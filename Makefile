@@ -262,6 +262,41 @@ smoke-fast: $(HELLO_EXE)
 smoke: $(HELLO_EXE)
 	tests/run-smoke.sh --exe $(HELLO_EXE)
 
+# --- Phase 2d smoke: SDL3 DOS-backend probe -----------------------------------
+#
+# Builds tests/sdl3-smoke/sdltest.c — our own minimal probe authored against
+# public SDL3 APIs — into build/sdl3-smoke/sdltest.exe. Same coverage as
+# upstream's testaudioinfo + testdisplayinfo combined (audio driver/device
+# enumeration + video driver/display/mode enumeration), but writes via
+# printf() to stdout instead of SDL_Log() to stderr.
+#
+# Why our own probe instead of upstream's tests: SDL_Log goes to stderr
+# unconditionally (vendor/SDL/src/SDL_log.c), and neither MS-DOS COMMAND.COM
+# nor DOSBox-X's built-in shell support `2>&1` redirection — the headless
+# capture would always be empty. Patching SDL test source to redirect log
+# output would conflict with vendor/SDL/CLAUDE.md (no AI-generated code into
+# SDL upstream). See tests/sdl3-smoke/README.md for the full rationale.
+#
+# minstack=512k: DPMI default 256K is tight for SDL3 init paths; doskutsu.exe
+# itself gets 2048K but a probe doesn't need that much.
+
+SDL3_SMOKE_DIR     := $(BUILD_DIR)/sdl3-smoke
+SDL3_SMOKE_SRC     := tests/sdl3-smoke/sdltest.c
+SDL3_SMOKE_EXE     := $(SDL3_SMOKE_DIR)/sdltest.exe
+SDL3_TEST_CFLAGS   := -march=i486 -mtune=pentium -O2 -Wall \
+                      -I$(SYSROOT)/include
+SDL3_TEST_LDLIBS   := -L$(SYSROOT)/lib -lSDL3 -lm
+SDL3_TEST_MINSTACK := 512k
+
+$(SDL3_SMOKE_EXE): $(SDL3_SMOKE_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(SDL3_SMOKE_DIR)
+	$(CC) $(SDL3_TEST_CFLAGS) -o $@ $< $(SDL3_TEST_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(SDL3_TEST_MINSTACK)
+
+.PHONY: sdl3-smoke
+sdl3-smoke: $(SDL3_SMOKE_EXE)
+	tests/run-sdl3-smoke.sh
+
 # --- Distribution -------------------------------------------------------------
 #
 # make dist      produces dist/doskutsu-cf.zip with the legal-complete payload

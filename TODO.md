@@ -19,11 +19,11 @@ Current work is organized by phase (see `PLAN.md`). Mark items complete as they 
 
 ## Phase 2 — SDL3 for DOS
 
-- [ ] `vendor/sources.manifest` pins a concrete SDL SHA post-PR-#15377 (currently `main` / `PIN_ME`)
-- [ ] `./scripts/fetch-sources.sh` clones `vendor/SDL` at pinned SHA
-- [ ] `make sdl3` produces `build/sysroot/lib/libSDL3.a`
-- [ ] At least one SDL test program (`testdraw2.c` / `testaudioinfo.c`) runs in DOSBox-X
-- [ ] Any DJGPP-specific fixes captured as `patches/SDL/*.patch` (upstream them after)
+- [x] `vendor/sources.manifest` pins a concrete SDL SHA post-PR-#15377 (`74a7462`)
+- [x] `./scripts/fetch-sources.sh` clones `vendor/SDL` at pinned SHA
+- [x] `make sdl3` produces `build/sysroot/lib/libSDL3.a` (~2 MB; 8 DOS-backend TUs; `SDL_AUDIO_DRIVER_DOS_SOUNDBLASTER=1`, `SDL_VIDEO_DRIVER_DOSVESA=1`)
+- [x] `make sdl3-smoke` — DOS-backend probe passes the video gate under DOSBox-X (34 VESA modes incl. 320x240 XRGB8888 / RGB565 / XRGB1555 / INDEX8); audio driver bootstraps but `SDL_Init(SDL_INIT_AUDIO)` fails — see Known issues #16 / #17
+- [ ] Any DJGPP-specific fixes captured as `patches/SDL/*.patch` (upstream them after) — pending #16 SB16 investigation
 
 ## Phase 3 — sdl2-compat for DOS (highest risk)
 
@@ -106,6 +106,7 @@ Levers 1-5 correspond to the descent from Tier 1 (PODP83 / 48 MB, reference) thr
 - [ ] Configurable keybindings (save to `DOSKUTSU.CFG`)
 - [ ] Mod support / Cave Story Tweaked integration
 
-## Known bugs
+## Known issues
 
-(None yet — will accumulate once Phase 5+ is running.)
+- **#16 — SDL3 SoundBlaster detection fails under DOSBox-X SB16 emulation.** DSP reset's "data ready" goes true but the byte read is not `0xAA`. Likely PR #15377 bug in the SB16 detection sequence. Tracked downstream; will produce `patches/SDL/*.patch` if the fix is local. Blocks Phase 7 playtest gate (audio required); does not block Phases 3–6.
+- **#17 — Upstream bug report at libsdl-org/SDL.** Draft at `.tmp/upstream-sdl-issue-pr15377-sb16.md`, awaiting human-with-`gh`-creds to file. URL will be backfilled into THIRD-PARTY.md and `patches/SDL/README.md` once the issue is open.

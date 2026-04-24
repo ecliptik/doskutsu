@@ -29,12 +29,15 @@ INTERACTIVE=0
 INCLUDES=()
 KEEP_STAGE=0
 FAST=0
+# --merge-stderr: capture stderr too (e.g. SDL_Log goes there). DOSBox-X / DOS shells
+# don't always honor `2>&1` cleanly — prefer printf-to-stdout in tests where possible.
+MERGE_STDERR=0
 CWSDPMI="${CWSDPMI:-$SCRIPT_DIR/../vendor/cwsdpmi/cwsdpmi.exe}"
 
 usage() {
   cat <<'USAGE'
 Usage: dosbox-run.sh --exe PATH [--args "..."] [--stdout PATH] [--include PATH]...
-                     [--fast] [--interactive] [--keep-stage]
+                     [--fast] [--interactive] [--keep-stage] [--merge-stderr]
 
   --exe PATH         DOS executable to run (required). Basename is placed at C:\.
   --args "..."       Arguments passed to the exe (quoted as a single string).
@@ -44,6 +47,9 @@ Usage: dosbox-run.sh --exe PATH [--args "..."] [--stdout PATH] [--include PATH].
   --fast             Use dosbox-x-fast.conf (cycles=max) instead of parity config.
   --interactive      Open the DOSBox-X window instead of running headless.
   --keep-stage       Leave the staging temp dir on exit (useful for debugging).
+  --merge-stderr     Capture both stdout and stderr (>STDOUT.TXT 2>&1). Needed for
+                     programs that log to stderr (e.g. SDL_Log on DJGPP). DJGPP's
+                     runtime processes 2>&1 itself so the syntax works under DOS.
   -h, --help         Show this help.
 USAGE
 }
@@ -57,6 +63,7 @@ while [[ $# -gt 0 ]]; do
     --fast)        FAST=1; shift ;;
     --interactive) INTERACTIVE=1; shift ;;
     --keep-stage)  KEEP_STAGE=1; shift ;;
+    --merge-stderr) MERGE_STDERR=1; shift ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "dosbox-run.sh: unknown arg: $1" >&2; usage; exit 2 ;;
   esac
@@ -110,12 +117,20 @@ for f in "${INCLUDES[@]:-}"; do
 done
 
 # RUN.BAT — invokes the exe with stdout captured to STDOUT.TXT.
+# With --merge-stderr we add `2>&1` so SDL_Log (and any stderr writer) is also
+# captured. DJGPP's runtime parses argv-level redirection itself, so 2>&1 works
+# under DOS even though MS-DOS COMMAND.COM proper doesn't support it natively.
+if [[ "$MERGE_STDERR" == "1" ]]; then
+  REDIR='> STDOUT.TXT 2>&1'
+else
+  REDIR='> STDOUT.TXT'
+fi
 case "${EXE_DOSNAME##*.}" in
   BAT|bat)
-    INVOKE_LINE="$(printf 'COMMAND /C %s %s > STDOUT.TXT\r\n' "$EXE_DOSNAME" "$ARGS")"
+    INVOKE_LINE="$(printf 'COMMAND /C %s %s %s\r\n' "$EXE_DOSNAME" "$ARGS" "$REDIR")"
     ;;
   *)
-    INVOKE_LINE="$(printf '%s %s > STDOUT.TXT\r\n' "$EXE_DOSNAME" "$ARGS")"
+    INVOKE_LINE="$(printf '%s %s %s\r\n' "$EXE_DOSNAME" "$ARGS" "$REDIR")"
     ;;
 esac
 {

@@ -8,11 +8,11 @@ Complete attribution and license matrix for everything DOSKUTSU touches, vendors
 
 | Component | Version / Ref | License | Shipped in dist? | Role |
 |---|---|---|---|---|
-| [NXEngine-evo](https://github.com/nxengine/nxengine-evo) | `main` (pinned in manifest) | **GPLv3** | Yes (statically linked) | Cave Story engine re-implementation |
-| [SDL3](https://github.com/libsdl-org/SDL) | post-PR-#15377 `main` | zlib | Yes (statically linked) | Platform abstraction + DOS backend |
-| [sdl2-compat](https://github.com/libsdl-org/sdl2-compat) | `main` | zlib | Yes (statically linked) | SDL2-API shim forwarding to SDL3 |
-| [SDL_mixer](https://github.com/libsdl-org/SDL_mixer) | `release-2.8.x` | zlib | Yes (statically linked) | Audio mixing + Organya PCM path |
-| [SDL_image](https://github.com/libsdl-org/SDL_image) | `release-2.8.x` | zlib | Yes (statically linked) | PNG loading |
+| [NXEngine-evo](https://github.com/nxengine/nxengine-evo) | `master` @ `1f093d1` | **GPLv3** | Yes (statically linked) | Cave Story engine re-implementation |
+| [SDL3](https://github.com/libsdl-org/SDL) | `main` @ `74a7462` (post-[PR #15377](https://github.com/libsdl-org/SDL/pull/15377)) | zlib | Yes (statically linked) | Platform abstraction + DOS backend |
+| [sdl2-compat](https://github.com/libsdl-org/sdl2-compat) | `main` @ `91d36b8` | zlib | Yes (statically linked) | SDL2-API shim forwarding to SDL3 |
+| [SDL_mixer](https://github.com/libsdl-org/SDL_mixer) | `release-2.8.x` @ `2b00802` | zlib | Yes (statically linked) | Audio mixing + Organya PCM path |
+| [SDL_image](https://github.com/libsdl-org/SDL_image) | `release-2.8.x` @ `67c8f53` | zlib | Yes (statically linked) | PNG loading |
 | stb_vorbis | bundled in SDL_mixer | **public domain / MIT** | Yes (via SDL_mixer) | OGG Vorbis decoder |
 | stb_image | bundled in SDL_image | **public domain / MIT** | Yes (via SDL_image) | PNG decoder |
 | [DJGPP libc](https://www.delorie.com/djgpp/) | 2.05+ (via GCC 12.2.0) | **GPL + runtime-library exception** | Yes (statically linked) | C runtime on DOS |
@@ -73,6 +73,7 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 
 - **License:** GPL-3.0-only (see `vendor/nxengine-evo/LICENSE` once cloned)
 - **Source:** https://github.com/nxengine/nxengine-evo
+- **Pinned ref:** `master` @ `1f093d1423cc395eb199230cd609b806ef1daa36` (per `vendor/sources.manifest`)
 - **Role:** Cave Story engine re-implementation in C++11. Statically linked into `DOSKUTSU.EXE`.
 - **Modifications:** DOS-port patches in `patches/nxengine-evo/*.patch` (see `TODO.md` Phase 5 for the full list)
 - **Redistribution:** GPLv3 terms — we include `vendor/nxengine-evo/LICENSE` as `GPLV3.TXT` in `dist/doskutsu-cf.zip` and point to this repo for corresponding source
@@ -80,15 +81,17 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 ### SDL3
 
 - **License:** zlib (see `vendor/SDL/LICENSE.txt` once cloned)
-- **Source:** https://github.com/libsdl-org/SDL (post-PR-#15377 main)
-- **Role:** Platform abstraction. The DOS backend (from PR #15377) is what makes this entire port possible.
-- **Modifications:** none expected for Phase 2; any DJGPP fixes land in `patches/SDL/`
+- **Source:** https://github.com/libsdl-org/SDL
+- **Pinned ref:** `main` @ `74a746281f2208e07a7680560fcb7ec57565228e` (post-[PR #15377](https://github.com/libsdl-org/SDL/pull/15377), the DOS-backend merge)
+- **Role:** Platform abstraction. The DOS backend (VESA video + SoundBlaster audio drivers from PR #15377) is what makes this entire port possible.
+- **Modifications:** none yet. Any DJGPP fixes land in `patches/SDL/*.patch`. Phase 2d uncovered an SB16-detection bug under DOSBox-X — see CHANGELOG `### Known issues` and TODO #16 / #17.
 - **Redistribution:** zlib permits redistribution under the same terms
 
 ### sdl2-compat
 
 - **License:** zlib
 - **Source:** https://github.com/libsdl-org/sdl2-compat
+- **Pinned ref:** `main` @ `91d36b8d9d06958e2663623d100d12b596675120`
 - **Role:** Pure-C shim exposing the SDL2 API on top of SDL3. Lets NXEngine-evo (SDL2-written) link against SDL3 (the only SDL with a DOS backend) without the SDL2→SDL3 migration.
 - **Modifications:** expected — DJGPP port patches land in `patches/sdl2-compat/`
 - **Redistribution:** zlib
@@ -97,6 +100,7 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 
 - **License:** zlib
 - **Source:** https://github.com/libsdl-org/SDL_mixer
+- **Pinned ref:** `release-2.8.x` @ `2b00802865e614f994b85264069c7933cdf538e2`
 - **Role:** Audio decoder + mixer. We enable WAV and OGG (via stb_vorbis) only; MP3, MOD, MIDI, FLAC, Opus are all disabled in our CMake options. Keeps the dependency graph zlib + public-domain.
 - **Included vendored code:** stb_vorbis (public domain / MIT dual)
 - **Modifications:** none expected; any DJGPP fixes land in `patches/SDL_mixer/`
@@ -105,6 +109,7 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 
 - **License:** zlib
 - **Source:** https://github.com/libsdl-org/SDL_image
+- **Pinned ref:** `release-2.8.x` @ `67c8f531ad09ddc0e6d4c7b1468c863235711ed4`
 - **Role:** Image loader. We enable PNG only (via stb_image); libpng, libjpeg, WebP, AVIF, TIFF are all disabled.
 - **Included vendored code:** stb_image (public domain / MIT dual)
 

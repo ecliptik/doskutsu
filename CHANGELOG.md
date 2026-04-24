@@ -31,7 +31,14 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 - Headless DOSBox-X test harness via `tools/dosbox-run.sh` (silent + exit, captures `STDOUT.TXT` from the ephemeral C: mount)
 - First automated correctness gate (per `CLAUDE.md § Correctness Gate` item 1) — passing
 
-### Known
-- Phases 0 and 1 are green; Phase 2 (build SDL3 with the DOS backend) is next
-- `vendor/SDL` requires PR #15377 merged into SDL main; pinned SHA in `vendor/sources.manifest` is still `PIN_ME` and must be resolved before `make sdl3` can run
-- sdl2-compat on DJGPP is untested upstream; Phase 3 remains the highest-risk phase
+### Phase 2 — SDL3 for DOS (gate passed)
+- `vendor/sources.manifest` SHAs resolved out of `PIN_ME` for all five upstreams (SDL `74a7462`, sdl2-compat `91d36b8`, SDL_mixer `2b00802`, SDL_image `67c8f53`, nxengine-evo `1f093d1`)
+- `make sdl3` cross-builds SDL3 via DJGPP into `build/sysroot/lib/libSDL3.a` (~2 MB, 8 DOS-backend translation units present, `SDL_AUDIO_DRIVER_DOS_SOUNDBLASTER=1` and `SDL_VIDEO_DRIVER_DOSVESA=1` confirmed in the generated `SDL_build_config.h`)
+- `make sdl3-smoke` — new DOS-backend probe and DOSBox-X harness (`tests/sdl3-smoke/sdltest.c`, `tests/run-sdl3-smoke.sh`). Verifies video subsystem init, mode enumeration (34 VESA modes including all four 320x240 variants — XRGB8888 / RGB565 / XRGB1555 / **INDEX8**, the last is the Phase 9 lever 3 target), and audio driver bootstrap
+- `tests/run-smoke.sh --contains STRING` — additive substring stdout match alongside the existing exact-match `--expected`
+- `tools/dosbox-run.sh --merge-stderr` — additive optional stderr capture
+- `tests/fixtures/sdl3-modes-dosbox.txt` — VESA mode-list baseline captured under DOSBox-X for Phase 8 real-hardware diff against `M64VBE` on g2k
+
+### Known issues
+- **PR #15377 SoundBlaster detection fails under DOSBox-X SB16 emulation.** `SDL_Init(SDL_INIT_AUDIO)` errors out: DSP reset's "data ready" flag goes true but the byte read is not `0xAA`. Tracked as task #16 (downstream investigation, will produce `patches/SDL/*.patch` if local) and #17 (upstream bug report at libsdl-org/SDL, draft pending a human-with-`gh`-creds filing — URL TBD). Does not block Phases 3–6; will be resolved before the Phase 7 playtest gate where audio is required.
+- sdl2-compat on DJGPP is untested upstream; Phase 3 remains the highest-risk phase.
