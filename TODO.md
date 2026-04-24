@@ -13,9 +13,9 @@ Current work is organized by phase (see `PLAN.md`). Mark items complete as they 
 
 ## Phase 1 — Toolchain smoke test
 
-- [ ] `tests/smoketest/hello.c` compiles via `make hello`
-- [ ] `make smoke-fast` passes (hello.exe runs under `dosbox-x-fast.conf`)
-- [ ] `make smoke` passes (hello.exe runs under `dosbox-x.conf` parity)
+- [x] `tests/smoketest/hello.c` compiles via `make hello`
+- [x] `make smoke-fast` passes (hello.exe runs under `dosbox-x-fast.conf`)
+- [x] `make smoke` passes (hello.exe runs under `dosbox-x.conf` parity)
 
 ## Phase 2 — SDL3 for DOS
 
