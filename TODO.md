@@ -21,9 +21,9 @@ Current work is organized by phase (see `PLAN.md`). Mark items complete as they 
 
 - [x] `vendor/sources.manifest` pins a concrete SDL SHA post-PR-#15377 (`74a7462`)
 - [x] `./scripts/fetch-sources.sh` clones `vendor/SDL` at pinned SHA
-- [x] `make sdl3` produces `build/sysroot/lib/libSDL3.a` (~2 MB; 8 DOS-backend TUs; `SDL_AUDIO_DRIVER_DOS_SOUNDBLASTER=1`, `SDL_VIDEO_DRIVER_DOSVESA=1`)
-- [x] `make sdl3-smoke` — DOS-backend probe passes the video gate under DOSBox-X (34 VESA modes incl. 320x240 XRGB8888 / RGB565 / XRGB1555 / INDEX8); audio driver bootstraps but `SDL_Init(SDL_INIT_AUDIO)` fails — see Known issues #16 / #17
-- [ ] Any DJGPP-specific fixes captured as `patches/SDL/*.patch` (upstream them after) — pending #16 SB16 investigation
+- [x] `make sdl3` produces `build/sysroot/lib/libSDL3.a` (2,054,564 bytes; 202 `.c.obj` members, 8 of them DOS-backend TUs; `SDL_AUDIO_DRIVER_DOS_SOUNDBLASTER=1`, `SDL_VIDEO_DRIVER_DOSVESA=1`; no host-platform drivers leaked)
+- [x] `make sdl3-smoke` — doskutsu-authored DOS-backend probe (`tests/sdl3-smoke/sdltest.c`, DJGPP `minstack=512k`) runs under headless DOSBox-X via `tests/run-sdl3-smoke.sh`. Video gate passes (34 VESA modes incl. 320x240 XRGB8888 / RGB565 / XRGB1555 / INDEX8); audio driver bootstraps but `SDL_Init(SDL_INIT_AUDIO)` device pick fails under SB16 emulation — see Known issues #16 / #17
+- [x] Any DJGPP-specific fixes captured as `patches/SDL/*.patch` — none needed for SDL @ `74a7462`; `patches/SDL/` is empty
 
 ## Phase 3 — sdl2-compat for DOS (highest risk)
 
