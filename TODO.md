@@ -6,10 +6,10 @@ Current work is organized by phase (see `PLAN.md`). Mark items complete as they 
 
 ## Phase 0 — Prerequisites
 
-- [ ] `scripts/setup-symlinks.sh` creates `tools/djgpp` → `~/emulators/tools/djgpp`
-- [ ] `make djgpp-check` passes
-- [ ] `vendor/cwsdpmi/cwsdpmi.exe` + `cwsdpmi.doc` present (copied from vellm or downloaded)
-- [ ] DOSBox-X installed (`dosbox-x -version` works)
+- [x] `scripts/setup-symlinks.sh` creates `tools/djgpp` → `~/emulators/tools/djgpp`
+- [x] `make djgpp-check` passes
+- [x] `vendor/cwsdpmi/cwsdpmi.exe` + `cwsdpmi.doc` present (copied from vellm or downloaded)
+- [x] DOSBox-X installed (`dosbox-x -version` works)
 
 ## Phase 1 — Toolchain smoke test
 
