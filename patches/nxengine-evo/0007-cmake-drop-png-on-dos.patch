@@ -1,70 +1,9 @@
-From ecebdb5152380b6c3a71b35b61669c5cfdfef3c9 Mon Sep 17 00:00:00 2001
+From de30bcc5e523782581df2fabe5005ba9f829ac62 Mon Sep 17 00:00:00 2001
 From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
-Date: Sat, 25 Apr 2026 11:00:22 -0700
+Date: Sat, 25 Apr 2026 11:07:14 -0700
 Subject: [PATCH] [DOSKUTSU] cmake+renderer: drop libpng dep on DOS (screenshot
  save disabled)
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-Why DOS needs this: build-engineer's first `make nxengine` attempt fails
-at CMake config time on `find_package(PNG REQUIRED)`. The doskutsu DOS
-sysroot doesn't ship libpng or zlib (Path B's vendored dependency stack
-covers SDL3 / SDL3_mixer / SDL3_image only — the engine itself uses raw
-libpng for one feature: screenshot save in src/graphics/pngfuncs.cpp).
-Per #41's option (A) recommendation: drop the screenshot-save feature on
-DOS. This unblocks Phase 5 integration without bringing libpng/zlib into
-the sysroot — a heavy infrastructure addition for a near-zero-value
-feature on the target platform (real-HW DOS players have no canonical
-in-game screenshot use case; DOSBox-X testing captures host-side via
-scrot anyway).
-
-Files touched:
-
-- `CMakeLists.txt`:
-  * `find_package(PNG REQUIRED)` wrapped in
-    `if(NOT (CMAKE_SYSTEM_NAME STREQUAL "MSDOS" OR CMAKE_CXX_COMPILER MATCHES "msdosdjgpp"))`
-    so DJGPP cross-builds skip the dep-resolution step entirely. Linux,
-    macOS, Windows-native, Vita, Switch all keep the existing
-    `find_package(PNG REQUIRED)` behavior unchanged.
-  * `pngfuncs.cpp` removed from `${GR_SOURCES}` on DJGPP via
-    `list(REMOVE_ITEM GR_SOURCES "${nx_SOURCE_DIR}/src/graphics/pngfuncs.cpp")`
-    after the GLOB. The file is unbuildable on DOS (it `#include <png.h>`s
-    and references libpng symbols throughout); removing it from the source
-    list is the cleanest way to keep upstream's GLOB-based build script
-    working without per-file `#ifdef`-wrapping the entire 200-line file.
-
-- `src/graphics/Renderer.cpp`:
-  * `#include "pngfuncs.h"` wrapped in `#ifndef NXE_DOS`.
-  * `Renderer::saveScreenshot()` body wrapped in `#ifdef NXE_DOS / #else /
-    #endif`. DOS branch logs a single warning line ("not supported on DOS
-    build") and returns; the F9 keybind in main.cpp:108 still fires the
-    function so the user gets a visible log line rather than a silent
-    no-op. Non-DOS branch keeps the existing libpng-based implementation
-    intact.
-
-Behavior on DOS:
-- Configure-time: no libpng required. CMake configure completes.
-- Compile-time: pngfuncs.cpp not compiled, no libpng headers referenced.
-- Link-time: no libpng symbols required.
-- Runtime: pressing F9 logs `saveScreenshot: not supported on DOS build
-  (libpng unavailable)` and continues. No crash.
-
-Behavior on non-DOS: zero changes. Linux/macOS/Windows-native users keep
-the screenshot feature untouched.
-
-Future-work hook (post-Phase 7 polish, separate patch): if the screenshot
-feature is wanted back on DOS, the cleanest path is to migrate
-`png_save_surface` to SDL3_image's `IMG_SavePNG(surface, file)` — verified
-present in build/sysroot/include/SDL3_image/SDL_image.h. That avoids the
-libpng dep entirely while preserving the feature. Out of #41's scope.
-
-Patch slot: `0020-cmake-drop-png-on-dos.patch` per team-lead's #41 brief.
-The README's `0010-0019` SDL3-migration range is treated as a planning
-estimate per team-lead's note ("not a hard ceiling") rather than a hard
-boundary. (Convention-purist alternative: slot `0007` in the DJGPP cluster
-since this is DOS-specific behavior. Team-lead's call on re-numbering if
-they prefer that.)
 ---
  CMakeLists.txt            | 19 ++++++++++++++++++-
  src/graphics/Renderer.cpp | 15 ++++++++++++++-
@@ -108,7 +47,7 @@ index f9df7d2..6d7ef41 100644
  file(GLOB PA_SOURCES "src/pause/[a-zA-Z]*.cpp")
  file(GLOB SL_SOURCES "src/siflib/[a-zA-Z]*.cpp")
 diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
-index 598f8db..ed57834 100644
+index d621e90..c997e85 100644
 --- a/src/graphics/Renderer.cpp
 +++ b/src/graphics/Renderer.cpp
 @@ -10,7 +10,9 @@
@@ -122,7 +61,7 @@ index 598f8db..ed57834 100644
  #include "../Utils/Logger.h"
  
  #include <SDL.h>
-@@ -575,6 +577,16 @@ void Renderer::clipScaled(SDL_Rect &srcrect, SDL_Rect &dstrect)
+@@ -556,6 +558,16 @@ void Renderer::clipScaled(SDL_Rect &srcrect, SDL_Rect &dstrect)
  
  void Renderer::saveScreenshot()
  {
@@ -139,8 +78,8 @@ index 598f8db..ed57834 100644
    auto filename = []()
    {
      int iter = 0;
-@@ -622,6 +634,7 @@ void Renderer::saveScreenshot()
-   SDL_DestroySurface(surface);
+@@ -613,6 +625,7 @@ void Renderer::saveScreenshot()
+   SDL_FreeSurface(surface);
    LOG_INFO("Saved {}", filename);
    return;
 +#endif // NXE_DOS

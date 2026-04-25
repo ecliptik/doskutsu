@@ -1,99 +1,9 @@
-From 7dc85f37115b8733aebbaf3830b29f6c66c663ce Mon Sep 17 00:00:00 2001
+From 71b8ad551861bbf689fb7b5ae92b6631d0bec5c3 Mon Sep 17 00:00:00 2001
 From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
-Date: Fri, 24 Apr 2026 17:45:54 -0700
-Subject: [PATCH 6/9] [DOSKUTSU] SDL3 mechanical renames: bulk
+Date: Sat, 25 Apr 2026 11:16:35 -0700
+Subject: [PATCH] [DOSKUTSU] SDL3 mechanical renames: bulk
  renderer/surface/cursor/joystick
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
 
-Why DOS needs this: NXEngine-evo's SDL2 API surface doesn't compile against
-SDL3 headers as-is. The doskutsu DOS port (Path B per project plan) targets
-SDL3 directly so it can use the SDL3 DOS backend — sdl2-compat is structurally
-incompatible with static-only DJGPP linkage. This is the bulk-rename slice
-of the SDL2->SDL3 migration; subsequent patches handle event-enum renames
-(0011), renderer-properties API (0012), audio refactor (0013-0017), and
-SDL3_image swap (0018).
-
-Per patches/nxengine-evo/README.md, this patch covers bulk-renames that are
-"uniform sed-bait." Sites + signature notes:
-
-- src/graphics/Renderer.cpp
-  * SDL_FreeSurface (3) -> SDL_DestroySurface
-  * SDL_CreateRGBSurfaceFrom (icon) -> SDL_CreateSurfaceFrom
-    (mask layout maps to SDL_PIXELFORMAT_RGBA32 endian-neutral alias)
-  * SDL_CreateRGBSurface (screenshot) -> SDL_CreateSurface
-  * SDL_RenderCopy (3) -> SDL_RenderTexture (SDL_FRect via SDL_RectToFRect)
-  * SDL_RenderCopyEx -> SDL_RenderTextureRotated (SDL_FRect)
-  * SDL_RenderDrawLine -> SDL_RenderLine (float coords)
-  * SDL_RenderFillRect/SDL_RenderFillRects: now take SDL_FRect
-  * SDL_ShowCursor signature change: bool toggle gone; pair with SDL_HideCursor
-  * SDL_SetWindowFullscreen takes bool (not flags)
-  * SDL_CreateWindow signature change: position params dropped; followed by
-    SDL_SetWindowPosition
-  * SDL_CreateRenderer signature change: (window, name) only; flags gone.
-    Passing NULL for now; the SDL_RENDERER_SOFTWARE force lives in 0004.
-  * SDL_WINDOW_SHOWN removed (windows shown by default); test !HIDDEN
-  * SDL_GetWindowFlags returns SDL_WindowFlags (Uint64)
-  * SDL_GetWindowDisplayIndex -> SDL_GetDisplayForWindow (SDL_DisplayID)
-  * SDL_GetDesktopDisplayMode now returns const SDL_DisplayMode* (no out-param)
-  * SDL_RenderGetViewport -> SDL_GetRenderViewport
-  * SDL_RenderReadPixels: returns SDL_Surface* directly
-  NOTE: SDL_RendererInfo + SDL_GetRendererInfo are deliberately untouched here
-  and migrated separately in 0012-sdl3-renderer-properties.patch (the brief
-  splits that out as a "genuinely different API surface" concern).
-
-- src/graphics/Font.cpp
-  * SDL_FreeSurface -> SDL_DestroySurface
-  * SDL_RenderCopy (4) -> SDL_RenderTexture (SDL_FRect via SDL_RectToFRect)
-
-- src/graphics/Surface.cpp
-  * SDL_FreeSurface (2) -> SDL_DestroySurface
-  * SDL_SetColorKey -> SDL_SetSurfaceColorKey (with bool, not SDL_TRUE)
-  * SDL_MapRGB -> SDL_MapSurfaceRGB (no surface->format dereference needed)
-
-- src/graphics/zoom.cpp
-  * SDL_GetColorKey -> SDL_GetSurfaceColorKey
-  * SDL_FreeSurface (3) -> SDL_DestroySurface
-  * SDL_CreateRGBSurface (3) -> SDL_CreateSurface (RGBA32 / source format / INDEX8)
-  * surface->format->BitsPerPixel -> SDL_BITSPERPIXEL(surface->format)
-    (surface->format is now an SDL_PixelFormat enum, not a struct ptr)
-  * surface->format->palette -> SDL_GetSurfacePalette(surface)
-    (palette no longer hung off format)
-
-- src/graphics/pngfuncs.cpp
-  * SDL_CreateRGBSurface -> SDL_CreateSurface (SDL_PIXELFORMAT_ARGB8888)
-
-- src/input.cpp (joystick API only — event-enum renames are 0011)
-  * SDL_NumJoysticks -> SDL_GetJoysticks (instance-id list)
-  * SDL_JoystickOpen(0) -> SDL_OpenJoystick(instance_id)
-  * SDL_JoystickNameForIndex -> SDL_GetJoystickNameForID
-  * SDL_JoystickNum{Axes,Buttons,Balls} -> SDL_GetNumJoystick{Axes,Buttons,Balls}
-  * SDL_JoystickRumble -> SDL_RumbleJoystick
-  * SDL_JoystickGetAxis -> SDL_GetJoystickAxis
-  * SDL_JoystickGetAttached -> SDL_JoystickConnected
-  * SDL_JoystickClose -> SDL_CloseJoystick
-
-- src/slope.cpp
-  * SDL_FillRect -> SDL_FillSurfaceRect
-  * SDL_MapRGB -> SDL_MapSurfaceRGB
-
-- src/trig.cpp
-  * SDL_WarpMouse -> SDL_WarpMouseInWindow(NULL, ...)
-
-- src/main.cpp
-  * SDL_Init now returns bool; old `< 0` check would always be false (silent
-    init failure under SDL3). Changed to `if (!SDL_Init(...))`.
-
-- src/ResourceManager.cpp
-  * SDL_GetBasePath now returns const char* owned by SDL — must NOT SDL_free.
-    Removed the SDL_free; declared the local as const char*.
-
-After this patch lands, NXEngine-evo will not yet compile against SDL3 alone:
-0011 (event-enum renames) and 0012 (renderer-properties) are required for
-the renderer/event subsystems to build. The patches are designed to apply as
-a 0010-0012 cluster; the split is for review readability and bisect
-granularity within the SDL3 migration block.
 ---
  src/ResourceManager.cpp   |   4 +-
  src/graphics/Font.cpp     |  22 ++++--
@@ -181,10 +91,10 @@ index 71da492..50e8942 100644
      }
  
 diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
-index d621e90..b80f02b 100644
+index c997e85..1579b79 100644
 --- a/src/graphics/Renderer.cpp
 +++ b/src/graphics/Renderer.cpp
-@@ -52,22 +52,24 @@ void Renderer::close()
+@@ -54,22 +54,24 @@ void Renderer::close()
    LOG_INFO("Renderer::Close()");
    font.cleanup();
    sprites.close();
@@ -214,7 +124,7 @@ index d621e90..b80f02b 100644
  #ifdef NXE_DOS
    // DOS lock: force 320x240 fullscreen regardless of which res index the user
    // (or the settings file) selected. The widescreen / HD entries in
-@@ -107,7 +109,12 @@ bool Renderer::initVideo()
+@@ -109,7 +111,12 @@ bool Renderer::initVideo()
    }
  
    LOG_DEBUG("SDL_CreateWindow: {}x{}", width, height);
@@ -228,7 +138,7 @@ index d621e90..b80f02b 100644
  
    if (!_window)
    {
-@@ -117,35 +124,27 @@ bool Renderer::initVideo()
+@@ -119,35 +126,27 @@ bool Renderer::initVideo()
  
  #if not defined(__VITA__) && not defined(__SWITCH__)
    SDL_Surface *icon;
@@ -278,7 +188,7 @@ index d621e90..b80f02b 100644
  #endif
    }
    if (!_renderer)
-@@ -168,7 +167,7 @@ bool Renderer::initVideo()
+@@ -170,7 +169,7 @@ bool Renderer::initVideo()
    SDL_Surface *image;
    image = IMG_Load(spotpath.c_str());
    _spot_light = SDL_CreateTextureFromSurface(_renderer, image);
@@ -287,7 +197,7 @@ index d621e90..b80f02b 100644
  
    return true;
  }
-@@ -188,8 +187,10 @@ bool Renderer::flushAll()
+@@ -190,8 +189,10 @@ bool Renderer::flushAll()
  
  void Renderer::setFullscreen(bool enable)
  {
@@ -300,7 +210,7 @@ index d621e90..b80f02b 100644
  }
  
  bool Renderer::setResolution(int r, bool restoreOnFailure)
-@@ -272,15 +273,18 @@ const Graphics::gres_t *Renderer::getResolutions(bool full_list)
+@@ -274,15 +275,18 @@ const Graphics::gres_t *Renderer::getResolutions(bool full_list)
  
    if (!full_list)
    {
@@ -326,7 +236,7 @@ index d621e90..b80f02b 100644
          {
            LOG_INFO("Disabling {}", res[i].name);
  
-@@ -355,9 +359,14 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+@@ -357,9 +361,14 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
      clipScaled(srcrect, dstrect);
  
    SDL_SetTextureAlphaMod(src->texture(), src->alpha);
@@ -343,7 +253,7 @@ index d621e90..b80f02b 100644
    }
  }
  
-@@ -383,9 +392,13 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+@@ -385,9 +394,13 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
      clipScaled(srcrect, dstrect);
  
    SDL_SetTextureAlphaMod(src->texture(), src->alpha);
@@ -359,7 +269,7 @@ index d621e90..b80f02b 100644
    }
  }
  
-@@ -412,7 +425,11 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+@@ -414,7 +427,11 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
    {
      dstrect.x = x;
      dstrect.y = y;
@@ -372,7 +282,7 @@ index d621e90..b80f02b 100644
      x += sfc->width()  * scale;
    } while (x < destwd);
  }
-@@ -420,15 +437,17 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+@@ -422,15 +439,17 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
  void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
  {
    SDL_SetRenderDrawColor(_renderer, color.r, color.g, color.b, SDL_ALPHA_OPAQUE);
@@ -395,7 +305,7 @@ index d621e90..b80f02b 100644
  
    SDL_SetRenderDrawColor(_renderer, r, g, b, SDL_ALPHA_OPAQUE);
    SDL_RenderFillRects(_renderer, rects, 4);
-@@ -436,12 +455,13 @@ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+@@ -438,12 +457,13 @@ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
  
  void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b)
  {
@@ -414,7 +324,7 @@ index d621e90..b80f02b 100644
  
    SDL_SetRenderDrawColor(_renderer, r, g, b, SDL_ALPHA_OPAQUE);
    SDL_RenderFillRect(_renderer, &rect);}
-@@ -582,23 +602,13 @@ void Renderer::saveScreenshot()
+@@ -594,23 +614,13 @@ void Renderer::saveScreenshot()
      return;
    }
  
@@ -442,7 +352,7 @@ index d621e90..b80f02b 100644
    {
      LOG_ERROR("Couldn't read screen: {}", SDL_GetError());
      return;
-@@ -606,11 +616,11 @@ void Renderer::saveScreenshot()
+@@ -618,11 +628,11 @@ void Renderer::saveScreenshot()
  
    if (png_save_surface(filename, surface) < 0)
    {
@@ -455,8 +365,8 @@ index d621e90..b80f02b 100644
 +  SDL_DestroySurface(surface);
    LOG_INFO("Saved {}", filename);
    return;
- }
-@@ -630,7 +640,10 @@ void Renderer::drawSpotLight(int x, int y, Object* o, int r, int g, int b, int u
+ #endif // NXE_DOS
+@@ -643,7 +653,10 @@ void Renderer::drawSpotLight(int x, int y, Object* o, int r, int g, int b, int u
    dstrec.h = height * upscale * scale;
  
    SDL_SetTextureColorMod(_spot_light, r, g, b);
