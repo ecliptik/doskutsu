@@ -1,0 +1,80 @@
+From f6af69d3d6116e906981c1f9b591714ca50dce6b Mon Sep 17 00:00:00 2001
+From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
+Date: Fri, 24 Apr 2026 17:51:53 -0700
+Subject: [PATCH 2/9] [DOSKUTSU] cmake: DJGPP target flags + NXE_DOS define
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: NXEngine-evo defaults to whatever optimisation level
+the host platform's CMake module picks. The DJGPP cross-build to MS-DOS
+6.22 on Pentium-era hardware needs explicit ISA / scheduling flags to
+emit code that runs on a 486DX (the project's architectural floor — see
+CLAUDE.md § Target Hardware) while being scheduled for the Pentium
+OverDrive in the g2k reference machine. We also need a compile-time
+NXE_DOS define so port-specific code (renderer software-mode forcing,
+runtime 320x240 lock, audio-init fallbacks, etc.) can gate cleanly with
+`#ifdef NXE_DOS`.
+
+Detection: matches either `CMAKE_SYSTEM_NAME == MSDOS` (set by future DJGPP
+toolchain files) or `CMAKE_CXX_COMPILER MATCHES "msdosdjgpp"` (matches the
+DJGPP cross-prefix used by `i586-pc-msdosdjgpp-g++` and any variants — kept
+broad so a 386 or 686 prefix would still trigger).
+
+Flags chosen:
+- `-march=i486` — instruction-set floor; project explicitly drops 486SX
+  (no x87, DJGPP requires FPU) and runs on 486DX or better.
+- `-mtune=pentium` — schedule code for the Pentium pipeline (the g2k
+  reference target). Doesn't restrict ISA.
+- `-O2` — standard optimisation. -O3 is avoided here; loop unrolling can
+  bloat code size and DJGPP's i486 cache is small.
+- `-fno-rtti` — confirmed safe by #27 audit: zero `dynamic_cast` / `typeid`
+  hits across `src/`. Saves a small amount of binary size.
+
+Notably NOT included:
+- `-fno-exceptions` — #27 audit found `src/map.cpp:448-486` wraps
+  `nlohmann::json::parse` in try/catch (real catch handler, logs + continues).
+  Five other files (`ResourceManager.cpp`, `Font.cpp`, `SoundManager.cpp` ×2,
+  `i18n/translate.cpp`) call `nlohmann::json::parse` without try/catch —
+  under `-fno-exceptions` + `JSON_NOEXCEPTION` those become hard `abort()`
+  calls on any malformed asset. Worse failure mode than the existing
+  exception-throw-and-terminate. Recommended against in #27 report,
+  ratified per architecture brief #29.
+- MMX / SSE / SSE2 — P54C (Pentium OverDrive) predates MMX; CLAUDE.md
+  hard rule.
+- `-ffast-math` — Cave Story's collision math relies on bit-exact integer
+  arithmetic; floating-point is only used in trig.cpp's sin/tan tables at
+  init time. -ffast-math saves nothing for this codebase and risks subtle
+  trajectory bugs.
+
+The block is gated by toolchain detection so non-DJGPP builds (Linux,
+macOS, Windows native, Vita, Switch) are unaffected — this patch is
+strictly additive on those targets.
+---
+ CMakeLists.txt | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 58f166f..0d0fb27 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -115,6 +115,16 @@ ENDIF()
+ 
+ add_definitions("-Wall")
+ 
++# DJGPP / DOS target flags. Detect by toolchain prefix or by CMAKE_SYSTEM_NAME.
++# Per #27 audit: keep -fno-rtti (zero dynamic_cast/typeid hits in src/) but
++# do NOT set -fno-exceptions (src/map.cpp:448 has a real try/catch around
++# nlohmann::json::parse, plus 5 unguarded parse sites that would convert
++# survivable log+continue to abort under -fno-exceptions + JSON_NOEXCEPTION).
++if(CMAKE_SYSTEM_NAME STREQUAL "MSDOS" OR CMAKE_CXX_COMPILER MATCHES "msdosdjgpp")
++    add_compile_options(-march=i486 -mtune=pentium -O2 -fno-rtti)
++    add_compile_definitions(NXE_DOS)
++endif()
++
+ add_executable(nx ${SOURCES})
+ 
+ IF(PLATFORM STREQUAL "pc")
+-- 
+2.47.3
+

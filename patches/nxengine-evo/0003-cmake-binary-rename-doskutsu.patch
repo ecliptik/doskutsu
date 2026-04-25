@@ -1,0 +1,59 @@
+From 423780f093ccda73da1f87bf2f953384d78681ed Mon Sep 17 00:00:00 2001
+From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
+Date: Fri, 24 Apr 2026 17:52:11 -0700
+Subject: [PATCH 3/9] [DOSKUTSU] cmake: rename DJGPP binary to doskutsu
+ (DOSKUTSU.EXE)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: the doskutsu project ships its binary as `DOSKUTSU.EXE`
+on the target CF card (per CLAUDE.md project naming + locked decision #9 in
+PLAN.md). Upstream NXEngine-evo names its CMake target `nx` with
+`OUTPUT_NAME nxengine-evo`, producing `nxengine-evo.exe` — not what we
+ship. DOS's 8.3 filename limit would force `NXENGIN~1.EXE`, which is uglier
+than just emitting the right name from the build.
+
+Approach: scope the rename to DJGPP toolchain detection so non-DOS builds
+(Linux / macOS / Windows native, etc.) keep upstream's `nxengine-evo`
+binary name. This keeps the patch a strict superset on those platforms —
+nothing changes if a user builds upstream on Linux against this fork.
+
+DJGPP / DOS produces `doskutsu.exe`; FAT-write uppercase auto-conversion
+turns it into `DOSKUTSU.EXE` on the CF card. The Makefile's
+post-build step copies the produced binary to `build/doskutsu.exe` so the
+installation path is consistent across host filesystems.
+
+Detection guard matches 0002-cmake-djgpp-target-flags.patch — same
+predicate, same rationale (toolchain prefix or system name).
+
+A future patch in slot 0006-0009 may also bump the DPMI minimum stack via
+stubedit (`stubedit doskutsu.exe minstack=2048k`); for now that runs as a
+post-link Makefile rule outside this patch's scope.
+---
+ CMakeLists.txt | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0d0fb27..f9df7d2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -128,7 +128,14 @@ endif()
+ add_executable(nx ${SOURCES})
+ 
+ IF(PLATFORM STREQUAL "pc")
+-    set_property(TARGET nx PROPERTY OUTPUT_NAME nxengine-evo)
++    # Binary rename: doskutsu ships as DOSKUTSU.EXE on the target CF card.
++    # DJGPP / DOS 8.3 filenames uppercase the basename automatically at FAT-write
++    # time, so emitting `doskutsu.exe` here produces `DOSKUTSU.EXE` on disk.
++    if(CMAKE_SYSTEM_NAME STREQUAL "MSDOS" OR CMAKE_CXX_COMPILER MATCHES "msdosdjgpp")
++        set_property(TARGET nx PROPERTY OUTPUT_NAME doskutsu)
++    else()
++        set_property(TARGET nx PROPERTY OUTPUT_NAME nxengine-evo)
++    endif()
+     add_definitions("-std=c++11")
+     IF(UNIX_LIKE)
+         add_definitions(-DHAVE_UNIX_LIKE)
+-- 
+2.47.3
+

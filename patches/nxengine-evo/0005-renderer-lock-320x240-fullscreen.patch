@@ -1,0 +1,93 @@
+From 3cef484defc012921d4d7cf64ebef5e3bea5ac8f Mon Sep 17 00:00:00 2001
+From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
+Date: Fri, 24 Apr 2026 17:52:57 -0700
+Subject: [PATCH 5/9] [DOSKUTSU] renderer: runtime lock to 320x240 fullscreen
+ on DOS
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: NXEngine-evo's getResolutions() table includes 4:3 modes
+from 320x240 up through 1600x1200 plus widescreen modes up to 3840x2160.
+On the doskutsu DOS target (g2k reference: ATI Mach64 PCI + M64VBE.COM
+VESA 1.2+ BIOS, Pentium OverDrive 83 MHz, 48 MB RAM), only 320x240 is
+both reliably negotiable through SDL3-DOS's video backend AND fast enough
+to maintain the engine's framerate budget. Selecting any other entry from
+the table either fails to set the VESA mode or drops below playable.
+
+Per CLAUDE.md § Critical Rules / NXEngine-evo specifics + locked decision
+#5 in PLAN.md, the resolution table is preserved (compiled in) for
+possible future revisit (DOSBox-X testing of other modes; CRT vs LCD
+trade-offs); the lock is a runtime override in initVideo, not a code
+removal.
+
+Site: src/graphics/Renderer.cpp `Renderer::initVideo()`.
+
+Approach (two NXE_DOS-gated blocks):
+
+1. **Window flag**: add `SDL_WINDOW_FULLSCREEN` to window_flags before
+   SDL_CreateWindow. Fullscreen is the only sensible mode under DOS — there
+   is no windowing system to draw a windowed-mode chrome around the game.
+   (SDL3 will treat the flag identically; the windowed/fullscreen bit
+   survives the 0010 SDL3 migration unchanged.)
+
+2. **Resolution override**: after the `res[_current_res]` lookup, override
+   width / height / scale / screenHeight / screenWidth / widescreen with
+   320x240 / 1 / 240 / 320 / false. Done after the upstream lookup rather
+   than instead of it so that any settings persistence still reads /
+   writes a valid index without us needing to touch settings.cpp.
+
+Non-DOS builds: both blocks `#ifdef NXE_DOS`-out cleanly; Linux / macOS /
+Windows native users get the unchanged upstream resolution-selection path.
+
+Future work (not this patch): if Phase 9 hardware-tier work needs to
+unlock 8bpp indexed mode (Tier 3 stretch), the resolution lock and the
+pixel-format choice are independent — this patch doesn't constrain the
+8bpp work.
+---
+ src/graphics/Renderer.cpp | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index a71f7f1..d621e90 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -68,6 +68,13 @@ bool Renderer::isWindowVisible()
+ bool Renderer::initVideo()
+ {
+   uint32_t window_flags = SDL_WINDOW_SHOWN;
++#ifdef NXE_DOS
++  // DOS lock: force 320x240 fullscreen regardless of which res index the user
++  // (or the settings file) selected. The widescreen / HD entries in
++  // getResolutions() remain compiled in for possible future use per CLAUDE.md
++  // locked decision #5 — we don't rip the table out, we just skip past it.
++  window_flags |= SDL_WINDOW_FULLSCREEN;
++#endif
+ 
+   const NXE::Graphics::gres_t *res = getResolutions(true);
+ 
+@@ -78,6 +85,21 @@ bool Renderer::initVideo()
+   screenWidth  = res[_current_res].base_width;
+   widescreen   = res[_current_res].widescreen;
+ 
++#ifdef NXE_DOS
++  // Override whatever resolution the settings asked for. 320x240 is the only
++  // VESA mode the SDL3-DOS backend can reliably negotiate on the reference
++  // hardware (ATI Mach64 + M64VBE.COM); other modes either fail to set or
++  // run too slow to be playable. scale=1 keeps the renderer in the cheap
++  // 1:1 path (Phase 9 perf work). widescreen=false preserves the engine's
++  // native 4:3 viewport.
++  width        = 320;
++  height       = 240;
++  scale        = 1;
++  screenHeight = 240;
++  screenWidth  = 320;
++  widescreen   = false;
++#endif
++
+   if (_window)
+   {
+     LOG_WARN("second call to Renderer::InitVideo()");
+-- 
+2.47.3
+

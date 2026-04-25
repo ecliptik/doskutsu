@@ -1,0 +1,58 @@
+From 392a8e207e730a2edfd6719211aa5e49b850b160 Mon Sep 17 00:00:00 2001
+From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
+Date: Fri, 24 Apr 2026 17:52:29 -0700
+Subject: [PATCH 4/9] [DOSKUTSU] renderer: force software renderer on DOS
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: SDL3's DOS backend (libsdl-org/SDL PR #15377) has no
+accelerated renderer — there's no GPU on the g2k reference target (Pentium
+OverDrive 83 MHz / ATI Mach64 PCI / VESA 1.2+ via M64VBE), and SDL3-DOS
+ships only the software renderer driver. Asking SDL3 for
+`SDL_RENDERER_ACCELERATED` (the upstream default) returns NULL on DOS;
+some drivers fall back to software with a warning, others don't. Asking
+explicitly for `SDL_RENDERER_SOFTWARE` is unambiguous and lets us bisect
+any future accel-attempt regression cleanly.
+
+Site: src/graphics/Renderer.cpp:119, the `SDL_CreateRenderer` call inside
+`Renderer::initVideo`.
+
+Gating: `#ifdef NXE_DOS` so the change is scoped to the DJGPP build.
+Non-DOS builds (Linux / macOS / Windows native, etc.) keep upstream's
+SDL_RENDERER_ACCELERATED behaviour. The NXE_DOS define is set by 0002.
+
+Note on the SDL3 form: SDL3 removed the `SDL_RENDERER_*` flag enum and
+reshaped `SDL_CreateRenderer` to `(window, name)` where `name` is the
+driver string ("software", "opengl", etc.). The SDL3 migration patch
+0010 transmutes this call to `SDL_CreateRenderer(_window, "software")`
+on DOS (and `SDL_CreateRenderer(_window, NULL)` elsewhere). This patch
+sets up the SDL2-side context so 0010's mechanical rewrite preserves the
+software-renderer intent on DOS without needing a separate carve-out.
+---
+ src/graphics/Renderer.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index d6b9486..a71f7f1 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -116,7 +116,15 @@ bool Renderer::initVideo()
+ 
+   if (!_renderer)
+   {
++    // Force the software renderer on DOS — SDL3-DOS has no accelerated
++    // renderer and would silently fall back to software anyway, but asking
++    // explicitly avoids the upstream warning + lets us bisect any future
++    // accel-attempt regression cleanly.
++#ifdef NXE_DOS
++    _renderer = SDL_CreateRenderer(_window, -1, SDL_RENDERER_SOFTWARE);
++#else
+     _renderer = SDL_CreateRenderer(_window, -1, SDL_RENDERER_ACCELERATED);
++#endif
+   }
+   if (!_renderer)
+   {
+-- 
+2.47.3
+
