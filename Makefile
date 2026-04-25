@@ -67,12 +67,41 @@ CWSDPMI_DOC     := $(VENDOR_DIR)/cwsdpmi/cwsdpmi.doc
 # Every stage uses the DJGPP toolchain file and installs into SYSROOT.
 # CMAKE_PREFIX_PATH makes each stage's output visible to later stages.
 
+# SDL3-NOSIMD compile defines for any SDL3 consumer on DJGPP. SDL3's PUBLIC
+# `SDL_intrin.h` (vendor/SDL/include/SDL3/SDL_intrin.h:291-292, 367) enables
+# `SDL_SSE_INTRINSICS=1` for any gcc>=4.9 because the compiler *supports*
+# `__attribute__((target("sse")))` — even though our P54C / 486 target has
+# no SSE. SDL3 itself sets `SDL_DISABLE_SSE=1` in its INTERNAL build_config.h
+# so its own code is fine, but downstream consumers (SDL3_mixer, SDL3_image,
+# NXEngine) compile without that internal config and pick up the SSE intrinsic
+# paths — which then emit a runtime check that fails on Pentium-class hardware
+# (e.g. SDL_mixer.c:685 `MIX_Init: Need SSE instructions but this CPU doesn't
+# offer it`). Forwarding these defines through CMAKE_C_FLAGS suppresses the
+# intrinsic gate at every consumer's preprocessor level. Includes the AVX
+# family for completeness — same upstream issue applies. Found via #26 spike;
+# upstream issue draft at .tmp/upstream-sdl-issue-sdl-intrin-propagation.md.
+NOSIMD_FLAGS := -DSDL_DISABLE_MMX=1 -DSDL_DISABLE_SSE=1 -DSDL_DISABLE_SSE2=1 \
+                -DSDL_DISABLE_SSE3=1 -DSDL_DISABLE_SSE4_1=1 -DSDL_DISABLE_SSE4_2=1 \
+                -DSDL_DISABLE_AVX=1 -DSDL_DISABLE_AVX2=1 -DSDL_DISABLE_AVX512F=1
+
 CMAKE_COMMON := \
     -DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=$(SYSROOT) \
     -DCMAKE_PREFIX_PATH=$(SYSROOT) \
+    -DCMAKE_FIND_ROOT_PATH=$(SYSROOT) \
+    -DCMAKE_C_FLAGS="$(NOSIMD_FLAGS)" \
+    -DCMAKE_CXX_FLAGS="$(NOSIMD_FLAGS)" \
     -DBUILD_SHARED_LIBS=OFF
+# CMAKE_FIND_ROOT_PATH=$(SYSROOT) is pre-populated so the DJGPP toolchain file's
+# `list(APPEND CMAKE_FIND_ROOT_PATH ${CC_ROOTS})` keeps both — needed because
+# the toolchain sets CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY, which restricts
+# find_package() to those paths. Without our sysroot prepended, downstream
+# stages (sdl3-mixer, sdl3-image, nxengine) couldn't find_package(SDL3).
+#
+# CMAKE_C_FLAGS / CMAKE_CXX_FLAGS carry the NOSIMD train (see above). SDL3's
+# own build is unaffected (it sets these internally already); SDL3_mixer,
+# SDL3_image, and NXEngine itself need them for the public-header gate.
 
 NPROC := $(shell nproc 2>/dev/null || echo 4)
 
@@ -160,6 +189,93 @@ $(SYSROOT)/lib/libSDL3.a: | djgpp-check
 	    -DSDL_SHARED=OFF -DSDL_STATIC=ON
 	cmake --build $(SDL3_BUILD) -j$(NPROC)
 	cmake --install $(SDL3_BUILD)
+
+# --- Path B spike: SDL3_mixer for DOS ----------------------------------------
+#
+# task #26 spike. Builds SDL_mixer (release-3.2.x) against libSDL3.a with
+# WAV (native) + OGG-via-stb_vorbis only. All other codecs OFF; SDLMIXER_DEPS_SHARED=OFF
+# disables dynamic codec loading (DJGPP has no real dlopen). PLATFORM_SUPPORTS_SHARED
+# is forced OFF via BUILD_SHARED_LIBS=OFF override.
+#
+# This is the path-B-go/no-go preflight per software-architect's condition 2.
+
+SDL3_MIXER_BUILD := $(BUILD_DIR)/sdl3-mixer
+
+.PHONY: sdl3-mixer
+sdl3-mixer: $(SYSROOT)/lib/libSDL3_mixer.a
+
+# NOSIMD flag train moved to CMAKE_COMMON (project-wide) per team-lead — every
+# SDL3 consumer on DJGPP needs the same defines. See the NOSIMD_FLAGS block
+# at the top of this file for the full rationale. Per-stage CMAKE_C_FLAGS
+# overrides removed; they'd shadow the CMAKE_COMMON value.
+
+$(SYSROOT)/lib/libSDL3_mixer.a: $(SYSROOT)/lib/libSDL3.a
+	@test -d "$(MIXER_SRC)" || (echo "error: $(MIXER_SRC) not present — run scripts/fetch-sources.sh" >&2; exit 1)
+	cmake -S $(MIXER_SRC) -B $(SDL3_MIXER_BUILD) $(CMAKE_COMMON) \
+	    -DSDLMIXER_VENDORED=ON \
+	    -DSDLMIXER_DEPS_SHARED=OFF \
+	    -DSDLMIXER_TESTS=OFF \
+	    -DSDLMIXER_EXAMPLES=OFF \
+	    -DSDLMIXER_AIFF=OFF \
+	    -DSDLMIXER_VOC=OFF \
+	    -DSDLMIXER_AU=OFF \
+	    -DSDLMIXER_FLAC=OFF \
+	    -DSDLMIXER_GME=OFF \
+	    -DSDLMIXER_MOD=OFF \
+	    -DSDLMIXER_MP3=OFF \
+	    -DSDLMIXER_MIDI=OFF \
+	    -DSDLMIXER_OPUS=OFF \
+	    -DSDLMIXER_WAVE=ON \
+	    -DSDLMIXER_VORBIS_STB=ON \
+	    -DSDLMIXER_VORBIS_VORBISFILE=OFF \
+	    -DSDLMIXER_WAVPACK=OFF
+	cmake --build $(SDL3_MIXER_BUILD) -j$(NPROC)
+	cmake --install $(SDL3_MIXER_BUILD)
+
+# --- Path B: SDL3_image for DOS (#28) ----------------------------------------
+#
+# Builds SDL_image release-3.2.x against libSDL3.a with PNG-via-stb_image
+# only. All other codecs OFF; SDLIMAGE_DEPS_SHARED=OFF disables the
+# SDL_LoadObject codec loader path. Same SDL_DISABLE_SSE/MMX flag train as
+# sdl3-mixer — the SDL3 PUBLIC SDL_intrin.h enables SDL_SSE_INTRINSICS for
+# any gcc>=4.9 regardless of target CPU, which would otherwise enable code
+# paths that fail on P54C-class hardware. SDL3_image kept the IMG_* prefix
+# from SDL2_image (signature drift, not the architectural redesign that
+# SDL3_mixer underwent) — see software-architect's note on #28.
+
+SDL3_IMAGE_BUILD := $(BUILD_DIR)/sdl3-image
+# NOSIMD flag train inherited from CMAKE_COMMON. See top-of-file NOSIMD_FLAGS.
+
+.PHONY: sdl3-image
+sdl3-image: $(SYSROOT)/lib/libSDL3_image.a
+
+$(SYSROOT)/lib/libSDL3_image.a: $(SYSROOT)/lib/libSDL3.a
+	@test -d "$(IMAGE_SRC)" || (echo "error: $(IMAGE_SRC) not present — run scripts/fetch-sources.sh" >&2; exit 1)
+	cmake -S $(IMAGE_SRC) -B $(SDL3_IMAGE_BUILD) $(CMAKE_COMMON) \
+	    -DSDLIMAGE_VENDORED=ON \
+	    -DSDLIMAGE_DEPS_SHARED=OFF \
+	    -DSDLIMAGE_TESTS=OFF \
+	    -DSDLIMAGE_SAMPLES=OFF \
+	    -DSDLIMAGE_BACKEND_STB=ON \
+	    -DSDLIMAGE_PNG=ON \
+	    -DSDLIMAGE_AVIF=OFF \
+	    -DSDLIMAGE_BMP=OFF \
+	    -DSDLIMAGE_GIF=OFF \
+	    -DSDLIMAGE_JPG=OFF \
+	    -DSDLIMAGE_JXL=OFF \
+	    -DSDLIMAGE_LBM=OFF \
+	    -DSDLIMAGE_PCX=OFF \
+	    -DSDLIMAGE_PNM=OFF \
+	    -DSDLIMAGE_QOI=OFF \
+	    -DSDLIMAGE_SVG=OFF \
+	    -DSDLIMAGE_TGA=OFF \
+	    -DSDLIMAGE_TIF=OFF \
+	    -DSDLIMAGE_WEBP=OFF \
+	    -DSDLIMAGE_XCF=OFF \
+	    -DSDLIMAGE_XPM=OFF \
+	    -DSDLIMAGE_XV=OFF
+	cmake --build $(SDL3_IMAGE_BUILD) -j$(NPROC)
+	cmake --install $(SDL3_IMAGE_BUILD)
 
 # --- Stage 2: sdl2-compat -----------------------------------------------------
 
@@ -296,6 +412,59 @@ $(SDL3_SMOKE_EXE): $(SDL3_SMOKE_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
 .PHONY: sdl3-smoke
 sdl3-smoke: $(SDL3_SMOKE_EXE)
 	tests/run-sdl3-smoke.sh
+
+# --- Path B spike: SDL3_mixer functional smoke (#26 sharpening) --------------
+#
+# Software-architect added a functional gate on top of "libSDL3_mixer.a links":
+# three NXEngine audio code paths must execute end-to-end. This probe maps:
+#   Mix_QuickLoad_RAW (Organya) → MIX_LoadRawAudio
+#   Mix_LoadWAV (SFX)           → MIX_LoadAudio_IO from in-memory WAV
+#   OGG via stb_vorbis (Remix)  → VORBIS in MIX_GetAudioDecoder list
+# See tests/sdl3-mixer-smoke/mixertest.c file header for full rationale.
+
+SDL3_MIXER_SMOKE_DIR := $(BUILD_DIR)/sdl3-mixer-smoke
+SDL3_MIXER_SMOKE_SRC := tests/sdl3-mixer-smoke/mixertest.c
+# 8.3 DOS filename: basename "mixsmk" (6) + ".exe" (4) — RUN.BAT references it
+# uppercased; DJGPP-built exe with > 8-char basename gets truncated by DOS and
+# becomes unfindable from the generated batch invocation.
+SDL3_MIXER_SMOKE_EXE := $(SDL3_MIXER_SMOKE_DIR)/mixsmk.exe
+
+$(SDL3_MIXER_SMOKE_EXE): $(SDL3_MIXER_SMOKE_SRC) $(SYSROOT)/lib/libSDL3_mixer.a $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(SDL3_MIXER_SMOKE_DIR)
+	$(CC) -march=i486 -mtune=pentium -O2 -Wall \
+	      -I$(SYSROOT)/include \
+	      -o $@ $< \
+	      -L$(SYSROOT)/lib -lSDL3_mixer -lSDL3 -lm
+	$(STUBEDIT) $@ minstack=2048k
+
+.PHONY: sdl3-mixer-smoke
+sdl3-mixer-smoke: $(SDL3_MIXER_SMOKE_EXE)
+	tests/run-sdl3-mixer-smoke.sh
+
+# --- Path B: SDL3_image functional smoke (#28 sharpening) --------------------
+#
+# Loads a hand-built 68-byte 1x1 RGBA PNG via IMG_Load_IO and verifies the
+# returned SDL_Surface has the expected 1x1 geometry. Confirms libSDL3_image
+# links against libSDL3 under DJGPP, the stb_image PNG decoder runs under
+# DPMI, and SDL_Surface allocation works.
+
+SDL3_IMAGE_SMOKE_DIR := $(BUILD_DIR)/sdl3-image-smoke
+SDL3_IMAGE_SMOKE_SRC := tests/sdl3-image-smoke/imagetest.c
+# 8.3 DOS filename — basename "imgsmk" (6) + ".exe" (4); see sdl3-mixer-smoke
+# for the rationale on why long basenames break headless DOSBox-X invocation.
+SDL3_IMAGE_SMOKE_EXE := $(SDL3_IMAGE_SMOKE_DIR)/imgsmk.exe
+
+$(SDL3_IMAGE_SMOKE_EXE): $(SDL3_IMAGE_SMOKE_SRC) $(SYSROOT)/lib/libSDL3_image.a $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(SDL3_IMAGE_SMOKE_DIR)
+	$(CC) -march=i486 -mtune=pentium -O2 -Wall \
+	      -I$(SYSROOT)/include \
+	      -o $@ $< \
+	      -L$(SYSROOT)/lib -lSDL3_image -lSDL3 -lm
+	$(STUBEDIT) $@ minstack=2048k
+
+.PHONY: sdl3-image-smoke
+sdl3-image-smoke: $(SDL3_IMAGE_SMOKE_EXE)
+	tests/run-sdl3-image-smoke.sh
 
 # --- Distribution -------------------------------------------------------------
 #
