@@ -1,0 +1,116 @@
+From eca87945b5d36c700b63dbb0baf0379874886632 Mon Sep 17 00:00:00 2001
+From: djgpp-dos <djgpp-dos@doskutsu.local>
+Date: Sat, 25 Apr 2026 11:34:23 -0700
+Subject: [PATCH] [DOSKUTSU] djgpp: POSIX headers visibility for nx target
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Three DJGPP-specific gaps blocking 'make nxengine' compilation, all
+rooted in the same cause: DJGPP's POSIX headers (dirent.h, sys/stat.h,
+strings.h) gate their POSIX-extension content on '#ifndef __STRICT_ANSI__'.
+The strict -std=c++11 flag NXEngine-evo uses for its 'pc' platform
+defines __STRICT_ANSI__, hiding DIR / struct stat / strcasecmp on DJGPP.
+
+Most non-DJGPP platforms either don't gate as tightly (glibc exposes
+POSIX content even under -std=c++11 if any of $_POSIX_SOURCE /
+$_POSIX_C_SOURCE / $_DEFAULT_SOURCE is set, which it usually is) or
+ship feature-test macros that reflect the real default.
+
+Three coordinated changes:
+
+1. CMakeLists.txt: switch -std=c++11 -> -std=gnu++11 for the pc-platform
+   path under DJGPP detection. -std=gnu++11 is c++11 + GNU extensions
+   and crucially does NOT define __STRICT_ANSI__, so DJGPP's POSIX
+   content becomes visible without per-file _POSIX_SOURCE defines.
+   Other pc-platform builds (Linux, macOS, MinGW) keep -std=c++11.
+
+2. src/ResourceManager.cpp: extend the unix-cluster platform guards on
+   the <sys/stat.h> include AND the fileExists() body to include
+   __DJGPP__. Previously DJGPP fell through to the Windows
+   GetFileAttributes branch (wrong) or the no-include branch (incomplete
+   struct stat).
+
+3. src/console.cpp: explicit '#include <strings.h>' for strcasecmp.
+   Some platforms expose strcasecmp transitively via <string.h> or
+   other headers; DJGPP requires the explicit POSIX include.
+
+src/extract/extractstages.cpp also uses strcasecmp but the entire
+extract target is excluded from DJGPP builds via 0008, so no fix
+needed there.
+
+Why DOS needs this: the symptom (DIR not declared, struct stat
+incomplete, strcasecmp not declared) looked like missing headers,
+but the headers are present and correct on DJGPP — they're just
+ANSI-gated. The CMake fix is the root-cause cure; the source-level
+includes/guards in (2) and (3) are belt-and-braces for headers that
+should be unambiguous about their POSIX-ness regardless of strict
+mode.
+---
+ CMakeLists.txt          | 14 +++++++++++++-
+ src/ResourceManager.cpp |  4 ++--
+ src/console.cpp         |  1 +
+ 3 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fc27372..30e741c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -172,7 +172,19 @@ IF(PLATFORM STREQUAL "pc")
+     else()
+         set_property(TARGET nx PROPERTY OUTPUT_NAME nxengine-evo)
+     endif()
+-    add_definitions("-std=c++11")
++    # DJGPP's POSIX headers (dirent.h, sys/stat.h, strings.h) gate their
++    # POSIX-extension content on `#ifndef __STRICT_ANSI__`. -std=c++11
++    # defines __STRICT_ANSI__, hiding DIR / struct stat / strcasecmp.
++    # -std=gnu++11 is c++11 + GNU extensions and disables strict-mode,
++    # making the POSIX content visible without per-file _POSIX_SOURCE
++    # defines. Other pc-platform builds (Linux glibc, macOS, MinGW) are
++    # unaffected — their libc headers don't gate POSIX content as
++    # tightly as DJGPP's.
++    if(CMAKE_SYSTEM_NAME STREQUAL "MSDOS" OR CMAKE_CXX_COMPILER MATCHES "msdosdjgpp")
++        add_definitions("-std=gnu++11")
++    else()
++        add_definitions("-std=c++11")
++    endif()
+     IF(UNIX_LIKE)
+         add_definitions(-DHAVE_UNIX_LIKE)
+ 
+diff --git a/src/ResourceManager.cpp b/src/ResourceManager.cpp
+index 36fa062..78e8dda 100644
+--- a/src/ResourceManager.cpp
++++ b/src/ResourceManager.cpp
+@@ -3,7 +3,7 @@
+ #include <stdexcept>
+ #include <string>
+ 
+-#if defined(__unix__) || defined(__APPLE__) || defined(__VITA__) || defined(__SWITCH__)
++#if defined(__unix__) || defined(__APPLE__) || defined(__VITA__) || defined(__SWITCH__) || defined(__DJGPP__)
+ #include <sys/stat.h>
+ #elif defined(__HAIKU__)
+ #include <posix/sys/stat.h> // ugh
+@@ -25,7 +25,7 @@
+ 
+ bool ResourceManager::fileExists(const std::string &filename)
+ {
+-#if defined(__unix__) || defined(__APPLE__) || defined(__HAIKU__) || defined(__VITA__) || defined(__SWITCH__)
++#if defined(__unix__) || defined(__APPLE__) || defined(__HAIKU__) || defined(__VITA__) || defined(__SWITCH__) || defined(__DJGPP__)
+   struct stat st;
+ 
+   if (stat(filename.c_str(), &st) == 0)
+diff --git a/src/console.cpp b/src/console.cpp
+index 4c2eb2c..ddaa162 100644
+--- a/src/console.cpp
++++ b/src/console.cpp
+@@ -22,6 +22,7 @@ using namespace NXE::Graphics;
+ 
+ #include <cstdarg>
+ #include <string>
++#include <strings.h>  // strcasecmp — POSIX, not in <string.h>; explicit on DJGPP
+ #include <vector>
+ #include <SDL3/SDL.h>
+ 
+-- 
+2.47.3
+
