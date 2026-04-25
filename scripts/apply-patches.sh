@@ -78,10 +78,21 @@ apply_one() {
     fi
 
     # Collect .patch files in lexical order. If none, that's fine.
+    #
+    # LC_ALL=C forces ASCII byte-order sort. Without it, glibc's default
+    # locale-aware collation treats `-` (0x2D) as punctuation that gets
+    # promoted next to alphabetics — so a filename like `0014a-...patch`
+    # would sort BEFORE `0014-...patch` on en_US.UTF-8 even though ASCII
+    # byte order has the reverse (0x2D < 0x61). Caught by nxengine during
+    # Phase 5 attempt 4 when sdl-engine's `0014a` and `0010a` follow-up
+    # patches both surfaced the bug. Renumbering those files to pure-
+    # numeric slots (0020, 0021) sidestepped the immediate apply-order
+    # problem; this LC_ALL=C export makes the durable fix so any future
+    # contributor can use any naming scheme without locale-fragility.
     local patches=()
     while IFS= read -r -d '' p; do
         patches+=("$p")
-    done < <(find "$patches_path" -maxdepth 1 -name '*.patch' -type f -print0 | sort -z)
+    done < <(find "$patches_path" -maxdepth 1 -name '*.patch' -type f -print0 | LC_ALL=C sort -z)
 
     if [[ "${#patches[@]}" -eq 0 ]]; then
         log "$name: no *.patch files in $patches_path — nothing to apply"
