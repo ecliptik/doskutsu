@@ -1,0 +1,252 @@
+From f6dda4f1af2b1767b9bc01ae56c75839bccead6f Mon Sep 17 00:00:00 2001
+From: sdl-engine <sdl-engine@doskutsu.local>
+Date: Sat, 25 Apr 2026 11:19:59 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20sdl3-mixer:=20wire=20SoundManager:?=
+ =?UTF-8?q?:updateSfxVolume=20=E2=86=92=20Pixtone::setVolume?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Follow-up to the 0013-0017 audio-refactor cluster (#31). Wires the SFX
+volume slider that 0017 left as a deliberate TODO and 0014 was supposed
+to deliver but missed. Caught by nxengine's synthesis-correctness review
+of the audio cluster (#31 review pass).
+
+Numbered 0014a so it sorts between 0014 (the Pixtone Mix→MIX + 64-track
+pool) and 0015 (Organya) in `find | sort` lexical order — keeps apply-
+patches.sh's apply-in-numeric-order behavior consistent with the natural
+dependency: 0014a needs 0014's _track_pool present and 0017's
+SoundManager::updateSfxVolume hook.
+
+================================================================
+The gap
+================================================================
+
+Upstream: SoundManager::updateSfxVolume() → Mix_Volume(-1, (int)(128.0/
+100.0 * sfx_volume)). Effective SDL2 gain = sfx_volume_0_100 / 100.
+
+Migration (in 0017): SoundManager::updateSfxVolume() → no-op TODO with
+comment "wired in patch 0014: Pixtone::getInstance()->setVolume(...)".
+
+Migration (in 0014): track-pool added, but Pixtone::setVolume method
+NOT added, and SoundManager::updateSfxVolume left as the 0017 TODO.
+
+Net effect: SFX plays at full gain regardless of the user's settings
+slider. Music volume preserved correctly by 0016; SFX is the missed
+sibling. Functional regression vs upstream.
+
+================================================================
+The fix
+================================================================
+
+1. Pixtone::setVolume(int volume_0_100) — new public method on Pixtone
+   that iterates the 64-track _track_pool calling MIX_SetTrackGain
+   with gain = volume_0_100 / 100.0f. NULL pool entries skipped (a
+   track allocation could have failed at init time without being
+   fatal). Conversion preserves upstream's effective gain exactly:
+
+     upstream: Mix_Volume(-1, 128/100 * vol)
+               → SDL2 effective gain = (128/100 * vol) / 128 = vol/100
+     ours:     MIX_SetTrackGain(track, vol/100.0f)
+               → SDL3 effective gain = vol/100
+
+   Audio-capture A/B at Phase 7 gate stays interpretable.
+
+2. SoundManager::updateSfxVolume() — body changed from no-op TODO to
+   call Pixtone::getInstance()->setVolume(settings->sfx_volume).
+
+3. Pixtone::play() — `// DOS-PORT:` comment block added documenting
+   the synchronous-callback dependency (MIX_StopTrack on a playing
+   track may dispatch the per-track stopped-callback inline before
+   returning, which is sequential on DJGPP cooperative scheduler but
+   would race on multi-threaded hosts). Race is benign in practice
+   (old slot reset to -1 is correct regardless), but the logic relies
+   on synchronous dispatch for clarity. References docs/SDL3-MIGRATION
+   § 3 invariant.
+
+================================================================
+Bug-find credit reframe (per nxengine's review)
+================================================================
+
+nxengine's review noted that 0014's "side fix" framing of the Pixtone::
+shutdown variable-shadowing typo undersells it. The bug:
+
+  for (uint32_t i = 0; i <= NUM_SOUNDS; i++) {
+    ...
+    for (int i = 0; i < NUM_RESAMPLED_BUFFERS; i++) {  // ← inner i
+      if (_sound_fx[i].resampled[i]) { Mix_FreeChunk... }
+                  // ↑ shadowed inner i, not outer SFX-slot index
+    }
+  }
+
+The inner `i` shadows the outer SFX-slot iterator. Net behavior under
+SDL2_mixer: most resampled buffers leaked at process exit (slots 16..
+NUM_SOUNDS never got their resampled[] freed), some slots' resampled
+buffers got considered with the wrong index. Harmless on SDL2_mixer
+because Mix_FreeChunk on null was a no-op after the first cleanup
+pass and the OS reclaimed the leaks at exit.
+
+Under SDL3_mixer post-migration, the equivalent MIX_DestroyAudio on
+a stale pointer would be a hard double-free that the new allocator
+won't tolerate as gracefully. 0014's fix (rename inner to `j`,
+access _sound_fx[i].resampled[j] correctly) was therefore not
+optional polish — it was load-bearing for the migration not crashing
+on shutdown.
+
+This is a meaningful upstream-find-during-migration win in the lineage
+of nxengine's #30 SDL_Init-bool-return / SDL_GetBasePath-const finds.
+Ratifying nxengine's "Path B's hypothesis paying out" framing here
+since 0014 is already committed; rebasing the cluster mid-stack to
+edit 0014's commit body for credit attribution would be more risk
+than benefit.
+
+================================================================
+Why follow-up patch instead of amending 0014 + 0017
+================================================================
+
+Per team-lead's option B selection: amending 0014 + 0017 mid-stack
+would require rebasing 5 commits in the audio cluster topic branch.
+Rebase risk on already-reviewed code exceeds the value of compacting
+the volume wireup into 0014. 0014a is the clean separation: small,
+atomic, post-cluster, lands as a single follow-up patch in build-
+engineer's next commit cycle.
+
+================================================================
+Validation
+================================================================
+
+Build verification deferred to build-engineer's next `make nxengine`
+attempt (currently #40 / Phase 5). Expected post-build behavior:
+- Title screen: SFX (e.g. menu cursor at default sfx_volume=100) at
+  full gain, equivalent to upstream.
+- Settings menu: SFX volume slider adjusts effective SFX level
+  proportionally (upstream behavior: 0..100 maps to 0..1.0 gain).
+  Pre-0014a: slider has no effect.
+- Audio-capture A/B at Phase 7 gate: SFX levels match pre-migration
+  capture at any given sfx_volume setting.
+
+================================================================
+Touch points
+================================================================
+
+- src/sound/Pixtone.h: +13 lines (public setVolume declaration + comment)
+- src/sound/Pixtone.cpp: +47 lines (setVolume definition + Pixtone::play
+  synchronous-callback DOS-PORT comment)
+- src/sound/SoundManager.cpp: -8 lines / +5 lines (replaces no-op TODO
+  body with Pixtone::setVolume call; comment trimmed since the rationale
+  now lives at the receiving end)
+
+Total ~57 lines net addition, no new external dependencies, no new
+public API beyond Pixtone::setVolume.
+---
+ src/sound/Pixtone.cpp      | 40 ++++++++++++++++++++++++++++++++++++++
+ src/sound/Pixtone.h        | 10 ++++++++++
+ src/sound/SoundManager.cpp | 13 ++++++-------
+ 3 files changed, 56 insertions(+), 7 deletions(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 4e2645a..25b1b46 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -383,6 +383,19 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+     // DOS-PORT: same track-pool dispatch as playResampled(). chan == -1
+     // means "first free track"; chan >= 0 means "use this pool slot,
+     // interrupting if busy".
++    //
++    // DOS-PORT: synchronous-callback dependency. MIX_StopTrack on a
++    // currently-playing track may dispatch the per-track stopped-callback
++    // (mySfxCallback → pxtSoundDone) inline before returning, which
++    // resets _sound_fx[old_slot].channel = -1. The subsequent
++    // _sound_fx[slot].channel = chan and _slots[chan] = slot writes
++    // below run AFTER that callback — so the bookkeeping is sequential
++    // and correct on SDL3-DOS's cooperative scheduler. Multi-threaded
++    // SDL3 hosts (Linux/macOS/Windows) would dispatch the callback on
++    // a different thread, theoretically racing this function's writes;
++    // in practice the race is benign (old slot reset to -1 is correct
++    // anyway) but the logic relies on synchronous dispatch for clarity.
++    // See docs/SDL3-MIGRATION.md § 3 for the no-threads invariant.
+     if (chan < 0) chan = _findFreeTrack();
+     if (chan >= 0)
+     {
+@@ -407,6 +420,33 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+   }
+ }
+ 
++void Pixtone::setVolume(int volume_0_100)
++{
++  // DOS-PORT: SDL2_mixer's Mix_Volume(-1, int_0_128) was a global
++  // "all channels" gain setter. SDL3_mixer's MIX_SetTrackGain is per-
++  // track, so we iterate the pre-allocated pool. Conversion preserves
++  // upstream's effective gain exactly:
++  //
++  //   upstream: Mix_Volume(-1, (int)(128.0/100.0 * sfx_volume_0_100))
++  //             effective gain = (128/100 * vol) / 128 = vol / 100
++  //   ours:     MIX_SetTrackGain(track, vol / 100.0f)
++  //             effective gain = vol / 100
++  //
++  // Same audible level pre and post migration. Audio capture A/B at
++  // the Phase 7 gate stays interpretable.
++  //
++  // Note: NULL pool entries are skipped — Pixtone::init() may have
++  // failed to allocate some tracks (logged at init time but not fatal),
++  // and we don't want a NULL-deref here. _findFreeTrack() does the
++  // same null-check; consistent.
++  const float gain = (float)volume_0_100 / 100.0f;
++  for (int i = 0; i < PIXTONE_TRACK_POOL_SIZE; ++i)
++  {
++    if (_track_pool[i])
++      MIX_SetTrackGain(_track_pool[i], gain);
++  }
++}
++
+ int Pixtone::_findFreeTrack()
+ {
+   // Scan pool for a track that isn't currently playing. Mirrors
+diff --git a/src/sound/Pixtone.h b/src/sound/Pixtone.h
+index 7731a2a..76a9474 100644
+--- a/src/sound/Pixtone.h
++++ b/src/sound/Pixtone.h
+@@ -97,6 +97,16 @@ public:
+   int prepareResampled(int32_t slot, uint32_t percent);
+   void stop(int32_t slot);
+ 
++  // DOS-PORT: SDL3_mixer's per-track gain API replaces SDL2_mixer's
++  // global Mix_Volume(-1, int_0..128). setVolume iterates the pre-
++  // allocated track pool calling MIX_SetTrackGain. Volume is in 0..100
++  // (matching SoundManager::updateSfxVolume's settings->sfx_volume
++  // input range); converted to SDL3 float gain via volume/100.0f.
++  // The full 0..100 maps to 0..1.0 gain (full SDL3 range), matching
++  // upstream's Mix_Volume(-1, 128/100 * sfx_volume) which fully mapped
++  // 0..100 to 0..128 (full SDL2 range).
++  void setVolume(int volume_0_100);
++
+   void pxtSoundDone(int channel);
+ 
+ protected:
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 43110d6..e120c42 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -367,13 +367,12 @@ void SoundManager::resume()
+ void SoundManager::updateSfxVolume()
+ {
+   // DOS-PORT: SDL3_mixer's volume API is per-track or per-tag (group),
+-  // not a global "all channels" setter. SDL2's Mix_Volume(-1, int_0_128)
+-  // becomes Pixtone iterating its track pool calling
+-  // MIX_SetTrackGain(track, float_0_1) — wired in patch 0014. For now
+-  // (foundation-only milestone), this is a no-op so audio still plays
+-  // at full volume; SFX volume slider is non-functional until 0014.
+-  // TODO(0014): Pixtone::getInstance()->setVolume(settings->sfx_volume);
+-  (void)settings;
++  // not a global "all channels" setter. Pixtone::setVolume iterates
++  // the 64-track pool calling MIX_SetTrackGain. Conversion to SDL3's
++  // 0..1.0 gain happens inside Pixtone — see Pixtone.cpp comment for
++  // the volume-scale-preservation math. The original 0017 patch
++  // shipped this as a no-op TODO; 0014a wires it through.
++  Pixtone::getInstance()->setVolume(settings->sfx_volume);
+ }
+ 
+ void SoundManager::updateMusicVolume()
+-- 
+2.47.3
+
