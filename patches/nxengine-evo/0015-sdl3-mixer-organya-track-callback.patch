@@ -1,0 +1,353 @@
+From 23a32209e73d54a30bb7c97323b682c42673b1fb Mon Sep 17 00:00:00 2001
+From: sdl-engine <sdl-engine@doskutsu.local>
+Date: Sat, 25 Apr 2026 10:50:18 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20sdl3-mixer:=20Organya=20Mix=5FHook?=
+ =?UTF-8?q?Music=20=E2=86=92=20SDL=5FAudioStream=20+=20MIX=5FTrack?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Final patch in the audio-refactor cluster (#31 / 0013-0017). Migrates
+Organya's music-synthesis hook from SDL2_mixer's global Mix_HookMusic
+callback to SDL3's pull-driven AudioStream pattern bound to a dedicated
+MIX_Track via MIX_SetTrackAudioStream.
+
+DESIGN DEVIATION FROM ORIGINAL PLAN — see "Why not MIX_SetTrackRawCallback"
+section below. The deviation is technically cleaner and saves CPU on the
+cooperative scheduler; documenting prominently because nxengine and I
+discussed an earlier design that this supersedes.
+
+Architectural change:
+- SDL2_mixer had ONE global music callback (Mix_HookMusic) that the
+  mixer called whenever it needed PCM bytes. Pull-driven, single hook.
+- SDL3 has no such global hook. The replacement is a per-track input
+  source — either a MIX_Audio (finite), an SDL_AudioStream (streaming),
+  or callbacks for modifying mid-pipeline. We use an SDL_AudioStream
+  with a get-callback that fires when the stream needs more data.
+
+Pipeline:
+  Organya._musicCallback (UNCHANGED — S16 stereo synth into Uint8* buffer)
+        ↓
+  organyaStreamCallback (new SDL_AudioStreamCallback adapter; resizes
+        scratch buf, calls _musicCallback, SDL_PutAudioStreamData)
+        ↓
+  _organya_stream (SDL_AudioStream, S16 stereo SAMPLE_RATE both src+dst)
+        ↓
+  MIX_SetTrackAudioStream binds it as input to _organya_track
+        ↓
+  Mixer pulls from track when it needs frames; SDL3 audio device
+  pipeline handles S16 → device-format conversion downstream.
+
+Lifecycle:
+- start() lazy-creates _organya_stream + _organya_track (kept alive
+  across stop/start cycles to avoid allocation churn).
+- stop() calls MIX_StopTrack(track, 0); track + stream stay alive.
+- shutdown() destroys both via MIX_DestroyTrack + SDL_DestroyAudioStream.
+  Order is important: track first (mixer stops pulling from stream),
+  stream second.
+
+Why not MIX_SetTrackRawCallback (deviation rationale):
+- I (sdl-engine) initially proposed using SDL3_mixer's
+  MIX_SetTrackRawCallback for the Organya generator path, with a
+  manual S16 → float conversion at the boundary. nxengine reviewed
+  and confirmed Organya should stay S16-internal with conversion at
+  the boundary. Both correct.
+- Closer reading of SDL3_mixer's API docs surfaced that
+  MIX_SetTrackRawCallback is for MODIFYING decoded PCM mid-pipeline,
+  NOT for SOURCING audio from a generator. The track must already
+  have an input source (MIX_Audio or SDL_AudioStream); the raw
+  callback fires AFTER decode, BEFORE gain/positioning/etc. To use
+  it as a generator we'd need a dummy silent MIX_Audio source bound
+  to the track and overwrite its silence — works, but indirect.
+- The SDL_AudioStream + get-callback pattern is the documented "I
+  generate PCM on demand" primitive in SDL3 core. MIX_SetTrackAudioStream
+  is the documented way to feed a track from such a stream. So this
+  patch uses that pattern instead.
+- Side benefit: skips the manual S16 → float pass nxengine and I were
+  designing around. The SDL3 audio device pipeline does the format
+  conversion downstream of us, saving a `samples × 2` floating-point
+  divide per chunk. nxengine's risk #2 (audio-callback duration on
+  cooperative scheduler) is reduced.
+- Synthesis correctness invariant (nxengine's review territory) is
+  PRESERVED — Organya internal mixer is still S16-only. Only the
+  data-handoff path differs from the original sketch.
+
+API mapping:
+- Mix_HookMusic(callback, NULL)  → SDL_CreateAudioStream +
+                                    SDL_SetAudioStreamGetCallback +
+                                    MIX_CreateTrack +
+                                    MIX_SetTrackAudioStream +
+                                    MIX_PlayTrack
+- Mix_HookMusic(NULL, NULL)      → MIX_StopTrack(track, 0)
+                                    (track + stream stay alive)
+
+New callback signature (organyaStreamCallback, replaces myMusicPlayer
+trampoline at the SDL boundary):
+- SDL2_mixer: void (*)(void *udata, uint8_t *stream, int len)
+- SDL3 core:  void (*)(void *userdata, SDL_AudioStream *stream,
+                       int additional_amount, int total_amount)
+The new callback resizes the scratch S16 buffer to additional_amount
+bytes (in int16_t units), calls _musicCallback to fill it (signature
+unchanged — still writes Uint8* of N bytes), then SDL_PutAudioStreamData.
+
+State:
+- New private members on Organya class (in Organya.h):
+  - MIX_Track *_organya_track = nullptr;
+  - SDL_AudioStream *_organya_stream = nullptr;
+  - std::vector<int16_t> _s16_scratch;  (resize-on-demand, never shrinks)
+- friend declaration grants organyaStreamCallback access to _s16_scratch.
+
+Synchronous-only invariant (per docs/SDL3-MIGRATION.md § 3): no
+SDL_CreateThread, no std::thread, the get-callback fires on SDL3-DOS's
+cooperative audio pump. Critical for Organya specifically because the
+synth is CPU-dense — no thread to offload to.
+
+Behavioral preservation:
+- _musicCallback's S16 synth math is byte-identical to upstream.
+- _musicCallback's "if (!song.playing) memset to silence" early-return
+  preserved. Pause/resume keep working via the existing flag toggle —
+  no MIX_PauseTrack needed.
+- pause/resume members unchanged; they toggle song.playing; the
+  callback returns silence when paused; the track keeps mixing silence.
+- SAMPLE_RATE pinning matches mixer spec from 0017 (44100 stereo S16).
+  Phase 9 lever 1 rate-change is a separate atomic concern with its own
+  audio-capture gate.
+
+Closes the 0013-0017 audio-refactor series. Together with 0017
+(SoundManager foundation), 0013 (Pixtone CVT → AudioStream),
+0014 (Pixtone Mix→MIX + 64-track pool), and 0016 (Ogg Mix_Music
+→ MIX_Audio + MIX_Track), this patch produces a tree where every
+SDL2_mixer / SDL_AudioCVT API call has been replaced. `make nxengine`
+should configure + compile end-to-end after this lands.
+
+LISTEN-CHECK at audio-capture gate (per nxengine's risk flag): silence
+floor / quantization noise that wasn't there pre-migration. The
+deviation to AudioStream means we no longer have a manual S16→float
+conversion to surface FP truncation artifacts at — but SDL3 core's
+device-side conversion still does S16→whatever-the-device-takes, and
+any truncation bug would surface as the same kind of audible artifact.
+Capture A/B remains valid: same Organya source bytes pre and post
+migration; same SAMPLE_RATE; only the path-to-device differs.
+---
+ src/sound/Organya.cpp | 121 ++++++++++++++++++++++++++++++++++++++++--
+ src/sound/Organya.h   |  30 +++++++++++
+ 2 files changed, 146 insertions(+), 5 deletions(-)
+
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index bb931e1..c438f41 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -14,8 +14,8 @@
+ #include "Pixtone.h"
+ #include "SoundManager.h"
+ 
+-#include <SDL.h>
+-#include <SDL_mixer.h>
++#include <SDL3/SDL.h>
++#include <SDL3_mixer/SDL_mixer.h>
+ #include <cmath>
+ #include <cstring>
+ #include <fstream>
+@@ -53,7 +53,24 @@ Organya *Organya::getInstance()
+ 
+ void Organya::init() {}
+ 
+-void Organya::shutdown() {}
++void Organya::shutdown()
++{
++  // DOS-PORT: tear down the SDL3 audio-stream + MIX_Track allocated lazily
++  // by start(). Order: destroy the track first (so the mixer stops pulling
++  // from the stream), then destroy the stream. Run before SoundManager's
++  // MIX_DestroyMixer (Organya::shutdown is invoked from SoundManager::
++  // shutdown ahead of MIX_DestroyMixer, so order is correct).
++  if (_organya_track)
++  {
++    MIX_DestroyTrack(_organya_track);
++    _organya_track = nullptr;
++  }
++  if (_organya_stream)
++  {
++    SDL_DestroyAudioStream(_organya_stream);
++    _organya_stream = nullptr;
++  }
++}
+ 
+ //------------------------------------------------------------------------------
+ 
+@@ -324,6 +341,56 @@ bool Organya::load(const std::string &fname)
+ 
+ std::function<void(void *, uint8_t *, int)> musicCallback;
+ 
++// DOS-PORT: SDL3 audio pipeline adapter for Organya's S16-internal
++// synthesis. SDL2_mixer's Mix_HookMusic was a global void(udata, Uint8*,
++// int) callback that the mixer called when it needed PCM bytes. SDL3's
++// equivalent is an SDL_AudioStreamCallback that we register on the
++// _organya_stream; the mixer (via MIX_SetTrackAudioStream) pulls from
++// the stream as needed, and the stream invokes this callback when it
++// runs short — exact same "produce on demand" semantics as the old hook.
++//
++// We deliberately use SDL3 core's SDL_AudioStream rather than
++// SDL3_mixer's MIX_SetTrackRawCallback here because the latter is for
++// MODIFYING decoded audio mid-pipeline, not for SOURCING audio from a
++// generator. (RawCallback would require attaching a dummy silent
++// MIX_Audio source and overwriting it — an unnecessary indirection.)
++// The AudioStream path also lets the SDL3 audio device pipeline handle
++// the S16 → device-format conversion downstream of us, saving the CPU
++// cost of a manual S16 → float pass in this callback. Important because
++// Organya synthesis is CPU-dense and the callback runs on SDL3-DOS's
++// cooperative scheduler (no thread to offload to).
++//
++// Note this is a deviation from the original boundary-conversion design
++// I (sdl-engine) discussed with nxengine — the deviation arose from
++// reading SDL3_mixer's API docs more carefully and discovering RawCallback
++// isn't a generator primitive. The new path keeps Organya internal S16
++// (nxengine's correctness invariant) and is strictly cheaper at runtime.
++static void SDLCALL organyaStreamCallback(void *userdata, SDL_AudioStream *stream,
++                                          int additional_amount, int /*total_amount*/)
++{
++  if (additional_amount <= 0) return;
++
++  Organya *self = static_cast<Organya *>(userdata);
++  // The old _musicCallback writes S16 stereo PCM into a Uint8* buffer of
++  // a given byte length. We resize our scratch buffer to that byte count
++  // (in int16_t units) and hand it the buffer reinterpreted as Uint8*.
++  size_t needed_int16s = (size_t)additional_amount / sizeof(int16_t);
++  if (self->_s16_scratch.size() < needed_int16s)
++  {
++    self->_s16_scratch.resize(needed_int16s);  // never shrinks
++  }
++  self->_musicCallback(nullptr,
++                       reinterpret_cast<uint8_t *>(self->_s16_scratch.data()),
++                       (uint32_t)additional_amount);
++  if (!SDL_PutAudioStreamData(stream, self->_s16_scratch.data(), additional_amount))
++  {
++    LOG_ERROR("SDL_PutAudioStreamData (Organya): {}", SDL_GetError());
++  }
++}
++
++// Legacy trampoline retained for any external references (none in our
++// tree post-migration, but keeps API surface stable for any third-party
++// code or tests that might bind to musicCallback directly).
+ void myMusicPlayer(void *udata, uint8_t *stream, int len)
+ {
+   musicCallback(udata, stream, len);
+@@ -375,7 +442,46 @@ bool Organya::start(int startBeat)
+       = std::bind(&Organya::_musicCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+   _setPlayPosition(startBeat);
+   song.Synth();
+-  Mix_HookMusic(myMusicPlayer, NULL);
++
++  // DOS-PORT: SDL2_mixer's Mix_HookMusic(callback, NULL) is replaced by
++  // the SDL3 AudioStream → MIX_Track binding pattern. See the
++  // organyaStreamCallback comment block at the top of this file for the
++  // architectural rationale; here we just wire it up.
++  //
++  // Lazy-create the stream + track on first start. Both kept alive
++  // across pause/resume/stop; explicitly destroyed in shutdown().
++  if (!_organya_stream)
++  {
++    SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
++    _organya_stream = SDL_CreateAudioStream(&spec, &spec);
++    if (!_organya_stream)
++    {
++      LOG_ERROR("SDL_CreateAudioStream (Organya): {}", SDL_GetError());
++      return false;
++    }
++    if (!SDL_SetAudioStreamGetCallback(_organya_stream, organyaStreamCallback, this))
++    {
++      LOG_ERROR("SDL_SetAudioStreamGetCallback (Organya): {}", SDL_GetError());
++    }
++  }
++  if (!_organya_track)
++  {
++    MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
++    _organya_track   = MIX_CreateTrack(mixer);
++    if (!_organya_track)
++    {
++      LOG_ERROR("MIX_CreateTrack (Organya): {}", SDL_GetError());
++      return false;
++    }
++    if (!MIX_SetTrackAudioStream(_organya_track, _organya_stream))
++    {
++      LOG_ERROR("MIX_SetTrackAudioStream (Organya): {}", SDL_GetError());
++    }
++  }
++  if (!MIX_PlayTrack(_organya_track, 0))
++  {
++    LOG_ERROR("MIX_PlayTrack (Organya): {}", SDL_GetError());
++  }
+   return true;
+ }
+ 
+@@ -397,7 +503,12 @@ uint32_t Organya::stop()
+     }
+ 
+     song.playing = false;
+-    Mix_HookMusic(NULL, NULL);
++    // DOS-PORT: SDL2_mixer's Mix_HookMusic(NULL, NULL) deactivated the
++    // global music callback. SDL3 equivalent: stop the track. Track and
++    // stream stay alive across stops; reused on next start(). Final
++    // teardown happens in shutdown() at process exit.
++    if (_organya_track)
++      MIX_StopTrack(_organya_track, 0);
+     return cur_beat;
+   }
+   return 0;
+diff --git a/src/sound/Organya.h b/src/sound/Organya.h
+index 37afe43..4d270b5 100644
+--- a/src/sound/Organya.h
++++ b/src/sound/Organya.h
+@@ -9,6 +9,8 @@
+ #include "../Singleton.h"
+ #include "SoundManager.h"
+ 
++#include <SDL3/SDL.h>
++#include <SDL3_mixer/SDL_mixer.h>
+ #include <cstdint>
+ #include <map>
+ #include <memory>
+@@ -77,6 +79,13 @@ public:
+   void resume();
+   void _musicCallback(void *udata, uint8_t *stream, uint32_t len);
+ 
++  // DOS-PORT: SDL3 audio-stream "produce on demand" callback. Defined
++  // as a free function in Organya.cpp; needs access to _s16_scratch
++  // (private) and _musicCallback (public). friend declaration grants
++  // _s16_scratch access without exposing it as a public API.
++  friend void SDLCALL organyaStreamCallback(void *userdata, SDL_AudioStream *stream,
++                                            int additional_amount, int total_amount);
++
+ protected:
+   friend class Singleton<Organya>;
+ 
+@@ -104,6 +113,27 @@ private:
+   float volume            = 1.0;
+   bool fading             = false;
+   uint32_t last_fade_time = 0;
++
++  // DOS-PORT: SDL3 audio pipeline replaces SDL2_mixer's Mix_HookMusic
++  // global "music callback" hook. The new model is:
++  //   _musicCallback (unchanged S16-internal synth) writes into _s16_scratch
++  //          ↓
++  //   _organya_stream (SDL_AudioStream) receives S16 stereo via
++  //          SDL_PutAudioStreamData inside an SDL_AudioStreamCallback
++  //          ↓
++  //   _organya_track (MIX_Track) is bound to the stream via
++  //          MIX_SetTrackAudioStream; the mixer pulls from the stream as
++  //          it needs frames; SDL3 audio device handles S16→device-format
++  //          conversion downstream of us.
++  //
++  // Lazy-created on first start(); kept alive across pause/resume/stop so
++  // we don't re-allocate per song. Explicitly destroyed in shutdown().
++  // Synchronous-only: the stream callback runs on SDL3-DOS's cooperative
++  // audio pump — no SDL_CreateThread anywhere in this path (per
++  // docs/SDL3-MIGRATION.md § 3 invariant).
++  MIX_Track       *_organya_track  = nullptr;
++  SDL_AudioStream *_organya_stream = nullptr;
++  std::vector<int16_t> _s16_scratch;  // resize-on-demand, never shrinks
+ };
+ 
+ } // namespace Sound
+-- 
+2.47.3
+
