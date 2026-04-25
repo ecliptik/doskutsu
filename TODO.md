@@ -74,14 +74,14 @@ Current work is organized by phase (see `PLAN.md`). Mark items complete as they 
 - [ ] `0006-disable-haptic.patch` and prophylactic gating patches for gamepad/sensor/camera/touch/pen NOT written — #27 audit confirmed zero references to any of those subsystems in NXEngine-evo source, so there is nothing to gate.
 - [ ] All five patches (`0001-0005`) applied cleanly by `scripts/apply-patches.sh` against the migrated tree
 
-## Phase 5 — NXEngine-evo → doskutsu.exe
+## Phase 5 — NXEngine-evo → doskutsu.exe ✓ (closed 2026-04-25 at `484efa7`)
 
-> Narrowed by the Path B amendment to the build/link/post-link step only — the DJGPP patches relocated to Phase 4'd. Phase 4' (all four sub-phases) must complete before this phase can build cleanly.
+> Narrowed by the Path B amendment to the build/link/post-link step only — the DJGPP patches relocated to Phase 4'd. Build gate met; title-screen runtime gate folds into Phase 6 (asset extraction in progress).
 
-- [ ] Grep `throw|try|dynamic_cast|typeid` across the codebase to confirm exception/RTTI flag plan from Phase 4'd is still valid
-- [ ] `make nxengine` produces `build/doskutsu.exe` linking `libSDL3.a` + `libSDL3_mixer.a` + `libSDL3_image.a` directly (no sdl2-compat in the link line)
-- [ ] `stubedit build/doskutsu.exe minstack=2048k`
-- [ ] Title screen reachable in `tools/dosbox-launch.sh --exe build/doskutsu.exe` (requires Phase 6 assets)
+- [x] Grep `throw|try|dynamic_cast|typeid` across the codebase to confirm exception/RTTI flag plan from Phase 4'd is still valid
+- [x] `make nxengine` produces `build/doskutsu.exe` linking `libSDL3.a` + `libSDL3_mixer.a` + `libSDL3_image.a` directly (no sdl2-compat in the link line) — 5,866,918 bytes, COFF + go32 + CWSDPMI autoload
+- [x] `stubedit build/doskutsu.exe minstack=2048k`
+- [ ] Title screen reachable in `tools/dosbox-launch.sh --exe build/doskutsu.exe` — gated on Phase 6 asset extraction (in progress); will tick when title-screen runtime gate passes
 
 ## Phase 6 — Cave Story assets
 
@@ -126,6 +126,13 @@ Levers 1-5 correspond to the descent from Tier 1 (PODP83 / 48 MB, reference) thr
 - [ ] `THIRD-PARTY.md` stays synchronized with `vendor/sources.manifest`
 - [ ] `CHANGELOG.md` updated per phase gate pass
 - [ ] `docs/PERFORMANCE.md` captures every Phase 9 experiment with measured before/after
+
+**Phase status:** Phases 0 / 1 / 2 / 5 closed. Phases 3' / 4'b / 4'c / 4'd closed (per task tracker #28, #30, #32, #33). Phase 4'a in flight (#31, audio refactor under N=4/N=7 tripwire). **Phase 5 closed 2026-04-25 at `484efa7`** — first end-to-end DJGPP+SDL3 build of NXEngine-evo. Phase 6 asset extraction in flight.
+
+## Known build warnings (non-blocking)
+
+- **`-Wformat=` in `src/pause/options.cpp`** — `%d` used for `int32_t`, but `int32_t` is `long int` on DJGPP (should be `%ld`). Same root cause family as the `Organya.cpp:260` clamp finding (Phase 5 bug #4). Cosmetic; could land as a `0025-` follow-up patch or roll into Phase 9 cleanup.
+- **`-Wunused-variable` in `Organya.cpp:188`** — `master_volume = 4e-6` declared but unused. Pre-existing latent. Cosmetic.
 
 ## Future / nice-to-have (post-1.0)
 

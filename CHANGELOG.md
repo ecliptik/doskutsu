@@ -51,5 +51,33 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 - **Preserved.** `vendor/sdl2-compat` stays cloned at `91d36b8d` per software-architect's "keep cloned but unbuilt" condition. Tasks #18 (clone) and #19 (audit) remain completed in the tracker — the audit is the evidence for the pivot. Tasks #20, #21, #23, #24 deleted as obsolete. Task #16 (SB16-detection-fix patch authoring) remains active — Path B still uses SDL3's DOS audio backend directly, so the local-only `patches/SDL/0001-sb16-dsp-detection-fix.patch` work governs Phase 7 audio gate readiness.
 - **Doc downstream pending.** `README.md`, `DOSKUTSU.md`, `BUILDING.md` still describe a "five-stage build" with sdl2-compat as the second stage; that drift will be reworked at the Phase 3' gate, not in this commit.
 
+### Phase 5 — Build → DOSKUTSU.EXE (gate passed 2026-04-25: `484efa7`)
+
+**The first end-to-end DJGPP + SDL3 build of NXEngine-evo.** `make nxengine` produces `build/doskutsu.exe` — 5,866,918 bytes, COFF + go32 + CWSDPMI autoload, `stubedit minstack=2048k` confirmed. CLAUDE.md § Correctness Gate item 2 met (build-link gate); the title-screen runtime gate folds into Phase 6 (asset extraction now in flight).
+
+- **Build trajectory: 9 attempts, 0% → 1% → 8% → 70% → 96% → 100% PASS.** The trajectory tracks how each obstacle (find_package wiring, header search paths, link-line ordering, late-discovered upstream bugs, locale-stable patch ordering) was successively cleared. Per-attempt detail in build-engineer's Phase 5 closure notes / commit `484efa7` body.
+- **Cumulative patch series: 25 local patches** across two repos, four cluster boundaries:
+  - `patches/nxengine-evo/0001-0009` — DJGPP build adaptations (5 patches; reservation slots `0006-0009` partially filled by `0006-djgpp-spdlog-replacement.patch` from #35)
+  - `patches/nxengine-evo/0010-0019` — SDL3-migration core (cluster filled including the reservation slot at `0019-cmake-find-package-sdl3.patch` from #36)
+  - `patches/nxengine-evo/0020-0024` — Phase 5 follow-up patches (overflow from `0010-0019` cluster permitted by README rule's content-determined slotting)
+  - `patches/SDL/0001-` — local-only SDL fixes per the 2026-04-25 patches-stay-local policy
+  - **Final count: 24 nxengine-evo + 1 SDL = 25 local patches.**
+
+**Pre-existing bug roundup — Path B's hypothesis paying out.** Path B was framed on the premise that *"we'd find bugs by actually doing the migration."* The migration framework forced careful reading of every relevant SDL2 call site, and **four real upstream pre-existing bugs** surfaced during patch cycles — each would have bitten us at runtime under SDL3. Without the migration's careful-reading discipline, these would have been runtime failures (likely months later, on real hardware, hard to diagnose). With it, they were patch-cycle catches:
+
+1. **`main.cpp:306` — silent-init-failure under SDL3 bool return.** SDL2's `SDL_Init` returned `0` on success (`!=0` failure); SDL3 returns `bool`. The unchecked-return idiom silently passed under SDL3's "true means success" semantics, so the binary would have silently failed at the title screen with no diagnostic. **Caught in `0010-sdl3-mechanical-renames` by nxengine.**
+2. **`ResourceManager.cpp:62` — `SDL_free` on const-owned `SDL_GetBasePath` return.** SDL2 returned writable storage; SDL3 returns a const-borrowed pointer that must not be freed. Calling `SDL_free` on it under SDL3 would have tripped the allocator. **Caught in `0010` by nxengine.**
+3. **`Pixtone::shutdown` variable-shadow leaking ~80% of resampled buffers.** A shadowed variable name caused the cleanup loop to iterate over the wrong vector; ~80% of resampled buffers were leaked rather than freed. Under SDL2 this was a benign shutdown leak; under SDL3's stricter ownership, the parallel cleanup path would have produced `MIX_DestroyAudio` double-frees. **Caught in `0014-sdl3-mixer-pixtone-decoder` by sdl-engine, ratified by nxengine.**
+4. **`Organya.cpp:260` — `std::clamp` template-deduction conflict on DJGPP `int32_t`.** DJGPP's `int32_t` is `long int`, not plain `int`; `std::clamp(int32_t_var, 0, 100)` triggers template deduction failure. Silent on Linux/macOS where `int32_t == int`; explicit failure on DJGPP. **Caught in `0024-audio-cluster-followups` by sdl-engine.**
+
+**Build / test infrastructure.**
+- `scripts/apply-patches.sh` now forces `LC_ALL=C sort` for locale-stable patch ordering. We hit the alpha-suffix sort trap during Phase 5 (locale-dependent ordering of `0014a-*.patch` relative to `0015-*.patch` produced different patch-application sequences across machines).
+- `patches/nxengine-evo/README.md` updated with a "pure numeric slots only" rule (no alpha suffixes) plus an explicit note that cluster overflow into adjacent reserved ranges is acceptable when content-determined slotting requires it (the `0010-0019` cluster overflowing into `0020-0024` is the working example).
+
+### Known build warnings (non-blocking)
+
+- **`-Wformat=` warnings in `src/pause/options.cpp`** — `%d` used for `int32_t`, but `int32_t` is `long int` on DJGPP (should be `%ld`). Same root cause family as the `Organya.cpp:260` clamp finding (Phase 5 bug #4). Cosmetic; could land as a `0025-` follow-up patch or roll into Phase 9 cleanup.
+- **`-Wunused-variable` in `Organya.cpp:188`** — `master_volume = 4e-6` declared but unused. Pre-existing latent. Cosmetic.
+
 ### Known issues
 - **PR #15377 SoundBlaster detection fails under DOSBox-X SB16 emulation.** `SDL_Init(SDL_INIT_AUDIO)` errors out: DSP reset's "data ready" flag goes true but the byte read after reset is not `0xAA`. The audio driver itself compiles and links cleanly; only the runtime device pick under emulation fails. Tracked as task #16 — investigation + authoring of `patches/SDL/0001-sb16-dsp-detection-fix.patch` (local-only, per the SDL-patches-stay-local policy added 2026-04-25; see CLAUDE.md § Vendoring). Real-HW SB16 test deferred to Phase 8. Does not block Phases 3'–5; will be resolved before the Phase 7 playtest gate where audio is required.

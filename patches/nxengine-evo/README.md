@@ -57,6 +57,12 @@ The migration patches. Clustered together so the API-migration commit range is r
 
 When rerolling against a new upstream NXEngine-evo SHA: rebase `0001`–`0005` first; let `0010+` rebase on top. If `0010+` conflicts on lines `0001`–`0005` already touched, fix the build patch first — it's the foundation.
 
+## Slot numbering convention
+
+**Pure numeric slots only — no alpha suffixes** (e.g., do not name a patch `0014a-foo.patch`). Sort behavior of `find … | sort` varies across locales (C vs UTF-8); `scripts/apply-patches.sh` forces `LC_ALL=C` for consistency, which puts alpha-suffix slots **after** the same-prefix numeric slot — so `0014a` lands after `0015`, not between `0014` and `0015` as a casual reader would expect. This bit us during Phase 5 closure; the locale-stable sort is now enforced in code, but the cleanest rule is to avoid alpha suffixes entirely.
+
+**Use the next free numeric slot** when adding a patch, even if it's outside the original cluster range. Reserved gaps (`0006-0009` for DJGPP follow-ups, `0019` for SDL3 follow-ups) remain the preferred home, but content-determined slotting wins when those gaps are full or when keeping a related patch adjacent reads better than scattering it. The `0010-0019` cluster has overflowed into `0020-0024` for Phase 5 follow-up patches; that pattern is acceptable when content-determined slotting requires it.
+
 ## Cross-references
 
 - `../README.md` — general patch convention
