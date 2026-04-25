@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## What This Is
 
-`doskutsu` is a port of Cave Story (Doukutsu Monogatari, Pixel 2004) via NXEngine-evo to MS-DOS 6.22 on vintage Pentium-era hardware. The engine is C++11 NXEngine-evo, linked against sdl2-compat → SDL3 (with DOS backend from [libsdl-org/SDL PR #15377](https://github.com/libsdl-org/SDL/pull/15377)) → DJGPP → CWSDPMI. Cross-compiled on Linux. The primary deliverable is `DOSKUTSU.EXE` plus CWSDPMI plus the extracted Cave Story data, fitting on a CF card and booting to the title screen on a Gateway 2000 Pentium OverDrive 83 MHz.
+`doskutsu` is a port of Cave Story (Doukutsu Monogatari, Pixel 2004) via NXEngine-evo to MS-DOS 6.22 on vintage Pentium-era hardware. The engine is C++11 NXEngine-evo (migrated SDL2 → SDL3 in source per the Path B amendment 2026-04-24 — see `PLAN.md § Plan Amendments § 2026-04-24`), linked statically against SDL3 (with DOS backend from [libsdl-org/SDL PR #15377](https://github.com/libsdl-org/SDL/pull/15377)) + SDL3_mixer + SDL3_image → DJGPP → CWSDPMI. Cross-compiled on Linux. The primary deliverable is `DOSKUTSU.EXE` plus CWSDPMI plus the extracted Cave Story data, fitting on a CF card and booting to the title screen on a Gateway 2000 Pentium OverDrive 83 MHz.
 
 See `PLAN.md` for the phased implementation roadmap. See `DOSKUTSU.md` for the project overview (architecture, data flow, ports touched).
 
@@ -38,43 +38,42 @@ The g2k boot profile (`[VIBRA]`) is already defined in the g2k repo's CONFIG.SYS
 | DOSBox-X (pre-HW test) | system | `sudo apt install dosbox-x` |
 | CMake ≥ 3.16 | system | `sudo apt install cmake` |
 
-Toolchain lives under `~/emulators/tools/` alongside the sibling projects (`vellm`, `geomys`, `flynn`). `tools/djgpp` in this repo is a symlink to that hub path; `./scripts/setup-symlinks.sh` creates it. The top-level `Makefile` exports DJGPP's bin dirs onto `PATH` so the five-stage cross-build Just Works once the symlink is in place.
+Toolchain lives under `~/emulators/tools/` alongside the sibling projects (`vellm`, `geomys`, `flynn`). `tools/djgpp` in this repo is a symlink to that hub path; `./scripts/setup-symlinks.sh` creates it. The top-level `Makefile` exports DJGPP's bin dirs onto `PATH` so the four-stage cross-build (SDL3 → SDL3_mixer → SDL3_image → NXEngine-evo) Just Works once the symlink is in place.
 
 See `~/emulators/CLAUDE.md` and `~/emulators/docs/DJGPP.md` for the hub convention.
 
 ## Build System
 
-This repo orchestrates five upstream codebases. Each is vendored as a snapshot (not a submodule) under `vendor/<name>/`, pinned by SHA in `vendor/sources.manifest`, with DOS-port patches applied from `patches/<name>/*.patch`.
+This repo orchestrates four upstream codebases (post-Path-B amendment 2026-04-24 — `vendor/sdl2-compat/` stays cloned but is no longer a build stage). Each is vendored as a snapshot (not a submodule) under `vendor/<name>/`, pinned by SHA in `vendor/sources.manifest`, with DOS-port patches applied from `patches/<name>/*.patch`.
 
 ```
 vendor/
 ├── sources.manifest                # URL + ref + pinned SHA per upstream
 ├── SDL/                            # libsdl-org/SDL (post-PR-#15377)
-├── sdl2-compat/                    # libsdl-org/sdl2-compat
-├── SDL_mixer/                      # libsdl-org/SDL_mixer (release-2.8.x)
-├── SDL_image/                      # libsdl-org/SDL_image (release-2.8.x)
+├── SDL_mixer/                      # libsdl-org/SDL_mixer (SDL3-track release)
+├── SDL_image/                      # libsdl-org/SDL_image (SDL3-track release)
 ├── nxengine-evo/                   # nxengine/nxengine-evo
+├── sdl2-compat/                    # libsdl-org/sdl2-compat — cloned, NOT built (Path B)
 └── cwsdpmi/                        # DPMI host binary (tracked, not cloned)
 
 patches/
 ├── SDL/*.patch
-├── sdl2-compat/*.patch
 ├── SDL_mixer/*.patch
 ├── SDL_image/*.patch
-└── nxengine-evo/*.patch
+├── nxengine-evo/*.patch            # see patches/nxengine-evo/README.md for layout
+└── sdl2-compat/*.patch             # historical, retained but unapplied (Path B)
 ```
 
 The top-level `Makefile` orchestrates the full chain. Each stage installs into `build/sysroot/` which the next stage consumes via `CMAKE_PREFIX_PATH`. No root needed.
 
 ```
-make sources    →  scripts/fetch-sources.sh   (clones per manifest)
-make patches    →  scripts/apply-patches.sh   (applies patches/)
-make sdl3       →  build/sysroot/ gains libSDL3.a
-make sdl2-compat → build/sysroot/ gains libSDL2.a (forwards to SDL3)
-make sdl2-mixer →  ...libSDL2_mixer.a
-make sdl2-image →  ...libSDL2_image.a
-make nxengine   →  build/doskutsu.exe         (the game binary)
-make all        →  the whole chain end-to-end
+make sources     →  scripts/fetch-sources.sh   (clones per manifest)
+make patches     →  scripts/apply-patches.sh   (applies patches/)
+make sdl3        →  build/sysroot/ gains libSDL3.a
+make sdl3-mixer  →  build/sysroot/ gains libSDL3_mixer.a
+make sdl3-image  →  build/sysroot/ gains libSDL3_image.a
+make nxengine    →  build/doskutsu.exe         (the game binary)
+make all         →  the whole chain end-to-end
 ```
 
 ## Development Workflow
@@ -171,7 +170,9 @@ pkill -x dosbox-x                                   # stop it (or Ctrl+F9 in win
 
 - **Lock window to 320x240 fullscreen at runtime.** Widescreen and Full HD code paths remain compiled in for possible future use — do not rip them out. The runtime lock lives in the DOS-port patch set.
 - **Audio init target:** `Mix_OpenAudio(22050, AUDIO_S16SYS, 2, 2048)` initially. Fallback if CPU-starved: `Mix_OpenAudio(11025, AUDIO_S16SYS, 1, 2048)` (matches Cave Story's 2004 original spec).
-- **`-fno-exceptions -fno-rtti` if the codebase allows.** Grep for `throw`, `try`, `dynamic_cast`, `typeid` before enabling; drop the flags if any hit.
+- **`-fno-rtti` yes, `-fno-exceptions` no.** Resolved 2026-04-24 by software-architect ratification of nxengine's #27 audit:
+  - **`-fno-rtti`** is a pure code-size win — NXEngine-evo has zero `dynamic_cast` / `typeid` hits, so the flag is safe to enable unconditionally. It lands in `patches/nxengine-evo/0002-dos-target-flags.patch`.
+  - **Do NOT enable `-fno-exceptions`.** NXEngine-evo has 6 `nlohmann::json` parse sites that depend on exception propagation to convert *"log + skip the malformed asset, keep playing"* into *"abort the process"*. That's a bad trade for a port we want to be modder-friendly — a corrupt mod file should not crash the binary. The flag would shrink the binary further but at unacceptable runtime cost. See `PLAN.md § Plan Amendments § 2026-04-24` Phase 4'd row for the full reasoning.
 - **Drop JPEG dep.** NXEngine-evo's `CMakeLists.txt` has `find_package(JPEG REQUIRED)` but Cave Story ships no `.jpg` assets — one of our patches removes this.
 
 ### Vendoring

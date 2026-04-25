@@ -23,6 +23,56 @@ These are answered and **not** open for re-litigation mid-phase. If a phase reve
 
 ---
 
+## Plan Amendments
+
+This section records mid-flight plan amendments. Each entry is dated and explains what changed and why. The original phase prose remains in place below as historical context — amendments **supersede** sections of the plan, they do not rewrite history.
+
+### 2026-04-24 — Path B: direct SDL3 migration (supersedes original Phase 3 and Phase 4)
+
+**What changed.** Phase 3 (sdl2-compat for DOS) is abandoned. NXEngine-evo will be migrated SDL2 → SDL3 directly in source, then linked against SDL3 (with the DOS backend from PR #15377), SDL3_mixer, and SDL3_image. The `## Fallback path: direct SDL3 migration` section near the bottom of this document is no longer the fallback — it is the active path.
+
+**Why.** Phase 3a (`vendor/sdl2-compat` cloned at `91d36b8d`) and Phase 3b (sdl-engine's audit of the dlopen/dlsym + dynapi infrastructure) found three structural blockers to a static-only DJGPP build of sdl2-compat. All four citations below reference the cloned `vendor/` source trees as of 2026-04-24.
+
+1. **`FATAL_ERROR` Linux-only gate** at `vendor/sdl2-compat/CMakeLists.txt:96-98`. The build system explicitly rejects non-Linux targets at configure time when `SDL2COMPAT_STATIC` is requested — not a flag we can flip, but a deliberate guard reflecting the upstream's design assumption that the shim is loaded dynamically on every supported platform.
+2. **1,291 `IGNORE_THIS_VERSION_OF_*` rename macros** in `vendor/sdl2-compat/src/sdl3_include_wrapper.h` (verified by `grep -c IGNORE_THIS_VERSION` against that file). These exist to support the dynamic-loader path; statically linking forces every one of them to resolve into the binary, with no source-level path to disable the rename layer.
+3. **Multiple-definition collision for ~1,500 `SDL_*` symbols.** sdl2-compat re-declares SDL2 entry points that SDL3's dynapi also defines. Under static link, the linker sees both and fails with thousands of multiple-definition errors. Resolving this would require an `objcopy --redefine-sym`-driven rename pass over either archive — novel infrastructure that doesn't exist in any prior DJGPP project, and that we would have to invent and maintain.
+
+**The architectural signal.** `vendor/sdl2-compat/src/sdl2_compat.c:372` contains the author's comment:
+
+> *"Obviously we can't use SDL_LoadObject() to load SDL3. :)"*
+
+— an explicit, authoritative acknowledgment that the shim's design depends on dynamic loading. SDL3's own dynapi reaches the same conclusion from the other direction and **disables itself on DOS** at `vendor/SDL/src/dynapi/SDL_dynapi.h:73-74`:
+
+```c
+#elif defined(SDL_PLATFORM_DOS)
+#define SDL_DYNAMIC_API 0  /* DJGPP doesn't support dynamic linking */
+```
+
+Both pieces of upstream code independently encode the assumption that DOS is a static-link-only target. Forcing sdl2-compat into that target violates the architectural premise both libraries were designed around.
+
+**Option A (objcopy-rename infrastructure)** was explored as an alternative to abandoning the path: post-process `libSDL2.a` with `objcopy --redefine-sym` to avoid the dynapi collision. Rejected — the maintenance burden (every SDL3 release potentially adds new symbols to track), the complexity (cross-archive symbol renaming is fragile and silently mis-resolves call sites if the rename table drifts), and the absence of precedent in DJGPP-cross projects all argued against owning that infrastructure. Better to do the direct migration once and live with SDL3 calls in the engine.
+
+**The new task graph.** Phases 3 and 4 below are superseded. Phase 5 narrows to just the build step (the DJGPP patches it formerly contained move to Phase 4'd). The active sequence is:
+
+| Phase | Work | Notes |
+|---|---|---|
+| **Phase 3' — SDL3_mixer + SDL3_image** | Cross-build the SDL3-native helper libraries via new Makefile targets `make sdl3-mixer` and `make sdl3-image`. Same constrained CMake options as the original Phase 4 (WAV + OGG via stb_vorbis; PNG via stb_image; MP3 / MOD / MIDI / FLAC / Opus / JPEG / WebP / AVIF / TIFF all off). | `vendor/sources.manifest` will gain entries for `SDL3_mixer` and `SDL3_image` pinned to their SDL3-track releases. The release-2.8.x entries for the SDL2 versions become historical. |
+| **Phase 4' — NXEngine-evo SDL2 → SDL3 migration + DJGPP port** | Migrate NXEngine-evo's source from the SDL2 API to the SDL3 API and apply the DOS-port patches. Four sub-phases described as categories of work, not a time-sequence — see orthogonality note below the table. | The substantive work of Path B. Operational details (per-patch enumeration, file:line touchpoints, authoring order) live in `patches/nxengine-evo/README.md` and `docs/SDL3-MIGRATION.md`. This table records the *decisions* governing the work; those docs record the *implementation*. |
+| Phase 4'a — Audio refactor (Path 1) | The audio refactor cluster (`0013-0017`). Co-owned by sdl-engine + nxengine on a symptom-based boundary — see `docs/SDL3-MIGRATION.md` for the co-ownership convention and the 5-touchpoint implementation spec. **Threading-zero invariant: no `SDL_CreateThread`, no `std::thread`, no worker threads of any kind during this rework. The audio refactor stays synchronous. SDL3-DOS's cooperative scheduler is the constraint we'd violate first.** | Gate: before/after audio capture from the synth path matches reference WAV byte-equivalent (or within documented rounding tolerance). **Two-stage tripwire: at N=4 working days, raise hand for reassessment; at N=7 working days, fall back to Path 2 — a custom SDL2_mixer-subset shim over `SDL_AudioStream`** (NOT Phase 9 lever 6, which stays reserved for SDL3-DOS audio backend *structural* failures, not Path-1 schedule slip). See `docs/SDL3-MIGRATION.md § delta 4` for the tripwire-stage definitions. |
+| Phase 4'b — Mechanical renames | The SDL2 → SDL3 mechanical rename pass (renderer/surface API + event enums). See `patches/nxengine-evo/README.md § 0010-0012` for the per-API breakdown and per-patch grouping. | Largely automatable with `sed`; review each diff. |
+| Phase 4'c — Library swap | SDL2_image → SDL3_image migration (and any related enum / property updates from the broader API delta). See `patches/nxengine-evo/README.md § 0018-sdl3-image-load.patch` (and § 0011/0012 if related deltas land there). | Capstone for the source migration — once this lands, NXEngine-evo no longer references SDL2 at all and the engine compiles against the SDL3 sysroot. |
+| Phase 4'd — DJGPP port patches | DOS-adaptation patches only — things that would apply to any NXEngine-evo DOS build regardless of SDL major version. **Finalized as 5 patches** per the #27 audit's subsystem-gating collapse (haptic + the would-have-been gamepad/sensor/camera/touch/pen prophylactic patches all dropped — zero refs in NXE-evo source) and the audio-init fold-in to Phase 4'a (`Mix_OpenAudio` → `MIX_CreateMixer` is an SDL3_mixer API change, not a DOS-adaptation, so it belongs in the audio cluster). **Decision: `-fno-rtti` yes, `-fno-exceptions` no** — RTTI is unused (zero `dynamic_cast`/`typeid` hits) so `-fno-rtti` is a pure code-size win; exceptions are load-bearing (6 `nlohmann::json` parse sites convert "log + skip malformed asset, keep playing" into "abort" without them — a bad trade for a modder-friendly port). See `patches/nxengine-evo/README.md § 0001-0005` for the DJGPP cluster layout. | Lands as `patches/nxengine-evo/*.patch` applied by `scripts/apply-patches.sh` against the migrated tree. CLAUDE.md § Critical Rules / NXEngine-evo specifics carries the matching `-fno-rtti`-yes-`-fno-exceptions`-no guidance. |
+| **Threading baseline: zero** (audit-confirmed invariant) | NXEngine-evo's #27 audit confirmed: zero `SDL_CreateThread`, zero `std::thread`, zero worker threads of any kind in upstream source. **Maintain this invariant through Path B — do not introduce threading in port glue, audio refactor, or anywhere else.** SDL3's DOS backend uses a cooperative scheduler (yields in event pump and `SDL_Delay`); spawning a thread breaks the model and is the first constraint we would violate. This row exists in the table as a permanent invariant, not a phase to complete. | Verifiable at any time by `grep -rE 'SDL_CreateThread\|std::thread\|pthread_create' src/`. |
+| **Phase 5 — Build → `doskutsu.exe`** | Build/link/post-link only: `make nxengine` consumes the migrated + patched tree from Phase 4', produces `build/doskutsu.exe`, post-link `stubedit doskutsu.exe minstack=2048k`. NXEngine-evo `#include`s SDL3 headers and links `libSDL3.a` + `libSDL3_mixer.a` + `libSDL3_image.a` directly — no sdl2-compat in the link line. | Gate: title screen reachable in `tools/dosbox-launch.sh --exe build/doskutsu.exe` (assumes Phase 6 assets present). |
+
+**Orthogonality of the Phase 4' sub-phases.** The labels (4'a / 4'b / 4'c / 4'd) name **what** each category of work is, not **when** it happens in calendar time. Engineers work in parallel on the four categories; the resulting `patches/nxengine-evo/*.patch` files apply in **numeric order** (`0001-0018`) regardless of which sub-phase produced them. nxengine can iterate on `0010-sdl3-mechanical-renames` while build-engineer lands `0001-0005` — they are orthogonal in file-locality terms and compose at patch-apply time. See `patches/nxengine-evo/README.md § Authoring order` for the practical guidance on which patches to write first against an un-migrated tree.
+
+**What's preserved from the abandoned path.** `vendor/sdl2-compat` stays cloned at `91d36b8d` per software-architect's "keep it cloned but unbuilt" condition — preserves the option to reconsider if Phase 4'a turns out worse than the audit predicts. `make sdl2-compat` will be removed from the default build target. Phase 3a (#18) and Phase 3b audit (#19) remain completed in the task tracker; their evidence is what produced this amendment. Old tasks #20, #21, #23, #24 deleted as obsolete.
+
+**Documentation downstream.** `CLAUDE.md` is updated in lockstep with this amendment (architecture stack, toolchain section, build system block). `README.md`, `DOSKUTSU.md`, and `BUILDING.md` all still describe the build as a "five-stage" pipeline with sdl2-compat as the second stage; those references remain drift and will be reworked at the Phase 3' gate so they match the new pipeline shape (SDL3 → SDL3_mixer + SDL3_image → NXEngine-evo). The `THIRD-PARTY.md` sdl2-compat row stays — we still ship the cloned source under the same vendoring convention even though we no longer link it.
+
+---
+
 ## Licensing
 
 DOSKUTSU's own source (the port glue in this repo — build system, patches, port-specific code, docs) is **MIT**. But the distributed `DOSKUTSU.EXE` binary statically links NXEngine-evo, which is **GPLv3**. Under GPLv3's linking clause, the combined binary work is **GPLv3**. MIT on our source is still valid and useful (re-use of our patches / build system / docs in other projects is unrestricted), but downstream redistribution of the binary must satisfy GPLv3.
@@ -150,6 +200,8 @@ Smoke test one of upstream's test programs (`testdraw2.c`, `testaudioinfo.c`) �
 
 ## Phase 3 — Build sdl2-compat for DOS
 
+> **⚠️ AMENDED 2026-04-24 — Path B.** This phase is superseded. sdl2-compat was found to be architecturally unbuildable as a static DJGPP target (`FATAL_ERROR` Linux gate, 1,291 IGNORE_THIS_VERSION_OF_* macros, ~1,500 SDL_* multiple-definition collisions; the shim's own source notes *"Obviously we can't use SDL_LoadObject() to load SDL3. :)"*). See `## Plan Amendments § 2026-04-24` above for the full reasoning and the new Phase 3' / 4' / 5 graph. The text below is preserved as historical context for the architectural reasoning that drove the pivot.
+
 **This is the highest-risk phase.** sdl2-compat has no prior DJGPP build.
 
 ```bash
@@ -174,6 +226,8 @@ If the build fails, triage errors:
 **Fallback if unfixable in ~1 day:** skip Phases 3-4, go direct SDL3 port in Phase 5 (see "Fallback path" below).
 
 ## Phase 4 — Build SDL2_mixer and SDL2_image
+
+> **⚠️ AMENDED 2026-04-24 — Path B.** Superseded by Phase 3' (SDL3_mixer + SDL3_image — direct SDL3-native helpers). See `## Plan Amendments § 2026-04-24` above. The CMake constraints described below (WAV + OGG only via stb_vorbis; PNG only via stb_image; everything else off) carry over verbatim to the SDL3-mixer / SDL3-image equivalents — only the package names and the linkage chain change.
 
 **SDL2_mixer (release-2.8.x).** CMake options constrained to shrink footprint:
 ```
@@ -202,6 +256,8 @@ NXEngine-evo only uses `IMG_Init`, `IMG_INIT_PNG`, `IMG_Load`, `IMG_GetError` �
 **Gate:** `Mix_OpenAudio` + `IMG_Load` both succeed in a DJGPP test harness under DOSBox-X.
 
 ## Phase 5 — Build NXEngine-evo for DOS
+
+> **⚠️ AMENDED 2026-04-24 — Path B.** Phase 5's deliverable (`make nxengine` → `build/doskutsu.exe`) is unchanged. The substitution: NXEngine-evo now links SDL3 + SDL3_mixer + SDL3_image directly instead of going through sdl2-compat → SDL3. The DOS-port patches listed below all still apply; the `find_package` invocations in patch 0001 (drop-jpeg) become SDL3-flavored. Phase 4' (the SDL2 → SDL3 source migration — see `## Plan Amendments § 2026-04-24` above) precedes this phase in the new graph; Phase 5 lands once the engine compiles cleanly against the SDL3 sysroot.
 
 ```bash
 make nxengine      # consumes build/sysroot/, produces build/doskutsu.exe
@@ -325,6 +381,8 @@ Each lever gets a `docs/PERFORMANCE.md` entry with measured before/after numbers
 ---
 
 ## Fallback path: direct SDL3 migration
+
+> **⚠️ AMENDED 2026-04-24 — Path B.** Per the 2026-04-24 amendment, this is no longer the fallback — it is the active path. The size estimate table below was the basis for the Phase 4' decomposition; refer to `## Plan Amendments § 2026-04-24` above for the current sub-phase structure (Phase 4'a audio refactor / 4'b mechanical renames / 4'c library swap). The "1-2 days" estimate is preserved here as a baseline for tracking actual migration time.
 
 If Phase 3 (sdl2-compat on DJGPP) is unfixable in reasonable time, migrate NXEngine-evo's SDL2 code to SDL3 directly.
 

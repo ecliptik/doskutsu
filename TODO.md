@@ -25,31 +25,62 @@ Current work is organized by phase (see `PLAN.md`). Mark items complete as they 
 - [x] `make sdl3-smoke` — doskutsu-authored DOS-backend probe (`tests/sdl3-smoke/sdltest.c`, DJGPP `minstack=512k`) runs under headless DOSBox-X via `tests/run-sdl3-smoke.sh`. Video gate passes (34 VESA modes incl. 320x240 XRGB8888 / RGB565 / XRGB1555 / INDEX8); audio driver bootstraps but `SDL_Init(SDL_INIT_AUDIO)` device pick fails under SB16 emulation — see Known issues #16 / #17
 - [x] Any DJGPP-specific fixes captured as `patches/SDL/*.patch` — none needed for SDL @ `74a7462`; `patches/SDL/` is empty
 
-## Phase 3 — sdl2-compat for DOS (highest risk)
+## Phase 3' — SDL3_mixer + SDL3_image
 
-- [ ] `./scripts/fetch-sources.sh` clones `vendor/sdl2-compat`
-- [ ] `make sdl2-compat` produces `build/sysroot/lib/libSDL2.a`
-- [ ] A trivial SDL2-API test program links against `-lSDL2` and runs in DOSBox-X
-- [ ] `dlopen` / `dlsym` code paths cleanly disabled via patch (not by lying about the symbols)
-- [ ] Fallback path documented in `PLAN.md` but not entered
+> Per the 2026-04-24 Path B amendment, original Phase 3 (sdl2-compat) is abandoned and original Phase 4 is replaced by Phase 3'. See `PLAN.md § Plan Amendments § 2026-04-24` and the "Superseded — historical" section near the bottom of this file.
 
-## Phase 4 — SDL2_mixer + SDL2_image
+- [ ] `vendor/sources.manifest` gains `SDL3_mixer` entry pinned to an SDL3-track release SHA
+- [ ] `vendor/sources.manifest` gains `SDL3_image` entry pinned to an SDL3-track release SHA
+- [ ] `./scripts/fetch-sources.sh` clones both into `vendor/SDL3_mixer/` and `vendor/SDL3_image/`
+- [ ] `make sdl3-mixer` produces `build/sysroot/lib/libSDL3_mixer.a` with WAV + OGG (stb_vorbis); MP3 / MOD / MIDI / FLAC / Opus all OFF
+- [ ] `make sdl3-image` produces `build/sysroot/lib/libSDL3_image.a` with PNG (stb_image); JPEG / WebP / AVIF / TIFF all OFF
+- [ ] Test harness extension: `Mix_OpenAudio` (SDL3 signature) + `IMG_Load` both succeed under DOSBox-X
+- [ ] `make sdl2-compat` removed from default build target; sdl2-compat sources stay cloned at `91d36b8d` per "keep cloned but unbuilt" condition
 
-- [ ] `make sdl2-mixer` produces `build/sysroot/lib/libSDL2_mixer.a` with WAV + OGG (stb_vorbis)
-- [ ] `make sdl2-image` produces `build/sysroot/lib/libSDL2_image.a` with PNG (stb_image)
-- [ ] Test harness: `Mix_OpenAudio` + `IMG_Load` both succeed under DOSBox-X
+## Phase 4' — NXEngine-evo SDL2 → SDL3 migration + DJGPP port
+
+> Four sub-phases in order. Land each as one or more commits and ideally one or more `patches/nxengine-evo/*.patch` so future upstream syncs stay manageable.
+
+### Phase 4'a — Audio refactor (Path 1)
+
+> **Threading-zero invariant (audit-confirmed, do not violate):** No `SDL_CreateThread`, no `std::thread`, no worker threads of any kind during this rework. The audio refactor stays synchronous. SDL3-DOS's cooperative scheduler is the constraint we'd violate first.
+>
+> Implementation spec, per-touchpoint enumeration, and per-patch breakdown live in `docs/SDL3-MIGRATION.md` (architectural brief) and `patches/nxengine-evo/README.md § 0010-0019` (audio cluster `0013-0017`). This list is the gate-and-tripwire view only.
+
+- [ ] Audio refactor cluster (`0013-0017`) implemented per `docs/SDL3-MIGRATION.md § delta 4`
+- [ ] Headless smoke: synthesized Pixtone tone matches reference WAV byte-equivalent (or within rounding tolerance documented)
+- [ ] Verify post-refactor: `grep -rE 'SDL_CreateThread|std::thread|pthread_create' src/` returns nothing
+- [ ] **N=4 working days tripwire:** if not on track, raise hand for reassessment
+- [ ] **N=7 working days tripwire:** if Path 1 still stalled, fall back to Path 2 (custom SDL2_mixer-subset shim over `SDL_AudioStream`) — NOT Phase 9 lever 6
+
+### Phase 4'b — Mechanical renames
+
+> Per-API breakdown and per-patch grouping live in `patches/nxengine-evo/README.md § 0010-0012`.
+
+- [ ] Mechanical SDL2 → SDL3 rename pass (`0010-0012`) implemented; build cleanly against `libSDL3.a` with no implicit-function-declaration warnings
+
+### Phase 4'c — Library swap
+
+> Per-call-site detail in `patches/nxengine-evo/README.md § 0018-sdl3-image-load.patch` (and `§ 0011/0012` for related enum/property updates if any).
+
+- [ ] SDL2_image → SDL3_image migration landed (`0018`)
+- [ ] After this lands: `grep -r "SDL2" src/` returns nothing in NXEngine-evo source
+
+### Phase 4'd — DJGPP port patches
+
+> 5-patch DOS-adaptation series. Per-patch enumeration and authoring-order guidance live in `patches/nxengine-evo/README.md § 0001-0005`. **Decision-record items** kept here because they aren't implementation-detail:
+
+- [ ] `0002-dos-target-flags.patch` flags are `-march=i486 -mtune=pentium -O2 -fno-rtti` only. **Do NOT enable `-fno-exceptions`** — #27 audit found 6 `nlohmann::json` parse sites that depend on exception propagation; without them the survivable "log + skip malformed asset, keep playing" path becomes hard abort, a bad trade for a modder-friendly port. CLAUDE.md § Critical Rules / NXEngine-evo specifics carries the matching guidance.
+- [ ] `0006-disable-haptic.patch` and prophylactic gating patches for gamepad/sensor/camera/touch/pen NOT written — #27 audit confirmed zero references to any of those subsystems in NXEngine-evo source, so there is nothing to gate.
+- [ ] All five patches (`0001-0005`) applied cleanly by `scripts/apply-patches.sh` against the migrated tree
 
 ## Phase 5 — NXEngine-evo → doskutsu.exe
 
-- [ ] `patches/nxengine-evo/0001-drop-jpeg-dep.patch`
-- [ ] `patches/nxengine-evo/0002-dos-target-flags.patch`
-- [ ] `patches/nxengine-evo/0003-software-renderer.patch`
-- [ ] `patches/nxengine-evo/0004-lock-320x240-fullscreen.patch` (widescreen code retained)
-- [ ] `patches/nxengine-evo/0005-audio-init.patch` (22050 stereo default)
-- [ ] `patches/nxengine-evo/0006-disable-haptic.patch`
-- [ ] `patches/nxengine-evo/0007-binary-rename-doskutsu.patch`
-- [ ] Grep `throw|try|dynamic_cast|typeid` across the codebase; drop `-fno-exceptions -fno-rtti` if any hit
-- [ ] `make nxengine` produces `build/doskutsu.exe` (stubedit'd to 2048K min stack)
+> Narrowed by the Path B amendment to the build/link/post-link step only — the DJGPP patches relocated to Phase 4'd. Phase 4' (all four sub-phases) must complete before this phase can build cleanly.
+
+- [ ] Grep `throw|try|dynamic_cast|typeid` across the codebase to confirm exception/RTTI flag plan from Phase 4'd is still valid
+- [ ] `make nxengine` produces `build/doskutsu.exe` linking `libSDL3.a` + `libSDL3_mixer.a` + `libSDL3_image.a` directly (no sdl2-compat in the link line)
+- [ ] `stubedit build/doskutsu.exe minstack=2048k`
 - [ ] Title screen reachable in `tools/dosbox-launch.sh --exe build/doskutsu.exe` (requires Phase 6 assets)
 
 ## Phase 6 — Cave Story assets
@@ -108,5 +139,29 @@ Levers 1-5 correspond to the descent from Tier 1 (PODP83 / 48 MB, reference) thr
 
 ## Known issues
 
-- **#16 — SDL3 SoundBlaster detection fails under DOSBox-X SB16 emulation.** DSP reset's "data ready" goes true but the byte read is not `0xAA`. Likely PR #15377 bug in the SB16 detection sequence. Tracked downstream; will produce `patches/SDL/*.patch` if the fix is local. Blocks Phase 7 playtest gate (audio required); does not block Phases 3–6.
+- **#16 — SDL3 SoundBlaster detection fails under DOSBox-X SB16 emulation.** DSP reset's "data ready" goes true but the byte read is not `0xAA`. Likely PR #15377 bug in the SB16 detection sequence. Tracked downstream; will produce `patches/SDL/*.patch` if the fix is local. Blocks Phase 7 playtest gate (audio required); does not block Phases 3'–5.
 - **#17 — Upstream bug report at libsdl-org/SDL.** Draft at `.tmp/upstream-sdl-issue-pr15377-sb16.md`, awaiting human-with-`gh`-creds to file. URL will be backfilled into THIRD-PARTY.md and `patches/SDL/README.md` once the issue is open.
+
+---
+
+## Superseded — historical (Path B amendment 2026-04-24)
+
+These phases were planned but abandoned. See `PLAN.md § Plan Amendments § 2026-04-24` for the architectural reasoning. The checkboxes are preserved as struck-through bullets so the audit trail is intact; do not work them.
+
+### Phase 3 — sdl2-compat for DOS — SUPERSEDED
+
+Replaced by direct SDL3 migration (see Phase 4' above). `vendor/sdl2-compat` stays cloned at `91d36b8d` per software-architect's "keep cloned but unbuilt" condition; `make sdl2-compat` is removed from the default build.
+
+- [x] ~~`./scripts/fetch-sources.sh` clones `vendor/sdl2-compat`~~ — landed as task #18 before the pivot decision; tree retained
+- [x] ~~`make sdl2-compat` produces `build/sysroot/lib/libSDL2.a`~~ — proven structurally infeasible by Phase 3b audit (#19); the audit's findings are the evidence for Path B
+- [ ] ~~A trivial SDL2-API test program links against `-lSDL2` and runs in DOSBox-X~~ — superseded
+- [ ] ~~`dlopen` / `dlsym` code paths cleanly disabled via patch (not by lying about the symbols)~~ — superseded
+- [ ] ~~Fallback path documented in `PLAN.md` but not entered~~ — superseded; the "Fallback path" section in PLAN.md is now the active path
+
+### Phase 4 (original) — SDL2_mixer + SDL2_image — SUPERSEDED
+
+Replaced by Phase 3' (SDL3_mixer + SDL3_image — direct SDL3-native helpers). The CMake constraints (WAV + OGG only via stb_vorbis; PNG only via stb_image) carry over verbatim to the SDL3-flavored equivalents.
+
+- [ ] ~~`make sdl2-mixer` produces `build/sysroot/lib/libSDL2_mixer.a` with WAV + OGG (stb_vorbis)~~ — superseded by Phase 3'
+- [ ] ~~`make sdl2-image` produces `build/sysroot/lib/libSDL2_image.a` with PNG (stb_image)~~ — superseded by Phase 3'
+- [ ] ~~Test harness: `Mix_OpenAudio` + `IMG_Load` both succeed under DOSBox-X~~ — survives in Phase 3' with the SDL3 `Mix_OpenAudio` signature
