@@ -1,0 +1,223 @@
+From 1a083332cdb0975b6ca54629455623c093252c9e Mon Sep 17 00:00:00 2001
+From: sdl-engine <sdl-engine@doskutsu.local>
+Date: Sat, 25 Apr 2026 10:32:16 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20sdl3-audio:=20Pixtone=20resample?=
+ =?UTF-8?q?=20SDL=5FAudioCVT=20=E2=86=92=20SDL=5FAudioStream?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Three SDL2 SDL_BuildAudioCVT + SDL_ConvertAudio call sites in Pixtone.cpp
+become the SDL3 SDL_AudioStream lifecycle: Create / Put / Flush / Get /
+Destroy.
+
+Sites:
+1. Pixtone::playResampled (was line 372 in upstream): runtime resample
+   to a per-rate cache slot when an SFX is requested at a non-cached
+   pitch. SAMPLE_RATE → resampled_rate, S16 stereo throughout.
+2. Pixtone::prepareResampled (was line 445): pre-cache resample for the
+   stream sounds (SND_STREAM1/STREAM2 at predetermined pitch variants;
+   called once at SoundManager init for Core battle / SSS in main artery).
+3. Pixtone::_prepareToPlay (was line 508): the load-time conversion of
+   each Pixtone-rendered SFX from S8 mono 22050 → S16 stereo SAMPLE_RATE.
+   Runs once per SFX during sound system init.
+
+The result `Uint8 *sound_buf` still flows into Mix_QuickLoad_RAW unchanged
+in this patch; that call becomes MIX_LoadRawAudio in 0014. So 0013 alone
+does not produce a compiling tree — it intentionally leaves Mix_*-stuff
+in place to keep the patch atomic in concept (CVT migration only) and
+small enough to read end-to-end. The 0013-0017 series together compiles.
+
+Audio format constants AUDIO_S8 / AUDIO_S16 (SDL2) → SDL_AUDIO_S8 /
+SDL_AUDIO_S16 (SDL3) at the same call sites. Folded into this patch
+rather than a separate one because they're touched only here in Pixtone
+and are part of the same conceptual migration.
+
+Behavioral correctness reasoning:
+- AudioStream's resample math is SDL3's reference implementation; it
+  replaces SDL2's SDL_BuildAudioCVT linear-resample at the same input/
+  output format pair. For S16-stereo→S16-stereo at integer rate ratios
+  the output is byte-identical or trivially close; for the S8-mono-22050
+  → S16-stereo-44100 path the format conversion + 2x upsample is the
+  same arithmetic in either API.
+- No allocation policy change: the converted buffer is still SDL_malloc'd
+  for handoff to Mix_QuickLoad_RAW, ownership semantics preserved (RAW
+  takes ownership / freed on Mix_FreeChunk).
+- Error handling matches the existing style: log SDL_GetError() at each
+  step, continue to the next step (the original SDL_BuildAudioCVT/
+  SDL_ConvertAudio calls did the same — log + continue).
+
+Per docs/SDL3-MIGRATION.md § 4 (annotate decisions, not substitutions):
+no DOS-PORT comments at the call sites. Mechanical SDL2→SDL3 migration
+is migration noise; git blame + this commit message tells the story.
+
+Patch 1/4 of the audio refactor's remaining work; foundation is 0017
+(landed); 0014 (Pixtone Mix_*→MIX_* + 64-track pool) and 0015 (Organya
+HookMusic→TrackRawCallback + S16→float boundary) and 0016 (Ogg) follow.
+---
+ src/sound/Pixtone.cpp | 108 ++++++++++++++++++++++--------------------
+ 1 file changed, 57 insertions(+), 51 deletions(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 215e676..ab954d6 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -369,33 +369,34 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+ 
+     if (idx == -1)
+     {
+-      SDL_AudioCVT cvt;
++      SDL_AudioSpec src_spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
++      SDL_AudioSpec dst_spec = { SDL_AUDIO_S16, 2, (int)resampled_rate };
+ 
+-      if (SDL_BuildAudioCVT(&cvt, AUDIO_S16, 2, SAMPLE_RATE, AUDIO_S16, 2, resampled_rate) == -1)
++      SDL_AudioStream *stream = SDL_CreateAudioStream(&src_spec, &dst_spec);
++      if (!stream)
+       {
+-        LOG_ERROR("SDL_BuildAudioCVT: {}", SDL_GetError());
++        LOG_ERROR("SDL_CreateAudioStream: {}", SDL_GetError());
+       }
+-      cvt.len = _sound_fx[slot].chunk->alen;
+-      cvt.buf = (Uint8 *)SDL_malloc(cvt.len * cvt.len_mult);
+-      SDL_memcpy(cvt.buf, _sound_fx[slot].chunk->abuf, _sound_fx[slot].chunk->alen);
+ 
+-      if (SDL_ConvertAudio(&cvt) == -1)
++      if (!SDL_PutAudioStreamData(stream, _sound_fx[slot].chunk->abuf, _sound_fx[slot].chunk->alen))
+       {
+-        LOG_ERROR("SDL_ConvertAudio: {}", SDL_GetError());
++        LOG_ERROR("SDL_PutAudioStreamData: {}", SDL_GetError());
+       }
+-
+-/*      if (_sound_fx[slot].resampled != NULL)
++      if (!SDL_FlushAudioStream(stream))
+       {
+-        SDL_free(_sound_fx[slot].resampled->abuf);
+-        SDL_free(_sound_fx[slot].resampled);
+-        _sound_fx[slot].resampled = NULL;
+-      }*/
++        LOG_ERROR("SDL_FlushAudioStream: {}", SDL_GetError());
++      }
+ 
+-      Uint8 *sound_buf = (Uint8 *)SDL_malloc(cvt.len_cvt);
+-      SDL_memcpy(sound_buf, (Uint8 *)cvt.buf, cvt.len_cvt);
+-      SDL_free(cvt.buf);
++      int converted_len = SDL_GetAudioStreamAvailable(stream);
++      Uint8 *sound_buf  = (Uint8 *)SDL_malloc(converted_len);
++      int got = SDL_GetAudioStreamData(stream, sound_buf, converted_len);
++      if (got != converted_len)
++      {
++        LOG_ERROR("SDL_GetAudioStreamData: short read {}/{}: {}", got, converted_len, SDL_GetError());
++      }
++      SDL_DestroyAudioStream(stream);
+ 
+-      _sound_fx[slot].resampled[rslot] = Mix_QuickLoad_RAW(sound_buf, cvt.len_cvt);
++      _sound_fx[slot].resampled[rslot] = Mix_QuickLoad_RAW(sound_buf, converted_len);
+       _sound_fx[slot].resampled_rate[rslot] = resampled_rate;
+       idx = rslot;
+     }
+@@ -442,35 +443,34 @@ int Pixtone::prepareResampled(int32_t slot, uint32_t percent)
+ 
+     if (idx == -1) // not found
+     {
+-      SDL_AudioCVT cvt;
++      SDL_AudioSpec src_spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
++      SDL_AudioSpec dst_spec = { SDL_AUDIO_S16, 2, (int)resampled_rate };
+ 
+-      if (SDL_BuildAudioCVT(&cvt, AUDIO_S16, 2, SAMPLE_RATE, AUDIO_S16, 2, resampled_rate) == -1)
++      SDL_AudioStream *stream = SDL_CreateAudioStream(&src_spec, &dst_spec);
++      if (!stream)
+       {
+-        LOG_ERROR("SDL_BuildAudioCVT: {}", SDL_GetError());
++        LOG_ERROR("SDL_CreateAudioStream: {}", SDL_GetError());
+       }
+-      cvt.len = _sound_fx[slot].chunk->alen;
+-      cvt.buf = (Uint8 *)SDL_malloc(cvt.len * cvt.len_mult);
+-      SDL_memcpy(cvt.buf, _sound_fx[slot].chunk->abuf, _sound_fx[slot].chunk->alen);
+ 
+-      if (SDL_ConvertAudio(&cvt) == -1)
++      if (!SDL_PutAudioStreamData(stream, _sound_fx[slot].chunk->abuf, _sound_fx[slot].chunk->alen))
+       {
+-        LOG_ERROR("SDL_ConvertAudio: {}", SDL_GetError());
++        LOG_ERROR("SDL_PutAudioStreamData: {}", SDL_GetError());
+       }
+-
+-/*
+-      if (_sound_fx[slot].resampled != NULL)
++      if (!SDL_FlushAudioStream(stream))
+       {
+-        SDL_free(_sound_fx[slot].resampled->abuf);
+-        SDL_free(_sound_fx[slot].resampled);
+-        _sound_fx[slot].resampled = NULL;
++        LOG_ERROR("SDL_FlushAudioStream: {}", SDL_GetError());
+       }
+-*/
+ 
+-      Uint8 *sound_buf = (Uint8 *)SDL_malloc(cvt.len_cvt);
+-      SDL_memcpy(sound_buf, (Uint8 *)cvt.buf, cvt.len_cvt);
+-      SDL_free(cvt.buf);
++      int converted_len = SDL_GetAudioStreamAvailable(stream);
++      Uint8 *sound_buf  = (Uint8 *)SDL_malloc(converted_len);
++      int got = SDL_GetAudioStreamData(stream, sound_buf, converted_len);
++      if (got != converted_len)
++      {
++        LOG_ERROR("SDL_GetAudioStreamData: short read {}/{}: {}", got, converted_len, SDL_GetError());
++      }
++      SDL_DestroyAudioStream(stream);
+ 
+-      _sound_fx[slot].resampled[rslot] = Mix_QuickLoad_RAW(sound_buf, cvt.len_cvt);
++      _sound_fx[slot].resampled[rslot] = Mix_QuickLoad_RAW(sound_buf, converted_len);
+       _sound_fx[slot].resampled_rate[rslot] = resampled_rate;
+     }
+   }
+@@ -505,28 +505,34 @@ void Pixtone::pxtSoundDone(int channel)
+ void Pixtone::_prepareToPlay(stPXSound *snd, int32_t slot)
+ {
+   // convert the buffer from 8-bit mono signed to 16-bit stereo signed
+-  SDL_AudioCVT cvt;
++  SDL_AudioSpec src_spec = { SDL_AUDIO_S8,  1, 22050 };
++  SDL_AudioSpec dst_spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
+ 
+-  if (SDL_BuildAudioCVT(&cvt, AUDIO_S8, 1, 22050, AUDIO_S16, 2, SAMPLE_RATE) == -1)
++  SDL_AudioStream *stream = SDL_CreateAudioStream(&src_spec, &dst_spec);
++  if (!stream)
+   {
+-    LOG_ERROR("SDL_BuildAudioCVT: {}", SDL_GetError());
++    LOG_ERROR("SDL_CreateAudioStream: {}", SDL_GetError());
+   }
+ 
+-  cvt.len = snd->final_size;
+-
+-  cvt.buf = (Uint8 *)SDL_malloc(cvt.len * cvt.len_mult);
+-  memcpy(cvt.buf, snd->final_buffer, snd->final_size);
+-
+-  if (SDL_ConvertAudio(&cvt) == -1)
++  if (!SDL_PutAudioStreamData(stream, snd->final_buffer, snd->final_size))
++  {
++    LOG_ERROR("SDL_PutAudioStreamData: {}", SDL_GetError());
++  }
++  if (!SDL_FlushAudioStream(stream))
+   {
+-    LOG_ERROR("SDL_ConvertAudio: {}", SDL_GetError());
++    LOG_ERROR("SDL_FlushAudioStream: {}", SDL_GetError());
+   }
+ 
+-  Uint8 *sound_buf = (Uint8 *)SDL_malloc(cvt.len_cvt);
+-  SDL_memcpy(sound_buf, (Uint8 *)cvt.buf, cvt.len_cvt);
+-  SDL_free(cvt.buf);
++  int converted_len = SDL_GetAudioStreamAvailable(stream);
++  Uint8 *sound_buf  = (Uint8 *)SDL_malloc(converted_len);
++  int got = SDL_GetAudioStreamData(stream, sound_buf, converted_len);
++  if (got != converted_len)
++  {
++    LOG_ERROR("SDL_GetAudioStreamData: short read {}/{}: {}", got, converted_len, SDL_GetError());
++  }
++  SDL_DestroyAudioStream(stream);
+ 
+-  _sound_fx[slot].chunk = Mix_QuickLoad_RAW(sound_buf, cvt.len_cvt);
++  _sound_fx[slot].chunk = Mix_QuickLoad_RAW(sound_buf, converted_len);
+ }
+ 
+ } // namespace Sound
+-- 
+2.47.3
+
