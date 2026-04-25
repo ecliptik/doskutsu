@@ -586,12 +586,12 @@ else
 	@install -m 0644 $(BUILD_DIR)/doskutsu.exe "$(CF)/DOSKUTSU/DOSKUTSU.EXE"
 	@install -m 0644 $(CWSDPMI_EXE)            "$(CF)/DOSKUTSU/CWSDPMI.EXE"
 	@install -m 0644 $(CWSDPMI_DOC)            "$(CF)/DOSKUTSU/CWSDPMI.DOC"
-	@if [ -d "$(REPO_ROOT)/data/base" ]; then \
-	    echo "copying extracted Cave Story data to $(CF)/DOSKUTSU/DATA/BASE/"; \
-	    mkdir -p "$(CF)/DOSKUTSU/DATA/BASE"; \
-	    cp -r "$(REPO_ROOT)/data/base/"* "$(CF)/DOSKUTSU/DATA/BASE/"; \
+	@if [ -d "$(REPO_ROOT)/data" ]; then \
+	    echo "copying data tree to $(CF)/DOSKUTSU/DATA/"; \
+	    mkdir -p "$(CF)/DOSKUTSU/DATA"; \
+	    cp -r "$(REPO_ROOT)/data/"* "$(CF)/DOSKUTSU/DATA/"; \
 	else \
-	    echo "note: data/base/ not present — Cave Story data must be copied separately"; \
+	    echo "note: data/ not present — see docs/ASSETS.md for extraction"; \
 	fi
 	@echo "installed doskutsu payload to $(CF)/DOSKUTSU/"
 endif
