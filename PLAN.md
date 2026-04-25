@@ -71,6 +71,56 @@ Both pieces of upstream code independently encode the assumption that DOS is a s
 
 **Documentation downstream.** `CLAUDE.md` is updated in lockstep with this amendment (architecture stack, toolchain section, build system block). `README.md`, `DOSKUTSU.md`, and `BUILDING.md` all still describe the build as a "five-stage" pipeline with sdl2-compat as the second stage; those references remain drift and will be reworked at the Phase 3' gate so they match the new pipeline shape (SDL3 → SDL3_mixer + SDL3_image → NXEngine-evo). The `THIRD-PARTY.md` sdl2-compat row stays — we still ship the cloned source under the same vendoring convention even though we no longer link it.
 
+### 2026-04-25 — Phase 6 closed; Phase 7 partially open (title screen renders nothing visible)
+
+**TL;DR — pickup state for next session.** Phase 6 (Cave Story data) is closed. Phase 7 (DOSBox-X playthrough) hit a wall: the binary now boots cleanly through NXEngine's full init sequence and reaches the main loop / stage 72 (the title screen), `drawSurface` produces zero errors, but the DOSBox-X emulated framebuffer never paints — it stays black. Five distinct pre-title-screen bugs were diagnosed and fixed today in one sweep (commit `44fec06` on `main`). The remaining "framebuffer doesn't show anything" issue is owned for human triage in the next session; it is **not** in NXEngine, it is somewhere in the SDL3-DOS render-vs-present pipeline.
+
+**What's done.**
+
+| Area | Artifact | Why it landed |
+|---|---|---|
+| Phase 6 closure | `scripts/extract-engine-data.py` produces `data/wavetable.dat` (Organya PCM, 25600 bytes from `Doukutsu.exe` offset `0x110664`) and `data/stage.dat` (95-record stage index transcribed from `vendor/nxengine-evo/src/extract/extractstages.cpp`, 6936 bytes). | Without `stage.dat` the script-engine init fatal-exits on `StageSelect.tsc` lookup; without `wavetable.dat` Organya init reports a non-fatal error and renders no music. |
+| Phase 6 closure | `data/base/` subdir convention from the original Phase 6 prose **superseded**. NXEngine's source resolves data via `getPath("Stage/0.pxm")` → `data/Stage/0.pxm` with no `base/` prefix; `docs/ASSETS.md` and the `make install` rule are reconciled. | NXEngine source-truth, not the original plan, is the source of truth for the layout. |
+| Phase 7 prep | `make stage` target + `tools/dosbox-launch.sh --stage` flag. Stage produces `build/stage/` with `DOSKUTSU.EXE` + `CWSDPMI.EXE` + `data/` (symlinked); the launcher mounts that as C:. | NXEngine's `getBasePath() + "data/"` resolution requires `data/` co-located with the `.exe`. Repo layout (build/doskutsu.exe vs data/ at repo root) doesn't satisfy that on its own. Same shape as the eventual install layout under `C:\DOSKUTSU\` on real CF. |
+| Phase 7 fatal #1 — fixed | `patches/nxengine-evo/0025-cmake-djgpp-data-path.patch` gates `IF(UNIX_LIKE)` on `AND NOT DJGPP`. | DJGPP cross from a Linux host inherits CMake `UNIX=1` unless the toolchain explicitly clears it. Was baking the build-host's absolute Linux path into the DOS binary as `DATADIR`; engine fatal-exited at graphics init on `Error opening font file /home/<user>/.../font_1.fnt`. |
+| Phase 7 fatal #2 — fixed | `tools/dosbox-x.conf` and `tools/dosbox-x-fast.conf` set `lfn = true`. | DOSBox-X defaults `lfn = auto` which means **disabled** for emulated MS-DOS 6.22. NXEngine's data has long-named files (`wavetable.dat`, `music_dirs.json`, `StageSelect.tsc`) that fopen()d as truncated 8.3 names and missed; engine fatal-exited at script-engine init. **Real-HW caveat below.** |
+| Phase 7 fatal #3 — fixed | `patches/nxengine-evo/0026-sdl3-zoom-index8-palette.patch` explicitly creates and attaches a palette to INDEX8 dst surfaces in `zoom.cpp`. | SDL3's `SDL_CreateSurface(...,INDEX8)` no longer attaches a default palette (SDL2 did). The palette-copy block guarded `if (_src_pal && _dst_pal)` was always false because `SDL_GetSurfacePalette(rz_dst)` returned NULL; downstream `SDL_CreateTextureFromSurface` failed with `"src does not have a palette set"` for every paletted `.pbm`. SDL2→SDL3 migration regression. |
+| Phase 7 fatal #4 — fixed (workaround, not root cause) | `tools/dosbox-launch.sh` sets `SET SDL_INVALID_PARAM_CHECKS=0`. | SDL3's `CHECK_TEXTURE_MAGIC` validates textures via a `SDL_FindObject` hash lookup in `vendor/SDL/src/SDL_utils.c`. On DJGPP the lookup fails for textures that were demonstrably just inserted (suspected init-order or alloc-lifecycle bug, not yet root-caused). All valid textures fail validation; `SDL_RenderTexture` returns `"Parameter 'texture' is invalid"` 540+ times per second. The hint flips `SDL_object_validation` to `false` so `ObjectValid()` falls back to non-null check; drawSurface error count drops to 0. **Local-launcher escape hatch only — the underlying SDL3-DOS hash issue should be revisited; logged as future work, not a Phase 7 blocker.** |
+| Phase 8 prep | `docs/PHASE8-G2K-CHECKLIST.md` authored — 179 lines covering pre-deployment, CF prep, g2k boot config, first-boot smoke, 30-min play checklist, top-5 failure-mode catalog (real-HW vs DOSBox-X divergences, including the explicit "do NOT set `SDL_DOS_AUDIO_SB_SKIP_DETECTION` on real HW" warning), reporting-back convention. | Ready to follow when Phase 7 closes. |
+
+**The Phase 7 wall — task #53 (open).**
+
+The binary now reaches stage 72 (title screen) cleanly. `build/stage/debug.log` shows: `Renderer::initVideo: using: software renderer` → `Sound system init` → `Organya init done` → `Reading npc.tbl...` → `Loading tilekey.dat.` → `Script engine init.` → `Entering main loop...` → `>> Entering stage 72: 'u'.` Then surfaces load (`Surface::loadImage 'data/Stage/PrtWhite.pbm'`, `data/bk0.pbm`, `data/Npc/NpcKings.pbm` etc., all reporting bpp/format correctly), `SDL_CreateTextureFromSurface` returns valid textures, `SDL_RenderTexture` emits zero errors. But the emulated DOSBox-X framebuffer stays completely black for the entire run.
+
+**Suspected cause (not yet confirmed):** SDL3-DOS's `vendor/SDL/src/video/dos/SDL_dosvideo.c:169` hard-codes the default fullscreen target to 640×480 via `SDL_GetClosestFullscreenDisplayMode(display_id, 640, 480, 0.0f, false, &closest)`, regardless of NXEngine's `SDL_CreateWindow(NXVERSION, 320, 240, SDL_WINDOW_FULLSCREEN)` request at `vendor/nxengine-evo/src/graphics/Renderer.cpp:115`. The renderer-vs-framebuffer scaling/letterboxing interaction may not be engaging in DOSBox-X — the renderer draws into a 320×240 backing surface that never makes it onto the 640×480 framebuffer that DOSBox-X is showing.
+
+**Investigation candidates for next session, in order of cheap-to-try:**
+1. Add `SDL_SetRenderLogicalPresentation(_renderer, 320, 240, SDL_LOGICAL_PRESENTATION_LETTERBOX)` after `SDL_CreateRenderer` in `Renderer.cpp:147`. SDL3's logical-presentation API explicitly handles the "render at game size, present at display size" case.
+2. Try `window_flags = 0` (windowed) instead of `SDL_WINDOW_FULLSCREEN` in `Renderer.cpp:80` for the DOS branch — confirm it's a fullscreen-mode-selection issue and not something else.
+3. Run `tests/sdl3-smoke/sdltest.exe` (already builds and runs in DOSBox-X with output) and compare its present-pipeline behaviour with DOSKUTSU.EXE — `sdltest.c` is doskutsu-authored against the same SDL3-DOS backend and reports framebuffer state via `printf`. If sdltest's framebuffer paints and DOSKUTSU's doesn't, the difference is in NXEngine's renderer setup.
+4. If 1-3 don't pinpoint it: instrument `SDL_RenderPresent` with an `SDL_LogDebug` to confirm it's called every frame, then trace into SDL3-DOS's framebuffer flush path (`vendor/SDL/src/video/dos/SDL_dosframebuffer.c`) to see whether the output buffer is populated.
+
+**Reproduction instructions for next session:**
+
+```bash
+make stage                                                     # rebuild staging dir
+tools/dosbox-launch.sh --fast --stage --exe DOSKUTSU.EXE       # smoke launch
+DISPLAY=:0 scrot -u /tmp/dosbox.png                            # capture framebuffer
+cat build/stage/debug.log                                      # NXEngine engine log
+cat /tmp/dosbox-launch.log                                     # DOSBox-X log
+pkill -x dosbox-x                                              # stop
+```
+
+Expected on hit: `debug.log` ends with `>> Entering stage 72: 'u'` followed by `Surface::loadImage` success lines, **no** `drawSurface failed` errors, **no** `Failed to initialize` criticals. Screenshot shows DOSBox-X menu bar at top + black inner region. Engine itself is healthy; the question is purely "why is the framebuffer black?"
+
+**Real-HW LFN follow-up (Phase 8 deferred decision).** The `lfn = true` workaround is **DOSBox-X-only**. Plain MS-DOS 6.22 on g2k has no LFN driver. Phase 8 needs either DOSLFN.COM (TSR LFN driver, ~9 KB, GPLv2 — redistributable, would ship alongside `CWSDPMI.EXE` in `dist/doskutsu-cf.zip`) loaded via AUTOEXEC.BAT before `DOSKUTSU.EXE`, or a source-level patch renaming the long-named assets at NXEngine source (large surface area: every file path reference). Decision deferred until we actually run on g2k. Logged as Phase 8 follow-up; not a Phase 7 blocker.
+
+**Background research deliverables (Phase 7 prep).**
+- Git-hygiene research (#37) closed: recommendation is option (e) — sealed-tree-per-task helper script + serial dispatch — codifying the existing `patches/nxengine-evo/README.md § Authoring order` policy. Does NOT use `git worktree` (per user caveat). Implementation deferred — research-only. Full memo in agent transcript.
+- PXT slot audit closed: 540 `data/pxt/fxNN.pxt not found` warnings during init are **expected**, not extractor bugs. NXEngine iterates `slot=1..0x75` blindly; Cave Story's `SND[]` table is genuinely sparse. `scripts/extract-pxt.py` is byte-identical to upstream's. No fix needed; could optionally bump `LOG_WARN` → `LOG_DEBUG` in a future patch to clean up the log.
+
+**What's preserved.** The five-bug sweep is in `main` at commit `44fec06`. Patches `0025` and `0026` are in `patches/nxengine-evo/`. Diagnostic logging I added to `Surface.cpp` and `Font.cpp` was reverted before commit (it was instrumentation-only, not a fix). The debug.log it produced confirmed that texture loads succeed cleanly on the post-fix path; that data informed the diagnosis above.
+
 ---
 
 ## Licensing
@@ -285,6 +335,8 @@ Required patches (landed as `patches/nxengine-evo/*.patch`):
 
 ## Phase 6 — Cave Story data files
 
+> **Status: closed 2026-04-25 at commit `44fec06`.** The `data/base/` subdir convention described below is **superseded** by `PLAN.md § Plan Amendments § 2026-04-25` — the production layout is `data/Stage/`, `data/Npc/`, etc., with no `base/` prefix. The original prose is preserved as historical context. `docs/ASSETS.md` carries the current procedure.
+
 NXEngine-evo ships engine support data (fonts, PBM backgrounds, JSON metadata) but not Cave Story game assets.
 
 1. Obtain the 2004 freeware `Doukutsu.exe` (English translation). Canonical source: https://www.cavestory.org — verify URL before scripting, the site's layout drifts.
@@ -306,6 +358,8 @@ Full procedure lives in `docs/ASSETS.md`.
 **Gate:** Title screen loads, first stage reachable, player sprite moves and jumps.
 
 ## Phase 7 — DOSBox-X playthrough
+
+> **Status: partially open as of 2026-04-25 commit `44fec06`.** All pre-title-screen fatals are fixed; binary reaches NXEngine main loop + stage 72 (title screen) cleanly. The remaining wall — the DOSBox-X framebuffer doesn't paint visibly even though `drawSurface` succeeds zero errors — is logged as task #53 and detailed in `PLAN.md § Plan Amendments § 2026-04-25` with reproduction steps and investigation candidates. Resume there.
 
 Using `tools/dosbox-x.conf` (parity config, `cycles=fixed 40000`), not the fast config — we want real-HW-like timing here.
 

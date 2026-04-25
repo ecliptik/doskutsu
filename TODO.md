@@ -94,6 +94,10 @@ Current work is organized by phase (see `PLAN.md`). Mark items complete as they 
 
 ## Phase 7 — DOSBox-X playtest
 
+> **Wall, current session 2026-04-25:** binary boots cleanly through full NXEngine init, reaches main loop + stage 72 (title screen), zero `drawSurface` errors — but DOSBox-X framebuffer stays black. Five pre-title-screen fatals fixed in commit `44fec06`. See `PLAN.md § Plan Amendments § 2026-04-25` for full state and next-session pickup checklist.
+
+- [x] All pre-title-screen fatals fixed: data-path baking (patch 0025), engine-data extraction (`wavetable.dat` + `stage.dat`), DOSBox-X LFN (`lfn = true`), INDEX8 palette (patch 0026), SDL3 texture-magic validation (`SDL_INVALID_PARAM_CHECKS=0`)
+- [ ] **Title screen actually renders to DOSBox-X framebuffer** (task #53 — next session). Suspected `SDL_SetRenderLogicalPresentation` missing or SDL3-DOS 640×480-default-fullscreen-vs-renderer mismatch
 - [ ] 30-min continuous session under `tools/dosbox-x.conf` (parity cycles)
 - [ ] Mimiga Village: dialogue + Organya stable
 - [ ] First Cave / Hermit Gunsmith: combat clean, no audio dropout
@@ -130,7 +134,7 @@ Levers 1-5 correspond to the descent from Tier 1 (PODP83 / 48 MB, reference) thr
 - [ ] `CHANGELOG.md` updated per phase gate pass
 - [ ] `docs/PERFORMANCE.md` captures every Phase 9 experiment with measured before/after
 
-**Phase status:** Phases 0 / 1 / 2 / 5 closed. Phases 3' / 4'b / 4'c / 4'd closed (per task tracker #28, #30, #32, #33). Phase 4'a in flight (#31, audio refactor under N=4/N=7 tripwire). **Phase 5 closed 2026-04-25 at `484efa7`** — first end-to-end DJGPP+SDL3 build of NXEngine-evo. Phase 6 asset extraction in flight.
+**Phase status:** Phases 0 / 1 / 2 / 5 / 6 closed. Phases 3' / 4'a / 4'b / 4'c / 4'd closed (per task tracker #28, #30, #31, #32, #33). **Phase 5 closed 2026-04-25 at `484efa7`** — first end-to-end DJGPP+SDL3 build. **Phase 6 closed 2026-04-25 at `44fec06`** — `data/` populated with Cave Story freeware + NXEngine engine support data, `wavetable.dat` + `stage.dat` extractor authored, `data/base/` subdir convention superseded. **Phase 7 partially open** — pre-title-screen fatals all fixed (commit `44fec06`); the title-screen-doesn't-render-to-framebuffer wall (#53) is owned for next session. See `PLAN.md § Plan Amendments § 2026-04-25` for the pickup state.
 
 ## Known build warnings (non-blocking)
 
