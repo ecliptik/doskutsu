@@ -40,7 +40,7 @@ The migration patches. Clustered together so the API-migration commit range is r
 | `0017-sdl3-mixer-soundmanager-init.patch` | `SoundManager.cpp` lines 36, 43, 49, 55: `Mix_Init` + `Mix_OpenAudioDevice` / `Mix_OpenAudio` + `Mix_AllocateChannels` → `MIX_CreateMixer` on an `SDL_AudioDeviceID`. The `SDL_MIXER_PATCHLEVEL >= 2` conditional collapses to a single SDL3_mixer init path. |
 | `0018-sdl3-image-load.patch` | `IMG_Init` + `IMG_Load` migration. Small — SDL3_image kept the legacy `IMG_*` prefix; mostly signature-drift. |
 
-`0013`–`0017` is the audio refactor cluster (task #30). It's reviewable as a unit because all five patches touch the same subsystem and pass through one before/after audio-capture gate. Per `docs/SDL3-MIGRATION.md § 3`, this work is co-owned by sdl-engine (SDL3 mechanics) and nxengine (synthesis correctness).
+`0013`–`0017` is the audio refactor cluster (task #31). It's reviewable as a unit because all five patches touch the same subsystem and pass through one before/after audio-capture gate. Per `docs/SDL3-MIGRATION.md § 3`, this work is co-owned by sdl-engine (SDL3 mechanics) and nxengine (synthesis correctness).
 
 `0019` reserved for any unforeseen SDL3 migration patches.
 
@@ -61,6 +61,10 @@ When rerolling against a new upstream NXEngine-evo SHA: rebase `0001`–`0005` f
 
 - `../README.md` — general patch convention
 - `docs/SDL3-MIGRATION.md` — architectural decisions encoded by these patches
-- `PLAN.md § Phase 5` — the originally-planned patch list this layout refines
+- `PLAN.md § Plan Amendments § 2026-04-24` — Path B decision record. **The supersession point for `§ Phase 5`'s original patch list**; this README is the canonical patch layout post-amendment.
+- `PLAN.md § Phase 5` — the originally-planned 7-patch list this layout refines (post-amendment, see the Plan Amendments row above; this layout is the canonical source)
 - Task #27 — the audit that sized the migration
-- Task #30 — the audio refactor governing the `0013`–`0017` cluster
+- Task #30 — the mechanical-rename patch (`0010`)
+- Task #31 — the audio refactor governing the `0013`–`0017` cluster
+- Task #32 — the IMG_* lib swap (`0018`)
+- Task #33 — the NXEngine DJGPP port patches (`0001`–`0005`)

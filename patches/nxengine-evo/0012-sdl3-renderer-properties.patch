@@ -1,0 +1,72 @@
+From b81a68505e206890428d371555f49673be040649 Mon Sep 17 00:00:00 2001
+From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
+Date: Fri, 24 Apr 2026 17:46:42 -0700
+Subject: [PATCH 8/9] [DOSKUTSU] SDL3 renderer-properties API migration
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: the SDL2 SDL_RendererInfo struct + SDL_GetRendererInfo()
+function are removed in SDL3, replaced by an SDL_PropertiesID-based query.
+This is a "genuinely different API surface" change rather than a rename, so
+the brief (patches/nxengine-evo/README.md) splits it from 0010.
+
+Site: src/graphics/Renderer.cpp Renderer::initVideo() (~lines 127-134).
+
+Old SDL2 pattern:
+    SDL_RendererInfo info;
+    if (SDL_GetRendererInfo(_renderer, &info)) { LOG_ERROR(...); return false; }
+    LOG_INFO("... using: {} renderer", info.name);
+
+New SDL3 pattern:
+    SDL_PropertiesID props = SDL_GetRendererProperties(_renderer);
+    const char *name = SDL_GetStringProperty(props,
+                                             SDL_PROP_RENDERER_NAME_STRING,
+                                             NULL);
+    LOG_INFO("... using: {} renderer", name ? name : "<unknown>");
+
+Notes:
+
+- SDL_GetRendererProperties returns 0 only on a NULL renderer; we already
+  guarded for that earlier in initVideo, so we don't error-check it here.
+- SDL_GetStringProperty returns the default (NULL) if the property isn't
+  set; we fall back to "<unknown>" in the log line rather than failing init.
+- The log line is the only consumer of info.name in NXEngine — no other
+  RendererInfo fields (flags, max_texture_width, etc.) are read.
+
+After this patch, the 0010-0012 cluster makes NXEngine-evo compile against
+SDL3 headers for the renderer subsystem. Audio (Mix_*, SDL_AudioCVT) and
+SDL3_image (IMG_*) calls remain to be migrated by 0013-0017 / 0018.
+---
+ src/graphics/Renderer.cpp | 15 +++++++--------
+ 1 file changed, 7 insertions(+), 8 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index b80f02b..598f8db 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -153,14 +153,13 @@ bool Renderer::initVideo()
+     return false;
+   }
+ 
+-  SDL_RendererInfo info;
+-  if (SDL_GetRendererInfo(_renderer, &info))
+-  {
+-    LOG_ERROR("Renderer::initVideo: SDL_GetRendererInfo failed: {}", SDL_GetError());
+-    return false;
+-  }
+-
+-  LOG_INFO("Renderer::initVideo: using: {} renderer", info.name);
++  // SDL3: SDL_RendererInfo struct + SDL_GetRendererInfo() are gone. The replacement
++  // is the SDL_PropertiesID-based query: SDL_GetRendererProperties() returns the
++  // renderer's property bag, then SDL_GetStringProperty() pulls named values out.
++  // SDL_PROP_RENDERER_NAME_STRING is the renderer-driver name (e.g. "software").
++  SDL_PropertiesID _renderer_props = SDL_GetRendererProperties(_renderer);
++  const char *_renderer_name = SDL_GetStringProperty(_renderer_props, SDL_PROP_RENDERER_NAME_STRING, NULL);
++  LOG_INFO("Renderer::initVideo: using: {} renderer", _renderer_name ? _renderer_name : "<unknown>");
+ 
+   std::string spotpath = ResourceManager::getInstance()->getPath("spot.png");
+ 
+-- 
+2.47.3
+

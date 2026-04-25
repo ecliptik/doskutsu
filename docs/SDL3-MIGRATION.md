@@ -4,7 +4,7 @@
 
 Architectural decisions for the SDL2 → SDL3 migration of NXEngine-evo (Path B per `PLAN.md § Fallback path: direct SDL3 migration`). Companion to `patches/nxengine-evo/README.md` (which documents the patch *layout*) and `PLAN.md § Phase 5` (which sketched the original patch list).
 
-This brief governs commit hygiene and code structure for tasks #30 (audio refactor), #31 (mechanical renames), #32 (mixer/image lib swap), and #33 (NXEngine DJGPP patches). Read it before opening one of those PRs.
+This brief governs commit hygiene and code structure for tasks #30 (mechanical renames), #31 (audio refactor), #32 (IMG_* lib swap), and #33 (NXEngine DJGPP patches). Read it before opening one of those PRs.
 
 **Why this exists:** Path B (rejecting `sdl2-compat` for direct SDL3) and Path 1 within it (accepting SDL3_mixer's `MIX_*` redesign rather than building our own shim) are the two big architectural calls. Beyond those, four downstream decisions shape the patch set's structure. Pinning them now means tasks #30–#33 land with consistent code idioms instead of rediscovering them mid-PR.
 
@@ -152,7 +152,12 @@ If audio dropouts surface during the refactor, the fix lives in:
 
 ### Tripwire
 
-Per the architect ratification (#29 prior thread): **N=7 working days** for the audio refactor (#30) to pass the audio-capture gate. If unmet, escalate to Path 2 (custom shim over `SDL_AudioStream`) — **not** to `PLAN.md § Phase 9 lever 6` (drop to original SDL1.2 NXEngine), which stays reserved for actual SDL3-DOS-backend incompatibilities.
+Two-stage tripwire on the audio refactor (#31), ratified per `PLAN.md § Plan Amendments § 2026-04-24`:
+
+- **Yellow flag at N=4 working days.** sdl-engine + nxengine convene a 1-hour pair-debug calibration session. Compare progress against nxengine's milestone approach (was the "compiles + reaches title screen" milestone hit at day 2-3 as planned?). Decide: continue, narrow scope, or escalate. No status change to the task — a forced check-in turns "we're behind, should we keep going?" from a vibes call into a scheduled decision point.
+- **Red flag at N=7 working days.** Escalate to Path 2 (custom shim over `SDL_AudioStream`) — **not** to `PLAN.md § Phase 9 lever 6` (drop to original SDL1.2 NXEngine), which stays reserved for actual SDL3-DOS-backend incompatibilities (DMA timing, VESA-class structural failures).
+
+The two-stage ladder reflects the small median: nxengine sized the refactor at 12-17 hours (~2 working days), so day-7 alone fires only after ~3.5x median has elapsed. The yellow flag at day 4 catches "drifting against the milestone" before the cliff.
 
 ---
 
@@ -205,15 +210,16 @@ FILE *fp = fopen(path, "rb");
 
 ## Cross-references
 
-- `PLAN.md § Fallback path: direct SDL3 migration` — strategic context for Path B
-- `PLAN.md § Phase 5` — the patch list this brief refines
+- `PLAN.md § Plan Amendments § 2026-04-24` — decision record: Path B ratification, Path 1 SDL3_mixer redesign acceptance, two-stage tripwire ladder. **The why behind everything in this brief.**
+- `PLAN.md § Fallback path: direct SDL3 migration` — strategic context that the amendment operationalizes
+- `PLAN.md § Phase 5` — the originally-planned 7-patch list. **Superseded by the amendment** (post-amendment the canonical patch layout is `patches/nxengine-evo/README.md`); kept as an in-PLAN cross-reference target only.
 - `PLAN.md § Phase 9` — when the deferred decisions (logical presentation, direct-blit on by default) get revisited
 - `CLAUDE.md § Critical Rules` — DJGPP/DOS rules this brief operationalizes (no threads, `fopen "rb"`, `size_t` audits, no SIMD)
 - `CLAUDE.md § SDL3 DOS backend quirks` — the cooperative-scheduler invariant cited in § 3
 - `patches/README.md` — general patch convention
 - `patches/nxengine-evo/README.md` — patch numbering and ordering for this migration
 - Task #27 — the call-site audit grounding the migration sizing
-- Task #30 — the audio refactor governed by § 3
-- Task #31 — the mechanical-rename patch governed by § 1, § 2, § 4
-- Task #32 — the mixer/image lib swap touching § 3
-- Task #33 — the NXEngine DJGPP patches governed by § 4
+- Task #30 — the mechanical-rename patch governed by § 1, § 2, § 4 (lands as `0010-sdl3-mechanical-renames.patch`)
+- Task #31 — the audio refactor governed by § 3 (lands as the `0013`–`0017` cluster)
+- Task #32 — the IMG_* lib swap touching § 4 only (lands as `0018-sdl3-image-load.patch`)
+- Task #33 — the NXEngine DJGPP patches governed by § 4 (lands as `0001`–`0005`)

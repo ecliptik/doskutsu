@@ -1,0 +1,149 @@
+From 087869784d3aed22d71495ccb8e7a2d24015c751 Mon Sep 17 00:00:00 2001
+From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
+Date: Fri, 24 Apr 2026 17:46:24 -0700
+Subject: [PATCH 7/9] [DOSKUTSU] SDL3 event-enum renames
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: companion to 0010-sdl3-mechanical-renames. The brief
+splits the event-type constant renames into their own patch because they're
+easy to miss in review when buried in mechanical-rename noise (per
+patches/nxengine-evo/README.md).
+
+Scope: src/input.cpp event handling.
+
+Constant renames (case labels + evt.type comparisons, ~14 sites):
+
+- SDL_KEYDOWN              -> SDL_EVENT_KEY_DOWN
+- SDL_KEYUP                -> SDL_EVENT_KEY_UP
+- SDL_QUIT                 -> SDL_EVENT_QUIT
+- SDL_JOYBUTTONDOWN        -> SDL_EVENT_JOYSTICK_BUTTON_DOWN
+- SDL_JOYBUTTONUP          -> SDL_EVENT_JOYSTICK_BUTTON_UP
+- SDL_JOYHATMOTION         -> SDL_EVENT_JOYSTICK_HAT_MOTION
+- SDL_JOYAXISMOTION        -> SDL_EVENT_JOYSTICK_AXIS_MOTION
+
+Event struct field renames (related; folded in here rather than 0010 since
+they're observed only via the event handler):
+
+- evt.key.keysym.sym       -> evt.key.key
+  (SDL_Keysym struct removed in SDL3; keycode lives directly on the event)
+- evt.jbutton.state == SDL_PRESSED -> evt.jbutton.down
+  (SDL_PRESSED constant removed; state field replaced by `bool down`)
+
+Other joystick-event field accesses (jbutton.button, jhat.hat/value,
+jaxis.axis/value) are unchanged in SDL3 — they keep their names.
+---
+ src/input.cpp | 32 +++++++++++++++++---------------
+ 1 file changed, 17 insertions(+), 15 deletions(-)
+
+diff --git a/src/input.cpp b/src/input.cpp
+index cdbe5da..95981b4 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -258,10 +258,11 @@ void input_poll(void)
+   {
+     switch (evt.type)
+     {
+-      case SDL_KEYDOWN:
+-      case SDL_KEYUP:
++      case SDL_EVENT_KEY_DOWN:
++      case SDL_EVENT_KEY_UP:
+       {
+-        key = evt.key.keysym.sym;
++        // SDL3: SDL_Keysym struct removed — keycode lives directly on SDL_KeyboardEvent.key.
++        key = evt.key.key;
+ 
+         static uint8_t shiftstates = 0;
+ 
+@@ -269,14 +270,14 @@ void input_poll(void)
+         {
+           if (key == SDLK_LSHIFT)
+           {
+-            if (evt.type == SDL_KEYDOWN)
++            if (evt.type == SDL_EVENT_KEY_DOWN)
+               shiftstates |= LEFTMASK;
+             else
+               shiftstates &= ~LEFTMASK;
+           }
+           else if (key == SDLK_RSHIFT)
+           {
+-            if (evt.type == SDL_KEYDOWN)
++            if (evt.type == SDL_EVENT_KEY_DOWN)
+               shiftstates |= RIGHTMASK;
+             else
+               shiftstates &= ~RIGHTMASK;
+@@ -297,7 +298,7 @@ void input_poll(void)
+                 ch = '!';
+             }
+ 
+-            if (evt.type == SDL_KEYDOWN)
++            if (evt.type == SDL_EVENT_KEY_DOWN)
+               console.HandleKey(ch);
+             else
+               console.HandleKeyRelease(ch);
+@@ -308,9 +309,9 @@ void input_poll(void)
+           ino = input_get_action(key); // mappings[key];
+ 
+           if (ino != -1)
+-            inputs[ino] = (evt.type == SDL_KEYDOWN);
++            inputs[ino] = (evt.type == SDL_EVENT_KEY_DOWN);
+ 
+-          if (evt.type == SDL_KEYDOWN)
++          if (evt.type == SDL_EVENT_KEY_DOWN)
+           {
+             if (key == '`') // bring up console
+             {
+@@ -332,33 +333,34 @@ void input_poll(void)
+       }
+       break;
+ 
+-      case SDL_QUIT:
++      case SDL_EVENT_QUIT:
+       {
+         inputs[ESCKEY] = true;
+         game.running   = false;
+       }
+       break;
+ 
+-      case SDL_JOYBUTTONDOWN:
++      case SDL_EVENT_JOYSTICK_BUTTON_DOWN:
+       {
+         Uint8 but            = evt.jbutton.button;
+         last_sdl_action.jbut = but;
+         ino                  = input_get_action_but(but); // mappings[key];
++        // SDL3: SDL_PRESSED constant + jbutton.state field gone; use jbutton.down (bool).
+         if (ino != -1)
+-          inputs[ino] = (evt.jbutton.state == SDL_PRESSED);
++          inputs[ino] = evt.jbutton.down;
+       }
+       break;
+ 
+-      case SDL_JOYBUTTONUP:
++      case SDL_EVENT_JOYSTICK_BUTTON_UP:
+       {
+         Uint8 but = evt.jbutton.button;
+         ino       = input_get_action_but(but); // mappings[key];
+         if (ino != -1)
+-          inputs[ino] = (evt.jbutton.state == SDL_PRESSED);
++          inputs[ino] = evt.jbutton.down;
+       }
+       break;
+ 
+-      case SDL_JOYHATMOTION:
++      case SDL_EVENT_JOYSTICK_HAT_MOTION:
+       {
+         if (evt.jhat.value != SDL_HAT_CENTERED)
+         {
+@@ -378,7 +380,7 @@ void input_poll(void)
+       }
+       break;
+ 
+-      case SDL_JOYAXISMOTION:
++      case SDL_EVENT_JOYSTICK_AXIS_MOTION:
+       {
+         // this only used for control remapping.
+         // for actual in-game handling see below.
+-- 
+2.47.3
+
