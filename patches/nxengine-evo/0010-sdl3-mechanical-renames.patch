@@ -1,0 +1,735 @@
+From bfaff941138f6c587e5bab89a48b620a03159742 Mon Sep 17 00:00:00 2001
+From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
+Date: Fri, 24 Apr 2026 17:45:54 -0700
+Subject: [PATCH 10/12] [DOSKUTSU] SDL3 mechanical renames: bulk
+ renderer/surface/cursor/joystick
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: NXEngine-evo's SDL2 API surface doesn't compile against
+SDL3 headers as-is. The doskutsu DOS port (Path B per project plan) targets
+SDL3 directly so it can use the SDL3 DOS backend — sdl2-compat is structurally
+incompatible with static-only DJGPP linkage. This is the bulk-rename slice
+of the SDL2->SDL3 migration; subsequent patches handle event-enum renames
+(0011), renderer-properties API (0012), audio refactor (0013-0017), and
+SDL3_image swap (0018).
+
+Per patches/nxengine-evo/README.md, this patch covers bulk-renames that are
+"uniform sed-bait." Sites + signature notes:
+
+- src/graphics/Renderer.cpp
+  * SDL_FreeSurface (3) -> SDL_DestroySurface
+  * SDL_CreateRGBSurfaceFrom (icon) -> SDL_CreateSurfaceFrom
+    (mask layout maps to SDL_PIXELFORMAT_RGBA32 endian-neutral alias)
+  * SDL_CreateRGBSurface (screenshot) -> SDL_CreateSurface
+  * SDL_RenderCopy (3) -> SDL_RenderTexture (SDL_FRect via SDL_RectToFRect)
+  * SDL_RenderCopyEx -> SDL_RenderTextureRotated (SDL_FRect)
+  * SDL_RenderDrawLine -> SDL_RenderLine (float coords)
+  * SDL_RenderFillRect/SDL_RenderFillRects: now take SDL_FRect
+  * SDL_ShowCursor signature change: bool toggle gone; pair with SDL_HideCursor
+  * SDL_SetWindowFullscreen takes bool (not flags)
+  * SDL_CreateWindow signature change: position params dropped; followed by
+    SDL_SetWindowPosition
+  * SDL_CreateRenderer signature change: (window, name) only; flags gone.
+    Passing NULL for now; the SDL_RENDERER_SOFTWARE force lives in 0004.
+  * SDL_WINDOW_SHOWN removed (windows shown by default); test !HIDDEN
+  * SDL_GetWindowFlags returns SDL_WindowFlags (Uint64)
+  * SDL_GetWindowDisplayIndex -> SDL_GetDisplayForWindow (SDL_DisplayID)
+  * SDL_GetDesktopDisplayMode now returns const SDL_DisplayMode* (no out-param)
+  * SDL_RenderGetViewport -> SDL_GetRenderViewport
+  * SDL_RenderReadPixels: returns SDL_Surface* directly
+  NOTE: SDL_RendererInfo + SDL_GetRendererInfo are deliberately untouched here
+  and migrated separately in 0012-sdl3-renderer-properties.patch (the brief
+  splits that out as a "genuinely different API surface" concern).
+
+- src/graphics/Font.cpp
+  * SDL_FreeSurface -> SDL_DestroySurface
+  * SDL_RenderCopy (4) -> SDL_RenderTexture (SDL_FRect via SDL_RectToFRect)
+
+- src/graphics/Surface.cpp
+  * SDL_FreeSurface (2) -> SDL_DestroySurface
+  * SDL_SetColorKey -> SDL_SetSurfaceColorKey (with bool, not SDL_TRUE)
+  * SDL_MapRGB -> SDL_MapSurfaceRGB (no surface->format dereference needed)
+
+- src/graphics/zoom.cpp
+  * SDL_GetColorKey -> SDL_GetSurfaceColorKey
+  * SDL_FreeSurface (3) -> SDL_DestroySurface
+  * SDL_CreateRGBSurface (3) -> SDL_CreateSurface (RGBA32 / source format / INDEX8)
+  * surface->format->BitsPerPixel -> SDL_BITSPERPIXEL(surface->format)
+    (surface->format is now an SDL_PixelFormat enum, not a struct ptr)
+  * surface->format->palette -> SDL_GetSurfacePalette(surface)
+    (palette no longer hung off format)
+
+- src/graphics/pngfuncs.cpp
+  * SDL_CreateRGBSurface -> SDL_CreateSurface (SDL_PIXELFORMAT_ARGB8888)
+
+- src/input.cpp (joystick API only — event-enum renames are 0011)
+  * SDL_NumJoysticks -> SDL_GetJoysticks (instance-id list)
+  * SDL_JoystickOpen(0) -> SDL_OpenJoystick(instance_id)
+  * SDL_JoystickNameForIndex -> SDL_GetJoystickNameForID
+  * SDL_JoystickNum{Axes,Buttons,Balls} -> SDL_GetNumJoystick{Axes,Buttons,Balls}
+  * SDL_JoystickRumble -> SDL_RumbleJoystick
+  * SDL_JoystickGetAxis -> SDL_GetJoystickAxis
+  * SDL_JoystickGetAttached -> SDL_JoystickConnected
+  * SDL_JoystickClose -> SDL_CloseJoystick
+
+- src/slope.cpp
+  * SDL_FillRect -> SDL_FillSurfaceRect
+  * SDL_MapRGB -> SDL_MapSurfaceRGB
+
+- src/trig.cpp
+  * SDL_WarpMouse -> SDL_WarpMouseInWindow(NULL, ...)
+
+- src/main.cpp
+  * SDL_Init now returns bool; old `< 0` check would always be false (silent
+    init failure under SDL3). Changed to `if (!SDL_Init(...))`.
+
+- src/ResourceManager.cpp
+  * SDL_GetBasePath now returns const char* owned by SDL — must NOT SDL_free.
+    Removed the SDL_free; declared the local as const char*.
+
+After this patch lands, NXEngine-evo will not yet compile against SDL3 alone:
+0011 (event-enum renames) and 0012 (renderer-properties) are required for
+the renderer/event subsystems to build. The patches are designed to apply as
+a 0010-0012 cluster; the split is for review readability and bisect
+granularity within the SDL3 migration block.
+---
+ src/ResourceManager.cpp   |   4 +-
+ src/graphics/Font.cpp     |  22 ++++--
+ src/graphics/Renderer.cpp | 146 +++++++++++++++++++++-----------------
+ src/graphics/Surface.cpp  |   6 +-
+ src/graphics/pngfuncs.cpp |   9 ++-
+ src/graphics/zoom.cpp     |  43 ++++++-----
+ src/input.cpp             |  34 +++++----
+ src/main.cpp              |   3 +-
+ src/slope.cpp             |   4 +-
+ src/trig.cpp              |   2 +-
+ 10 files changed, 157 insertions(+), 116 deletions(-)
+
+diff --git a/src/ResourceManager.cpp b/src/ResourceManager.cpp
+index 29355ae..36fa062 100644
+--- a/src/ResourceManager.cpp
++++ b/src/ResourceManager.cpp
+@@ -59,11 +59,11 @@ std::string ResourceManager::getBasePath()
+   #if defined(__SWITCH__)
+     return std::string("romfs:/");
+   #else
+-    char* resPath = SDL_GetBasePath();
++    const char* resPath = SDL_GetBasePath();
+     if (NULL != resPath)
+     {
+         std::string strpath(resPath);
+-        SDL_free(resPath);
++        // SDL3: SDL_GetBasePath returns a const char* owned by SDL — do not SDL_free.
+         return strpath;
+     }
+     return std::string("");
+diff --git a/src/graphics/Font.cpp b/src/graphics/Font.cpp
+index 71da492..50e8942 100644
+--- a/src/graphics/Font.cpp
++++ b/src/graphics/Font.cpp
+@@ -73,7 +73,7 @@ bool Font::load()
+       std::string atlaspath = ResourceManager::getInstance()->getPath(atlas.get<std::string>());
+       SDL_Surface *surf     = IMG_Load(atlaspath.c_str());
+       _atlases.push_back(SDL_CreateTextureFromSurface(Renderer::getInstance()->renderer(), surf));
+-      SDL_FreeSurface(surf);
++      SDL_DestroySurface(surf);
+     }
+   }
+   else
+@@ -181,12 +181,18 @@ uint32_t Font::draw(int x, int y, const std::string &text, uint32_t color, bool
+         shdrect.y = y + (glyph.yoffset * _upscale + _shadowOffset * Renderer::getInstance()->scale);
+         shdrect.w = glyph.w * _upscale;
+         shdrect.h = glyph.h * _upscale;
++        SDL_FRect _srcfr, _shdfr;
++        SDL_RectToFRect(&srcrect, &_srcfr);
++        SDL_RectToFRect(&shdrect, &_shdfr);
+         SDL_SetTextureColorMod(atlas, 0, 0, 0);
+-        SDL_RenderCopy(Renderer::getInstance()->renderer(), atlas, &srcrect, &shdrect);
++        SDL_RenderTexture(Renderer::getInstance()->renderer(), atlas, &_srcfr, &_shdfr);
+         SDL_SetTextureColorMod(atlas, 255, 255, 255);
+       }
++      SDL_FRect _srcfr, _dstfr;
++      SDL_RectToFRect(&srcrect, &_srcfr);
++      SDL_RectToFRect(&dstrect, &_dstfr);
+       SDL_SetTextureColorMod(atlas, r, g, b);
+-      SDL_RenderCopy(Renderer::getInstance()->renderer(), atlas, &srcrect, &dstrect);
++      SDL_RenderTexture(Renderer::getInstance()->renderer(), atlas, &_srcfr, &_dstfr);
+       SDL_SetTextureColorMod(atlas, 255, 255, 255);
+     }
+ 
+@@ -281,12 +287,18 @@ uint32_t Font::drawLTR(int x, int y, const std::string &text, uint32_t color, bo
+         shdrect.y = y + glyph.yoffset * _upscale + _shadowOffset * Renderer::getInstance()->scale;
+         shdrect.w = glyph.w * _upscale;
+         shdrect.h = glyph.h * _upscale;
++        SDL_FRect _srcfr, _shdfr;
++        SDL_RectToFRect(&srcrect, &_srcfr);
++        SDL_RectToFRect(&shdrect, &_shdfr);
+         SDL_SetTextureColorMod(atlas, 0, 0, 0);
+-        SDL_RenderCopy(Renderer::getInstance()->renderer(), atlas, &srcrect, &shdrect);
++        SDL_RenderTexture(Renderer::getInstance()->renderer(), atlas, &_srcfr, &_shdfr);
+         SDL_SetTextureColorMod(atlas, 255, 255, 255);
+       }
++      SDL_FRect _srcfr, _dstfr;
++      SDL_RectToFRect(&srcrect, &_srcfr);
++      SDL_RectToFRect(&dstrect, &_dstfr);
+       SDL_SetTextureColorMod(atlas, r, g, b);
+-      SDL_RenderCopy(Renderer::getInstance()->renderer(), atlas, &srcrect, &dstrect);
++      SDL_RenderTexture(Renderer::getInstance()->renderer(), atlas, &_srcfr, &_dstfr);
+       SDL_SetTextureColorMod(atlas, 255, 255, 255);
+     }
+ 
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index d6b9486..e103946 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -52,22 +52,24 @@ void Renderer::close()
+   LOG_INFO("Renderer::Close()");
+   font.cleanup();
+   sprites.close();
+-  SDL_ShowCursor(true);
++  SDL_ShowCursor();
+   SDL_DestroyWindow(_window);
+   _window = NULL;
+ }
+ 
+ bool Renderer::isWindowVisible()
+ {
+-  Uint32 flags = SDL_GetWindowFlags(_window);
++  // SDL3: SDL_WINDOW_SHOWN is gone (windows are shown by default; check ! HIDDEN instead).
++  SDL_WindowFlags flags = SDL_GetWindowFlags(_window);
+ 
+-  return (flags & SDL_WINDOW_SHOWN) && !(flags & SDL_WINDOW_MINIMIZED) // SDL_APPACTIVE
+-         && (flags & SDL_WINDOW_INPUT_FOCUS);                          // SDL_APPINPUTFOCUS
++  return !(flags & SDL_WINDOW_HIDDEN) && !(flags & SDL_WINDOW_MINIMIZED) // SDL_APPACTIVE
++         && (flags & SDL_WINDOW_INPUT_FOCUS);                            // SDL_APPINPUTFOCUS
+ }
+ 
+ bool Renderer::initVideo()
+ {
+-  uint32_t window_flags = SDL_WINDOW_SHOWN;
++  // SDL3: no SDL_WINDOW_SHOWN — windows are shown by default.
++  SDL_WindowFlags window_flags = 0;
+ 
+   const NXE::Graphics::gres_t *res = getResolutions(true);
+ 
+@@ -85,7 +87,12 @@ bool Renderer::initVideo()
+   }
+ 
+   LOG_DEBUG("SDL_CreateWindow: {}x{}", width, height);
+-  _window = SDL_CreateWindow(NXVERSION, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height, window_flags);
++  // SDL3: SDL_CreateWindow no longer takes position params; use SDL_SetWindowPosition.
++  _window = SDL_CreateWindow(NXVERSION, width, height, window_flags);
++  if (_window)
++  {
++    SDL_SetWindowPosition(_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
++  }
+ 
+   if (!_window)
+   {
+@@ -95,28 +102,23 @@ bool Renderer::initVideo()
+ 
+ #if not defined(__VITA__) && not defined(__SWITCH__)
+   SDL_Surface *icon;
+-  icon = SDL_CreateRGBSurfaceFrom((void *)WINDOW_TITLE_ICON.pixel_data, WINDOW_TITLE_ICON.width,
+-                                  WINDOW_TITLE_ICON.height, WINDOW_TITLE_ICON.bytes_per_pixel * 8,
+-                                  WINDOW_TITLE_ICON.bytes_per_pixel * WINDOW_TITLE_ICON.width,
+-#if (SDL_BYTEORDER == SDL_BIG_ENDIAN)
+-                                  0xff000000, /* Red bit mask. */
+-                                  0x00ff0000, /* Green bit mask. */
+-                                  0x0000ff00, /* Blue bit mask. */
+-                                  0x000000ff  /* Alpha bit mask. */
+-#else
+-                                  0x000000ff, /* Red bit mask. */
+-                                  0x0000ff00, /* Green bit mask. */
+-                                  0x00ff0000, /* Blue bit mask. */
+-                                  0xff000000  /* Alpha bit mask. */
+-#endif
+-  );
++  // SDL3: SDL_CreateSurfaceFrom takes (w, h, format, pixels, pitch).
++  // Mask layout R=0xff/G=0xff00/B=0xff0000/A=0xff000000 (LE) or RGBA-from-high (BE)
++  // is "RGBA in memory order" — SDL_PIXELFORMAT_RGBA32 is its endian-neutral alias.
++  icon = SDL_CreateSurfaceFrom(WINDOW_TITLE_ICON.width,
++                               WINDOW_TITLE_ICON.height,
++                               SDL_PIXELFORMAT_RGBA32,
++                               (void *)WINDOW_TITLE_ICON.pixel_data,
++                               WINDOW_TITLE_ICON.bytes_per_pixel * WINDOW_TITLE_ICON.width);
+   SDL_SetWindowIcon(_window, icon);
+-  SDL_FreeSurface(icon);
++  SDL_DestroySurface(icon);
+ #endif
+ 
+   if (!_renderer)
+   {
+-    _renderer = SDL_CreateRenderer(_window, -1, SDL_RENDERER_ACCELERATED);
++    // SDL3: SDL_CreateRenderer takes (window, name); driver index + flags are gone.
++    // The DOS-port patch overrides `name` to "software"; here we pass NULL = pick first.
++    _renderer = SDL_CreateRenderer(_window, NULL);
+   }
+   if (!_renderer)
+   {
+@@ -138,7 +140,7 @@ bool Renderer::initVideo()
+   SDL_Surface *image;
+   image = IMG_Load(spotpath.c_str());
+   _spot_light = SDL_CreateTextureFromSurface(_renderer, image);
+-  SDL_FreeSurface(image);
++  SDL_DestroySurface(image);
+ 
+   return true;
+ }
+@@ -158,8 +160,10 @@ bool Renderer::flushAll()
+ 
+ void Renderer::setFullscreen(bool enable)
+ {
+-  SDL_ShowCursor(!enable);
+-  SDL_SetWindowFullscreen(_window, (enable ? SDL_WINDOW_FULLSCREEN : 0));
++  // SDL3: SDL_ShowCursor takes no args; pair with SDL_HideCursor for the inverse.
++  // SDL_SetWindowFullscreen takes a bool (true == fullscreen) instead of flags.
++  if (enable) SDL_HideCursor(); else SDL_ShowCursor();
++  SDL_SetWindowFullscreen(_window, enable);
+ }
+ 
+ bool Renderer::setResolution(int r, bool restoreOnFailure)
+@@ -242,15 +246,18 @@ const Graphics::gres_t *Renderer::getResolutions(bool full_list)
+ 
+   if (!full_list)
+   {
+-      int displayIdx = SDL_GetWindowDisplayIndex(_window);
+-      LOG_DEBUG("Display idx: {}",displayIdx);
+-      SDL_DisplayMode dm;
+-      SDL_GetDesktopDisplayMode(displayIdx, &dm);
+-
+-      LOG_INFO("Display W: {}, Display H: {}", dm.w, dm.h);
++      // SDL3: SDL_GetWindowDisplayIndex → SDL_GetDisplayForWindow (returns SDL_DisplayID).
++      // SDL_GetDesktopDisplayMode now returns a const SDL_DisplayMode* (no out-param).
++      SDL_DisplayID _displayId = SDL_GetDisplayForWindow(_window);
++      LOG_DEBUG("Display id: {}", (uint32_t)_displayId);
++      const SDL_DisplayMode *_dm = SDL_GetDesktopDisplayMode(_displayId);
++      int _dm_w = _dm ? _dm->w : 0;
++      int _dm_h = _dm ? _dm->h : 0;
++
++      LOG_INFO("Display W: {}, Display H: {}", _dm_w, _dm_h);
+       for (int i = 0; res[i].name; i++)
+       {
+-        if (res[i].width > (uint32_t)dm.w || res[i].height > (uint32_t)dm.h)
++        if (res[i].width > (uint32_t)_dm_w || res[i].height > (uint32_t)_dm_h)
+         {
+           LOG_INFO("Disabling {}", res[i].name);
+ 
+@@ -325,9 +332,14 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+     clipScaled(srcrect, dstrect);
+ 
+   SDL_SetTextureAlphaMod(src->texture(), src->alpha);
+-  if (SDL_RenderCopy(_renderer, src->texture(), &srcrect, &dstrect))
++  // SDL3: SDL_RenderCopy → SDL_RenderTexture; SDL_Rect args become SDL_FRect.
++  // SDL_RenderTexture returns true on success (was 0 in SDL2).
++  SDL_FRect _srcfr, _dstfr;
++  SDL_RectToFRect(&srcrect, &_srcfr);
++  SDL_RectToFRect(&dstrect, &_dstfr);
++  if (!SDL_RenderTexture(_renderer, src->texture(), &_srcfr, &_dstfr))
+   {
+-    LOG_ERROR("Renderer::drawSurface: SDL_RenderCopy failed: {}", SDL_GetError());
++    LOG_ERROR("Renderer::drawSurface: SDL_RenderTexture failed: {}", SDL_GetError());
+   }
+ }
+ 
+@@ -353,9 +365,13 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+     clipScaled(srcrect, dstrect);
+ 
+   SDL_SetTextureAlphaMod(src->texture(), src->alpha);
+-  if (SDL_RenderCopyEx(_renderer, src->texture(), &srcrect, &dstrect, 0, NULL, SDL_FLIP_HORIZONTAL))
++  // SDL3: SDL_RenderCopyEx → SDL_RenderTextureRotated; rect args are SDL_FRect.
++  SDL_FRect _srcfr, _dstfr;
++  SDL_RectToFRect(&srcrect, &_srcfr);
++  SDL_RectToFRect(&dstrect, &_dstfr);
++  if (!SDL_RenderTextureRotated(_renderer, src->texture(), &_srcfr, &_dstfr, 0, NULL, SDL_FLIP_HORIZONTAL))
+   {
+-    LOG_ERROR("Renderer::drawSurface: SDL_RenderCopy failed: {}", SDL_GetError());
++    LOG_ERROR("Renderer::drawSurface: SDL_RenderTextureRotated failed: {}", SDL_GetError());
+   }
+ }
+ 
+@@ -382,7 +398,11 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+   {
+     dstrect.x = x;
+     dstrect.y = y;
+-    SDL_RenderCopy(_renderer, sfc->texture(), &srcrect, &dstrect);
++    // SDL3: SDL_RenderCopy → SDL_RenderTexture; SDL_Rect → SDL_FRect.
++    SDL_FRect _srcfr, _dstfr;
++    SDL_RectToFRect(&srcrect, &_srcfr);
++    SDL_RectToFRect(&dstrect, &_dstfr);
++    SDL_RenderTexture(_renderer, sfc->texture(), &_srcfr, &_dstfr);
+     x += sfc->width()  * scale;
+   } while (x < destwd);
+ }
+@@ -390,15 +410,17 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+ void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
+ {
+   SDL_SetRenderDrawColor(_renderer, color.r, color.g, color.b, SDL_ALPHA_OPAQUE);
+-  SDL_RenderDrawLine(_renderer, x1 * scale, y1 * scale, x2 * scale, y2 * scale);
++  // SDL3: SDL_RenderDrawLine → SDL_RenderLine, float coords.
++  SDL_RenderLine(_renderer, (float)(x1 * scale), (float)(y1 * scale), (float)(x2 * scale), (float)(y2 * scale));
+ }
+ 
+ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b)
+ {
+-  SDL_Rect rects[4] = {{x1 * scale, y1 * scale, ((x2 - x1) + 1) * scale, scale},
+-  {x1 * scale, y2 * scale, ((x2 - x1) + 1) * scale, scale},
+-  {x1 * scale, y1 * scale, scale, ((y2 - y1) + 1) * scale},
+-  {x2 * scale, y1 * scale, scale, ((y2 - y1) + 1) * scale}};
++  // SDL3: SDL_RenderFillRects takes SDL_FRect.
++  SDL_FRect rects[4] = {{(float)(x1 * scale), (float)(y1 * scale), (float)(((x2 - x1) + 1) * scale), (float)scale},
++  {(float)(x1 * scale), (float)(y2 * scale), (float)(((x2 - x1) + 1) * scale), (float)scale},
++  {(float)(x1 * scale), (float)(y1 * scale), (float)scale, (float)(((y2 - y1) + 1) * scale)},
++  {(float)(x2 * scale), (float)(y1 * scale), (float)scale, (float)(((y2 - y1) + 1) * scale)}};
+ 
+   SDL_SetRenderDrawColor(_renderer, r, g, b, SDL_ALPHA_OPAQUE);
+   SDL_RenderFillRects(_renderer, rects, 4);
+@@ -406,12 +428,13 @@ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+ 
+ void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b)
+ {
+-  SDL_Rect rect;
++  // SDL3: SDL_RenderFillRect takes SDL_FRect.
++  SDL_FRect rect;
+ 
+-  rect.x = x1 * scale;
+-  rect.y = y1 * scale;
+-  rect.w = ((x2 - x1) + 1) * scale;
+-  rect.h = ((y2 - y1) + 1) * scale;
++  rect.x = (float)(x1 * scale);
++  rect.y = (float)(y1 * scale);
++  rect.w = (float)(((x2 - x1) + 1) * scale);
++  rect.h = (float)(((y2 - y1) + 1) * scale);
+ 
+   SDL_SetRenderDrawColor(_renderer, r, g, b, SDL_ALPHA_OPAQUE);
+   SDL_RenderFillRect(_renderer, &rect);}
+@@ -552,23 +575,13 @@ void Renderer::saveScreenshot()
+     return;
+   }
+ 
++  // SDL3: SDL_RenderGetViewport → SDL_GetRenderViewport.
++  // SDL3: SDL_RenderReadPixels now returns SDL_Surface* directly (no fmt/pixels/pitch out args).
+   SDL_Rect viewport;
+-  SDL_RenderGetViewport(_renderer, &viewport);
+-  SDL_Surface* surface = SDL_CreateRGBSurface(0, viewport.w, viewport.h, 24,
+-#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+-                                 0xff000000, 0x00ff0000, 0x0000ff00, 0x000000ff
+-#else
+-                                 0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000
+-#endif
+-  );
++  SDL_GetRenderViewport(_renderer, &viewport);
++  SDL_Surface* surface = SDL_RenderReadPixels(_renderer, NULL);
+ 
+   if (!surface)
+-  {
+-    LOG_ERROR("Couldn't create surface: {}", SDL_GetError());
+-    return;
+-  }
+-
+-  if (SDL_RenderReadPixels(_renderer, NULL, surface->format->format, surface->pixels, surface->pitch) < 0)
+   {
+     LOG_ERROR("Couldn't read screen: {}", SDL_GetError());
+     return;
+@@ -576,11 +589,11 @@ void Renderer::saveScreenshot()
+ 
+   if (png_save_surface(filename, surface) < 0)
+   {
+-    SDL_FreeSurface(surface);
++    SDL_DestroySurface(surface);
+     LOG_ERROR("Couldn't save screen");
+     return;
+   }
+-  SDL_FreeSurface(surface);
++  SDL_DestroySurface(surface);
+   LOG_INFO("Saved {}", filename);
+   return;
+ }
+@@ -600,7 +613,10 @@ void Renderer::drawSpotLight(int x, int y, Object* o, int r, int g, int b, int u
+   dstrec.h = height * upscale * scale;
+ 
+   SDL_SetTextureColorMod(_spot_light, r, g, b);
+-  SDL_RenderCopy(_renderer, _spot_light, NULL, &dstrec);
++  // SDL3: SDL_RenderCopy → SDL_RenderTexture; SDL_Rect → SDL_FRect.
++  SDL_FRect _dstfr;
++  SDL_RectToFRect(&dstrec, &_dstfr);
++  SDL_RenderTexture(_renderer, _spot_light, NULL, &_dstfr);
+ }
+ 
+ 
+diff --git a/src/graphics/Surface.cpp b/src/graphics/Surface.cpp
+index b6f5224..c00c0bf 100644
+--- a/src/graphics/Surface.cpp
++++ b/src/graphics/Surface.cpp
+@@ -36,16 +36,16 @@ bool Surface::loadImage(const std::string &pbm_name, bool use_colorkey)
+   _height = image->h * Renderer::getInstance()->scale;
+ 
+   SDL_Surface *image_scaled = SDL_ZoomSurface(image, Renderer::getInstance()->scale);
+-  SDL_FreeSurface(image);
++  SDL_DestroySurface(image);
+ 
+   if (use_colorkey)
+   {
+-    SDL_SetColorKey(image_scaled, SDL_TRUE, SDL_MapRGB(image_scaled->format, 0, 0, 0));
++    SDL_SetSurfaceColorKey(image_scaled, true, SDL_MapSurfaceRGB(image_scaled, 0, 0, 0));
+   }
+ 
+   _texture = SDL_CreateTextureFromSurface(Renderer::getInstance()->renderer(), image_scaled);
+ 
+-  SDL_FreeSurface(image_scaled);
++  SDL_DestroySurface(image_scaled);
+ 
+   if (!_texture)
+   {
+diff --git a/src/graphics/pngfuncs.cpp b/src/graphics/pngfuncs.cpp
+index f2f3e9f..df45f35 100644
+--- a/src/graphics/pngfuncs.cpp
++++ b/src/graphics/pngfuncs.cpp
+@@ -131,10 +131,9 @@ SDL_Surface *png_load_surface(const std::string& name)
+   int color_type, interlace_type;
+   FILE *fp = NULL;
+ 
+-  Uint32 Rmask = 0x00FF0000;
+-  Uint32 Gmask = 0x0000FF00;
+-  Uint32 Bmask = 0x000000FF;
+-  Uint32 Amask = 0xFF000000;
++  // SDL3: SDL_CreateSurface takes an SDL_PixelFormat enum instead of explicit masks.
++  // Mask layout R=0x00FF0000 G=0x0000FF00 B=0x000000FF A=0xFF000000 corresponds
++  // to SDL_PIXELFORMAT_ARGB8888 in 32-bit pixels.
+ 
+   if ((fp = myfopen(widen(name).c_str(), widen("rb").c_str())) == NULL)
+   {
+@@ -181,7 +180,7 @@ SDL_Surface *png_load_surface(const std::string& name)
+ 
+   unsigned int row_bytes = png_get_rowbytes(png_ptr, info_ptr);
+ 
+-  SDL_Surface *surface = SDL_CreateRGBSurface(0, width, height, 32, Rmask, Gmask, Bmask, Amask);
++  SDL_Surface *surface = SDL_CreateSurface(width, height, SDL_PIXELFORMAT_ARGB8888);
+ 
+   if (surface == NULL)
+   {
+diff --git a/src/graphics/zoom.cpp b/src/graphics/zoom.cpp
+index a756d80..9ff0643 100644
+--- a/src/graphics/zoom.cpp
++++ b/src/graphics/zoom.cpp
+@@ -32,7 +32,7 @@ typedef struct tColorY
+ Uint32 _colorkey(SDL_Surface *src)
+ {
+   Uint32 key = 0;
+-  SDL_GetColorKey(src, &key);
++  SDL_GetSurfaceColorKey(src, &key);
+   return key;
+ }
+ 
+@@ -285,21 +285,19 @@ SDL_Surface *SDL_ZoomSurface(SDL_Surface *src, double zoom)
+   if (src == NULL)
+     return (NULL);
+ 
+-  is32bit = (src->format->BitsPerPixel == 32);
+-  if ((is32bit) || (src->format->BitsPerPixel == 8))
++  // SDL3: surface->format is now an SDL_PixelFormat enum; use SDL_BITSPERPIXEL macro.
++  is32bit = (SDL_BITSPERPIXEL(src->format) == 32);
++  if ((is32bit) || (SDL_BITSPERPIXEL(src->format) == 8))
+   {
+     rz_src        = src;
+     src_converted = 0;
+   }
+   else
+   {
+-    rz_src = SDL_CreateRGBSurface(SDL_SWSURFACE, src->w, src->h, 32,
+-#if SDL_BYTEORDER == SDL_LIL_ENDIAN
+-                                  0x000000ff, 0x0000ff00, 0x00ff0000, 0xff000000
+-#else
+-                                  0xff000000, 0x00ff0000, 0x0000ff00, 0x000000ff
+-#endif
+-    );
++    // SDL3: SDL_CreateSurface uses an SDL_PixelFormat enum.
++    // SDL_PIXELFORMAT_RGBA32 is the endian-corrected alias for "RGBA in memory order"
++    // (== RGBA8888 on BE, == ABGR8888 on LE), matching the original mask layout.
++    rz_src = SDL_CreateSurface(src->w, src->h, SDL_PIXELFORMAT_RGBA32);
+ 
+     if (rz_src == NULL)
+     {
+@@ -317,19 +315,20 @@ SDL_Surface *SDL_ZoomSurface(SDL_Surface *src, double zoom)
+   rz_dst = NULL;
+   if (is32bit)
+   {
+-    rz_dst = SDL_CreateRGBSurface(SDL_SWSURFACE, dstwidth, dstheight + GUARD_ROWS, 32, rz_src->format->Rmask,
+-                                  rz_src->format->Gmask, rz_src->format->Bmask, rz_src->format->Amask);
++    // SDL3: surface->format is now an SDL_PixelFormat enum directly,
++    // so we can pass it through to keep the same pixel layout.
++    rz_dst = SDL_CreateSurface(dstwidth, dstheight + GUARD_ROWS, rz_src->format);
+   }
+   else
+   {
+-    rz_dst = SDL_CreateRGBSurface(SDL_SWSURFACE, dstwidth, dstheight + GUARD_ROWS, 8, 0, 0, 0, 0);
++    rz_dst = SDL_CreateSurface(dstwidth, dstheight + GUARD_ROWS, SDL_PIXELFORMAT_INDEX8);
+   }
+ 
+   if (rz_dst == NULL)
+   {
+     if (src_converted)
+     {
+-      SDL_FreeSurface(rz_src);
++      SDL_DestroySurface(rz_src);
+     }
+     return NULL;
+   }
+@@ -348,12 +347,18 @@ SDL_Surface *SDL_ZoomSurface(SDL_Surface *src, double zoom)
+   }
+   else
+   {
+-    // Copy palette and colorkey info
+-    for (i = 0; i < rz_src->format->palette->ncolors; i++)
++    // Copy palette and colorkey info.
++    // SDL3: palette is no longer hung off surface->format; query via SDL_GetSurfacePalette.
++    SDL_Palette *_src_pal = SDL_GetSurfacePalette(rz_src);
++    SDL_Palette *_dst_pal = SDL_GetSurfacePalette(rz_dst);
++    if (_src_pal && _dst_pal)
+     {
+-      rz_dst->format->palette->colors[i] = rz_src->format->palette->colors[i];
++      for (i = 0; i < _src_pal->ncolors; i++)
++      {
++        _dst_pal->colors[i] = _src_pal->colors[i];
++      }
++      _dst_pal->ncolors = _src_pal->ncolors;
+     }
+-    rz_dst->format->palette->ncolors = rz_src->format->palette->ncolors;
+ 
+     _zoomSurfaceY(rz_src, rz_dst);
+   }
+@@ -365,7 +370,7 @@ SDL_Surface *SDL_ZoomSurface(SDL_Surface *src, double zoom)
+ 
+   if (src_converted)
+   {
+-    SDL_FreeSurface(rz_src);
++    SDL_DestroySurface(rz_src);
+   }
+ 
+   return (rz_dst);
+diff --git a/src/input.cpp b/src/input.cpp
+index cac7782..cdbe5da 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -100,31 +100,38 @@ bool input_init(void)
+   mappings[ENTERKEY].key = SDLK_RETURN;
+ 
+   SDL_InitSubSystem(SDL_INIT_JOYSTICK);
+-  if (SDL_NumJoysticks() > 0)
++  // SDL3: SDL_NumJoysticks → SDL_GetJoysticks(&count) returning array of instance IDs.
++  // SDL_JoystickOpen(0) → SDL_OpenJoystick(instance_id).
++  // SDL_JoystickNameForIndex → SDL_GetJoystickNameForID.
++  // SDL_JoystickNum{Axes,Buttons,Balls} → SDL_GetNumJoystick{Axes,Buttons,Balls}.
++  int _joy_count = 0;
++  SDL_JoystickID *_joy_ids = SDL_GetJoysticks(&_joy_count);
++  if (_joy_ids && _joy_count > 0)
+   {
+-    // Open joystick
+-    joy = SDL_JoystickOpen(0);
++    SDL_JoystickID _first = _joy_ids[0];
++    joy = SDL_OpenJoystick(_first);
+ 
+     if (joy)
+     {
+       LOG_INFO("Opened Joystick 0");
+-      LOG_INFO("Name: {}", SDL_JoystickNameForIndex(0));
+-      LOG_INFO("Number of Axes: {}", SDL_JoystickNumAxes(joy));
+-      LOG_INFO("Number of Buttons: {}", SDL_JoystickNumButtons(joy));
+-      LOG_INFO("Number of Balls: {}", SDL_JoystickNumBalls(joy));
++      LOG_INFO("Name: {}", SDL_GetJoystickNameForID(_first));
++      LOG_INFO("Number of Axes: {}", SDL_GetNumJoystickAxes(joy));
++      LOG_INFO("Number of Buttons: {}", SDL_GetNumJoystickButtons(joy));
++      LOG_INFO("Number of Balls: {}", SDL_GetNumJoystickBalls(joy));
+     }
+     else
+     {
+       LOG_WARN("Couldn't open Joystick 0");
+     }
+   }
++  if (_joy_ids) SDL_free(_joy_ids);
+   return 0;
+ }
+ 
+ void rumble(float str, uint32_t len)
+ {
+   if (settings->rumble)
+-    SDL_JoystickRumble(joy, 0xFFFF * str, 0xFFFF * str, len);
++    SDL_RumbleJoystick(joy, 0xFFFF * str, 0xFFFF * str, len);
+ }
+ 
+ // set the SDL key that triggers an input
+@@ -396,9 +403,9 @@ void input_poll(void)
+   }
+ 
+   // now get current values of all axises
+-  for (int ax = 0; ax < SDL_JoystickNumAxes(joy); ax++)
++  for (int ax = 0; ax < SDL_GetNumJoystickAxes(joy); ax++)
+   {
+-    int value = SDL_JoystickGetAxis(joy, ax);
++    int value = SDL_GetJoystickAxis(joy, ax);
+     ino       = input_get_action_axis(ax, value); // this returns actual mapping for axis direction
+ 
+     if (ino != -1 && (value > 20000 || value < -20000))
+@@ -408,10 +415,11 @@ void input_poll(void)
+ 
+ void input_close(void)
+ {
+-  // Close if opened
+-  if (SDL_JoystickGetAttached(joy))
++  // SDL3: SDL_JoystickGetAttached → SDL_JoystickConnected.
++  // SDL_JoystickClose → SDL_CloseJoystick.
++  if (SDL_JoystickConnected(joy))
+   {
+-    SDL_JoystickClose(joy);
++    SDL_CloseJoystick(joy);
+   }
+ }
+ 
+diff --git a/src/main.cpp b/src/main.cpp
+index 017a434..86e95a7 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -303,7 +303,8 @@ int main(int argc, char *argv[])
+ 
+   Logger::init(ResourceManager::getInstance()->getPrefPath("debug.log"));
+ //  SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+-  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0)
++  // SDL3: SDL_Init returns bool (true on success); old `< 0` check would always be false.
++  if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO))
+   {
+     LOG_CRITICAL("ack, sdl_init failed: {}.", SDL_GetError());
+     return 1;
+diff --git a/src/slope.cpp b/src/slope.cpp
+index b8c06f7..550ff1a 100644
+--- a/src/slope.cpp
++++ b/src/slope.cpp
+@@ -364,9 +364,9 @@ void DrawSlopeTableOnTile(int table, int tile)
+       if (slopetable[table].table[x][y])
+       {
+         if (table > 4) // floor slopes
+-          SDL_FillRect(tileset, &dstrect, SDL_MapRGB(tileset->format, 0, 255, 0));
++          SDL_FillSurfaceRect(tileset, &dstrect, SDL_MapSurfaceRGB(tileset, 0, 255, 0));
+         else
+-          SDL_FillRect(tileset, &dstrect, SDL_MapRGB(tileset->format, 255, 0, 0));
++          SDL_FillSurfaceRect(tileset, &dstrect, SDL_MapSurfaceRGB(tileset, 255, 0, 0));
+       }
+     }
+   }
+diff --git a/src/trig.cpp b/src/trig.cpp
+index 7bb3b48..440f07c 100644
+--- a/src/trig.cpp
++++ b/src/trig.cpp
+@@ -52,7 +52,7 @@ static char firsttime = 1;
+         if (firsttime)
+         {
+                 trig_init();
+-                SDL_WarpMouse(240<<1,64<<1);
++                SDL_WarpMouseInWindow(NULL, 240<<1,64<<1);
+                 firsttime = 0;
+         }
+ 
+-- 
+2.47.3
+
