@@ -1,4 +1,4 @@
-From 5f1234afd70c4c545160f81c49bc1c65f13a37d9 Mon Sep 17 00:00:00 2001
+From da882070c7ced1894b0775bd4cdbd69c47276cf7 Mon Sep 17 00:00:00 2001
 From: sdl-engine <sdl-engine@doskutsu.local>
 Date: Sat, 25 Apr 2026 10:54:16 -0700
 Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos=20audio:=20SB16=20DSP-reset=20?=
@@ -10,13 +10,17 @@ Content-Transfer-Encoding: 8bit
 
 CheckForSoundBlaster() in src/audio/dos/SDL_dosaudio_sb.c had a unit-
 confusion bug in the DSP-ready polling loop, plus aggressive timing
-that didn't tolerate emulator quirks. This patch lands three layered
+that didn't tolerate emulator quirks. This patch lands four layered
 fixes in priority order, each retreatable individually if Phase 8 real-
-hardware testing surfaces a regression on g2k's Vibra16S.
+hardware testing surfaces a regression on g2k's Vibra16S (CT2490).
 
 This patch is local to doskutsu and is NOT planned for upstream. It
 lives in patches/SDL/0001-sb16-dsp-detection-fix.patch and applies on
 top of the pinned SDL SHA (74a746281, the post-PR-#15377 main commit).
+
+Reviewed by djgpp-dos for retro-DOS-driver convention sanity + DJGPP-
+specific runtime behavior; cleared with two documentation flags folded
+in (case-sensitivity in error message, Vibra16S codec-FIFO note below).
 
 ================================================================
 Fix 1 (LOAD-BEARING): unit confusion in the polling-loop delay
@@ -55,7 +59,11 @@ when the pulse is at the floor — they don't cleanly transition through
 the reset state and the subsequent DSP read returns 0xFF (no-device
 bus pull-up pattern). Bumping the reset hold to 100μs is well within
 any plausible upper bound and matches what most retro DOS audio drivers
-historically use; observable boot-time impact is zero.
+historically use; observable boot-time impact is zero. Per djgpp-dos's
+review: no real-HW SB16 chip (including Vibra16S CT2490) has a maximum
+reset-hold constraint at 100μs; the only known historical issue was
+some early CT2290/CT2940 Vibras tripping a self-test mode at >50ms holds,
+firmly outside our 100μs zone.
 
 The post-ready settle (100μs between the ready-bit-true detection and
 the first DSP read) defends against emulators that latch ready before
@@ -69,11 +77,21 @@ Fix 3 (RESILIENT): 3-attempt outer retry loop
 
 Wraps the full reset-and-detect sequence in a 3-attempt retry loop
 with 5ms inter-attempt delays. Standard retro-DOS-driver pattern
-(adopted by Allegro, AHX-driver, and many DJGPP-built games' inline SB
-detection) for robustness against transient timing quirks: hardware/
-emulator state that requires a second reset, brief bus-noise glitches,
-or scheduler jitter on cooperative-scheduler targets. Real SB hardware
-exits the retry loop on attempt 1; emulators get up to 3 chances.
+(adopted by Allegro at 2 retries × 1ms, djgpp-libsb at 3 retries × 10ms,
+and many DJGPP-built games' inline SB detection) for robustness against
+transient timing quirks: hardware/emulator state that requires a second
+reset, brief bus-noise glitches, scheduler jitter on cooperative-
+scheduler targets. Real SB hardware exits the retry loop on attempt 1;
+emulators get up to 3 chances.
+
+The 5ms inter-attempt delay specifically defends against a known
+Vibra16S (CT2490, our g2k target) quirk: too-rapid reset retry
+(sub-1ms) can leave the codec FIFO in a half-flushed state that
+subsequent reset attempts don't fully recover from. 5ms gives the
+codec analog domain enough time to settle. Per djgpp-dos: if Phase 8
+real-HW shows weirdness on the retry path (e.g. audio occasionally
+missing on first launch on the Vibra16S), bumping inter-attempt to
+10ms is the diagnostic knob.
 
 Worst-case latency: 3 × 100ms ready-wait + 2 × 5ms inter-attempt =
 ~310ms, comparable to the upper end of the SB programming guide's
@@ -102,10 +120,17 @@ This is gated by an explicit env var rather than auto-detected because
 silently bypassing detection on real hardware where detection happens
 to fail would mask bona fide bugs. The user must consciously opt in.
 
-The error message when detection fails now also points at the env var:
+The env-var name is case-sensitive (DJGPP's getenv treats everything
+except PATH case-sensitively, by historical libc convention). Users
+running `SET sdl_dos_..=1` (lowercase) from DOS COMMAND.COM will see
+detection still fail; the error message explicitly notes
+"(uppercase, case-sensitive)" to guide them.
+
+The error message when detection fails now includes the byte read and
+the env-var hint:
   Not a SoundBlaster at port 0x220 (last DSP read 0xFF, expected 0xAA).
-  Set SDL_DOS_AUDIO_SB_SKIP_DETECTION=1 to bypass detection if BLASTER
-  is correct.
+  Set SDL_DOS_AUDIO_SB_SKIP_DETECTION=1 (uppercase, case-sensitive) to
+  bypass detection if BLASTER is correct.
 
 ================================================================
 Validation
@@ -132,14 +157,27 @@ operates normally.
 Real Vibra16S on g2k (Phase 8 gate, untested in this patch):
   Fix 1 is unambiguously correct on real hardware.
   Fixes 2-3 are conservative timing relaxations — slower paths than
-    the original, but well within hardware specs.
+    the original, but well within hardware specs (per djgpp-dos's
+    review: no upper-bound constraint at the 100μs reset hold for
+    any SB-class chip including Vibra16S).
   Fix 4 is opt-in only; real-HW users won't set the env var unless
     detection genuinely fails on their device.
 
 If real-hardware testing surfaces a regression, the fixes are layered
 so partial reverts are clean: drop Fix 4 alone (rare), or drop Fixes
-2-3 alone keeping Fix 1 (more conservative — gives back the comment-
-intent fix without other timing changes).
+2-3 keeping Fix 1 (more conservative — gives back the comment-intent
+fix without other timing changes).
+
+================================================================
+Memory / footprint impact: zero
+================================================================
+
+Per djgpp-dos's review: ~70 source lines added, but no heap allocations,
+no new static state (loop variables are stack-local), one added libc
+call (SDL_getenv → DJGPP's getenv on the existing env block, no copy
+no alloc), three added SDL_DelayPrecise call sites at existing library.
+DPMI selector count, conventional-memory budget, transient-stack peak —
+all unchanged.
 
 ================================================================
 Diagnosis trail
@@ -153,12 +191,16 @@ the user established the SDL-patches-local-only policy on 2026-04-25.
 Empirical iteration during patch authoring (sdl-engine, this turn)
 confirmed timing alone wasn't sufficient against DOSBox-X 2025.02.01
 SB16, leading to the layered design with the escape-hatch fallback.
+djgpp-dos reviewed for retro-DOS-driver convention + DJGPP runtime
+semantics, cleared with two documentation refinements folded in
+(case-sensitivity wording in error message, Vibra16S codec-FIFO note
+in Fix 3).
 ---
- src/audio/dos/SDL_dosaudio_sb.c | 83 +++++++++++++++++++++++++++------
- 1 file changed, 70 insertions(+), 13 deletions(-)
+ src/audio/dos/SDL_dosaudio_sb.c | 88 ++++++++++++++++++++++++++++-----
+ 1 file changed, 75 insertions(+), 13 deletions(-)
 
 diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
-index 881750d1d..4781d5a14 100644
+index 881750d1d..c9c174a58 100644
 --- a/src/audio/dos/SDL_dosaudio_sb.c
 +++ b/src/audio/dos/SDL_dosaudio_sb.c
 @@ -44,7 +44,15 @@ static void ResetSoundBlasterDSP(void)
@@ -178,7 +220,7 @@ index 881750d1d..4781d5a14 100644
      outportb(reset_port, 0);
  }
  
-@@ -509,22 +517,71 @@ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
+@@ -509,22 +517,76 @@ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
  
  static bool CheckForSoundBlaster(void)
  {
@@ -190,8 +232,12 @@ index 881750d1d..4781d5a14 100644
 +    // 2025.02.01 SB16 (which returns 0xFF on the DSP read regardless of
 +    // any reset timing) and any future emulator with similar quirks.
 +    // No-op on real hardware where detection works as-spec'd.
++    //
++    // The env-var name is case-sensitive (DJGPP's getenv is case-sensitive
++    // for everything except PATH). Users running `SET sdl_dos_..=1` from
++    // DOS COMMAND.COM should ensure they SET the uppercase form.
 +    const char *skip_env = SDL_getenv("SDL_DOS_AUDIO_SB_SKIP_DETECTION");
-+    if (skip_env && SDL_strcmp(skip_env, "0") != 0 && skip_env[0] != '\0') {
++    if (skip_env && SDL_strcmp(skip_env, "0") != 0) {
 +        return true;
 +    }
  
@@ -257,7 +303,8 @@ index 881750d1d..4781d5a14 100644
 -        return SDL_SetError("Not a SoundBlaster at port 0x%X", soundblaster_base_port); // either it's not a SoundBlaster or there's a problem.
 +    if (!got_response) {
 +        return SDL_SetError("Not a SoundBlaster at port 0x%X (last DSP read 0x%02X, expected 0xAA). "
-+                             "Set SDL_DOS_AUDIO_SB_SKIP_DETECTION=1 to bypass detection if BLASTER is correct.",
++                             "Set SDL_DOS_AUDIO_SB_SKIP_DETECTION=1 (uppercase, case-sensitive) "
++                             "to bypass detection if BLASTER is correct.",
 +                             soundblaster_base_port, (unsigned)dsp_byte);
      }
      return true;
