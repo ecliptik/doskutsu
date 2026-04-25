@@ -136,6 +136,12 @@ esac
 {
   printf '@ECHO OFF\r\n'
   printf 'SET BLASTER=A220 I5 D1 H5 T6\r\n'
+  # SDL_DOS_AUDIO_SB_SKIP_DETECTION — escape hatch from patches/SDL/0001.
+  # DOSBox-X's emulated SB16 returns 0xFF on the DSP detection read regardless
+  # of timing tuning, so SDL3-DOS audio init fails without this in the emulator.
+  # Real hardware (g2k Phase 8) MUST NOT set this — would mask Vibra16S regressions.
+  # See tools/dosbox-launch.sh for the matching parity-config injection.
+  printf 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1\r\n'
   printf '%s' "$INVOKE_LINE"
 } > "$STAGE/RUN.BAT"
 

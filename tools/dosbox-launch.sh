@@ -77,11 +77,18 @@ export DISPLAY="${DOSBOX_DISPLAY:-:0}"
 # D: = vendor/cwsdpmi (puts CWSDPMI.EXE on PATH so DJGPP binaries find DPMI host)
 # BLASTER env var — matches the [sblaster] block in dosbox-x.conf; SDL3-DOS
 # reads this.
+# SDL_DOS_AUDIO_SB_SKIP_DETECTION — escape hatch from patches/SDL/0001. The
+# real-HW timing fixes in that patch are correct, but DOSBox-X's emulated SB16
+# returns 0xFF on the DSP detection read regardless of timing tuning. Setting
+# this env var tells SDL3-DOS to skip detection and trust BLASTER, which is the
+# only way audio inits in the emulator. Real hardware (g2k Phase 8) MUST NOT
+# set this — it would mask a legitimate Vibra16S regression.
 DBX_ARGS=(-conf "$CONF" -nopromptfolder
           -c "MOUNT C $REPO_ROOT"
           -c "MOUNT D $REPO_ROOT/vendor/cwsdpmi"
           -c 'SET PATH=Z:\;C:\;D:\'
           -c 'SET BLASTER=A220 I5 D1 H5 T6'
+          -c 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1'
           -c "C:")
 
 if [[ -n "$EXE" ]]; then
