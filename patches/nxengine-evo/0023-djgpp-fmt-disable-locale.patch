@@ -1,0 +1,82 @@
+From a96791ecc6b130374eff2d59099d0eba0bb8c0fd Mon Sep 17 00:00:00 2001
+From: djgpp-dos <djgpp-dos@doskutsu.local>
+Date: Sat, 25 Apr 2026 11:46:10 -0700
+Subject: [PATCH] [DOSKUTSU] djgpp: disable fmt's locale code path to dodge
+ ctype-macro collision
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Symptom: 'make nxengine' fails inside fmt's bundled base.h while
+parsing misc.cpp's TU:
+
+  deps/spdlog/fmt/bundled/base.h:930:43:
+    error: macro "isalpha" passed 2 arguments, but takes just 1
+    detail::ignore_unused(isalpha('x', loc));
+
+Cause: DJGPP's <ctype.h> defines isalpha as a 1-arg function-style
+macro (`#define isalpha(c) (__dj_ctype_flags[(int)(c)+1] & __dj_ISALPHA)`).
+fmt's bundled base.h:930 calls 'isalpha('x', loc)' — the C++
+locale-aware 2-arg overload from <locale> + std::ctype facets — inside
+its locale_ref template, gated by '#if FMT_USE_LOCALE'. The C
+preprocessor doesn't know about the C++ overload and expands the macro
+first, collapsing to a 1-arg call site that produces a 2-arg list
+under the parens.
+
+Fix: define FMT_USE_LOCALE=0 before '#include <spdlog/fmt/fmt.h>' in
+src/Utils/Logger_djgpp.h. fmt provides this knob exactly so users can
+opt out of the <locale> code path. Effects:
+
+* Eliminates the unqualified isalpha/isdigit/etc. call sites that fmt
+  emits under FMT_USE_LOCALE=1 — no preprocessor collision possible.
+* Removes the <locale>-using runtime support fmt would otherwise pull
+  in. DJGPP libstdc++ ships <locale> in a stripped form (no
+  localedef facets, no UTF awareness on DOS); avoiding it is a small
+  binary-size and compile-time win.
+* Cave Story has no localized number / time / monetary formatting
+  needs anywhere in the codebase. NXEngine's logger doesn't
+  parameterize on locale either. Zero functional regression on
+  non-DJGPP platforms (this define lives in Logger_djgpp.h which is
+  only included under '#ifdef __DJGPP__').
+
+Why DOS needs this: DJGPP libc retains classic-C macro-form ctype.h
+for performance reasons (single array lookup beats a function call).
+That convention predates C++'s 2-arg locale-overloaded ctype API by
+decades; the two cannot coexist in the same TU without one of them
+being neutered. fmt's FMT_USE_LOCALE knob is the documented escape
+hatch — using it is the cleanest fix.
+
+Alternative considered: '#undef isalpha' (and other ctype macros) in
+Logger_djgpp.h's preamble before fmt include. Works but blanket-undefs
+macros that might be used elsewhere in the same TU, and leaves fmt's
+locale code path active (more code than we need). FMT_USE_LOCALE=0 is
+both surgical and reduces footprint.
+---
+ src/Utils/Logger_djgpp.h | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/Utils/Logger_djgpp.h b/src/Utils/Logger_djgpp.h
+index 970fc44..3cd4866 100644
+--- a/src/Utils/Logger_djgpp.h
++++ b/src/Utils/Logger_djgpp.h
+@@ -32,6 +32,17 @@
+ //   * No colour. NXEngine on DOS prints to a single stderr stream where
+ //     ANSI escapes would be visible literal noise.
+ 
++// Disable fmt's <locale>-using code path. fmt's bundled base.h calls
++// `isalpha('x', loc)` (the C++ locale-aware 2-arg overload) inside its
++// locale_ref class template, gated by `#if FMT_USE_LOCALE`. DJGPP's
++// <ctype.h> defines `isalpha` as a 1-arg function-style macro, which the
++// preprocessor expands first — collision: `macro "isalpha" passed 2
++// arguments, but takes just 1`. Setting FMT_USE_LOCALE=0 elides the
++// locale code path entirely. Cave Story is single-locale (C/POSIX) and
++// has no localized number formatting need, so this loses nothing
++// functional. Bonus: skips the heavyweight <locale> include, which
++// DJGPP libstdc++ ships in stripped form anyway.
++#define FMT_USE_LOCALE 0
+ #include <spdlog/fmt/fmt.h>
+ 
+ #include <cstdio>
+-- 
+2.47.3
+
