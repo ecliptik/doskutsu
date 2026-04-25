@@ -1,0 +1,331 @@
+From db8023861f64568eb3c4a44e5c71d139d767a7cb Mon Sep 17 00:00:00 2001
+From: sdl-engine <sdl-engine@doskutsu.local>
+Date: Sat, 25 Apr 2026 10:36:53 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20sdl3-mixer:=20Ogg=20music=20playba?=
+ =?UTF-8?q?ck=20Mix=5FMusic=20=E2=86=92=20MIX=5FAudio=20+=20MIX=5FTrack?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Migrates the OGG soundtrack subsystem from SDL2_mixer's "music slot"
+model (Mix_PlayMusic + global Mix_HookMusicFinished + Mix_VolumeMusic /
+Mix_SetMusicPosition / Mix_PauseMusic / Mix_HaltMusic) to SDL3_mixer's
+Mixer + Track + Audio model.
+
+Architectural change:
+- SDL2_mixer had ONE global music channel; functions like Mix_PlayMusic
+  acted on that implicit slot.
+- SDL3_mixer has no global music channel. Music plays through a
+  caller-owned MIX_Track, exactly like any other audio in the new
+  model. Ogg now holds a single persistent MIX_Track* (`_music_track`),
+  lazy-created on first play from SoundManager's mixer, reused across
+  songs by re-binding via MIX_SetTrackAudio.
+
+Track lifetime: created lazy in start() on first play, never explicitly
+destroyed by Ogg. The mixer owns it; SoundManager::shutdown's
+MIX_DestroyMixer call cleans it up. This avoids ordering issues at
+process exit (Ogg singleton's dtor running after SoundManager's mixer is
+already gone).
+
+API mapping (all in src/sound/Ogg.cpp):
+- Mix_LoadMUS(path)              → MIX_LoadAudio(mixer, path, false)
+- Mix_GetError()                 → SDL_GetError()  (unified in SDL3)
+- Mix_PlayMusic(audio, 0)        → MIX_SetTrackAudio + MIX_PlayTrack
+- Mix_HookMusicFinished(cb)      → MIX_SetTrackStoppedCallback(track, cb, ud)
+- Mix_HookMusicFinished(NULL)    → MIX_SetTrackStoppedCallback(track, NULL, NULL)
+- Mix_HaltMusic()                → MIX_StopTrack(track, 0)
+- Mix_FreeMusic(audio)           → MIX_DestroyAudio(audio)
+- Mix_PauseMusic()               → MIX_PauseTrack(track)
+- Mix_ResumeMusic()               → MIX_ResumeTrack(track)
+- Mix_VolumeMusic(int_0..128)    → MIX_SetTrackGain(track, float_0..1)
+- Mix_SetMusicPosition(sec_dbl)  → MIX_SetTrackPlaybackPosition(track, frames)
+                                    via MIX_MSToFrames(SAMPLE_RATE, ms)
+
+Type changes (in src/sound/Ogg.h):
+- struct oggSong:    Mix_Music *intro / *loop  →  MIX_Audio *intro / *loop
+- class Ogg adds:    MIX_Track *_music_track = nullptr  (private member)
+
+Callback signature change (musicFinishedCallback):
+- SDL2_mixer Mix_HookMusicFinished's   void (*)(void)
+- SDL3_mixer MIX_TrackStoppedCallback: void (*)(void *userdata, MIX_Track *track)
+Both args ignored — singleton lookup gives us state. SDLCALL added per
+the typedef. Original "Here be dragons" comment about calling mixer
+functions from the callback context preserved verbatim — same advisory
+applies to MIX_*; nxengine's synthesis-correctness review will validate
+empirically against pre-migration audio capture.
+
+Volume-scale conversion (preserve existing behavior):
+- Upstream's Mix_VolumeMusic feeds 0..100 (computed from _song.volume *
+  music_volume / 100) into a 0..128 API, effectively using ~78% of the
+  volume range.
+- Migration preserves this exactly: gain = (vol*music_vol/100) / 128.0.
+- Audio capture A/B comparison (pre-migration vs post-migration on the
+  same hardware) stays interpretable.
+
+stop() ordering: the new MIX_StopTrack + MIX_SetTrackAudio(NULL)
+sequence detaches the audio from the track BEFORE MIX_DestroyAudio
+runs on the song's audio handles. Without this, the track would
+briefly reference freed memory if the mixer hadn't yet processed the
+stop — defensive ordering.
+
+DOS-PORT annotations on the architectural decisions per
+docs/SDL3-MIGRATION.md § 4: persistent _music_track lifetime model,
+volume-scale preservation rationale, MS→frames unit conversion at the
+position-set call.
+
+Patch 2/4 of the audio refactor's remaining work; 0014 (Pixtone Mix→MIX
++ 64-track pool) and 0015 (Organya HookMusic→TrackRawCallback + S16→
+float boundary) follow. The series 0013-0017 together compiles; this
+patch alone leaves Pixtone/Organya still calling SDL2_mixer Mix_*.
+---
+ src/sound/Ogg.cpp | 97 +++++++++++++++++++++++++++++++++++++----------
+ src/sound/Ogg.h   | 15 +++++---
+ 2 files changed, 86 insertions(+), 26 deletions(-)
+
+diff --git a/src/sound/Ogg.cpp b/src/sound/Ogg.cpp
+index ac9cbd3..88b2cc3 100644
+--- a/src/sound/Ogg.cpp
++++ b/src/sound/Ogg.cpp
+@@ -7,8 +7,8 @@
+ #include "../settings.h"
+ #include "SoundManager.h" // SAMPLE_RATE
+ 
+-#include <SDL.h>
+-#include <SDL_mixer.h>
++#include <SDL3/SDL.h>
++#include <SDL3_mixer/SDL_mixer.h>
+ #include <cmath>
+ #include <cstdlib>
+ #include <cstring>
+@@ -30,6 +30,13 @@ Ogg::~Ogg() {}
+ 
+ bool Ogg::load(const std::string &fname, const std::string &dir, bool doloop)
+ {
++  MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
++  if (!mixer)
++  {
++    LOG_ERROR("Ogg::load called before SoundManager init");
++    return false;
++  }
++
+   std::string filename = ResourceManager::getInstance()->getPath(dir + fname + "_intro.ogg", false);
+   if (!ResourceManager::fileExists(filename))
+   {
+@@ -40,10 +47,10 @@ bool Ogg::load(const std::string &fname, const std::string &dir, bool doloop)
+     }
+   }
+   _song.intro = NULL;
+-  _song.intro = Mix_LoadMUS(filename.c_str());
++  _song.intro = MIX_LoadAudio(mixer, filename.c_str(), false);
+   if (!_song.intro)
+   {
+-    LOG_ERROR("Mix_LoadMUS(): {}", Mix_GetError());
++    LOG_ERROR("MIX_LoadAudio(): {}", SDL_GetError());
+     return false;
+   }
+ 
+@@ -54,10 +61,10 @@ bool Ogg::load(const std::string &fname, const std::string &dir, bool doloop)
+   }
+ 
+   _song.loop = NULL;
+-  _song.loop = Mix_LoadMUS(filename.c_str());
++  _song.loop = MIX_LoadAudio(mixer, filename.c_str(), false);
+   if (!_song.loop)
+   {
+-    LOG_ERROR("Mix_LoadMUS(): {}", Mix_GetError());
++    LOG_ERROR("MIX_LoadAudio(): {}", SDL_GetError());
+     return false;
+   }
+ 
+@@ -66,7 +73,11 @@ bool Ogg::load(const std::string &fname, const std::string &dir, bool doloop)
+   return true;
+ }
+ 
+-static void musicFinishedCallback()
++// DOS-PORT: SDL3_mixer's MIX_TrackStoppedCallback signature is
++// (void *userdata, MIX_Track *track) — wider than SDL2_mixer's
++// Mix_HookMusicFinished's void(void) but functionally equivalent for
++// our use case (we ignore both args; singleton lookup gives us state).
++static void SDLCALL musicFinishedCallback(void * /*userdata*/, MIX_Track * /*track*/)
+ {
+   Ogg::getInstance()->musicFinished();
+ }
+@@ -83,7 +94,8 @@ void Ogg::musicFinished()
+   _song.last_pos = SDL_GetTicks();
+   if (_song.doloop)
+   {
+-    Mix_PlayMusic(_song.loop, 0);
++    MIX_SetTrackAudio(_music_track, _song.loop);
++    MIX_PlayTrack(_music_track, 0);
+   }
+ }
+ 
+@@ -98,6 +110,22 @@ bool Ogg::start(const std::string &fname, const std::string &dir, int startbeat,
+     _song.playing = false;
+   }
+ 
++  // DOS-PORT: SDL3_mixer requires a MIX_Track to play through. We hold
++  // a single persistent track for the lifetime of the Ogg singleton —
++  // lazy-create on first play, never destroyed. Reused across songs by
++  // re-calling MIX_SetTrackAudio with the new MIX_Audio. Track is owned
++  // by the mixer, cleaned up on MIX_DestroyMixer.
++  if (!_music_track)
++  {
++    MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
++    _music_track     = MIX_CreateTrack(mixer);
++    if (!_music_track)
++    {
++      LOG_ERROR("MIX_CreateTrack(): {}", SDL_GetError());
++      return false;
++    }
++  }
++
+   _song.last_pos = 0;
+   _song.playing  = true;
+   _song.fading   = false;
+@@ -111,22 +139,37 @@ bool Ogg::start(const std::string &fname, const std::string &dir, int startbeat,
+ 
+   if (_looped)
+   {
+-    Mix_PlayMusic(_song.loop, 0);
++    MIX_SetTrackAudio(_music_track, _song.loop);
+   }
+   else
+   {
+-    Mix_PlayMusic(_song.intro, 0);
++    MIX_SetTrackAudio(_music_track, _song.intro);
+   }
+-  Mix_VolumeMusic((double)_song.volume * ((double)settings->music_volume / 100.));
+-  Mix_SetMusicPosition(startbeat / 1000);
++  MIX_PlayTrack(_music_track, 0);
+ 
+-  Mix_HookMusicFinished(musicFinishedCallback);
++  // DOS-PORT: Mix_VolumeMusic(int_0..128) → MIX_SetTrackGain(float_0..1).
++  // Preserve existing math: upstream feeds 0..100 to a 0..128 API (using
++  // ~78% of the volume range). Keeping the /128 divisor gives the same
++  // effective gain post-migration.
++  MIX_SetTrackGain(_music_track,
++                   (float)((double)_song.volume * ((double)settings->music_volume / 100.) / 128.0));
++
++  // DOS-PORT: Mix_SetMusicPosition takes seconds (double); SDL3_mixer's
++  // MIX_SetTrackPlaybackPosition takes Sint64 frames. Convert via
++  // MIX_MSToFrames(sample_rate, ms). startbeat is in ms.
++  MIX_SetTrackPlaybackPosition(_music_track, MIX_MSToFrames(SAMPLE_RATE, startbeat));
++
++  MIX_SetTrackStoppedCallback(_music_track, musicFinishedCallback, nullptr);
+   return true;
+ }
+ 
+ void Ogg::updateVolume()
+ {
+-  Mix_VolumeMusic((double)_song.volume * ((double)settings->music_volume / 100.));
++  if (_music_track)
++  {
++    MIX_SetTrackGain(_music_track,
++                     (float)((double)_song.volume * ((double)settings->music_volume / 100.) / 128.0));
++  }
+ }
+ 
+ // pause/stop playback of the current song
+@@ -137,16 +180,22 @@ uint32_t Ogg::stop()
+     _song.playing = false;
+     _do_loop      = false;
+     _looped       = false;
+-    Mix_HookMusicFinished(NULL);
+-    Mix_HaltMusic();
++    if (_music_track)
++    {
++      MIX_SetTrackStoppedCallback(_music_track, nullptr, nullptr);
++      MIX_StopTrack(_music_track, 0);
++      // Detach audio from the track before destroying audio handles —
++      // otherwise the track briefly references freed memory.
++      MIX_SetTrackAudio(_music_track, nullptr);
++    }
+     if (_song.intro)
+     {
+-      Mix_FreeMusic(_song.intro);
++      MIX_DestroyAudio(_song.intro);
+       _song.intro = nullptr;
+     }
+     if (_song.loop)
+     {
+-      Mix_FreeMusic(_song.loop);
++      MIX_DestroyAudio(_song.loop);
+       _song.loop = nullptr;
+     }
+     return SDL_GetTicks() - _song.last_pos;
+@@ -170,7 +219,11 @@ void Ogg::setVolume(int newvolume)
+   if (newvolume != _song.volume)
+   {
+     _song.volume = newvolume;
+-    Mix_VolumeMusic((double)_song.volume * ((double)settings->music_volume / 100.));
++    if (_music_track)
++    {
++      MIX_SetTrackGain(_music_track,
++                       (float)((double)_song.volume * ((double)settings->music_volume / 100.) / 128.0));
++    }
+   }
+ }
+ 
+@@ -199,12 +252,14 @@ void Ogg::runFade()
+ 
+ void Ogg::pause()
+ {
+-  Mix_PauseMusic();
++  if (_music_track)
++    MIX_PauseTrack(_music_track);
+ }
+ 
+ void Ogg::resume()
+ {
+-  Mix_ResumeMusic();
++  if (_music_track)
++    MIX_ResumeTrack(_music_track);
+ }
+ 
+ bool Ogg::looped()
+diff --git a/src/sound/Ogg.h b/src/sound/Ogg.h
+index 2a332ec..5f28cc2 100644
+--- a/src/sound/Ogg.h
++++ b/src/sound/Ogg.h
+@@ -4,11 +4,9 @@
+ 
+ #include "../Singleton.h"
+ 
+-#include <SDL_mixer.h>
++#include <SDL3_mixer/SDL_mixer.h>
+ #include <string>
+ 
+-typedef void (*music_finished_cb)(void);
+-
+ namespace NXE
+ {
+ namespace Sound
+@@ -16,8 +14,8 @@ namespace Sound
+ 
+ struct oggSong
+ {
+-  Mix_Music *intro = nullptr;
+-  Mix_Music *loop  = nullptr;
++  MIX_Audio *intro = nullptr;
++  MIX_Audio *loop  = nullptr;
+   bool playing     = false;
+   int volume       = 75;
+ 
+@@ -58,6 +56,13 @@ private:
+   oggSong _song;
+   bool _do_loop = false;
+   bool _looped  = false;
++
++  // DOS-PORT: SDL3_mixer model: a single MIX_Track owns the music
++  // playback "slot" (no global Mix_PlayMusic equivalent). Lazy-created
++  // on first play from SoundManager's mixer; never explicitly destroyed
++  // — owned by the mixer, cleaned up when MIX_DestroyMixer runs in
++  // SoundManager::shutdown().
++  MIX_Track *_music_track = nullptr;
+ };
+ 
+ }; // namespace Sound
+-- 
+2.47.3
+
