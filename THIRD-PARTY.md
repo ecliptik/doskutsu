@@ -84,7 +84,7 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 - **Source:** https://github.com/libsdl-org/SDL
 - **Pinned ref:** `main` @ `74a746281f2208e07a7680560fcb7ec57565228e` (post-[PR #15377](https://github.com/libsdl-org/SDL/pull/15377), the DOS-backend merge)
 - **Role:** Platform abstraction. The DOS backend (VESA video + SoundBlaster audio drivers from PR #15377) is what makes this entire port possible.
-- **Modifications:** none yet. Any DJGPP fixes land in `patches/SDL/*.patch`. Phase 2d uncovered an SB16-detection bug under DOSBox-X — see CHANGELOG `### Known issues` and TODO #16 / #17.
+- **Modifications:** any DJGPP fixes land in `patches/SDL/*.patch` as local-only patches (we do not upstream — see `CLAUDE.md § Vendoring` for the policy and rationale). Phase 2d uncovered an SB16-detection bug under DOSBox-X tracked as TODO #16; lands as `patches/SDL/0001-sb16-dsp-detection-fix.patch`. See CHANGELOG `### Known issues` for status.
 - **Redistribution:** zlib permits redistribution under the same terms
 
 ### sdl2-compat

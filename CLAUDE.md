@@ -179,6 +179,7 @@ pkill -x dosbox-x                                   # stop it (or Ctrl+F9 in win
 
 - **Snapshots, not submodules.** `vendor/<name>/` is a working tree the `fetch-sources.sh` script populates by `git clone`-ing the SHA from `vendor/sources.manifest`. All cloned trees except `vendor/cwsdpmi/` are gitignored.
 - **Patches live in `patches/<name>/*.patch`.** Numeric prefixes drive application order (`0001-*.patch`, `0002-*.patch`, ...). Use `git format-patch` to produce them. Reason each patch exists in its commit message — "why DOS needs this," not "what it does."
+- **Patches stay local; never upstreamed** (policy decision 2026-04-25). Our `patches/<name>/*.patch` are workspace-local artifacts, not upstream contributions. We do not open PRs against `libsdl-org/SDL`, `libsdl-org/sdl2-compat`, `libsdl-org/SDL_mixer`, `libsdl-org/SDL_image`, or `nxengine/nxengine-evo` from this work. **This sidesteps `vendor/SDL/CLAUDE.md`'s no-AI-authoring restriction** entirely — that restriction scopes to PR-style contributions, which we commit to never doing. The trade is real: every upstream sync (rebasing the patch series against a new pinned SHA) is on us; freedom-to-patch beats upstream alignment for this project's purposes. If a fix is so generally useful that someone wants it upstream, that's a separate human-authored effort outside this repo.
 - **Annotate every DOS-specific deviation in our port glue with `// DOS-PORT:`.** This is only for code we write ourselves (not imported patches). vellm's pattern.
 
 ### Licensing (read this before adding dependencies)

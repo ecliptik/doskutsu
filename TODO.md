@@ -139,8 +139,7 @@ Levers 1-5 correspond to the descent from Tier 1 (PODP83 / 48 MB, reference) thr
 
 ## Known issues
 
-- **#16 — SDL3 SoundBlaster detection fails under DOSBox-X SB16 emulation.** DSP reset's "data ready" goes true but the byte read is not `0xAA`. Likely PR #15377 bug in the SB16 detection sequence. Tracked downstream; will produce `patches/SDL/*.patch` if the fix is local. Blocks Phase 7 playtest gate (audio required); does not block Phases 3'–5.
-- **#17 — Upstream bug report at libsdl-org/SDL.** Draft at `.tmp/upstream-sdl-issue-pr15377-sb16.md`, awaiting human-with-`gh`-creds to file. URL will be backfilled into THIRD-PARTY.md and `patches/SDL/README.md` once the issue is open.
+- **#16 — SDL3 SoundBlaster detection fails under DOSBox-X SB16 emulation.** DSP reset's "data ready" goes true but the byte read is not `0xAA`. Likely PR #15377 bug in the SB16 detection sequence. Lands as `patches/SDL/0001-sb16-dsp-detection-fix.patch` (local-only — see CLAUDE.md § Vendoring on the patches-stay-local policy). Blocks Phase 7 playtest gate (audio required); does not block Phases 3'–5.
 
 ---
 

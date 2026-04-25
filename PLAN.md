@@ -420,7 +420,7 @@ Upstream migration guide: https://wiki.libsdl.org/SDL3/README/migration
 
 These aren't blocking; flag if you hit one.
 
-- **SDL3 DOS backend real-HW behavior.** PR #15377 was DOSBox-only tested upstream. Expect VESA quirks, audio DMA edge cases. First real-HW bug reports should probably go back upstream as well as into our patches.
+- **SDL3 DOS backend real-HW behavior.** PR #15377 was DOSBox-only tested upstream. Expect VESA quirks, audio DMA edge cases. Bug fixes land as local-only `patches/SDL/*.patch` per the SDL-patches-stay-local policy (CLAUDE.md § Vendoring) — we do not upstream them; the maintenance cost of rebasing the patch series against new SDL SHAs is the deliberate trade for sidestepping `vendor/SDL/CLAUDE.md`'s no-AI-authoring-PRs restriction.
 - **sdl2-compat static-only build.** We need the static build only; the compat shim's dynamic-loader code path must be disabled cleanly (not just by lying about `dlopen`). Phase 3 work.
 - **Organya CPU cost at 22050 stereo on PODP83.** Likely tight. The 11025 mono fallback is prepared; when to trigger is a Phase 7 / 8 judgment call.
 - **Heap fragmentation under DPMI over ~30-60 min.** NXEngine-evo's C++11 allocation patterns haven't been profiled under DJGPP. Watch CWSDPMI.SWP growth during Phase 7 sessions.
