@@ -1,0 +1,118 @@
+From d21fd0ad953ed3f4e69bc5decb24e66a0a172a19 Mon Sep 17 00:00:00 2001
+From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
+Date: Fri, 24 Apr 2026 18:01:07 -0700
+Subject: [PATCH] [DOSKUTSU] cmake: switch find_package SDL2 -> SDL3 on the PC
+ platform
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: NXEngine-evo's CMakeLists.txt unconditionally calls
+`find_package(SDL2 REQUIRED)` etc. The doskutsu DOS port (Path B) builds
+against SDL3 in `build/sysroot/lib/cmake/SDL3{,_mixer,_image}/` — the
+SDL2 install never gets populated under Path B. CMake configure fails at
+`find_package(SDL2 REQUIRED)` before any source compilation, blocking
+`make nxengine` outright. This is the gap nxengine flagged at #33's
+completion: it's a cross-platform SDL3 migration concern (any host
+moving NXEngine-evo to SDL3 needs it, not just DOS), so per the
+patches/nxengine-evo/README.md numeric-range convention it lives in
+the 0010-0019 SDL3-migration block — slot 0019.
+
+Approach: gate the find_package call by PLATFORM. The Vita and Switch
+branches (which the doskutsu fork doesn't itself build for, but which
+we keep functional for upstream rebases) keep their SDL2 dependencies
+since neither devkitPro nor the Vita SDK ship SDL3 yet. The PC branch
+— which covers Linux, macOS, Windows native, AND the DJGPP/DOS
+cross-build — switches to SDL3:
+
+    find_package(SDL3 CONFIG REQUIRED)
+    find_package(SDL3_mixer CONFIG REQUIRED)
+    find_package(SDL3_image CONFIG REQUIRED)
+
+CONFIG mode pulls in SDL3's installed Config files
+(`build/sysroot/lib/cmake/SDL3/SDL3Config.cmake` etc.); the imported
+targets `SDL3::SDL3`, `SDL3_mixer::SDL3_mixer`, `SDL3_image::SDL3_image`
+each carry their include dirs and link-interface transitively, so the
+explicit `${SDL2_*_INCLUDE_DIR}` calls below the find_package block
+become no-ops on the PC branch. (Left in place to keep the patch diff
+minimal and the Vita/Switch paths unchanged.)
+
+The PC platform's `target_link_libraries(nx ...)` call is updated to
+use the SDL3:: targets in place of `${SDL2_LIBRARY}` etc. PNG is still
+linked because src/graphics/pngfuncs.cpp uses libpng directly for
+screenshot writing (SDL3_image's vendored stb_image doesn't have
+write-side PNG support).
+
+Verification gate: `cmake -S vendor/nxengine-evo -B build/nxengine
+-DCMAKE_PREFIX_PATH=$(pwd)/build/sysroot` should complete configure
+without error after this patch + 0001-0006 + 0010-0018 are applied.
+Compile-time failures are still expected on the audio source files
+(#31 not landed; Mix_*/SDL_AudioCVT calls remain unmigrated) — that's
+the next gate, not this one.
+---
+ CMakeLists.txt | 35 +++++++++++++++++++++++++++++------
+ 1 file changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f9df7d2..2690727 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -50,18 +50,37 @@ include(CheckCXXCompilerFlag)
+ include(GNUInstallDirs)
+ 
+ IF(PLATFORM STREQUAL "vita")
+-find_package(SDL2 CONFIG REQUIRED)
++    # Vita keeps SDL2 — no SDL3 port for the PSP Vita SDK at the moment.
++    find_package(SDL2 CONFIG REQUIRED)
++    find_package(SDL2_mixer REQUIRED)
++    find_package(SDL2_image REQUIRED)
++ELSEIF(PLATFORM STREQUAL "switch")
++    # Switch keeps SDL2 — devkitPro's SDL3 port hasn't landed yet.
++    find_package(SDL2 REQUIRED)
++    find_package(SDL2_mixer REQUIRED)
++    find_package(SDL2_image REQUIRED)
+ ELSE()
+-find_package(SDL2 REQUIRED)
++    # PC platform — including the doskutsu DJGPP / DOS cross-build — uses
++    # SDL3. CONFIG mode pulls in the SDL3*Config.cmake files from the
++    # build/sysroot/ install (see scripts/setup-symlinks.sh and the top-level
++    # Makefile's CMAKE_PREFIX_PATH). The SDL3:: targets carry their own
++    # include dirs transitively, so the explicit include_directories() calls
++    # below are not needed on this branch.
++    find_package(SDL3 CONFIG REQUIRED)
++    find_package(SDL3_mixer CONFIG REQUIRED)
++    find_package(SDL3_image CONFIG REQUIRED)
+ ENDIF()
+-find_package(SDL2_mixer REQUIRED)
+-find_package(SDL2_image REQUIRED)
+ find_package(PNG REQUIRED)
+ # JPEG dropped: Cave Story ships no .jpg assets (verified in #27 audit) and
+-# SDL2_image/SDL3_image is built without JPEG support in the doskutsu pipeline.
++# SDL3_image is built without JPEG support in the doskutsu pipeline.
+ # Removing the find_package call avoids a hard dependency on libjpeg in the
+ # DJGPP cross-toolchain.
+ 
++# Legacy SDL2 include dirs only apply on the Vita / Switch branches above.
++# The SDL3:: targets used on the PC branch carry their includes via
++# INTERFACE_INCLUDE_DIRECTORIES, so the bare `${SDL2_*_INCLUDE_DIR}` calls
++# would be no-ops there (the variables are unset on a SDL3-only sysroot)
++# but harmless — keep them unconditional to minimise the patch diff.
+ include_directories(${SDL2_INCLUDE_DIR})
+ include_directories(${SDL2_MIXER_INCLUDE_DIR})
+ include_directories(${SDL2_IMAGE_INCLUDE_DIR})
+@@ -152,7 +171,11 @@ IF(PLATFORM STREQUAL "pc")
+             ENDIF()
+         ENDIF()
+     ENDIF()
+-    target_link_libraries(nx ${SDL2_LIBRARY} ${SDL2_MIXER_LIBRARY} ${SDL2_IMAGE_LIBRARY} ${PNG_LIBRARY})
++    # SDL3 imported targets carry their own include dirs and link interfaces.
++    # PNG is still required by src/graphics/pngfuncs.cpp (screenshot save path)
++    # which uses libpng directly — SDL3_image's vendored stb_image doesn't
++    # cover write-side PNG.
++    target_link_libraries(nx SDL3::SDL3 SDL3_mixer::SDL3_mixer SDL3_image::SDL3_image ${PNG_LIBRARY})
+ 
+ ELSEIF(PLATFORM STREQUAL "vita")
+     add_definitions("-std=gnu++11")
+-- 
+2.47.3
+
