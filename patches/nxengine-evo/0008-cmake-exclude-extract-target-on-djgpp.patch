@@ -1,0 +1,86 @@
+From 6e1a5c6a1309b8033992ad8c71b8d783050a5ecc Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 25 Apr 2026 11:25:17 -0700
+Subject: [PATCH] [DOSKUTSU] cmake: exclude extract host-utility on DJGPP
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: build-engineer's Phase 5 first-compile attempt
+(#40) hit POSIX-function errors in src/extract/extractfiles.cpp,
+extractstages.cpp, extractpxt.cpp:
+
+  error: 'strdup' was not declared in this scope
+  error: 'S_IRUSR' / 'S_IWUSR' / 'S_IXUSR' / etc. not declared
+  error: 'mkdir' was not declared in this scope
+  error: 'strcasecmp' was not declared in this scope
+
+These are POSIX-shaped functions (mkdir-with-mode-bits, file-mode
+constants, BSD-derived strdup, BSD strcasecmp) that DJGPP's libc
+does not provide. Adding the appropriate #include directives on
+DJGPP doesn't help — the underlying functions don't exist as
+POSIX-shaped on this libc, and the DOS FAT filesystem has no
+Unix-style permission bits to map S_IRUSR/etc. to anyway.
+
+Per PLAN.md § Phase 6 (asset-extraction step), Cave Story data is
+extracted on the developer's host (Linux/Windows) using the
+extract utility there, then copied to the CF card for the DOS
+target. Building the extract utility ON DOS isn't a canonical
+use case — the resulting binary couldn't write to the CF card it
+booted from anyway.
+
+Fix: exclude the extract target from the DJGPP cross-build at
+CMake time. Wraps the existing `IF(PLATFORM STREQUAL "pc")`
+extract block in an inner `IF(NOT (CMAKE_SYSTEM_NAME STREQUAL
+"MSDOS" OR CMAKE_CXX_COMPILER MATCHES "msdosdjgpp"))` conditional
+matching the pattern that 0002-cmake-djgpp-target-flags.patch
+established.
+
+The extract install rule splits accordingly:
+  - Non-DJGPP PC build: `install(TARGETS nx extract ...)` (both)
+  - DJGPP PC build:     `install(TARGETS nx ...)` (nx only)
+
+Slot 0008 in the DJGPP cluster (0001-0009 range per
+patches/nxengine-evo/README.md). Sits next to 0007 (drop libpng
+on DOS) as another "DOS-makes-an-upstream-feature-untenable"
+DJGPP-only adaptation.
+---
+ CMakeLists.txt | 21 +++++++++++++++++----
+ 1 file changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6d7ef41..4daeb50 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -236,11 +236,24 @@ ELSEIF(PLATFORM STREQUAL "switch")
+ ENDIF()
+ 
+ IF(PLATFORM STREQUAL "pc")
+-    add_executable(extract ${EXTR_SOURCES})
+-    target_link_libraries(extract ${SDL2_LIBRARY})
+-    set_property(TARGET extract PROPERTY OUTPUT_NAME nxextract)
++    IF(NOT (CMAKE_SYSTEM_NAME STREQUAL "MSDOS" OR CMAKE_CXX_COMPILER MATCHES "msdosdjgpp"))
++        # Host-side asset-extraction utility — see docs/ASSETS.md (PLAN.md
++        # § Phase 6). Excluded from the DJGPP cross-build because src/extract/
++        # uses POSIX functions (mkdir-with-mode-bits, S_I[RW][USR/GRP/OTH],
++        # strdup, strcasecmp) that DJGPP's libc does not provide as
++        # POSIX-shaped, and because asset extraction on DOS isn't a
++        # canonical use case (CF target has no obvious file-out path).
++        # Detection conditional matches the pattern from
++        # 0002-cmake-djgpp-target-flags.patch.
++        add_executable(extract ${EXTR_SOURCES})
++        target_link_libraries(extract ${SDL2_LIBRARY})
++        set_property(TARGET extract PROPERTY OUTPUT_NAME nxextract)
+ 
+-    install(TARGETS nx extract RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++        install(TARGETS nx extract RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++    ELSE()
++        # DJGPP/DOS path: install nx only, extract target is not built.
++        install(TARGETS nx RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++    ENDIF()
+     install(DIRECTORY data DESTINATION ${CMAKE_INSTALL_DATADIR}/nxengine)
+ 
+     # Install XDG metadata on Desktop Linux like platforms
+-- 
+2.47.3
+
