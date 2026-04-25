@@ -1,0 +1,55 @@
+From be29291e22b9ab615d4de2c2556392e6ec6bb0bd Mon Sep 17 00:00:00 2001
+From: Claude Code <noreply@anthropic.com>
+Date: Sat, 25 Apr 2026 12:37:48 -0700
+Subject: [PATCH] cmake: skip HAVE_UNIX_LIKE / DATADIR baking on DJGPP
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DJGPP cross from a Linux host inherits CMake UNIX=1, so the existing
+IF(UNIX_LIKE) guard fires and bakes a Linux-host absolute path into
+the DOS binary as DATADIR. The binary then tries stat()-ing that
+host path at runtime, fails to open data/font_1.fnt, and fatal-exits
+during graphics init — caught by the Phase 7 prep smoke launch.
+
+Gating on AND NOT DJGPP makes ResourceManager fall through to
+SDL_GetBasePath() + "data/", matching how the binary is shipped on
+every other portable NXEngine-evo target.
+---
+ CMakeLists.txt | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 30e741c..a17af75 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -185,7 +185,25 @@ IF(PLATFORM STREQUAL "pc")
+     else()
+         add_definitions("-std=c++11")
+     endif()
+-    IF(UNIX_LIKE)
++    # DJGPP cross from a Linux host inherits CMake's UNIX=1 unless explicitly
++    # cleared, so without this guard the DJGPP build picks up HAVE_UNIX_LIKE
++    # plus a Linux-host CMAKE_INSTALL_FULL_DATADIR baked in as DATADIR. Both
++    # are wrong on DOS:
++    #
++    #   - HAVE_UNIX_LIKE pushes ResourceManager::getPath into the
++    #     "../share/nxengine/data/" relative-to-binary path, which is the FHS
++    #     layout for system-installed Linux binaries — irrelevant on DOS.
++    #
++    #   - DATADIR bakes the build-host's absolute Linux path
++    #     (e.g., /home/<user>/...build/sysroot/share/nxengine/data/) into the
++    #     DOS binary, which obviously can't exist on the target system.
++    #
++    # Dropping both for DJGPP makes ResourceManager fall through to
++    # `getBasePath() + "data/"`, i.e. data/ co-located with DOSKUTSU.EXE.
++    # That matches how Cave Story / NXEngine-evo on every other platform
++    # (Win32 zip, Vita, Switch) ships, and it matches `make install`'s
++    # C:\DOSKUTSU\DATA\ layout on the CF card.
++    IF(UNIX_LIKE AND NOT DJGPP)
+         add_definitions(-DHAVE_UNIX_LIKE)
+ 
+         # Use non-portable install, with hard-coded data directory path,
+-- 
+2.47.3
+

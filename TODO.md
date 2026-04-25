@@ -86,7 +86,10 @@ Current work is organized by phase (see `PLAN.md`). Mark items complete as they 
 ## Phase 6 — Cave Story assets
 
 - [ ] `docs/ASSETS.md` extraction procedure verified against current cavestory.org
-- [ ] `data/base/Stage/`, `Npc/`, `org/`, `wav/` populated on the dev host
+- [ ] `data/Stage/`, `Npc/`, `org/`, `wav/` populated on the dev host
+- [x] `scripts/extract-engine-data.py` produces `data/wavetable.dat` (25600 bytes, offset `0x110664`) + `data/stage.dat` (95-record stage index, offset `0x937B0`) from the 2004 EN freeware `Doukutsu.exe` — sibling of `scripts/extract-pxt.py`, transcribed from `vendor/nxengine-evo/src/extract/extractstages.cpp`
+- [x] DJGPP data-path baking fix (`patches/nxengine-evo/0025-cmake-djgpp-data-path.patch`) — gates `IF(UNIX_LIKE)` on `AND NOT DJGPP`, so `ResourceManager::getPath()` falls through to `SDL_GetBasePath() + "data/"` instead of stat-ing a Linux-host absolute path
+- [x] Runtime staging tooling — `make stage` produces `build/stage/` (binary + CWSDPMI + `data/` symlink), and `tools/dosbox-launch.sh --stage` mounts it as C: for real game runs
 - [ ] Title screen → First Cave → Quote visible, moves, jumps
 
 ## Phase 7 — DOSBox-X playtest

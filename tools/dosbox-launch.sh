@@ -7,10 +7,18 @@
 # so you can drive it by hand or by script.
 #
 # Usage:
-#   tools/dosbox-launch.sh                         # open DOSBox-X at C:\
+#   tools/dosbox-launch.sh                         # open DOSBox-X at C:\ (repo root)
 #   tools/dosbox-launch.sh --fast                  # use dosbox-x-fast.conf
 #   tools/dosbox-launch.sh --kill-first            # kill any running instance first
 #   tools/dosbox-launch.sh --exe build/doskutsu.exe  # auto-run on launch
+#   tools/dosbox-launch.sh --stage                 # mount build/stage/ as C:
+#   tools/dosbox-launch.sh --stage --exe DOSKUTSU.EXE  # stage + auto-run
+#
+# The --stage form runs `make stage` first (so DOSKUTSU.EXE + CWSDPMI.EXE +
+# data/ all sit together) and mounts that staging dir as C:. This matches the
+# eventual install layout under C:\DOSKUTSU\ on a real CF card and is what
+# NXEngine-evo's ResourceManager (SDL_GetBasePath() + "data/") expects. Use
+# this for any test that needs the game's data tree.
 #
 # After launch:
 #   DISPLAY=:0 scrot -u /tmp/dosbox.png                   # capture focused window
@@ -30,14 +38,20 @@ CONF="$CONF_PARITY"
 
 KILL_FIRST=0
 EXE=""
+STAGE=0
 
 usage() {
   cat <<'USAGE'
-Usage: dosbox-launch.sh [--fast] [--kill-first] [--exe PATH]
+Usage: dosbox-launch.sh [--fast] [--kill-first] [--stage] [--exe PATH]
 
   --fast, -f         Use dosbox-x-fast.conf (cycles=max) instead of parity config
   --kill-first, -k   Kill any running dosbox-x process first
-  --exe PATH         Path to an .exe to auto-run (relative to repo root)
+  --stage, -s        Run `make stage` and mount build/stage/ as C: (where
+                     DOSKUTSU.EXE + CWSDPMI.EXE + data/ sit together — the
+                     layout NXEngine-evo's ResourceManager expects on DOS).
+  --exe PATH         Path to an .exe to auto-run. Without --stage, PATH is
+                     relative to repo root. With --stage, PATH should be a
+                     bare DOS-side filename (e.g. DOSKUTSU.EXE).
   -h, --help         Show this help
 USAGE
 }
@@ -46,6 +60,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --fast|-f)       CONF="$CONF_FAST"; shift ;;
     --kill-first|-k) KILL_FIRST=1; shift ;;
+    --stage|-s)      STAGE=1; shift ;;
     --exe)           EXE="$2"; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "dosbox-launch.sh: unknown arg: $1" >&2; usage; exit 2 ;;
@@ -73,22 +88,41 @@ fi
 # genuinely needed. Matches the Snow / Basilisk / vellm emulator convention.
 export DISPLAY="${DOSBOX_DISPLAY:-:0}"
 
-# C: = repo root (so build/doskutsu.exe + data/ + vendor/cwsdpmi are all visible)
-# D: = vendor/cwsdpmi (puts CWSDPMI.EXE on PATH so DJGPP binaries find DPMI host)
-# BLASTER env var — matches the [sblaster] block in dosbox-x.conf; SDL3-DOS
-# reads this.
+# Mount layout depends on --stage:
+#   default:  C: = repo root, D: = vendor/cwsdpmi
+#             (handy for sdl3-smoke and one-off .exe testing)
+#   --stage:  C: = build/stage/, D: = vendor/cwsdpmi
+#             (the runtime layout DOSKUTSU.EXE expects: DOSKUTSU.EXE +
+#              CWSDPMI.EXE + data/ all co-located, matching the install
+#              layout under C:\DOSKUTSU\ on real CF cards. SDL_GetBasePath()
+#              + "data/" then resolves correctly.)
+#
+# D: always points at vendor/cwsdpmi so CWSDPMI.EXE is on PATH for DJGPP
+# binaries that aren't yet staged. The BLASTER env var matches the
+# [sblaster] block in dosbox-x.conf; SDL3-DOS reads it.
+#
 # SDL_DOS_AUDIO_SB_SKIP_DETECTION — escape hatch from patches/SDL/0001. The
 # real-HW timing fixes in that patch are correct, but DOSBox-X's emulated SB16
 # returns 0xFF on the DSP detection read regardless of timing tuning. Setting
 # this env var tells SDL3-DOS to skip detection and trust BLASTER, which is the
 # only way audio inits in the emulator. Real hardware (g2k Phase 8) MUST NOT
 # set this — it would mask a legitimate Vibra16S regression.
+
+if [[ "$STAGE" == "1" ]]; then
+  echo "Running 'make stage' to populate build/stage/..."
+  make -C "$REPO_ROOT" stage >/dev/null
+  C_DRIVE="$REPO_ROOT/build/stage"
+else
+  C_DRIVE="$REPO_ROOT"
+fi
+
 DBX_ARGS=(-conf "$CONF" -nopromptfolder
-          -c "MOUNT C $REPO_ROOT"
+          -c "MOUNT C $C_DRIVE"
           -c "MOUNT D $REPO_ROOT/vendor/cwsdpmi"
           -c 'SET PATH=Z:\;C:\;D:\'
           -c 'SET BLASTER=A220 I5 D1 H5 T6'
           -c 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1'
+          -c 'SET SDL_INVALID_PARAM_CHECKS=0'
           -c "C:")
 
 if [[ -n "$EXE" ]]; then

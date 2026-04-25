@@ -574,6 +574,37 @@ dist: $(BUILD_DIR)/doskutsu.exe
 	@(cd "$(CF_STAGE)" && zip -q -r "$(CF_ZIP)" .)
 	@echo "built $(CF_ZIP) ($$(stat -c '%s' $(CF_ZIP)) bytes)"
 
+# --- Runtime staging for DOSBox-X testing -------------------------------------
+#
+# `make stage` produces $(BUILD_DIR)/stage/ — the DOS-side runtime layout
+# (DOSKUTSU.EXE + CWSDPMI.EXE + DATA/) — which is what tools/dosbox-launch.sh
+# mounts as C: when invoked with `--stage`. NXEngine-evo's ResourceManager
+# resolves data via SDL_GetBasePath() + "data/" on DOS, so the .exe and the
+# data tree must be co-located at runtime; the repo layout (build/doskutsu.exe
+# + data/ at repo root) doesn't satisfy that on its own.
+#
+# data/ is symlinked rather than copied — fast iteration, no rsync churn, and
+# DOSBox-X's host-mount layer follows the symlink transparently. The symlink
+# is recreated each run to track repo-side data/ updates without stale-link
+# guards.
+
+STAGE_DIR := $(BUILD_DIR)/stage
+
+.PHONY: stage
+stage: $(BUILD_DIR)/doskutsu.exe
+	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing — see vendor/cwsdpmi/README.md" >&2; exit 1)
+	@mkdir -p "$(STAGE_DIR)"
+	@install -m 0644 $(BUILD_DIR)/doskutsu.exe "$(STAGE_DIR)/DOSKUTSU.EXE"
+	@install -m 0644 $(CWSDPMI_EXE)            "$(STAGE_DIR)/CWSDPMI.EXE"
+	@if [ -d "$(REPO_ROOT)/data" ]; then \
+	    rm -f "$(STAGE_DIR)/data" "$(STAGE_DIR)/DATA"; \
+	    ln -s "$(REPO_ROOT)/data" "$(STAGE_DIR)/data"; \
+	    echo "staged $(STAGE_DIR)/ (data/ symlinked from repo)"; \
+	else \
+	    echo "note: data/ not present at repo root — see docs/ASSETS.md"; \
+	    echo "      $(STAGE_DIR)/ contains only DOSKUTSU.EXE + CWSDPMI.EXE"; \
+	fi
+
 .PHONY: install
 install: $(BUILD_DIR)/doskutsu.exe
 ifeq ($(strip $(CF)),)

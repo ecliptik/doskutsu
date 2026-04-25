@@ -1,0 +1,69 @@
+From f071a3fbe7da1aa69e3c49b29178d173cb18d3f2 Mon Sep 17 00:00:00 2001
+From: Claude Code <noreply@anthropic.com>
+Date: Sat, 25 Apr 2026 12:52:11 -0700
+Subject: [PATCH] sdl3: zoom.cpp INDEX8 dst surfaces need an explicit palette
+
+SDL2 -> SDL3 migration regression. SDL_CreateSurface(w,h,INDEX8) in SDL3
+no longer attaches a default palette to the new surface. zoom.cpp:324
+created an INDEX8 dst surface, then the palette-copy block at 350-361
+queried SDL_GetSurfacePalette on it and got NULL, so the if(_src_pal &&
+_dst_pal) guard was always false and no palette ever got copied.
+
+Surface::loadImage downstream then fed this paletteless INDEX8 surface
+to SDL_CreateTextureFromSurface, which fails with "src does not have a
+palette set". Every paletted image in the title screen rendered as a
+null texture, then drawSurface flooded debug.log with
+"Renderer::drawSurface: SDL_RenderTexture failed: Parameter texture
+is invalid" once per blit attempt -- title screen never came up.
+
+Fix: explicitly SDL_CreatePalette()/SDL_SetSurfacePalette() on rz_dst
+before the colour copy. Release our local ref after attach since
+SDL_SetSurfacePalette retains its own.
+
+Why DOS needs this: the SDL3 DOS backend uses the same software
+renderer path as the desktop SDL3 builds, so it inherits this exact
+SDL3-API-divergence-from-SDL2 issue. Affects every paletted .pbm/.bmp
+load.
+---
+ src/graphics/zoom.cpp | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/src/graphics/zoom.cpp b/src/graphics/zoom.cpp
+index 9ff0643..521c471 100644
+--- a/src/graphics/zoom.cpp
++++ b/src/graphics/zoom.cpp
+@@ -349,15 +349,26 @@ SDL_Surface *SDL_ZoomSurface(SDL_Surface *src, double zoom)
+   {
+     // Copy palette and colorkey info.
+     // SDL3: palette is no longer hung off surface->format; query via SDL_GetSurfacePalette.
++    // SDL3 also no longer attaches a default palette to surfaces created with
++    // SDL_PIXELFORMAT_INDEX8 — SDL_GetSurfacePalette(rz_dst) returns NULL until
++    // we explicitly create + attach one. Without this, the palette-copy below
++    // silently no-ops and rz_dst exits with no palette, which then makes
++    // SDL_CreateTextureFromSurface() in Surface::loadImage fail with
++    // "src does not have a palette set".
+     SDL_Palette *_src_pal = SDL_GetSurfacePalette(rz_src);
+-    SDL_Palette *_dst_pal = SDL_GetSurfacePalette(rz_dst);
+-    if (_src_pal && _dst_pal)
++    if (_src_pal)
+     {
+-      for (i = 0; i < _src_pal->ncolors; i++)
++      SDL_Palette *_dst_pal = SDL_CreatePalette(_src_pal->ncolors);
++      if (_dst_pal)
+       {
+-        _dst_pal->colors[i] = _src_pal->colors[i];
++        for (i = 0; i < _src_pal->ncolors; i++)
++        {
++          _dst_pal->colors[i] = _src_pal->colors[i];
++        }
++        // SDL_SetSurfacePalette retains its own reference; we can release ours.
++        SDL_SetSurfacePalette(rz_dst, _dst_pal);
++        SDL_DestroyPalette(_dst_pal);
+       }
+-      _dst_pal->ncolors = _src_pal->ncolors;
+     }
+ 
+     _zoomSurfaceY(rz_src, rz_dst);
+-- 
+2.47.3
+

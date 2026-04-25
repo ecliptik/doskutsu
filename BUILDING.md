@@ -143,13 +143,18 @@ make smoke         # tests/run-smoke.sh with tools/dosbox-x.conf (cycles=fixed 4
 
 ### DOSKUTSU.EXE in DOSBox-X (visible)
 
-Once `make` has produced `build/doskutsu.exe` and `data/base/` contains extracted Cave Story assets:
+Once `make` has produced `build/doskutsu.exe` and `data/` contains extracted Cave Story assets:
 
 ```bash
 tools/dosbox-launch.sh --exe build/doskutsu.exe              # parity config
 tools/dosbox-launch.sh --fast --exe build/doskutsu.exe       # fast config
 tools/dosbox-launch.sh --kill-first --exe build/doskutsu.exe # restart cleanly
+tools/dosbox-launch.sh --stage --exe build/doskutsu.exe      # mount build/stage/ as C:
 ```
+
+**`--stage` / `-s` for real game runs.** NXEngine-evo's `ResourceManager` resolves assets via `SDL_GetBasePath() + "data/"` — i.e. it expects `data/` to live next to the binary. The default launcher mounts the repo root as C:, which works for one-off SDL probes that don't touch `data/`, but a real game run needs the runtime layout: `DOSKUTSU.EXE` + `CWSDPMI.EXE` + `data/` co-located. `--stage` produces that layout under `build/stage/` (binary, DPMI host, and a symlink to `data/`) and mounts it as C: instead. This matches the `C:\DOSKUTSU\` install target on real CF cards. The flag invokes `make stage` automatically — no need to run it manually.
+
+Use `--stage` whenever you're actually launching the game (title screen, playtest, smoke runs that load assets). Plain `tools/dosbox-launch.sh` is fine for SDL-driver probes (`tests/sdl3-smoke/sdltest.exe`) that don't read `data/`.
 
 The DOSBox-X window opens on `DISPLAY=:0`. From the same shell, you can drive it:
 

@@ -127,6 +127,16 @@ done
 # or the doukutsu-rs / NXEngine-evo extract tool):
 # produces data/pxt/fxNN.pxt files
 
+# Add the binary-extracted Organya wavetable + stage index. These two
+# blobs live inside Doukutsu.exe (wavetable at offset 0x110664, stage
+# table at offset 0x937B0) and are consumed verbatim by NXEngine-evo at
+# runtime. scripts/extract-engine-data.py is the doskutsu-authored
+# sibling of extract-pxt.py; it transcribes the algorithm from
+# vendor/nxengine-evo/src/extract/extractstages.cpp and produces
+# data/wavetable.dat (25600 bytes) + data/stage.dat (6936 bytes, 95
+# stages):
+scripts/extract-engine-data.py /path/to/Doukutsu.exe data/
+
 # Also merge NXEngine-evo's engine support data (fonts, UI, PBM backgrounds,
 # StageMeta, endpic) — these live at the same level as the Cave Story content:
 cp -r vendor/nxengine-evo/data/* data/
@@ -138,6 +148,8 @@ data/Stage/0.pxm          # Cave Story maps exist
 data/Npc/NpcSym.pbm       # Cave Story NPC sprites exist
 data/org/gravity.org      # Cave Story Organya music exists (lowercased)
 data/pxt/fx02.pxt         # Cave Story Pixtone params exist
+data/wavetable.dat        # Organya PCM wavetable (extract-engine-data.py)
+data/stage.dat            # 95-record stage index (extract-engine-data.py)
 data/npc.tbl              # Cave Story NPC table exists
 data/MyChar.pbm           # Cave Story player sprite exists
 data/font_1.fnt           # NXEngine-evo engine bitmap font exists
