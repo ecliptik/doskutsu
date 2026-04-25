@@ -1,0 +1,347 @@
+From 88e4a82988f98efc6f18580a4c3b5e4c3520783e Mon Sep 17 00:00:00 2001
+From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
+Date: Fri, 24 Apr 2026 17:59:16 -0700
+Subject: [PATCH] [DOSKUTSU] djgpp: replace spdlog with fmt-backed Logger shim
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Why DOS needs this: spdlog (vendored in deps/spdlog/) is non-viable on the
+DJGPP cross-toolchain for two independent reasons identified by task #34's
+investigation:
+
+1. `SPDLOG_WCHAR_FILENAMES` is unconditionally enabled in the vendored
+   `deps/spdlog/tweakme.h:59` — not the originally-suspected
+   `SPDLOG_WCHAR_TO_UTF8_SUPPORT`. The macro pulls
+   `<spdlog/fmt/xchar.h>` which references `std::fputws` and
+   `std::wostream`. DJGPP's libstdc++ provides neither — wide-stream
+   support is missing. Compilation fails before linking with
+   `'fputws' is not a member of 'std'` and `'wostream' is not a member of
+   'std'`.
+
+2. `std::mutex` is not instantiable on DJGPP 12.2.0 — `_GLIBCXX_HAS_GTHREADS`
+   is undefined because there's no pthread runtime to back it. spdlog's
+   `*_mt` sink typedefs (`stdout_color_sink_mt`, `basic_file_sink_mt`)
+   instantiate `std::mutex` at static-construction time, and the global
+   spdlog registry holds a mutex unconditionally even if you only use
+   `*_st` sinks. Switching the sink type does not avoid the registry's
+   mutex; the whole library is unusable.
+
+The path forward, ratified in #29 architecture brief revision per #34's
+findings: drop spdlog on DJGPP only, replace with a thin fmt-backed
+shim that preserves the LOG_TRACE / LOG_DEBUG / LOG_INFO / LOG_WARN /
+LOG_ERROR / LOG_CRITICAL macro surface verbatim. NXEngine has ~280 LOG_*
+call sites; preserving the macro surface means zero call-site edits.
+
+Files added:
+- `src/Utils/Logger_djgpp.h` (~120 lines): the shim. Contains:
+  * `extern std::FILE *djgpp_log_fp` and `extern int djgpp_log_level`
+    (both defined in Logger.cpp's DJGPP branch).
+  * Internal `DJGPP_LOG_(level, name, ...)` macro that level-filters
+    short-circuit, formats with `fmt::format_to(std::back_inserter(buf),
+    ...)`, and writes the resulting `fmt::memory_buffer` to both the log
+    FILE* (if open) and stderr.
+  * Six `LOG_*(...)` macros aliasing `DJGPP_LOG_` with the right level.
+  * Minimal `spdlog::level::level_enum` + `spdlog::set_pattern` /
+    `spdlog::set_level` / `spdlog::flush_on` no-op stubs so Logger.cpp's
+    DJGPP init path can avoid wrapping every call in `#ifdef`s.
+
+Files modified:
+- `src/Utils/Logger.h`: `#ifdef __DJGPP__` gate. DJGPP gets
+  `#include "Logger_djgpp.h"` (which defines LOG_* directly); other
+  platforms keep `#include <spdlog/spdlog.h>` + the existing
+  `#define LOG_TRACE SPDLOG_TRACE` aliases.
+- `src/Utils/Logger.cpp`: spdlog sink-setup code preserved on non-DJGPP.
+  DJGPP branch declares the shim's `djgpp_log_fp` + `djgpp_log_level`
+  storage, then `init()` `fopen()`s the log file in text mode (CRLF
+  line endings desired for DOS log readers) and sets the level based
+  on `DEBUG`. fopen failure logs to stderr and continues — log noise
+  remains visible even when the configured path can't be written.
+
+Behaviour deltas vs. upstream spdlog:
+- No async sink, no log rotation, no thread-id tagging. NXEngine doesn't
+  use any of these on Linux/Windows either (the existing init() only
+  installs basic_file_sink + stdout_color_sink synchronously).
+- Log pattern is hardcoded to `[HH:MM:SS] [LEVEL] message`. The
+  `set_pattern(LOG_PATTERN)` call from Logger.cpp's non-DJGPP branch
+  becomes a no-op on DJGPP. Sub-second precision (`%e` in upstream)
+  dropped — `time()`+`localtime()` is enough for human-readable DOS
+  logs and avoids pulling in chrono machinery.
+- No ANSI colour. DOS stdout is a single stream where escape codes
+  would be visible literal noise unless an ANSI driver is loaded.
+
+Verified: standalone DJGPP+SDL3 sanity-compile of a tiny driver exercising
+Logger::init + every LOG_* macro succeeds with `-fsyntax-only`. Macro
+expansion is tight: a disabled-level call site emits
+`if (level >= djgpp_log_level) { ... }` around the formatting, so
+LOG_TRACE under -DDEBUG=0 short-circuits to a single integer compare.
+
+This is patch slot 0006-0009 (reserved for future DOS concerns per #29
+brief). The DJGPP series now extends from 5 to 6 patches; tech-writer
+should reflect the expansion in patches/nxengine-evo/README.md when this
+lands. The patch is orthogonal to the SDL3 migration patches (0010-0018)
+— neither touches `src/Utils/`.
+---
+ src/Utils/Logger.cpp     |  41 ++++++++++--
+ src/Utils/Logger.h       |  19 +++++-
+ src/Utils/Logger_djgpp.h | 133 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 188 insertions(+), 5 deletions(-)
+ create mode 100644 src/Utils/Logger_djgpp.h
+
+diff --git a/src/Utils/Logger.cpp b/src/Utils/Logger.cpp
+index f0ecf98..8e63fec 100644
+--- a/src/Utils/Logger.cpp
++++ b/src/Utils/Logger.cpp
+@@ -1,8 +1,12 @@
+ #include "Logger.h"
+-#include <spdlog/sinks/basic_file_sink.h>
+-#include <spdlog/sinks/stdout_color_sinks.h>
+ #include "../common/misc.h"
+ 
++#ifndef __DJGPP__
++#  include <spdlog/sinks/basic_file_sink.h>
++#  include <spdlog/sinks/stdout_color_sinks.h>
++#endif
++
++#include <cstdio>
+ #include <iostream>
+ #include <memory>
+ #include <string>
+@@ -13,11 +17,39 @@ namespace Utils
+ {
+ namespace Logger
+ {
++#ifdef __DJGPP__
++  // Shim-side state declared `extern` in Logger_djgpp.h so the inline
++  // LOG_* macros can read djgpp_log_fp + djgpp_log_level without going
++  // through a function call. Default level = INFO so pre-init log calls
++  // (rare, but possible from static constructors elsewhere) still emit.
++  std::FILE *djgpp_log_fp    = nullptr;
++  int        djgpp_log_level = DJGPP_LOG_LEVEL_INFO;
++#else
+   static const char *LOG_PATTERN = "%^[%H:%M:%S.%e] [%l] [%@ %!]: %v%$";
+   std::vector<spdlog::sink_ptr> sinks;
++#endif
+ 
+   void init(std::string filename)
+   {
++#ifdef __DJGPP__
++    // DJGPP path: open the log file in text mode so DOS gets CRLF line
++    // endings (correct for log readers; nobody binary-reads log files).
++    // If fopen fails we keep djgpp_log_fp == nullptr and the macros
++    // silently fall back to stderr-only — log noise is still visible
++    // even when the configured path can't be written.
++    djgpp_log_fp = std::fopen(filename.c_str(), "w");
++    if (!djgpp_log_fp)
++    {
++      std::fprintf(stderr,
++                   "Logger::init: could not open '%s' for writing; logging to stderr only\n",
++                   filename.c_str());
++    }
++#  if defined(DEBUG)
++    djgpp_log_level = DJGPP_LOG_LEVEL_TRACE;
++#  else
++    djgpp_log_level = DJGPP_LOG_LEVEL_INFO;
++#  endif
++#else
+     sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+     sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(widen(filename), true));
+ 
+@@ -30,10 +62,11 @@ namespace Logger
+     });
+ 
+     spdlog::flush_on(spdlog::level::debug);
+-#if defined(DEBUG)
++#  if defined(DEBUG)
+     spdlog::set_level(spdlog::level::trace);
+-#else
++#  else
+     spdlog::set_level(spdlog::level::info);
++#  endif
+ #endif
+   }
+ 
+diff --git a/src/Utils/Logger.h b/src/Utils/Logger.h
+index 8817961..a660e7e 100644
+--- a/src/Utils/Logger.h
++++ b/src/Utils/Logger.h
+@@ -1,6 +1,19 @@
+ #ifndef _LOGGER_H
+ 
+-#include <spdlog/spdlog.h>
++// On DJGPP we substitute a fmt-only Logger shim for spdlog. spdlog itself
++// pulls `<spdlog/fmt/xchar.h>` (via SPDLOG_WCHAR_FILENAMES in the vendored
++// tweakme.h) which references std::fputws / std::wostream — neither in
++// DJGPP's libstdc++ — and uses `std::mutex` at static-init time, which
++// DJGPP 12.2.0 cannot instantiate. See task #34's diagnosis and the
++// header comment in Logger_djgpp.h for the full story. The shim preserves
++// the LOG_TRACE / LOG_DEBUG / LOG_INFO / LOG_WARN / LOG_ERROR /
++// LOG_CRITICAL macro surface verbatim (fmt-style `{}` placeholders), so
++// call sites (~280 across NXEngine-evo) require no edits.
++#ifdef __DJGPP__
++#  include "Logger_djgpp.h"
++#else
++#  include <spdlog/spdlog.h>
++#endif
+ 
+ #include <string>
+ 
+@@ -14,12 +27,16 @@ namespace Logger
+ 
+   void init(std::string filename);
+ 
++#ifndef __DJGPP__
++// Upstream spdlog macro aliases. The DJGPP path defines LOG_* directly in
++// Logger_djgpp.h with the same fmt-style placeholder semantics.
+ #define LOG_TRACE SPDLOG_TRACE
+ #define LOG_DEBUG SPDLOG_DEBUG
+ #define LOG_INFO SPDLOG_INFO
+ #define LOG_WARN SPDLOG_WARN
+ #define LOG_ERROR SPDLOG_ERROR
+ #define LOG_CRITICAL SPDLOG_CRITICAL
++#endif
+ 
+ } // namespace Logger
+ } // namespace Utils
+diff --git a/src/Utils/Logger_djgpp.h b/src/Utils/Logger_djgpp.h
+new file mode 100644
+index 0000000..5f8a05f
+--- /dev/null
++++ b/src/Utils/Logger_djgpp.h
+@@ -0,0 +1,133 @@
++#ifndef _LOGGER_DJGPP_H
++#define _LOGGER_DJGPP_H
++
++// fmt-backed logger shim used in place of spdlog on DJGPP. spdlog itself is
++// non-viable on DJGPP for two reasons (per task #34's investigation):
++//
++//   * `SPDLOG_WCHAR_FILENAMES` is unconditionally enabled in vendored
++//     spdlog (deps/spdlog/tweakme.h:59) and pulls `<spdlog/fmt/xchar.h>`
++//     which references `std::fputws` and `std::wostream`. Neither is
++//     provided by DJGPP's libstdc++.
++//   * `std::mutex` is not instantiable on DJGPP 12.2.0 (gthreads support
++//     undefined) and spdlog's `_mt` sinks plus the global registry both
++//     instantiate it at static construction time. Switching to `_st` does
++//     not help — the registry singleton uses mutex unconditionally.
++//
++// This shim:
++//   * Keeps the LOG_TRACE / LOG_DEBUG / LOG_INFO / LOG_WARN / LOG_ERROR /
++//     LOG_CRITICAL macro surface identical to upstream's (fmt-style `{}`
++//     placeholders, variadic args). Existing call sites do not change.
++//   * Routes formatted lines to a per-process FILE* (set by Logger::init)
++//     plus stderr.
++//   * Provides minimal `spdlog::level` / `spdlog::set_*` stubs so that the
++//     remaining code in Logger.cpp's DJGPP branch can still talk in
++//     spdlog-shaped terms when convenient. The Logger.cpp init body is
++//     mostly `#ifdef __DJGPP__` carved out anyway.
++//
++// Behaviour deltas vs. upstream spdlog:
++//   * No async sink, no rotation, no per-thread tagging. NXEngine doesn't
++//     use any of these even on Linux/Windows.
++//   * Pattern hardcoded to `[HH:MM:SS] [LEVEL] message`. The
++//     `set_pattern(LOG_PATTERN)` call from Logger.cpp becomes a no-op.
++//   * No colour. NXEngine on DOS prints to a single stderr stream where
++//     ANSI escapes would be visible literal noise.
++
++#include <spdlog/fmt/fmt.h>
++
++#include <cstdio>
++#include <ctime>
++#include <iterator>
++#include <string>
++
++namespace NXE
++{
++namespace Utils
++{
++namespace Logger
++{
++
++// Storage for the open log file (or NULL if init() couldn't open it; in
++// that case we fall back to stderr-only). Defined in Logger.cpp.
++extern std::FILE *djgpp_log_fp;
++
++// Active level threshold. Calls below this level are short-circuited
++// before any formatting work. Defined in Logger.cpp; default = INFO.
++extern int djgpp_log_level;
++
++// Numeric level enums. Match spdlog::level::level_enum's ordering so the
++// stub set_level() below interoperates with existing call sites that pass
++// `spdlog::level::trace` etc.
++enum {
++    DJGPP_LOG_LEVEL_TRACE    = 0,
++    DJGPP_LOG_LEVEL_DEBUG    = 1,
++    DJGPP_LOG_LEVEL_INFO     = 2,
++    DJGPP_LOG_LEVEL_WARN     = 3,
++    DJGPP_LOG_LEVEL_ERROR    = 4,
++    DJGPP_LOG_LEVEL_CRITICAL = 5,
++    DJGPP_LOG_LEVEL_OFF      = 6
++};
++
++} // namespace Logger
++} // namespace Utils
++} // namespace NXE
++
++// Single internal macro used by all six level-tagged macros. The
++// do/while(0) wraps it as a single statement so it composes correctly
++// inside if/else without braces. The level check short-circuits before
++// any fmt formatting so disabled-level call sites are essentially free.
++#define DJGPP_LOG_(_lvl, _lvlname, ...)                                     \
++    do {                                                                    \
++        if ((_lvl) >= ::NXE::Utils::Logger::djgpp_log_level)                \
++        {                                                                   \
++            std::time_t _t = std::time(nullptr);                            \
++            std::tm *_tm   = std::localtime(&_t);                           \
++            fmt::memory_buffer _buf;                                        \
++            fmt::format_to(std::back_inserter(_buf),                        \
++                           "[{:02d}:{:02d}:{:02d}] [" _lvlname "] ",       \
++                           _tm->tm_hour, _tm->tm_min, _tm->tm_sec);        \
++            fmt::format_to(std::back_inserter(_buf), __VA_ARGS__);          \
++            _buf.push_back('\n');                                           \
++            if (::NXE::Utils::Logger::djgpp_log_fp)                         \
++            {                                                               \
++                std::fwrite(_buf.data(), 1, _buf.size(),                    \
++                            ::NXE::Utils::Logger::djgpp_log_fp);            \
++                std::fflush(::NXE::Utils::Logger::djgpp_log_fp);            \
++            }                                                               \
++            std::fwrite(_buf.data(), 1, _buf.size(), stderr);               \
++        }                                                                   \
++    } while (0)
++
++#define LOG_TRACE(...)    DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_TRACE,    "trace",    __VA_ARGS__)
++#define LOG_DEBUG(...)    DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_DEBUG,    "debug",    __VA_ARGS__)
++#define LOG_INFO(...)     DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_INFO,     "info",     __VA_ARGS__)
++#define LOG_WARN(...)     DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_WARN,     "warn",     __VA_ARGS__)
++#define LOG_ERROR(...)    DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_ERROR,    "error",    __VA_ARGS__)
++#define LOG_CRITICAL(...) DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_CRITICAL, "critical", __VA_ARGS__)
++
++// Minimal spdlog:: namespace stubs so Logger.cpp's existing init() body
++// can keep talking to `spdlog::set_level` / `spdlog::level::*` without an
++// `#ifdef` per call. Only the symbols Logger.cpp actually references are
++// stubbed; anything else triggers a normal compile error if accidentally
++// used.
++namespace spdlog
++{
++namespace level
++{
++    enum level_enum
++    {
++        trace    = ::NXE::Utils::Logger::DJGPP_LOG_LEVEL_TRACE,
++        debug    = ::NXE::Utils::Logger::DJGPP_LOG_LEVEL_DEBUG,
++        info     = ::NXE::Utils::Logger::DJGPP_LOG_LEVEL_INFO,
++        warn     = ::NXE::Utils::Logger::DJGPP_LOG_LEVEL_WARN,
++        err      = ::NXE::Utils::Logger::DJGPP_LOG_LEVEL_ERROR,
++        critical = ::NXE::Utils::Logger::DJGPP_LOG_LEVEL_CRITICAL,
++        off      = ::NXE::Utils::Logger::DJGPP_LOG_LEVEL_OFF
++    };
++} // namespace level
++
++inline void set_pattern(const std::string &)        {}            // pattern hardcoded above
++inline void set_level(level::level_enum lvl)        { ::NXE::Utils::Logger::djgpp_log_level = static_cast<int>(lvl); }
++inline void flush_on(level::level_enum)             {}            // we fflush per-line above
++} // namespace spdlog
++
++#endif // _LOGGER_DJGPP_H
+-- 
+2.47.3
+
