@@ -1,4 +1,4 @@
-From 88e4a82988f98efc6f18580a4c3b5e4c3520783e Mon Sep 17 00:00:00 2001
+From 82082a493f50ab7955f19ff3f5ffb02e748ae834 Mon Sep 17 00:00:00 2001
 From: DOSKUTSU NXEngine Port <services.claude@accounts.ecliptik.com>
 Date: Fri, 24 Apr 2026 17:59:16 -0700
 Subject: [PATCH] [DOSKUTSU] djgpp: replace spdlog with fmt-backed Logger shim
@@ -82,14 +82,14 @@ should reflect the expansion in patches/nxengine-evo/README.md when this
 lands. The patch is orthogonal to the SDL3 migration patches (0010-0018)
 — neither touches `src/Utils/`.
 ---
- src/Utils/Logger.cpp     |  41 ++++++++++--
+ src/Utils/Logger.cpp     |  44 ++++++++++--
  src/Utils/Logger.h       |  19 +++++-
- src/Utils/Logger_djgpp.h | 133 +++++++++++++++++++++++++++++++++++++++
- 3 files changed, 188 insertions(+), 5 deletions(-)
+ src/Utils/Logger_djgpp.h | 143 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 201 insertions(+), 5 deletions(-)
  create mode 100644 src/Utils/Logger_djgpp.h
 
 diff --git a/src/Utils/Logger.cpp b/src/Utils/Logger.cpp
-index f0ecf98..8e63fec 100644
+index f0ecf98..269a8b4 100644
 --- a/src/Utils/Logger.cpp
 +++ b/src/Utils/Logger.cpp
 @@ -1,8 +1,12 @@
@@ -107,7 +107,7 @@ index f0ecf98..8e63fec 100644
  #include <iostream>
  #include <memory>
  #include <string>
-@@ -13,11 +17,39 @@ namespace Utils
+@@ -13,11 +17,42 @@ namespace Utils
  {
  namespace Logger
  {
@@ -126,11 +126,14 @@ index f0ecf98..8e63fec 100644
    void init(std::string filename)
    {
 +#ifdef __DJGPP__
-+    // DJGPP path: open the log file in text mode so DOS gets CRLF line
-+    // endings (correct for log readers; nobody binary-reads log files).
-+    // If fopen fails we keep djgpp_log_fp == nullptr and the macros
-+    // silently fall back to stderr-only — log noise is still visible
-+    // even when the configured path can't be written.
++    // DOS-PORT: open the log file in text mode ("w", not "wb"). This is the
++    // legitimate exception to CLAUDE.md's "always 'rb' on DOS" rule — log
++    // output is line-oriented text where DOS's CRLF translation is desirable
++    // (notepad-style readers expect CRLF). Binary-mode here would make the
++    // log file look single-line in DOS text editors. If fopen fails we keep
++    // djgpp_log_fp == nullptr and the macros silently fall back to stderr-
++    // only — log noise stays visible even when the configured path can't
++    // be written.
 +    djgpp_log_fp = std::fopen(filename.c_str(), "w");
 +    if (!djgpp_log_fp)
 +    {
@@ -147,7 +150,7 @@ index f0ecf98..8e63fec 100644
      sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
      sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(widen(filename), true));
  
-@@ -30,10 +62,11 @@ namespace Logger
+@@ -30,10 +65,11 @@ namespace Logger
      });
  
      spdlog::flush_on(spdlog::level::debug);
@@ -205,10 +208,10 @@ index 8817961..a660e7e 100644
  } // namespace Utils
 diff --git a/src/Utils/Logger_djgpp.h b/src/Utils/Logger_djgpp.h
 new file mode 100644
-index 0000000..5f8a05f
+index 0000000..970fc44
 --- /dev/null
 +++ b/src/Utils/Logger_djgpp.h
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,143 @@
 +#ifndef _LOGGER_DJGPP_H
 +#define _LOGGER_DJGPP_H
 +
@@ -285,7 +288,17 @@ index 0000000..5f8a05f
 +// Single internal macro used by all six level-tagged macros. The
 +// do/while(0) wraps it as a single statement so it composes correctly
 +// inside if/else without braces. The level check short-circuits before
-+// any fmt formatting so disabled-level call sites are essentially free.
++// any fmt formatting so disabled-level call sites are essentially free
++// (one int compare, no allocation, no time() syscall, no formatting work).
++//
++// `##__VA_ARGS__` is the GCC extension that swallows the preceding comma
++// when __VA_ARGS__ is empty. Used here for robustness even though
++// NXEngine has no LOG_*() empty-args call sites today — keeps a future
++// `LOG_INFO()` stub from breaking the macro layer (it would still fail
++// at fmt::format_to time, same as spdlog's behaviour, but the
++// preprocessor stays happy). DJGPP gcc 12.2.0 supports `##__VA_ARGS__`;
++// using it instead of C++20 `__VA_OPT__` because our DJGPP build is
++// pinned to the C++11 standard per 0002-cmake-djgpp-target-flags.patch.
 +#define DJGPP_LOG_(_lvl, _lvlname, ...)                                     \
 +    do {                                                                    \
 +        if ((_lvl) >= ::NXE::Utils::Logger::djgpp_log_level)                \
@@ -296,7 +309,7 @@ index 0000000..5f8a05f
 +            fmt::format_to(std::back_inserter(_buf),                        \
 +                           "[{:02d}:{:02d}:{:02d}] [" _lvlname "] ",       \
 +                           _tm->tm_hour, _tm->tm_min, _tm->tm_sec);        \
-+            fmt::format_to(std::back_inserter(_buf), __VA_ARGS__);          \
++            fmt::format_to(std::back_inserter(_buf), ##__VA_ARGS__);        \
 +            _buf.push_back('\n');                                           \
 +            if (::NXE::Utils::Logger::djgpp_log_fp)                         \
 +            {                                                               \
@@ -308,12 +321,12 @@ index 0000000..5f8a05f
 +        }                                                                   \
 +    } while (0)
 +
-+#define LOG_TRACE(...)    DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_TRACE,    "trace",    __VA_ARGS__)
-+#define LOG_DEBUG(...)    DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_DEBUG,    "debug",    __VA_ARGS__)
-+#define LOG_INFO(...)     DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_INFO,     "info",     __VA_ARGS__)
-+#define LOG_WARN(...)     DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_WARN,     "warn",     __VA_ARGS__)
-+#define LOG_ERROR(...)    DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_ERROR,    "error",    __VA_ARGS__)
-+#define LOG_CRITICAL(...) DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_CRITICAL, "critical", __VA_ARGS__)
++#define LOG_TRACE(...)    DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_TRACE,    "trace",    ##__VA_ARGS__)
++#define LOG_DEBUG(...)    DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_DEBUG,    "debug",    ##__VA_ARGS__)
++#define LOG_INFO(...)     DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_INFO,     "info",     ##__VA_ARGS__)
++#define LOG_WARN(...)     DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_WARN,     "warn",     ##__VA_ARGS__)
++#define LOG_ERROR(...)    DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_ERROR,    "error",    ##__VA_ARGS__)
++#define LOG_CRITICAL(...) DJGPP_LOG_(::NXE::Utils::Logger::DJGPP_LOG_LEVEL_CRITICAL, "critical", ##__VA_ARGS__)
 +
 +// Minimal spdlog:: namespace stubs so Logger.cpp's existing init() body
 +// can keep talking to `spdlog::set_level` / `spdlog::level::*` without an
