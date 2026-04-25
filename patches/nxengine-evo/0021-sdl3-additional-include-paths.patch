@@ -1,0 +1,358 @@
+From c18773a196e1eb96251aea870065dcfc1d709bd4 Mon Sep 17 00:00:00 2001
+From: sdl-engine <sdl-engine@doskutsu.local>
+Date: Sat, 25 Apr 2026 11:24:12 -0700
+Subject: [PATCH] [DOSKUTSU] sdl3: convert remaining SDL2-style include paths
+ to SDL3-style
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Follow-up to patch 0010 (sdl3-mechanical-renames). 0010 covered the
+bulk SDL2→SDL3 API renames (SDL_RenderCopy → SDL_RenderTexture,
+SDL_FreeSurface → SDL_DestroySurface, etc.) but missed converting the
+SDL2-era include paths to SDL3-era include paths. Result: Phase 5
+attempt 3 hit `fatal error: SDL.h: No such file or directory` on
+`src/floattext.h:4` and likely several other sites that use #include
+<SDL.h> instead of the SDL3-prefixed #include <SDL3/SDL.h>.
+
+Numbered 0010a (alpha-suffix between 0010 and 0011) to keep 0010
+immutable — preserves nxengine's #30 review on the original 26 KB
+mechanical-renames patch. apply-patches.sh's lexical ordering picks
+up 0010a in sequence.
+
+================================================================
+What changed
+================================================================
+
+20 #include site conversions across 18 files in src/:
+
+  #include <SDL.h>            →  #include <SDL3/SDL.h>            (16 sites)
+  #include "SDL.h"            →  #include <SDL3/SDL.h>            (1 site, src/graphics/zoom.h —
+                                                                   normalized to angle-bracket form to
+                                                                   match every other include site)
+  #include <SDL_image.h>      →  #include <SDL3_image/SDL_image.h>  (2 sites)
+  #include <SDL_mixer.h>      →  #include <SDL3_mixer/SDL_mixer.h>  (1 site)
+
+Files touched (full list):
+  src/common/misc.cpp
+  src/console.cpp
+  src/debug.cpp
+  src/floattext.h           ← Phase 5 attempt 3's specific failure site
+  src/graphics/Font.cpp
+  src/graphics/Font.h
+  src/graphics/Renderer.cpp
+  src/graphics/Renderer.h
+  src/graphics/Surface.h
+  src/graphics/pngfuncs.h
+  src/graphics/types.h
+  src/graphics/zoom.h
+  src/input.h
+  src/main.cpp
+  src/niku.cpp
+  src/nx.h
+  src/profile.cpp
+  src/settings.cpp
+
+================================================================
+Why this slipped past 0010
+================================================================
+
+0010 (sdl3-mechanical-renames.patch, 26 KB) used regex-based
+identifier renames targeting SDL2 function/type/enum names
+(SDL_RenderCopy etc.). The include-path conversions are syntactically
+distinct — `#include <SDL.h>` doesn't contain any of the renamed
+identifiers, so the original sweep didn't catch them. Different
+search pattern, different sweep needed. Easy miss in retrospect.
+
+The audio cluster (0013-0017) caught its own audio-side includes
+(`#include <SDL_mixer.h>` in Pixtone.cpp, Organya.cpp, Ogg.cpp,
+SoundManager.h/cpp) because that work was scoped to src/sound/ and
+naturally rewrote those sites. The graphics + core .h/.cpp files
+outside src/sound/ were the gap.
+
+================================================================
+Why no behavioral change
+================================================================
+
+These are header-file location changes only. The SDL3 API surfaces
+the same types/functions through the SDL3-prefixed paths; no source
+code logic changes. Pure path rename.
+
+The vendor/SDL/include/SDL3/SDL.h header still re-exports the full
+SDL3 API (including the SDL_image and SDL_mixer companion libraries
+when their headers are also pulled in via the SDL3_image/, SDL3_mixer/
+prefixed paths). So all transitively-included symbols continue to
+resolve identically.
+
+================================================================
+Validation
+================================================================
+
+Build verification deferred to build-engineer's next `make nxengine`
+attempt (Phase 5 attempt 4). Expected: the floattext.h compile error
+goes away; if any further include paths are missing they'll surface
+as new "No such file or directory" errors at compile time and trigger
+a 0010b follow-up. Doesn't affect runtime behaviour either way —
+this is pure compile-time path resolution.
+---
+ src/common/misc.cpp       | 2 +-
+ src/console.cpp           | 2 +-
+ src/debug.cpp             | 2 +-
+ src/floattext.h           | 2 +-
+ src/graphics/Font.cpp     | 2 +-
+ src/graphics/Font.h       | 2 +-
+ src/graphics/Renderer.cpp | 4 ++--
+ src/graphics/Renderer.h   | 2 +-
+ src/graphics/Surface.h    | 2 +-
+ src/graphics/pngfuncs.h   | 2 +-
+ src/graphics/types.h      | 2 +-
+ src/graphics/zoom.h       | 2 +-
+ src/input.h               | 2 +-
+ src/main.cpp              | 4 ++--
+ src/niku.cpp              | 2 +-
+ src/nx.h                  | 2 +-
+ src/profile.cpp           | 2 +-
+ src/settings.cpp          | 2 +-
+ 18 files changed, 20 insertions(+), 20 deletions(-)
+
+diff --git a/src/common/misc.cpp b/src/common/misc.cpp
+index 8afd2c3..7d702a0 100644
+--- a/src/common/misc.cpp
++++ b/src/common/misc.cpp
+@@ -6,7 +6,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <ctype.h>
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #if defined(_WIN32)
+ #include <windows.h>
+ #endif
+diff --git a/src/console.cpp b/src/console.cpp
+index e7126be..4c2eb2c 100644
+--- a/src/console.cpp
++++ b/src/console.cpp
+@@ -23,7 +23,7 @@ using namespace NXE::Graphics;
+ #include <cstdarg>
+ #include <string>
+ #include <vector>
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ 
+ #include "sound/SoundManager.h"
+ #include "player.h"
+diff --git a/src/debug.cpp b/src/debug.cpp
+index 0a63df1..26cacbb 100644
+--- a/src/debug.cpp
++++ b/src/debug.cpp
+@@ -20,7 +20,7 @@
+ #include <stdarg.h>
+ #include <string>
+ #include <vector>
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ 
+ using namespace NXE::Graphics;
+ 
+diff --git a/src/floattext.h b/src/floattext.h
+index c5bf396..8a05c1d 100644
+--- a/src/floattext.h
++++ b/src/floattext.h
+@@ -1,7 +1,7 @@
+ #ifndef _FLOATTEXT_H
+ #define _FLOATTEXT_H
+ class Object;
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #define FT_Y_START -4 // this starts it exactly centered, since the font is 8px tall
+ #define FT_Y_HOLD -19
+ #define FT_Y_RISEAWAY (FT_Y_HOLD - 8)
+diff --git a/src/graphics/Font.cpp b/src/graphics/Font.cpp
+index 50e8942..b605d2f 100644
+--- a/src/graphics/Font.cpp
++++ b/src/graphics/Font.cpp
+@@ -9,7 +9,7 @@
+ #include "../game.h"
+ #include "../nx.h"
+ 
+-#include <SDL_image.h>
++#include <SDL3_image/SDL_image.h>
+ #include <json.hpp>
+ #include <utf8.h>
+ #include <fstream>
+diff --git a/src/graphics/Font.h b/src/graphics/Font.h
+index 27ae2fb..dd7285d 100644
+--- a/src/graphics/Font.h
++++ b/src/graphics/Font.h
+@@ -1,7 +1,7 @@
+ #ifndef _BMFONT_H
+ #define _BMFONT_H
+ 
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #include <map>
+ #include <string>
+ #include <vector>
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index ed57834..3f92b41 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -15,8 +15,8 @@
+ #endif
+ #include "../Utils/Logger.h"
+ 
+-#include <SDL.h>
+-#include <SDL_image.h>
++#include <SDL3/SDL.h>
++#include <SDL3_image/SDL_image.h>
+ #include <cstdlib>
+ #include <sstream>
+ #include <iomanip>
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index a5208a0..aa96092 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -8,7 +8,7 @@
+ #include "Tileset.h"
+ #include "Sprites.h"
+ 
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ 
+ 
+ namespace NXE
+diff --git a/src/graphics/Surface.h b/src/graphics/Surface.h
+index bafb6a8..134af9a 100644
+--- a/src/graphics/Surface.h
++++ b/src/graphics/Surface.h
+@@ -4,7 +4,7 @@
+ 
+ #include "../common/basics.h"
+ 
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #include <string>
+ #include "types.h"
+ 
+diff --git a/src/graphics/pngfuncs.h b/src/graphics/pngfuncs.h
+index 7f37e71..b768c71 100644
+--- a/src/graphics/pngfuncs.h
++++ b/src/graphics/pngfuncs.h
+@@ -21,7 +21,7 @@
+    you can find other examples on http://marsnomercy.org
+ */
+ 
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #include <string>
+ 
+ int png_save_surface(const std::string& filename, SDL_Surface *surf);
+diff --git a/src/graphics/types.h b/src/graphics/types.h
+index aa672ae..00fc0bc 100644
+--- a/src/graphics/types.h
++++ b/src/graphics/types.h
+@@ -2,7 +2,7 @@
+ #define _G_TYPES_H
+ 
+ #include <cstdint>
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ 
+ struct NXColor
+ {
+diff --git a/src/graphics/zoom.h b/src/graphics/zoom.h
+index cd492b4..f1febbe 100644
+--- a/src/graphics/zoom.h
++++ b/src/graphics/zoom.h
+@@ -1,7 +1,7 @@
+ #ifndef _ZOOM_H
+ #define _ZOOM_H
+ 
+-#include "SDL.h"
++#include <SDL3/SDL.h>
+ 
+ #include <math.h>
+ 
+diff --git a/src/input.h b/src/input.h
+index 54375dd..20c7f6a 100644
+--- a/src/input.h
++++ b/src/input.h
+@@ -1,7 +1,7 @@
+ 
+ #ifndef _INPUT_H
+ #define _INPUT_H
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #include <string>
+ 
+ typedef struct
+diff --git a/src/main.cpp b/src/main.cpp
+index ef005fd..972a766 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -20,8 +20,8 @@
+ #include "trig.h"
+ #include "tsc.h"
+ 
+-#include <SDL_mixer.h>
+-#include <SDL_image.h>
++#include <SDL3_mixer/SDL_mixer.h>
++#include <SDL3_image/SDL_image.h>
+ using namespace NXE::Graphics;
+ #include "ResourceManager.h"
+ #include "caret.h"
+diff --git a/src/niku.cpp b/src/niku.cpp
+index b4a9bdb..6676853 100644
+--- a/src/niku.cpp
++++ b/src/niku.cpp
+@@ -5,7 +5,7 @@
+ #include "Utils/Logger.h"
+ #include "ResourceManager.h"
+ 
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #include <cstdio>
+ #include <string>
+ 
+diff --git a/src/nx.h b/src/nx.h
+index ce44d2d..f31c051 100644
+--- a/src/nx.h
++++ b/src/nx.h
+@@ -2,7 +2,7 @@
+ #ifndef _NX_H
+ #define _NX_H
+ 
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+diff --git a/src/profile.cpp b/src/profile.cpp
+index 60f364c..458a7c7 100644
+--- a/src/profile.cpp
++++ b/src/profile.cpp
+@@ -6,7 +6,7 @@
+ #include "nx.h"
+ #include "tsc.h"
+ 
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #include <cstdlib>
+ #include <sstream>
+ #include <string>
+diff --git a/src/settings.cpp b/src/settings.cpp
+index 40213f8..a6bb719 100644
+--- a/src/settings.cpp
++++ b/src/settings.cpp
+@@ -6,7 +6,7 @@
+ #include "Utils/Logger.h"
+ #include "input.h"
+ 
+-#include <SDL.h>
++#include <SDL3/SDL.h>
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstdlib>
+-- 
+2.47.3
+
