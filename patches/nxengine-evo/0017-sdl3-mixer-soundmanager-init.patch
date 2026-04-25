@@ -1,0 +1,210 @@
+From 0a89391bf41ec950ab9dd841b625a318fe1729b3 Mon Sep 17 00:00:00 2001
+From: sdl-engine <sdl-engine@doskutsu.local>
+Date: Fri, 24 Apr 2026 18:04:26 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20sdl3-mixer:=20SoundManager=20init/?=
+ =?UTF-8?q?shutdown/pause/resume=20=E2=86=92=20MIX=5F*?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Foundation patch of the audio-refactor series (#31, planned 0013-0017).
+Replaces SoundManager's SDL2_mixer calls with their SDL3_mixer equivalents
+and exposes the singleton MIX_Mixer* through a public mixer() accessor so
+Pixtone/Organya/Ogg (patches 0013/0014/0015/0016) can attach their tracks
+to it.
+
+This patch alone DOES NOT produce a compiling tree — Pixtone, Organya, and
+Ogg still call SDL2_mixer Mix_* APIs that don't exist in SDL3_mixer. The
+'compiles + reaches title screen' milestone (per docs/SDL3-MIGRATION.md § 3)
+requires the full 0013-0017 series. Numbered as 0017 because it depends on
+no other audio-refactor patch (foundation), but is the last in apply-order
+because it changes the surface that earlier patches rely on.
+
+Specific changes:
+- SoundManager.h: switch include from <SDL_mixer.h> to <SDL3_mixer/SDL_mixer.h>;
+  add MIX_Mixer* mixer() public accessor; add private MIX_Mixer* _mixer member
+  (with a synchronous-only invariant warning per the cooperative-scheduler
+  constraint).
+- SoundManager.cpp init(): drop Mix_Init(MIX_INIT_OGG) (decoders are
+  registered at compile time in SDL3_mixer; we built with SDLMIXER_VORBIS_STB
+  and SDLMIXER_WAVE on); replace Mix_OpenAudioDevice/Mix_OpenAudio with
+  MIX_CreateMixerDevice + SDL_AudioSpec; drop Mix_AllocateChannels(64)
+  (SDL3_mixer has no fixed channel count — Pixtone manages its own
+  MIX_Track pool in patch 0014).
+- SoundManager.cpp shutdown(): MIX_DestroyMixer + MIX_Quit replace
+  Mix_CloseAudio + Mix_Quit.
+- SoundManager.cpp pause()/resume(): MIX_PauseAllTracks / MIX_ResumeAllTracks
+  replace Mix_Pause(-1) / Mix_Resume(-1).
+- SoundManager.cpp updateSfxVolume(): no-op with TODO(0014). SDL3_mixer's
+  volume API is per-track, not global; will be wired through Pixtone when
+  the track pool lands. Volume slider non-functional in the interim.
+
+DOS-PORT annotations added per docs/SDL3-MIGRATION.md § 4 (annotate
+decisions, not substitutions).
+---
+ src/sound/SoundManager.cpp | 73 ++++++++++++++++++++++++++++----------
+ src/sound/SoundManager.h   | 15 +++++++-
+ 2 files changed, 69 insertions(+), 19 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index d29b56e..43110d6 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -33,26 +33,41 @@ SoundManager *SoundManager::getInstance()
+ bool SoundManager::init()
+ {
+   LOG_INFO("Sound system init");
+-  if (Mix_Init(MIX_INIT_OGG) == -1)
+-  {
+-    LOG_ERROR("Unable to init mixer.");
+-    return false;
+-  }
+ 
+-#if SDL_MIXER_PATCHLEVEL >= 2
+-  if (Mix_OpenAudioDevice(SAMPLE_RATE, AUDIO_S16, 2, 4096, NULL, 0) == -1)
++  // DOS-PORT: SDL3_mixer registers decoders at compile time (we built it
++  // with SDLMIXER_VORBIS_STB=ON for stb_vorbis OGG, SDLMIXER_WAVE=ON for
++  // WAV; everything else OFF). The SDL2-era Mix_Init(MIX_INIT_OGG) gate
++  // is gone in SDL3_mixer's API — the MIX_Init() below takes no flags.
++  if (!MIX_Init())
+   {
+-    LOG_ERROR("Unable to open audio device.");
++    LOG_ERROR("Unable to init mixer: {}", SDL_GetError());
+     return false;
+   }
+-#else
+-  if (Mix_OpenAudio(SAMPLE_RATE, AUDIO_S16, 2, 2048) == -1)
++
++  // DOS-PORT: SDL3_mixer's mixer-creation API is MIX_CreateMixerDevice
++  // (with audio device) or MIX_CreateMixer (memory-only). The SDL2-era
++  // (rate, format, channels, samples) tuple is now an SDL_AudioSpec
++  // struct without the `samples` field — buffer sizing is automatic
++  // (or controlled via SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES).
++  SDL_AudioSpec spec;
++  SDL_zero(spec);
++  spec.format   = SDL_AUDIO_S16;
++  spec.channels = 2;
++  spec.freq     = SAMPLE_RATE;
++
++  _mixer = MIX_CreateMixerDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec);
++  if (!_mixer)
+   {
+-    LOG_ERROR("Unable to open audio device.");
++    LOG_ERROR("Unable to open audio device: {}", SDL_GetError());
++    MIX_Quit();
+     return false;
+   }
+-#endif
+-  Mix_AllocateChannels(64);
++
++  // DOS-PORT: Mix_AllocateChannels(64) is gone in SDL3_mixer — the new
++  // API has no fixed channel count. Tracks are created on-demand by
++  // Pixtone via MIX_CreateTrack(). The 64-channel cap is preserved by
++  // Pixtone's _slots[64] array; channel-pool-vs-on-demand decision is
++  // documented in docs/SDL3-MIGRATION.md § 3.
+ 
+   std::string path = ResourceManager::getInstance()->getPath("music_dirs.json", false);
+ 
+@@ -125,8 +140,14 @@ void SoundManager::shutdown()
+   Organya::getInstance()->shutdown();
+   Pixtone::getInstance()->shutdown();
+ 
+-  Mix_CloseAudio();
+-  Mix_Quit();
++  // DOS-PORT: SDL3_mixer's destroy is MIX_DestroyMixer(mixer); pairs with
++  // MIX_CreateMixerDevice. MIX_Quit() then unwinds the global state.
++  if (_mixer)
++  {
++    MIX_DestroyMixer(_mixer);
++    _mixer = nullptr;
++  }
++  MIX_Quit();
+   LOG_INFO("Sound system shutdown");
+ }
+ 
+@@ -306,7 +327,12 @@ void SoundManager::runFade()
+ 
+ void SoundManager::pause()
+ {
+-  Mix_Pause(-1);
++  // DOS-PORT: Mix_Pause(-1) ("pause all channels") becomes
++  // MIX_PauseAllTracks(mixer). All Pixtone tracks attached to our mixer
++  // pause; the music subsystems handle their own track separately below.
++  if (_mixer)
++    MIX_PauseAllTracks(_mixer);
++
+   switch (settings->new_music)
+   {
+     case 0:
+@@ -321,7 +347,11 @@ void SoundManager::pause()
+ 
+ void SoundManager::resume()
+ {
+-  Mix_Resume(-1);
++  // DOS-PORT: Mix_Resume(-1) → MIX_ResumeAllTracks(mixer). Mirror of
++  // pause() above.
++  if (_mixer)
++    MIX_ResumeAllTracks(_mixer);
++
+   switch (settings->new_music)
+   {
+     case 0:
+@@ -336,7 +366,14 @@ void SoundManager::resume()
+ 
+ void SoundManager::updateSfxVolume()
+ {
+-  Mix_Volume(-1, (int)(128. / 100. * (double)settings->sfx_volume));
++  // DOS-PORT: SDL3_mixer's volume API is per-track or per-tag (group),
++  // not a global "all channels" setter. SDL2's Mix_Volume(-1, int_0_128)
++  // becomes Pixtone iterating its track pool calling
++  // MIX_SetTrackGain(track, float_0_1) — wired in patch 0014. For now
++  // (foundation-only milestone), this is a no-op so audio still plays
++  // at full volume; SFX volume slider is non-functional until 0014.
++  // TODO(0014): Pixtone::getInstance()->setVolume(settings->sfx_volume);
++  (void)settings;
+ }
+ 
+ void SoundManager::updateMusicVolume()
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index 1845dc2..765e8ae 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -3,7 +3,7 @@
+ 
+ #include "../Singleton.h"
+ 
+-#include <SDL_mixer.h>
++#include <SDL3_mixer/SDL_mixer.h>
+ #include <cstdint>
+ #include <string>
+ #include <vector>
+@@ -137,6 +137,12 @@ public:
+   void updateSfxVolume();
+   std::vector<std::string> &music_dir_names();
+ 
++  // DOS-PORT: Public accessor to the singleton MIX_Mixer*. SDL3_mixer
++  // requires every track / decoder operation to be associated with a
++  // mixer instance. Pixtone, Organya, and Ogg use this to build their
++  // own MIX_Track + MIX_Audio handles. Returns nullptr before init().
++  MIX_Mixer *mixer() { return _mixer; }
++
+ protected:
+   friend class Singleton<SoundManager>;
+ 
+@@ -152,6 +158,13 @@ private:
+   void _start_ogg_track(int songno, bool resume, std::string dir);
+   void _reloadTrackList();
+ 
++  // DOS-PORT: SDL3_mixer Mixer singleton. Owned by SoundManager (created
++  // in init(), destroyed in shutdown()). Pixtone/Organya/Ogg attach their
++  // tracks to this. SDL3-DOS uses a cooperative scheduler — see
++  // docs/SDL3-MIGRATION.md § 3 — so the audio refactor stays SYNCHRONOUS;
++  // do not introduce worker threads accessing _mixer.
++  MIX_Mixer *_mixer     = nullptr;
++
+   uint32_t _lastSong    = 0;
+   uint32_t _lastSongPos = 0;
+   uint32_t _currentSong = 0;
+-- 
+2.47.3
+
