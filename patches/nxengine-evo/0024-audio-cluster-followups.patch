@@ -1,0 +1,209 @@
+From b06b2778d350abad79be434b8cdc21cbec9fb380 Mon Sep 17 00:00:00 2001
+From: Claude Code <noreply@anthropic.com>
+Date: Sat, 25 Apr 2026 12:03:00 -0700
+Subject: [PATCH] audio: post-attempt-8 cluster fixes (clamp, callback linkage,
+ opaque MIX_Audio)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 5 attempt 8 reached 96% of source files compiled cleanly. Three
+remaining errors, all in the audio cluster — folded into a single
+patch since they land together and bisect granularity is nominal:
+
+(1) Organya.cpp:260 — clamp() template deduction conflict
+    NXEngine's `template<class T> constexpr const T& clamp(T,T,T)`
+    deduces conflicting types from `clamp(int32_t&, int, int)` on DJGPP,
+    where `int32_t` is `long int` (not `int`). Same call site compiles
+    silently on glibc x86_64 because there `int32_t == int`. Fix:
+    explicit template arg `clamp<int32_t>(...)` pins deduction; the
+    integer literals 0/12 implicit-convert to the bound type.
+
+    This is a pre-existing latent bug in NXEngine — surfaced by the
+    DJGPP build, not introduced by the SDL3 migration. Flagging for
+    nxengine ratification post-merge; including inline because it
+    blocks compile and the fix is one line.
+
+(2) Organya.cpp:368 — extern vs static linkage mismatch
+    Introduced by 0015-sdl3-mixer-organya-track-callback. The
+    `friend void SDLCALL organyaStreamCallback(...)` declaration in
+    Organya.h's class body introduces the function at namespace
+    (NXE::Sound) scope with external linkage by default. The .cpp
+    definition's `static` qualifier set internal linkage,
+    contradicting the prior extern declaration. gcc rejects with
+    "declared 'extern' and later 'static'". Fix: drop `static` from
+    the .cpp definition. The callback is referenced only as a
+    function pointer to SDL_SetAudioStreamGetCallback; external
+    linkage has zero observable cost.
+
+(3) Pixtone.cpp:498,589 — opaque MIX_Audio struct
+    Introduced by 0014-sdl3-mixer-pixtone-decoder. SDL2_mixer's
+    Mix_Chunk exposed `abuf`/`alen` as public struct members; the
+    resample paths (playResampled and prepareResampled) read those to
+    feed SDL_AudioStream when materializing a rate-shifted copy.
+    SDL3_mixer's MIX_Audio is forward-declared opaque — no public
+    field accessors. Fix: add a non-owning alias `raw_master_buf` /
+    `raw_master_len` to the per-slot struct in Pixtone.h. _prepareToPlay
+    loads the SDL_malloc'd buffer into MIX_Audio with
+    free_when_done=false (mixer borrows; we own) and records the
+    pointer/length for the resample paths to read. shutdown() runs
+    MIX_DestroyAudio first (mixer releases borrow), then SDL_free()s
+    raw_master_buf. The resampled[] buffers don't need this — they're
+    terminal (never re-resampled) so they keep free_when_done=true.
+
+After this lands, attempt 9 should reach link. Link is the next gate;
+may surface another wave (symbol resolution against libSDL3 +
+libSDL3_mixer + libSDL3_image) or could clear cleanly.
+
+Authored-by: sdl-engine
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Organya.cpp | 22 +++++++++++++++++++---
+ src/sound/Pixtone.cpp | 36 +++++++++++++++++++++++++++++++++---
+ src/sound/Pixtone.h   | 13 +++++++++++++
+ 3 files changed, 65 insertions(+), 6 deletions(-)
+
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index c438f41..88827b6 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -257,7 +257,14 @@ void Song::Synth()
+     }
+ 
+     // Generate wave data. Calculate left & right volumes...
+-    const double pan = (panning_table[clamp(i.cur_pan, 0, 12)] - 256) * 10.0;
++    // DOS-PORT: explicit template arg required because on DJGPP `int32_t`
++    // is `long int` (not `int` like typical desktop), so `clamp(long_var,
++    // 0, 12)` produces a template-deduction conflict between `long int`
++    // and `int`. The `int32_t` template arg pins the deduction to one
++    // type and lets the integer literals 0/12 implicit-convert. Pre-
++    // existing latent bug surfaced by the Phase 5 build — same code on
++    // glibc x86_64 (where int32_t == int) compiled silently.
++    const double pan = (panning_table[clamp<int32_t>(i.cur_pan, 0, 12)] - 256) * 10.0;
+     double left = 1.0;
+     double right = 1.0;
+ 
+@@ -365,8 +372,17 @@ std::function<void(void *, uint8_t *, int)> musicCallback;
+ // reading SDL3_mixer's API docs more carefully and discovering RawCallback
+ // isn't a generator primitive. The new path keeps Organya internal S16
+ // (nxengine's correctness invariant) and is strictly cheaper at runtime.
+-static void SDLCALL organyaStreamCallback(void *userdata, SDL_AudioStream *stream,
+-                                          int additional_amount, int /*total_amount*/)
++// DOS-PORT: NOT `static` — the matching declaration in Organya.h is a
++// `friend` declaration inside the Organya class body, which introduces
++// the function at namespace scope (NXE::Sound) with external linkage by
++// default. Adding `static` here would set internal linkage on the
++// definition, contradicting the prior extern-by-default declaration
++// (gcc rejects with "declared 'extern' and later 'static'"). The
++// callback is referenced only as a function pointer passed to
++// SDL_SetAudioStreamGetCallback; external linkage has zero observable
++// cost and avoids the conflict.
++void SDLCALL organyaStreamCallback(void *userdata, SDL_AudioStream *stream,
++                                   int additional_amount, int /*total_amount*/)
+ {
+   if (additional_amount <= 0) return;
+ 
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 25b1b46..aada037 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -352,6 +352,18 @@ void Pixtone::shutdown()
+       MIX_DestroyAudio(_sound_fx[i].chunk);
+       _sound_fx[i].chunk = nullptr;
+     }
++    // DOS-PORT: master buffer is owned by us (free_when_done=false in
++    // _prepareToPlay); free it AFTER MIX_DestroyAudio releases the
++    // mixer's borrow. SDL_free pairs with the SDL_malloc in
++    // _prepareToPlay's _sound_buf allocation. resampled[] buffers are
++    // not aliased here — those use free_when_done=true and the mixer
++    // releases them in MIX_DestroyAudio above.
++    if (_sound_fx[i].raw_master_buf)
++    {
++      SDL_free(_sound_fx[i].raw_master_buf);
++      _sound_fx[i].raw_master_buf = nullptr;
++      _sound_fx[i].raw_master_len = 0;
++    }
+     for (int j = 0; j < NUM_RESAMPLED_BUFFERS; j++)
+     {
+       if (_sound_fx[i].resampled[j])
+@@ -495,7 +507,10 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+         LOG_ERROR("SDL_CreateAudioStream: {}", SDL_GetError());
+       }
+ 
+-      if (!SDL_PutAudioStreamData(stream, _sound_fx[slot].chunk->abuf, _sound_fx[slot].chunk->alen))
++      // DOS-PORT: feed the master buffer alias (raw_master_buf/raw_master_len)
++      // rather than chunk->abuf/alen. SDL3_mixer's MIX_Audio is opaque —
++      // see Pixtone.h's _sound_fx struct comment for the ownership model.
++      if (!SDL_PutAudioStreamData(stream, _sound_fx[slot].raw_master_buf, _sound_fx[slot].raw_master_len))
+       {
+         LOG_ERROR("SDL_PutAudioStreamData: {}", SDL_GetError());
+       }
+@@ -517,6 +532,9 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+       // (mixer, buf, len, &spec, free_when_done=true). NoCopy variant
+       // takes ownership of the SDL_malloc'd buffer — matches SDL2_mixer's
+       // QuickLoad ownership semantics and avoids a redundant memcpy.
++      // (Resampled buffers are terminal — never re-resampled — so
++      // free_when_done=true is correct here. Master chunk is the
++      // exception, see _prepareToPlay.)
+       MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
+       SDL_AudioSpec audio_spec = { SDL_AUDIO_S16, 2, (int)resampled_rate };
+       _sound_fx[slot].resampled[rslot] = MIX_LoadRawAudioNoCopy(mixer, sound_buf, converted_len, &audio_spec, true);
+@@ -586,7 +604,8 @@ int Pixtone::prepareResampled(int32_t slot, uint32_t percent)
+         LOG_ERROR("SDL_CreateAudioStream: {}", SDL_GetError());
+       }
+ 
+-      if (!SDL_PutAudioStreamData(stream, _sound_fx[slot].chunk->abuf, _sound_fx[slot].chunk->alen))
++      // DOS-PORT: see playResampled() comment on the master-buffer alias.
++      if (!SDL_PutAudioStreamData(stream, _sound_fx[slot].raw_master_buf, _sound_fx[slot].raw_master_len))
+       {
+         LOG_ERROR("SDL_PutAudioStreamData: {}", SDL_GetError());
+       }
+@@ -678,9 +697,20 @@ void Pixtone::_prepareToPlay(stPXSound *snd, int32_t slot)
+ 
+   // DOS-PORT: see playResampled() for MIX_LoadRawAudioNoCopy rationale.
+   // Master chunk is at SAMPLE_RATE stereo S16 (post-CVT-to-AudioStream).
++  //
++  // free_when_done=false here (different from the resampled[] buffers in
++  // playResampled / prepareResampled): the resample paths need to RE-feed
++  // this raw buffer through SDL_AudioStream when materializing a new
++  // rate-shifted copy, but SDL3_mixer's MIX_Audio is opaque (no abuf/alen
++  // accessors). We hold the buffer ourselves, lend it to the mixer, and
++  // free it explicitly in shutdown() AFTER MIX_DestroyAudio releases the
++  // borrow. The resampled[] buffers don't need this dance — they're
++  // terminal (never re-resampled), so they keep free_when_done=true.
+   MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
+   SDL_AudioSpec audio_spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
+-  _sound_fx[slot].chunk = MIX_LoadRawAudioNoCopy(mixer, sound_buf, converted_len, &audio_spec, true);
++  _sound_fx[slot].chunk           = MIX_LoadRawAudioNoCopy(mixer, sound_buf, converted_len, &audio_spec, false);
++  _sound_fx[slot].raw_master_buf  = sound_buf;
++  _sound_fx[slot].raw_master_len  = converted_len;
+ }
+ 
+ } // namespace Sound
+diff --git a/src/sound/Pixtone.h b/src/sound/Pixtone.h
+index 76a9474..cde52bb 100644
+--- a/src/sound/Pixtone.h
++++ b/src/sound/Pixtone.h
+@@ -127,6 +127,19 @@ private:
+     MIX_Audio *resampled[NUM_RESAMPLED_BUFFERS] = {NULL};
+     uint32_t resampled_rate[NUM_RESAMPLED_BUFFERS]  = {SAMPLE_RATE};
+     int32_t channel          = -1;  // index into _track_pool when busy; -1 when idle
++    // DOS-PORT: SDL2_mixer's Mix_Chunk exposed `abuf`/`alen` as public
++    // struct members; the resample paths (Pixtone::playResampled and
++    // Pixtone::prepareResampled) read those to feed SDL_AudioStream when
++    // building rate-shifted copies. SDL3_mixer's MIX_Audio is opaque —
++    // forward-declared with no public field access. We work around by
++    // keeping our own non-owning alias of the master buffer and length:
++    // _prepareToPlay loads the SDL_malloc'd buffer into MIX_Audio with
++    // free_when_done=false (the mixer borrows; we own), records the
++    // pointer here, and the resample paths read from it. shutdown() is
++    // responsible for SDL_free()ing raw_master_buf AFTER MIX_DestroyAudio
++    // has released the mixer's borrow on it.
++    uint8_t *raw_master_buf  = nullptr;
++    int      raw_master_len  = 0;
+   } _sound_fx[256];
+   int32_t _slots[PIXTONE_TRACK_POOL_SIZE];
+ 
+-- 
+2.47.3
+
