@@ -339,7 +339,7 @@ MINSTACK := 2048k
 .PHONY: nxengine
 nxengine: $(BUILD_DIR)/doskutsu.exe
 
-$(BUILD_DIR)/doskutsu.exe: $(SYSROOT)/lib/libSDL2_mixer.a $(SYSROOT)/lib/libSDL2_image.a
+$(BUILD_DIR)/doskutsu.exe: $(SYSROOT)/lib/libSDL3_mixer.a $(SYSROOT)/lib/libSDL3_image.a
 	@test -d "$(NXENGINE_SRC)" || (echo "error: $(NXENGINE_SRC) not present" >&2; exit 1)
 	cmake -S $(NXENGINE_SRC) -B $(NXENGINE_BUILD) $(CMAKE_COMMON)
 	cmake --build $(NXENGINE_BUILD) -j$(NPROC)
