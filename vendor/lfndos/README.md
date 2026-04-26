@@ -1,6 +1,6 @@
 # vendor/lfndos/
 
-**LFNDOS** is a TSR (Terminate and Stay Resident) driver that adds the Windows 95 long-filename API (`INT 21h` function family `7140h-71A8h`) to plain MS-DOS 6.22, where it doesn't exist natively. We vendor it to use as the *primary candidate* for Phase 8's LFN strategy (see `docs/PHASE8-LFN-DECISION.md`) and as the loaded driver for the DPMI propagation probe at `tests/dpmi-lfn-smoke/`.
+**LFNDOS** is a TSR (Terminate and Stay Resident) driver that adds the Windows 95 long-filename API (`INT 21h` function family `7140h-71A8h`) to plain MS-DOS 6.22, where it doesn't exist natively. We vendor it as the *primary candidate* LFN driver and as the loaded driver for the DPMI propagation probe at `tests/dpmi-lfn-smoke/`.
 
 ## Expected files
 
@@ -11,7 +11,7 @@ COPYING       Full text of the GNU General Public License, Version 2 — require
 lfndos.lsm    FreeDOS Linux Software Map metadata — declares the license + provenance
 ```
 
-All four files are **tracked in git** (the `.gitignore` has explicit exceptions) — this matches the `vendor/cwsdpmi/` precedent. The build's `dist` target may eventually depend on them being present at known paths if the Phase 8 g2k probe (`tests/dpmi-lfn-smoke/probe.exe`) confirms LFNDOS-via-CWSDPMI works under real DOS.
+All four files are **tracked in git** (the `.gitignore` has explicit exceptions) — this matches the `vendor/cwsdpmi/` precedent. The build's `dist` target may eventually depend on them being present at known paths if real-hardware testing confirms LFNDOS-via-CWSDPMI works under real DOS.
 
 ## How to obtain
 
@@ -42,7 +42,7 @@ GPLv2 redistribution requires:
 
 The doskutsu repo's `LICENSE` (MIT) is **not** changed by vendoring LFNDOS — `LFNDOS.EXE` is a standalone runtime binary, not linked into `DOSKUTSU.EXE`. GPLv2 LFNDOS + GPLv3 DOSKUTSU.EXE in the same archive is **mere aggregation** per the GNU GPL FAQ (the license stays scoped to its own file).
 
-See `docs/PHASE8-LFN-DECISION.md` § "License clarification follow-up — 2026-04-25" for the full reasoning that established LFNDOS as the primary LFN-TSR candidate.
+LFNDOS is the primary LFN-TSR candidate based on its explicit GPLv2 declaration; DOSLFN at `vendor/doslfn/` is the fallback for environments where LFNDOS doesn't load.
 
 ## Why this is not in the build graph
 
@@ -52,4 +52,4 @@ See `docs/PHASE8-LFN-DECISION.md` § "License clarification follow-up — 2026-0
 
 Two reasons:
 1. The Phase 8 DPMI-propagation probe (`tests/dpmi-lfn-smoke/`) needs LFNDOS.COM to load as a TSR before the probe runs, in order to exercise the actual question being tested. Without a vendored copy, the probe runner would have to fetch LFNDOS at test time — a network round-trip every CI run, fragile.
-2. If/when Phase 8 confirms LFNDOS works under DPMI on g2k, `make dist` will need to bundle LFNDOS.EXE + LFNDOS.DOC + COPYING into `dist/doskutsu-cf.zip` so end users don't have to track down a separate driver. Vendoring now means that step is one Makefile line away when the time comes.
+2. If/when real-hardware testing confirms LFNDOS works under DPMI, `make dist` will need to bundle LFNDOS.EXE + LFNDOS.DOC + COPYING into `dist/doskutsu-cf.zip` so end users don't have to track down a separate driver. Vendoring now means that step is one Makefile line away when the time comes.

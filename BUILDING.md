@@ -2,8 +2,6 @@
 
 Step-by-step guide for building `DOSKUTSU.EXE` from source on a Linux dev host, testing it in DOSBox-X, and deploying to a Pentium-era DOS machine.
 
-For the plan behind *why* each stage is structured the way it is, see [PLAN.md](./PLAN.md). For licensing implications of the build output, see [PLAN.md § Licensing](./PLAN.md#licensing).
-
 ---
 
 ## Prerequisites
@@ -73,7 +71,7 @@ This clones the upstreams listed in `vendor/sources.manifest` at the pinned SHAs
 - `vendor/SDL_mixer/` — libsdl-org/SDL_mixer release-3.2.x (SDL3-track)
 - `vendor/SDL_image/` — libsdl-org/SDL_image release-3.2.x (SDL3-track)
 - `vendor/nxengine-evo/` — nxengine/nxengine-evo master
-- `vendor/sdl2-compat/` — libsdl-org/sdl2-compat main (cloned but **not built** post-Path-B; retained per `PLAN.md § Plan Amendments § 2026-04-24`)
+- `vendor/sdl2-compat/` — libsdl-org/sdl2-compat main (cloned but **not built**; retained for reference)
 
 All five directories are gitignored; only `vendor/sources.manifest` and `vendor/cwsdpmi/` are tracked.
 
@@ -89,7 +87,7 @@ Applies every `patches/<name>/*.patch` to `vendor/<name>/` in lexical order. Re-
 
 ## Build
 
-The top-level `Makefile` orchestrates four stages (post-Path-B; see `PLAN.md § Plan Amendments § 2026-04-24` for why sdl2-compat dropped out of the build line):
+The top-level `Makefile` orchestrates four stages:
 
 ```bash
 make sdl3          # SDL3 static library (with DOS backend), installs into build/sysroot/
@@ -184,7 +182,7 @@ This runs the binary under `dosbox-x -silent -exit`, captures its stdout to `STD
 
 | Config | `cycles` | Purpose |
 |---|---|---|
-| `tools/dosbox-x.conf` | `fixed 40000` | **Parity** with Pentium OverDrive 83 MHz (PODP83). Use for Phase 7 playtest gate, audio-dropout investigations, anything where real-HW-equivalent timing matters. |
+| `tools/dosbox-x.conf` | `fixed 40000` | **Parity** with Pentium-class hardware. Use for playtest gate, audio-dropout investigations, anything where real-HW-equivalent timing matters. |
 | `tools/dosbox-x-fast.conf` | `max` | **Fast iteration.** Use when you're debugging logic / UI / crash bugs and just want to get to the repro state quickly. Do not use for performance judgments — 4-8x faster than real HW. |
 
 Both configs are otherwise identical: 48 MB RAM, SB16 on IRQ 5 / DMA 1/5 / base 220, VESA SVGA (`svga_s3` machine), `quit warning = false`.
@@ -221,10 +219,6 @@ make install CF=/mnt/cf
 
 Copies the same payload to `$CF/DOSKUTSU/`. If Cave Story data is present at `data/base/` at install time, the Makefile also copies it to `$CF/DOSKUTSU/DATA/BASE/` — for convenience only, not legal redistribution (the copy is happening on your own CF card, not being uploaded anywhere).
 
-### Deploy to the g2k target via the sibling repo
-
-The g2k machine (Gateway 2000 Pentium OverDrive) has its own repo with `scripts/push-to-card.sh` and `sync-manifest.txt`. Add `C:\DOSKUTSU\*` paths to `sync-manifest.txt`, commit, push, and run `scripts/push-to-card.sh --go`. See [docs/BOOT.md](./docs/BOOT.md) for the g2k-side boot profile.
-
 ---
 
 ## Common errors
@@ -251,15 +245,15 @@ DJGPP defaults to text mode. Always `fopen(path, "rb")` for binary files (sprite
 
 ### VESA mode fails on real hardware but works in DOSBox-X
 
-Real VESA BIOSes vary. On the g2k (ATI Mach64), the vendor VBE `M64VBE.COM` must be loaded before `DOSKUTSU.EXE`. UNIVBE is a fallback but often slower. The SDL3 DOS backend probes for VBE 1.2+ linear framebuffer; older VBE 1.0 cards are unsupported.
+Real VESA BIOSes vary. If the on-board BIOS doesn't expose VBE 1.2+, load a vendor VBE driver (e.g. `M64VBE.COM` for ATI Mach64, `S3VBE` for S3 cards) before `DOSKUTSU.EXE`. UNIVBE is a generic fallback but often slower. The SDL3 DOS backend probes for VBE 1.2+ linear framebuffer; older VBE 1.0 cards are unsupported.
 
 ### Audio plays but is garbled / wrong speed
 
-`BLASTER` environment variable mismatch. SB16 / Vibra16S expects `A220 I5 D1 H5 T6`. Check `SET` output on the target. The SDL3 DOS backend reads `BLASTER` at init.
+`BLASTER` environment variable mismatch. SB16-compatible cards typically expect `A220 I5 D1 H5 T6` or similar. Check `SET` output on the target. The SDL3 DOS backend reads `BLASTER` at init.
 
 ### Framerate drops / audio stutters in Mimiga Village
 
-Organya synth CPU cost at 22050 stereo is the likely culprit. Fallback is `Mix_OpenAudio(11025, AUDIO_S16SYS, 1, 2048)` — matches Cave Story's original 2004 spec. This is a Phase 9 performance tuning step.
+Organya synth CPU cost at 22050 stereo is the likely culprit. Fallback is `Mix_OpenAudio(11025, AUDIO_S16SYS, 1, 2048)` — matches Cave Story's original 2004 spec.
 
 ### `make distclean` removed my Cave Story data
 

@@ -45,9 +45,9 @@ Two paths to fix were considered and rejected:
 2. **Wait for DOSBox-X / DJGPP to support `2>&1`.** DJGPP's argv-level
    redirection is real but only kicks in for tokens left after COMMAND.COM
    parsing — and DOSBox's shell consumes `2>` first. Even if we worked around
-   it, MS-DOS 6.22 on g2k won't behave the same, so the gate would break on
-   real hardware anyway. Shell-agnostic capture is the only future-proof
-   answer.
+   it, MS-DOS 6.22 on real hardware won't behave the same, so the gate would
+   break on real hardware anyway. Shell-agnostic capture is the only future-
+   proof answer.
 
 So we author this small probe in our own tree (MIT, doskutsu-only), call the
 same public SDL3 APIs the upstream tests do, and write to stdout via printf.
@@ -107,11 +107,11 @@ cat build/sdl3-smoke/sdltest.log               # full capture
 cat tests/fixtures/sdl3-modes-dosbox.txt       # Phase 8 baseline (committed)
 ```
 
-## Phase 8 baseline (`tests/fixtures/sdl3-modes-dosbox.txt`)
+## Real-hardware baseline (`tests/fixtures/sdl3-modes-dosbox.txt`)
 
 Committed snapshot of the probe's output under `tools/dosbox-x.conf`
-(parity config). The Phase 8 real-hardware engineer runs the same
-`sdltest.exe` on g2k under the `[VIBRA]` profile and diffs the captures.
-Differences in the VESA mode list, SB device naming, or display bounds are
-the early-warning signal that PR #15377's DOS backend behaves differently
-on a real Mach64 than under DOSBox-X's emulation.
+(parity config). For real-hardware testing, run the same `sdltest.exe`
+on the target machine and diff against this fixture. Differences in the
+VESA mode list, SB device naming, or display bounds are the early-
+warning signal that PR #15377's DOS backend behaves differently on real
+hardware than under DOSBox-X's emulation.

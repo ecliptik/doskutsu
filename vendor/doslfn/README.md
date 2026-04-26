@@ -17,10 +17,10 @@ All four are **tracked in git** (the `.gitignore` has explicit exceptions). Same
 
 ## Which binary to use
 
-- **`doslfnms.com`**: prefer this on real MS-DOS 6.22 (g2k). Built specifically for the MS-DOS environment per the upstream's `tasm doslfn.asm,doslfn%1.obj,doslfn%1.lst` build with `%1=ms`. Smaller (20 KB) and avoids any FreeDOS-specific code paths that MS-DOS doesn't expose.
+- **`doslfnms.com`**: prefer this on real MS-DOS 6.22. Built specifically for the MS-DOS environment per the upstream's `tasm doslfn.asm,doslfn%1.obj,doslfn%1.lst` build with `%1=ms`. Smaller (20 KB) and avoids any FreeDOS-specific code paths that MS-DOS doesn't expose.
 - **`doslfn.com`**: the FreeDOS-default build. Use under DOSBox-X / FreeDOS / DR-DOS / DOSEMU. Broader environment detection.
 
-The probe runner (`tests/run-dpmi-lfn-smoke.sh --variant tsr-doslfn`) defaults to `doslfn.com` for DOSBox-X testing; the g2k operator step in `tests/dpmi-lfn-smoke/README.md` recommends `doslfnms.com`.
+The probe runner (`tests/run-dpmi-lfn-smoke.sh --variant tsr-doslfn`) defaults to `doslfn.com` for DOSBox-X testing; the real-hardware operator step in `tests/dpmi-lfn-smoke/README.md` recommends `doslfnms.com`.
 
 ## How to obtain
 
@@ -42,11 +42,11 @@ Verify:
 
 DOSLFN is **"Freeware w/sources"** per its FreeDOS LSM, with explicit reference to `https://en.wikipedia.org/wiki/License-free_software`. The upstream `github.com/adoxa/doslfn` repo has no `LICENSE` / `COPYING` file (verified 2026-04-25 via the GitHub contents API), so the FreeDOS LSM is the canonical declaration we lean on. FreeDOS's package vetting concluded redistribution is safe; that's what we cite.
 
-This is meaningfully weaker evidence than LFNDOS's explicit GPLv2 — which is why LFNDOS is the primary recommendation in `docs/PHASE8-LFN-DECISION.md`. We vendor DOSLFN here as the empirically-tested fallback for environments where LFNDOS doesn't load (notably DOSBox-X). If real-HW Phase B testing on g2k confirms LFNDOS works there, DOSLFN can be dropped from the dist zip later.
+This is meaningfully weaker evidence than LFNDOS's explicit GPLv2 — which is why LFNDOS is the primary recommendation. We vendor DOSLFN here as the empirically-tested fallback for environments where LFNDOS doesn't load (notably DOSBox-X). If real-hardware testing confirms LFNDOS works there, DOSLFN can be dropped from the dist zip later.
 
 The doskutsu repo's `LICENSE` (MIT) is unchanged by vendoring DOSLFN — it's a standalone TSR, not linked into `DOSKUTSU.EXE`. Ships in `dist/doskutsu-cf.zip` (when shipped) under "mere aggregation" semantics, alongside (not combined with) the GPLv3 binary.
 
-See `docs/PHASE8-LFN-DECISION.md` § "License clarification follow-up — 2026-04-25" for the full reasoning that established DOSLFN as the fallback LFN-TSR candidate.
+DOSLFN is the fallback LFN-TSR candidate; LFNDOS at `vendor/lfndos/` is primary based on its stronger license declaration.
 
 ## Why two binary variants
 

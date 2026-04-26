@@ -115,8 +115,6 @@ DOSKUTSU runs under any DJGPP-compatible DOS boot profile with:
 - VESA 1.2+ video BIOS (UNIVBE works as a fallback)
 - CTMOUSE or equivalent INT 33h mouse driver (optional — keyboard-only play is fully supported)
 
-See [docs/BOOT.md](./docs/BOOT.md) for the full reference profile and common pitfalls.
-
 ## Acknowledgments
 
 - **[Cave Story / Doukutsu Monogatari](https://www.cavestory.org/)** by Daisuke "Pixel" Amaya (2004) — freeware, redistributed per Pixel's original terms
@@ -148,4 +146,4 @@ The `DOSKUTSU.EXE` binary is GPLv3 as a combined work because it statically link
 | CWSDPMI | freeware, redistribution permitted with bundled `CWSDPMI.DOC` | No — separate executable shipped alongside |
 | Cave Story game data | freeware per Pixel's 2004 terms | No — user-extracted, not redistributed in this repo |
 
-See [THIRD-PARTY.md](./THIRD-PARTY.md) for full attribution and [PLAN.md § Licensing](./PLAN.md#licensing) for the full compatibility analysis.
+See [THIRD-PARTY.md](./THIRD-PARTY.md) for full attribution.

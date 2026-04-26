@@ -1,6 +1,6 @@
 # Cave Story Game Assets
 
-DOSKUTSU requires the Cave Story game data (maps, sprites, music, dialogue) at runtime. **These are not redistributed in this repository** — they are freeware-licensed by Daisuke "Pixel" Amaya under his 2004 terms, but we keep them out of the repo and out of `dist/doskutsu-cf.zip` to avoid licensing ambiguity (see [PLAN.md § Licensing](../PLAN.md#licensing)).
+DOSKUTSU requires the Cave Story game data (maps, sprites, music, dialogue) at runtime. **These are not redistributed in this repository** — they are freeware-licensed by Daisuke "Pixel" Amaya under his 2004 terms, but we keep them out of the repo and out of `dist/doskutsu-cf.zip` to avoid licensing ambiguity.
 
 This document tells you how to obtain and extract the assets yourself, and where DOSKUTSU expects to find them.
 
@@ -231,10 +231,8 @@ as the last extraction step. The full rename map:
 
 Mod compatibility note: Cave Story mods that ship their own canonical
 long-named assets (the modding scene's convention since 2004) won't load
-under DOSKUTSU on real DOS without renaming. Decision: 8.3-only for
-now; revisit at task #10 (mod stretch) with a possible
-ResourceManager-fallback layer that tries both 8.3 and long names. See
-`docs/PHASE8-LFN-RENAME-PLAN.md` for the full reasoning.
+under DOSKUTSU on real DOS without renaming. The current decision is
+8.3-only; mod-side compatibility may be revisited later.
 
 ---
 

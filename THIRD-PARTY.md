@@ -1,6 +1,6 @@
 # Third-Party Components
 
-Complete attribution and license matrix for everything DOSKUTSU touches, vendors, or ships. Kept in sync with `vendor/sources.manifest` and `PLAN.md § Licensing`.
+Complete attribution and license matrix for everything DOSKUTSU touches, vendors, or ships. Kept in sync with `vendor/sources.manifest`.
 
 ---
 
@@ -75,7 +75,7 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 - **Source:** https://github.com/nxengine/nxengine-evo
 - **Pinned ref:** `master` @ `1f093d1423cc395eb199230cd609b806ef1daa36` (per `vendor/sources.manifest`)
 - **Role:** Cave Story engine re-implementation in C++11. Statically linked into `DOSKUTSU.EXE`.
-- **Modifications:** DOS-port patches in `patches/nxengine-evo/*.patch` (see `TODO.md` Phase 5 for the full list)
+- **Modifications:** DOS-port patches in `patches/nxengine-evo/*.patch`
 - **Redistribution:** GPLv3 terms — we include `vendor/nxengine-evo/LICENSE` as `GPLV3.TXT` in `dist/doskutsu-cf.zip` and point to this repo for corresponding source
 
 ### SDL3

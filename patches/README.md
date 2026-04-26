@@ -77,6 +77,6 @@ git format-patch <pinned-sha>..HEAD -o ../../patches/nxengine-evo/
 
 ## License implications
 
-Patches against GPLv3 upstreams (`nxengine-evo`) are **derivative works and therefore GPLv3**, regardless of this repo's MIT `LICENSE`. This is not a conflict: the MIT `LICENSE` correctly describes our original non-derivative source (Makefile, scripts, docs, port glue), and the patches inherit GPLv3 by operation of copyright law. See `THIRD-PARTY.md` and `PLAN.md § Licensing`.
+Patches against GPLv3 upstreams (`nxengine-evo`) are **derivative works and therefore GPLv3**, regardless of this repo's MIT `LICENSE`. This is not a conflict: the MIT `LICENSE` correctly describes our original non-derivative source (Makefile, scripts, docs, port glue), and the patches inherit GPLv3 by operation of copyright law. See `THIRD-PARTY.md`.
 
 Patches against zlib-licensed upstreams (`SDL`, `sdl2-compat`, `SDL_mixer`, `SDL_image`) are **derivatives of zlib-licensed code and therefore zlib-licensed**. More permissive than MIT; no conflict.
