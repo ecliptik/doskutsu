@@ -1,0 +1,199 @@
+From e4b2a61940952cc08a3e102fa120da0e96973638 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 16:06:35 -0700
+Subject: [PATCH] [doskutsu] diag: per-drawcall timing + dimension log +
+ flip-block tally
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 2 §3.2.1 / §3.2.2 (patch 0042). Brackets the two
+SDL_RenderTexture* call sites in Renderer::drawSurface /
+drawSurfaceMirrored with SDL_GetTicks reads to measure wall-time per
+drawcall, and logs src/dst rect dimensions alongside the timing so the
+distribution audit (one big sprite vs death by 340 small 32x32s) falls
+out of the same data. A per-flip-block running tally flushed every 100
+flips bundles the aggregate so we have totals without grepping every
+sample line.
+
+Why DOS needs this:
+On real HW (Mach64 + PODP83) we can measure SDL_RenderPresent (~2-3 s
+per flip from patch 0039) but the per-drawcall cost is inferred -- 340
+calls at unknown ms-each is a hole the lever 2 fix can't be sized
+against. The DOSBox-X numbers don't transfer for framebuffer flush per
+the dosbox-not-perf-proxy memory note, but per-drawcall CPU work
+(palette lookup + INDEX8 -> RGB565 conversion in pure C, no SIMD on
+P54C) does scale with the cycles knob -- so DOSBox-X parity is a valid
+proxy for this measurement specifically. Direct numbers let us pick
+between Approach A (SDL_BlitSurface), B (hand-rolled per-format inner
+loop), and C (pre-converted sprites) intelligently.
+
+Sampling: log first 10 calls per call-site (so we see the warm-up
+shape even at <1 fps real-HW) then every 1000th to bound log volume.
+Per-site indexing keeps drawSurface and drawSurfaceMirrored
+independent. The block tally fires every 100 flips alongside the
+existing flip-probe cadence (patch 0031), so the new diagnostic shares
+the existing summary rhythm and stays bounded even on a 30 min
+gameplay capture.
+
+LOG_INFO (not LOG_DEBUG): release builds default to info-level (see
+Logger.cpp:53), so debug-level messages would never reach DEBUG.LOG.
+Patch 0036's per-line fsync makes mid-run reads viable on both
+DOSBox-X and real HW.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 110 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 108 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 5ffa40a..c756172 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -76,12 +76,105 @@ int _flip_failed = 0;
+ int _drawcalls_since_flip = 0;
+ int _drawcalls_total = 0;
+ 
++// Per-drawcall timing diagnostic (Phase 9 lever 2 §3.2.1 / §3.2.2; patch
++// 0042). On real HW the present_ms cost is known (~2-3 s/flip) but the
++// drawcall cost is inferred. We need direct measurements to know whether
++// one big sprite dominates or it's death by 340 small 32x32 ones, AND a
++// dimension histogram so we can size the lever 2 fix correctly.
++//
++// Sampling: log first 10 calls per call-site so we see the warm-up shape,
++// then every 1000th to bound the log volume (340 drawcalls/flip × <1 fps
++// real-HW means even every-1000th gives us ~3 lines/min). A running tally
++// flushed every 100 flips bundles the aggregate so we have totals without
++// reading every line.
++constexpr int _dc_log_first_n = 10;
++constexpr int _dc_log_every = 1000;
++constexpr int _dc_tally_every_flips = 100;
++int _dc_call_idx_normal = 0;   // for SDL_RenderTexture site
++int _dc_call_idx_rotated = 0;  // for SDL_RenderTextureRotated site
++Uint64 _dc_total_ms_block = 0; // sums over the current tally window
++int _dc_count_block = 0;
++int _dc_block_idx = 0;
++
+ void _bump_drawcall()
+ {
+   ++_drawcalls_since_flip;
+   ++_drawcalls_total;
+ }
+ 
++// Bracket-and-log helper for the two SDL_RenderTexture* call sites.
++// Wraps an existing call. Returns the SDL bool result so the caller's
++// success/failure handling stays unchanged. `site` distinguishes the
++// normal vs rotated path; `idx_counter` is per-site so each site's
++// "first 10" sample is independent.
++inline bool _timed_render_texture(SDL_Renderer *r, SDL_Texture *t,
++                                  const SDL_FRect *src, const SDL_FRect *dst,
++                                  const char *site, int &idx_counter,
++                                  int src_w, int src_h, int dst_w, int dst_h,
++                                  int dst_x, int dst_y)
++{
++  Uint64 _t0 = SDL_GetTicks();
++  bool ok = SDL_RenderTexture(r, t, src, dst);
++  Uint64 _ms = SDL_GetTicks() - _t0;
++
++  ++idx_counter;
++  _dc_total_ms_block += _ms;
++  ++_dc_count_block;
++
++  if (idx_counter <= _dc_log_first_n || (idx_counter % _dc_log_every) == 0)
++  {
++    // LOG_INFO (not LOG_DEBUG): release builds default to info-level (see
++    // Logger.cpp:53), so debug messages would never reach DEBUG.LOG.
++    LOG_INFO("drawcall {} call {}: src={}x{} dst={}x{} at ({},{}) took {}ms",
++             site, idx_counter, src_w, src_h, dst_w, dst_h,
++             dst_x, dst_y, (long long)_ms);
++  }
++  return ok;
++}
++
++inline bool _timed_render_texture_rotated(SDL_Renderer *r, SDL_Texture *t,
++                                          const SDL_FRect *src, const SDL_FRect *dst,
++                                          double angle, const SDL_FPoint *center,
++                                          SDL_FlipMode flip,
++                                          const char *site, int &idx_counter,
++                                          int src_w, int src_h, int dst_w, int dst_h,
++                                          int dst_x, int dst_y)
++{
++  Uint64 _t0 = SDL_GetTicks();
++  bool ok = SDL_RenderTextureRotated(r, t, src, dst, angle, center, flip);
++  Uint64 _ms = SDL_GetTicks() - _t0;
++
++  ++idx_counter;
++  _dc_total_ms_block += _ms;
++  ++_dc_count_block;
++
++  if (idx_counter <= _dc_log_first_n || (idx_counter % _dc_log_every) == 0)
++  {
++    LOG_INFO("drawcall {} call {}: src={}x{} dst={}x{} at ({},{}) took {}ms",
++             site, idx_counter, src_w, src_h, dst_w, dst_h,
++             dst_x, dst_y, (long long)_ms);
++  }
++  return ok;
++}
++
++void _maybe_flush_drawcall_tally()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0)
++    return;
++  if (_dc_count_block == 0)
++    return;
++  ++_dc_block_idx;
++  long long avg10x = _dc_count_block
++      ? (long long)((_dc_total_ms_block * 10) / _dc_count_block)
++      : 0;
++  LOG_INFO("drawcall tally block {}: drawcalls={} total_ms={} avg_ms_x10={}"
++           " (over {} flips ending at flip {})",
++           _dc_block_idx, _dc_count_block, (long long)_dc_total_ms_block,
++           avg10x, _dc_tally_every_flips, _flip_total);
++  _dc_total_ms_block = 0;
++  _dc_count_block = 0;
++}
++
+ void _log_renderer_state_once(SDL_Renderer *r, SDL_Window *w)
+ {
+   // Once-only renderer-properties + window-size dump on first flip. Confirms
+@@ -480,6 +573,8 @@ void Renderer::flip()
+              _drawcalls_total, _flip_failed, _null_tex_total);
+   }
+   _drawcalls_since_flip = 0;
++  // Patch 0042: end-of-flip drawcall tally (block summary every N flips).
++  _maybe_flush_drawcall_tally();
+ //  LOG_INFO("===FLIPPED===\n");
+ }
+ 
+@@ -519,7 +614,13 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   SDL_FRect _srcfr, _dstfr;
+   SDL_RectToFRect(&srcrect, &_srcfr);
+   SDL_RectToFRect(&dstrect, &_dstfr);
+-  if (!SDL_RenderTexture(_renderer, src->texture(), &_srcfr, &_dstfr))
++  // Patch 0042: per-drawcall timing diagnostic; helper preserves the
++  // bool return contract of SDL_RenderTexture so the success/failure
++  // branches below are unchanged.
++  if (!_timed_render_texture(_renderer, src->texture(), &_srcfr, &_dstfr,
++                             "drawSurface", _dc_call_idx_normal,
++                             srcrect.w, srcrect.h, dstrect.w, dstrect.h,
++                             dstrect.x, dstrect.y))
+   {
+     LOG_ERROR("Renderer::drawSurface: SDL_RenderTexture failed: {}", SDL_GetError());
+   }
+@@ -560,7 +661,12 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+   SDL_FRect _srcfr, _dstfr;
+   SDL_RectToFRect(&srcrect, &_srcfr);
+   SDL_RectToFRect(&dstrect, &_dstfr);
+-  if (!SDL_RenderTextureRotated(_renderer, src->texture(), &_srcfr, &_dstfr, 0, NULL, SDL_FLIP_HORIZONTAL))
++  // Patch 0042: per-drawcall timing diagnostic; rotated variant.
++  if (!_timed_render_texture_rotated(_renderer, src->texture(), &_srcfr, &_dstfr,
++                                     0, NULL, SDL_FLIP_HORIZONTAL,
++                                     "drawSurfaceMirrored", _dc_call_idx_rotated,
++                                     srcrect.w, srcrect.h, dstrect.w, dstrect.h,
++                                     dstrect.x, dstrect.y))
+   {
+     LOG_ERROR("Renderer::drawSurface: SDL_RenderTextureRotated failed: {}", SDL_GetError());
+   }
+-- 
+2.47.3
+

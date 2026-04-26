@@ -1,0 +1,110 @@
+From 70b60ffd43faa09f624427f9469197ad5ec83cbb Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 16:02:58 -0700
+Subject: [PATCH] [DOSKUTSU] dos: dump full BIOS-reported VBE mode list (lever
+ 0b diag)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 0b investigation. patches/SDL/0003 already dumps the
+mode-id list (0x10D 0x111 ...) plus the chosen mode's attributes, but
+to answer "does Mach64 expose any 320×240 mode at all?" and "what bpp
+options exist at 640×480?" the team needs WxH/bpp/attrs/lfb-flag for
+EVERY mode the BIOS reports — not just the one SDL3-DOS picked.
+
+Adds a one-shot dump (gated by `static int dumped = 0;`) at the top
+of DOSVESA_GetDisplayModes that calls GetVESAModeInfo for each entry
+in vinfo->mode_list and logs:
+
+  mode 0xNNNN: WxH bpp=B planes=P model=M attrs=0x%X lfb=L
+              sup=S gfx=G color=C pitch=P pages=N
+              win_seg/size/gran/attr lfb_addr
+
+Output appended to /sdldbg.log (sibling of NXEngine's /debug.log,
+same pattern as 0002/0003/0006). Output prefixed `DOSVESA-MODELIST:`
+so it's grep-able alongside the existing DOSVESA-CTRL / DOSVESA-MODESET
+lines from patch 0003.
+
+This is purely additive logging. Does not change the mode-pick
+decision, the attribute filter, or the bpp cap (those still live in
+the existing iteration loop further down in DOSVESA_GetDisplayModes).
+The dump fires before the bpp cap is even read so we see the full
+unfiltered BIOS view. Required before deciding lever 0b's escalation
+strategy (cap to 320x240 hint vs. live with 640x480).
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream, sidestepping
+vendor/SDL/CLAUDE.md's no-AI-PRs restriction.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosmodes.c | 52 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 1ef2878bd..20051a983 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -379,6 +379,58 @@ bool DOSVESA_GetDisplayModes(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_disp
+ {
+     const SDL_VESAInfo *vinfo = GetVESAInfo();
+ 
++    // DOSKUTSU diagnostic (patches/SDL/0007 — Phase 9 lever 0b investigation):
++    // one-shot dump of EVERY VBE mode the BIOS reports as supported, with
++    // GetVESAModeInfo's full attributes per mode. Patch 0003 only logs the
++    // mode-id list (0x10D 0x111 ...); to answer "does Mach64 expose any
++    // 320×240 mode at all?" and "what bpp options exist at 640×480?" we
++    // need WxH/bpp/attrs/lfb-flag/memory-model for each entry. Output to
++    // /sdldbg.log alongside patches 0002/0003/0006. Gated by a static
++    // counter so it only fires once per process. Diagnostic-only; does not
++    // alter SDL3-DOS's mode-pick decision. See docs/PHASE9-15FPS-PLAN.md
++    // §3 Lever 0b.1.
++    {
++        static int dumped = 0;
++        if (!dumped && vinfo) {
++            dumped = 1;
++            _doskutsu_modes_dbg_open();
++            if (_doskutsu_modes_dbg_log) {
++                fprintf(_doskutsu_modes_dbg_log,
++                        "DOSVESA-MODELIST: enumerating %d BIOS-reported modes (lever 0b diagnostic)\n",
++                        vinfo->num_modes);
++                for (int mi = 0; mi < vinfo->num_modes; mi++) {
++                    const Uint16 modeid = vinfo->mode_list[mi];
++                    SDL_DisplayModeData info;
++                    if (!GetVESAModeInfo(modeid, &info)) {
++                        fprintf(_doskutsu_modes_dbg_log,
++                                "  mode 0x%04X: GetVESAModeInfo FAILED\n",
++                                modeid);
++                        continue;
++                    }
++                    const bool sup = (info.attributes & VBE_MODEATTR_SUPPORTED) != 0;
++                    const bool gfx = (info.attributes & VBE_MODEATTR_GRAPHICS) != 0;
++                    const bool color = (info.attributes & VBE_MODEATTR_COLOR) != 0;
++                    fprintf(_doskutsu_modes_dbg_log,
++                            "  mode 0x%04X: %4dx%-4d bpp=%-2d planes=%d "
++                            "model=%d attrs=0x%04X lfb=%d sup=%d gfx=%d color=%d "
++                            "pitch=%d pages=%d win_seg=0x%04X win_size=%uKB win_gran=%uKB win_attr=0x%02X "
++                            "lfb_addr=0x%08lX\n",
++                            info.mode_id, info.w, info.h, info.bpp, info.num_planes,
++                            info.memory_model, info.attributes,
++                            (int)info.has_lfb, (int)sup, (int)gfx, (int)color,
++                            info.pitch, info.num_image_pages,
++                            info.win_a_segment, (unsigned)info.win_size,
++                            (unsigned)info.win_granularity, info.win_a_attributes,
++                            (unsigned long)info.physical_base_addr);
++                }
++                fprintf(_doskutsu_modes_dbg_log,
++                        "DOSVESA-MODELIST: end of BIOS-reported mode dump\n");
++                fflush(_doskutsu_modes_dbg_log);
++                fsync(fileno(_doskutsu_modes_dbg_log));
++            }
++        }
++    }
++
+     // Patch 0006 (DOSKUTSU): SDL_HINT_DOS_MAX_BPP caps the enumerated mode
+     // list to a maximum bits-per-pixel. Lets games skip wasteful high-bpp
+     // VESA modes that SDL's closest-mode matching would otherwise prefer.
+-- 
+2.47.3
+

@@ -1,0 +1,131 @@
+From 2fc0f6a97820fb4a49ea3c473505fd6702a2a4bb Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 16:08:59 -0700
+Subject: [PATCH] [doskutsu] diag: alpha-mod audit counter per Renderer
+ drawcall
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 4 §3.4.1 (patch 0043). Counts how often src->alpha is
+< 255 across every Renderer::drawSurface and Renderer::drawSurfaceMirrored
+call so we have a real number for the lever 4 fix's expected win.
+Per-100-flip block summary fires alongside the patch 0042 drawcall
+tally so the two diagnostics share a cadence and produce one
+stage-progress paragraph rather than independent log streams.
+
+Why DOS needs this:
+Lever 4 (Approach A) is "skip SDL_SetTextureAlphaMod when
+src->alpha == 255 unchanged-since-last-call." Intuition says <5% of
+Cave Story drawcalls actually need the alpha-mod path, but intuition
+isn't a measurement. If the real number is closer to 30% the win is
+much smaller and we'd weigh the conditional-cache complexity against
+something else; if it's <1% we know the fix is essentially a free
+bypass for the common case. The audit costs ~2 increments per
+drawcall — negligible vs the SDL_RenderTexture wall-time itself
+(measured 30-3000 ms on real HW per patch 0039 + 0042).
+
+Counters track block (per 100 flips, reset each summary) and global
+(running total across the whole capture). Both ratios reported as
+percent-times-10 to dodge floating-point in the LOG_INFO formatter
+on DJGPP — consumer reads "245" as "24.5%". LOG_INFO not LOG_DEBUG
+for the same reason as patch 0042: release builds default to
+info-level.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 57 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 57 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index c756172..a6846a3 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -175,6 +175,55 @@ void _maybe_flush_drawcall_tally()
+   _dc_count_block = 0;
+ }
+ 
++// Per-Phase-9 lever 4 §3.4.1 (patch 0043). Audit how often src->alpha
++// is < 255 so we know whether dropping the per-drawcall
++// SDL_SetTextureAlphaMod call (lever 4 fix) actually wins on the
++// common case. Intuition says <5% of drawcalls in Cave Story have a
++// translucent sprite; we need a real number to size the win.
++//
++// Counters cover both drawSurface and drawSurfaceMirrored because both
++// call SDL_SetTextureAlphaMod unconditionally before their respective
++// SDL_RenderTexture* call. The summary fires alongside the per-100-flip
++// drawcall tally so the two diagnostics share a cadence.
++int _alpha_total_drawcalls_block = 0;
++int _alpha_nonopaque_drawcalls_block = 0;
++int _alpha_total_drawcalls_global = 0;
++int _alpha_nonopaque_drawcalls_global = 0;
++
++void _bump_alpha_count(Uint8 alpha)
++{
++  ++_alpha_total_drawcalls_block;
++  ++_alpha_total_drawcalls_global;
++  if (alpha != 255)
++  {
++    ++_alpha_nonopaque_drawcalls_block;
++    ++_alpha_nonopaque_drawcalls_global;
++  }
++}
++
++void _maybe_flush_alpha_audit()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0)
++    return;
++  if (_alpha_total_drawcalls_block == 0)
++    return;
++  // Percent x10 (one-decimal-place ratio) — keep arithmetic integer to
++  // dodge any DJGPP-side fmt formatter quirks at the cost of a fixed
++  // "P.P%" reading the consumer has to do.
++  long long pct10 = (long long)((_alpha_nonopaque_drawcalls_block * 1000LL)
++                                / _alpha_total_drawcalls_block);
++  long long pct10_global = (long long)((_alpha_nonopaque_drawcalls_global * 1000LL)
++                                       / _alpha_total_drawcalls_global);
++  LOG_INFO("alpha audit block {}: {} total drawcalls, {} with alpha<255 "
++           "(block pct_x10={}; global {}/{} pct_x10={})",
++           _dc_block_idx, _alpha_total_drawcalls_block,
++           _alpha_nonopaque_drawcalls_block, pct10,
++           _alpha_nonopaque_drawcalls_global, _alpha_total_drawcalls_global,
++           pct10_global);
++  _alpha_total_drawcalls_block = 0;
++  _alpha_nonopaque_drawcalls_block = 0;
++}
++
+ void _log_renderer_state_once(SDL_Renderer *r, SDL_Window *w)
+ {
+   // Once-only renderer-properties + window-size dump on first flip. Confirms
+@@ -575,6 +624,8 @@ void Renderer::flip()
+   _drawcalls_since_flip = 0;
+   // Patch 0042: end-of-flip drawcall tally (block summary every N flips).
+   _maybe_flush_drawcall_tally();
++  // Patch 0043: alpha-mod audit summary (shares the per-100-flip cadence).
++  _maybe_flush_alpha_audit();
+ //  LOG_INFO("===FLIPPED===\n");
+ }
+ 
+@@ -608,6 +659,10 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   if (_need_clip)
+     clipScaled(srcrect, dstrect);
+ 
++  // Patch 0043: alpha-mod audit counter (lever 4 §3.4.1). Runs before
++  // the SDL_SetTextureAlphaMod call so it reflects every drawcall that
++  // currently triggers the alpha-mod path, regardless of value.
++  _bump_alpha_count(src->alpha);
+   SDL_SetTextureAlphaMod(src->texture(), src->alpha);
+   // SDL3: SDL_RenderCopy → SDL_RenderTexture; SDL_Rect args become SDL_FRect.
+   // SDL_RenderTexture returns true on success (was 0 in SDL2).
+@@ -656,6 +711,8 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+   if (_need_clip)
+     clipScaled(srcrect, dstrect);
+ 
++  // Patch 0043: alpha-mod audit counter; mirrored variant.
++  _bump_alpha_count(src->alpha);
+   SDL_SetTextureAlphaMod(src->texture(), src->alpha);
+   // SDL3: SDL_RenderCopyEx → SDL_RenderTextureRotated; rect args are SDL_FRect.
+   SDL_FRect _srcfr, _dstfr;
+-- 
+2.47.3
+
