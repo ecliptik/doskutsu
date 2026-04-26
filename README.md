@@ -14,8 +14,8 @@ This project is 100% built agentically using [Claude Code](https://docs.anthropi
 |:---:|:---:|
 | ![DOSKUTSU title screen running in DOSBox-X](docs/screenshots/doskutsu-title.png) | ![Opening dialogue: "From somewhere, a transmission..."](docs/screenshots/doskutsu-intro-dialogue.png) |
 | **Title Screen** | **Opening Transmission** |
-| ![First lab room with Quote and the broken teleporter](docs/screenshots/doskutsu-first-room.png) | ![Cutscene dialogue: "Connecting to network... / Logged on."](docs/screenshots/doskutsu-cutscene.png) |
-| **First Lab Room** | **Teleporter Cutscene** |
+| ![First lab room with Quote and the broken teleporter](docs/screenshots/doskutsu-first-room.png) | ![First Cave with Quote, HUD, and a Heart pickup](docs/screenshots/doskutsu-first-cave.png) |
+| **First Lab Room** | **First Cave** |
 
 Captures from DOSBox-X running `DOSKUTSU.EXE` under CWSDPMI; the menu bar at the top is DOSBox-X's own. Pixel-perfect 320×240 letterboxed in the emulator window.
 
