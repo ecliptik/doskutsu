@@ -134,6 +134,7 @@ help:
 	@echo
 	@echo "Deploy:"
 	@echo "  make dist                        dist/doskutsu-cf.zip (CF-ready bundle)"
+	@echo "  make dist-list                   dry-run: print dist manifest, no staging"
 	@echo "  make install CF=/mnt/cf          copy payload to mounted CF card"
 	@echo
 	@echo "Cleanup:"
@@ -468,10 +469,13 @@ sdl3-image-smoke: $(SDL3_IMAGE_SMOKE_EXE)
 
 # --- Distribution -------------------------------------------------------------
 #
-# make dist      produces dist/doskutsu-cf.zip with the legal-complete payload
-# make install   copies the same payload to a mounted CF card ($CF required)
+# make dist        produces dist/doskutsu-cf.zip with the legal-complete payload
+# make dist-list   prints the manifest of what dist would package, without
+#                  building the binary or staging files — for sanity-checking
+#                  the bundle composition against PLAN.md § Licensing
+# make install     copies the same payload to a mounted CF card ($CF required)
 #
-# PAYLOAD (matches THIRD-PARTY.md § Verification):
+# PAYLOAD (matches PLAN.md § Licensing § Downstream redistribution checklist):
 #   DOSKUTSU.EXE       the binary
 #   CWSDPMI.EXE        DPMI host
 #   CWSDPMI.DOC        CWSDPMI redistribution terms (required by its license)
@@ -479,6 +483,16 @@ sdl3-image-smoke: $(SDL3_IMAGE_SMOKE_EXE)
 #   GPLV3.TXT          NXEngine-evo's GPLv3 (dominant license of the binary)
 #   THIRD-PARTY.TXT    attribution matrix (CRLF normalized)
 #   README.TXT         DOS-readable quick-start + asset-extraction pointer
+#   DATA/...           NXEngine-evo bundled engine data — fonts, baseline
+#                      .pbm backgrounds, sprite metadata, JSON configs,
+#                      tilekey.dat, StageMeta/, endpic/. Cloned verbatim
+#                      from vendor/nxengine-evo/data/ — GPLv3-inherited.
+#
+# Cave Story freeware game data (maps, NPC sprites, .org music, .pxt SFX,
+# wavetable.dat, stage.dat) is **NEVER** in this zip — those come from the
+# user's own Doukutsu.exe extraction per docs/ASSETS.md. The DATA/ subdir
+# in the dist contains only what NXEngine-evo upstream ships in its data/
+# directory; users add their extracted Cave Story content on top after install.
 
 CF             ?=
 DIST_DIR       := $(REPO_ROOT)/dist
@@ -491,6 +505,16 @@ CRLF := awk 'BEGIN{ORS="\r\n"} {sub(/\r$$/, ""); print}'
 # GPL text source: the cloned NXEngine-evo tree ships its LICENSE file at the root.
 NX_LICENSE := $(NXENGINE_SRC)/LICENSE
 
+# Engine-bundled data tree — cloned verbatim into the zip's DATA/ subdir.
+# Contents (as of vendor SHA pinned in vendor/sources.manifest): bitmap
+# fonts (font_*.fnt + font_*_*.png), Face*.pbm dialog portraits, sprites.sif
+# atlas, tilekey.dat, system.json + music.json + music_dirs.json, spot.png
+# focus glow, several bk*.pbm parallax backgrounds (the *480fix variants are
+# the engine's full-HD overrides, kept since 320x240 mode never reaches
+# them), StageMeta/*.json (~54 stage-metadata records), endpic/credit*.bmp.
+# Total ~86 files, ~3.5 MiB. Verify with `make dist-list`.
+NX_DATA_SRC    := $(NXENGINE_SRC)/data
+
 define DIST_README
 DOSKUTSU - Cave Story for MS-DOS 6.22
 =====================================
@@ -501,32 +525,40 @@ to MS-DOS 6.22, cross-compiled with DJGPP against a DOS-ported SDL3.
 HOW TO RUN
 ----------
 
- 1. Place DOSKUTSU.EXE, CWSDPMI.EXE, and the DATA directory (containing
-    extracted Cave Story game assets) in the same folder on your DOS
-    machine, e.g. C:\DOSKUTSU\.
- 2. Boot DOS with HIMEM.SYS loaded and NO EMS page frame (DJGPP uses DPMI).
- 3. Ensure your SB16 BLASTER environment variable is set correctly,
+ 1. Place DOSKUTSU.EXE, CWSDPMI.EXE, and the DATA directory in the same
+    folder on your DOS machine, e.g. C:\DOSKUTSU\.
+ 2. Extract Cave Story game data INTO that DATA directory (see below).
+ 3. Boot DOS with HIMEM.SYS loaded and NO EMS page frame (DJGPP uses DPMI).
+ 4. Ensure your SB16 BLASTER environment variable is set correctly,
     e.g.  SET BLASTER=A220 I5 D1 H5 T6
- 4. Load a VESA 1.2+ BIOS driver if your video card doesn't provide one
+ 5. Load a VESA 1.2+ BIOS driver if your video card doesn't provide one
     in its firmware (UNIVBE as fallback).
- 5. Run:
+ 6. Run:
         C:\>CD \DOSKUTSU
         C:\DOSKUTSU>DOSKUTSU
 
 YOU MUST SUPPLY CAVE STORY DATA
 -------------------------------
 
-This bundle does NOT include the Cave Story game data (maps, sprites,
-music). You must extract them from the 2004 freeware Doukutsu.exe
+This bundle includes only the NXEngine-evo engine data (fonts, baseline
+backgrounds, sprite metadata) under DATA\. It does NOT include the Cave
+Story game content (maps, NPC sprites, music, sound effects, Organya
+wavetable). You must extract those from the 2004 freeware Doukutsu.exe
 yourself. Source: https://www.cavestory.org/
 
-Place the extracted files under:
-    C:\DOSKUTSU\DATA\BASE\Stage\
-    C:\DOSKUTSU\DATA\BASE\Npc\
-    C:\DOSKUTSU\DATA\BASE\org\
-    C:\DOSKUTSU\DATA\BASE\wav\
+The extracted Cave Story content is added to the same DATA directory
+that ships with this bundle, populating these subdirectories alongside
+what's already there:
 
-See the project's docs/ASSETS.md for extraction details.
+    C:\DOSKUTSU\DATA\Stage\          (Cave Story maps: .pxm/.pxe/.pxa/.tsc)
+    C:\DOSKUTSU\DATA\Npc\            (Cave Story NPC sprites)
+    C:\DOSKUTSU\DATA\org\            (Cave Story Organya music)
+    C:\DOSKUTSU\DATA\pxt\            (Cave Story Pixtone SFX params)
+    C:\DOSKUTSU\DATA\wavetable.dat   (Organya synth PCM, from Doukutsu.exe)
+    C:\DOSKUTSU\DATA\stage.dat       (stage index, generated by extract script)
+
+There is no DATA\BASE\ subdirectory; all assets coexist directly under
+DATA\. See the project's docs/ASSETS.md for extraction details.
 
 CWSDPMI
 -------
@@ -542,7 +574,8 @@ This binary is licensed under the GNU General Public License v3 because
 it statically links NXEngine-evo (GPLv3). The port source code in this
 repository is MIT licensed. See LICENSE.TXT (MIT, for the repo source)
 and GPLV3.TXT (GPLv3, for the binary as a whole). THIRD-PARTY.TXT has
-the complete attribution matrix.
+the complete attribution matrix. The DATA\ contents shipped here inherit
+NXEngine-evo's GPLv3.
 
 SOURCE
 ------
@@ -552,11 +585,67 @@ Full source, including build scripts and DOS-port patches:
 endef
 export DIST_README
 
+# --- dist-list — manifest dry-run ---------------------------------------------
+#
+# Prints what `make dist` would package, without building doskutsu.exe or
+# staging files. Used to sanity-check the bundle composition against
+# PLAN.md § Licensing § Downstream redistribution checklist before cutting
+# a release. Sources that don't exist (e.g. vendor tree not cloned, binary
+# not built) are flagged "[MISSING]" but do not fail the target — this is
+# intentional: dist-list answers "would this bundle the right things?"
+# regardless of whether the build artifacts are present yet.
+
+.PHONY: dist-list
+dist-list:
+	@printf '== make dist manifest (dry run) ==\n'
+	@printf '   target zip: %s\n\n' "$(CF_ZIP)"
+	@printf 'top-level files:\n'
+	@$(call _dist_list_entry,DOSKUTSU.EXE,$(BUILD_DIR)/doskutsu.exe,binary (rename to upper-case))
+	@$(call _dist_list_entry,CWSDPMI.EXE,$(CWSDPMI_EXE),DPMI host (vendored in repo))
+	@$(call _dist_list_entry,CWSDPMI.DOC,$(CWSDPMI_DOC),CWSDPMI redistribution terms)
+	@$(call _dist_list_entry,LICENSE.TXT,$(REPO_ROOT)/LICENSE,MIT - repo source [CRLF])
+	@$(call _dist_list_entry,GPLV3.TXT,$(NX_LICENSE),GPLv3 - binary as a whole [CRLF])
+	@$(call _dist_list_entry,THIRD-PARTY.TXT,$(REPO_ROOT)/THIRD-PARTY.md,attribution matrix [CRLF])
+	@printf '  %-22s %-55s %s\n' "README.TXT" "(generated from DIST_README)" "DOS-readable quick start [CRLF]"
+	@printf '\nDATA/ subdirectory (engine-bundled - NXEngine-evo GPLv3):\n'
+	@# LC_ALL=C on the sort: byte-order, locale-stable. Without this the
+	@# manifest output drifts between en_US.UTF-8 and C locales (UTF-8
+	@# collation treats underscore specially, so 'Face_0.pbm' sorts before
+	@# 'Face.pbm' under UTF-8 but after under C). Same trap as the
+	@# patches/<name>/ alpha-suffix numbering issue — keep dry-run output
+	@# diffable across reviewer environments.
+	@if [ -d "$(NX_DATA_SRC)" ]; then \
+	    cd "$(NX_DATA_SRC)" && find . -type f | LC_ALL=C sort | sed 's|^\./|  DATA/|'; \
+	    count=$$(find "$(NX_DATA_SRC)" -type f | wc -l); \
+	    bytes=$$(find "$(NX_DATA_SRC)" -type f -exec stat -c '%s' {} + | awk '{s+=$$1} END{print s+0}'); \
+	    printf '  (%d files, %d bytes from %s)\n' "$$count" "$$bytes" "$(NX_DATA_SRC)"; \
+	else \
+	    printf '  [MISSING] %s -- run scripts/fetch-sources.sh\n' "$(NX_DATA_SRC)"; \
+	fi
+	@printf '\nNOT included (per PLAN.md section Licensing item 4):\n'
+	@printf '  Cave Story freeware game data -- user extracts per docs/ASSETS.md.\n'
+	@printf '  Specifically excluded: data/Stage/, data/Npc/, data/org/, data/pxt/,\n'
+	@printf '  data/wavetable.dat, data/stage.dat, and any data/wav/ content.\n'
+
+# Helper for dist-list: prints "  <staged-name>  <src-path>  <comment>" with a
+# [MISSING] tag if the source path doesn't exist. Args via $(call); commas
+# separate args so don't put commas in args. Don't pad call sites with
+# whitespace alignment -- $(call) does NOT strip leading whitespace from args
+# and would inject spaces into the path (test -e " /path" then fails).
+define _dist_list_entry
+	if [ -e "$(2)" ]; then \
+	    printf '  %-22s %-55s %s\n' "$(1)" "$(2)" "$(3)"; \
+	else \
+	    printf '  %-22s %-55s %s\n' "$(1)" "[MISSING] $(2)" "$(3)"; \
+	fi
+endef
+
 .PHONY: dist
 dist: $(BUILD_DIR)/doskutsu.exe
 	@test -f "$(CWSDPMI_EXE)"   || (echo "error: $(CWSDPMI_EXE) missing — see vendor/cwsdpmi/README.md" >&2; exit 1)
 	@test -f "$(CWSDPMI_DOC)"   || (echo "error: $(CWSDPMI_DOC) missing" >&2; exit 1)
 	@test -f "$(NX_LICENSE)"    || (echo "error: $(NX_LICENSE) missing — run scripts/fetch-sources.sh" >&2; exit 1)
+	@test -d "$(NX_DATA_SRC)"   || (echo "error: $(NX_DATA_SRC) missing — run scripts/fetch-sources.sh" >&2; exit 1)
 	@test -f LICENSE            || (echo "error: LICENSE missing in repo root" >&2; exit 1)
 	@test -f THIRD-PARTY.md     || (echo "error: THIRD-PARTY.md missing" >&2; exit 1)
 	@rm -rf "$(CF_STAGE)" "$(CF_ZIP)"
@@ -571,6 +660,10 @@ dist: $(BUILD_DIR)/doskutsu.exe
 	    printf '%s\n' "$$DIST_README" | \
 	    awk -v url="$$url" '{gsub(/@REPO_URL@/, url); print}' | \
 	    $(CRLF) > "$(CF_STAGE)/README.TXT"
+	@# Engine-bundled data tree → DATA/ in the zip. cp -R preserves the
+	@# StageMeta/ and endpic/ subdirs; no Cave Story freeware data here.
+	@mkdir -p "$(CF_STAGE)/DATA"
+	@cp -R "$(NX_DATA_SRC)/." "$(CF_STAGE)/DATA/"
 	@(cd "$(CF_STAGE)" && zip -q -r "$(CF_ZIP)" .)
 	@echo "built $(CF_ZIP) ($$(stat -c '%s' $(CF_ZIP)) bytes)"
 
