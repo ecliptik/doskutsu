@@ -61,12 +61,31 @@ When the `0001`–`0009` and `0010`–`0019` reservation gaps were full, follow-
 
 This cluster mixes concerns deliberately — the overflow rule is "next free slot wins over cluster purity once the reservation gap is full." Bisection within `[0020, 0024]` doesn't tell you category at a glance; read the patch filename. The trade-off was accepted because renumbering downstream patches every time a follow-up landed would have churned the patch series and broken `git blame` continuity.
 
+### `0025`–`0032`: Phase 7 — pre-title-screen fatal fixes + framebuffer-wall investigation + closure
+
+Phase 7 produced two adjacent runs of patches. **`0025`–`0026`** are pre-title-screen fatal fixes (DJGPP data-path baking + the SDL3 INDEX8 palette regression in `zoom.cpp`); they belong to the original Phase 7 prep work (CHANGELOG `### Phase 7 prep` covers their history). **`0027`–`0032`** are the framebuffer-wall investigation + closure cluster — what made the title screen render to the DOSBox-X framebuffer.
+
+| File | Concern | Role |
+|---|---|---|
+| `0025-cmake-djgpp-data-path.patch` | Gate `IF(UNIX_LIKE)` on `AND NOT DJGPP` so `ResourceManager::getPath()` falls through to `SDL_GetBasePath() + "data/"` instead of stat-ing a Linux-host absolute path baked in at CMake time. Phase 7 prep fatal-fix. | Load-bearing |
+| `0026-sdl3-zoom-index8-palette.patch` | Explicitly create + attach a palette to INDEX8 dst surfaces in `zoom.cpp`. SDL3's `SDL_CreateSurface(...,INDEX8)` no longer attaches a default palette (SDL2 did); downstream `SDL_CreateTextureFromSurface` failed with `"src does not have a palette set"` for every paletted `.pbm`. SDL2→SDL3 migration regression. Phase 7 prep fatal-fix. | Load-bearing |
+| `0027-sdl3-renderer-logical-presentation.patch` | `SDL_SetRenderLogicalPresentation(_renderer, 320, 240, LETTERBOX)` after `SDL_CreateRenderer`. SDL2's implicit `SDL_RenderSetLogicalSize` letterboxing is gone in SDL3; without the explicit opt-in the renderer paints into a 320×240 corner of the framebuffer with no scaling. Structurally correct; not load-bearing for the wall (the wall sat further down the pipeline). | Defensive |
+| `0028-log-null-texture-from-silent-create-sites.patch` | NULL check + `LOG_ERROR` at the two previously-silent `SDL_CreateTextureFromSurface` sites in `Renderer::initVideo` (`_spot_light`) and `Font::load` (atlas pages). Bisect proved both creates succeed; the NULL source is elsewhere. | Diagnostic |
+| `0029-sdl3-set-invalid-param-checks-hint-dos.patch` | Programmatic `SDL_SetHintWithPriority(SDL_HINT_INVALID_PARAM_CHECKS, "0", SDL_HINT_OVERRIDE)` before `SDL_Init`. Tested whether the env-var path was being missed by SDL3's hint-callback init order — env arrives intact; the "Parameter 'texture' is invalid" flood was NULL-pointer attribution, not validation-hash misses. | Diagnostic |
+| `0030-log-null-texture-in-drawsurface.patch` | Explicit NULL checks + early-return + throttled per-Surface logging at `Renderer::drawSurface` / `drawSurfaceMirrored` / `blitPatternAcross`. Replaces the Release-build no-op `assert(src->texture())` that let NULL textures fall through to `SDL_RenderTexture`. Throttles the diagnostic flood **and** confirmed the second cause: even with the NULL flood throttled, the framebuffer stayed pure black, proving an independent present-pipeline bug. | Load-bearing |
+| `0031-log-renderpresent-and-per-flip-drawcalls.patch` | `SDL_RenderPresent` return-value check + per-flip drawcall counter in `Renderer::flip()`. Confirmed 1000/1000 present calls return success and the drawcall counter is non-zero — so the engine is rendering and the present is succeeding; the bug lives below `SDL_RenderPresent` in SDL3-DOS's normal-path framebuffer flush. | Diagnostic |
+| `0032-sdl3-dos-fast-framebuffer-hint.patch` | Programmatic `SDL_SetHintWithPriority(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, "1", SDL_HINT_OVERRIDE)` before `SDL_Init`. Empirically what unblocks the framebuffer; the actual mechanism is a side-effect during `fb_state` init rather than fast-path engagement (task #24 documents the latent upstream bug — no-action by policy). | Load-bearing (workaround) |
+
+Companion diagnostic in the SDL tree: `patches/SDL/0002-debug-dosvesa-framebuffer-trace.patch` instruments `DOSVESA_UpdateWindowFramebuffer` and writes to `sdldbg.log` (SDL_Log's stderr-redirect doesn't survive DOSBox-X's shell). Local-only per the patches-stay-local policy; pinned the bug to the normal-path branch.
+
+This cluster mixes load-bearing fixes with diagnostic instrumentation deliberately — the diagnostic patches stay applied (not reverted post-investigation) because their throttled-logging contracts remain useful for ongoing real-HW debugging on g2k. If a future regression bisects to `[0027, 0032]`, read the filename + the role column to know whether you're looking at a fix or a probe.
+
 ### Why this layout, not the alternatives
 
 - **One concern per patch** (per `../README.md`). The migration is many concerns; one mega-patch fails review and bisection. We had this debate; the answer is "split."
 - **Per-file split is too fine-grained.** The mechanical-rename pass touches `Renderer.cpp` + `Sprites.cpp` + `Font.cpp` + `Surface.cpp` for the same concern (the SDL2→SDL3 renderer/surface API delta). Splitting per-file produces five patches that all need to land together to compile — that's a fake split. Group by concern instead.
 - **Numeric gaps reserved insertion points; gaps now full.** `0006`–`0009` absorbed DJGPP-specific issues exactly as designed (the reservation worked). `0019` absorbed the SDL3 CMake follow-up. Once both gaps filled, Phase 5 follow-ups went into `0020`–`0024` per the slot-numbering convention below — content-determined slotting beat cluster purity once the gaps were exhausted.
-- **The 0010–0019 block + `{0020, 0021, 0022, 0024}` is the SDL3 work; `[0001, 0009] + {0023}` is the DJGPP work.** Bisection isn't as cleanly partitioned as it was at the start of Phase 5 (the overflow cluster mixes categories), but inside any single patch the concern is still scoped — the filename tells you the category. If a regression is bisected to `[0010, 0019]`, look at SDL3 mechanics first; to `[0001, 0009]`, DJGPP first; to `[0020, 0024]`, read the filename.
+- **The 0010–0019 block + `{0020, 0021, 0022, 0024}` is the SDL3 migration work; `[0001, 0009] + {0023}` is the DJGPP build work; `[0025, 0032]` is the Phase 7 work (pre-title-screen fatal fixes + framebuffer-wall investigation + closure).** Bisection isn't as cleanly partitioned as it was at the start of Phase 5 (the overflow + Phase 7 clusters mix concerns), but inside any single patch the concern is still scoped — the filename tells you the category. If a regression is bisected to `[0010, 0019]`, look at SDL3 mechanics first; to `[0001, 0009]`, DJGPP first; to `[0020, 0024]`, read the filename; to `[0025, 0032]`, read the filename + the role column in the Phase 7 cluster table (load-bearing vs. diagnostic).
 
 ## Authoring order
 
@@ -74,7 +93,9 @@ This cluster mixes concerns deliberately — the overflow rule is "next free slo
 
 `0020`–`0024` are Phase 5 follow-up fixes against a tree with both prior clusters applied. They're conceptually fix-ups to the relevant earlier cluster (`0020` and `0024` to `0013`–`0017`; `0021` and `0022` to `0010`; `0023` to `0001`–`0009`); slot order reflects discovery order during Phase 5 integration, not concern category.
 
-When rerolling against a new upstream NXEngine-evo SHA: rebase `0001`–`0009` first, then `0010`–`0019`, then `0020`–`0024`. If a later cluster conflicts on lines an earlier cluster already touched, fix the earlier one first — it's the foundation.
+`0025`–`0032` are Phase 7 patches authored against a tree with `0001`–`0024` applied. `0025`–`0026` (pre-title-screen fatal fixes) were written first against the build that booted but couldn't reach graphics init; `0027`–`0032` (framebuffer-wall investigation + closure) were authored serially against the build that reached the title screen but rendered black. The diagnostic patches in `0028`/`0029`/`0031` stay applied alongside the load-bearing `0030`/`0032` — see the cluster table for role attribution.
+
+When rerolling against a new upstream NXEngine-evo SHA: rebase `0001`–`0009` first, then `0010`–`0019`, then `0020`–`0024`, then `0025`–`0032`. If a later cluster conflicts on lines an earlier cluster already touched, fix the earlier one first — it's the foundation.
 
 ## Slot numbering convention
 
@@ -96,3 +117,4 @@ When rerolling against a new upstream NXEngine-evo SHA: rebase `0001`–`0009` f
 - Task #34 / #35 — spdlog/DJGPP investigation + `fmt`-backed shim (`0006`)
 - Task #36 — `find_package(SDL3)` CMake wireup (`0019`)
 - Task #42 / #46 — DJGPP POSIX headers visibility (`0009`, regenerated)
+- Tasks #5 / #7 / #9 / #14 / #16 / #21 / #22 / #24 — the Phase 7 framebuffer-wall investigation that produced `0027`–`0032` + `patches/SDL/0002`. Bisect chain: #5 (texture-create vs. validation-hash) → #7 (silent-create-site NULL probe = `0028`) → #9 (`SDL_SetHint OVERRIDE` programmatic = `0029`) → #14 (`drawSurface` NULL probe = `0030`) → #16 (`SDL_RenderPresent` per-flip probe = `0031`) → #21 (`DOSVESA_UpdateWindowFramebuffer` trace = `SDL/0002`) → #22 (`SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER` flip = `0032`). Task #24 documents the latent SDL3-DOS init-state-leak bug that `0032` works around — no-action by policy.
