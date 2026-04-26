@@ -139,11 +139,15 @@ The `DOSKUTSU.EXE` binary is GPLv3 as a combined work because it statically link
 
 | Component | License | Linked into `DOSKUTSU.EXE`? |
 |---|---|---|
-| DOSKUTSU port source (this repo) | MIT | n/a (source, not binary) |
-| **NXEngine-evo** | **GPLv3** | **Yes — dominant license of the binary** |
-| SDL3 + SDL3_mixer + SDL3_image | zlib | Yes (zlib is GPLv3-compatible) |
-| DJGPP libc | GPL with runtime-library exception | Yes (the exception explicitly permits static linking) |
-| CWSDPMI | freeware, redistribution permitted with bundled `CWSDPMI.DOC` | No — separate executable shipped alongside |
-| Cave Story game data | freeware per Pixel's 2004 terms | No — user-extracted, not redistributed in this repo |
+| DOSKUTSU port source (this repo) | [MIT](./LICENSE) | n/a (source, not binary) |
+| **NXEngine-evo** | **[GPLv3](https://github.com/nxengine/nxengine-evo/blob/master/LICENSE)** | **Yes — dominant license of the binary** |
+| SDL3 | [zlib](https://github.com/libsdl-org/SDL/blob/main/LICENSE.txt) | Yes (zlib is GPLv3-compatible) |
+| SDL3_mixer | [zlib](https://github.com/libsdl-org/SDL_mixer/blob/main/LICENSE.txt) | Yes |
+| SDL3_image | [zlib](https://github.com/libsdl-org/SDL_image/blob/main/LICENSE.txt) | Yes |
+| DJGPP libc | [GPL with runtime-library exception](https://www.delorie.com/djgpp/v2faq/faq11_2.html) | Yes (the exception explicitly permits static linking) |
+| CWSDPMI | [freeware, redistribution permitted](./vendor/cwsdpmi/cwsdpmi.doc) | No — separate executable shipped alongside |
+| LFNDOS | [GPLv2](./vendor/lfndos/COPYING) | No — separate TSR shipped alongside |
+| DOSLFN | [Freeware w/sources](./vendor/doslfn/doslfn.txt) | No — separate TSR shipped alongside |
+| Cave Story game data | [freeware per Pixel's 2004 terms](https://www.cavestory.org/) | No — user-extracted, not redistributed in this repo |
 
 See [THIRD-PARTY.md](./THIRD-PARTY.md) for full attribution.
