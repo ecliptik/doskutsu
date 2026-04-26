@@ -694,9 +694,16 @@ dist: $(BUILD_DIR)/doskutsu.exe
 	    awk -v url="$$url" '{gsub(/@REPO_URL@/, url); print}' | \
 	    $(CRLF) > "$(CF_STAGE)/README.TXT"
 	@# Engine-bundled data tree → DATA/ in the zip. cp -R preserves the
-	@# StageMeta/ and endpic/ subdirs; no Cave Story freeware data here.
+	@# StgMeta/ and endpic/ subdirs; no Cave Story freeware data here.
+	@# bk*480fix.pbm files are widescreen-only backdrops; the source path
+	@# that would load them (map.cpp:560) is gated on `widescreen` which
+	@# patch 0005-renderer-lock-320x240-fullscreen forces to false on DOS.
+	@# Excluding them from the dist saves ~2 MB and dodges 5 of the 76
+	@# 8.3-violator filenames inventoried in
+	@# docs/PHASE8-LFN-RENAME-PLAN.md without needing to rename them.
 	@mkdir -p "$(CF_STAGE)/DATA"
 	@cp -R "$(NX_DATA_SRC)/." "$(CF_STAGE)/DATA/"
+	@rm -f "$(CF_STAGE)/DATA/"bk*480fix.pbm
 	@(cd "$(CF_STAGE)" && zip -q -r "$(CF_ZIP)" .)
 	@echo "built $(CF_ZIP) ($$(stat -c '%s' $(CF_ZIP)) bytes)"
 
@@ -747,6 +754,8 @@ else
 	    echo "copying data tree to $(CF)/DOSKUTSU/DATA/"; \
 	    mkdir -p "$(CF)/DOSKUTSU/DATA"; \
 	    cp -r "$(REPO_ROOT)/data/"* "$(CF)/DOSKUTSU/DATA/"; \
+	    rm -f "$(CF)/DOSKUTSU/DATA/"bk*480fix.pbm; \
+	    echo "  (excluded bk*480fix.pbm — dead code on DOS per patch 0005)"; \
 	else \
 	    echo "note: data/ not present — see docs/ASSETS.md for extraction"; \
 	fi

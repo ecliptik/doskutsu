@@ -136,7 +136,8 @@ done
 # doskutsu-authored sibling of extract-pxt.py; it transcribes the
 # algorithm from vendor/nxengine-evo/src/extract/extractstages.cpp +
 # extractfiles.cpp and produces:
-#   data/wavetable.dat       (25600 bytes)
+#   data/wavetbl.dat         (25600 bytes; renamed from upstream's
+#                             wavetable.dat to fit DOS 8.3, see § 8.3)
 #   data/stage.dat           (6936 bytes, 95 stages)
 #   data/endpic/pixel.bmp    (1398 bytes — 25-byte BMP file-header
 #                             reconstruction + 1373 bytes of palette and
@@ -151,8 +152,14 @@ done
 scripts/extract-engine-data.py /path/to/Doukutsu.exe data/
 
 # Also merge NXEngine-evo's engine support data (fonts, UI, PBM backgrounds,
-# StageMeta, endpic) — these live at the same level as the Cave Story content:
+# StgMeta, endpic) — these live at the same level as the Cave Story content:
 cp -r vendor/nxengine-evo/data/* data/
+
+# Rename the user-extracted Cave Story content files that violate DOS 8.3
+# (PrtAlmond.pbm, Almond.pxa, NpcBallos.pbm, NpcIsland.pbm, NpcPriest.pbm,
+# NpcStream.pbm, ArmsImage.pbm, ItemImage.pbm, StageImage.pbm,
+# StageSelect.tsc). Idempotent — safe to run on already-renamed trees.
+scripts/rename-user-data-83.sh data
 ```
 
 Verify (using NXEngine-source-true paths — note: no `base/` subdir):
@@ -161,14 +168,73 @@ data/Stage/0.pxm          # Cave Story maps exist
 data/Npc/NpcSym.pbm       # Cave Story NPC sprites exist
 data/org/gravity.org      # Cave Story Organya music exists (lowercased)
 data/pxt/fx02.pxt         # Cave Story Pixtone params exist
-data/wavetable.dat        # Organya PCM wavetable (extract-engine-data.py)
+data/wavetbl.dat          # Organya PCM wavetable (extract-engine-data.py)
 data/stage.dat            # 95-record stage index (extract-engine-data.py)
 data/endpic/pixel.bmp     # blanking sprite (extract-engine-data.py)
+data/StgSel.tsc           # stage-select TSC (renamed from StageSelect.tsc)
+data/StgMeta/Start.jsn    # engine stage-metadata (renamed from StageMeta/Start.json)
+data/Stage/PrtAlmnd.pbm   # Almond tileset (renamed from PrtAlmond.pbm)
 data/npc.tbl              # Cave Story NPC table exists
 data/MyChar.pbm           # Cave Story player sprite exists
 data/font_1.fnt           # NXEngine-evo engine bitmap font exists
-data/StageMeta/*.json     # NXEngine-evo engine stage metadata exists
+data/StgMeta/*.jsn        # NXEngine-evo engine stage metadata
+                          # (Cave Story stems are all 8.3-clean; only the
+                          # extension and the parent directory needed
+                          # 8.3 trims; see § 8.3 below)
 ```
+
+---
+
+## 8.3 filename convention {#8.3}
+
+Real MS-DOS 6.22 (no LFN driver) enforces 8.3 at the filesystem layer.
+DOSKUTSU runs against this constraint by renaming all engine and
+extractor-emitted assets to fit. The renames live in three patches:
+
+- `patches/nxengine-evo/0033-asset-renames-source.patch` — source-side
+  string-literal updates (Organya.cpp, SoundManager.cpp, translate.cpp,
+  tsc.cpp, map.cpp, credits.cpp, stagedata.cpp).
+- `patches/nxengine-evo/0034-asset-renames-data-files.patch` — physical
+  rename of the engine-bundled data tree (`StageMeta/` → `StgMeta/`,
+  `*.json` → `*.jsn`, `bkHellish.pbm` → `bkHellsh.pbm`, etc.).
+- `patches/nxengine-evo/0035-asset-renames-sprites-sif.patch` — binary
+  regeneration of `sprites.sif` to update the embedded sheet-path
+  strings via `scripts/rename-sif.py`.
+
+User-extracted Cave Story content is renamed by
+`scripts/rename-user-data-83.sh` (idempotent), which Step 3 above runs
+as the last extraction step. The full rename map:
+
+| Long name | 8.3 form |
+|---|---|
+| `wavetable.dat` | `wavetbl.dat` |
+| `music.json` | `music.jsn` |
+| `music_dirs.json` | `musicdir.jsn` |
+| `system.json` | `system.jsn` |
+| `StageSelect.tsc` | `StgSel.tsc` |
+| `ArmsImage.pbm` | `ArmImg.pbm` |
+| `ItemImage.pbm` | `ItmImg.pbm` |
+| `StageImage.pbm` | `StgImg.pbm` |
+| `bkHellish.pbm` | `bkHellsh.pbm` |
+| `bk*480fix.pbm` (×5) | (excluded from staging — dead code at 320×240) |
+| `StageMeta/` | `StgMeta/` |
+| `StageMeta/<name>.json` | `StgMeta/<name>.jsn` |
+| `Stage/PrtAlmond.pbm` | `Stage/PrtAlmnd.pbm` |
+| `Stage/Almond.pxa` | `Stage/Almnd.pxa` |
+| `Npc/NpcBallos.pbm` | `Npc/NpcBalls.pbm` |
+| `Npc/NpcIsland.pbm` | `Npc/NpcIslnd.pbm` |
+| `Npc/NpcPriest.pbm` | `Npc/NpcPrst.pbm` |
+| `Npc/NpcStream.pbm` | `Npc/NpcStrm.pbm` |
+| `endpic/credit01m.bmp` | `endpic/credt01m.bmp` |
+| `endpic/credit02m.bmp` | `endpic/credt02m.bmp` |
+| `endpic/credit03m.bmp` | `endpic/credt03m.bmp` |
+
+Mod compatibility note: Cave Story mods that ship their own canonical
+long-named assets (the modding scene's convention since 2004) won't load
+under DOSKUTSU on real DOS without renaming. Decision: 8.3-only for
+now; revisit at task #10 (mod stretch) with a possible
+ResourceManager-fallback layer that tries both 8.3 and long names. See
+`docs/PHASE8-LFN-RENAME-PLAN.md` for the full reasoning.
 
 ---
 

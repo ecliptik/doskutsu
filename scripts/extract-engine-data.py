@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Cave Story engine-data extractor (wavetable.dat + stage.dat + pixel.bmp).
+Cave Story engine-data extractor (wavetbl.dat + stage.dat + pixel.bmp).
 
 Mirrors the relevant parts of vendor/nxengine-evo/src/extract/extractfiles.cpp
 and extractstages.cpp:
 
-  - wavetable.dat:  raw 25600-byte blob from offset 0x110664 in the 2004 EN
+  - wavetbl.dat:  raw 25600-byte blob from offset 0x110664 in the 2004 EN
                     freeware Doukutsu.exe (CRC 0xb3a3b7ef per files[] in
                     extractfiles.cpp).
   - stage.dat:      generated from the EXE's embedded EXEMapRecord[NMAPS]
@@ -38,7 +38,7 @@ import struct
 import sys
 import zlib  # CRC-32 verification of extracted blobs
 
-# --- wavetable.dat ----------------------------------------------------------
+# --- wavetbl.dat ----------------------------------------------------------
 
 WAVETABLE_OFFSET = 0x110664
 WAVETABLE_LENGTH = 25600
@@ -130,14 +130,14 @@ def find_index(name, table, field, stage_no):
 
 
 def extract_wavetable(exe, out_dir):
-    out = os.path.join(out_dir, "wavetable.dat")
+    out = os.path.join(out_dir, "wavetbl.dat")
     exe.seek(WAVETABLE_OFFSET)
     blob = exe.read(WAVETABLE_LENGTH)
     if len(blob) != WAVETABLE_LENGTH:
         sys.exit(f"wavetable: short read at 0x{WAVETABLE_OFFSET:x}")
     with open(out, "wb") as fp:
         fp.write(blob)
-    print(f"extracted wavetable.dat ({WAVETABLE_LENGTH} bytes) to {out_dir}/")
+    print(f"extracted wavetbl.dat ({WAVETABLE_LENGTH} bytes) to {out_dir}/")
 
 
 def extract_stages(exe, out_dir):

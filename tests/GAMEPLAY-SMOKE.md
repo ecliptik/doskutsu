@@ -86,6 +86,20 @@ First successful gameplay smoke after the Phase 7 framebuffer wall closure (comm
 
 The 3 errors were the known noise above (settings.dat / pixel.bmp / 0030-first-occurrence). Real signal: zero criticals, zero drawSurface-invalid, full opening sequence rendered through to the playable lab room.
 
+## DOSBox-X LFN configuration
+
+As of patches 0033/0034/0035 + the DOSBox-X conf updates (commit pending),
+both `tools/dosbox-x.conf` and `tools/dosbox-x-fast.conf` set `lfn = false`
+to mirror real-HW MS-DOS 6.22 (no LFN driver). This is the **filesystem-
+honest** smoke baseline — if a long-named file isn't renamed by the patch
+series or by the user-data renamer (`scripts/rename-user-data-83.sh`),
+the smoke will surface a `Couldn't open ...` error rather than silently
+fall back to LFN resolution.
+
+The `DEBUG.LOG` and `SDLDBG.LOG` filenames are the DOS-canonical uppercase
+forms under `lfn = false` — the scripts in this directory match either
+case, but any new tooling should expect uppercase on `lfn = false` runs.
+
 ## Caveats and tuning
 
 - **Timing assumes `--fast`** (DOSBox-X `cycles=max`). Under `--parity` (`cycles=fixed 40000`, real-HW-approximate), the engine init takes longer and the milestones shift; the script has a `--parity` flag but the screenshot timings inside the script are tuned for `--fast`. If you want a parity-config smoke, expect to re-tune the `sleep` values.
