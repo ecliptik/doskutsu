@@ -1,0 +1,113 @@
+From 7bef1739a30683e0eb4c8adfa8cf25386d9ec856 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 13:49:17 -0700
+Subject: [PATCH] [DOSKUTSU] dos: SDL_HINT_DOS_MAX_BPP caps mode enumeration
+ bpp
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8 perf patch (NXEngine sets the hint at boot to "16"). Without
+this hint, SDL3's closest-mode matching prefers higher-bpp VESA modes —
+the g2k Mach64 picks mode 0x112 (640×480×24bpp pitch=2560), which
+inflates per-frame framebuffer flush to 921 KB. With max_bpp=16, mode
+0x111 (640×480×16bpp pitch=1280) is chosen instead — 614 KB/frame,
+~1.5× cheaper to flush.
+
+Hint usage:
+  - unset / "0": enumerate all modes (default, preserves prior behavior)
+  - "16": skip 24/32bpp modes
+  - "8":  only INDEX8 modes (requires palette-ready renderer; Cave
+          Story's NXEngine isn't palette-ready end-to-end yet — quick
+          test produced "Texture doesn't have a palette" errors)
+
+Implementation: numeric SDL_atoi of the hint value in
+DOSVESA_GetDisplayModes; one-line filter in the existing mode-skip
+chain (continue if info.bpp > max_bpp).
+
+Trade-off observed under DOSBox-X parity: 16bpp is ~8× slower per flip
+than 24bpp/32bpp under emulation (535 ms vs 64 ms) because the SDL3
+software renderer's 24bpp -> 16bpp conversion is not optimized. On real
+Mach64 the balance should reverse: real HW's 24bpp flush is bandwidth-
+bound (2.8 s/flip measured) while the conversion is CPU-bound (~10 ms
+amortized at PODP83 cycles), so the net is expected to be positive.
+Worth real-HW measurement.
+
+Local-only patch per workspace policy.
+---
+ include/SDL3/SDL_hints.h     | 29 +++++++++++++++++++++++++++++
+ src/video/dos/SDL_dosmodes.c | 11 +++++++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/include/SDL3/SDL_hints.h b/include/SDL3/SDL_hints.h
+index 377226f05..da0481360 100644
+--- a/include/SDL3/SDL_hints.h
++++ b/include/SDL3/SDL_hints.h
+@@ -741,6 +741,35 @@ extern "C" {
+  */
+ #define SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER "SDL_DOS_ALLOW_DIRECT_FRAMEBUFFER"
+ 
++/**
++ * A variable that caps VESA mode enumeration on DOS to a maximum bits-per-
++ * pixel.
++ *
++ * Numeric value: any mode whose bpp exceeds this cap is skipped during
++ * DOSVESA_GetDisplayModes. The default behavior (hint unset) is to
++ * enumerate all supported VESA modes regardless of bpp, which allows
++ * SDL's closest-mode matching to pick e.g. 24bpp (mode 0x112) at 640×480
++ * over 16bpp (mode 0x111) or 8bpp (mode 0x101). For games whose source
++ * art is paletted or doesn't benefit from >16bpp, capping bpp drops
++ * per-frame VRAM bandwidth substantially: at 640×480, 24bpp = 921 KB/frame
++ * vs 16bpp = 614 KB/frame vs 8bpp = 307 KB/frame.
++ *
++ * Useful values:
++ *
++ * - unset: Enumerate all supported VESA modes. (default)
++ * - "16":  Cap bpp at 16. Skips 24/32bpp modes, keeps 8/15/16bpp.
++ * - "8":   Cap bpp at 8. Only 8bpp INDEX8 modes (requires palette-ready
++ *          renderer; Cave Story's NXEngine is not yet palette-ready end-
++ *          to-end as of 2026-04-26 — use "16" for now).
++ *
++ * This hint must be set before the first call to SDL_GetDisplayMode() (or
++ * any function that triggers display-mode enumeration, including
++ * SDL_CreateWindow).
++ *
++ * Added by patches/SDL/0006 (DOSKUTSU local patch, never upstreamed).
++ */
++#define SDL_HINT_DOS_MAX_BPP "SDL_DOS_MAX_BPP"
++
+ /**
+  * Set the level of checking for invalid parameters passed to SDL functions.
+  *
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 02abd46a3..1ef2878bd 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -379,6 +379,15 @@ bool DOSVESA_GetDisplayModes(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_disp
+ {
+     const SDL_VESAInfo *vinfo = GetVESAInfo();
+ 
++    // Patch 0006 (DOSKUTSU): SDL_HINT_DOS_MAX_BPP caps the enumerated mode
++    // list to a maximum bits-per-pixel. Lets games skip wasteful high-bpp
++    // VESA modes that SDL's closest-mode matching would otherwise prefer.
++    // 16-cap drops 640×480 framebuffer flush from 921 KB (24bpp) to
++    // 614 KB (16bpp) — ~1.5× speedup. 8-cap requires a palette-ready
++    // renderer pipeline. See docs/PHASE8-FINDINGS.md.
++    const char *max_bpp_str = SDL_GetHint(SDL_HINT_DOS_MAX_BPP);
++    const int max_bpp = max_bpp_str ? SDL_atoi(max_bpp_str) : 0;
++
+     // Enumerate VESA modes if we have a VBE 1.2+ BIOS.  Older VBE versions
+     // (1.0, 1.1) or no VESA at all just skip this loop and fall through to
+     // the VGA mode 13h fallback below.
+@@ -410,6 +419,8 @@ bool DOSVESA_GetDisplayModes(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_disp
+             continue; // skip planar pixel layouts.
+         } else if (info.bpp < 8) {
+             continue; // skip anything below 8-bit.
++        } else if (max_bpp > 0 && info.bpp > max_bpp) {
++            continue; // patch 0006: SDL_HINT_DOS_MAX_BPP cap
+         } else if (!info.w || !info.h) {
+             continue; // zero-area display mode?!
+         } else if (!info.has_lfb && !info.win_granularity) {
+-- 
+2.47.3
+
