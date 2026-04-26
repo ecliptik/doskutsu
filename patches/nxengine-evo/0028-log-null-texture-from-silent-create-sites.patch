@@ -1,0 +1,114 @@
+From 8963553e63d7a47ac2b3533820a0c7f9beb0a881 Mon Sep 17 00:00:00 2001
+From: Claude Code <noreply@anthropic.com>
+Date: Sat, 25 Apr 2026 13:31:04 -0700
+Subject: [PATCH] log: surface NULL textures from the two silent
+ CreateTextureFromSurface sites
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Surface::loadImage (src/graphics/Surface.cpp:46-53) is the only NXEngine
+texture-creation site that NULL-checks the SDL_CreateTextureFromSurface
+result and emits a LOG_ERROR. Two other sites swallow NULL silently:
+
+  - Renderer::initVideo (src/graphics/Renderer.cpp:189) — _spot_light.
+    No NULL check on IMG_Load(spot.png) either.
+  - Font::load (src/graphics/Font.cpp:75) — font atlas page textures.
+    No NULL check on IMG_Load(atlas) either, and a NULL was getting
+    push_back'd into _atlases, then later read via _atlases.at(idx) at
+    every text-glyph render.
+
+Why DOS needs this -- specifically, why "log + propagate failure" is the
+shape of this fix:
+
+The DOS Phase 7 build reaches the title screen but renders pure black,
+with build/stage/debug.log flooded by 1647 instances of
+"Renderer::drawSurface: SDL_RenderTexture failed: Parameter 'texture' is
+invalid" per session. Bisect (task #5) determined: textures going through
+Surface::loadImage are not the source (its NULL-branch logger never
+fires); the workaround env var SDL_INVALID_PARAM_CHECKS=0 reaches the
+DOS process intact but cannot suppress the errors because SDL3's
+SDL_ObjectValid (vendor/SDL/src/SDL_utils_c.h:79-90) tests for NULL
+*before* the validation-disabled short-circuit -- so a literal NULL
+texture pointer trips the "invalid" path regardless of the hint state.
+
+Net: the 1647 errors must be coming from a NULL texture, and the only
+plausible NULL sources in NXEngine are these two silent sites. Without
+this patch we have no way to identify which one fires -- the downstream
+drawSurface error doesn't carry the create-site identity.
+
+Fix shape (matching Surface.cpp:52's existing pattern):
+
+  - Renderer::initVideo: log on IMG_Load NULL (spot.png missing); log
+    on SDL_CreateTextureFromSurface NULL; set _spot_light = NULL
+    explicitly on the early-out so the lighting render path can be
+    null-checked separately (out of scope for this patch). Continue
+    initVideo (return true) -- spotlight is non-fatal.
+
+  - Font::load: log on IMG_Load NULL or texture creation NULL, and
+    do NOT push the NULL into _atlases. Page indices may de-sync with
+    glyph.atlasid as a result, but the title-screen font typically uses
+    a single page; surfacing the failure clearly is more valuable than
+    preserving silent-cascade behaviour. If a real font ships with
+    multiple pages and a middle page fails, follow-up work can pick a
+    different recovery (sentinel, separate index map) -- the missing
+    log line was the blocker.
+
+This is a permanent fix, not a one-shot diagnostic: NULL texture from
+either site will always be a real bug worth surfacing, and the LOG_ERROR
+matches Surface.cpp:52's idiom so future audits read consistently.
+---
+ src/graphics/Font.cpp     | 13 ++++++++++++-
+ src/graphics/Renderer.cpp | 10 ++++++++++
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/Font.cpp b/src/graphics/Font.cpp
+index b605d2f..ebf0a00 100644
+--- a/src/graphics/Font.cpp
++++ b/src/graphics/Font.cpp
+@@ -72,8 +72,19 @@ bool Font::load()
+     {
+       std::string atlaspath = ResourceManager::getInstance()->getPath(atlas.get<std::string>());
+       SDL_Surface *surf     = IMG_Load(atlaspath.c_str());
+-      _atlases.push_back(SDL_CreateTextureFromSurface(Renderer::getInstance()->renderer(), surf));
++      if (!surf)
++      {
++        LOG_ERROR("Font::load: atlas IMG_Load failed for '{}': {}", atlaspath, SDL_GetError());
++        continue;
++      }
++      SDL_Texture *atlas_tex = SDL_CreateTextureFromSurface(Renderer::getInstance()->renderer(), surf);
+       SDL_DestroySurface(surf);
++      if (!atlas_tex)
++      {
++        LOG_ERROR("Font::load: atlas SDL_CreateTextureFromSurface failed for '{}': {}", atlaspath, SDL_GetError());
++        continue;
++      }
++      _atlases.push_back(atlas_tex);
+     }
+   }
+   else
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 3dd970f..77613ef 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -186,7 +186,17 @@ bool Renderer::initVideo()
+ 
+   SDL_Surface *image;
+   image = IMG_Load(spotpath.c_str());
++  if (!image)
++  {
++    LOG_ERROR("Renderer::initVideo: spotlight IMG_Load failed for '{}': {}", spotpath, SDL_GetError());
++    _spot_light = NULL;
++    return true;
++  }
+   _spot_light = SDL_CreateTextureFromSurface(_renderer, image);
++  if (!_spot_light)
++  {
++    LOG_ERROR("Renderer::initVideo: spotlight SDL_CreateTextureFromSurface failed: {}", SDL_GetError());
++  }
+   SDL_DestroySurface(image);
+ 
+   return true;
+-- 
+2.47.3
+

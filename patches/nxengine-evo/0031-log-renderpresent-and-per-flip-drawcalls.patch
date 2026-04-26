@@ -1,0 +1,188 @@
+From 5a5de448ecc15010957af6db349ed1e29e548c71 Mon Sep 17 00:00:00 2001
+From: Claude Code <noreply@anthropic.com>
+Date: Sat, 25 Apr 2026 13:56:45 -0700
+Subject: [PATCH] log: SDL_RenderPresent + per-flip drawcall instrumentation in
+ flip()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 7 black-screen second-cause probe (task #16). Patch 0030 confirmed
+that silencing the pixel.bmp NULL-texture flood does NOT unblock the
+framebuffer. Hundreds of valid drawSurface calls per frame should now
+be reaching SDL_RenderTexture and painting the title screen, but the
+DOSBox-X framebuffer is still pure black. So there's an independent
+second cause in the present-to-framebuffer pipeline.
+
+This patch instruments Renderer::flip() (the per-frame
+SDL_RenderPresent caller, distinct from flushAll() which is invoked on
+resource reloads only) to identify which of these is happening:
+
+  (a) SDL_RenderPresent succeeds but the SDL3-DOS backend never flushes
+      the backing surface to the VESA framebuffer.
+  (b) SDL_RenderPresent silently returns false (logs SDL_GetError).
+  (c) flip() is never being called at all (zero entries in the log).
+  (d) drawcalls-between-flips counter is zero/tiny — NXEngine's render
+      path is short-circuiting upstream of the renderer.
+
+The probe captures:
+
+  - Bool return value from SDL_RenderPresent. SDL3 changed this from
+    void (SDL2) to bool; failures previously went unnoticed. First fail
+    + every-100th-fail logs SDL_GetError().
+  - Per-flip drawcall counter, bumped only on the SUCCESS path of
+    SDL_RenderTexture / SDL_RenderTextureRotated in drawSurface,
+    drawSurfaceMirrored, and blitPatternAcross. Tells us how many
+    valid renders made it into the backbuffer between flips.
+  - Once-only on first flip: SDL_GetRendererProperties (driver name,
+    window pointer, output colorspace), SDL_GetWindowSize vs
+    SDL_GetWindowSizeInPixels (validates 0027's logical-presentation
+    expectation that window-size differs from framebuffer-pixel-size on
+    DOS), and SDL_GetRenderLogicalPresentation (confirms 0027 took
+    effect).
+  - Periodic summary every 100th flip: total flips, fails, drawcalls
+    cumulative, NULL-skip total — gives a rolling view across runtime.
+
+Diagnostic only. The patch should be safe to leave in series long-term:
+the bumpers are integer increments (cheap), the throttle keeps log
+noise bounded, and the once-only block is gated on flip-counter==1.
+
+Why DOS needs this — same NXE_DOS-blast-radius reasoning as 0030:
+  * The black-screen symptom is DOS-only (PC builds work).
+  * The probe is unconditional because instrumentation costs nothing
+    on platforms where the bug doesn't manifest, and consistent
+    behaviour across builds simplifies future bisection.
+---
+ src/graphics/Renderer.cpp | 88 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 86 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 6f68cdf..1146629 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -64,6 +64,51 @@ void _log_null_tex(const char *site, Surface *src)
+               site, (int)_null_tex_seen.size(), _null_tex_total);
+   }
+ }
++
++// flip() / SDL_RenderPresent diagnostic (task #16, patch 0031). Identifies
++// whether (a) presents succeed but framebuffer stays empty, (b) presents
++// fail silently, (c) presents aren't called, or (d) something else. Counts
++// drawSurface calls that ACTUALLY reached SDL_RenderTexture (i.e. success
++// path, post-NULL-check) per flip, so we can tell if NXEngine is queuing
++// hundreds of valid renders per frame and the present is dropping them.
++int _flip_total = 0;
++int _flip_failed = 0;
++int _drawcalls_since_flip = 0;
++int _drawcalls_total = 0;
++
++void _bump_drawcall()
++{
++  ++_drawcalls_since_flip;
++  ++_drawcalls_total;
++}
++
++void _log_renderer_state_once(SDL_Renderer *r, SDL_Window *w)
++{
++  // Once-only renderer-properties + window-size dump on first flip. Confirms
++  // the renderer is the software driver we asked for, the window pointer is
++  // non-NULL, and validates the 0027 logical-presentation expectation that
++  // window/framebuffer sizes may differ on DOS.
++  SDL_PropertiesID props = SDL_GetRendererProperties(r);
++  const char *name = SDL_GetStringProperty(props, SDL_PROP_RENDERER_NAME_STRING, "(none)");
++  void *win_prop = SDL_GetPointerProperty(props, SDL_PROP_RENDERER_WINDOW_POINTER, NULL);
++  Sint64 colorspace = SDL_GetNumberProperty(props, SDL_PROP_RENDERER_OUTPUT_COLORSPACE_NUMBER, -1);
++
++  int win_w = -1, win_h = -1, fb_w = -1, fb_h = -1;
++  SDL_GetWindowSize(w, &win_w, &win_h);
++  SDL_GetWindowSizeInPixels(w, &fb_w, &fb_h);
++
++  int logical_w = 0, logical_h = 0;
++  SDL_RendererLogicalPresentation logical_mode = SDL_LOGICAL_PRESENTATION_DISABLED;
++  SDL_GetRenderLogicalPresentation(r, &logical_w, &logical_h, &logical_mode);
++
++  LOG_INFO("flip-probe: renderer={} window_ptr={} colorspace={} "
++           "window_size={}x{} framebuffer_pixels={}x{} "
++           "logical_present={}x{} mode={}",
++           name ? name : "(null)",
++           (std::uintptr_t)win_prop, (long long)colorspace,
++           win_w, win_h, fb_w, fb_h,
++           logical_w, logical_h, (int)logical_mode);
++}
+ } // anonymous namespace
+ 
+ Renderer::Renderer() {}
+@@ -403,7 +448,35 @@ SDL_Window* Renderer::window()
+ void Renderer::flip()
+ {
+ //  LOG_INFO("===FLIPPING===\n");
+-  SDL_RenderPresent(_renderer);
++  // Diagnostic instrumentation (task #16 / patch 0031). Capture
++  // SDL_RenderPresent's bool return + per-flip drawcall count to identify
++  // whether the framebuffer-black symptom is from (a) failed presents,
++  // (b) presents with zero drawcalls in between, or (c) presents that
++  // succeed-but-the-backing-surface-never-flushes-to-screen. Throttled:
++  // first flip, every 100th flip, plus the sanity dump on first flip.
++  bool ok = SDL_RenderPresent(_renderer);
++  ++_flip_total;
++  if (!ok)
++  {
++    ++_flip_failed;
++    if (_flip_failed == 1 || (_flip_failed % 100) == 0)
++    {
++      LOG_ERROR("flip-probe: SDL_RenderPresent FAILED (#{}/{}, drawcalls-since-last-flip={}): {}",
++                _flip_failed, _flip_total, _drawcalls_since_flip, SDL_GetError());
++    }
++  }
++  if (_flip_total == 1)
++  {
++    _log_renderer_state_once(_renderer, _window);
++    LOG_INFO("flip-probe: first flip ok={} drawcalls-since-flip={} drawcalls-total={}",
++             ok, _drawcalls_since_flip, _drawcalls_total);
++  }
++  else if ((_flip_total % 100) == 0)
++  {
++    LOG_INFO("flip-probe: flip #{} ok={} drawcalls-since-flip={} drawcalls-total={} fail-total={} null-skips-total={}",
++             _flip_total, ok, _drawcalls_since_flip, _drawcalls_total, _flip_failed, _null_tex_total);
++  }
++  _drawcalls_since_flip = 0;
+ //  LOG_INFO("===FLIPPED===\n");
+ }
+ 
+@@ -447,6 +520,10 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   {
+     LOG_ERROR("Renderer::drawSurface: SDL_RenderTexture failed: {}", SDL_GetError());
+   }
++  else
++  {
++    _bump_drawcall();
++  }
+ }
+ 
+ // blit the specified portion of the surface to the screen
+@@ -484,6 +561,10 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+   {
+     LOG_ERROR("Renderer::drawSurface: SDL_RenderTextureRotated failed: {}", SDL_GetError());
+   }
++  else
++  {
++    _bump_drawcall();
++  }
+ }
+ 
+ // blit the specified surface across the screen in a repeating pattern
+@@ -519,7 +600,10 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+     SDL_FRect _srcfr, _dstfr;
+     SDL_RectToFRect(&srcrect, &_srcfr);
+     SDL_RectToFRect(&dstrect, &_dstfr);
+-    SDL_RenderTexture(_renderer, sfc->texture(), &_srcfr, &_dstfr);
++    if (SDL_RenderTexture(_renderer, sfc->texture(), &_srcfr, &_dstfr))
++    {
++      _bump_drawcall();
++    }
+     x += sfc->width()  * scale;
+   } while (x < destwd);
+ }
+-- 
+2.47.3
+

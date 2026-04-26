@@ -1,0 +1,76 @@
+From b78c0901594ac135ca9b86e6dab6bd9c1dc56e14 Mon Sep 17 00:00:00 2001
+From: Claude Code <noreply@anthropic.com>
+Date: Sat, 25 Apr 2026 13:14:23 -0700
+Subject: [PATCH] sdl3: set render logical presentation on DOS so the
+ framebuffer paints
+
+SDL2 -> SDL3 migration regression. The Phase 7 build links and runs to
+the title screen but the DOSBox-X framebuffer never paints -- stays
+black -- with drawSurface reporting zero errors.
+
+Root cause: the renderer is created at 320x240 (NXEngine's native game
+size), but SDL3's DOS backend negotiates the framebuffer at the closest
+available VESA mode, which can be 640x480 (the desktop_mode default in
+src/video/dos/SDL_dosvideo.c is 640x480). When render size != output
+size and no logical-presentation has been set, SDL3 paints into a
+320x240 corner of the framebuffer with no scaling -- so the game pixels
+either land off the visible display or are squeezed into a tiny dark
+region.
+
+SDL2 had SDL_RenderSetLogicalSize with implicit letterboxing. SDL3
+replaced that with the more explicit SDL_SetRenderLogicalPresentation
+(renderer, w, h, mode) -- and requires the caller to opt in. NXEngine
+pre-dates SDL3, so the migration's mechanical-rename pass had no way to
+know this call needed adding.
+
+Fix: after SDL_CreateRenderer, call SDL_SetRenderLogicalPresentation
+with the engine's native 320x240 and SDL_LOGICAL_PRESENTATION_LETTERBOX.
+LETTERBOX preserves the 4:3 aspect, centres the game, and clears the
+unused framebuffer with the renderer's clear colour. We log-and-warn
+on failure rather than fail-fast: even without it the renderer is in a
+defined state (just visibly broken), and a warning is more useful than
+a hard exit at this stage.
+
+Why DOS needs this: only the DOS backend negotiates a framebuffer mode
+distinct from the requested window size at this layer. On desktop SDL3
+the X11/Wayland window is created at 320x240 and the framebuffer
+matches, so the missing-logical-presentation issue stays latent.
+
+Guarded by NXE_DOS to avoid changing desktop behaviour.
+---
+ src/graphics/Renderer.cpp | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 3f92b41..3dd970f 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -155,6 +155,25 @@ bool Renderer::initVideo()
+     return false;
+   }
+ 
++#ifdef NXE_DOS
++  // The renderer paints at the game's native 320x240, but the SDL3-DOS
++  // backend's framebuffer may be a larger VESA mode (the desktop-mode
++  // default in src/video/dos/SDL_dosvideo.c is 640x480). Without an
++  // explicit logical presentation, SDL3 paints the 320x240 output into
++  // a 320x240 corner of the framebuffer with no scaling, leaving most of
++  // the screen black -- and on at least some VESA modes the game pixels
++  // never reach the visible display at all (Phase 7 black-screen bug).
++  // SDL_SetRenderLogicalPresentation tells SDL to scale the renderer's
++  // 320x240 output to the framebuffer with letterboxing: preserves the
++  // 4:3 aspect and centres the game. SDL3's logical-presentation API is
++  // the documented replacement for SDL2's SDL_RenderSetLogicalSize, and
++  // is required (not optional) when render-size != window-size.
++  if (!SDL_SetRenderLogicalPresentation(_renderer, 320, 240, SDL_LOGICAL_PRESENTATION_LETTERBOX))
++  {
++    LOG_WARN("Renderer::initVideo: SDL_SetRenderLogicalPresentation failed: {}", SDL_GetError());
++  }
++#endif
++
+   // SDL3: SDL_RendererInfo struct + SDL_GetRendererInfo() are gone. The replacement
+   // is the SDL_PropertiesID-based query: SDL_GetRendererProperties() returns the
+   // renderer's property bag, then SDL_GetStringProperty() pulls named values out.
+-- 
+2.47.3
+

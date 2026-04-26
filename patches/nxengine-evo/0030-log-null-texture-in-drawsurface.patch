@@ -1,0 +1,161 @@
+From cd30a7afe601e381026db7afe226df1d8a413713 Mon Sep 17 00:00:00 2001
+From: Claude Code <noreply@anthropic.com>
+Date: Sat, 25 Apr 2026 13:47:16 -0700
+Subject: [PATCH] log: NULL-texture probe in Renderer::drawSurface to attribute
+ the flood
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 7 black-screen diagnostic (task #14). Process-of-elimination from
+tasks #5/#7/#9 confirms: 558-err/12s `SDL_RenderTexture failed: Parameter
+texture is invalid` floods are literal NULL texture pointers, not
+validation-hash failures. Patches 0026 + 0028 ruled out the three known
+NXEngine SDL_CreateTextureFromSurface sites — the NULLs come from
+elsewhere.
+
+This patch instruments drawSurface itself to attribute the failures.
+
+Three call sites in src/graphics/Renderer.cpp now NULL-check both the
+Surface* and src->texture() at function entry:
+
+  - drawSurface (line ~411)
+  - drawSurfaceMirrored (line ~444)
+  - blitPatternAcross (line ~476)
+
+The existing assert(src->texture()) lines are left in place; they were
+no-ops in Release builds (NDEBUG defined), which is why textures fell
+through to SDL_RenderTexture and emitted "Parameter 'texture' is
+invalid" with no attribution. The new explicit NULL checks log + early
+return regardless of build type.
+
+Throttling: a file-static std::unordered_set<Surface*> tracks which
+Surface objects have been seen passing NULL textures. First sighting per
+Surface logs a full LOG_ERROR with pointer address (hex), dimensions,
+and aggregate counters. Subsequent renders from the same Surface only
+log a periodic running summary every 500th total NULL-render. This
+turns 558 identical lines per 12 seconds into a small handful of
+distinguishable LOG_ERRORs that point at the actual offending Surface
+objects.
+
+Why DOS needs this: the same SDL3 NULL-guard semantics
+(SDL_utils_c.h:79) apply on all platforms — the validation kill-switch
+SDL_INVALID_PARAM_CHECKS=0 cannot suppress NULL-pointer renders. So
+NULL textures will silently waste cycles on every platform. But the
+Phase 7 black-screen bug only manifests on DOS, so the diagnostic noise
+is most useful here. The probe is unconditional (no NXE_DOS gate); the
+defensive early-return is a pure correctness improvement that should
+land everywhere — pushing NULL into SDL_RenderTexture is never the
+right behaviour.
+
+Diagnostic, not a fix: this patch only logs which Surface objects are
+broken. Patch 0031+ will fix the upstream code path that produces them
+once we know which Surface(s) we're dealing with.
+---
+ src/graphics/Renderer.cpp | 60 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 77613ef..6f68cdf 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -17,15 +17,55 @@
+ 
+ #include <SDL3/SDL.h>
+ #include <SDL3_image/SDL_image.h>
++#include <cstdint>
+ #include <cstdlib>
+ #include <sstream>
+ #include <iomanip>
++#include <unordered_set>
+ 
+ namespace NXE
+ {
+ namespace Graphics
+ {
+ 
++namespace
++{
++// drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
++// Track which Surface objects produce NULL textures so we log each origin
++// once + a periodic running count, instead of hundreds of identical lines
++// per second.
++std::unordered_set<Surface *> _null_tex_seen;
++int _null_tex_total = 0;
++
++void _log_null_tex(const char *site, Surface *src)
++{
++  ++_null_tex_total;
++  if (!src)
++  {
++    // Outright NULL Surface* — much rarer; log every 100th to bound noise.
++    if (_null_tex_total == 1 || (_null_tex_total % 100) == 0)
++    {
++      LOG_ERROR("{}: Surface* is NULL (NULL-render #{} total)", site, _null_tex_total);
++    }
++    return;
++  }
++
++  bool first = _null_tex_seen.insert(src).second;
++  if (first)
++  {
++    LOG_ERROR("{}: NULL texture from Surface@0x{:x} (size {}x{}); first occurrence "
++              "(unique-surfaces-so-far: {}, total-null-renders: {})",
++              site, (std::uintptr_t)src, src->width(), src->height(),
++              (int)_null_tex_seen.size(), _null_tex_total);
++  }
++  else if ((_null_tex_total % 500) == 0)
++  {
++    LOG_ERROR("{}: NULL-render summary: {} unique surfaces, {} total renders skipped",
++              site, (int)_null_tex_seen.size(), _null_tex_total);
++  }
++}
++} // anonymous namespace
++
+ Renderer::Renderer() {}
+ Renderer::~Renderer() {}
+ 
+@@ -371,6 +411,15 @@ void Renderer::flip()
+ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
+   assert(_renderer);
++  // Diagnostic NULL-checks (task #14 / patch 0030). assert() is a no-op in
++  // Release where NDEBUG is defined; without these explicit checks NULL
++  // textures fall through to SDL_RenderTexture and emit "Parameter 'texture'
++  // is invalid" with no attribution to the offending Surface.
++  if (!src || !src->texture())
++  {
++    _log_null_tex("Renderer::drawSurface", src);
++    return;
++  }
+   assert(src->texture());
+ 
+   SDL_Rect srcrect, dstrect;
+@@ -404,6 +453,11 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
+   assert(_renderer);
++  if (!src || !src->texture())
++  {
++    _log_null_tex("Renderer::drawSurfaceMirrored", src);
++    return;
++  }
+   assert(src->texture());
+ 
+   SDL_Rect srcrect, dstrect;
+@@ -435,6 +489,12 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+ // blit the specified surface across the screen in a repeating pattern
+ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src, int height)
+ {
++  if (!sfc || !sfc->texture())
++  {
++    _log_null_tex("Renderer::blitPatternAcross", sfc);
++    return;
++  }
++
+   SDL_Rect srcrect, dstrect;
+ 
+   srcrect.x = 0;
+-- 
+2.47.3
+

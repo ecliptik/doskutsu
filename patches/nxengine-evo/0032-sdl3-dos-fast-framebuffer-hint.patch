@@ -1,0 +1,90 @@
+From 909b90d6491100f9b0cfefb845c5d3ae2c5411da Mon Sep 17 00:00:00 2001
+From: Claude Code <noreply@anthropic.com>
+Date: Sat, 25 Apr 2026 14:12:00 -0700
+Subject: [PATCH] sdl3: opt into SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER fast
+ path on DOS
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 7 framebuffer-paint fix (task #22). SDL3-DOS provides two
+framebuffer-flush paths in vendor/SDL/src/video/dos/SDL_dosframebuffer.c:
+
+  - Fast path (line 275 onward): system-RAM surface copied directly to
+    VRAM via dosmemput (banked) or memcpy (LFB). Cursor compositing,
+    palette sync, vsync, and page flipping are all skipped. Gated
+    behind SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, default "0" (off).
+
+  - Normal path (line 661 onward): full-featured blit through an LFB-
+    backed surface with cursor + palette + vsync + page flipping.
+
+Task #21's SDL/0002 diagnostic showed the normal path returns success
+to every caller but paints nothing visible under DOSBox-X — every one
+of 900+ DOSVESA_UpdateWindowFramebuffer calls hit the normal-path
+branch tag, with SDL_RenderPresent reporting success 1000/1000 times,
+yet the framebuffer stayed pure black. The bug is in the normal
+path's banked-mode blit at line 806+.
+
+Our use case doesn't need what the normal path adds:
+
+  - Cursor compositing: game runs fullscreen, no SDL software cursor.
+  - Palette sync between window and src surfaces: we use a single
+    surface format end to end.
+  - Vsync: Pentium-class hardware can't sustain >50 FPS reliably
+    anyway; the original Cave Story spec is already tear-tolerant.
+  - Page flipping: banked mode (which DOSBox-X's emulated 320x240
+    INDEX8 hits) doesn't use page flipping in the normal path either.
+
+So forcing the fast path is cheaper for us regardless of whether the
+normal-path bug gets fixed upstream. The hint is set programmatically
+via SDL_SetHintWithPriority(..., "1", SDL_HINT_OVERRIDE) immediately
+before SDL_Init, identical shape to the existing patch 0029
+(SDL_HINT_INVALID_PARAM_CHECKS) in this same #ifdef NXE_DOS block.
+
+Why DOS needs this: only the DOS backend has this two-paths choice;
+desktop builds use entirely different framebuffer pipelines. Guarded
+by NXE_DOS to keep desktop behaviour unchanged.
+---
+ src/main.cpp | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 8c2070a..1bafafa 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -313,6 +313,32 @@ int main(int argc, char *argv[])
+   // any env-read-timing concerns. Diagnostic for the Phase 7 black-screen /
+   // 1647-drawSurface-invalid-error bug.
+   SDL_SetHintWithPriority(SDL_HINT_INVALID_PARAM_CHECKS, "0", SDL_HINT_OVERRIDE);
++
++  // Opt into SDL3-DOS's direct-framebuffer fast path. SDL3-DOS has two flush
++  // paths (vendor/SDL/src/video/dos/SDL_dosframebuffer.c):
++  //   - "Fast path" (line ~275): system-RAM surface copied directly to VRAM
++  //     via dosmemput (banked) or memcpy (LFB). Gated behind this hint;
++  //     defaults to "0" (off).
++  //   - "Normal path" (line ~661): system-RAM surface blitted to an LFB-
++  //     backed surface, with cursor compositing, palette sync, vsync, and
++  //     page flipping.
++  //
++  // Task #21's SDL/0002 diagnostic showed the normal path returns success
++  // 1000/1000 calls under DOSBox-X but paints nothing visible — the bug is
++  // in the normal path's banked-mode blit (line 806+). Forcing the fast
++  // path bypasses that whole branch.
++  //
++  // Our use case doesn't need what the normal path adds:
++  //   - cursor compositing — game runs fullscreen, no SDL software cursor;
++  //   - palette sync between window and src surfaces — we use a single
++  //     surface format end to end;
++  //   - vsync — Pentium-class hardware can't sustain >50 FPS reliably anyway;
++  //   - page flipping — banked mode (which DOSBox-X's emulated 320x240 hits)
++  //     doesn't use page flipping in the normal path either.
++  //
++  // So forcing the fast path is cheaper for us regardless of whether the
++  // normal-path bug ever gets fixed.
++  SDL_SetHintWithPriority(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, "1", SDL_HINT_OVERRIDE);
+ #endif
+ 
+   // SDL3: SDL_Init returns bool (true on success); old `< 0` check would always be false.
+-- 
+2.47.3
+
