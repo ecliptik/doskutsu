@@ -1,0 +1,65 @@
+From b2711e01b8d7481f5b1c45fec35197b5805cd205 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 25 Apr 2026 20:13:09 -0700
+Subject: [PATCH 36/37] djgpp: fsync DEBUG.LOG after each line so it survives a
+ hard reset
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+fflush() commits libc -> OS but on DOS, BUFFERS and the CF card's write
+cache still hold both the bytes and (critically) the directory entry
+recording the new file size. After a wedged-engine power-cycle on the
+g2k Pentium, DEBUG.LOG is left as a 0-byte file even though every LOG_*
+macro "succeeded" — leaving us with no breadcrumbs to diagnose the
+hang.
+
+Add a per-line fsync(fileno(djgpp_log_fp)) after the existing fflush.
+fsync routes to DOS INT 21h fn 68h "Commit File," which propagates
+both data and metadata to media. CF write cost is ~tens of ms per
+fsync so this is not free at scale, but during the Phase 8 real-HW
+diagnostic phase, crash-survivability beats throughput.
+
+Surfaced 2026-04-25 by the first g2k boot attempt: engine reached
+Renderer::showLoadingScreen() (LOADING.. visible on screen), then
+wedged in SoundManager::init's MIX_CreateMixerDevice -> SDL3-DOS
+SB16 DSP probe. Hard reset to recover. DEBUG.LOG was empty post-
+reset despite SoundManager.cpp:35 issuing LOG_INFO("Sound system
+init") at the top of init().
+---
+ src/Utils/Logger_djgpp.h | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/Utils/Logger_djgpp.h b/src/Utils/Logger_djgpp.h
+index 3cd4866..1f4fdad 100644
+--- a/src/Utils/Logger_djgpp.h
++++ b/src/Utils/Logger_djgpp.h
+@@ -49,6 +49,7 @@
+ #include <ctime>
+ #include <iterator>
+ #include <string>
++#include <unistd.h>      // fsync — see DJGPP_LOG_ for why fflush is insufficient on DOS
+ 
+ namespace NXE
+ {
+@@ -113,6 +114,17 @@ enum {
+                 std::fwrite(_buf.data(), 1, _buf.size(),                    \
+                             ::NXE::Utils::Logger::djgpp_log_fp);            \
+                 std::fflush(::NXE::Utils::Logger::djgpp_log_fp);            \
++                /* DOS-PORT: fflush only goes libc -> OS; DOS BUFFERS and  \
++                 * the CF card's write cache still hold the bytes plus     \
++                 * (critically) the directory entry that records the new   \
++                 * file size. A hard reset on a wedged g2k drops both,     \
++                 * leaving DEBUG.LOG as a 0-byte file even though the      \
++                 * macro "succeeded." fsync forces DOS INT 21h fn 68h      \
++                 * Commit-File which propagates data + metadata to media.  \
++                 * Slow on CF (tens of ms) but during diagnostic phases    \
++                 * crash-survivability beats throughput. */                \
++                ::fsync(::fileno(                                           \
++                    ::NXE::Utils::Logger::djgpp_log_fp));                   \
+             }                                                               \
+             std::fwrite(_buf.data(), 1, _buf.size(), stderr);               \
+         }                                                                   \
+-- 
+2.47.3
+

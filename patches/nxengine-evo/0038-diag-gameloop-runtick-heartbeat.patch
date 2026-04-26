@@ -1,0 +1,152 @@
+From b6c50ddce1d6dc3150ae793279004296806ca26f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 00:31:59 -0700
+Subject: [PATCH] diag: heartbeat + per-step probes in gameloop / run_tick
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8 real-HW diagnostic. g2k 2026-04-26 attempt with patches 0036
+(fsync DEBUG.LOG) + 0037 (audio bypass) confirmed:
+
+  * Engine reaches >> Entering stage 72: 'u' (title screen) cleanly.
+  * No subsequent flip-probe lines (patch 0031 instrumentation logs
+    every 100th flip; we see only the first, the loading-screen flip).
+  * Engine wedges between stage entry and the title state's first
+    flip(), regardless of audio init state.
+
+This patch instruments the suspect path so the next DEBUG.LOG names
+the wedge precisely:
+
+  gameloop():
+    - Entry log (once per gameloop invocation): curmap + running
+    - Per-iteration heartbeat on first 3 iters + every 600 thereafter
+
+  run_tick():
+    - Per-step bookend logs around input_poll, game.tick, flip,
+      and SoundManager::runFade — but ONLY for the first 3 ticks.
+      That's enough to catch hang-on-iter-1 (the symptom) without
+      flooding the log.
+    - After tick 3, a heartbeat every 300 ticks (~5s @ 60Hz) confirms
+      the loop stays alive.
+
+The expected outcomes on the next g2k boot:
+
+  (a) "gameloop: entered" but no "iter 1" -> wedge in main.cpp:443
+      outer-loop pre-gameloop code (stage load completion).
+  (b) "iter 1" but no "run_tick #1: input_poll start" -> SDL_GetTicks
+      / timeRemaining math broken on real DOS HW; run_tick never fires.
+  (c) "input_poll start" but no "input_poll done" -> input subsystem
+      blocking (joystick: we did see "Opened Joystick 0 / DOS Gameport
+      Joystick" earlier).
+  (d) "input_poll done" but no "game.tick start" -> the F9-key check
+      / freezeframe path (unlikely but bounded).
+  (e) "game.tick start" but no "game.tick done" -> the title state's
+      tick wedges (most likely candidate: title sprite first-paint).
+  (f) "game.tick done" but no "flip start" -> some intermediate code
+      (freezeframe block, fps update).
+  (g) "flip start" but no "flip done" -> SDL_RenderPresent /
+      SDL3-DOS framebuffer flush wedges. Combined with our knowledge
+      that the loading-screen flip succeeded once, this would mean
+      the second flip wedges -- which would point at a real-HW
+      regression in the SDL3-DOS framebuffer flush state machine.
+  (h) "flip done" + heartbeats -> engine is alive, render is silently
+      broken downstream. Pivot the investigation back to the
+      framebuffer flush itself.
+
+One bounded round-trip should localize the wedge to the right call.
+---
+ src/main.cpp | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 76a31f6..4bd2cf4 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -99,8 +99,21 @@ static inline void run_tick()
+ #endif
+   static int frameskip       = 0;
+ 
++  // DOS-PORT (patch 0038, Phase 8 real-HW diagnostic): per-step heartbeat
++  // so DEBUG.LOG identifies which call wedges between stage entry and the
++  // title state's first flip. Per-step logging on the first 3 ticks (catches
++  // hang-on-iter-1, the symptom seen on g2k 2026-04-26), then heartbeat
++  // every 300 ticks (~5s @ 60Hz) for confirmation the loop stays alive.
++  static int tick_count = 0;
++  ++tick_count;
++  const bool log_steps = (tick_count <= 3);
++  const bool log_beat  = (!log_steps && (tick_count % 300) == 0);
++  if (log_steps) LOG_INFO("run_tick #{}: input_poll start", tick_count);
++
+   input_poll();
+ 
++  if (log_steps) LOG_INFO("run_tick #{}: input_poll done", tick_count);
++
+   // input handling for a few global things
+ 
+   if (justpushed(F9KEY))
+@@ -141,7 +154,9 @@ static inline void run_tick()
+ 
+   if (can_tick)
+   {
++    if (log_steps) LOG_INFO("run_tick #{}: game.tick start", tick_count);
+     game.tick();
++    if (log_steps) LOG_INFO("run_tick #{}: game.tick done", tick_count);
+ 
+     if (freezeframe)
+     {
+@@ -159,6 +174,7 @@ static inline void run_tick()
+       update_fps();
+     }
+ 
++    if (log_steps) LOG_INFO("run_tick #{}: flip start", tick_count);
+     if (!flipacceltime)
+     {
+       Renderer::getInstance()->flip();
+@@ -172,6 +188,7 @@ static inline void run_tick()
+         frameskip = 256;
+       }
+     }
++    if (log_steps) LOG_INFO("run_tick #{}: flip done", tick_count);
+ 
+     memcpy(lastinputs, inputs, sizeof(lastinputs));
+   }
+@@ -180,7 +197,10 @@ static inline void run_tick()
+     SDL_Delay(20);
+   }
+ 
++  if (log_steps) LOG_INFO("run_tick #{}: runFade start", tick_count);
+   SoundManager::getInstance()->runFade();
++  if (log_steps) LOG_INFO("run_tick #{}: runFade done (tick complete)", tick_count);
++  if (log_beat)  LOG_INFO("run_tick #{}: heartbeat (loop alive)", tick_count);
+ }
+ 
+ void AppMinimized(void)
+@@ -207,8 +227,24 @@ void gameloop(void)
+ 
+   game.switchstage.mapno = -1;
+ 
++  // DOS-PORT (patch 0038, Phase 8 real-HW diagnostic): localize the wedge
++  // between stage entry and the title state's first flip on g2k. Symptom:
++  // stage 72 entry logged, then no further LOG output, blue-screen hang.
++  // This LOG fires once per gameloop() invocation; the per-iteration heart-
++  // beat below catches the case where SDL_GetTicks() / timeRemaining math
++  // is broken on real DOS HW and run_tick() never fires.
++  LOG_INFO("gameloop: entered (curmap={}, running={})", (int)game.curmap, (int)game.running);
++  int loop_iter = 0;
++
+   while (game.running && game.switchstage.mapno < 0)
+   {
++    ++loop_iter;
++    if (loop_iter <= 3 || (loop_iter % 600) == 0)
++    {
++      LOG_INFO("gameloop: iter {} ticks={} mapno={}",
++               loop_iter, (int32_t)SDL_GetTicks(), (int)game.switchstage.mapno);
++    }
++
+     // get time until next tick
+     int32_t curtime       = SDL_GetTicks();
+     int32_t timeRemaining = nexttick - curtime;
+-- 
+2.47.3
+

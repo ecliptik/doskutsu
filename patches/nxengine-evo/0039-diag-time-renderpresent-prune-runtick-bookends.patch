@@ -1,0 +1,194 @@
+From 5a574bbaee6541c03fe40985d3226c3682eb29e7 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 00:48:07 -0700
+Subject: [PATCH] diag: time SDL_RenderPresent, drop redundant run_tick
+ bookends
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Patch 0038 confirmed (g2k DEBUG.LOG 2026-04-26 attempt 3):
+
+  * Engine is alive, gameloop is running, run_tick completes the full
+    cycle (input_poll / game.tick / flip / runFade) on every iter.
+  * input_poll, game.tick, runFade all complete in ~0s (no log gap).
+  * flip() takes 2-3s per call — running at ~0.3 fps.
+
+The blue-screen "hang" is therefore not a hang at all; it is the title
+state rendering at 0.3 fps, faster than the user gives up but slower
+than the title content fades in to anything visible.
+
+This patch refines the instrumentation:
+
+  Renderer.cpp (flip-probe in patch 0031):
+    - Time SDL_RenderPresent itself with SDL_GetTicks bracket.
+    - Drop every-100th throttle to every-10th. At 0.3 fps the 100th
+      cadence is 5+ minutes between log entries, useless.
+    - Log the per-flip present_ms so we know if the cost is
+      SDL_RenderPresent (likely SDL3-DOS framebuffer flush slow path)
+      vs. something upstream of it inside flip().
+    - Log drawcalls-since-flip so we know whether the title state is
+      actually emitting paint work each frame or rendering nothing.
+
+  main.cpp (run_tick from patch 0038):
+    - Drop the per-step bookend logs (input_poll start/done,
+      game.tick start/done, flip start/done, runFade start/done).
+      They confirmed what they needed to confirm; now they are noise
+      that flushes ~8 fsync writes per tick for no diagnostic value.
+    - Keep the heartbeat at every 300 ticks (silent at the current
+      rate, which is fine — silence in DEBUG.LOG = wedge, log activity
+      = alive).
+    - Keep the gameloop entry log + per-iteration heartbeat unchanged
+      from 0038.
+
+Expected next-attempt outcomes:
+
+  * If present_ms is ~3000ms consistently and drawcalls > 0:
+    SDL3-DOS framebuffer flush is the bottleneck. Most likely the
+    SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER fast path that worked under
+    DOSBox-X (patch 0032) is not engaging on real Mach64. Pivot to
+    instrumenting vendor/SDL/src/video/dos/SDL_dosframebuffer.c.
+
+  * If present_ms is small (<100ms) but flip() is still slow:
+    cost is upstream of SDL_RenderPresent inside flip() — but flip()
+    is essentially just SDL_RenderPresent + counter bumps, so this
+    outcome would be very surprising.
+
+  * If drawcalls-since-flip == 0: title state is rendering nothing.
+    Different bug — investigate title-state render path, possibly
+    NULL textures somewhere (patch 0030 would have logged but only
+    on first occurrence per Surface).
+
+  * If drawcalls non-zero AND present_ms small: title state IS
+    rendering and flips ARE fast — the slowness is somewhere we
+    haven't measured. Check fsync overhead from patch 0036 (we add
+    one fsync per LOG line, ~30ms each on CF; if title state's
+    rendering triggers many LOG lines indirectly via NXEngine's own
+    instrumentation that cost could cumulate).
+---
+ src/graphics/Renderer.cpp | 25 ++++++++++++++-----------
+ src/main.cpp              | 27 ++++++++++-----------------
+ 2 files changed, 24 insertions(+), 28 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 1146629..5ffa40a 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -448,13 +448,15 @@ SDL_Window* Renderer::window()
+ void Renderer::flip()
+ {
+ //  LOG_INFO("===FLIPPING===\n");
+-  // Diagnostic instrumentation (task #16 / patch 0031). Capture
+-  // SDL_RenderPresent's bool return + per-flip drawcall count to identify
+-  // whether the framebuffer-black symptom is from (a) failed presents,
+-  // (b) presents with zero drawcalls in between, or (c) presents that
+-  // succeed-but-the-backing-surface-never-flushes-to-screen. Throttled:
+-  // first flip, every 100th flip, plus the sanity dump on first flip.
++  // Diagnostic instrumentation (patch 0031 + 0039). Patch 0039 added
++  // SDL_RenderPresent timing in ms and dropped the every-100th throttle to
++  // every 10th — at the ~0.3 fps real-HW pace observed on g2k 2026-04-26
++  // the every-100th cadence would not produce a log entry until after 5+
++  // minutes of wait, useless for diagnosis. Every 10th gives us 30s
++  // resolution at the slow pace and stays bounded if/when fps recovers.
++  Uint64 _t0 = SDL_GetTicks();
+   bool ok = SDL_RenderPresent(_renderer);
++  Uint64 _present_ms = SDL_GetTicks() - _t0;
+   ++_flip_total;
+   if (!ok)
+   {
+@@ -468,13 +470,14 @@ void Renderer::flip()
+   if (_flip_total == 1)
+   {
+     _log_renderer_state_once(_renderer, _window);
+-    LOG_INFO("flip-probe: first flip ok={} drawcalls-since-flip={} drawcalls-total={}",
+-             ok, _drawcalls_since_flip, _drawcalls_total);
++    LOG_INFO("flip-probe: first flip ok={} present={}ms drawcalls-since-flip={} drawcalls-total={}",
++             ok, (long long)_present_ms, _drawcalls_since_flip, _drawcalls_total);
+   }
+-  else if ((_flip_total % 100) == 0)
++  else if ((_flip_total % 10) == 0)
+   {
+-    LOG_INFO("flip-probe: flip #{} ok={} drawcalls-since-flip={} drawcalls-total={} fail-total={} null-skips-total={}",
+-             _flip_total, ok, _drawcalls_since_flip, _drawcalls_total, _flip_failed, _null_tex_total);
++    LOG_INFO("flip-probe: flip #{} ok={} present={}ms drawcalls-since-flip={} drawcalls-total={} fail-total={} null-skips-total={}",
++             _flip_total, ok, (long long)_present_ms, _drawcalls_since_flip,
++             _drawcalls_total, _flip_failed, _null_tex_total);
+   }
+   _drawcalls_since_flip = 0;
+ //  LOG_INFO("===FLIPPED===\n");
+diff --git a/src/main.cpp b/src/main.cpp
+index 4bd2cf4..470847d 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -99,21 +99,20 @@ static inline void run_tick()
+ #endif
+   static int frameskip       = 0;
+ 
+-  // DOS-PORT (patch 0038, Phase 8 real-HW diagnostic): per-step heartbeat
+-  // so DEBUG.LOG identifies which call wedges between stage entry and the
+-  // title state's first flip. Per-step logging on the first 3 ticks (catches
+-  // hang-on-iter-1, the symptom seen on g2k 2026-04-26), then heartbeat
+-  // every 300 ticks (~5s @ 60Hz) for confirmation the loop stays alive.
++  // DOS-PORT (patch 0038, narrowed by 0039): the per-step bookend probes
++  // from 0038 confirmed input_poll/game.tick/runFade are all fast on real
++  // HW (~0s each); only flip() is slow (2-3s per call, ~0.3 fps). Per-step
++  // probes were flooding the log with fsync overhead for no diagnostic
++  // value. Keeping just the heartbeat — every 300 ticks at theoretical
++  // 60 Hz = ~5s, but at the observed 0.3 fps that's once every 16 minutes,
++  // which is fine: if we're hung we want SILENCE in the log, and if we're
++  // alive the per-flip flip-probe in Renderer.cpp tells us the rate.
+   static int tick_count = 0;
+   ++tick_count;
+-  const bool log_steps = (tick_count <= 3);
+-  const bool log_beat  = (!log_steps && (tick_count % 300) == 0);
+-  if (log_steps) LOG_INFO("run_tick #{}: input_poll start", tick_count);
++  const bool log_beat = ((tick_count % 300) == 0);
+ 
+   input_poll();
+ 
+-  if (log_steps) LOG_INFO("run_tick #{}: input_poll done", tick_count);
+-
+   // input handling for a few global things
+ 
+   if (justpushed(F9KEY))
+@@ -154,9 +153,7 @@ static inline void run_tick()
+ 
+   if (can_tick)
+   {
+-    if (log_steps) LOG_INFO("run_tick #{}: game.tick start", tick_count);
+     game.tick();
+-    if (log_steps) LOG_INFO("run_tick #{}: game.tick done", tick_count);
+ 
+     if (freezeframe)
+     {
+@@ -174,7 +171,6 @@ static inline void run_tick()
+       update_fps();
+     }
+ 
+-    if (log_steps) LOG_INFO("run_tick #{}: flip start", tick_count);
+     if (!flipacceltime)
+     {
+       Renderer::getInstance()->flip();
+@@ -188,7 +184,6 @@ static inline void run_tick()
+         frameskip = 256;
+       }
+     }
+-    if (log_steps) LOG_INFO("run_tick #{}: flip done", tick_count);
+ 
+     memcpy(lastinputs, inputs, sizeof(lastinputs));
+   }
+@@ -197,10 +192,8 @@ static inline void run_tick()
+     SDL_Delay(20);
+   }
+ 
+-  if (log_steps) LOG_INFO("run_tick #{}: runFade start", tick_count);
+   SoundManager::getInstance()->runFade();
+-  if (log_steps) LOG_INFO("run_tick #{}: runFade done (tick complete)", tick_count);
+-  if (log_beat)  LOG_INFO("run_tick #{}: heartbeat (loop alive)", tick_count);
++  if (log_beat) LOG_INFO("run_tick #{}: heartbeat (loop alive)", tick_count);
+ }
+ 
+ void AppMinimized(void)
+-- 
+2.47.3
+

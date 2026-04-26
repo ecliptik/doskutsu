@@ -1,0 +1,77 @@
+From 3d7423e1944b55d5cbaa53ded1790e81c057555f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 13:49:35 -0700
+Subject: [PATCH] diag: cap VESA mode enumeration at 16bpp via
+ SDL_HINT_DOS_MAX_BPP
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8 perf companion to patches/SDL/0006-vbe-max-bpp-hint. NXEngine
+sets SDL_HINT_DOS_MAX_BPP="16" at OVERRIDE priority before SDL_Init so
+SDL3-DOS's mode enumeration filters out 24bpp+ modes. Result on the
+g2k Mach64: VESA mode 0x111 (640×480×16bpp pitch=1280) is chosen
+instead of 0x112 (640×480×24bpp pitch=2560), dropping per-frame
+framebuffer flush from 921 KB to 614 KB.
+
+We don't go to 8bpp yet — a quick test produced "Texture doesn't have
+a palette" errors flooding DEBUG.LOG because NXEngine's renderer
+pipeline isn't palette-ready end-to-end (Phase 9 lever 3 work). 16bpp
+sidesteps that.
+
+Trade-off: under DOSBox-X parity 16bpp is ~8× slower per flip than
+24bpp because the SDL3 software-renderer's 24->16bpp conversion is
+slow under emulation. On real Mach64 the conversion is CPU-bound
+(~10 ms amortized) while the flush is bandwidth-bound (~2.8 s
+measured at 24bpp), so 16bpp should net faster on real HW. Verify on
+g2k.
+---
+ src/main.cpp | 31 +++++++++++++++++++++----------
+ 1 file changed, 21 insertions(+), 10 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 470847d..0b7b828 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -357,17 +357,28 @@ int main(int argc, char *argv[])
+   // in the normal path's banked-mode blit (line 806+). Forcing the fast
+   // path bypasses that whole branch.
+   //
+-  // Our use case doesn't need what the normal path adds:
+-  //   - cursor compositing — game runs fullscreen, no SDL software cursor;
+-  //   - palette sync between window and src surfaces — we use a single
+-  //     surface format end to end;
+-  //   - vsync — Pentium-class hardware can't sustain >50 FPS reliably anyway;
+-  //   - page flipping — banked mode (which DOSBox-X's emulated 320x240 hits)
+-  //     doesn't use page flipping in the normal path either.
+-  //
+-  // So forcing the fast path is cheaper for us regardless of whether the
+-  // normal-path bug ever gets fixed.
++  // 2026-04-26 update: attempted to remove this in a Phase-8 perf experiment
++  // (would have engaged LFB on Mach64 instead of banked mode, ~10-15× speedup).
++  // Removal reproduced the original Phase 7 black-framebuffer wall under
++  // DOSBox-X (fb_state stays zero-initialized in the LFB code path —
++  // confirmed via patches/SDL/0002+0003 dump showing direct_fb=0 fb_size=0
++  // bpp=0 pixels=NULL). The hint stays for now; the proper fix lives in
++  // SDL_dosframebuffer.c's fb_state init for the LFB path and will land as
++  // a separate patch (tracked in docs/PHASE8-FINDINGS.md).
+   SDL_SetHintWithPriority(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, "1", SDL_HINT_OVERRIDE);
++
++  // Patch 0041 (Phase 8 perf, 2026-04-26): cap SDL3-DOS VESA mode
++  // enumeration at 16bpp. Without this, SDL3's closest-mode matching picks
++  // 24bpp (mode 0x112 on the g2k Mach64; 32bpp 0x190 on DOSBox-X). 16-cap
++  // forces 0x111 (640×480×16) on Mach64 — drops per-frame framebuffer flush
++  // from 921 KB to 614 KB (~1.5× speedup).
++  //
++  // We don't go to 8bpp (which would be ~3× speedup) because NXEngine's
++  // renderer pipeline isn't palette-ready end-to-end yet — a quick test
++  // produced "Texture doesn't have a palette" errors flooding DEBUG.LOG.
++  // 8bpp end-to-end is Phase 9 lever 3 work; needs palette management on
++  // stage transitions. Tracked in docs/PHASE8-FINDINGS.md.
++  SDL_SetHintWithPriority(SDL_HINT_DOS_MAX_BPP, "16", SDL_HINT_OVERRIDE);
+ #endif
+ 
+   // SDL3: SDL_Init returns bool (true on success); old `< 0` check would always be false.
+-- 
+2.47.3
+

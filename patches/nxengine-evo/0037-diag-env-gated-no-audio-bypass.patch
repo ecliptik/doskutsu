@@ -1,0 +1,62 @@
+From f0f4fc4a3bcd3f66072971234de40b81b6ebd9ff Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 25 Apr 2026 20:13:23 -0700
+Subject: [PATCH 37/37] diag: env-gated DOSKUTSU_NO_AUDIO bypass for
+ SoundManager::init
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8 real-HW diagnostic. SoundManager::init() ultimately reaches
+SDL3-DOS's Sound Blaster DSP probe via MIX_CreateMixerDevice ->
+SDL_OpenAudioDevice. PR #15377's SDL3-DOS audio backend has no
+real-hardware test coverage, and on a real Vibra16S CT2490 (g2k
+machine, 2026-04-25 attempt) the probe wedges with no further log
+output past Renderer::showLoadingScreen().
+
+Setting DOSKUTSU_NO_AUDIO=1 in the DOS environment skips the init
+call entirely. If the engine reaches the title screen with this set,
+audio init is confirmed as the wall and the SB DSP probe in SDL3-DOS
+needs a real fix (most likely a bounded-timeout wrapper around the
+DSP version-query loop). If the engine still hangs, audio is ruled
+out and we look elsewhere (font load, NPC table, script init, etc).
+
+Not for shipping. Leaving the env var set in production = no audio.
+This is intentionally an env-var bypass rather than a build-time
+flag so the same DOSKUTSU.EXE artifact serves both the audio-on
+"normal" run and the audio-off "diagnostic" run — one tarball, two
+boots.
+---
+ src/main.cpp | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 1bafafa..76a31f6 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -374,7 +374,21 @@ int main(int argc, char *argv[])
+ 
+   Renderer::getInstance()->showLoadingScreen();
+ 
+-  if (!SoundManager::getInstance()->init())
++  // DOS-PORT: env-gated audio-init bypass for Phase 8 real-HW diagnostics.
++  // SoundManager::init() ultimately calls into SDL3-DOS's Sound Blaster DSP
++  // probe (via MIX_CreateMixerDevice -> SDL_OpenAudioDevice). PR #15377's
++  // SDL3-DOS audio backend has no real-hardware test coverage; on a real
++  // Vibra16S (g2k machine) this path wedges with no log output past
++  // showLoadingScreen(). Setting DOSKUTSU_NO_AUDIO=1 in the DOS environment
++  // skips audio init so we can localize the hang. If the engine reaches the
++  // title screen with this set, audio init is confirmed as the wall and the
++  // SB DSP probe needs a real fix. Not for shipping — leaving this in place
++  // means no audio.
++  if (std::getenv("DOSKUTSU_NO_AUDIO"))
++  {
++    LOG_INFO("DOSKUTSU_NO_AUDIO set; bypassing SoundManager::init() for diagnostics");
++  }
++  else if (!SoundManager::getInstance()->init())
+   {
+     fatal("Failed to initialize sound.");
+     return 1;
+-- 
+2.47.3
+
