@@ -11,7 +11,7 @@ These are answered and **not** open for re-litigation mid-phase. If a phase reve
 | # | Decision | Chosen |
 |---|---|---|
 | 1 | Repo hosting | Forgejo primary (`ssh://git@forgejo.ecliptik.com/ecliptik/doskutsu.git`). No GitHub / Codeberg mirrors for now. |
-| 2 | Build system | Top-level `Makefile` orchestrating five stages (SDL3 → sdl2-compat → SDL2_mixer + SDL2_image → NXEngine-evo). Each stage is a CMake invocation. |
+| 2 | Build system | Top-level `Makefile` orchestrating five stages (SDL3 → sdl2-compat → SDL2_mixer + SDL2_image → NXEngine-evo). Each stage is a CMake invocation. **⚠️ Amended 2026-04-24** — see `## Plan Amendments § 2026-04-24` below; current pipeline is **four** stages (SDL3 → SDL3_mixer → SDL3_image → NXEngine-evo); sdl2-compat dropped from build line, retained as cloned-but-unbuilt. |
 | 3 | Vendoring | Snapshots under `vendor/<name>/` with `vendor/sources.manifest` pinning SHAs + `patches/<name>/*.patch` applied at build time. Clones are gitignored; manifest + patches are tracked. |
 | 4 | `[DOSKUTSU]` CONFIG.SYS profile | **No dedicated profile in this repo.** Run under existing `[VIBRA]`-style SB16+NOEMS boot; suggestions live in `docs/BOOT.md`. |
 | 5 | Widescreen / Full HD in NXEngine-evo | **Lock at runtime to 320x240 fullscreen.** Code paths remain compiled in for future revisit. |
@@ -73,6 +73,8 @@ Both pieces of upstream code independently encode the assumption that DOS is a s
 
 ### 2026-04-25 — Phase 6 closed; Phase 7 partially open (title screen renders nothing visible)
 
+> **⚠️ SUPERSEDED 2026-04-25 (revision below).** This amendment was authored from a compaction-corrupted summary and contains verifiable falsehoods. Most importantly: the "`drawSurface` produces zero errors" claim is wrong (`build/stage/debug.log` shows 1647 errors over a full run; ~50/sec sustained on a shorter capture — bisected in subsequent triage), and the "five-bug fix sweep" framing claims more validated fixes than actually landed. The "fatal #4 — fixed" row's claim that the `SDL_INVALID_PARAM_CHECKS=0` env var "drops drawSurface error count to 0" is also wrong — see the revision below for why (NULL-guard at `vendor/SDL/src/SDL_utils_c.h:79` short-circuits the hint). The corrupted prose below is preserved verbatim as a record of the compaction artifact; **the revision below this block is the authoritative pickup state for next session.**
+
 **TL;DR — pickup state for next session.** Phase 6 (Cave Story data) is closed. Phase 7 (DOSBox-X playthrough) hit a wall: the binary now boots cleanly through NXEngine's full init sequence and reaches the main loop / stage 72 (the title screen), `drawSurface` produces zero errors, but the DOSBox-X emulated framebuffer never paints — it stays black. Five distinct pre-title-screen bugs were diagnosed and fixed today in one sweep (commit `44fec06` on `main`). The remaining "framebuffer doesn't show anything" issue is owned for human triage in the next session; it is **not** in NXEngine, it is somewhere in the SDL3-DOS render-vs-present pipeline.
 
 **What's done.**
@@ -120,6 +122,54 @@ Expected on hit: `debug.log` ends with `>> Entering stage 72: 'u'` followed by `
 - PXT slot audit closed: 540 `data/pxt/fxNN.pxt not found` warnings during init are **expected**, not extractor bugs. NXEngine iterates `slot=1..0x75` blindly; Cave Story's `SND[]` table is genuinely sparse. `scripts/extract-pxt.py` is byte-identical to upstream's. No fix needed; could optionally bump `LOG_WARN` → `LOG_DEBUG` in a future patch to clean up the log.
 
 **What's preserved.** The five-bug sweep is in `main` at commit `44fec06`. Patches `0025` and `0026` are in `patches/nxengine-evo/`. Diagnostic logging I added to `Surface.cpp` and `Font.cpp` was reverted before commit (it was instrumentation-only, not a fix). The debug.log it produced confirmed that texture loads succeed cleanly on the post-fix path; that data informed the diagnosis above.
+
+### 2026-04-25 (revision) — corrects the prior 2026-04-25 amendment
+
+> **Why this exists.** The amendment immediately above was authored from a compaction-corrupted summary. This entry preserves the (smaller) set of changes that actually landed and corrects the falsehoods. Per the project rule "the rewrite is correcting falsehoods, not declaring victory" — Phase 7 remains **open and in active investigation**.
+
+**TL;DR — accurate pickup state.** Phase 6 (Cave Story data) is closed at commit `44fec06`. Phase 7 reached stage 72 (title screen) cleanly, but the DOSBox-X framebuffer stays black: the paint path is blocked by sustained `Renderer::drawSurface: SDL_RenderTexture failed: Parameter 'texture' is invalid` errors (`build/stage/debug.log` captures show 1647 over a full run, ~50/sec sustained on a shorter capture). The source of the invalid texture handle reaching `SDL_RenderTexture` is **not yet root-caused**; investigation continues — see the local task tracker for in-flight hypotheses.
+
+**What actually landed in `main` (commit `44fec06` plus the 0027/0028/0029 follow-ups).**
+
+| Area | Artifact | Status |
+|---|---|---|
+| Phase 6 closure | `scripts/extract-engine-data.py` produces `data/wavetable.dat` (Organya PCM, 25600 bytes from `Doukutsu.exe` offset `0x110664`) and `data/stage.dat` (95-record stage index transcribed from `vendor/nxengine-evo/src/extract/extractstages.cpp`, 6936 bytes). | Closed. |
+| Phase 6 closure | `data/base/` subdir convention from the original Phase 6 prose **superseded**: NXEngine resolves data via `getPath("Stage/0.pxm")` → `data/Stage/0.pxm` with no `base/` prefix. `docs/ASSETS.md` and `make install` reconciled. | Closed. |
+| Phase 7 prep | `make stage` target + `tools/dosbox-launch.sh --stage` flag. Stages `build/stage/` with `DOSKUTSU.EXE` + `CWSDPMI.EXE` + `data/` (symlinked) so NXEngine's `getBasePath() + "data/"` resolution finds the data tree. | Closed. |
+| Phase 7 fatal — CMake DJGPP data path | `patches/nxengine-evo/0025-cmake-djgpp-data-path.patch` gates `IF(UNIX_LIKE)` on `AND NOT DJGPP`. Was baking the build-host's absolute Linux path into `DATADIR`; engine fatal-exited at graphics init on the host-path font lookup. | Fixed. |
+| Phase 7 fatal — DOSBox-X long filenames | `tools/dosbox-x.conf` and `tools/dosbox-x-fast.conf` set `lfn = true`. Default `lfn = auto` disables LFN for emulated MS-DOS 6.22, truncating `wavetable.dat` / `music_dirs.json` / `StageSelect.tsc` to 8.3 names that fopen() missed. | Fixed under DOSBox-X. **Real-HW caveat:** plain MS-DOS 6.22 on g2k has no LFN driver; Phase 8 deferred decision (DOSLFN.COM TSR vs source-level rename) tracked separately. |
+| Phase 7 fatal — INDEX8 palette | `patches/nxengine-evo/0026-sdl3-zoom-index8-palette.patch` explicitly creates and attaches a palette to INDEX8 dst surfaces in `zoom.cpp`. SDL3's `SDL_CreateSurface(...,INDEX8)` no longer attaches a default palette (SDL2 did); downstream `SDL_CreateTextureFromSurface` failed with `"src does not have a palette set"` for every paletted `.pbm`. SDL2→SDL3 migration regression. | Fixed. |
+| Phase 7 logical-presentation | `patches/nxengine-evo/0027-sdl3-renderer-logical-presentation.patch` adds `SDL_SetRenderLogicalPresentation(_renderer, 320, 240, SDL_LOGICAL_PRESENTATION_LETTERBOX)` after `SDL_CreateRenderer`. Structurally correct (the SDL3-DOS backend defaults the fullscreen target to 640×480 at `vendor/SDL/src/video/dos/SDL_dosvideo.c:169` regardless of the 320×240 window request); **not load-bearing for the framebuffer-black symptom** because the upstream texture-validation failure short-circuits the render path before logical presentation matters. | Landed; not the wall's resolution. |
+| Phase 7 diagnostics | `patches/nxengine-evo/0028-log-null-texture-from-silent-create-sites.patch` adds NULL checks + `LOG_ERROR` at the previously-silent texture-creation call sites (`_spot_light` create in `Renderer.cpp`, font-atlas create in `Font.cpp`). Defensive only. **Bisect outcome:** both creates succeed and return non-NULL textures — neither is the source of the invalid-texture handle. The NULL source is elsewhere. | Landed; did not pinpoint the source. |
+| Phase 7 diagnostics | `patches/nxengine-evo/0029-sdl3-set-invalid-param-checks-hint-dos.patch` — programmatic `SDL_SetHint(..., SDL_HINT_OVERRIDE)` for `INVALID_PARAM_CHECKS=0` (env-var path verified to deliver intact via `tests/sdl3-smoke/sdltest.exe` reading `SDL_GetHint`). Landed; **does not resolve the wall** for the structural reason documented below the table. | Landed; not the wall's resolution. |
+| Phase 8 prep | `docs/PHASE8-G2K-CHECKLIST.md` authored — pre-deployment, CF prep, g2k boot config, first-boot smoke, 30-min play checklist, top failure-mode catalog (real-HW vs DOSBox-X divergences, including the explicit "do NOT set `SDL_DOS_AUDIO_SB_SKIP_DETECTION` on real HW" warning). | Ready when Phase 7 closes. |
+
+**Why the `SDL_INVALID_PARAM_CHECKS=0` env var cannot be the workaround the prior amendment claimed.** The earlier "fatal #4 — fixed" row asserted that exporting `SDL_INVALID_PARAM_CHECKS=0` from `tools/dosbox-launch.sh` "drops drawSurface error count to 0." Verified, that is wrong:
+
+- The env var **does** arrive intact in the DOS process (verified by `tests/sdl3-smoke/sdltest.exe` reading and reporting `SDL_GetHint(SDL_HINT_INVALID_PARAM_CHECKS)`).
+- `SDL_object_validation = false` only short-circuits the *non-NULL pointer validation* path inside `ObjectValid()`. **NULL textures still fail the NULL guard at `vendor/SDL/src/SDL_utils_c.h:79` regardless of the hint state.**
+- Therefore the env-var workaround is **structurally incapable** of suppressing NULL-texture errors — which are what `drawSurface` is hitting. Any prior reading of "error count dropped to 0" is a measurement / summarization artifact, not real behavior.
+
+**Investigation status (open).** Source of the invalid texture handle reaching `SDL_RenderTexture` is the open question. Patch `0029` (programmatic hint) landed but does not resolve the wall (above). The next active step is `patches/nxengine-evo/0030-*` — instrumentation in `Renderer::drawSurface` to identify the NULL-texture origin (in flight). Further hypotheses queued behind that: windowed-mode probe (DOS branch `window_flags = 0`), paint-and-present extension to `sdltest.c`, and SDL3-DOS framebuffer-flush trace into `vendor/SDL/src/video/dos/SDL_dosframebuffer.c`. **Resume from current task-tracker state, not from the corrupted prose above.**
+
+**Real-HW LFN follow-up (Phase 8 deferred decision)** — unchanged from the prior amendment: `lfn = true` is DOSBox-X-only; plain MS-DOS 6.22 on g2k has no LFN driver. Phase 8 needs either DOSLFN.COM (~9 KB, GPLv2 TSR, redistributable) loaded via AUTOEXEC.BAT before `DOSKUTSU.EXE`, or a source-level patch renaming the long-named assets. Decision deferred until we actually run on g2k.
+
+**Background research deliverables (Phase 7 prep)** — unchanged from the prior amendment:
+- Git-hygiene research closed: recommendation is sealed-tree-per-task helper script + serial dispatch, codifying the `patches/nxengine-evo/README.md § Authoring order` policy. Does NOT use `git worktree` (per user caveat). Implementation deferred — research-only.
+- PXT slot audit closed: 540 `data/pxt/fxNN.pxt not found` warnings during init are expected, not extractor bugs (NXEngine iterates `slot=1..0x75` blindly; Cave Story's `SND[]` table is genuinely sparse). `scripts/extract-pxt.py` is byte-identical to upstream's. Optional log-noise cleanup possible (`LOG_WARN` → `LOG_DEBUG`) but not required.
+
+**Reproduction instructions for next session** (unchanged from the prior amendment, still accurate):
+
+```bash
+make stage                                                     # rebuild staging dir
+tools/dosbox-launch.sh --fast --stage --exe DOSKUTSU.EXE       # smoke launch
+DISPLAY=:0 scrot -u /tmp/dosbox.png                            # capture framebuffer
+cat build/stage/debug.log                                      # NXEngine engine log
+cat /tmp/dosbox-launch.log                                     # DOSBox-X launcher log
+pkill -x dosbox-x                                              # stop
+```
+
+Expected on next-session pickup: `debug.log` ends with `>> Entering stage 72: 'u'` followed by `Surface::loadImage` success lines and many `Renderer::drawSurface: SDL_RenderTexture failed: Parameter 'texture' is invalid` lines. Screenshot shows DOSBox-X menu bar at top + black inner region. Engine init is healthy; the open question is "why is the texture handle invalid by the time it reaches `SDL_RenderTexture`?"
 
 ---
 
@@ -180,6 +230,8 @@ We do **not** include Cave Story game data in the dist. `README.TXT` tells users
 - [ ] No git hook / CI step yet, but: before cutting a release, manually verify the dist zip contains all five license files (`LICENSE.TXT`, `GPLV3.TXT`, `CWSDPMI.DOC`, `THIRD-PARTY.TXT`, plus any zlib notices referenced in THIRD-PARTY.md)
 
 ## Architecture Recap
+
+> **⚠️ AMENDED 2026-04-24 — Path B.** The SDL2-via-sdl2-compat stack described below is superseded. Current pipeline is direct SDL2 → SDL3 source migration in NXEngine-evo with no shim layer: NXEngine-evo (now SDL3 C++11 source) → `libSDL3_mixer.a` + `libSDL3_image.a` → `libSDL3.a` (with DOS backend from PR #15377) → DJGPP + CWSDPMI + DOS 6.22. See `## Plan Amendments § 2026-04-24` for the structural reasons (sdl2-compat unbuildable as a static DJGPP target: `FATAL_ERROR` Linux gate, 1,291 `IGNORE_THIS_VERSION_OF_*` rename macros, ~1,500 `SDL_*` multiple-definition collisions; SDL3's own dynapi disables itself on DOS at `vendor/SDL/src/dynapi/SDL_dynapi.h:73-74`). The original recap below is preserved as historical context for why we ever chose sdl2-compat.
 
 ```
 NXEngine-evo (SDL2 C++11 source)
@@ -359,7 +411,7 @@ Full procedure lives in `docs/ASSETS.md`.
 
 ## Phase 7 — DOSBox-X playthrough
 
-> **Status: partially open as of 2026-04-25 commit `44fec06`.** All pre-title-screen fatals are fixed; binary reaches NXEngine main loop + stage 72 (title screen) cleanly. The remaining wall — the DOSBox-X framebuffer doesn't paint visibly even though `drawSurface` succeeds zero errors — is logged as task #53 and detailed in `PLAN.md § Plan Amendments § 2026-04-25` with reproduction steps and investigation candidates. Resume there.
+> **Status: partially open as of 2026-04-25 commit `44fec06`.** Pre-title-screen fatals (CMake DJGPP data path, DOSBox-X long filenames, INDEX8 palette) are fixed; binary reaches NXEngine main loop + stage 72 (title screen) cleanly. The remaining wall — the DOSBox-X framebuffer doesn't paint visibly because the paint path is blocked by sustained `SDL_RenderTexture` "Parameter 'texture' is invalid" errors — is logged in the local task tracker (in-flight hypotheses + bisect status) and detailed in `PLAN.md § Plan Amendments § 2026-04-25 (revision)` with reproduction steps and investigation candidates. Resume there.
 
 Using `tools/dosbox-x.conf` (parity config, `cycles=fixed 40000`), not the fast config — we want real-HW-like timing here.
 
@@ -475,6 +527,6 @@ Upstream migration guide: https://wiki.libsdl.org/SDL3/README/migration
 These aren't blocking; flag if you hit one.
 
 - **SDL3 DOS backend real-HW behavior.** PR #15377 was DOSBox-only tested upstream. Expect VESA quirks, audio DMA edge cases. Bug fixes land as local-only `patches/SDL/*.patch` per the SDL-patches-stay-local policy (CLAUDE.md § Vendoring) — we do not upstream them; the maintenance cost of rebasing the patch series against new SDL SHAs is the deliberate trade for sidestepping `vendor/SDL/CLAUDE.md`'s no-AI-authoring-PRs restriction.
-- **sdl2-compat static-only build.** We need the static build only; the compat shim's dynamic-loader code path must be disabled cleanly (not just by lying about `dlopen`). Phase 3 work.
+- **SUPERSEDED 2026-04-24:** ~~**sdl2-compat static-only build.** We need the static build only; the compat shim's dynamic-loader code path must be disabled cleanly (not just by lying about `dlopen`). Phase 3 work.~~ — Closed by Path B; sdl2-compat is no longer in the build line. See `## Plan Amendments § 2026-04-24`.
 - **Organya CPU cost at 22050 stereo on PODP83.** Likely tight. The 11025 mono fallback is prepared; when to trigger is a Phase 7 / 8 judgment call.
 - **Heap fragmentation under DPMI over ~30-60 min.** NXEngine-evo's C++11 allocation patterns haven't been profiled under DJGPP. Watch CWSDPMI.SWP growth during Phase 7 sessions.

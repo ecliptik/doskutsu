@@ -25,15 +25,12 @@ Companion reference to `README.md` (user-facing) and `PLAN.md` (phased roadmap).
                      ┌──────────────────────────┐
                      │  NXEngine-evo            │  C++11, GPLv3
    Engine            │  (Cave Story reimpl)     │  locked 320x240, widescreen retained
+                     │  migrated SDL2 → SDL3    │  per Path B (PLAN § 2026-04-24)
                      └──────────────────────────┘
-                                  │  SDL2 API calls
+                                  │  SDL3 API calls
                      ┌──────────────────────────┐
-   Audio + image     │  SDL2_mixer (WAV, OGG)   │  zlib
-   helpers           │  SDL2_image (PNG)        │  zlib
-                     └──────────────────────────┘
-                                  │
-                     ┌──────────────────────────┐
-   SDL2-API shim     │  sdl2-compat             │  zlib — pure-C, forwards to SDL3
+   Audio + image     │  SDL3_mixer (WAV, OGG)   │  zlib
+   helpers           │  SDL3_image (PNG)        │  zlib
                      └──────────────────────────┘
                                   │  SDL3 API calls
                      ┌──────────────────────────┐
@@ -69,13 +66,13 @@ Each layer is vendored as a pinned snapshot under `vendor/<name>/` and built by 
 
 | Owned (in this repo) | Inherited (vendored upstream) |
 |---|---|
-| `Makefile` — the five-stage build orchestration | NXEngine-evo source tree + its CMakeLists |
+| `Makefile` — the four-stage build orchestration | NXEngine-evo source tree + its CMakeLists |
 | `scripts/fetch-sources.sh`, `apply-patches.sh`, `setup-symlinks.sh` | SDL3 source + the DOS backend from PR #15377 |
-| `tools/dosbox-x.conf`, `dosbox-x-fast.conf`, `dosbox-launch.sh`, `dosbox-run.sh` | sdl2-compat forwarding shim |
-| `patches/<name>/*.patch` (DOS-port patches) | SDL_mixer + stb_vorbis |
-| `tests/smoketest/*` + `tests/run-smoke.sh` | SDL_image + stb_image |
-| All docs under `docs/` + top-level `.md` files | DJGPP toolchain (from `~/emulators/tools/djgpp/`) |
-| `vendor/cwsdpmi/` (binary + docs) | CWSDPMI binary (sourced, but redistributed unmodified) |
+| `tools/dosbox-x.conf`, `dosbox-x-fast.conf`, `dosbox-launch.sh`, `dosbox-run.sh` | SDL3_mixer + stb_vorbis |
+| `patches/<name>/*.patch` (DOS-port patches) | SDL3_image + stb_image |
+| `tests/smoketest/*` + `tests/run-smoke.sh` | DJGPP toolchain (from `~/emulators/tools/djgpp/`) |
+| All docs under `docs/` + top-level `.md` files | CWSDPMI binary (sourced, but redistributed unmodified) |
+| `vendor/cwsdpmi/` (binary + docs) | sdl2-compat (cloned but not built post-Path-B; preserved per `PLAN § Plan Amendments § 2026-04-24`) |
 | `vendor/sources.manifest` (what we pin) | Everything under `vendor/<name>/` after `fetch-sources.sh` runs |
 
 The explicit goal is that **our diff against upstream stays reviewable.** All DOS-specific changes to upstream code live in `patches/<name>/*.patch` — never as ad-hoc edits in the cloned vendor trees. All DOS-specific choices in our own code are annotated with `// DOS-PORT:` so `grep 'DOS-PORT:' -r <file>` enumerates the full delta.
@@ -92,15 +89,15 @@ The DOS backend uses DJGPP's `uclock()` for timing, DJGPP's `setjmp`/`longjmp` f
 
 **Symptoms of problems here:** black screen after init, audio silence with no error, cooperative scheduler wedged (game window unresponsive but DOS not frozen).
 
-### sdl2-compat → SDL3
+### NXEngine-evo → SDL3 (post-Path-B; sdl2-compat removed from the link line)
 
-Pure-C forwarding. Every SDL2 call goes through a thin wrapper to the SDL3 equivalent. The SDL2 → SDL3 audio CVT → AudioStream mapping is the trickiest part of the shim; Organya synth goes through `Mix_QuickLoad_RAW` which hits this path.
+Per `PLAN.md § Plan Amendments § 2026-04-24`, NXEngine-evo's source was migrated SDL2 → SDL3 directly (patches `0010`–`0019`, with `0020`–`0024` Phase 5 follow-ups, plus the audio cluster `0013`–`0017` for `SDL_AudioCVT` → `SDL_AudioStream` and `Mix_*` → `MIX_*`). There is no shim layer. Symptoms that previously belonged to "sdl2-compat → SDL3" now manifest at the engine ↔ SDL3 boundary directly.
 
-**Symptoms of problems here:** audio with wrong pitch / speed / stereo/mono, link errors at Phase 3, `SDL_GetError()` returning SDL3-era strings that NXEngine-evo doesn't recognize.
+**Symptoms of problems here:** audio with wrong pitch / speed / stereo / mono (suspect the Pixtone or Organya migration patches `0013`–`0017`); SDL3-era `SDL_GetError()` strings appearing in `debug.log` (suspect a missed mechanical-rename site — `0010`–`0012` was the bulk pass, `0021`/`0022` the follow-ups); link errors against `libSDL3.a` (suspect `find_package(SDL3)` wireup in `0019`).
 
 ### NXEngine-evo's renderer → SDL3's software renderer
 
-NXEngine-evo calls `SDL_CreateRenderer(_window, -1, SDL_RENDERER_ACCELERATED)` by default. Our patch forces `SDL_RENDERER_SOFTWARE` because SDL3-DOS has no accelerated renderer. Once software, the path is `SDL_Surface` → `SDL_CreateTextureFromSurface` → `SDL_RenderCopy`, which is a per-frame texture upload we probably don't need.
+NXEngine-evo calls `SDL_CreateRenderer(_window, -1, SDL_RENDERER_ACCELERATED)` by default. `patches/nxengine-evo/0004-renderer-force-software-renderer.patch` forces `SDL_RENDERER_SOFTWARE` because SDL3-DOS has no accelerated renderer. Once software, the path is `SDL_Surface` → `SDL_CreateTextureFromSurface` → `SDL_RenderTexture` (post-Path-B; was `SDL_RenderCopy` under SDL2), which is a per-frame texture upload we probably don't need.
 
 **Symptoms of problems here:** correct output but severe FPS drop (upload-bound); garbled output (texture format mismatch with the software renderer's internal surface format).
 

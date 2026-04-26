@@ -67,13 +67,13 @@ The Makefile refuses to build the `dist` target if either file is missing.
 ./scripts/fetch-sources.sh
 ```
 
-This clones the five upstreams listed in `vendor/sources.manifest` at the pinned SHAs:
+This clones the upstreams listed in `vendor/sources.manifest` at the pinned SHAs:
 
 - `vendor/SDL/` — libsdl-org/SDL (post-PR-#15377 main)
-- `vendor/sdl2-compat/` — libsdl-org/sdl2-compat main
-- `vendor/SDL_mixer/` — libsdl-org/SDL_mixer release-2.8.x
-- `vendor/SDL_image/` — libsdl-org/SDL_image release-2.8.x
-- `vendor/nxengine-evo/` — nxengine/nxengine-evo main
+- `vendor/SDL_mixer/` — libsdl-org/SDL_mixer release-3.2.x (SDL3-track)
+- `vendor/SDL_image/` — libsdl-org/SDL_image release-3.2.x (SDL3-track)
+- `vendor/nxengine-evo/` — nxengine/nxengine-evo master
+- `vendor/sdl2-compat/` — libsdl-org/sdl2-compat main (cloned but **not built** post-Path-B; retained per `PLAN.md § Plan Amendments § 2026-04-24`)
 
 All five directories are gitignored; only `vendor/sources.manifest` and `vendor/cwsdpmi/` are tracked.
 
@@ -89,13 +89,12 @@ Applies every `patches/<name>/*.patch` to `vendor/<name>/` in lexical order. Re-
 
 ## Build
 
-The top-level `Makefile` orchestrates five stages:
+The top-level `Makefile` orchestrates four stages (post-Path-B; see `PLAN.md § Plan Amendments § 2026-04-24` for why sdl2-compat dropped out of the build line):
 
 ```bash
-make sdl3          # SDL3 static library, installs into build/sysroot/
-make sdl2-compat   # SDL2-on-SDL3 shim, installs into build/sysroot/
-make sdl2-mixer    # SDL2_mixer built against sdl2-compat, installs into build/sysroot/
-make sdl2-image    # SDL2_image built against sdl2-compat, installs into build/sysroot/
+make sdl3          # SDL3 static library (with DOS backend), installs into build/sysroot/
+make sdl3-mixer    # SDL3_mixer (WAV + OGG via stb_vorbis), installs into build/sysroot/
+make sdl3-image    # SDL3_image (PNG via stb_image),         installs into build/sysroot/
 make nxengine      # NXEngine-evo → build/doskutsu.exe (stubedit'd to 2048K min stack)
 ```
 
@@ -117,9 +116,8 @@ Each stage has a per-stage build directory under `build/`:
 build/
 ├── sysroot/                        # where each stage installs (libs + headers)
 ├── sdl3/                           # SDL3's cmake build tree
-├── sdl2-compat/                    # sdl2-compat's cmake build tree
-├── SDL_mixer/                      # SDL_mixer's cmake build tree
-├── SDL_image/                      # SDL_image's cmake build tree
+├── sdl3-mixer/                     # SDL3_mixer's cmake build tree
+├── sdl3-image/                     # SDL3_image's cmake build tree
 ├── nxengine/                       # NXEngine-evo's cmake build tree
 └── doskutsu.exe                    # final artifact
 ```
@@ -243,9 +241,9 @@ export PATH=$PWD/tools/djgpp/bin:$PWD/tools/djgpp/i586-pc-msdosdjgpp/bin:$PATH
 
 `CWSDPMI.EXE` is not in the current directory or on `PATH`. Ensure both `DOSKUTSU.EXE` and `CWSDPMI.EXE` are in the same directory, or that `CWSDPMI.EXE` is somewhere on `PATH` (e.g. `C:\DOS\`).
 
-### SDL2_mixer or SDL2_image build fails with "undefined reference to dlopen"
+### SDL3_mixer or SDL3_image build fails with "undefined reference to dlopen"
 
-sdl2-compat's dynamic-loader code path isn't cleanly disabled. This is a Phase 3 work item — see the corresponding patch in `patches/sdl2-compat/`.
+A codec backend's dynamic-loader path leaked through. The Makefile passes `-DSDLMIXER_DEPS_SHARED=OFF` / `-DSDLIMAGE_DEPS_SHARED=OFF` to disable the `SDL_LoadObject` codec-loader path on DJGPP (which has no real `dlopen`). If you see this error, verify those flags survived your CMake invocation — see the `make sdl3-mixer` / `make sdl3-image` recipes in `Makefile`.
 
 ### `fopen("file", "r")` reads short / corrupted bytes
 
@@ -283,7 +281,7 @@ If a patch fails to apply:
 - Individual patches are `git format-patch`-style; you can `git am` them in the vendor tree directly for triage
 - If upstream has drifted, re-pin the SHA in `vendor/sources.manifest` to an earlier commit, or refresh the patch against the new upstream
 
-If CMake can't find SDL3 / SDL2 / SDL2_mixer / SDL2_image when building a later stage:
+If CMake can't find SDL3 / SDL3_mixer / SDL3_image when building a later stage:
 
 - Verify `build/sysroot/lib/pkgconfig/*.pc` or `build/sysroot/lib/cmake/*/` exist
 - The Makefile passes `CMAKE_PREFIX_PATH=build/sysroot` — check the upstream's CMakeLists accepts that

@@ -48,7 +48,7 @@ All tiers also need:
 - Optional OGG Vorbis via stb_vorbis for custom soundtracks (Cave Story Remix, etc.)
 
 **Compatibility**
-- Statically linked — no shared libraries; all SDL3 + sdl2-compat + SDL2_mixer + SDL2_image linked into one binary
+- Statically linked — no shared libraries; all SDL3 + SDL3_mixer + SDL3_image linked into one binary
 - CWSDPMI ships alongside `DOSKUTSU.EXE`
 - Fits DOS 8.3 filename convention — `DOSKUTSU.EXE` is a legal 8-char base name
 
@@ -75,15 +75,15 @@ Save files live in `DATA\Profile.dat` alongside the binary.
 
 ## Building
 
-See [BUILDING.md](./BUILDING.md) for prerequisites, DJGPP cross-compiler install, the full five-stage build (SDL3 → sdl2-compat → SDL2_mixer + SDL2_image → NXEngine-evo), testing in DOSBox-X, and common errors.
+See [BUILDING.md](./BUILDING.md) for prerequisites, DJGPP cross-compiler install, the full four-stage build (SDL3 → SDL3_mixer → SDL3_image → NXEngine-evo), testing in DOSBox-X, and common errors.
 
 Short version, once DJGPP is installed:
 
 ```bash
 ./scripts/setup-symlinks.sh     # one-time: links tools/djgpp to the emulators hub
-./scripts/fetch-sources.sh      # clone the five upstream repos at pinned SHAs
+./scripts/fetch-sources.sh      # clone the upstream repos at pinned SHAs
 ./scripts/apply-patches.sh      # apply DOS-port patches
-make                            # orchestrates all five build stages
+make                            # orchestrates all four build stages
 make smoke-fast                 # headless DOSBox-X smoke test (fast config)
 ```
 
@@ -141,7 +141,7 @@ The source code in this repository — build system, scripts, port patches, and 
 |---|---|---|
 | DOSKUTSU port source (this repo) | MIT | n/a (source, not binary) |
 | **NXEngine-evo** | **GPLv3** | **Yes — dominant license of the binary** |
-| SDL3 + sdl2-compat + SDL2_mixer + SDL2_image | zlib | Yes (zlib is GPLv3-compatible) |
+| SDL3 + SDL3_mixer + SDL3_image | zlib | Yes (zlib is GPLv3-compatible) |
 | DJGPP libc | GPL with runtime-library exception | Yes (the exception explicitly permits static linking) |
 | CWSDPMI | freeware, redistribution permitted with bundled `CWSDPMI.DOC` | No — separate executable shipped alongside |
 | Cave Story game data | freeware per Pixel's 2004 terms | No — user-extracted, not redistributed in this repo |
