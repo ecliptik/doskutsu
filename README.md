@@ -4,6 +4,15 @@ DOSKUTSU (a portmanteau of **DOS** + **Doukutsu Monogatari**, Cave Story's origi
 
 This project is 100% built agentically using [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
+| | |
+|:---:|:---:|
+| ![DOSKUTSU title screen running in DOSBox-X](docs/screenshots/doskutsu-title.png) | ![Opening dialogue: "From somewhere, a transmission..."](docs/screenshots/doskutsu-intro-dialogue.png) |
+| **Title Screen** | **Opening Transmission** |
+| ![First lab room with Quote and the broken teleporter](docs/screenshots/doskutsu-first-room.png) | ![Cutscene dialogue: "Connecting to network... / Logged on."](docs/screenshots/doskutsu-cutscene.png) |
+| **First Lab Room** | **Teleporter Cutscene** |
+
+Captures from DOSBox-X running `DOSKUTSU.EXE` under CWSDPMI; the menu bar at the top is DOSBox-X's own. Pixel-perfect 320×240 letterboxed in the emulator window.
+
 <p align="center">
 <a href="#minimum-requirements">Minimum Requirements</a> · <a href="#features">Features</a> · <a href="#usage">Usage</a> · <a href="#building">Building</a> · <a href="#assets">Assets</a> · <a href="#boot-profile-suggestions">Boot Profile</a> · <a href="#acknowledgments">Acknowledgments</a> · <a href="#license">License</a>
 </p>
