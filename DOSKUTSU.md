@@ -143,7 +143,7 @@ All four share `~/emulators/` as the toolchain hub:
 - `~/emulators/scripts/` — shared installers + automation
 - `~/emulators/docs/` — shared platform docs (DJGPP.md, DOSBOX.md, SNOW.md, etc.)
 
-The hub itself lives at `/home/claude/emulators/` and has its own `CLAUDE.md` with cross-project rules.
+The hub itself lives at `~/emulators/` and has its own `CLAUDE.md` with cross-project rules.
 
 ---
 

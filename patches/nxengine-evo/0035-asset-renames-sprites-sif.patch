@@ -1,0 +1,87 @@
+From a4ecd069dd44f296d877f82e0992149cbcc76fff Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 25 Apr 2026 17:48:21 -0700
+Subject: [PATCH] 8.3: regenerate sprites.sif with 8.3-compliant sheet paths
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8 LFN-Option-B execution (task #28), companion to 0033 source
+renames + 0034 data-file renames. NXEngine-evo's sprites.sif binary
+embeds 64 sprite-sheet path strings (length-prefixed) in its
+SIF_SECTION_SHEETS section. Eight of those paths violate DOS 8.3:
+
+  ArmsImage.pbm       -> ArmImg.pbm
+  ItemImage.pbm       -> ItmImg.pbm
+  StageImage.pbm      -> StgImg.pbm
+  Npc/NpcBallos.pbm   -> Npc/NpcBalls.pbm
+  Npc/NpcIsland.pbm   -> Npc/NpcIslnd.pbm
+  Npc/NpcPriest.pbm   -> Npc/NpcPrst.pbm
+  Npc/NpcStream.pbm   -> Npc/NpcStrm.pbm
+  Stage/PrtAlmond.pbm -> Stage/PrtAlmnd.pbm
+
+The new scripts/rename-sif.py rewrites the binary in place:
+
+  - Parses the 2FIS magic + 1-byte nsections + 9-byte index entries
+    (type, offset, length) per
+    vendor/nxengine-evo/src/siflib/sifloader.cpp.
+  - Decodes the SIF_SECTION_SHEETS string array (1-byte Pascal length
+    + ASCII bytes) per sectStringArray.cpp.
+  - Applies the rename map.
+  - Re-encodes SHEETS at the new (smaller) size.
+  - Recomputes index-table offsets so subsequent sections stay packed
+    contiguously.
+
+The rewriter is round-trip-validated: scripts/rename-sif.py --check
+produces a byte-identical output for an unchanged input, proving the
+decoder/encoder pair preserves the format faithfully. Applying the
+rename map shrinks the file from 59482 to 59465 bytes (17 bytes
+saved across the 8 renamed strings).
+
+Three caveats worth flagging:
+
+  - Mod compatibility: any existing Cave Story mod that ships its
+    own sprites.sif with the canonical long names will load wrong
+    sheets after this patch. Mitigation deferred to task #10 (mod
+    stretch) — option for a runtime fallback ResourceManager layer.
+
+  - User-extracted Cave Story content (Npc/*.pbm, Stage/Prt*.pbm)
+    is renamed via instructions in docs/ASSETS.md, NOT this patch.
+    Users running with un-renamed user data will see "could not
+    open" errors at sprite-load time despite the .sif having the
+    new paths.
+
+  - Credit.tsc (data file, encrypted) may reference credit*m.bmp by
+    name via TSC opcodes. Source-side credits.cpp:281 has been
+    renamed (patch 0033) and the .bmp files have been renamed (patch
+    0034), so the runtime path generation is consistent. If a TSC
+    opcode literally references the old path, that would only
+    manifest during the credits sequence — verify post-Phase-8 in
+    the long-running stability gate.
+
+Why DOS needs this: only DOS without an LFN driver enforces 8.3 at
+the filesystem layer. Desktop builds see no functional change — the
+sprites.sif path strings are passed verbatim to fopen which resolves
+both old and new.
+---
+ data/sprites.sif | Bin 59482 -> 59465 bytes
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+
+diff --git a/data/sprites.sif b/data/sprites.sif
+index 46156a40d56e07b5764f8c3dc225b9df079c4d5a..7605854d1b703e8348fa33f0414bf114a114a282 100644
+GIT binary patch
+delta 178
+zcmcb0f%)VGW)mYf&tNu2YX$}e9u@`$CU+oVw1<I#x$*!5!!dCN23GqUKoMRB2A0C7
+z3=9{UfC`-^n%D_(ITq!5=BDcvB;|5>mVlTOyVQ6D{0frwf!HZACuic`o7^zIXK~Kt
+zMT`|({80ITqRDDZZrm_#a7oeRN~R!ouHce%ph=UjF@^IA1(zhIr|Jh3l{n_)ZnkEY
+Ge+mF{(KG}A
+
+delta 195
+zcmX?kf%(=2W)mYf&tNu2YX$}eSr!HcrU)Qmw1<I#x$6J}!!dCN2G)QZKoMRB29~C$
+z3=9{UfC_^rn%GJ3Iu_*?d*&vlr|K0X<??!#q~?No6I;}H1^o(=^?}$aF()T~;<lSS
+zFagivoW#kq7%Sic0Y#aqlVzCP;97!9ic%9N=Q0Ix^97dx4F{V!`503;pD>uOA5c`{
+Nn3J2oS&LczDFB`XI|Bd!
+
+-- 
+2.47.3
+

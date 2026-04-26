@@ -174,4 +174,4 @@ NXEngine-evo's C++11 heap behavior under DPMI is uncharacterized. Phase 7 playte
 - [vellm's docs/hardware.md](https://forgejo.ecliptik.com/ecliptik/vellm) — sibling project on the same g2k target; DOSBox-X calibration methodology was borrowed from there
 - [SDL3 PR #15377](https://github.com/libsdl-org/SDL/pull/15377) — the DOS backend that makes this port possible. Author's note: "*tested extensively with DevilutionX in DOSBox. But no real hardware testing.*"
 - [DOSBox-X documentation](https://dosbox-x.com/wiki/) — `cputype`, `cycles`, `sbtype` reference
-- [~/emulators/docs/DOSBOX.md](/home/claude/emulators/docs/DOSBOX.md) — hub-level DOSBox-X config patterns and conventions
+- `~/emulators/docs/DOSBOX.md` — hub-level DOSBox-X config patterns and conventions (in the sibling emulators repo)

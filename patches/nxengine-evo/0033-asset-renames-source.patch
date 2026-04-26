@@ -1,0 +1,215 @@
+From b2751986dc636f3033a9e45d1199de742cbd5115 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 25 Apr 2026 17:46:08 -0700
+Subject: [PATCH] 8.3: rename source-side asset path strings for no-LFN DOS
+ compatibility
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8 LFN-Option-B execution (task #28). NXEngine-evo's source has
+hard-coded long-filename references to assets that violate DOS 8.3
+naming. Under `lfn = false` DOSBox-X (and on real DOS without an LFN
+TSR) these long names are inaccessible. This patch trues up the source
+strings to 8.3-compliant equivalents; companion patches 0034 (data-file
+renames) and 0035 (sprites.sif binary regeneration) close the loop on
+disk and in the binary sprite manifest.
+
+Renames in this patch (source strings only, mixed-case preserved to
+match existing convention; DOS is case-insensitive but Linux dev hosts
+aren't):
+
+  src/sound/Organya.cpp
+    "wavetable.dat" -> "wavetbl.dat"
+
+  src/sound/SoundManager.cpp
+    "music_dirs.json" -> "musicdir.jsn"
+    "music.json"      -> "music.jsn"        (×2 push_back sites)
+    error-log strings updated to match
+
+  src/i18n/translate.cpp
+    "system.json" -> "system.jsn"
+
+  src/tsc.cpp
+    "StageSelect.tsc" -> "StgSel.tsc"
+
+  src/map.cpp
+    "StageMeta/%s.json" -> "StgMeta/%s.jsn"
+    (NB: also closes the directory-name 8.3 violation gap — `StageMeta`
+     is 9 chars and would have been auto-truncated to STAGEM~1 under
+     DOS short-name aliasing, which is fragile across CF cards.
+     `StgMeta` is unambiguous + 8.3-clean.)
+
+  src/endgame/credits.cpp
+    "endpic/credit%02dm.bmp" -> "endpic/credt%02dm.bmp"
+    (the `m` suffix variant is the primary; the non-`m` fallback at
+     line 283 is left unchanged because `credit01.bmp` is already
+     8.3-compliant — 8 char stem.)
+
+  src/stagedata.cpp
+    tileset_names[14]: "Almond" -> "Almnd"
+    (drives both Stage/Almnd.pxa and Stage/PrtAlmnd.pbm path generation
+     via map.cpp:66 sprintf and Tileset.cpp:40 sprintf respectively.)
+
+Not renamed (intentionally):
+  src/map.cpp:560 — the `+ "480fix.pbm"` branch generates names like
+  bkFog480fix.pbm (11-char stem) but is gated on
+  `Renderer::widescreen`, which is forced false on DOS by patch
+  0005-renderer-lock-320x240-fullscreen.patch. Dead-code path; rename
+  unnecessary. The 5 bk*480fix.pbm files are excluded from staging
+  via a Makefile change in this same patch series.
+
+Mod-compatibility implication: Cave Story mods authored against the
+canonical Cave Story long names (Npc/NpcBallos.pbm, etc.) won't load.
+Decision: 8.3-only for now per CLAUDE.md modder-friendly scope; revisit
+at task #10 (mod stretch) with a possible ResourceManager fallback
+layer that tries both 8.3 and long names.
+
+Companion patch 0034 renames the corresponding data files in
+vendor/nxengine-evo/data/ + the StageMeta directory.
+Companion patch 0035 regenerates vendor/nxengine-evo/data/sprites.sif
+to update the embedded sheet-path strings.
+
+Why DOS needs this: only DOS without an LFN driver enforces 8.3 at the
+filesystem layer. Desktop builds see no functional change — the names
+are just shorter; getPath() resolves both old and new equivalently.
+---
+ src/endgame/credits.cpp    |  2 +-
+ src/i18n/translate.cpp     |  2 +-
+ src/map.cpp                |  2 +-
+ src/sound/Organya.cpp      |  4 ++--
+ src/sound/SoundManager.cpp | 10 +++++-----
+ src/stagedata.cpp          |  2 +-
+ src/tsc.cpp                |  2 +-
+ 7 files changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/src/endgame/credits.cpp b/src/endgame/credits.cpp
+index d4b0008..4fa28c9 100644
+--- a/src/endgame/credits.cpp
++++ b/src/endgame/credits.cpp
+@@ -278,7 +278,7 @@ bool BigImage::Init()
+   for (int i = 0; i < MAX_BIGIMAGES; i++)
+   {
+     if (i > 0 && i < 4 && game.flags[1020])
+-      sprintf(fname, "endpic/credit%02dm.bmp", i);
++      sprintf(fname, "endpic/credt%02dm.bmp", i);
+     else
+       sprintf(fname, "endpic/credit%02d.bmp", i);
+     if (ResourceManager::fileExists(ResourceManager::getInstance()->getPath(fname)))
+diff --git a/src/i18n/translate.cpp b/src/i18n/translate.cpp
+index 237d383..f0e955c 100644
+--- a/src/i18n/translate.cpp
++++ b/src/i18n/translate.cpp
+@@ -18,7 +18,7 @@ I18N::~I18N() {}
+ 
+ bool I18N::load()
+ {
+-  std::string path = ResourceManager::getInstance()->getPath("system.json");
++  std::string path = ResourceManager::getInstance()->getPath("system.jsn");
+   std::ifstream fl;
+   _strings.clear();
+   fl.open(widen(path), std::ifstream::in | std::ifstream::binary);
+diff --git a/src/map.cpp b/src/map.cpp
+index 165aa86..f17bb44 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -79,7 +79,7 @@ bool load_stage(int stage_no)
+   map.motionpos  = 0;
+ 
+   // optional metadata
+-  sprintf(fname, "StageMeta/%s.json", mapname);
++  sprintf(fname, "StgMeta/%s.jsn", mapname);
+   load_meta(ResourceManager::getInstance()->getPath(fname, false));
+ 
+   return 0;
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index 88827b6..353ef2f 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -77,10 +77,10 @@ void Organya::shutdown()
+ bool Organya::_loadWavetable()
+ {
+   FILE *fp
+-      = myfopen(widen(ResourceManager::getInstance()->getPath("wavetable.dat", false)).c_str(), widen("rb").c_str());
++      = myfopen(widen(ResourceManager::getInstance()->getPath("wavetbl.dat", false)).c_str(), widen("rb").c_str());
+   if (!fp)
+   {
+-    LOG_ERROR("Unable to open wavetable.dat");
++    LOG_ERROR("Unable to open wavetbl.dat");
+     return false;
+   }
+ 
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index e120c42..075463a 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -69,14 +69,14 @@ bool SoundManager::init()
+   // Pixtone's _slots[64] array; channel-pool-vs-on-demand decision is
+   // documented in docs/SDL3-MIGRATION.md § 3.
+ 
+-  std::string path = ResourceManager::getInstance()->getPath("music_dirs.json", false);
++  std::string path = ResourceManager::getInstance()->getPath("musicdir.jsn", false);
+ 
+   _music_dirs.clear();
+   _music_dir_names.clear();
+   _music_playlists.clear();
+   _music_dirs.push_back("org/");
+   _music_dir_names.push_back("Original");
+-  _music_playlists.push_back("music.json");
++  _music_playlists.push_back("music.jsn");
+ 
+   std::ifstream fl;
+ 
+@@ -101,7 +101,7 @@ bool SoundManager::init()
+         }
+         else
+         {
+-          _music_playlists.push_back("music.json");
++          _music_playlists.push_back("music.jsn");
+         }
+ 
+         _music_dirs.push_back(dir);
+@@ -116,7 +116,7 @@ bool SoundManager::init()
+   }
+   else
+   {
+-    LOG_ERROR("Failed to load music_dirs.json");
++    LOG_ERROR("Failed to load musicdir.jsn");
+   }
+ 
+   _reloadTrackList();
+@@ -477,7 +477,7 @@ void SoundManager::_reloadTrackList()
+   }
+   else
+   {
+-    LOG_ERROR("Failed to load music.json");
++    LOG_ERROR("Failed to load music.jsn");
+   }
+ }
+ 
+diff --git a/src/stagedata.cpp b/src/stagedata.cpp
+index c407246..096400a 100644
+--- a/src/stagedata.cpp
++++ b/src/stagedata.cpp
+@@ -8,4 +8,4 @@ const char *backdrop_names[] = {"bk0",     "bkBlue", "bkGreen", "bkBlack", "bkGa
+ 
+ const char *tileset_names[]
+     = {"0",     "Pens", "Eggs",   "EggX",  "EggIn", "Store", "Weed",  "Barr", "Maze", "Sand", "Mimi", "Cave",
+-       "River", "Gard", "Almond", "Oside", "Cent",  "Jail",  "White", "Fall", "Hell", "Labo", NULL};
++       "River", "Gard", "Almnd", "Oside", "Cent",  "Jail",  "White", "Fall", "Hell", "Labo", NULL};
+diff --git a/src/tsc.cpp b/src/tsc.cpp
+index f0725bb..3baea9d 100644
+--- a/src/tsc.cpp
++++ b/src/tsc.cpp
+@@ -127,7 +127,7 @@ bool TSC::Init(void)
+     return false;
+ 
+   // load stage select/teleporter scripts
+-  if (!Load(ResourceManager::getInstance()->getPath("StageSelect.tsc"), ScriptPages::SP_STAGESELECT))
++  if (!Load(ResourceManager::getInstance()->getPath("StgSel.tsc"), ScriptPages::SP_STAGESELECT))
+     return false;
+ 
+   return true;
+-- 
+2.47.3
+
