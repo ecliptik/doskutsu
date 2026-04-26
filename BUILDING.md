@@ -4,84 +4,99 @@ Step-by-step guide for building `DOSKUTSU.EXE` from source on a Linux dev host, 
 
 ---
 
+## TL;DR — one command
+
+```bash
+./scripts/bootstrap.sh
+```
+
+The bootstrap script orchestrates the whole pipeline:
+
+1. Verifies host prerequisites (`cmake`, `git`, `make`, `gcc`, `python3`, `unzip`)
+2. Checks for the DJGPP cross-toolchain (prompts with install instructions if missing)
+3. Fetches the four vendored upstreams (SDL3, SDL3_mixer, SDL3_image, NXEngine-evo) at pinned SHAs
+4. Applies the DOS-port patch series
+5. Builds the four-stage chain → `build/doskutsu.exe`
+6. Optionally extracts Cave Story assets if you provide the freeware `Doukutsu.exe`
+7. Stages the runtime layout in `build/stage/`
+
+### With Cave Story assets in one shot
+
+If you have the 2004 EN freeware `Doukutsu.exe` already, point the script at it:
+
+```bash
+./scripts/bootstrap.sh --cave-story-exe /path/to/Doukutsu.exe
+```
+
+The script extracts `wavetbl.dat`, `stage.dat`, and `endpic/pixel.bmp` from the EXE into `./data/`, runs the 8.3 rename helper, and stages the runtime layout. The remaining game content (sprites, maps, music, TSC scripts) you'll still need to extract via `doukutsu-rs` / `NXExtract` / `cavestory.one` and drop into `./data/` per [docs/ASSETS.md](./docs/ASSETS.md) — then re-run `./scripts/rename-user-data-83.sh data && make stage` to finish.
+
+### Override locations
+
+```bash
+DJGPP_PREFIX=/opt/djgpp ./scripts/bootstrap.sh   # use a system DJGPP install
+EMULATORS_ROOT=/elsewhere ./scripts/bootstrap.sh # non-default ~/emulators/ hub path
+./scripts/bootstrap.sh --skip-djgpp-check         # bypass the toolchain probe entirely
+```
+
+---
+
 ## Prerequisites
 
 Required on the dev host (Linux or WSL):
 
 - `cmake` >= 3.16
 - `git`, `make`, standard POSIX build tools (`bash`, `awk`, `patch`)
-- `dosbox-x` — `sudo apt install dosbox-x` on Debian/Ubuntu
+- `python3` — the asset extractor
+- `unzip` — the bootstrap may unpack a downloaded `Doukutsu.exe` zip
+- `dosbox-x` — `sudo apt install dosbox-x` on Debian/Ubuntu (only needed to test in emulation)
 - `scrot`, `xdotool` — for visible DOSBox-X automation (optional, only needed for playtest + screenshots)
-- `zip` — for the `dist` target
+- `zip` — for `make dist`
 
-DJGPP is installed via the shared `~/emulators/` hub — see below.
+The bootstrap script verifies all of the above and aborts with a clear message if anything is missing.
 
-## One-time setup
+## DJGPP
 
-### 1. Link to the shared `~/emulators/` toolchain hub
+The DJGPP cross-compiler is the one prerequisite the bootstrap can't auto-install (the build takes 30-60 minutes; running it without explicit consent isn't friendly). Three options:
 
-The DJGPP cross-compiler lives under `~/emulators/tools/djgpp/` alongside the sibling projects (`vellm`, `geomys`, `flynn`). A convenience symlink at `tools/djgpp` lets this repo's Makefile path-reference it without assuming `$HOME`.
-
-```bash
-./scripts/setup-symlinks.sh
-```
-
-This creates `tools/djgpp -> ~/emulators/tools/djgpp`. The Makefile adds `tools/djgpp/bin` and `tools/djgpp/i586-pc-msdosdjgpp/bin` (for `stubedit`) to `PATH` automatically.
-
-### 2. Install DJGPP (if not already present)
+**Option 1 — install via [`andrewwutw/build-djgpp`](https://github.com/andrewwutw/build-djgpp):**
 
 ```bash
-~/emulators/scripts/update-djgpp.sh
+git clone https://github.com/andrewwutw/build-djgpp.git
+cd build-djgpp && ./build-djgpp.sh 12.2.0   # ~30 min
+DJGPP_PREFIX=$HOME/djgpp ./scripts/bootstrap.sh
 ```
 
-Under the hood this wraps [`andrewwutw/build-djgpp`](https://github.com/andrewwutw/build-djgpp) and builds GCC 12.2.0 + binutils + DJGPP libc into `~/emulators/tools/djgpp/`. The build takes 30-60 minutes. You can skip it if the toolchain is already installed — the script detects existing installs.
+**Option 2 — use an existing DJGPP install:**
 
-Verify:
+```bash
+DJGPP_PREFIX=/path/to/djgpp ./scripts/bootstrap.sh
+```
+
+**Option 3 — use the shared `~/emulators/` hub** (sibling-project convention). If you already have `~/emulators/tools/djgpp/` from a related project (`vellm`, `geomys`, etc.), the bootstrap auto-symlinks `tools/djgpp` to it. No `DJGPP_PREFIX` needed.
+
+Verify the toolchain is reachable:
 
 ```bash
 make djgpp-check
 ```
 
-Expected output: `i586-pc-msdosdjgpp-gcc (GCC) 12.2.0` or similar.
+Expected: `i586-pc-msdosdjgpp-gcc (GCC) 12.2.0` or similar.
 
-### 3. Place CWSDPMI
+## CWSDPMI
 
-`CWSDPMI.EXE` is the DPMI host that DJGPP-built programs need on DOS. It is vendored per-project.
+`CWSDPMI.EXE` is already vendored at `vendor/cwsdpmi/cwsdpmi.exe` (tracked in this repo per the redistribution-permitted license). No fetch step needed.
 
-```bash
-# Option A: copy from the sibling vellm project
-cp ~/git/vellm/vendor/cwsdpmi/cwsdpmi.exe vendor/cwsdpmi/
-cp ~/git/vellm/vendor/cwsdpmi/cwsdpmi.doc vendor/cwsdpmi/
+## Manual steps (if you want to do it without the bootstrap)
 
-# Option B: download from https://sandmann.dotster.com/cwsdpmi/
-# (see vendor/cwsdpmi/README.md for the exact URL and verification steps)
-```
-
-The Makefile refuses to build the `dist` target if either file is missing.
-
-### 4. Fetch the upstream sources
+If you'd rather run each step yourself — e.g., to debug a specific stage — the bootstrap is just a wrapper around these:
 
 ```bash
-./scripts/fetch-sources.sh
+./scripts/setup-symlinks.sh    # if using the ~/emulators/ hub
+./scripts/fetch-sources.sh     # clone vendored upstreams at pinned SHAs
+./scripts/apply-patches.sh     # apply the DOS-port patch series
+make all                       # build the four-stage chain
+make stage                     # produce build/stage/
 ```
-
-This clones the upstreams listed in `vendor/sources.manifest` at the pinned SHAs:
-
-- `vendor/SDL/` — libsdl-org/SDL (post-PR-#15377 main)
-- `vendor/SDL_mixer/` — libsdl-org/SDL_mixer release-3.2.x (SDL3-track)
-- `vendor/SDL_image/` — libsdl-org/SDL_image release-3.2.x (SDL3-track)
-- `vendor/nxengine-evo/` — nxengine/nxengine-evo master
-- `vendor/sdl2-compat/` — libsdl-org/sdl2-compat main (cloned but **not built**; retained for reference)
-
-All five directories are gitignored; only `vendor/sources.manifest` and `vendor/cwsdpmi/` are tracked.
-
-### 5. Apply DOS-port patches
-
-```bash
-./scripts/apply-patches.sh
-```
-
-Applies every `patches/<name>/*.patch` to `vendor/<name>/` in lexical order. Re-running is safe — the script first `git reset --hard` to the pinned SHA, then reapplies.
 
 ---
 
