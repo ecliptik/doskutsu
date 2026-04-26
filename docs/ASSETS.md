@@ -127,14 +127,27 @@ done
 # or the doukutsu-rs / NXEngine-evo extract tool):
 # produces data/pxt/fxNN.pxt files
 
-# Add the binary-extracted Organya wavetable + stage index. These two
-# blobs live inside Doukutsu.exe (wavetable at offset 0x110664, stage
-# table at offset 0x937B0) and are consumed verbatim by NXEngine-evo at
-# runtime. scripts/extract-engine-data.py is the doskutsu-authored
-# sibling of extract-pxt.py; it transcribes the algorithm from
-# vendor/nxengine-evo/src/extract/extractstages.cpp and produces
-# data/wavetable.dat (25600 bytes) + data/stage.dat (6936 bytes, 95
-# stages):
+# Add the binary-extracted Organya wavetable + stage index + the
+# endpic/pixel.bmp blanking sprite. These three blobs live inside
+# Doukutsu.exe (wavetable at offset 0x110664, stage table at offset
+# 0x937B0, pixel.bmp data at offset 0x16722f) and are consumed verbatim
+# (or with a small reconstructed BMP header for pixel.bmp) by
+# NXEngine-evo at runtime. scripts/extract-engine-data.py is the
+# doskutsu-authored sibling of extract-pxt.py; it transcribes the
+# algorithm from vendor/nxengine-evo/src/extract/extractstages.cpp +
+# extractfiles.cpp and produces:
+#   data/wavetable.dat       (25600 bytes)
+#   data/stage.dat           (6936 bytes, 95 stages)
+#   data/endpic/pixel.bmp    (1398 bytes — 25-byte BMP file-header
+#                             reconstruction + 1373 bytes of palette and
+#                             pixel data; CRC-32 verified against the
+#                             0x6181d0a1 value in extractfiles.cpp's
+#                             files[] table)
+#
+# pixel.bmp is referenced from data/sprites.sif as a sprite-sheet entry;
+# without it, the engine emits a runtime "drawSurface NULL texture"
+# diagnostic that is silenced cosmetically by NXEngine patch 0030 but
+# better cleared at the source.
 scripts/extract-engine-data.py /path/to/Doukutsu.exe data/
 
 # Also merge NXEngine-evo's engine support data (fonts, UI, PBM backgrounds,
@@ -150,6 +163,7 @@ data/org/gravity.org      # Cave Story Organya music exists (lowercased)
 data/pxt/fx02.pxt         # Cave Story Pixtone params exist
 data/wavetable.dat        # Organya PCM wavetable (extract-engine-data.py)
 data/stage.dat            # 95-record stage index (extract-engine-data.py)
+data/endpic/pixel.bmp     # blanking sprite (extract-engine-data.py)
 data/npc.tbl              # Cave Story NPC table exists
 data/MyChar.pbm           # Cave Story player sprite exists
 data/font_1.fnt           # NXEngine-evo engine bitmap font exists

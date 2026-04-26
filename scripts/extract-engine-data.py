@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cave Story engine-data extractor (wavetable.dat + stage.dat).
+Cave Story engine-data extractor (wavetable.dat + stage.dat + pixel.bmp).
 
 Mirrors the relevant parts of vendor/nxengine-evo/src/extract/extractfiles.cpp
 and extractstages.cpp:
@@ -13,6 +13,16 @@ and extractstages.cpp:
                     runtime MapRecord layout (filename[32] + stagename[35] +
                     6 trailing uint8 indices) and prefixed with one byte
                     NMAPS, exactly the way load_stages() in map.cpp expects.
+  - data/endpic/pixel.bmp: 25-byte BMP file-header prefix + 1373 bytes of
+                    palette+pixel data from offset 0x16722f (CRC 0x6181d0a1).
+                    160x16 4bpp palette image used as a generic blanking
+                    sprite by Cave Story's title-screen sprite-sheet list
+                    (referenced from data/sprites.sif). Without this file,
+                    Sprites::init() leaves the relevant Surface in a
+                    NULL-texture state and the engine emits a runtime
+                    drawSurface flood (silenced by NXEngine patch 0030,
+                    but the missing-file warning still appears in
+                    debug.log).
 
 This script is the freestanding-Python sibling of NXEngine's own extract
 tools — we don't ship those because (a) we don't want to cross-build them
@@ -26,12 +36,35 @@ Usage: extract-engine-data.py <Doukutsu.exe> <output-data-dir>
 import os
 import struct
 import sys
+import zlib  # CRC-32 verification of extracted blobs
 
 # --- wavetable.dat ----------------------------------------------------------
 
 WAVETABLE_OFFSET = 0x110664
 WAVETABLE_LENGTH = 25600
 WAVETABLE_CRC = 0xB3A3B7EF  # not verified — we trust the offset+length
+
+# --- data/endpic/pixel.bmp --------------------------------------------------
+#
+# Cave Story embeds bitmap resources in the .exe stripped of their 14-byte
+# BMP file header (Windows resource format — DIB header onward only). The
+# extractor prepends a per-file fixed header to reconstruct a valid BMP.
+# pixel.bmp is 160x16 4bpp (16-color palette + 1280 bytes pixel data).
+#
+# Constants verbatim from extractfiles.cpp's files[] entry for pixel.bmp
+# and the pixel_header[] array. CRC-32 is the standard polynomial
+# 0x04C11DB7 (reflected input/output, init 0xFFFFFFFF, xor-out 0xFFFFFFFF)
+# — i.e., zlib.crc32 — verified by reading vendor/nxengine-evo/src/extract/
+# crc.cpp.
+PIXEL_BMP_OFFSET = 0x16722F
+PIXEL_BMP_LENGTH = 1373
+PIXEL_BMP_CRC = 0x6181D0A1
+PIXEL_BMP_HEADER = bytes([
+    0x42, 0x4D, 0x76, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x76, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0xA0, 0x00,
+    0x00, 0x00, 0x10, 0x00, 0x00,
+])
+assert len(PIXEL_BMP_HEADER) == 25, "pixel.bmp header must be 25 bytes"
 
 # --- stage.dat --------------------------------------------------------------
 
@@ -155,6 +188,35 @@ def extract_stages(exe, out_dir):
     print(f"extracted stage.dat ({size} bytes, {NMAPS} stages) to {out_dir}/")
 
 
+def extract_pixel_bmp(exe, out_dir):
+    """
+    Extract data/endpic/pixel.bmp by reading 1373 bytes at offset 0x16722f
+    in Doukutsu.exe and prepending the 25-byte BMP file-header reconstruction.
+    Verifies CRC-32 over the EXE-resident bytes (header is not CRC'd).
+    """
+    exe.seek(PIXEL_BMP_OFFSET)
+    blob = exe.read(PIXEL_BMP_LENGTH)
+    if len(blob) != PIXEL_BMP_LENGTH:
+        sys.exit(f"pixel.bmp: short read at 0x{PIXEL_BMP_OFFSET:x} "
+                 f"({len(blob)}/{PIXEL_BMP_LENGTH} bytes)")
+
+    actual_crc = zlib.crc32(blob) & 0xFFFFFFFF
+    if actual_crc != PIXEL_BMP_CRC:
+        sys.exit(f"pixel.bmp: CRC mismatch at 0x{PIXEL_BMP_OFFSET:x} — "
+                 f"expected 0x{PIXEL_BMP_CRC:08x}, got 0x{actual_crc:08x}. "
+                 "The Doukutsu.exe at the given path is probably not the "
+                 "2004 EN freeware build extractfiles.cpp's offsets target.")
+
+    out_subdir = os.path.join(out_dir, "endpic")
+    os.makedirs(out_subdir, exist_ok=True)
+    out_path = os.path.join(out_subdir, "pixel.bmp")
+    with open(out_path, "wb") as fp:
+        fp.write(PIXEL_BMP_HEADER)
+        fp.write(blob)
+    total = len(PIXEL_BMP_HEADER) + PIXEL_BMP_LENGTH
+    print(f"extracted endpic/pixel.bmp ({total} bytes, CRC verified) to {out_dir}/")
+
+
 def main():
     if len(sys.argv) != 3:
         sys.exit(f"usage: {sys.argv[0]} <Doukutsu.exe> <output-data-dir>")
@@ -165,6 +227,7 @@ def main():
     with open(exe_path, "rb") as exe:
         extract_wavetable(exe, out_dir)
         extract_stages(exe, out_dir)
+        extract_pixel_bmp(exe, out_dir)
 
 
 if __name__ == "__main__":
