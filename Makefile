@@ -131,6 +131,7 @@ help:
 	@echo "  make hello                       build tests/smoketest/hello.exe"
 	@echo "  make smoke-fast                  run hello.exe in DOSBox-X (cycles=max)"
 	@echo "  make smoke                       run hello.exe in DOSBox-X (parity cycles)"
+	@echo "  make dpmi-lfn-smoke              Phase 8 prereq: DPMI LFN propagation probe"
 	@echo
 	@echo "Deploy:"
 	@echo "  make dist                        dist/doskutsu-cf.zip (CF-ready bundle)"
@@ -378,6 +379,38 @@ smoke-fast: $(HELLO_EXE)
 .PHONY: smoke
 smoke: $(HELLO_EXE)
 	tests/run-smoke.sh --exe $(HELLO_EXE)
+
+# --- Phase 8 prerequisite: DPMI LFN propagation probe (task #20) ------------
+#
+# Builds tests/dpmi-lfn-smoke/probe.c — tiny DJGPP DOS exe that issues
+# INT 21h function 716Ch (LFN Extended Open/Create) for a long-named test
+# fixture (wavetable.dat, 9-char base, breaks 8.3) via three different paths:
+#   1. open() with 8.3 name           — control, always passes
+#   2. open() after _use_lfn(1)       — DJGPP libc LFN path
+#   3. __dpmi_int(0x21, AX=716Ch)     — raw DPMI, isolates the libc question
+#
+# Answers the gating Phase 8 question (docs/PHASE8-LFN-DECISION.md): does
+# CWSDPMI's INT 21h reflector pass LFN-family calls (function codes
+# 7140h-71A8h) to a real-mode TSR loaded under MS-DOS 6.22? Run on dev host
+# under DOSBox-X (lfn=true baseline); the actual answer comes from running
+# probe.exe on g2k with LFNDOS.COM (or DOSLFN.COM) loaded. See the runner
+# script header + tests/dpmi-lfn-smoke/README.md for the decision tree.
+#
+# 8.3 DOS filename: basename "probe" + ".exe" — fits.
+# minstack=256k: probe is tiny, default DPMI stack is plenty.
+
+DPMI_LFN_SMOKE_DIR := $(BUILD_DIR)/dpmi-lfn-smoke
+DPMI_LFN_SMOKE_SRC := tests/dpmi-lfn-smoke/probe.c
+DPMI_LFN_SMOKE_EXE := $(DPMI_LFN_SMOKE_DIR)/probe.exe
+
+$(DPMI_LFN_SMOKE_EXE): $(DPMI_LFN_SMOKE_SRC) | djgpp-check
+	@mkdir -p $(DPMI_LFN_SMOKE_DIR)
+	$(CC) -march=i486 -mtune=pentium -O2 -Wall -o $@ $<
+	$(STUBEDIT) $@ minstack=256k
+
+.PHONY: dpmi-lfn-smoke
+dpmi-lfn-smoke: $(DPMI_LFN_SMOKE_EXE)
+	tests/run-dpmi-lfn-smoke.sh
 
 # --- Phase 2d smoke: SDL3 DOS-backend probe -----------------------------------
 #
