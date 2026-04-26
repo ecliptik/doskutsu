@@ -1,0 +1,141 @@
+From b6d0aff8859b221ced67991e3d906c91f56a4e38 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 01:00:14 -0700
+Subject: [PATCH] [DOSKUTSU] dos: dump VBE controller info + per-mode-set
+ details to sdldbg.log
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8 real-HW diagnostic. Companion to patches/SDL/0002 (which traces
+the per-flush framebuffer write path). 0003 dumps boot-time controller
+info plus the chosen-mode attributes on every DOSVESA_SetDisplayMode
+call, so we can attribute the slow-flush bug observed on g2k Mach64
+(2-3 s/flip vs DOSBox-X parity's 64 ms/flip; see docs/PHASE8-FINDINGS.md)
+to specific BIOS-reported values:
+
+  - VBE controller version, total VRAM, OEM strings, full mode list
+  - Per chosen mode: id, width/height/bpp, pitch, attributes, memmodel,
+    LFB availability + whether we actually used LFB or banked mode,
+    LFB physical address, banked-window segment / size / granularity /
+    attributes, banked-mode bank-switch function pointer, current state
+    of SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER.
+
+Output appended to /sdldbg.log (sibling of NXEngine's /debug.log).
+Stdout/stderr would be invisible by the time SetDisplayMode runs (DOS
+console is in a VESA graphics mode); same rationale as patch 0002.
+
+The hypothesis we're testing: SDL3-DOS picks 640x480 on Mach64 because
+M64VBE doesn't expose 320x240 as a VBE mode (DOSBox-X's emulated S3 BIOS
+does). The full mode list dump answers this directly. The per-mode-set
+dump confirms whether LFB is enabled — banked-mode VESA writes through
+the 64KB window at 0xA0000 with bank-switch INT 10h calls would produce
+exactly the cost profile we measured (4× more bytes per frame plus
+per-bank overhead = 30-50× slower than a host-RAM memcpy).
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream, sidestepping
+vendor/SDL/CLAUDE.md's no-AI-PRs restriction.
+---
+ src/video/dos/SDL_dosmodes.c | 71 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 71 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 2976caf8c..116872307 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -32,6 +32,21 @@
+ #include "SDL_dosmodes.h"
+ #include "SDL_dosvideo.h"
+ #include <sys/movedata.h> // for dosmemput (banked framebuffer access)
++#include <stdio.h>        // diagnostic file I/O (DOSKUTSU patches/SDL/0003)
++
++// DOSKUTSU diagnostic (patches/SDL/0003). Companion to patches/SDL/0002:
++// 0002 traces the per-flush framebuffer write path; 0003 dumps controller
++// info + per-mode-set details once at boot, so we can attribute slow flushes
++// to the VBE mode attributes we're given (LFB vs banked, pitch, etc).
++// Output appended to /sdldbg.log alongside 0002's output. Local-only patch
++// per workspace policy (memory note "SDL upstream — local patches only").
++static FILE *_doskutsu_modes_dbg_log = NULL;
++static void _doskutsu_modes_dbg_open(void)
++{
++    if (!_doskutsu_modes_dbg_log) {
++        _doskutsu_modes_dbg_log = fopen("/sdldbg.log", "ab");
++    }
++}
+ 
+ // Some VESA usage information:
+ //   https://delorie.com/djgpp/doc/ug/graphics/vesa.html.en
+@@ -216,6 +231,40 @@ static const SDL_VESAInfo *GetVESAInfo(void)
+ 
+     DOS_FreeConventionalMemory(&hwinfo_seginfo);
+ 
++    // DOSKUTSU diagnostic (patches/SDL/0003): one-shot dump of VBE
++    // controller info plus the full enumerated mode list. Lets us see
++    // which VESA modes the BIOS exposes (so we know whether SDL3-DOS's
++    // 640x480 fallback choice was forced by the BIOS not exposing 320x240,
++    // or by some filter in our own enumeration). Critical for the g2k
++    // Mach64 / M64VBE investigation where flips run 30-50× slower than
++    // DOSBox-X parity (docs/PHASE8-FINDINGS.md).
++    if (vesa_info) {
++        _doskutsu_modes_dbg_open();
++        if (_doskutsu_modes_dbg_log) {
++            fprintf(_doskutsu_modes_dbg_log,
++                    "DOSVESA-CTRL: VBE %d.%d  total_vram=%lu_KB  oem_sw_rev=0x%04X\n"
++                    "DOSVESA-CTRL: oem_string='%s'\n"
++                    "DOSVESA-CTRL: oem_vendor='%s'  product='%s'  rev='%s'\n"
++                    "DOSVESA-CTRL: %d modes enumerated:",
++                    vesa_info->version >> 8, vesa_info->version & 0xFF,
++                    (unsigned long)(vesa_info->total_memory / 1024),
++                    vesa_info->oem_software_revision,
++                    vesa_info->oem_string ? vesa_info->oem_string : "(empty)",
++                    vesa_info->oem_vendor ? vesa_info->oem_vendor : "(empty)",
++                    vesa_info->oem_product ? vesa_info->oem_product : "(empty)",
++                    vesa_info->oem_revision ? vesa_info->oem_revision : "(empty)",
++                    vesa_info->num_modes);
++            for (int i = 0; i < vesa_info->num_modes; i++) {
++                if ((i % 16) == 0) {
++                    fprintf(_doskutsu_modes_dbg_log, "\n  ");
++                }
++                fprintf(_doskutsu_modes_dbg_log, " 0x%04X", vesa_info->mode_list[i]);
++            }
++            fprintf(_doskutsu_modes_dbg_log, "\n");
++            fflush(_doskutsu_modes_dbg_log);
++        }
++    }
++
+     return vesa_info;
+ }
+ 
+@@ -569,6 +618,28 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+ 
+     data->banked_mode = !use_lfb;
+ 
++    // DOSKUTSU diagnostic (patches/SDL/0003): every mode-set dumps the chosen
++    // mode's full attributes so we can attribute slow flushes / wrong stride
++    // / banked-vs-LFB to specific BIOS-reported values. Investigation tracker:
++    // docs/PHASE8-FINDINGS.md "What we have not confirmed" list.
++    _doskutsu_modes_dbg_open();
++    if (_doskutsu_modes_dbg_log) {
++        fprintf(_doskutsu_modes_dbg_log,
++                "DOSVESA-MODESET: id=0x%04X %dx%d %dbpp pitch=%d attr=0x%04X memmodel=%d "
++                "has_lfb=%d use_lfb=%d banked=%d "
++                "lfb_addr=0x%08lX win_seg=0x%04X win_size=%uKB win_gran=%uKB win_attr=0x%02X "
++                "win_func=0x%08lX hint_direct_fb=%d\n",
++                modedata->mode_id, modedata->w, modedata->h, modedata->bpp, modedata->pitch,
++                modedata->attributes, modedata->memory_model,
++                (int)modedata->has_lfb, (int)use_lfb, (int)data->banked_mode,
++                (unsigned long)modedata->physical_base_addr,
++                modedata->win_a_segment, (unsigned)modedata->win_size,
++                (unsigned)modedata->win_granularity, modedata->win_a_attributes,
++                (unsigned long)modedata->win_func_ptr,
++                (int)SDL_GetHintBoolean(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, false));
++        fflush(_doskutsu_modes_dbg_log);
++    }
++
+     if (use_lfb) {
+         data->mapping.address = modedata->physical_base_addr;
+         data->mapping.size = DOSVESA_GetVESATotalMemory();
+-- 
+2.47.3
+
