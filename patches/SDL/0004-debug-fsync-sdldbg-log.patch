@@ -1,0 +1,102 @@
+From 8f99174566d572f2ec2c1bf08da06d74c0d51ebf Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 13:05:12 -0700
+Subject: [PATCH] [DOSKUTSU] dos: fsync sdldbg.log writes so they survive a
+ hard reset
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 8 real-HW finding 2026-04-26: patches/SDL/0002 + 0003 wrote to
+/sdldbg.log via fopen("ab")+fprintf+fflush. On a wedged-engine hard
+reset, the file ended up at 0 bytes — same DOS-write-buffering trap
+we already hit with NXEngine's DEBUG.LOG (fixed by
+patches/nxengine-evo/0036-djgpp-fsync-debug-log-per-line.patch).
+
+fflush only commits libc -> OS. DOS BUFFERS plus the CF write cache
+hold both data and the directory entry recording new file size until
+either: buffer fills, fclose, or DOS INT 21h fn 68h Commit-File. A
+hard reset before any of those wipes everything. fsync routes to
+INT 21h fn 68h directly.
+
+Same one-line fix applied at every fflush site in:
+  - SDL_dosmodes.c (3003-debug-vbe-controller-mode-info-dump.patch)
+  - SDL_dosframebuffer.c (0002-debug-dosvesa-framebuffer-trace.patch)
+
+Both files gain <unistd.h> for fsync's declaration.
+
+Local-only patch per workspace policy. No upstream PR.
+---
+ src/video/dos/SDL_dosframebuffer.c | 7 +++++++
+ src/video/dos/SDL_dosmodes.c       | 2 ++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 616ed3de1..e8bc847b4 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -33,6 +33,7 @@
+ #include <pc.h>           // for inportb, outportb
+ #include <sys/movedata.h> // for dosmemput (banked framebuffer writes)
+ #include <stdio.h>        // diagnostic file I/O (DOSKUTSU patches/SDL/0002)
++#include <unistd.h>       // fsync — crash-survive log writes on DOS (patch 0004)
+ 
+ // note that DOS_SURFACE's value is the same string that the dummy driver uses.
+ #define DOS_SURFACE "SDL.internal.window.surface"
+@@ -532,6 +533,7 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 (unsigned long)fb_state.win_size_bytes,
+                 (unsigned long)(uintptr_t)fb_state.pixels);
+         fflush(_doskutsu_dbg_log);
++        fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
+     }
+     {
+         bool guard = (fb_state.direct_fb && (fb_state.vram_ptr || fb_state.vram_phys));
+@@ -546,6 +548,8 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 fprintf(_doskutsu_dbg_log, "src=NULL\n");
+             }
+             fflush(_doskutsu_dbg_log);
++            fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
++        fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
+         }
+     }
+ 
+@@ -717,6 +721,8 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+             }
+             _doskutsu_dbg_dump_first16("DOSVESA-FB-VRAM ", vram_first, 16);
+             fflush(_doskutsu_dbg_log);
++            fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
++        fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
+         }
+ 
+         // Page flipping is only used with the nearptr LFB path. The banked
+@@ -756,6 +762,7 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 "DOSVESA-FB-NORMAL #%d: entered normal-path (fast-path guard failed)\n",
+                 _doskutsu_dbg_call_total);
+         fflush(_doskutsu_dbg_log);
++        fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
+     }
+ 
+     SDL_Surface *src = fb_state.surface;
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 116872307..02abd46a3 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -33,6 +33,7 @@
+ #include "SDL_dosvideo.h"
+ #include <sys/movedata.h> // for dosmemput (banked framebuffer access)
+ #include <stdio.h>        // diagnostic file I/O (DOSKUTSU patches/SDL/0003)
++#include <unistd.h>       // fsync — crash-survive log writes on DOS (patch 0004)
+ 
+ // DOSKUTSU diagnostic (patches/SDL/0003). Companion to patches/SDL/0002:
+ // 0002 traces the per-flush framebuffer write path; 0003 dumps controller
+@@ -262,6 +263,7 @@ static const SDL_VESAInfo *GetVESAInfo(void)
+             }
+             fprintf(_doskutsu_modes_dbg_log, "\n");
+             fflush(_doskutsu_modes_dbg_log);
++            fsync(fileno(_doskutsu_modes_dbg_log)); // crash-survive on DOS (patch 0004)
+         }
+     }
+ 
+-- 
+2.47.3
+
