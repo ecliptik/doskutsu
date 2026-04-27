@@ -1,0 +1,114 @@
+From cf4e5534064b12a6713b3142b1cd64b0afa1bd2d Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 17:44:45 -0700
+Subject: [PATCH] sdl3-dos: opt into SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE
+ (lever 0b)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 0b NXEngine-side companion to patches/SDL/0012.
+
+Sets SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE="1" at OVERRIDE priority
+before SDL_Init, identical shape to the existing
+SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER / SDL_HINT_DOS_MAX_BPP /
+SDL_HINT_DOS_PREFER_LFB setters in the same #ifdef NXE_DOS block.
+
+Effect: SDL3-DOS backend's DOSVESA_SetDisplayMode rejects any mode-set
+request whose dimensions differ from the active mode (returning success
+without doing a hardware mode change). On Cirrus + UNIVBE — the user's
+current real-HW target, where 320×240 VBE modes exist natively
+(/tmp/cirrus/SDLDBG.LOG lines 99-125: modes 0x01D9, 0x01F8, etc.) —
+this prevents the destructive mode-set #3 to 640×480 that SDL3's
+window/fullscreen reconciliation otherwise fires after the engine's
+SDL_CreateWindow(320, 240, FULLSCREEN) negotiated mode 0x0136 / similar
+at mode-set #1.
+
+Wave 2 DOSBox-X smoke (build/stage/SDLDBG.LOG, 2026-04-26) showed the
+unsuppressed sequence and the upper-left rendering bug it produced:
+
+  mode-set #1 (entry): requested id=0x0136 320x240
+  mode-set #1 (exit ok)
+  ... renderer created against 320×240 surface ...
+  mode-set #3 (entry): requested id=0x0111 640x480
+  mode-set #3 (exit ok)
+  DOSVESA-FB-INIT: ... vram_w=640 vram_h=480 fb_size=614400
+  flip-probe: window_size=320x240 framebuffer_pixels=320x240 logical_present=320x240
+
+(Renderer at 320×240, framebuffer at 640×480 — backbuffer-to-VRAM copy
+draws into upper-left only, leaves the rest as garbage.) With this
+patch + SDL/0012 the third mode-set logs as suppressed and the
+framebuffer stays at 320×240 dimensions for the duration of the run.
+
+Why DOS needs this
+------------------
+
+DOS-only hint that targets the SDL3-DOS backend specifically. Has no
+effect on non-DOS builds. Guarded by NXE_DOS to keep desktop behaviour
+unchanged.
+
+Layered with patches/SDL/0011 (lazy fb_state re-init) which still
+applies — the lazy re-init is a no-op when the dimensions don't change,
+so the two patches compose correctly.
+
+On Mach64 + M64VBE (no native 320×240 modes — chip lacks line-doubling)
+this hint is harmless: mode-set #1 already picks the 640×480 fallback
+so the suppression gate never triggers. The Mach64 stretch case (renderer
+at 320×240 + framebuffer at 640×480) needs a separate stretch-on-flush
+fix; deferred to a future wave per the Phase 9 lever 0b scoping.
+
+See docs/PHASE9-15FPS-PLAN.md §3 Lever 0b for the full lever stack.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/main.cpp | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index a161313..7652352 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -401,6 +401,40 @@ int main(int argc, char *argv[])
+   // the LFB code path (the wave-1 / Phase 8 attempt's failure mode).
+   // See docs/PHASE9-15FPS-PLAN.md §3 Lever 1 and docs/PHASE8-FINDINGS.md.
+   SDL_SetHintWithPriority(SDL_HINT_DOS_PREFER_LFB, "1", SDL_HINT_OVERRIDE);
++
++  // Patch 0046 (Phase 9 lever 0b, 2026-04-26): pin SDL3-DOS to whatever
++  // mode the first SetDisplayMode picks and refuse subsequent dimension
++  // changes. SDL3's window/fullscreen reconciliation in SDL_video.c
++  // (SDL_UpdateFullscreenMode) fires a second mode-set that asks for the
++  // display's desktop mode (SDL3-DOS hard-codes 640×480 in
++  // DOSVESA_VideoInit). On a card with native 320×240 VBE modes (e.g.
++  // Cirrus + UNIVBE — see Cirrus wave-1 capture, /tmp/cirrus/SDLDBG.LOG
++  // lines 99-125 confirming 0x01D9 / 0x01F8 etc), the renderer is created
++  // against the 320×240 surface; the second mode-set bumps VRAM dimensions
++  // to 640×480 but the renderer's backbuffer stays 320×240, producing the
++  // upper-left-only rendering bug surfaced in build/stage/SDLDBG.LOG
++  // 2026-04-26 wave 2 (mode-set #1 320×240 → mode-set #3 640×480 → flip
++  // probe shows window_size=320×240 framebuffer_pixels=320×240 logical=320×240
++  // but DOSVESA-FB-INIT logged vram_w=640 vram_h=480 fb_size=614400).
++  //
++  // The new hint SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE (added by
++  // patches/SDL/0012) instructs the SDL3-DOS backend's
++  // DOSVESA_SetDisplayMode to suppress mode-changes that would alter
++  // VRAM dimensions, returning success without doing the hardware mode
++  // change. The first mode (whatever the closest match for our 320×240
++  // CreateWindow request was) stays active for the duration of the
++  // process; SDL3 framework state thinks fullscreen succeeded so the
++  // rest of window setup is happy.
++  //
++  // On hardware that has no native 320×240 mode (Mach64 + M64VBE — the
++  // chip lacks line-doubling per the gateway4 wave-1 UNIVBE capture),
++  // mode-set #1 already picks the 640×480 fallback so the suppression
++  // never triggers. Harmless on that target.
++  //
++  // See docs/PHASE9-15FPS-PLAN.md §3 Lever 0b for the full discovery
++  // context (UNIVBE/Cirrus path) and the Mach64-side stretch fix
++  // (deferred to a future wave).
++  SDL_SetHintWithPriority(SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE, "1", SDL_HINT_OVERRIDE);
+ #endif
+ 
+   // SDL3: SDL_Init returns bool (true on success); old `< 0` check would always be false.
+-- 
+2.47.3
+
