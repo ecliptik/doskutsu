@@ -1,0 +1,152 @@
+From 6cd979863b69440726576383315c755f4a576e2b Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 10:14:21 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=208=20patc?=
+ =?UTF-8?q?h=200050=20=E2=80=94=20cache=20window=20surface=20per=20frame?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 7 perf attribution (cirrus7 SDLDBG.LOG / DEBUG.LOG): per-flip
+wall-clock ~167 ms with SDL_RenderPresent only ~10 ms; remainder is
+NXEngine's ~340 drawcalls/frame @ ~0.46 ms each. Approach B's hand-
+rolled 16x16 inner loop is ~15 µs of actual blit work, so the per-
+call overhead (~445 µs) is the next attack surface.
+
+One contributor: _try_fast_blit_16x16 was calling
+SDL_GetWindowSurface(_window) on every drawcall. SDL3 (SW renderer)
+walks the renderer's surface chain on each call. Cheap individually,
+but 340x/frame adds up.
+
+Fix: cache SDL_GetWindowSurface's return value in a Renderer member
+and refresh it post-RenderPresent (canonical SDL3 invalidation point —
+RenderPresent may swap the SW renderer's backing surface on mode
+change or window-surface invalidation).
+
+Implementation:
+  * New member: SDL_Surface *_cached_window_surface (Renderer.h, public
+    so the future-considered extraction of drawSurface to header-side
+    inline could read it without a getter).
+  * Seed at end of initVideo() — first drawcall happens before first
+    flip(), so initVideo's seed is required.
+  * Refresh in flip() after SDL_RenderPresent and in flushAll() after
+    its SDL_RenderPresent (engine has two flip points; both must
+    invalidate).
+  * _try_fast_blit_16x16 takes SDL_Surface *win_surface directly; the
+    inline SDL_GetWindowSurface(window) call inside the helper is
+    removed.
+  * Call site in drawSurface passes _cached_window_surface.
+
+Smoke-tested under DOSBox-X parity (build/stage runs cleanly, title
+renders correctly, intro/Mimiga scene renders, character moves).
+DEBUG.LOG flip-probe shows present_ms=0–1 ms steady (DOSBox-X is not
+a perf proxy, but the rendering pipeline is functionally intact).
+
+Expected real-HW saving: 340 × N µs per frame where N is the per-
+SDL_GetWindowSurface cost on real HW. Direct-write fast-path savings
+arrive together with patch 0051's conditional flush.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 28 +++++++++++++++++++++++++---
+ src/graphics/Renderer.h   | 10 ++++++++++
+ 2 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 8ae30c3..7980cae 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -521,6 +521,15 @@ bool Renderer::initVideo()
+   }
+   SDL_DestroySurface(image);
+ 
++  // DOS-PORT (patch 0050, Phase 9 wave 8): seed the per-frame window-
++  // surface cache. _try_fast_blit_16x16 reads this on every drawcall;
++  // the first drawcall happens before the first flip() so we need a
++  // valid pointer here. Refreshed after every SDL_RenderPresent in
++  // flip() (post-present is the canonical SDL3 invalidation point —
++  // RenderPresent may swap the SW renderer's backing surface, e.g. on
++  // mode change or window-surface invalidation).
++  _cached_window_surface = SDL_GetWindowSurface(_window);
++
+   return true;
+ }
+ 
+@@ -528,6 +537,10 @@ bool Renderer::flushAll()
+ {
+   LOG_DEBUG("Renderer::flushAll()");
+   SDL_RenderPresent(_renderer);
++  // DOS-PORT (patch 0050): present implicitly flushed the renderer
++  // queue and may have invalidated the SW-renderer's window-surface
++  // pointer. Refresh, mirroring flip().
++  _cached_window_surface = SDL_GetWindowSurface(_window);
+   sprites.flushSheets();
+   tileset.reload();
+   map_flush_graphics();
+@@ -695,6 +708,11 @@ void Renderer::flip()
+   bool ok = SDL_RenderPresent(_renderer);
+   Uint64 _present_ms = SDL_GetTicks() - _t0;
+   ++_flip_total;
++  // DOS-PORT (patch 0050, Phase 9 wave 8): refresh the cached window
++  // surface post-present. SDL_RenderPresent (SW renderer) may swap or
++  // invalidate the underlying window surface — re-querying once per
++  // flip is the safe invalidation hook.
++  _cached_window_surface = SDL_GetWindowSurface(_window);
+   if (!ok)
+   {
+     ++_flip_failed;
+@@ -771,7 +789,8 @@ void Renderer::flip()
+ //   called or SDL_RenderPresent fires. Either way the slow-path output
+ //   composites on top of fast-path output exactly as it would if both
+ //   went through the renderer.
+-static inline bool _try_fast_blit_16x16(SDL_Renderer *renderer, SDL_Window *window,
++static inline bool _try_fast_blit_16x16(SDL_Renderer *renderer,
++                                        SDL_Surface *win_surface,
+                                         Surface *src, int srcx, int srcy,
+                                         const SDL_Rect &srcrect, const SDL_Rect &dstrect)
+ {
+@@ -787,7 +806,9 @@ static inline bool _try_fast_blit_16x16(SDL_Renderer *renderer, SDL_Window *wind
+   if (!src_surface)
+     return false;
+ 
+-  SDL_Surface *win_surface = SDL_GetWindowSurface(window);
++  // DOS-PORT (patch 0050): use the cached window surface populated by
++  // initVideo() / flip(). Pre-patch this called SDL_GetWindowSurface
++  // 340x/frame; SDL3 walks the renderer's surface chain on each call.
+   if (!win_surface)
+     return false;
+ 
+@@ -921,7 +942,8 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   // to the slow path below). Per wave-5 drawcall logs, ~95% of drawSurface
+   // calls in the title scene are 16×16 sprites with alpha=255 and no
+   // scale/clip — those all take the fast path.
+-  if (_try_fast_blit_16x16(_renderer, _window, src, srcx, srcy, srcrect, dstrect))
++  if (_try_fast_blit_16x16(_renderer, _cached_window_surface,
++                           src, srcx, srcy, srcrect, dstrect))
+   {
+     ++_fastpath_taken_block;
+     ++_fastpath_taken_global;
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index aa96092..26daf9f 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -113,6 +113,16 @@ class Renderer
+     SDL_Rect _clip_rect;
+     SDL_Texture* _spot_light;
+ 
++  public:
++    // DOS-PORT (patch 0050, Phase 9 wave 8): per-frame cache of the SW
++    // renderer's window surface. _try_fast_blit_16x16 was calling
++    // SDL_GetWindowSurface(_window) per drawcall (~340/frame on title);
++    // SDL3 walks the renderer's surface chain on every call, which is
++    // small but not free at 340x. Cache it once at flip() entry and
++    // refresh on RenderPresent. Public so the inline drawSurface()
++    // helper can read it; nullable until first flip() runs.
++    SDL_Surface *_cached_window_surface = nullptr;
++
+   protected:
+     friend class Singleton<Renderer>;
+ 
+-- 
+2.47.3
+
