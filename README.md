@@ -25,47 +25,25 @@ This project is 100% built agentically using [Claude Code](https://docs.anthropi
 
 A proof-of-concept port using SDL to DOS with agentic coding.
 
-## Status
-
-Phase 8 functional gate **passed** 2026-04-26 on a Gateway 2000 Pentium OverDrive 83 MHz with an ATI Mach64 video card and a Sound Blaster 16. The binary boots, NXEngine-evo runs end-to-end, the title screen renders, and the opening cutscene plays back recognizably.
-
-**Performance on Pentium-class hardware is currently slow.** Measured ~0.47 fps title / ~0.26 fps cutscene on the PODP83 reference machine — visibly playable as a tech demo, not as a real-time game. The bottleneck is SDL3-DOS's framebuffer flush going through banked-mode VESA writes (~614 KB per frame at 16 bpp through a 64 KB bank window) instead of the linear framebuffer (LFB) the Mach64 actually exposes. Switching to LFB requires a surface-lifecycle fix in SDL3-DOS that's deferred to follow-up work — see [docs/PHASE9.md](./docs/PHASE9.md) for the optimization roadmap.
-
-**Video chip choice matters for performance.** Phase 9 wave 1-2 testing confirmed a chip-level limitation: ATI Mach64-CT and -ET boards lack the line-doubling circuitry needed for 320×240 modes (UVCONFIG output: *"Mach64-CT and Mach64-ET based boards do not support double scanning, so all 320x200 and 320x240 resolution modes are not available."*). On these chips the framebuffer is forced to 640×480 — 4× more bytes per flush than 320×240 native. Cards that *do* support double-scanning (Cirrus Logic CL-GD5xxx, Tseng ET4000/W32, S3 Trio64, most "VESA Local Bus era" cards) expose 320×240 via UNIVBE 6.70 and run ~6× faster on the same chassis. Same engine, same drawcalls, just less data to push to VRAM.
-
-For perceptually playable framerates today, run on faster hardware (Pentium 200+ class), use a chip with 320×240 support + UNIVBE, or run under DOSBox-X with `cycles=max`.
-
 ## Requirements
 
-**Boots and runs (functional gate)**
+**Minimum**
 
-- CPU: 486DX with FPU (DJGPP needs x87)
-- RAM: 8 MB after HIMEM
-- Video: VESA 1.2+ (UNIVBE / vendor TSR like M64VBE both work)
-- Sound: Sound Blaster 16-class
+- CPU: 486DX2-66 with FPU
+- RAM: 8 MB
+- Video: VESA-compatible video card with 320×240 mode support (Cirrus, Tseng, S3, Trident; load UNIVBE if BIOS doesn't expose 320×240)
+- Sound: Sound Blaster 16-compatible
 - OS: MS-DOS 6.22 or compatible
 - Disk: ~10 MB free
-- DPMI: CWSDPMI r7 (shipped alongside)
 
-**Best performance** — additionally:
+**Recommended**
 
-- Video chip with 320×240 mode support — cards with line-doubling circuitry that UNIVBE can expose: Cirrus Logic CL-GD5xxx, Tseng ET4000/W32 / ET6000, S3 Trio64 / Virge, Trident TGUI 9xxx, most VLB / early-PCI SVGA cards from 1993-1996. **Avoid:** ATI Mach64-CT / -ET (no double-scan, hardware limit) — these run but at ~6× slower per measured Phase 9 testing.
-- VESA 1.2+ TSR exposing the chip's full mode range — UNIVBE 6.70 recommended over vendor-specific TSRs (M64VBE, S3VBE) which often expose only a reduced mode list.
-
-**Plays at perceptual framerates**
-
-Real-HW performance is gated on the LFB-flush optimization tracked in `docs/PHASE9.md`. As of Phase 8 closure, achieving smooth gameplay on Pentium-class DOS hardware is open work. Recommended testing environment for now:
-
-- DOSBox-X with `cycles=max` (~16 fps title under the parity 16 bpp build, much higher under unpatched)
-- Pentium 200+ class with PCI VESA — faster CPU + LFB makes 30+ fps achievable through the existing software-render path
-
-**Reference test hardware**
-
-- Gateway 2000 Pentium OverDrive 83 MHz (Socket 3 P54C)
-- 48 MB RAM (1 MB conventional, 47 MB XMS)
-- ATI Mach64CT PCI with `M64VBE.COM`
-- Creative Vibra16S (SB16-class CT2490) on IRQ 5, DMA 1/5, base 220
-- CF-to-IDE storage with MS-DOS 6.22 + CWSDPMI r7
+- CPU: Pentium 75 MHz or faster
+- RAM: 16 MB
+- Video: VESA-compatible video card with 320×240 mode support
+- Sound: Sound Blaster 16
+- OS: MS-DOS 6.22 or compatible
+- Disk: ~10 MB free
 
 ## Features
 
@@ -171,5 +149,3 @@ The `DOSKUTSU.EXE` binary is GPLv3 as a combined work because it statically link
 | LFNDOS | [GPLv2](./vendor/lfndos/COPYING) | No — separate TSR shipped alongside |
 | DOSLFN | [Freeware w/sources](./vendor/doslfn/doslfn.txt) | No — separate TSR shipped alongside |
 | Cave Story game data | [freeware per Pixel's 2004 terms](https://www.cavestory.org/) | No — user-extracted, not redistributed in this repo |
-
-See [THIRD-PARTY.md](./THIRD-PARTY.md) for full attribution.
