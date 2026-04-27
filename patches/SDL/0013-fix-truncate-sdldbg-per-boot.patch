@@ -1,0 +1,50 @@
+From 08c91d7872ce0e399b0baaeaa8d8393cced05bac Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 18:20:30 -0700
+Subject: [PATCH] [DOSKUTSU] dos: truncate /sdldbg.log per boot, not append
+ (lever 1 wave 2 followup)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The shared diagnostic FILE* in SDL_dosdbg.c was opened with "ab"
+(append-binary), so SDLDBG.LOG accumulated across every boot. Multiple
+test runs concatenated into one file made it tedious to identify which
+section corresponded to the current binary — the user explicitly
+flagged this as a quality-of-life regression after the cirrus2 wave-2
+capture forced manual section-finding.
+
+NXEngine's DEBUG.LOG already truncates per boot via Logger.cpp
+(fopen(filename, "w")). This change brings SDLDBG.LOG to parity:
+fopen("/sdldbg.log", "wb").
+---
+ src/video/dos/SDL_dosdbg.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/video/dos/SDL_dosdbg.c b/src/video/dos/SDL_dosdbg.c
+index f70fdc8a6..eaf34399d 100644
+--- a/src/video/dos/SDL_dosdbg.c
++++ b/src/video/dos/SDL_dosdbg.c
+@@ -35,6 +35,10 @@
+ // mid-line. fsync after every line so the trace survives a hard reset
+ // (matches patch 0004's per-line fsync pattern).
+ //
++// "wb" (truncate-on-first-open) so each boot starts with a fresh log
++// rather than appending to a multi-boot history that's hard to read.
++// NXEngine's DEBUG.LOG already truncates per boot; this matches.
++//
+ // See SDL_dosdbg.h for rationale (gateway4 wave 1 log-race postmortem,
+ // docs/PHASE9-15FPS-PLAN.md §3 Lever 1 wave 2 plan).
+ static FILE *g_dbg_log = NULL;
+@@ -42,7 +46,7 @@ static FILE *g_dbg_log = NULL;
+ void doskutsu_dbg_open(void)
+ {
+     if (!g_dbg_log) {
+-        g_dbg_log = fopen("/sdldbg.log", "ab");
++        g_dbg_log = fopen("/sdldbg.log", "wb");
+     }
+ }
+ 
+-- 
+2.47.3
+

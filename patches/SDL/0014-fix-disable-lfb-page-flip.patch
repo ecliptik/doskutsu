@@ -1,0 +1,144 @@
+From 73e6c79836435181e63e82cda842f4153d14e80b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 18:26:50 -0700
+Subject: [PATCH 1/2] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=203=20?=
+ =?UTF-8?q?Fix=20A=20=E2=80=94=20disable=20LFB=20page-flip=20when=20PREFER?=
+ =?UTF-8?q?=5FLFB?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 2 (patches 0010+0011) successfully engaged the LFB fast path on
+real Cirrus / Mach64 hardware (vram_ptr in mapped LFB confirmed). But
+the page-flipping logic that comes for free on LFB modes turned out to
+be the wrong choice for Cave Story's 2-15 fps target:
+
+Symptom (real-HW Cirrus, /tmp/cirrus2/SDLDBG.LOG):
+  - line 180: UpdateWindowFramebuffer #1   vram_ptr=77c25800  (page 1)
+  - line 184: UpdateWindowFramebuffer #100 vram_ptr=77c00000  (page 0)
+  - 0x25800 = 153600 bytes = exactly one 320x240x16bpp frame.
+
+User-visible: the boot "Loading..." splash sticks while the engine
+renders into the off-screen page; the visible page only updates on a
+PageSet (`__dpmi_int 0x10, ax=0x4F07`) call that either silently fails
+on the M64VBE ROM or selects a stale page on the next flip.
+
+The post-flush block in SDL_dosframebuffer.c (around line 880) does
+contain a VBE 0x4F07 call, but the rotation it performs assumes a
+working PageSet that on Mach64 + M64VBE doesn't reliably swap the
+displayed image. We don't need page-flipping at our target framerate —
+single-buffered with potential tearing is invisible at 2-15 fps.
+
+Two-pronged fix:
+
+1. SDL_dosframebuffer.c populate_fb_state_for_direct_fb (Path B helper
+   from patch 0011): always select page_offset[0] as the WRITE target
+   regardless of `data->page_flip_available`. The WRITE always lands on
+   the visible page.
+
+2. SDL_dosmodes.c DOSVESA_SetDisplayMode: gate the
+   `data->page_flip_available = true` block on
+   !SDL_GetHintBoolean(SDL_HINT_DOS_PREFER_LFB, false). When the
+   PREFER_LFB hint (which doskutsu sets unconditionally on DJGPP) is
+   active, page_flip_available stays false. The post-flush rotation
+   block at SDL_dosframebuffer.c:880 gates on
+   `vdata->page_flip_available` so it becomes a no-op — no VBE 0x4F07
+   calls, no vram_ptr swap. Belt-and-braces consistency with #1.
+
+Verified under DOSBox-X parity smoke (build/stage/SDLDBG.LOG, fast cycles,
+~900 flushes captured):
+  mode-set #1 (exit ok): banked_mode=0 mapping.size=2097152 page_flip=0
+  UpdateWindowFramebuffer #1:   ... vram_ptr=dfc00000 ...
+  UpdateWindowFramebuffer #100: ... vram_ptr=dfc00000 ...
+  UpdateWindowFramebuffer #200: ... vram_ptr=dfc00000 ...
+  ... (stable through #900)
+
+vram_ptr stable across all 900 sampled flushes — single page, no
+rotation. Wave-2's alternation behavior is gone.
+
+Trade-off accepted: lose double-buffer tear-prevention. At Cave Story's
+2-15 fps target the visual cost is invisible. If a future higher-fps
+mode (Phase 9 final gate is 15 fps; nothing above that on the roadmap
+yet) wants proper double-buffering, restore VBE PageSet plumbing then.
+
+Why DOS needs this
+------------------
+Real-HW Cirrus / Mach64 + M64VBE ROM treatment of VBE function 0x4F07
+(Set Display Start) does not produce a stable visible image when
+combined with the SDL3-DOS driver's per-flush page rotation. Found
+empirically via the wave-2 capture; not a problem on DOSBox-X parity
+because its emulated VBE PageSet is a memcpy. DOS-only fix in the DOS
+backend.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c | 22 ++++++++++++++++++++--
+ src/video/dos/SDL_dosmodes.c       | 16 +++++++++++++++-
+ 2 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 418189449..4594ab5da 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -343,8 +343,26 @@ static bool populate_fb_state_for_direct_fb(SDL_VideoDevice *device,
+ 
+     if (use_lfb_path) {
+         // LFB nearptr — DPMI-mapped VRAM linear address.
+-        int back_page = data->page_flip_available ? (1 - data->current_page) : 0;
+-        fb_state.vram_ptr = (Uint8 *)DOS_PhysicalToLinear(data->mapping.address) + data->page_offset[back_page];
++        //
++        // DOSKUTSU patch 0014 (Phase 9 wave 3, Fix A): force single-buffered
++        // page 0 always. The previous logic selected `1 - current_page` as
++        // the WRITE target whenever `page_flip_available` was true, but the
++        // post-flush block at line ~880 then calls VBE 0x4F07 to swap the
++        // DISPLAYED page and rotate vram_ptr. On real Cirrus / Mach64
++        // hardware that swap either silently fails or leaves the wrong page
++        // visible — symptom: the boot-time "Loading…" splash sticks while
++        // the engine renders into the invisible page (`vram_ptr` alternates
++        // between `0x77c00000` and `0x77c25800` per /tmp/cirrus2 SDLDBG.LOG
++        // line 184 vs 180). DOSVESA_SetDisplayMode also force-disables
++        // page_flip_available when DOS_PREFER_LFB is set, so this is belt-
++        // and-braces consistency: regardless of the upstream flag, the
++        // helper writes into page 0 and the post-flush block (which gates
++        // on `vdata->page_flip_available`) becomes a no-op. Trade-off
++        // accepted: lose double-buffer tear-prevention. At Cave Story's
++        // 2-15 fps target this is invisible. If a higher-fps mode wants
++        // proper double-buffering later, restore VBE PageSet plumbing
++        // then.
++        fb_state.vram_ptr = (Uint8 *)DOS_PhysicalToLinear(data->mapping.address) + data->page_offset[0];
+         fb_state.vram_phys = 0;
+         fb_state.use_dosmemput = false;
+         fb_state.banked_multibank = false;
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 8cdbf34bc..dd4e7a6b5 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -848,7 +848,21 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+     // we would still need to bank-switch through the same 64KB window to write
+     // to the back page, so the performance benefit is minimal (just tear-free).
+     // For simplicity, disable page-flipping in banked mode for now.
+-    if (!data->banked_mode && modedata->num_image_pages >= 1) {
++    //
++    // DOSKUTSU patch 0014 (Phase 9 wave 3, Fix A): when SDL_HINT_DOS_PREFER_LFB
++    // is set, also force-disable page-flipping. The post-flush rotation in
++    // SDL_dosframebuffer.c (`__dpmi_int(0x10, ax=0x4F07)` plus vram_ptr swap)
++    // does not produce a stable visible image on Cirrus / Mach64 + M64VBE in
++    // wave-2 testing — symptom is the boot splash sticking while the engine
++    // renders to the off-screen page. Forcing single-buffered page 0 makes
++    // every frame land on the visible page; the post-flush block becomes a
++    // no-op because it gates on `page_flip_available`. Pairs with the
++    // `populate_fb_state_for_direct_fb` change to always select page 0 as
++    // the WRITE target. Trade-off: lose tear-prevention double-buffering;
++    // accepted for the 2-15 fps target.
++    const bool prefer_lfb_no_flip =
++        SDL_GetHintBoolean(SDL_HINT_DOS_PREFER_LFB, false);
++    if (!data->banked_mode && modedata->num_image_pages >= 1 && !prefer_lfb_no_flip) {
+         data->page_flip_available = true;
+         data->current_page = 0;
+         data->page_offset[0] = 0;
+-- 
+2.47.3
+

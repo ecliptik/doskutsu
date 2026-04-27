@@ -1,0 +1,246 @@
+From 9e9fd04dcd84f46efc4b9bfff8f9b0aa3ede585c Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 18:30:17 -0700
+Subject: [PATCH 2/2] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=203=20?=
+ =?UTF-8?q?Fix=20B=20=E2=80=94=20fast-path=20timing=20brackets?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave-2 (LFB engaged) measurements on real Cirrus / Mach64 hardware
+show title-screen flips at 333-367 ms / 2.94 fps despite the LFB
+fast path landing correctly. Drawcalls account for ~7 ms per flip
+(per existing tally), leaving ~325 ms unattributed across the per-
+flip work in DOSVESA_UpdateWindowFramebuffer.
+
+Add per-flush timing brackets via SDL_GetPerformanceCounter (which
+calls DJGPP uclock() — microsecond resolution per src/timer/dos/
+SDL_systimer.c) to segment the fast-path cost into four phases:
+
+  t0 = function entry
+  t1 = after lazy-reinit / DPMI work       => DPMI bracket = t1 - t0
+  t2 = after the system-RAM → VRAM copy    => COPY bracket = t2 - t1
+  t3 = after post-flush block (now no-op    => POST bracket = t3 - t2
+       since patch 0014 disabled page-flip)
+                                            TOTAL bracket = t3 - t0
+
+Format conversion: no separate format-convert pass exists in the
+fast path. The src system-RAM SDL_Surface is allocated in the mode
+format by CreateSystemSurface, so the inner copy is either a single
+SDL_memcpy (pitches match) or a per-rect SDL_memcpy. Conversion
+work, if any ever materialized, would surface as inflated COPY
+bracket. The brackets cannot distinguish "convert + copy" from
+"long copy" since they share the same code span — but the existing
+DOSVESA-FB-INIT log line already prints `pitches_match=1`, so we
+know which sub-mode is active.
+
+Per-100-flush summary line emitted to /sdldbg.log via the shared
+doskutsu_dbg_log writer (patch 0009 coordination):
+
+  fastpath-timing block @flush=N: dpmi_ms_avg=X (min=A max=B)
+  copy_ms_avg=X (min=A max=B) post_ms_avg=X (min=A max=B)
+  total_ms_avg=X (min=A max=B) [over 100 flushes]
+
+Sample DOSBox-X parity output (build/stage/SDLDBG.LOG, 900 flushes):
+  fastpath-timing block @flush=300: dpmi_ms_avg=0.002 (min=0.002
+  max=0.040) copy_ms_avg=0.048 (min=0.046 max=0.075) post_ms_avg=0.002
+  (min=0.002 max=0.023) total_ms_avg=0.054 (min=0.051 max=0.139)
+  [over 100 flushes]
+
+DOSBox-X total ~0.05 ms is the emulator's host-RAM memcpy speed (not
+representative of real-Mach64 PCI bus per the dosbox_not_perf_proxy
+memory note). Real-HW capture is the only valid datapoint for the
+~325 ms attribution question; this patch's job is to PRODUCE that
+datapoint.
+
+What we expect to see on real Cirrus:
+  - dpmi_ms_avg ≈ 0 (lazy-reinit only fires on mode-change boundaries;
+    the hot loop skips it; the conditional check costs ~0)
+  - copy_ms_avg = where the 320 ms goes IF the bottleneck is
+    write-combining / cached-mapping issues on the Mach64 LFB. ~6 ms
+    expected for 153,600 bytes at PCI write-combining throughput; if
+    measured ≫ 6 ms, that's the mapping-cache attribute problem.
+  - post_ms_avg ≈ 0 (page-flip block gates on page_flip_available
+    which patch 0014 forces false)
+  - total_ms_avg = 320-360 ms steady = matches drawcall + flip total
+
+If copy_ms_avg explains all 320 ms: bottleneck is uncached PCI writes.
+Mitigation menu: write-combining DPMI mapping attribute, MTRR, dword-
+aligned word writes, REP MOVSD vs SDL_memcpy.
+
+If copy_ms_avg ≈ 6 ms but total_ms_avg = 320 ms: bottleneck is
+elsewhere and these brackets are insufficient — next iteration adds
+finer-grained measurement (palette ProgramVGADAC?).
+
+Counters use static accumulators reset every 100 flushes. Min/max/sum
+tracked per bracket. uS resolution; ms+fractional ms in the printout.
+Cost: ~4 SDL_GetPerformanceCounter calls per flush (single uclock()
+read each ≈ 1-2 µs) — negligible compared to the work being measured.
+
+Why DOS needs this
+------------------
+Real-HW perf attribution is a DOS-only question (per
+dosbox_not_perf_proxy: DOSBox-X's emulated framebuffer flush is a
+host-memcpy and gives misleading numbers). The brackets compile in
+unconditionally on the DOS backend; non-DOS builds don't include
+SDL_dosframebuffer.c. Output is via doskutsu_dbg_log so it routes
+to the same /sdldbg.log used by the patch 0009 lifecycle traces.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c | 115 +++++++++++++++++++++++++++++
+ 1 file changed, 115 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 4594ab5da..e76f9d524 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -611,6 +611,29 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+ {
+     SDL_VideoData *vdata = device->internal;
+ 
++    // DOSKUTSU patch 0015 (Phase 9 wave 3, Fix B): fast-path timing
++    // brackets. Wave-2 measurements showed real-Cirrus title flips at
++    // 333-367 ms / 2.94 fps even with LFB engaged, ~325 ms unaccounted
++    // for after subtracting drawcalls (~7 ms) from the per-flip total.
++    // Brackets segment the per-flip cost into four phases:
++    //   t0 = entry
++    //   t1 = after lazy-reinit & DPMI work (DPMI = t1-t0)
++    //   t2 = after the VRAM copy (copy = t2-t1, sub-bracketed below)
++    //   t3 = exit (return path = t3-t2; total = t3-t0)
++    // Format conversion is implicit in the copy span: src is a system-
++    // RAM SDL_Surface in mode-format; if pitches match we memcpy, else
++    // we per-rect copy. No separate format-convert pass exists in the
++    // fast path (would only happen on the normal-path fallback).
++    //
++    // Use SDL_GetPerformanceCounter (calls DJGPP uclock(), microsecond
++    // resolution per src/timer/dos/SDL_systimer.c). Per-block summary
++    // every 100 flushes via doskutsu_dbg_log.
++    const Uint64 _ts_t0 = SDL_GetPerformanceCounter();
++    static Uint64 _ts_freq = 0;
++    if (!_ts_freq) {
++        _ts_freq = SDL_GetPerformanceFrequency();
++    }
++
+     // DOSKUTSU diagnostic (patches/SDL/0008 — Lever 1 lifecycle trace).
+     // Logs once on first call and every 100th call. Surfaces the staleness
+     // bug where fb_state was invalidated by InvalidateCachedFramebuffer but
+@@ -680,6 +703,13 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+         // pre-patch behaviour).
+     }
+ 
++    // DOSKUTSU patch 0015 timing point t1: after lazy-reinit / DPMI work.
++    // Captures the cost of populate_fb_state_for_direct_fb when it runs
++    // (DPMI nearptr math, mapping lookups). When the lazy-reinit branch
++    // is skipped (fb_state already populated from a prior call) this is
++    // ~zero and the DPMI bracket reflects only the conditional check.
++    const Uint64 _ts_t1 = SDL_GetPerformanceCounter();
++
+     // DOSKUTSU diagnostic header (patches/SDL/0002, task #21; routed
+     // through shared doskutsu_dbg_log by patch 0009).
+     ++_doskutsu_dbg_call_total;
+@@ -877,6 +907,14 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+             }
+         }
+ 
++        // DOSKUTSU patch 0015 timing point t2: VRAM-copy block done.
++        // Bracket [_ts_t1 .. _ts_t2] covers the system-RAM → VRAM blit.
++        // Expected: 153,600 bytes (320×240×16bpp) at PCI write-combining
++        // throughput. Real-HW Mach64 PCI bus theoretical max ~25 MB/s
++        // uncached → ~6 ms; if measured copy_ms >> 6 ms, write-combining
++        // / cached-mapping issue.
++        const Uint64 _ts_t2 = SDL_GetPerformanceCounter();
++
+         // DOSKUTSU diagnostic (patches/SDL/0002): post-write VRAM readback.
+         // For dosmemput path, dosmemget the first 16 bytes of vram_phys; for
+         // nearptr LFB path, read directly from vram_ptr. If these differ
+@@ -914,6 +952,83 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+             fb_state.vram_ptr = (Uint8 *)DOS_PhysicalToLinear(vdata->mapping.address) + vdata->page_offset[new_back];
+         }
+ 
++        // DOSKUTSU patch 0015 timing point t3: fast-path exit. Bracket
++        // [_ts_t2 .. _ts_t3] covers VRAM-readback diag + (now no-op
++        // post-flush rotation since patch 0014). Total bracket
++        // [_ts_t0 .. _ts_t3] should match the wall-clock cost of
++        // SDL_UpdateWindowSurfaceRects's call into us.
++        const Uint64 _ts_t3 = SDL_GetPerformanceCounter();
++
++        // Accumulate per-bracket cost in microseconds; emit a single
++        // summary line every 100 flushes. Min/max/sum tracked per
++        // bracket. _ts_freq guaranteed non-zero (set at t0).
++        static int _tb_n = 0;
++        static Uint64 _tb_dpmi_sum_us = 0, _tb_copy_sum_us = 0;
++        static Uint64 _tb_post_sum_us = 0, _tb_total_sum_us = 0;
++        static Uint32 _tb_dpmi_max_us = 0, _tb_copy_max_us = 0;
++        static Uint32 _tb_post_max_us = 0, _tb_total_max_us = 0;
++        static Uint32 _tb_dpmi_min_us = 0xFFFFFFFF, _tb_copy_min_us = 0xFFFFFFFF;
++        static Uint32 _tb_post_min_us = 0xFFFFFFFF, _tb_total_min_us = 0xFFFFFFFF;
++
++        const Uint64 us_per_tick_num = 1000000ULL;
++        const Uint32 dpmi_us  = (Uint32)(((_ts_t1 - _ts_t0) * us_per_tick_num) / _ts_freq);
++        const Uint32 copy_us  = (Uint32)(((_ts_t2 - _ts_t1) * us_per_tick_num) / _ts_freq);
++        const Uint32 post_us  = (Uint32)(((_ts_t3 - _ts_t2) * us_per_tick_num) / _ts_freq);
++        const Uint32 total_us = (Uint32)(((_ts_t3 - _ts_t0) * us_per_tick_num) / _ts_freq);
++
++        _tb_n++;
++        _tb_dpmi_sum_us  += dpmi_us;
++        _tb_copy_sum_us  += copy_us;
++        _tb_post_sum_us  += post_us;
++        _tb_total_sum_us += total_us;
++        if (dpmi_us  > _tb_dpmi_max_us)  _tb_dpmi_max_us  = dpmi_us;
++        if (copy_us  > _tb_copy_max_us)  _tb_copy_max_us  = copy_us;
++        if (post_us  > _tb_post_max_us)  _tb_post_max_us  = post_us;
++        if (total_us > _tb_total_max_us) _tb_total_max_us = total_us;
++        if (dpmi_us  < _tb_dpmi_min_us)  _tb_dpmi_min_us  = dpmi_us;
++        if (copy_us  < _tb_copy_min_us)  _tb_copy_min_us  = copy_us;
++        if (post_us  < _tb_post_min_us)  _tb_post_min_us  = post_us;
++        if (total_us < _tb_total_min_us) _tb_total_min_us = total_us;
++
++        if (_tb_n >= 100) {
++            doskutsu_dbg_log("fastpath-timing block @flush=%d: "
++                             "dpmi_ms_avg=%lu.%03lu (min=%lu.%03lu max=%lu.%03lu) "
++                             "copy_ms_avg=%lu.%03lu (min=%lu.%03lu max=%lu.%03lu) "
++                             "post_ms_avg=%lu.%03lu (min=%lu.%03lu max=%lu.%03lu) "
++                             "total_ms_avg=%lu.%03lu (min=%lu.%03lu max=%lu.%03lu) "
++                             "[over %d flushes]",
++                             _doskutsu_dbg_call_total,
++                             (unsigned long)((_tb_dpmi_sum_us / _tb_n) / 1000),
++                             (unsigned long)((_tb_dpmi_sum_us / _tb_n) % 1000),
++                             (unsigned long)(_tb_dpmi_min_us / 1000),
++                             (unsigned long)(_tb_dpmi_min_us % 1000),
++                             (unsigned long)(_tb_dpmi_max_us / 1000),
++                             (unsigned long)(_tb_dpmi_max_us % 1000),
++                             (unsigned long)((_tb_copy_sum_us / _tb_n) / 1000),
++                             (unsigned long)((_tb_copy_sum_us / _tb_n) % 1000),
++                             (unsigned long)(_tb_copy_min_us / 1000),
++                             (unsigned long)(_tb_copy_min_us % 1000),
++                             (unsigned long)(_tb_copy_max_us / 1000),
++                             (unsigned long)(_tb_copy_max_us % 1000),
++                             (unsigned long)((_tb_post_sum_us / _tb_n) / 1000),
++                             (unsigned long)((_tb_post_sum_us / _tb_n) % 1000),
++                             (unsigned long)(_tb_post_min_us / 1000),
++                             (unsigned long)(_tb_post_min_us % 1000),
++                             (unsigned long)(_tb_post_max_us / 1000),
++                             (unsigned long)(_tb_post_max_us % 1000),
++                             (unsigned long)((_tb_total_sum_us / _tb_n) / 1000),
++                             (unsigned long)((_tb_total_sum_us / _tb_n) % 1000),
++                             (unsigned long)(_tb_total_min_us / 1000),
++                             (unsigned long)(_tb_total_min_us % 1000),
++                             (unsigned long)(_tb_total_max_us / 1000),
++                             (unsigned long)(_tb_total_max_us % 1000),
++                             _tb_n);
++            _tb_n = 0;
++            _tb_dpmi_sum_us = _tb_copy_sum_us = _tb_post_sum_us = _tb_total_sum_us = 0;
++            _tb_dpmi_max_us = _tb_copy_max_us = _tb_post_max_us = _tb_total_max_us = 0;
++            _tb_dpmi_min_us = _tb_copy_min_us = _tb_post_min_us = _tb_total_min_us = 0xFFFFFFFF;
++        }
++
+         return true;
+     }
+ 
+-- 
+2.47.3
+
