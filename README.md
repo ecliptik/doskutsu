@@ -31,7 +31,9 @@ Phase 8 functional gate **passed** 2026-04-26 on a Gateway 2000 Pentium OverDriv
 
 **Performance on Pentium-class hardware is currently slow.** Measured ~0.47 fps title / ~0.26 fps cutscene on the PODP83 reference machine — visibly playable as a tech demo, not as a real-time game. The bottleneck is SDL3-DOS's framebuffer flush going through banked-mode VESA writes (~614 KB per frame at 16 bpp through a 64 KB bank window) instead of the linear framebuffer (LFB) the Mach64 actually exposes. Switching to LFB requires a surface-lifecycle fix in SDL3-DOS that's deferred to follow-up work — see [docs/PHASE9.md](./docs/PHASE9.md) for the optimization roadmap.
 
-For perceptually playable framerates today, run on faster hardware (Pentium 200+ class) or under DOSBox-X with `cycles=max`.
+**Video chip choice matters for performance.** Phase 9 wave 1-2 testing confirmed a chip-level limitation: ATI Mach64-CT and -ET boards lack the line-doubling circuitry needed for 320×240 modes (UVCONFIG output: *"Mach64-CT and Mach64-ET based boards do not support double scanning, so all 320x200 and 320x240 resolution modes are not available."*). On these chips the framebuffer is forced to 640×480 — 4× more bytes per flush than 320×240 native. Cards that *do* support double-scanning (Cirrus Logic CL-GD5xxx, Tseng ET4000/W32, S3 Trio64, most "VESA Local Bus era" cards) expose 320×240 via UNIVBE 6.70 and run ~6× faster on the same chassis. Same engine, same drawcalls, just less data to push to VRAM.
+
+For perceptually playable framerates today, run on faster hardware (Pentium 200+ class), use a chip with 320×240 support + UNIVBE, or run under DOSBox-X with `cycles=max`.
 
 ## Requirements
 
@@ -44,6 +46,11 @@ For perceptually playable framerates today, run on faster hardware (Pentium 200+
 - OS: MS-DOS 6.22 or compatible
 - Disk: ~10 MB free
 - DPMI: CWSDPMI r7 (shipped alongside)
+
+**Best performance** — additionally:
+
+- Video chip with 320×240 mode support — cards with line-doubling circuitry that UNIVBE can expose: Cirrus Logic CL-GD5xxx, Tseng ET4000/W32 / ET6000, S3 Trio64 / Virge, Trident TGUI 9xxx, most VLB / early-PCI SVGA cards from 1993-1996. **Avoid:** ATI Mach64-CT / -ET (no double-scan, hardware limit) — these run but at ~6× slower per measured Phase 9 testing.
+- VESA 1.2+ TSR exposing the chip's full mode range — UNIVBE 6.70 recommended over vendor-specific TSRs (M64VBE, S3VBE) which often expose only a reduced mode list.
 
 **Plays at perceptual framerates**
 
