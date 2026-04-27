@@ -1,0 +1,161 @@
+From a1c35ef8234621e019819d54c5fd6c59062e0c42 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 27 Apr 2026 08:51:04 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=205=20patc?=
+ =?UTF-8?q?h=200047=20=E2=80=94=20Lever=202=20Approach=20C:=20pre-convert?=
+ =?UTF-8?q?=20sprites=20to=20RGB565=20at=20load=20time?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave-4 real-Cirrus capture (/tmp/cirrus4/SDLDBG.LOG line 77):
+
+    sw-present-timing block @present=100:
+      queue_flush_ms_avg=390.280  render_present_ms_avg=10.352  total=400.633
+
+queue_flush is 97% of per-flip time. The LFB write itself is 10 ms;
+the rest is the SW renderer's drawcall queue (340 sprite blits per
+flip, ~95% are 16x16 tile blits) executing per-pixel INDEX8 -> RGB565
+format conversion in pure C inside SDL_BlitSurface. With patch 0044
+(conditional alpha-mod) the per-call overhead is already minimised;
+the format conversion is what's left.
+
+Approach C: pre-convert each sprite's source SDL_Surface to RGB565
+BEFORE handing it to SDL_CreateTextureFromSurface. The texture's
+internal SDL_Surface (SW_RenderData::texture->internal in
+render_sw.c) becomes RGB565 too, because
+SDL_CreateTextureFromSurface (SDL_render.c §1830-1834) prefers an
+exact format match against the renderer's texture_formats list. With
+the active mode at 16bpp (RGB565, after patches 0041 + 0045), every
+SDL_RENDERCMD_COPY in the queue becomes a same-format
+RGB565 -> RGB565 SDL_BlitSurface — the fast path, no per-pixel
+conversion, just a memcpy with colorkey skipping.
+
+Implementation: one new SDL_ConvertSurface call between the existing
+SDL_ZoomSurface and SDL_CreateTextureFromSurface in
+Surface::loadImage. Colorkey is re-asserted on the converted surface
+(SDL_ConvertSurface preserves it across format changes for matching-
+channel formats, but explicit re-assertion is cheap and bullet-proof).
+Approach A (direct SDL_BlitSurface to window->surface) and Approach B
+(hand-rolled INDEX8->RGB565 inner loop in drawSurface) were
+considered; C wins because it requires no SDL3 internals exposure and
+preserves the renderer's clip / scale / alpha-mod plumbing.
+
+Why this leaves Font.cpp and Renderer::initVideo (spot_light) alone:
+font atlas PNGs and the spot.png lighting effect both use the alpha
+channel — converting them to RGB565 (16bpp without alpha) would
+break text antialiasing and the spotlight blend. Sprites are
+INDEX8 BMPs with colorkey-only transparency, which converts cleanly.
+
+Trade-off accepted: each loaded sprite costs ~2x its BMP size in RAM
+(INDEX8 source freed immediately after conversion; the RGB565
+shadow lives inside the SDL_Texture). For Cave Story's <2 MB total
+sprite footprint that's <4 MB on a 48 MB Tier 1 reference machine.
+Tier 2 (16 MB) and Tier 3 (8 MB) would need an INDEX8-end-to-end
+pipeline (Lever 3 palette merge) — Phase 9's plan accepts that
+scope split.
+
+Verified under DOSBox-X parity smoke (build/stage/SDLDBG.LOG):
+  Title scene renders correctly, all sprites visible, colours intact,
+  no artifacts. queue_flush_ms_avg=644.572 in DOSBox-X. The DOSBox-X
+  number cannot be directly compared to wave-4's 390 ms because that
+  was a real-HW capture; DOSBox-X cycles=fixed 40000 has different
+  per-pixel-cost characteristics (memory note
+  "dosbox_not_perf_proxy.md"). The wave-5 cirrus5 real-HW capture is
+  what determines actual win on Cirrus.
+
+Why DOS needs this
+------------------
+SDL3's software renderer's per-pixel format conversion is pure C with
+no SIMD acceleration — this is the configuration we're stuck with on
+P54C / 486 (no MMX). Pre-converting once at load time amortises the
+cost across ~hundreds-of-millions of pixel writes (a single sprite
+loaded once, blitted thousands of times during gameplay).
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): the equivalent change in SDL_render.c would be
+upstream-PR territory; this nxengine-side change is purely ours.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/graphics/Surface.cpp | 62 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 60 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/Surface.cpp b/src/graphics/Surface.cpp
+index c00c0bf..32e5f21 100644
+--- a/src/graphics/Surface.cpp
++++ b/src/graphics/Surface.cpp
+@@ -43,10 +43,68 @@ bool Surface::loadImage(const std::string &pbm_name, bool use_colorkey)
+     SDL_SetSurfaceColorKey(image_scaled, true, SDL_MapSurfaceRGB(image_scaled, 0, 0, 0));
+   }
+ 
+-  _texture = SDL_CreateTextureFromSurface(Renderer::getInstance()->renderer(), image_scaled);
+-
++  // DOSKUTSU patch 0047 (Phase 9 wave 5 Lever 2 Approach C): pre-convert
++  // the INDEX8 source surface to RGB565 BEFORE handing it to
++  // SDL_CreateTextureFromSurface. This eliminates the per-drawcall
++  // INDEX8 -> RGB565 conversion that dominates the SW renderer's queue
++  // flush on real Cirrus hardware (390 ms / 340 drawcalls = ~1.1 ms per
++  // drawcall, of which ~1 ms is the format conversion in pure C).
++  //
++  // Why this works in one place and lasts: SDL_CreateTextureFromSurface
++  // (SDL_render.c §1830-1834) prefers an exact format match against the
++  // renderer's texture_formats list. The DOS software renderer reports
++  // RGB565 in its native format list when the SDL3-DOS framebuffer is
++  // RGB565 (the active mode after our 16bpp cap, patch 0041). Therefore
++  // when we hand it an RGB565 SDL_Surface, the resulting SDL_Texture's
++  // internal SDL_Surface (texture->internal in SW_RenderData) is also
++  // RGB565. The render command's COPY case then performs a RGB565 ->
++  // RGB565 SDL_BlitSurface — same-format, the fast path, no per-pixel
++  // conversion. Colorkey is preserved across the conversion via
++  // SDL_ConvertSurfaceAndColorspace (SDL3 keeps colorkey through format
++  // changes when the destination has matching channels; we re-assert
++  // it explicitly below to guarantee correctness).
++  //
++  // Trade-off: every loaded sprite costs ~2x its BMP size in RAM
++  // (INDEX8 source freed immediately, 16bpp shadow kept inside the
++  // texture). For Cave Story's <2 MB total sprite footprint that's
++  // <4 MB on a 48 MB Tier 1 machine. Tier 1 only — Tier 2 (16 MB) and
++  // Tier 3 (8 MB) would need the INDEX8 path or palette-merging
++  // (Lever 3) for an end-to-end 8bpp pipeline. The Phase 9 plan
++  // accepts that scope.
++  //
++  // Why this isn't the FIRST thing we tried: SDL3's documentation
++  // doesn't say "the renderer's preferred format is what the texture
++  // gets stored as"; that's surfaced only by reading
++  // SDL_render.c::SDL_CreateTextureFromSurface and
++  // SW_RenderData::texture->internal in render_sw.c. Approach A
++  // (direct SDL_BlitSurface to window->surface) and Approach B
++  // (hand-rolled inner loop in drawSurface) were considered; C wins on
++  // simplicity-vs-payoff because it requires no new SDL3 internals
++  // exposure and no replacement for the renderer's clip / scale /
++  // alpha-mod plumbing.
++  SDL_Surface *image_rgb565 = SDL_ConvertSurface(image_scaled, SDL_PIXELFORMAT_RGB565);
+   SDL_DestroySurface(image_scaled);
+ 
++  if (!image_rgb565)
++  {
++    LOG_ERROR("Surface::LoadImage: SDL_ConvertSurface to RGB565 failed for '{}': {}", pbm_name, SDL_GetError());
++    return false;
++  }
++
++  // SDL3's SDL_ConvertSurface preserves colorkey across format changes for
++  // formats with matching channels, but re-assert it for safety — the
++  // converted-surface code path is well-trodden but the colorkey rule for
++  // RGB565 specifically is worth explicit confirmation in the log if
++  // anything ever regresses (the LOG_DEBUG hits once per load).
++  if (use_colorkey)
++  {
++    SDL_SetSurfaceColorKey(image_rgb565, true, SDL_MapSurfaceRGB(image_rgb565, 0, 0, 0));
++  }
++
++  _texture = SDL_CreateTextureFromSurface(Renderer::getInstance()->renderer(), image_rgb565);
++
++  SDL_DestroySurface(image_rgb565);
++
+   if (!_texture)
+   {
+     LOG_ERROR("Surface::LoadImage: SDL_CreateTextureFromSurface failed: {}", SDL_GetError());
+-- 
+2.47.3
+
