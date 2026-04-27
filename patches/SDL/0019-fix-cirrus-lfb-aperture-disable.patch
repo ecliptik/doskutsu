@@ -1,0 +1,421 @@
+From 63730e39c9f1a9b5612db8bf6b3dfd96d2649461 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 27 Apr 2026 09:20:32 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=206=20patc?=
+ =?UTF-8?q?h=200019=20=E2=80=94=20auto-disable=20LFB=20on=20Cirrus?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave-5 cirrus5 capture (/tmp/cirrus5/SDLDBG.LOG lines 38-79) confirmed
+two facts that, taken together, kill the LFB-on-Cirrus story:
+
+  1. Patch 0018's display-start GET reports X=0 Y=0 (offset=0):
+        display-start GET (pre-set):  X=0 Y=0 (offset=0) ax=0x004F
+        display-start SET attempt:    X=0 Y=0 ax=0x004F
+        display-start GET (post-set): X=0 Y=0 (offset=0) ax=0x004F
+
+     so writes to LFB offset 0 SHOULD be visible — but...
+
+  2. The Loading splash stuck on screen for the entire run; 100+
+     post-flush DOSVESA-FB-CALLs hit LFB at vram_phys=0x78000000 and
+     none of them appeared on the visible display.
+
+Conclusion: on Cirrus CL-GD5434 + UNIVBE 6.7, the LFB aperture
+(0x78000000) and the displayed VRAM region are decoupled. Writes to
+the aperture update VRAM cells the display generator does not read
+from. No VBE-side fix is reachable; this is below the BIOS interface.
+
+Wave-1's BANKED path on the same Cirrus card showed visible "Loading
++ partial title scene" updates — so the banked window at A000:0
+remains the working route on this hardware.
+
+Fix C: auto-disable LFB on cards matching the Cirrus + UNIVBE
+fingerprint, and add a manual hint as escape hatch.
+
+Implementation
+--------------
+
+Two activation paths:
+
+  a. Auto-detection. DOSVESA_DetectLFBApertureBug (new public helper
+     in SDL_dosmodes.[ch]) reads the cached VESA controller info and
+     fingerprints against:
+
+       - Exact: vendor "SciTech Software, Inc." + product containing
+         "Display Doctor" + total VRAM 1024 KB. Matches the cirrus5
+         capture exactly. UNIVBE rewrites OEM strings so the chip
+         identity is hidden behind UNIVBE; VRAM size is the proxy
+         for "this is a Cirrus 1MB card running UNIVBE."
+
+       - Loose: "Cirrus" or "CL-GD" anywhere in any OEM string.
+         Catches native Cirrus VBE without UNIVBE (uncommon).
+
+     Logs `cirrus-lfb-aperture-bug: detected (oem=... product=...
+     vram=...KB) -> forcing banked path (reason: ...)` on match,
+     `cirrus-lfb-aperture-bug: NOT detected ...` otherwise. Either
+     way the result lands in SDLDBG.LOG so the detection outcome is
+     always traceable.
+
+     DOSVESA_VideoInit calls this once at init and stores the result
+     in SDL_VideoData::force_banked_path (new field).
+
+  b. Manual hint. SDL_HINT_DOS_DISABLE_LFB=1 forces the banked path
+     regardless of detection. Useful for diagnostics or for cards
+     exhibiting the same bug we haven't fingerprinted yet. Read at
+     each populate_fb_state_for_direct_fb call (cheap, no caching).
+
+populate_fb_state_for_direct_fb (SDL_dosframebuffer.c) ORs the auto-
+detect bit and the hint into a single `force_banked` decision; when
+true and banked is usable, the helper takes the banked dosmemput path
+even when LFB would otherwise win the prefer_lfb / use_lfb_path
+calculation. One log line fires when the override actually changes
+the path:
+
+    [lifecycle] DISABLE_LFB engaged: auto=N hint=N -> banked path
+    (would have used LFB otherwise: prefer_lfb=N banked_usable=1)
+
+Verified under DOSBox-X parity smoke (build/stage/SDLDBG.LOG):
+
+  - No SDL_DOS_DISABLE_LFB env: detection runs, no fingerprint match
+    on DOSBox-X's S3 Trio64 emulation (vendor='DOSBox Development
+    Team' product='DOSBox - The DOS Emulator' vram=2048KB), LFB path
+    remains enabled. Title scene renders correctly through LFB.
+
+  - With SDL_DOS_DISABLE_LFB=1: same detection result, but the hint
+    forces banked anyway. CreateWindowFramebuffer reports
+    use_dosmemput=1 vram_phys=0x000a0000 (banked window), and the
+    title + post-Z intro scene renders correctly through the banked
+    dosmemput path.
+
+The hint mechanism is also the safe deploy path for Cirrus real-HW
+gateways where the manual override sidesteps any fingerprint-miss
+risk on cards with subtly different OEM strings.
+
+Why DOS needs this
+------------------
+
+The aperture-vs-display VRAM decoupling on Cirrus + UNIVBE is a real
+hardware/firmware constraint that VBE 0x4F07 doesn't expose and we
+cannot work around at the LFB layer. Auto-disabling LFB on
+fingerprint-matched cards keeps the banked path available where it
+works, while leaving LFB enabled on Mach64 / M64VBE (the gateway /
+PODP-machine target) where banked is bandwidth-bound and LFB is
+5-10× faster.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ include/SDL3/SDL_hints.h           | 64 +++++++++++++++++++++
+ src/video/dos/SDL_dosframebuffer.c | 37 +++++++++++-
+ src/video/dos/SDL_dosmodes.c       | 90 ++++++++++++++++++++++++++++++
+ src/video/dos/SDL_dosmodes.h       | 11 ++++
+ src/video/dos/SDL_dosvideo.c       | 10 ++++
+ src/video/dos/SDL_dosvideo.h       | 15 +++++
+ 6 files changed, 226 insertions(+), 1 deletion(-)
+
+diff --git a/include/SDL3/SDL_hints.h b/include/SDL3/SDL_hints.h
+index d1187e41a..d6d9cda0f 100644
+--- a/include/SDL3/SDL_hints.h
++++ b/include/SDL3/SDL_hints.h
+@@ -857,6 +857,70 @@ extern "C" {
+  */
+ #define SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE "SDL_DOS_PIN_WINDOW_TO_NATIVE_MODE"
+ 
++/**
++ * A variable that disables the Linear Framebuffer (LFB) path on the DOS VBE
++ * backend, forcing the banked-window (real-mode A000:0 + bank-switching)
++ * path even when the BIOS reports an LFB available and the mode supports it.
++ *
++ * Background: on at least one combination of card + BIOS we test against —
++ * Cirrus Logic CL-GD5434 with SciTech UNIVBE 6.7 ("Display Doctor") — the
++ * LFB aperture (typically `0x78000000`) and the displayed VRAM region are
++ * effectively decoupled. Writes to LFB offset 0 update the aperture, but
++ * the display generator reads from a different region of VRAM than the
++ * aperture maps to, so on-screen output never changes despite successful
++ * VBE 0x4F02 mode-set, successful LFB DPMI mapping, and successful 0x4F07
++ * SET (which is itself a silent no-op on this BIOS — patch 0018 traces
++ * the GET-SET-GET sequence). Banked-mode writes via the `0xA000:0` window
++ * do reach the displayed page on the same card, so the banked path remains
++ * the working route on this BIOS even when the mode advertises LFB.
++ *
++ * Patches 0011/0014/0016/0018 each tried to fix LFB display-page selection
++ * on this card; patch 0018 confirmed the BIOS reports display-start at
++ * (0,0) but writes to LFB offset 0 still don't appear. The conclusion is
++ * that no LFB-side fix is reachable from VBE — the aperture-vs-display
++ * decoupling is below the BIOS interface.
++ *
++ * Two activation paths:
++ *
++ *  - **Auto-detection**: on every VBE controller-info read,
++ *    DOSVESA_GetVBEControllerInfo examines the OEM strings against the
++ *    Cirrus + UNIVBE fingerprint (vendor "SciTech Software, Inc.",
++ *    product containing "Display Doctor", total VRAM 1024 KB) and a
++ *    looser substring match for "Cirrus" / "CL-GD" anywhere in the OEM
++ *    strings. A match sets an internal `force_banked_path` flag,
++ *    suppressing LFB engagement.
++ *
++ *  - **Manual override**: setting this hint to "1" forces banked-only
++ *    regardless of detection. Useful for diagnostics or for cards we
++ *    haven't fingerprinted yet that exhibit the same aperture-decoupling
++ *    behaviour.
++ *
++ * The variable can be set to the following values:
++ *
++ *  - "0" (or unset): Use auto-detection. LFB is engaged when supported by
++ *    the mode AND the card isn't fingerprinted as Cirrus + UNIVBE. (default)
++ *  - "1": Force the banked path always. LFB is never engaged. The mode
++ *    will still be set with the LFB attribute when the BIOS reports it,
++ *    but `populate_fb_state_for_direct_fb` will treat the mode as banked
++ *    for the purpose of choosing the VRAM access path.
++ *
++ * On hardware where LFB is faster than banked (notably ATI Mach64 with
++ * M64VBE on the g2k Pentium OverDrive reference machine, where banked is
++ * bandwidth-bound at ~500 KB/s and LFB is 5-10× faster), do not set this
++ * hint — the auto-detection path will leave LFB enabled and you keep the
++ * Mach64 perf win. This hint is a per-card escape hatch, not a
++ * recommendation.
++ *
++ * This hint must be set before the first call to SDL_GetWindowSurface()
++ * (or any function that triggers VBE mode-set). Reading the hint at each
++ * mode-set is cheap; it is not cached.
++ *
++ * Added by patches/SDL/0019 (DOSKUTSU local patch, never upstreamed).
++ * See docs/PHASE9-15FPS-PLAN.md and the wave-5 cirrus5 capture
++ * (`/tmp/cirrus5/SDLDBG.LOG` lines 38-79) for the discovery context.
++ */
++#define SDL_HINT_DOS_DISABLE_LFB "SDL_DOS_DISABLE_LFB"
++
+ /**
+  * Set the level of checking for invalid parameters passed to SDL functions.
+  *
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 62a525f34..d19ae2844 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -328,7 +328,42 @@ static bool populate_fb_state_for_direct_fb(SDL_VideoDevice *device,
+     // policy at this VRAM-path-selection layer that it applies at the
+     // mode-selection layer (SDL_dosmodes.c LFB-decision).
+     const bool prefer_lfb = SDL_GetHintBoolean(SDL_HINT_DOS_PREFER_LFB, false);
+-    const bool use_lfb_path = lfb_usable && (prefer_lfb || !banked_usable);
++
++    // DOSKUTSU patch 0019 (Phase 9 wave 6) — disable LFB engagement on
++    // cards where the LFB aperture and the displayed VRAM region are
++    // decoupled. Two activation paths feed `force_banked`:
++    //
++    //   1. Auto-detection: data->force_banked_path was set by
++    //      DOSVESA_DetectLFBApertureBug at video-init when the OEM
++    //      strings matched the Cirrus + UNIVBE fingerprint (cirrus5
++    //      wave-5 evidence: writes to LFB offset 0 invisible despite
++    //      successful mode-set + DPMI mapping + display-start at (0,0)).
++    //
++    //   2. Manual hint: SDL_HINT_DOS_DISABLE_LFB=1 forces the banked
++    //      path regardless of detection. Useful for diagnostics or for
++    //      cards exhibiting the same bug we haven't fingerprinted yet.
++    //
++    // Note: this gate operates on the PATH SELECTION at this helper
++    // (LFB nearptr vs banked dosmemput), not on whether VBE 0x4F02 was
++    // called with VBE_SETMODE_LFB (DOSVESA_SetDisplayMode still does
++    // that based on the original use_lfb decision). The DPMI mapping
++    // exists; we just don't write to it. Banked is reachable even
++    // when the mode was technically opened with the LFB attribute on
++    // hardware where banked_usable is true (every card we care about).
++    const bool hint_disable_lfb = SDL_GetHintBoolean(SDL_HINT_DOS_DISABLE_LFB, false);
++    const bool force_banked = data->force_banked_path || hint_disable_lfb;
++    const bool use_lfb_path = lfb_usable && !force_banked &&
++                              (prefer_lfb || !banked_usable);
++
++    if (force_banked && lfb_usable && banked_usable) {
++        // One log line per CreateWindowFramebuffer when the override
++        // actually changes the path. Silent when banked was going to
++        // win anyway (would be redundant noise on every flush-equiv).
++        DOSKUTSU_LC_LOG("DISABLE_LFB engaged: auto=%d hint=%d -> banked path "
++                        "(would have used LFB otherwise: prefer_lfb=%d banked_usable=1)",
++                        (int)data->force_banked_path, (int)hint_disable_lfb,
++                        (int)prefer_lfb);
++    }
+ 
+     fb_state.surface = surface;
+     fb_state.direct_fb = true;
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 9a68dd3c9..00b34a2e1 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -277,6 +277,65 @@ static const SDL_VESAInfo *GetVESAInfo(void)
+     return vesa_info;
+ }
+ 
++// DOSKUTSU patch 0019 (Phase 9 wave 6) — Cirrus aperture-decoupling
++// fingerprint. Examines OEM strings against known-broken combinations
++// where the LFB aperture and the displayed VRAM region are decoupled.
++// Returns true if the active VBE controller matches the broken pattern;
++// the caller (DOSVESA_VideoInit via DOSVESA_DetectLFBApertureBug) sets
++// SDL_VideoData::force_banked_path which suppresses LFB engagement in
++// populate_fb_state_for_direct_fb regardless of mode capabilities.
++//
++// Two match strategies:
++//
++//   1. Exact fingerprint: vendor "SciTech Software, Inc." +
++//      product containing "Display Doctor" + total VRAM 1024 KB.
++//      This is the cirrus5 wave-5 capture exactly. UNIVBE 6.7
++//      replaces the card's native VBE with its own ROM emulation
++//      and rewrites all OEM strings, so the underlying chip identity
++//      is hidden behind UNIVBE's strings unless we look at VRAM size
++//      as a proxy (CL-GD5434's 1 MB is the typical Cirrus config).
++//
++//   2. Loose substring: "Cirrus" or "CL-GD" anywhere in any OEM string.
++//      Catches cards running Cirrus's own native VBE (uncommon — Cirrus
++//      cards usually need UNIVBE — but possible).
++//
++// Diagnostic-only when not matched; one log line on each path so we
++// always see WHY the path was or wasn't taken.
++static bool DOSVESA_FingerprintCirrusLFBApertureBug(const SDL_VESAInfo *info, const char **out_reason)
++{
++    if (!info) {
++        if (out_reason) *out_reason = "no VESA info";
++        return false;
++    }
++
++    const char *vendor = info->oem_vendor ? info->oem_vendor : "";
++    const char *product = info->oem_product ? info->oem_product : "";
++    const char *string = info->oem_string ? info->oem_string : "";
++    const Uint32 vram_kb = info->total_memory / 1024;
++
++    // (1) Exact UNIVBE-on-Cirrus fingerprint. cirrus5 wave-5 evidence:
++    //     vendor='SciTech Software, Inc.'  product='SciTech Display Doctor(tm)'
++    //     total_vram=1024 KB
++    if (SDL_strstr(vendor, "SciTech Software") &&
++        SDL_strstr(product, "Display Doctor") &&
++        vram_kb == 1024) {
++        if (out_reason) *out_reason = "UNIVBE on 1MB card (matches CL-GD5434 + UNIVBE 6.7)";
++        return true;
++    }
++
++    // (2) Loose Cirrus substring match in any OEM string (catches native
++    //     Cirrus VBE without UNIVBE, if such a thing exists in the wild).
++    if (SDL_strstr(vendor, "Cirrus") || SDL_strstr(vendor, "CL-GD") ||
++        SDL_strstr(product, "Cirrus") || SDL_strstr(product, "CL-GD") ||
++        SDL_strstr(string, "Cirrus") || SDL_strstr(string, "CL-GD")) {
++        if (out_reason) *out_reason = "Cirrus/CL-GD substring in OEM strings";
++        return true;
++    }
++
++    if (out_reason) *out_reason = "no fingerprint match";
++    return false;
++}
++
+ // Test by writing and reading back the DAC Pixel Mask register
+ // On VGA this is a read/write register, on EGA/CGA the port either
+ // doesn't exist (reads 0xFF) or isn't writable.
+@@ -331,6 +390,37 @@ Uint32 DOSVESA_GetVESATotalMemory(void)
+     return info ? info->total_memory : 0;
+ }
+ 
++bool DOSVESA_DetectLFBApertureBug(void)
++{
++    const SDL_VESAInfo *info = GetVESAInfo();
++    const char *reason = "no VESA info";
++    const bool match = DOSVESA_FingerprintCirrusLFBApertureBug(info, &reason);
++    if (match) {
++        // Match: log the decisive line in the same format the report
++        // describes. The reason string carries the "what matched" detail
++        // (UNIVBE+1MB exact vs. Cirrus substring) without exposing the
++        // raw fingerprint logic to consumers.
++        DOSKUTSU_MODES_LOG("cirrus-lfb-aperture-bug: detected (oem='%s' product='%s' vram=%luKB) "
++                           "-> forcing banked path (reason: %s)",
++                           info && info->oem_vendor ? info->oem_vendor : "(empty)",
++                           info && info->oem_product ? info->oem_product : "(empty)",
++                           info ? (unsigned long)(info->total_memory / 1024) : 0UL,
++                           reason);
++    } else {
++        // No match: still log it so SDLDBG.LOG always carries the
++        // detection outcome (negative result is just as useful as
++        // positive when investigating a "should this hardware have
++        // forced banked?" question).
++        DOSKUTSU_MODES_LOG("cirrus-lfb-aperture-bug: NOT detected (oem='%s' product='%s' vram=%luKB) "
++                           "-> LFB path remains enabled (reason: %s)",
++                           info && info->oem_vendor ? info->oem_vendor : "(empty)",
++                           info && info->oem_product ? info->oem_product : "(empty)",
++                           info ? (unsigned long)(info->total_memory / 1024) : 0UL,
++                           reason);
++    }
++    return match;
++}
++
+ static bool GetVESAModeInfo(Uint16 mode_id, SDL_DisplayModeData *info)
+ {
+     _go32_dpmi_seginfo hwinfo_seginfo;
+diff --git a/src/video/dos/SDL_dosmodes.h b/src/video/dos/SDL_dosmodes.h
+index 27ffa426b..45d021e68 100644
+--- a/src/video/dos/SDL_dosmodes.h
++++ b/src/video/dos/SDL_dosmodes.h
+@@ -31,6 +31,17 @@ extern void DOSVESA_FreeVESAInfo(void);
+ extern Uint32 DOSVESA_GetVESATotalMemory(void);
+ extern const char *DOSVESA_GetGPUName(void);
+ 
++// DOSKUTSU patch 0019 (Phase 9 wave 6) — return true if the active VBE
++// controller matches a known-broken combination where the LFB aperture
++// and the displayed VRAM region are decoupled (writes to LFB offset 0
++// don't appear on screen even with display-start at (0,0)). Currently
++// fingerprints UNIVBE-on-Cirrus 1MB cards. The caller (DOSVESA_VideoInit)
++// stores the result in SDL_VideoData::force_banked_path which suppresses
++// LFB engagement in populate_fb_state_for_direct_fb. Logs the decision
++// with the matched fingerprint reason. Safe to call any time after VBE
++// controller info has been queried (i.e. after DOSVESA_SupportsVESA()).
++extern bool DOSVESA_DetectLFBApertureBug(void);
++
+ // VGA DAC (Digital-to-Analog Converter) ports for palette programming
+ #define VGA_DAC_PIXEL_MASK  0x3C6 // pixel mask register (read/write, VGA-only)
+ #define VGA_DAC_WRITE_INDEX 0x3C8 // write index register (set starting color index)
+diff --git a/src/video/dos/SDL_dosvideo.c b/src/video/dos/SDL_dosvideo.c
+index 59043bb76..90428e4a5 100644
+--- a/src/video/dos/SDL_dosvideo.c
++++ b/src/video/dos/SDL_dosvideo.c
+@@ -156,6 +156,16 @@ static bool DOSVESA_VideoInit(SDL_VideoDevice *device)
+ 
+     SDL_zero(data->current_mode);
+ 
++    // DOSKUTSU patch 0019 (Phase 9 wave 6) — auto-detect the Cirrus
++    // LFB-aperture-decoupling bug and pre-emptively force the banked
++    // path. Detection is one log line + zero or one bool flip; safe to
++    // run unconditionally on every video-init. The flag is read in
++    // populate_fb_state_for_direct_fb (SDL_dosframebuffer.c) where the
++    // LFB-vs-banked path is selected per-CreateWindowFramebuffer; the
++    // SDL_HINT_DOS_DISABLE_LFB hint is also OR-checked there so the
++    // user can override even on cards we haven't fingerprinted.
++    data->force_banked_path = DOSVESA_DetectLFBApertureBug();
++
+     SDL_VideoDisplay *display = SDL_GetVideoDisplay(display_id);
+     if (!display || !DOSVESA_GetDisplayModes(device, display)) {
+         return false;
+diff --git a/src/video/dos/SDL_dosvideo.h b/src/video/dos/SDL_dosvideo.h
+index ad27e3018..1695d746f 100644
+--- a/src/video/dos/SDL_dosvideo.h
++++ b/src/video/dos/SDL_dosvideo.h
+@@ -87,6 +87,21 @@ struct SDL_VideoData
+     Uint32 display_start_offset; // byte offset (Y*pitch + X*bpp) of the
+                                  // displayed origin, queried via VBE 0x4F07
+                                  // sub 1. 0 if unknown / pre-LFB-set.
++
++    // DOSKUTSU patch 0019 (Phase 9 wave 6) — auto-disable LFB on cards
++    // where the LFB aperture and the displayed VRAM region are decoupled.
++    // The cirrus5 wave-5 capture (Cirrus CL-GD5434 + UNIVBE 6.7) showed
++    // writes to LFB offset 0 invisible on screen even with patch 0018's
++    // queried display-start offset (BIOS reports (0,0) but the display
++    // generator reads from a different VRAM region than the aperture
++    // maps to). The banked window at A000:0 still reaches the displayed
++    // page on the same card. populate_fb_state_for_direct_fb honours
++    // this flag by skipping the LFB path even when use_lfb_path would
++    // otherwise be selected. Set by GetVESAInfo when an OEM-string
++    // fingerprint matches the Cirrus + UNIVBE pattern, or by the manual
++    // SDL_HINT_DOS_DISABLE_LFB hint at populate_fb_state_for_direct_fb
++    // call time.
++    bool force_banked_path;      // detected/forced "do not engage LFB"
+ };
+ 
+ struct SDL_DisplayData
+-- 
+2.47.3
+
