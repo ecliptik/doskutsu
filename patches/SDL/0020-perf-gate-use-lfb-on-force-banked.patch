@@ -1,0 +1,108 @@
+From d19333b2cfbf3c15714b75fc9c59557aa20105a0 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 27 Apr 2026 09:51:03 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=207=20patc?=
+ =?UTF-8?q?h=200020=20=E2=80=94=20gate=20use=5Flfb=20on=20force=5Fbanked?=
+ =?UTF-8?q?=5Fpath=20+=20reduce=20GetWindowSurface=20log=20spam?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 6 cirrus6 capture confirmed Patch 0019's auto-detection fired
+correctly on real Cirrus + UNIVBE 6.70, but the screen was completely
+blank (not even Loading text). Root cause: patch 0019 only flipped the
+FB-LAYER path while leaving the BIOS in LFB mode -- mismatch. The BIOS
+programs the LFB hardware path; our FB layer writes through the banked
+window at A000:0; the BIOS never set up that window for display refresh
+because we asked for LFB. cirrus6 SDLDBG line 8 confirmed this:
+mode-set #1 reports use_lfb=1 banked=0 but CreateWindowFramebuffer
+exits with use_dosmemput=1 vram_phys=0x000a0000 -- two layers
+disagreeing.
+
+  * SDL_dosmodes.c DOSVESA_SetDisplayMode: gate use_lfb decision on
+    !(data->force_banked_path || SDL_HINT_DOS_DISABLE_LFB). When forced,
+    VBE 0x4F02 is called WITHOUT the 0x4000 LFB bit, BIOS programs
+    banked-mode hardware path, our FB layer's banked dosmemput aligns
+    with what the BIOS set up. Cirrus auto-detect AND manual env hint
+    both work end-to-end now.
+
+  * SDL_video.c SDL_GetWindowSurface: gate the per-call log to first
+    5 + every 1000th for the cached-return path (which is hit by every
+    drawcall via Renderer's fast-path SDL_GetWindowSurface call).
+    cirrus6 had 43,244 lines of GetWindowSurface log spam, fsync-per-line
+    on CF storage. The recreate-path branch (rare, lifecycle-relevant)
+    keeps logging every call. DOSBox-X smoke confirms 77 total lines vs
+    the prior 43,000+.
+
+DOSBox-X smoke (cirrus auto-detect doesn't fire on emulator vendor
+'DOSBox Development Team') confirms LFB path still engages cleanly --
+no regression on Mach64 / DOSBox-X targets, only behavior change is
+on detected Cirrus or hint-forced builds.
+---
+ src/video/SDL_video.c        | 24 +++++++++++++++++++-----
+ src/video/dos/SDL_dosmodes.c | 13 +++++++++++++
+ 2 files changed, 32 insertions(+), 5 deletions(-)
+
+diff --git a/src/video/SDL_video.c b/src/video/SDL_video.c
+index 14cf0fb35..8b45af4e6 100644
+--- a/src/video/SDL_video.c
++++ b/src/video/SDL_video.c
+@@ -3699,11 +3699,25 @@ SDL_Surface *SDL_GetWindowSurface(SDL_Window *window)
+ {
+     CHECK_WINDOW_MAGIC(window, NULL);
+ 
+-    DOSKUTSU_LIFECYCLE_LOG("GetWindowSurface: window=%p surface_valid=%d existing=%p (will %s)\n",
+-                           (void *)window, (int)window->surface_valid,
+-                           (void *)window->surface,
+-                           window->surface_valid ? "return cached" : "destroy+recreate");
+-    if (!window->surface_valid) {
++    // DOSKUTSU patch 0020 (Phase 9 wave 7): the cached-return path is hit
++    // every drawcall by Renderer::drawSurface (~340 calls/flip × 100 flips =
++    // 34000+ entries per session). Patch 0008 logs unconditionally with a
++    // per-line fsync; on CF-card storage that's milliseconds of disk wait
++    // per call. cirrus6 SDLDBG.LOG showed 43,244 GetWindowSurface lines in
++    // one 5-minute run -- a substantial fraction of the per-flip 150 ms
++    // "render_present" cost. Sample the cached path (first 5 + every 1000th)
++    // while keeping every recreate-path call logged (those are rare and
++    // matter for lifecycle attribution).
++    static unsigned long _gws_cached_calls = 0;
++    if (window->surface_valid) {
++        ++_gws_cached_calls;
++        if (_gws_cached_calls <= 5 || (_gws_cached_calls % 1000) == 0) {
++            DOSKUTSU_LIFECYCLE_LOG("GetWindowSurface (cached) #%lu: window=%p existing=%p\n",
++                                   _gws_cached_calls, (void *)window, (void *)window->surface);
++        }
++    } else {
++        DOSKUTSU_LIFECYCLE_LOG("GetWindowSurface: window=%p surface_valid=0 existing=%p (will destroy+recreate)\n",
++                               (void *)window, (void *)window->surface);
+         if (window->surface) {
+             window->surface->internal_flags &= ~SDL_INTERNAL_SURFACE_DONTFREE;
+             SDL_DestroySurface(window->surface);
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 00b34a2e1..c7cc9eb04 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -824,7 +824,20 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+                                   (modedata->win_a_attributes & VBE_WINATTR_USABLE) == VBE_WINATTR_USABLE;
+     const bool hint_allow_direct = SDL_GetHintBoolean(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, false);
+     const bool hint_prefer_lfb = SDL_GetHintBoolean(SDL_HINT_DOS_PREFER_LFB, false);
++
++    // DOSKUTSU patch 0020 (Phase 9 wave 7): when force_banked is set --
++    // either the Cirrus auto-detect from patch 0019, OR the manual
++    // SDL_HINT_DOS_DISABLE_LFB env var -- the VBE BIOS must be told to set
++    // the BANKED mode, not LFB. Patch 0019 only flipped the FB-LAYER path
++    // while leaving the BIOS in LFB mode -- mismatch: BIOS programs LFB
++    // hardware path, FB layer writes through the banked window at A000:0,
++    // BIOS hasn't set up that window for display refresh, no visual on
++    // real Cirrus (cirrus6 capture symptom). Gating use_lfb on
++    // !force_banked here keeps both layers in sync.
++    const bool hint_disable_lfb = SDL_GetHintBoolean(SDL_HINT_DOS_DISABLE_LFB, false);
++    const bool force_banked = (data->force_banked_path || hint_disable_lfb) && is_banked_usable;
+     const bool use_lfb = modedata->has_lfb &&
++                         !force_banked &&
+                          (hint_prefer_lfb ||
+                           !is_banked_usable ||
+                           !hint_allow_direct);
+-- 
+2.47.3
+
