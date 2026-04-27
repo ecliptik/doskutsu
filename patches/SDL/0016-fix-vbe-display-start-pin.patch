@@ -1,0 +1,161 @@
+From 78e252f2200097fe2417c0e280bedaffaf96da7e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 18:54:25 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=204=20patc?=
+ =?UTF-8?q?h=200016=20=E2=80=94=20pin=20VBE=20display-start=20to=20(0,0)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 3's Fix A (patch 0014) made `populate_fb_state_for_direct_fb`
+always pick `data->page_offset[0]` as the WRITE target — under the
+assumption that "page 0" of the LFB is also the displayed page. On
+real Cirrus + UNIVBE that assumption is wrong: the BIOS's mode-set
+leaves the display-start scan-line offset wherever the previous mode
+left it, so writes to LFB offset 0 land on a non-displayed page and
+the user sees the boot Loading splash stick forever despite 160+
+fast-path flushes per the wave-3 cirrus3 capture.
+
+Patch 0014 also force-disabled page-flipping when SDL_HINT_DOS_PREFER_LFB
+is set, which routed the mode-set into the `else` branch that does NOT
+call VBE 0x4F07. That's how the BIOS-controlled offset never gets
+zeroed — the only existing 0x4F07 call (line ~882) lives inside the
+page-flip branch, gated behind `prefer_lfb_no_flip`.
+
+Two-part fix:
+
+1. SDL_dosmodes.c: after the mode-set succeeds (use_lfb true), call
+   VBE function 0x4F07 subfunction 0 with X=0,Y=0 unconditionally.
+   This forces the displayed page to LFB offset 0 regardless of what
+   the BIOS left behind. Idempotent with the page-flip branch's
+   existing call (same arguments). Failure is logged but not fatal —
+   pre-VBE-1.2 BIOSes lacked 0x4F07, but every BIOS we'd actually
+   target supports it.
+
+2. SDL_dosframebuffer.c: record the BIOS-reported LFB physical
+   address in `fb_state.vram_phys` instead of the sentinel 0 patch
+   0014 left there. Operationally inert (the fast-path guard accepts
+   either vram_ptr or vram_phys), but the wave-3 SDLDBG.LOG line 52
+   showing `vram_phys=0x00000000` was misleading during the
+   visual-stuck investigation. With this fix the diag now reports
+   the actual LFB base (e.g. 0x78000000 on Cirrus, 0xe0000000 on
+   DOSBox-X parity), making "is the LFB mapping correct?" answerable
+   from the log alone.
+
+Verified under DOSBox-X parity smoke (build/stage/SDLDBG.LOG):
+  display-start pinned to (0,0) via VBE 0x4F07: ax=0x004F
+  CreateWindowFramebuffer #1 (exit fast): direct_fb=1 ... vram_phys=0xe0000000
+  DOSVESA-FB-INIT: ... vram_phys=0xe0000000 vram_ptr=0xdfc00000
+
+Title scene renders full-window with no upper-left corner artifact
+and no Loading-screen stick — matches wave-2's lever0b-title.png
+baseline. fastpath-timing blocks continue to flow normally
+(~1.2 ms/flush in DOSBox-X).
+
+Why DOS needs this
+------------------
+Real Cirrus + UNIVBE (g2k Cirrus configuration) and possibly other
+real-HW VBE BIOSes do not zero the display-start register on a fresh
+mode-set. Without an explicit VBE 0x4F07 call the displayed page
+remains at whatever the BIOS left it at, and writes via the LFB
+nearptr to "page 0" land out of sight. DOSBox-X's emulated VBE clears
+display-start to (0,0) on mode-set so this is invisible under parity
+testing — only surfaces on real HW.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c | 13 +++++++-
+ src/video/dos/SDL_dosmodes.c       | 50 ++++++++++++++++++++++++++++++
+ 2 files changed, 62 insertions(+), 1 deletion(-)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index e76f9d524..2f4dfcb08 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -363,7 +363,18 @@ static bool populate_fb_state_for_direct_fb(SDL_VideoDevice *device,
+         // proper double-buffering later, restore VBE PageSet plumbing
+         // then.
+         fb_state.vram_ptr = (Uint8 *)DOS_PhysicalToLinear(data->mapping.address) + data->page_offset[0];
+-        fb_state.vram_phys = 0;
++        // DOSKUTSU patch 0016: record the BIOS-reported LFB physical
++        // address (e.g. 0x78000000 on the cirrus3 capture) instead of the
++        // sentinel 0 patch 0014 left here. The fast-path guard at the
++        // bottom of UpdateWindowFramebuffer accepts either vram_ptr OR
++        // vram_phys as proof of "we have a destination", so the previous
++        // value worked operationally — but the diagnostic line in
++        // SDLDBG.LOG (DOSVESA-FB-INIT vram_phys=...) carried a misleading
++        // 0x00000000, which made it look like the LFB mapping itself was
++        // bad during the wave-3 visual-stuck investigation. Recording
++        // the real LFB base makes the diag accurate without changing
++        // runtime behaviour.
++        fb_state.vram_phys = (Uint32)data->mapping.address + data->page_offset[0];
+         fb_state.use_dosmemput = false;
+         fb_state.banked_multibank = false;
+     } else {
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index dd4e7a6b5..72bb62f77 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -892,6 +892,56 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+         data->page_offset[1] = 0;
+     }
+ 
++    // DOSKUTSU patch 0016 (Phase 9 wave 4, fixes Fix A's broken assumption):
++    // unconditionally pin the displayed page to LFB offset (0,0) for any
++    // successful LFB mode-set. The original page-flip block above only
++    // calls VBE 0x4F07 inside its true branch, so when patch 0014's
++    // `prefer_lfb_no_flip` gate forces us into the `else` branch the BIOS
++    // never receives a Set-Display-Start call and the displayed page
++    // retains whatever scan-line offset the BIOS left it at on mode-set.
++    //
++    // Wave-3 real-Cirrus capture (/tmp/cirrus3 SDLDBG.LOG): the engine
++    // wrote into LFB offset 0 (page_offset[0]) at vram_ptr=0x77c00000 for
++    // 160+ flips, but the user saw the boot Loading splash stuck and
++    // never updated. Inference: Cirrus's BIOS left display-start pointing
++    // at a different page after mode-set, so writes to "page 0" landed in
++    // a non-displayed page. Wave-2 saw "Loading + flashes" on the same
++    // hardware — that pattern matches page 1 being the displayed page and
++    // the per-flush VBE 0x4F07 swap intermittently bringing page 0 into
++    // view.
++    //
++    // The fix: after the BIOS mode-set succeeds, call VBE 0x4F07
++    // subfunction 0 with X=0,Y=0 to FORCE display-start to LFB offset 0.
++    // Now "page 0" IS the displayed page, regardless of what the BIOS
++    // left behind. This is unconditional for LFB modes (use_lfb true)
++    // and only logs a soft warning if the BIOS rejects the call — older
++    // VBE 1.0 ROMs lacked function 0x4F07 but every VBE 1.2+ BIOS we'd
++    // actually run on supports it.
++    //
++    // Why it's safe to do twice when the page-flip branch above also
++    // called it: VBE 0x4F07 with the same arguments is idempotent. The
++    // duplication exists for the (unlikely) future case where someone
++    // reverts patch 0014 and wants page-flipping back; the above branch
++    // sets up page_offset[1] correctly and starts at page 0, this block
++    // re-asserts (0,0) for the no-page-flip case.
++    if (use_lfb) {
++        __dpmi_regs sds_regs;
++        SDL_zero(sds_regs);
++        sds_regs.x.ax = 0x4F07;
++        sds_regs.x.bx = 0x0000; // BH=0 set display start, BL=0 wait for retrace
++        sds_regs.x.cx = 0;      // first pixel in scan line
++        sds_regs.x.dx = 0;      // first scan line
++        __dpmi_int(0x10, &sds_regs);
++        if ((sds_regs.x.ax & 0x00FF) == 0x004F) {
++            DOSKUTSU_MODES_LOG("display-start pinned to (0,0) via VBE 0x4F07: ax=0x%04X",
++                               sds_regs.x.ax);
++        } else {
++            DOSKUTSU_MODES_LOG("display-start force FAILED (VBE 0x4F07 unsupported?): ax=0x%04X "
++                               "-- continuing; visible page may be wrong",
++                               sds_regs.x.ax);
++        }
++    }
++
+     if (SDL_GetMouse()->internal != NULL) { // internal != NULL) == int 33h services available.
+         regs.x.ax = 0x7;                    // set mouse min/max horizontal position.
+         regs.x.cx = 0;
+-- 
+2.47.3
+
