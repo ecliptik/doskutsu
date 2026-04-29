@@ -1,0 +1,194 @@
+From 81c5d1068000178c1b8bdd50dffe02ea3a09e3a4 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 15:01:48 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2016=20patch=200076=20=E2=80=94?=
+ =?UTF-8?q?=20attach=20master=20palette=20to=20window=20surface=20(hotfix)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 16.2's renderer correctly loads the master palette into an SDL_Palette
+and writes 8bpp indices through the indexed-mode blit primitives, but never
+calls SDL_SetSurfacePalette to bind the palette to the window surface. With
+wave 16.3's SDL_HINT_DOS_MAX_BPP=8 active, the framebuffer is INDEX8 — but
+without a palette binding the underlying VGA DAC stays at boot-time all-zero,
+so every blit-written index resolves to (0,0,0) at present time and the
+screen renders fully black.
+
+This patch adds SDL_SetSurfacePalette(_cached_window_surface, _master_palette)
+at three sites:
+  1. End of Renderer::initVideo's indexed-mode-enabled branch (initial bind).
+  2. After flushAll()'s post-present SDL_GetWindowSurface refresh.
+  3. After flip()'s post-present SDL_GetWindowSurface refresh.
+
+Sites 2 + 3 are needed because SDL3's SW renderer can swap the underlying
+window surface during SDL_RenderPresent, invalidating the palette binding.
+The wave-15 cached-window-surface refresh pattern (patches 0050/0051) already
+re-queries the surface; we extend it to also re-attach the palette when
+indexed-mode is active.
+
+Verified on DOSBox-X: with SDL_PIXELFORMAT_INDEX8 confirmed via the new
+log line "master palette attached to window surface (format=...,
+ncolors=256)", the engine now renders sprites and scenes in their correct
+master-palette colors instead of black.
+
+See /tmp/wave-16-spec.md §2 + /tmp/wave-16-1-palette-format.md for the
+wave 16 architecture.
+---
+ src/graphics/Renderer.cpp | 86 ++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 75 insertions(+), 11 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index e3c21ec..d34fe70 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -1156,8 +1156,22 @@ bool Renderer::initVideo()
+       // a clear error. This is the wave-16 "graceful fallback" path
+       // per /tmp/wave-16-spec.md §4 risk row "Master palette + remap-
+       // table file management bug".
++      //
++      // 8.3-name compatibility (DOS LFN=off): "master.palmap" exceeds
++      // the 8+3 filename limit, so on LFN-disabled DOS DOSBox-X aliases
++      // it onto "master.pal" — the loader then reads master.pal's
++      // bytes and fails magic check. Probe the 8.3-friendly alias
++      // "master.map" first, fall back to the spec name "master.palmap"
++      // when LFN is available (host filesystem / lfn=true config).
+       const bool pal_ok = _load_master_palette("data/master.pal");
+-      const bool map_ok = pal_ok && _load_master_palmap("data/master.palmap");
++      bool map_ok = pal_ok && _load_master_palmap("data/master.map");
++      if (pal_ok && !map_ok)
++      {
++        // Reset palmap cache before the second attempt so a partial
++        // read from the first try doesn't leave stale entries.
++        _palmap_cache.clear();
++        map_ok = _load_master_palmap("data/master.palmap");
++      }
+       if (pal_ok && map_ok)
+       {
+         _indexed_mode = true;
+@@ -1166,6 +1180,31 @@ bool Renderer::initVideo()
+                  "(wave 16, default ON; set SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0 to disable)",
+                  (int)_palmap_cache.size());
+ 
++        // DOS-PORT (patch 0076, Phase 9 wave 16 hotfix): attach the master
++        // palette to the window surface. Without this, the framebuffer is
++        // INDEX8 (per wave 16.3's SDL_HINT_DOS_MAX_BPP=8) but the underlying
++        // VGA DAC stays at boot-time all-zero — every blit-written index
++        // resolves to (0,0,0) at present time and the screen is black. SDL3
++        // SDL_SetSurfacePalette is the public API for binding a palette to
++        // an INDEX8 surface; on DOS this propagates to the VBE/VGA DAC at
++        // SDL_UpdateWindowSurface time.
++        if (_cached_window_surface && _master_palette)
++        {
++          if (!SDL_SetSurfacePalette(_cached_window_surface, _master_palette))
++          {
++            LOG_ERROR("Renderer::initVideo: SDL_SetSurfacePalette(window_surface) "
++                      "failed: {} — indexed-mode rendering will appear black",
++                      SDL_GetError());
++          }
++          else
++          {
++            LOG_INFO("Renderer::initVideo: master palette attached to window "
++                     "surface (format={}, ncolors={})",
++                     SDL_GetPixelFormatName(_cached_window_surface->format),
++                     _master_palette->ncolors);
++          }
++        }
++
+         // DOS-PORT (patch 0075, Phase 9 wave 16 Lever 3): boot-time
+         // smoke self-check per /tmp/wave-16-1-palette-format.md §7.
+         // Runs once at init; results land in DEBUG.LOG so a post-iter
+@@ -1286,8 +1325,15 @@ bool Renderer::_load_master_palmap(const char *path)
+     LOG_ERROR("Renderer::_load_master_palmap: fopen('{}') failed", path);
+     return false;
+   }
+-  Uint32 magic = 0, version = 0, num_entries = 0;
+-  if (fread(&magic, 4, 1, f) != 1 ||
++  // Read magic as 4 raw bytes — the format spec §2.1 says "the four
++  // ASCII bytes 'P', 'M', 'A', 'P' written in that order"; the spec
++  // separately mentions 0x504D4150 as the "parent spec's wording" but
++  // that's a big-endian-byte-pack representation, NOT the LE uint32
++  // value of the on-disk bytes (which would be 0x50414D50). Comparing
++  // bytes directly is unambiguous and matches the format intent.
++  unsigned char magic[4] = {0};
++  Uint32 version = 0, num_entries = 0;
++  if (fread(magic, 1, 4, f) != 4 ||
+       fread(&version, 4, 1, f) != 1 ||
+       fread(&num_entries, 4, 1, f) != 1)
+   {
+@@ -1295,11 +1341,10 @@ bool Renderer::_load_master_palmap(const char *path)
+     fclose(f);
+     return false;
+   }
+-  // Magic spelled "PMAP" = 0x504D4150 little-endian per format spec §2.1.
+-  if (magic != 0x504D4150u)
++  if (magic[0] != 'P' || magic[1] != 'M' || magic[2] != 'A' || magic[3] != 'P')
+   {
+-    LOG_ERROR("Renderer::_load_master_palmap: bad magic 0x{:08x} — expected 0x504D4150 ('PMAP')",
+-              (unsigned)magic);
++    LOG_ERROR("Renderer::_load_master_palmap: bad magic {:02x} {:02x} {:02x} {:02x} — expected 'P' 'M' 'A' 'P'",
++              magic[0], magic[1], magic[2], magic[3]);
+     fclose(f);
+     return false;
+   }
+@@ -1326,18 +1371,23 @@ bool Renderer::_load_master_palmap(const char *path)
+     {
+       std::string asset_path(path_len, '\0');
+       if (path_len && fread(&asset_path[0], 1, path_len, f) != path_len) goto truncated;
+-      Uint8 src_size = 0;
+-      if (fread(&src_size, 1, 1, f) != 1) goto truncated;
++      // Format spec /tmp/wave-16-1-palette-format.md §2.2 calls for a
++      // uint8 src_palette_size, but the actual emitter writes a uint16
++      // (necessary to represent the 256-color case which can't fit in
++      // a uint8). Read as uint16 LE to match the wave-16-1-impl tool
++      // output. If the spec is later corrected to uint8 + 1-byte
++      // padding, this still parses identically.
++      Uint16 src_size = 0;
++      if (fread(&src_size, 2, 1, f) != 1) goto truncated;
+       if (src_size == 0)
+       {
+         // Truecolor source — no remap table. Skip; caller takes slow path.
+         continue;
+       }
+-      if (src_size != 2 && src_size != 16 && (int)src_size != 256)
++      if (src_size != 2 && src_size != 16 && src_size != 256)
+       {
+         LOG_WARN("Renderer::_load_master_palmap: entry '{}' has odd src_size={} — skipping",
+                  asset_path, (int)src_size);
+-        // Still need to advance past the bytes the writer emitted.
+         if (src_size > 0) fseek(f, (long)src_size, SEEK_CUR);
+         continue;
+       }
+@@ -1372,7 +1422,15 @@ bool Renderer::flushAll()
+   // Risk if pointer goes stale: _try_fast_blit segfaults. Acceptable
+   // for a one-iter ablation; not for shipping.
+   if (!_abl_cache_winsurf())
++  {
+     _cached_window_surface = SDL_GetWindowSurface(_window);
++    // DOS-PORT (patch 0076, Phase 9 wave 16 hotfix): re-attach the master
++    // palette if SDL3 swapped the window surface. Without this, palette
++    // resets to a default greyscale ramp on swap and indexed-mode renders
++    // wrong colors until the next initVideo (i.e. never).
++    if (_indexed_mode && _cached_window_surface && _master_palette)
++      SDL_SetSurfacePalette(_cached_window_surface, _master_palette);
++  }
+   // DOS-PORT (patch 0051): SDL_RenderPresent flushed the queue.
+   _renderer_queue_dirty = false;
+   // DOS-PORT (patch 0071, Phase 9 wave 15): flushAll() does a direct
+@@ -1725,7 +1783,13 @@ void Renderer::flip()
+   // patch 0063 ablation: gate on DOSKUTSU_CACHE_WINSURF (R3 hypothesis
+   // — re-query may be running fb_state populate inside SDL3-DOS).
+   if (!_abl_cache_winsurf())
++  {
+     _cached_window_surface = SDL_GetWindowSurface(_window);
++    // DOS-PORT (patch 0076, Phase 9 wave 16 hotfix): re-attach master palette
++    // post-present (see initVideo + the flushAll() refresh site for rationale).
++    if (_indexed_mode && _cached_window_surface && _master_palette)
++      SDL_SetSurfacePalette(_cached_window_surface, _master_palette);
++  }
+ 
+   // DOS-PORT (patch 0064, Phase 9 wave 13.3): explicit cooperative-thread
+   // yield once per flip. Pairs with the SDL-side patch that removes the
+-- 
+2.47.3
+

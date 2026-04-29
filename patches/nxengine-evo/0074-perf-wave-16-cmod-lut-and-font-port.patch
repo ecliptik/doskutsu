@@ -1,0 +1,387 @@
+From e292e791b1329947303e881aba388072c2103939 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 14:42:39 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2016=20patch=200074=20=E2=80=94?=
+ =?UTF-8?q?=20cmod=20LUT=20+=20drawSurfaceColorMod=208bpp=20dispatch?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+THE BIG PERF WIN. Replaces the per-pixel 14-22 op multiply in the
+RGB565 cmod path with a per-pixel 1-byte LUT lookup on INDEX8 — Cave
+Story uses 1-3 distinct cmod tuples (Font foreground colors), so the
+LUT cache stays tiny while every glyph draw drops to memcpy-shaped
+inner loops.
+
+Renderer (src/graphics/Renderer.{h,cpp}):
+  * _cmod_lut_cache (std::unordered_map<Uint32, std::array<Uint8,256>>):
+    keyed by (r << 16 | g << 8 | b); value is the 256-byte master-
+    palette → master-palette LUT for that cmod tuple.
+  * Renderer::_cmod_lut_for(r, g, b): builds the LUT lazily on first
+    use (256 weighted-Euclidean nearest-color walks ≈ 7.5 ms once on
+    PODP83), returns a stable reference. Special-cases (0,0,0) → master
+    index 0 and (255,0,255) → master index 255 so the LUT can never
+    re-map non-colorkey pixels into the colorkey slot or vice versa.
+  * _blit_indexed_color_mod_black: byte-per-pixel sibling of
+    _blit_rgb565_color_mod_black. Writes master_black_idx (=0) for
+    every non-colorkey source pixel.
+  * _blit_indexed_color_mod: byte-per-pixel sibling of
+    _blit_rgb565_color_mod_general. Inner loop is `dp[col] =
+    cmod_lut[sp[col]]` plus optional colorkey skip — ~3 ops/pixel vs
+    14-22 for the RGB565 multiply path.
+  * Renderer::drawSurfaceColorMod: 6-way dispatch. white → drawSurface
+    (existing); INDEX8 + black → _blit_indexed_color_mod_black; INDEX8
+    + general → _blit_indexed_color_mod with cached LUT; RGB565 + black
+    → _blit_rgb565_color_mod_black (existing); RGB565 + general →
+    _blit_rgb565_color_mod_general (existing); else → SDL_RenderTexture
+    fallback.
+  * Diagnostic counters (_color_mod_indexed_black_*, _color_mod_indexed_
+    general_*) added to the per-100-flip color/alpha audit block so
+    real-HW iter logs report whether the new INDEX8 path engaged.
+
+Font.cpp is unchanged: Surface::loadFromSDLSurface (modified in patch
+0073) handles the format choice internally, and Font.cpp's call sites
+into drawSurfaceColorMod stay identical.
+
+Out of scope (deferred to wave 17): _blit_indexed_alpha (alpha-mod
+INDEX8 fast path). Per spec §2.9, alpha-mod calls in indexed mode fall
+through to SDL_RenderTexture which the SDL3 SW renderer registers as
+INDEX8-capable (vendor/SDL/src/render/software/SDL_render_sw.c:1214).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 254 +++++++++++++++++++++++++++++++++++---
+ src/graphics/Renderer.h   |  15 +++
+ 2 files changed, 253 insertions(+), 16 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 4b8dffc..fa8f7ca 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -572,6 +572,15 @@ int _color_mod_general_block = 0;
+ int _color_mod_general_global = 0;
+ int _color_mod_fallback_block = 0;
+ int _color_mod_fallback_global = 0;
++// DOS-PORT (patch 0074, Phase 9 wave 16 Lever 3): INDEX8 cmod hits.
++// Subsets of _color_mod_black_* / _color_mod_general_* respectively
++// that landed on the wave-16 INDEX8 path (LUT-driven) rather than the
++// wave-12.5 RGB565 path (per-pixel multiply). Used by the per-100-flip
++// audit block to confirm cmod calls hit the new path on real HW.
++int _color_mod_indexed_black_block = 0;
++int _color_mod_indexed_black_global = 0;
++int _color_mod_indexed_general_block = 0;
++int _color_mod_indexed_general_global = 0;
+ 
+ void _maybe_flush_color_alpha_audit()
+ {
+@@ -581,14 +590,18 @@ void _maybe_flush_color_alpha_audit()
+                         + _color_mod_general_block + _color_mod_fallback_block;
+   if (alpha_total == 0 && cmod_total == 0) return;
+   LOG_INFO("color/alpha audit block {}: cmod_white={} cmod_black={} "
+-           "cmod_general={} cmod_fb={}; alpha_taken={} alpha_skipped={} "
+-           "(global cmod={}/{}/{}/{} alpha={}/{})",
++           "(idx={}) cmod_general={} (idx={}) cmod_fb={}; "
++           "alpha_taken={} alpha_skipped={} "
++           "(global cmod={}/{}/{}/{} idx={}/{} alpha={}/{})",
+            _dc_block_idx,
+            _color_mod_white_block, _color_mod_black_block,
+-           _color_mod_general_block, _color_mod_fallback_block,
++           _color_mod_indexed_black_block,
++           _color_mod_general_block, _color_mod_indexed_general_block,
++           _color_mod_fallback_block,
+            _fastpath_alpha_taken_block, _fastpath_alpha_skipped_block,
+            _color_mod_white_global, _color_mod_black_global,
+            _color_mod_general_global, _color_mod_fallback_global,
++           _color_mod_indexed_black_global, _color_mod_indexed_general_global,
+            _fastpath_alpha_taken_global, _fastpath_alpha_skipped_global);
+   _fastpath_alpha_taken_block = 0;
+   _fastpath_alpha_skipped_block = 0;
+@@ -596,6 +609,8 @@ void _maybe_flush_color_alpha_audit()
+   _color_mod_black_block = 0;
+   _color_mod_general_block = 0;
+   _color_mod_fallback_block = 0;
++  _color_mod_indexed_black_block = 0;
++  _color_mod_indexed_general_block = 0;
+ }
+ 
+ // DOS-PORT (patch 0060, Phase 9 wave 12.5-D Lever B diagnostics): phase
+@@ -2578,6 +2593,180 @@ static inline bool _blit_rgb565_color_mod_general(SDL_Surface *dst, SDL_Surface
+   return true;
+ }
+ 
++// DOS-PORT (patch 0074, Phase 9 wave 16 Lever 3): INDEX8 sibling of
++// _blit_rgb565_color_mod_black. Black-mod (mod_r=mod_g=mod_b=0) writes
++// master index 0 (reserved black per format spec §1.2) for every
++// non-colorkey source pixel. Hot path for Font shadow rendering.
++//
++// Cheaper than the general branch: no LUT lookup needed since the
++// output is constant. ~3 ops/pixel (load src, compare, store 0).
++static inline bool _blit_indexed_color_mod_black(SDL_Surface *dst, SDL_Surface *src,
++                                                 SDL_Rect srcrect, SDL_Rect dstrect,
++                                                 Uint8 colorkey, bool has_colorkey,
++                                                 Uint8 master_black_idx)
++{
++  int dst_x = dstrect.x;
++  int dst_y = dstrect.y;
++  int sx = srcrect.x;
++  int sy = srcrect.y;
++  int rows = srcrect.h;
++  int cols = srcrect.w;
++
++  if (dst_x < 0) { cols += dst_x; sx -= dst_x; dst_x = 0; }
++  if (dst_y < 0) { rows += dst_y; sy -= dst_y; dst_y = 0; }
++  if (dst_x + cols > dst->w) cols = dst->w - dst_x;
++  if (dst_y + rows > dst->h) rows = dst->h - dst_y;
++  if (rows <= 0 || cols <= 0) return true;
++
++  const int src_pitch = src->pitch;
++  const int dst_pitch = dst->pitch;
++  const Uint8 *sp = (const Uint8 *)src->pixels + sy * src_pitch + sx;
++  Uint8 *dp = (Uint8 *)dst->pixels + dst_y * dst_pitch + dst_x;
++
++  for (int row = 0; row < rows; ++row)
++  {
++    for (int col = 0; col < cols; ++col)
++    {
++      const Uint8 spx = sp[col];
++      if (has_colorkey && spx == colorkey) continue;
++      dp[col] = master_black_idx;
++    }
++    sp += src_pitch;
++    dp += dst_pitch;
++  }
++  return true;
++}
++
++// DOS-PORT (patch 0074, Phase 9 wave 16 Lever 3): INDEX8 sibling of
++// _blit_rgb565_color_mod_general — the BIG PERF WIN. Replaces the
++// per-pixel 14-22 op channel multiply with a per-pixel 1-byte LUT
++// lookup. The LUT (`cmod_lut`) is precomputed by Renderer::_cmod_lut_for
++// once per unique (mod_r, mod_g, mod_b) tuple and cached on the
++// Renderer; Cave Story uses 1-3 distinct tuples so cache pressure is
++// negligible.
++//
++// Inner loop is just `dp[col] = cmod_lut[sp[col]]` plus optional
++// colorkey skip. Faster than _blit_indexed (no colorkey skip in the
++// no-colorkey branch) but the cmod path always uses colorkey for
++// fonts.
++static inline bool _blit_indexed_color_mod(SDL_Surface *dst, SDL_Surface *src,
++                                           SDL_Rect srcrect, SDL_Rect dstrect,
++                                           Uint8 colorkey, bool has_colorkey,
++                                           const Uint8 *cmod_lut)
++{
++  int dst_x = dstrect.x;
++  int dst_y = dstrect.y;
++  int sx = srcrect.x;
++  int sy = srcrect.y;
++  int rows = srcrect.h;
++  int cols = srcrect.w;
++
++  if (dst_x < 0) { cols += dst_x; sx -= dst_x; dst_x = 0; }
++  if (dst_y < 0) { rows += dst_y; sy -= dst_y; dst_y = 0; }
++  if (dst_x + cols > dst->w) cols = dst->w - dst_x;
++  if (dst_y + rows > dst->h) rows = dst->h - dst_y;
++  if (rows <= 0 || cols <= 0) return true;
++
++  const int src_pitch = src->pitch;
++  const int dst_pitch = dst->pitch;
++  const Uint8 *sp = (const Uint8 *)src->pixels + sy * src_pitch + sx;
++  Uint8 *dp = (Uint8 *)dst->pixels + dst_y * dst_pitch + dst_x;
++
++  if (has_colorkey)
++  {
++    for (int row = 0; row < rows; ++row)
++    {
++      for (int col = 0; col < cols; ++col)
++      {
++        const Uint8 spx = sp[col];
++        if (spx == colorkey) continue;
++        dp[col] = cmod_lut[spx];
++      }
++      sp += src_pitch;
++      dp += dst_pitch;
++    }
++  }
++  else
++  {
++    for (int row = 0; row < rows; ++row)
++    {
++      for (int col = 0; col < cols; ++col)
++      {
++        dp[col] = cmod_lut[sp[col]];
++      }
++      sp += src_pitch;
++      dp += dst_pitch;
++    }
++  }
++  return true;
++}
++
++// DOS-PORT (patch 0074, Phase 9 wave 16 Lever 3): cmod LUT factory.
++// Returns a stable reference to the LUT for `(r, g, b)`, building it
++// on first call. The LUT cell at index i is the master-palette index
++// closest to `(master[i].r * r >> 8, master[i].g * g >> 8,
++// master[i].b * b >> 8)` per the cmod-multiplicative formula.
++//
++// Build cost is 256 × 256 × ~10 ops ≈ 600K cycles ≈ 7.5ms on PODP83
++// per spec §2.3. Once per unique tuple, then free forever; total LUT
++// memory is ~256 bytes × small-N ≈ tiny. The cache is keyed by Uint32
++// pack of the tuple.
++const std::array<Uint8, 256>& Renderer::_cmod_lut_for(Uint8 r, Uint8 g, Uint8 b)
++{
++  const Uint32 key = ((Uint32)r << 16) | ((Uint32)g << 8) | (Uint32)b;
++  auto it = _cmod_lut_cache.find(key);
++  if (it != _cmod_lut_cache.end()) return it->second;
++
++  // Pre-insert default-constructed slot, then fill — avoids a second
++  // hash on the return-by-reference.
++  auto inserted = _cmod_lut_cache.emplace(key, std::array<Uint8, 256>{});
++  std::array<Uint8, 256> &lut = inserted.first->second;
++
++  const SDL_Color *colors = _master_palette ? _master_palette->colors : nullptr;
++  if (!colors)
++  {
++    // Defensive: if cmod is requested without a master palette loaded,
++    // build the identity LUT so the inner loop produces *something*
++    // recognizable instead of garbage. _indexed_mode should have been
++    // cleared in initVideo if the palette is missing, so this branch
++    // is a belt-and-braces guard.
++    for (int i = 0; i < 256; ++i) lut[i] = (Uint8)i;
++    return lut;
++  }
++
++  for (int i = 0; i < 256; ++i)
++  {
++    const int rr = (colors[i].r * (int)r) >> 8;
++    const int gg = (colors[i].g * (int)g) >> 8;
++    const int bb = (colors[i].b * (int)b) >> 8;
++    // Special cases (per format spec §3.4 colorkey-stable rules) so
++    // the LUT can never re-map a non-colorkey pixel into the colorkey
++    // slot or vice versa.
++    if (rr == 0 && gg == 0 && bb == 0)
++    {
++      lut[i] = 0;
++      continue;
++    }
++    if (rr == 0xFF && gg == 0x00 && bb == 0xFF)
++    {
++      lut[i] = 255;
++      continue;
++    }
++    Uint8 best_idx = 0;
++    int best_dist = INT_MAX;
++    for (int j = 0; j < 256; ++j)
++    {
++      const int dr = rr - (int)colors[j].r;
++      const int dg = gg - (int)colors[j].g;
++      const int db = bb - (int)colors[j].b;
++      const int d = 299 * dr * dr + 587 * dg * dg + 114 * db * db;
++      if (d < best_dist) { best_dist = d; best_idx = (Uint8)j; }
++    }
++    lut[i] = best_idx;
++  }
++  return lut;
++}
++
+ // blit the specified portion of the surface to the screen
+ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
+@@ -2873,23 +3062,56 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
+                                                 _renderer_queue_dirty);
+   SDL_Surface *src_surface = src->surfaceCpu();
+ 
+-  if (win && src_surface && src->alpha == 255)
++  if (win && src_surface && src->alpha == 255 &&
++      win->format == src_surface->format)
+   {
+-    bool ok;
+-    if (mod_r == 0 && mod_g == 0 && mod_b == 0)
++    bool ok = false;
++    // DOS-PORT (patch 0074, Phase 9 wave 16 Lever 3): 6-way dispatch
++    // (3 mod-tuple branches × 2 formats). The INDEX8 path replaces the
++    // per-pixel multiply in the general branch with a 1-byte LUT
++    // lookup — THE BIG PERF WIN.
++    if (win->format == SDL_PIXELFORMAT_INDEX8)
+     {
+-      ok = _blit_rgb565_color_mod_black(win, src_surface, srcrect, dstrect,
+-                                        (Uint16)src->colorkey(), src->hasColorkey());
+-      ++_color_mod_black_block;
+-      ++_color_mod_black_global;
++      if (mod_r == 0 && mod_g == 0 && mod_b == 0)
++      {
++        ok = _blit_indexed_color_mod_black(win, src_surface, srcrect, dstrect,
++                                           (Uint8)src->colorkey(),
++                                           src->hasColorkey(),
++                                           /*master_black_idx=*/0);
++        ++_color_mod_indexed_black_block;
++        ++_color_mod_indexed_black_global;
++        ++_color_mod_black_block;
++        ++_color_mod_black_global;
++      }
++      else
++      {
++        const auto &lut = _cmod_lut_for(mod_r, mod_g, mod_b);
++        ok = _blit_indexed_color_mod(win, src_surface, srcrect, dstrect,
++                                     (Uint8)src->colorkey(), src->hasColorkey(),
++                                     lut.data());
++        ++_color_mod_indexed_general_block;
++        ++_color_mod_indexed_general_global;
++        ++_color_mod_general_block;
++        ++_color_mod_general_global;
++      }
+     }
+-    else
++    else if (win->format == SDL_PIXELFORMAT_RGB565)
+     {
+-      ok = _blit_rgb565_color_mod_general(win, src_surface, srcrect, dstrect,
+-                                          (Uint16)src->colorkey(), src->hasColorkey(),
+-                                          mod_r, mod_g, mod_b);
+-      ++_color_mod_general_block;
+-      ++_color_mod_general_global;
++      if (mod_r == 0 && mod_g == 0 && mod_b == 0)
++      {
++        ok = _blit_rgb565_color_mod_black(win, src_surface, srcrect, dstrect,
++                                          (Uint16)src->colorkey(), src->hasColorkey());
++        ++_color_mod_black_block;
++        ++_color_mod_black_global;
++      }
++      else
++      {
++        ok = _blit_rgb565_color_mod_general(win, src_surface, srcrect, dstrect,
++                                            (Uint16)src->colorkey(), src->hasColorkey(),
++                                            mod_r, mod_g, mod_b);
++        ++_color_mod_general_block;
++        ++_color_mod_general_global;
++      }
+     }
+     if (ok)
+     {
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index 85781dc..c5fbd6d 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -254,6 +254,21 @@ class Renderer
+     bool _load_master_palette(const char *path);
+     bool _load_master_palmap(const char *path);
+ 
++    // DOS-PORT (patch 0074, Phase 9 wave 16 Lever 3): per-tuple cmod LUT
++    // cache. Keyed by `(r << 16) | (g << 8) | b`; value is a 256-byte
++    // LUT mapping each master-palette index to the master-palette index
++    // closest to `(palette[i] * mod) >> 8` per channel. THE BIG PERF WIN
++    // — replaces the per-pixel 14-22 op multiply in
++    // _blit_rgb565_color_mod_general with a per-pixel 1-cycle byte
++    // lookup. Cave Story uses 1-3 distinct cmod tuples in practice
++    // (Font foreground colors), so the cache stays tiny.
++    //
++    // First call for a tuple builds the LUT (256 weighted-Euclidean
++    // nearest-color walks ≈ 7.5 ms on PODP83 per spec §2.3); subsequent
++    // calls are O(1) hash lookups. Defined in Renderer.cpp.
++    std::unordered_map<Uint32, std::array<Uint8, 256>> _cmod_lut_cache;
++    const std::array<Uint8, 256>& _cmod_lut_for(Uint8 r, Uint8 g, Uint8 b);
++
+   protected:
+     friend class Singleton<Renderer>;
+ 
+-- 
+2.47.3
+

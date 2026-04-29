@@ -1,0 +1,216 @@
+From 4d1e263cd67523d4002792de88a26e75e3bbe590 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 28 Apr 2026 16:32:59 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2016=20pat?=
+ =?UTF-8?q?ch=200027=20=E2=80=94=20banked-mode=208bpp=20flush=20audit?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 16 8bpp integration on real Cirrus + UNIVBE 6.7 surfaces a missing-
+bottom-strip symptom: title screen renders but the bottom ~35-40 scanlines
+appear blank. Mode 0x01F8 (320x240 8bpp banked) puts fb_size=76800, which
+crosses the 64 KB bank boundary by ~11,264 bytes (35 lines × 320 B). The
+bandwidth math from the wave-15 vs wave-16 timing brackets is suggestive
+but not conclusive (W15 16bpp at 153,600 B / 9.3 ms ≈ 16.5 MB/s, W16 8bpp
+at 76,800 B / 4.83 ms ≈ 15.9 MB/s — looks like full-frame writes, but a
+single-bank-only path would be 13.6 MB/s, only 2 MB/s lower).
+
+Two competing hypotheses for the missing-bottom-strip:
+
+  H-A: BankedDosmemput correctly issues 2 SwitchBank calls per flush and
+       writes all 76,800 bytes; the BIOS-programmed CRTC for mode 0x01F8
+       under UNIVBE 6.7 has a smaller-than-expected visible region, so
+       lines 205-239 of the buffer aren't displayed. Fix would target
+       mode-pick / display-start, NOT the flush.
+
+  H-B: SwitchBank fails to fire for the second bank under specific
+       conditions in the wave-16 build, so only the first 65,536 bytes
+       reach VRAM. Fix would target the multi-bank flush logic.
+
+This patch ships diagnostics, not a fix. We need real-HW data to discriminate.
+
+  - File-scope counters _dbg_bank_switches_total and _dbg_bytes_written_total
+    are bumped from inside SwitchBank() and BankedDosmemput() respectively.
+
+  - DOSVESA_UpdateWindowFramebuffer snapshots them at flush entry, computes
+    per-flush deltas at flush exit, and accumulates min/max/avg over each
+    100-flush window. One WAVE16-FB-FLUSH-AUDIT line per window:
+      switches/flush avg=X.XX (min=Y max=Z) bytes/flush avg=A (min=B max=C)
+    H-A predicts switches=2, bytes=76800; H-B predicts switches=1, bytes=65536.
+
+  - Bank-1 VRAM readback. Every 100th flush (and the first), after the flush
+    completes, the audit code switches to bank 1, reads the first 16 bytes
+    (= VRAM offset win_size_bytes ≈ start of the spill region for lines
+    205-239), and emits a DOSVESA-FB-VRAM-BANK1 dump line. If those bytes
+    are zero on a non-zero source frame, H-B is confirmed (writes didn't
+    land). If they show pixel data, H-A is confirmed (flush is fine,
+    look elsewhere). The probe restores bank 0 before returning.
+
+The audit adds 2 extra SwitchBank calls per 100 flushes (the bank-1 probe +
+reset-to-bank-0), so the per-flush deltas on the readback flush show
+switches+2; the 99 clean flushes drive the dominant signal in min/avg.
+
+Slot 0027 per patches/SDL/0026's wave-16 sequence; pure-numeric per
+patch_numbering memory. Pairs with WAVE16-MODESET / WAVE16-FB-FIRSTFLUSH
+diagnostics from patch 0026 to give a complete picture per wave 16 spec.
+---
+ src/video/dos/SDL_dosframebuffer.c | 114 +++++++++++++++++++++++++++++
+ 1 file changed, 114 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 4005c1d5d..c0ec89709 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -71,6 +71,19 @@ typedef struct DOSFramebufferState
+ 
+ static DOSFramebufferState fb_state;
+ 
++// DOSKUTSU patch 0027 (Phase 9 wave 16 — banked-mode 8bpp flush audit).
++// Cumulative counters bumped from inside SwitchBank() and BankedDosmemput()
++// so we can prove (or disprove) that BOTH banks are firing per flush at
++// 8bpp. 76,800-byte frames cross the 64 KB bank boundary by ~11,264 bytes
++// (35 scanlines × 320 B); a missing-bottom-strip symptom on real Cirrus +
++// UNIVBE points us either at a bank-switch failure (only bank 0 fires →
++// bytes_per_flush ≈ 65536, switches_per_flush = 1) or at correct writes
++// + display-geometry issue elsewhere (bytes_per_flush ≈ 76800, switches
++// = 2). UpdateWindowFramebuffer snapshots these counters pre/post flush
++// and emits a periodic WAVE16-FB-FLUSH-AUDIT line.
++static Uint32 _dbg_bank_switches_total = 0;
++static Uint32 _dbg_bytes_written_total = 0;
++
+ // Convert cursor to the current format.
+ static SDL_Surface *GetConvertedCursorSurface(SDL_CursorData *curdata, SDL_Surface *dst)
+ {
+@@ -544,6 +557,10 @@ SDL_FORCE_INLINE void SwitchBank(int bank, int *current_bank, Uint32 win_func_pt
+         __dpmi_int(0x10, &regs);
+     }
+     *current_bank = bank;
++    // DOSKUTSU patch 0027 (wave 16 banked-flush audit): count actual
++    // BIOS-issued bank switches. Per-flush deltas are computed in
++    // DOSVESA_UpdateWindowFramebuffer below.
++    _dbg_bank_switches_total++;
+ }
+ 
+ // Copy a contiguous byte range from system RAM to VRAM through the banked
+@@ -564,6 +581,11 @@ SDL_FORCE_INLINE void BankedDosmemput(const Uint8 *src, Uint32 total_bytes, Uint
+         }
+         SwitchBank(bank, current_bank, win_func_ptr);
+         dosmemput(src + src_off, n, win_base + off_in_win);
++        // DOSKUTSU patch 0027 (wave 16 banked-flush audit): count
++        // bytes pushed through the banked window. Used to confirm the
++        // full fb_size lands per flush at 8bpp (76,800 B) vs falling
++        // off after the first bank (would show ~65,536 B / flush).
++        _dbg_bytes_written_total += n;
+         src_off += n;
+         dst_offset += n;
+         total_bytes -= n;
+@@ -687,6 +709,12 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+         _ts_freq = SDL_GetPerformanceFrequency();
+     }
+ 
++    // DOSKUTSU patch 0027 (wave 16 banked-flush audit): snapshot the
++    // cumulative bank-switch + bytes-written counters at flush entry, so
++    // the per-flush delta can be computed and accumulated below.
++    const Uint32 _audit_switches_pre = _dbg_bank_switches_total;
++    const Uint32 _audit_bytes_pre    = _dbg_bytes_written_total;
++
+     // DOSKUTSU diagnostic (patches/SDL/0008 — Lever 1 lifecycle trace).
+     // Logs once on first call and every 100th call. Surfaces the staleness
+     // bug where fb_state was invalidated by InvalidateCachedFramebuffer but
+@@ -997,6 +1025,92 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 SDL_memcpy(vram_first, fb_state.vram_ptr, 16);
+             }
+             _doskutsu_dbg_dump_first16("DOSVESA-FB-VRAM ", vram_first, 16);
++
++            // DOSKUTSU patch 0027 (wave 16 banked-flush audit) — bank-1
++            // VRAM readback. After the flush has completed, switch to bank
++            // 1 and read the first 16 bytes (= VRAM offset win_size_bytes).
++            // At 8bpp this is the start of the spill region (~lines 205-239).
++            // If those bytes are zero on a non-zero source, the writes for
++            // bytes ≥ 65,536 didn't land (bank-switch fail). If they reflect
++            // sensible pixel data, the flush is correct and the missing-
++            // bottom-strip is a display-geometry issue, not a flush bug.
++            //
++            // Only fires on the multi-bank banked path; LFB / single-bank
++            // skip this. Switches back to bank 0 afterwards so the next
++            // flush starts where it expects.
++            if (fb_state.use_dosmemput && fb_state.banked_multibank &&
++                fb_state.win_gran_bytes > 0 && fb_state.fb_size > fb_state.win_size_bytes) {
++                Uint8 vram_bank1[16] = { 0 };
++                int probe_bank_dummy = -1;
++                int probe_bank = (int)(fb_state.win_size_bytes / fb_state.win_gran_bytes);
++                SwitchBank(probe_bank, &probe_bank_dummy, fb_state.win_func_ptr);
++                dosmemget(fb_state.win_base, 16, vram_bank1);
++                _doskutsu_dbg_dump_first16("DOSVESA-FB-VRAM-BANK1 ", vram_bank1, 16);
++                // Switch back to bank 0 to leave VRAM aperture in the
++                // expected start state for the next flush.
++                int reset_bank_dummy = -1;
++                SwitchBank(0, &reset_bank_dummy, fb_state.win_func_ptr);
++            }
++        }
++
++        // DOSKUTSU patch 0027 (wave 16 banked-flush audit) — per-flush
++        // delta accumulator. Computes how many bank switches and bytes
++        // were issued by THIS flush from the pre-snapshot taken at t0.
++        // Tracks min/max/sum across 100-flush windows and emits a single
++        // WAVE16-FB-FLUSH-AUDIT line per window. At 8bpp on Cirrus +
++        // UNIVBE the expected per-flush values are:
++        //   switches/flush = 2  (bank 0 then bank 1, fresh from probe-reset)
++        //   bytes/flush    = 76800
++        // If switches/flush stays at 1 and bytes/flush stays at 65536, the
++        // multi-bank logic isn't firing the second SwitchBank call → that's
++        // the missing-bottom-strip cause.
++        //
++        // NOTE: the bank-1 readback above issues 2 extra SwitchBank calls
++        // every 100 flushes; those land in bank_switches_total too. We
++        // compute the per-flush delta INCLUDING those, but on non-readback
++        // flushes (99 out of every 100) the delta reflects only the flush
++        // itself. The block summary uses the 99 "clean" flushes as the
++        // dominant signal; the 1 "noisy" flush is min=switches+2, ignore.
++        {
++            const Uint32 sw_delta = _dbg_bank_switches_total - _audit_switches_pre;
++            const Uint32 by_delta = _dbg_bytes_written_total - _audit_bytes_pre;
++
++            static int  _au_n = 0;
++            static Uint32 _au_sw_sum = 0, _au_by_sum = 0;
++            static Uint32 _au_sw_min = 0xFFFFFFFF, _au_by_min = 0xFFFFFFFF;
++            static Uint32 _au_sw_max = 0, _au_by_max = 0;
++
++            _au_n++;
++            _au_sw_sum += sw_delta;
++            _au_by_sum += by_delta;
++            if (sw_delta < _au_sw_min) _au_sw_min = sw_delta;
++            if (by_delta < _au_by_min) _au_by_min = by_delta;
++            if (sw_delta > _au_sw_max) _au_sw_max = sw_delta;
++            if (by_delta > _au_by_max) _au_by_max = by_delta;
++
++            if (_au_n >= 100) {
++                doskutsu_dbg_log(
++                    "WAVE16-FB-FLUSH-AUDIT @flush=%d: "
++                    "switches/flush avg=%lu.%02lu (min=%lu max=%lu) "
++                    "bytes/flush avg=%lu (min=%lu max=%lu) "
++                    "fb_size=%lu win_size=%lu win_gran=%lu multibank=%d "
++                    "[over %d flushes]",
++                    _doskutsu_dbg_call_total,
++                    (unsigned long)(_au_sw_sum / _au_n),
++                    (unsigned long)(((_au_sw_sum * 100) / _au_n) % 100),
++                    (unsigned long)_au_sw_min, (unsigned long)_au_sw_max,
++                    (unsigned long)(_au_by_sum / _au_n),
++                    (unsigned long)_au_by_min, (unsigned long)_au_by_max,
++                    (unsigned long)fb_state.fb_size,
++                    (unsigned long)fb_state.win_size_bytes,
++                    (unsigned long)fb_state.win_gran_bytes,
++                    (int)fb_state.banked_multibank,
++                    _au_n);
++                _au_n = 0;
++                _au_sw_sum = _au_by_sum = 0;
++                _au_sw_max = _au_by_max = 0;
++                _au_sw_min = _au_by_min = 0xFFFFFFFF;
++            }
+         }
+ 
+         // Page flipping is only used with the nearptr LFB path. The banked
+-- 
+2.47.3
+

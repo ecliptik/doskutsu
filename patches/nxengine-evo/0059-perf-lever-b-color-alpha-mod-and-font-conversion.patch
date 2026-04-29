@@ -1,0 +1,776 @@
+From e9bb5cb40a4e59b7f8fec8fa6fa01dc5548ca75a Mon Sep 17 00:00:00 2001
+From: Claude Code <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 15:32:59 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2012.5=20=E2=80=94=20color-mod?=
+ =?UTF-8?q?=20+=20Font.cpp=20+=20alpha-mod=20hand-rolled=20(Lever=20B=20st?=
+ =?UTF-8?q?ep=205)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/graphics/Font.cpp     |  69 +++----
+ src/graphics/Font.h       |  11 +-
+ src/graphics/Renderer.cpp | 382 ++++++++++++++++++++++++++++++++++++++
+ src/graphics/Renderer.h   |  13 ++
+ src/graphics/Surface.cpp  |  95 ++++++++++
+ src/graphics/Surface.h    |  15 ++
+ 6 files changed, 550 insertions(+), 35 deletions(-)
+
+diff --git a/src/graphics/Font.cpp b/src/graphics/Font.cpp
+index ebf0a00..87f2f31 100644
+--- a/src/graphics/Font.cpp
++++ b/src/graphics/Font.cpp
+@@ -77,14 +77,24 @@ bool Font::load()
+         LOG_ERROR("Font::load: atlas IMG_Load failed for '{}': {}", atlaspath, SDL_GetError());
+         continue;
+       }
+-      SDL_Texture *atlas_tex = SDL_CreateTextureFromSurface(Renderer::getInstance()->renderer(), surf);
+-      SDL_DestroySurface(surf);
+-      if (!atlas_tex)
++      // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): adopt the
++      // PNG into a full Surface (with cached RGB565 + colorkey) so
++      // Renderer::drawSurfaceColorMod can take its hand-rolled fast
++      // path. PNG alpha is flattened to a magenta colorkey by
++      // Surface::loadFromSDLSurface (alpha=0 pixels become magenta,
++      // colorkey set to magenta). Cave Story's font atlases are
++      // pixel-art with binary alpha, so this is a faithful
++      // representation.
++      Surface *atlas_sfc = new Surface();
++      if (!atlas_sfc->loadFromSDLSurface(surf, /*flatten_alpha_to_colorkey=*/true))
+       {
+-        LOG_ERROR("Font::load: atlas SDL_CreateTextureFromSurface failed for '{}': {}", atlaspath, SDL_GetError());
++        LOG_ERROR("Font::load: Surface::loadFromSDLSurface failed for '{}'", atlaspath);
++        delete atlas_sfc;
++        SDL_DestroySurface(surf);
+         continue;
+       }
+-      _atlases.push_back(atlas_tex);
++      SDL_DestroySurface(surf);
++      _atlases.push_back(atlas_sfc);
+     }
+   }
+   else
+@@ -101,9 +111,12 @@ void Font::cleanup()
+   _height = 0;
+   _base   = 0;
+   _glyphs.clear();
++  // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): atlases are now
++  // Surface* — delete them (Surface::~Surface frees the SDL_Texture +
++  // RGB565 surface together).
+   for (auto atlas : _atlases)
+   {
+-    SDL_DestroyTexture(atlas);
++    delete atlas;
+   }
+   _atlases.clear();
+   _upscale = 1;
+@@ -127,7 +140,7 @@ const Font::Glyph &Font::glyph(uint32_t codepoint)
+   }
+ }
+ 
+-SDL_Texture *Font::atlas(uint32_t idx)
++Surface *Font::atlas(uint32_t idx)
+ {
+   return _atlases.at(idx);
+ }
+@@ -157,7 +170,7 @@ uint32_t Font::draw(int x, int y, const std::string &text, uint32_t color, bool
+     else ch = utf8::next(it, text.end());
+ 
+     Glyph glyph = this->glyph(ch);
+-    SDL_Texture *atlas  = this->atlas(glyph.atlasid);
++    Surface *atlas = this->atlas(glyph.atlasid);
+ 
+     if (ch == '=' && game.mode != GM_CREDITS)
+     {
+@@ -186,25 +199,22 @@ uint32_t Font::draw(int x, int y, const std::string &text, uint32_t color, bool
+         else
+           Renderer::getInstance()->clipScaled(srcrect, dstrect);
+       }
++      // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): replaced the
++      // SDL_SetTextureColorMod + SDL_RenderTexture + reset triple (twice
++      // when shaded) with drawSurfaceColorMod calls. The (0,0,0) shadow
++      // and (r,g,b) foreground branches dispatch internally to the
++      // hand-rolled blit primitives — no SDL_Renderer state mailbox
++      // touched on the hot path.
+       if (isShaded)
+       {
+         shdrect.x = x + (glyph.xoffset * _upscale);
+         shdrect.y = y + (glyph.yoffset * _upscale + _shadowOffset * Renderer::getInstance()->scale);
+         shdrect.w = glyph.w * _upscale;
+         shdrect.h = glyph.h * _upscale;
+-        SDL_FRect _srcfr, _shdfr;
+-        SDL_RectToFRect(&srcrect, &_srcfr);
+-        SDL_RectToFRect(&shdrect, &_shdfr);
+-        SDL_SetTextureColorMod(atlas, 0, 0, 0);
+-        SDL_RenderTexture(Renderer::getInstance()->renderer(), atlas, &_srcfr, &_shdfr);
+-        SDL_SetTextureColorMod(atlas, 255, 255, 255);
++        Renderer::getInstance()->drawSurfaceColorMod(atlas, srcrect, shdrect, 0, 0, 0);
+       }
+-      SDL_FRect _srcfr, _dstfr;
+-      SDL_RectToFRect(&srcrect, &_srcfr);
+-      SDL_RectToFRect(&dstrect, &_dstfr);
+-      SDL_SetTextureColorMod(atlas, r, g, b);
+-      SDL_RenderTexture(Renderer::getInstance()->renderer(), atlas, &_srcfr, &_dstfr);
+-      SDL_SetTextureColorMod(atlas, 255, 255, 255);
++      Renderer::getInstance()->drawSurfaceColorMod(atlas, srcrect, dstrect,
++                                                   (uint8_t)r, (uint8_t)g, (uint8_t)b);
+     }
+ 
+     if (ch == ' ')
+@@ -263,7 +273,7 @@ uint32_t Font::drawLTR(int x, int y, const std::string &text, uint32_t color, bo
+     ch = utf8::next(it, text.end());
+ 
+     Glyph glyph = this->glyph(ch);
+-    SDL_Texture *atlas  = this->atlas(glyph.atlasid);
++    Surface *atlas = this->atlas(glyph.atlasid);
+ 
+     if (ch == '=' && game.mode != GM_CREDITS)
+     {
+@@ -292,25 +302,18 @@ uint32_t Font::drawLTR(int x, int y, const std::string &text, uint32_t color, bo
+         else
+           Renderer::getInstance()->clipScaled(srcrect, dstrect);
+       }
++      // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): see Font::draw
++      // for the rationale. Same color-mod replacement, LTR variant.
+       if (isShaded)
+       {
+         shdrect.x = x + (glyph.xoffset * _upscale);
+         shdrect.y = y + glyph.yoffset * _upscale + _shadowOffset * Renderer::getInstance()->scale;
+         shdrect.w = glyph.w * _upscale;
+         shdrect.h = glyph.h * _upscale;
+-        SDL_FRect _srcfr, _shdfr;
+-        SDL_RectToFRect(&srcrect, &_srcfr);
+-        SDL_RectToFRect(&shdrect, &_shdfr);
+-        SDL_SetTextureColorMod(atlas, 0, 0, 0);
+-        SDL_RenderTexture(Renderer::getInstance()->renderer(), atlas, &_srcfr, &_shdfr);
+-        SDL_SetTextureColorMod(atlas, 255, 255, 255);
++        Renderer::getInstance()->drawSurfaceColorMod(atlas, srcrect, shdrect, 0, 0, 0);
+       }
+-      SDL_FRect _srcfr, _dstfr;
+-      SDL_RectToFRect(&srcrect, &_srcfr);
+-      SDL_RectToFRect(&dstrect, &_dstfr);
+-      SDL_SetTextureColorMod(atlas, r, g, b);
+-      SDL_RenderTexture(Renderer::getInstance()->renderer(), atlas, &_srcfr, &_dstfr);
+-      SDL_SetTextureColorMod(atlas, 255, 255, 255);
++      Renderer::getInstance()->drawSurfaceColorMod(atlas, srcrect, dstrect,
++                                                   (uint8_t)r, (uint8_t)g, (uint8_t)b);
+     }
+ 
+     if (ch == ' ')
+diff --git a/src/graphics/Font.h b/src/graphics/Font.h
+index dd7285d..cc12a92 100644
+--- a/src/graphics/Font.h
++++ b/src/graphics/Font.h
+@@ -6,6 +6,8 @@
+ #include <string>
+ #include <vector>
+ 
++#include "Surface.h"
++
+ namespace NXE
+ {
+ namespace Graphics
+@@ -32,7 +34,12 @@ public:
+   bool load();
+   void cleanup();
+   const Font::Glyph &glyph(uint32_t codepoint);
+-  SDL_Texture *atlas(uint32_t idx);
++  // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): atlas is a
++  // Surface* not an SDL_Texture* — gives Renderer::drawSurfaceColorMod
++  // direct access to the atlas's RGB565 pixel data and pre-extracted
++  // colorkey, avoiding the SDL_RenderTexture queue/dispatch path on
++  // every glyph.
++  Surface *atlas(uint32_t idx);
+   uint32_t draw(int x, int y, const std::string &text, uint32_t color = 0xFFFFFF, bool isShaded = false);
+   uint32_t drawLTR(int x, int y, const std::string &text, uint32_t color = 0xFFFFFF, bool isShaded = false);
+   uint32_t getWidth(const std::string &text);
+@@ -41,7 +48,7 @@ public:
+ 
+ 
+ private:
+-  std::vector<SDL_Texture *> _atlases;
++  std::vector<Surface *> _atlases;  // patch 0059 — was std::vector<SDL_Texture *>
+   std::map<uint32_t, Glyph> _glyphs;
+   uint32_t _height;
+   uint32_t _base;
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index dbc0b74..1e6738c 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -490,6 +490,54 @@ void _maybe_flush_slowpath_reason_audit()
+ // somehow goes backwards (clock glitch on real HW).
+ Uint64 _last_flip_t0 = 0;
+ 
++// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): alpha-blend fastpath
++// engagement counters + drawSurfaceColorMod branch tally. Reported in
++// `color/alpha audit block N: ...` at the per-100-flip cadence.
++//   alpha_taken/skipped: alpha<255 fastpath (took / fell through)
++//   cmod_white: drawSurfaceColorMod called with (255,255,255) — delegated
++//     to the regular drawSurface path; counted here for visibility
++//   cmod_black: drawSurfaceColorMod called with (0,0,0) — Font shadow path
++//   cmod_general: any other (r,g,b) — Font foreground path
++//   cmod_fallback: drawSurfaceColorMod fell through to SDL_Renderer
++//     (Mach64 / format mismatch). Should be 0 on Cirrus.
++int _fastpath_alpha_taken_block = 0;
++int _fastpath_alpha_taken_global = 0;
++int _fastpath_alpha_skipped_block = 0;
++int _fastpath_alpha_skipped_global = 0;
++int _color_mod_white_block = 0;
++int _color_mod_white_global = 0;
++int _color_mod_black_block = 0;
++int _color_mod_black_global = 0;
++int _color_mod_general_block = 0;
++int _color_mod_general_global = 0;
++int _color_mod_fallback_block = 0;
++int _color_mod_fallback_global = 0;
++
++void _maybe_flush_color_alpha_audit()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0) return;
++  const int alpha_total = _fastpath_alpha_taken_block + _fastpath_alpha_skipped_block;
++  const int cmod_total  = _color_mod_white_block + _color_mod_black_block
++                        + _color_mod_general_block + _color_mod_fallback_block;
++  if (alpha_total == 0 && cmod_total == 0) return;
++  LOG_INFO("color/alpha audit block {}: cmod_white={} cmod_black={} "
++           "cmod_general={} cmod_fb={}; alpha_taken={} alpha_skipped={} "
++           "(global cmod={}/{}/{}/{} alpha={}/{})",
++           _dc_block_idx,
++           _color_mod_white_block, _color_mod_black_block,
++           _color_mod_general_block, _color_mod_fallback_block,
++           _fastpath_alpha_taken_block, _fastpath_alpha_skipped_block,
++           _color_mod_white_global, _color_mod_black_global,
++           _color_mod_general_global, _color_mod_fallback_global,
++           _fastpath_alpha_taken_global, _fastpath_alpha_skipped_global);
++  _fastpath_alpha_taken_block = 0;
++  _fastpath_alpha_skipped_block = 0;
++  _color_mod_white_block = 0;
++  _color_mod_black_block = 0;
++  _color_mod_general_block = 0;
++  _color_mod_fallback_block = 0;
++}
++
+ // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): drawcall-fingerprint
+ // helpers. The hash function is FNV-1a 64-bit on a fixed-shape header
+ // of (op_type, surface_id, srcx, srcy, srcw, srch, dstx, dsty, dstw,
+@@ -1116,6 +1164,9 @@ void Renderer::flip()
+   _maybe_flush_fastpath_mirror_audit();
+   _maybe_flush_primitive_tally();
+   _maybe_flush_slowpath_reason_audit();
++  // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): alpha-blend +
++  // color-mod audit (shares the same cadence).
++  _maybe_flush_color_alpha_audit();
+ 
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): per-frame
+   // bookkeeping. Tally the skip stats, swap last-frame ↔ current-
+@@ -1604,6 +1655,208 @@ static inline SDL_Surface *_ensure_handrolled_surface(SDL_Renderer *renderer,
+   return win_surface;
+ }
+ 
++// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): alpha-blend RGB565
++// blit primitive — the alpha<255 sibling of _blit_rgb565. Per architect
++// design memo §4: per-pixel `(src*alpha + dst*(255-alpha)) >> 8` (the
++// `>> 8` divisor approximates `/255` with a 0.4% rounding error,
++// invisible at 5/6/5 quantization).
++//
++// ~22 integer ops/pixel — about 2x the no-blend path. For typical
++// alpha-mod sites (menu fade-in, ~80x80 dialog box = 6400 px) this is
++// ~1.7 ms per call on PODP. Full-screen tintScreen-equivalents are
++// ~20 ms (handled separately in 12.6).
++//
++// Same dst-clip pattern as `_blit_rgb565`. Two inner-loop branches on
++// `has_colorkey`:
++//   - has_colorkey=false: blend every pixel
++//   - has_colorkey=true: skip colorkey pixels, blend the rest
++static inline bool _blit_rgb565_alpha(SDL_Surface *dst, SDL_Surface *src,
++                                      SDL_Rect srcrect, SDL_Rect dstrect,
++                                      Uint16 colorkey, bool has_colorkey,
++                                      Uint8 alpha)
++{
++  int dst_x = dstrect.x;
++  int dst_y = dstrect.y;
++  int sx = srcrect.x;
++  int sy = srcrect.y;
++  int rows = srcrect.h;
++  int cols = srcrect.w;
++
++  if (dst_x < 0) { cols += dst_x; sx -= dst_x; dst_x = 0; }
++  if (dst_y < 0) { rows += dst_y; sy -= dst_y; dst_y = 0; }
++  if (dst_x + cols > dst->w) cols = dst->w - dst_x;
++  if (dst_y + rows > dst->h) rows = dst->h - dst_y;
++
++  if (rows <= 0 || cols <= 0) return true;
++
++  const int src_pitch_pixels = src->pitch / 2;
++  const int dst_pitch_pixels = dst->pitch / 2;
++
++  const Uint16 *sp = (const Uint16 *)src->pixels + sy * src_pitch_pixels + sx;
++  Uint16 *dp = (Uint16 *)dst->pixels + dst_y * dst_pitch_pixels + dst_x;
++
++  const int inv = 255 - (int)alpha;
++
++  for (int row = 0; row < rows; ++row)
++  {
++    for (int col = 0; col < cols; ++col)
++    {
++      const Uint16 spx = sp[col];
++      if (has_colorkey && spx == colorkey) continue;
++
++      // Unpack src 5/6/5 → 8/8/8 (replicate top bits for cheap fidelity).
++      const int sr5 = (spx >> 11) & 0x1F;
++      const int sg6 = (spx >>  5) & 0x3F;
++      const int sb5 =  spx        & 0x1F;
++      const int sr8 = (sr5 << 3) | (sr5 >> 2);
++      const int sg8 = (sg6 << 2) | (sg6 >> 4);
++      const int sb8 = (sb5 << 3) | (sb5 >> 2);
++
++      const Uint16 dpx = dp[col];
++      const int dr5 = (dpx >> 11) & 0x1F;
++      const int dg6 = (dpx >>  5) & 0x3F;
++      const int db5 =  dpx        & 0x1F;
++      const int dr8 = (dr5 << 3) | (dr5 >> 2);
++      const int dg8 = (dg6 << 2) | (dg6 >> 4);
++      const int db8 = (db5 << 3) | (db5 >> 2);
++
++      const int or8 = (sr8 * (int)alpha + dr8 * inv) >> 8;
++      const int og8 = (sg8 * (int)alpha + dg8 * inv) >> 8;
++      const int ob8 = (sb8 * (int)alpha + db8 * inv) >> 8;
++
++      dp[col] = (Uint16)(((or8 >> 3) << 11) | ((og8 >> 2) << 5) | (ob8 >> 3));
++    }
++    sp += src_pitch_pixels;
++    dp += dst_pitch_pixels;
++  }
++
++  return true;
++}
++
++// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): alpha-blend fast-path
++// wrapper. Mirror of `_try_fast_blit` but gates on alpha < 255 (the
++// alpha=255 case stays in `_try_fast_blit`).
++static inline bool _try_fast_blit_alpha(SDL_Renderer *renderer,
++                                        SDL_Surface *win_surface,
++                                        bool &renderer_queue_dirty,
++                                        Surface *src,
++                                        const SDL_Rect &srcrect, const SDL_Rect &dstrect)
++{
++  if (src->alpha == 255) return false;  // 255 path lives in _try_fast_blit
++
++  SDL_Surface *src_surface = src->surface16bpp();
++  if (!src_surface) return false;
++
++  if (!win_surface) return false;
++  if (win_surface->format != SDL_PIXELFORMAT_RGB565) return false;
++  if (win_surface->w != 320 || win_surface->h != 240) return false;
++
++  if (renderer_queue_dirty)
++  {
++    SDL_FlushRenderer(renderer);
++    renderer_queue_dirty = false;
++  }
++
++  return _blit_rgb565_alpha(win_surface, src_surface, srcrect, dstrect,
++                            src->colorkey16(), src->hasColorkey(),
++                            (Uint8)src->alpha);
++}
++
++// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): color-mod RGB565 blit
++// primitive — black branch (mod_r=mod_g=mod_b=0). Every non-colorkey
++// source pixel is written as 0x0000 (RGB565 black). Hot path for Font
++// shadow rendering. Cheaper than the general branch — no multiply, no
++// 5/6/5 ↔ 8/8/8 expansion needed since the output is constant.
++static inline bool _blit_rgb565_color_mod_black(SDL_Surface *dst, SDL_Surface *src,
++                                                SDL_Rect srcrect, SDL_Rect dstrect,
++                                                Uint16 colorkey, bool has_colorkey)
++{
++  int dst_x = dstrect.x;
++  int dst_y = dstrect.y;
++  int sx = srcrect.x;
++  int sy = srcrect.y;
++  int rows = srcrect.h;
++  int cols = srcrect.w;
++
++  if (dst_x < 0) { cols += dst_x; sx -= dst_x; dst_x = 0; }
++  if (dst_y < 0) { rows += dst_y; sy -= dst_y; dst_y = 0; }
++  if (dst_x + cols > dst->w) cols = dst->w - dst_x;
++  if (dst_y + rows > dst->h) rows = dst->h - dst_y;
++  if (rows <= 0 || cols <= 0) return true;
++
++  const int src_pitch_pixels = src->pitch / 2;
++  const int dst_pitch_pixels = dst->pitch / 2;
++  const Uint16 *sp = (const Uint16 *)src->pixels + sy * src_pitch_pixels + sx;
++  Uint16 *dp = (Uint16 *)dst->pixels + dst_y * dst_pitch_pixels + dst_x;
++
++  for (int row = 0; row < rows; ++row)
++  {
++    for (int col = 0; col < cols; ++col)
++    {
++      const Uint16 spx = sp[col];
++      if (has_colorkey && spx == colorkey) continue;
++      dp[col] = 0;
++    }
++    sp += src_pitch_pixels;
++    dp += dst_pitch_pixels;
++  }
++  return true;
++}
++
++// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): color-mod RGB565 blit
++// primitive — general branch. Per architect design memo §3: per-pixel
++// per-channel multiply with 5/6/5 ↔ 8/8/8 expansion. ~14 integer ops
++// per pixel. ~35 µs per 13×16 glyph on PODP, ~1 ms total for ~30
++// glyphs/frame on dialog-heavy scenes.
++static inline bool _blit_rgb565_color_mod_general(SDL_Surface *dst, SDL_Surface *src,
++                                                  SDL_Rect srcrect, SDL_Rect dstrect,
++                                                  Uint16 colorkey, bool has_colorkey,
++                                                  Uint8 mod_r, Uint8 mod_g, Uint8 mod_b)
++{
++  int dst_x = dstrect.x;
++  int dst_y = dstrect.y;
++  int sx = srcrect.x;
++  int sy = srcrect.y;
++  int rows = srcrect.h;
++  int cols = srcrect.w;
++
++  if (dst_x < 0) { cols += dst_x; sx -= dst_x; dst_x = 0; }
++  if (dst_y < 0) { rows += dst_y; sy -= dst_y; dst_y = 0; }
++  if (dst_x + cols > dst->w) cols = dst->w - dst_x;
++  if (dst_y + rows > dst->h) rows = dst->h - dst_y;
++  if (rows <= 0 || cols <= 0) return true;
++
++  const int src_pitch_pixels = src->pitch / 2;
++  const int dst_pitch_pixels = dst->pitch / 2;
++  const Uint16 *sp = (const Uint16 *)src->pixels + sy * src_pitch_pixels + sx;
++  Uint16 *dp = (Uint16 *)dst->pixels + dst_y * dst_pitch_pixels + dst_x;
++
++  for (int row = 0; row < rows; ++row)
++  {
++    for (int col = 0; col < cols; ++col)
++    {
++      const Uint16 spx = sp[col];
++      if (has_colorkey && spx == colorkey) continue;
++
++      const int sr5 = (spx >> 11) & 0x1F;
++      const int sg6 = (spx >>  5) & 0x3F;
++      const int sb5 =  spx        & 0x1F;
++      const int sr8 = (sr5 << 3) | (sr5 >> 2);
++      const int sg8 = (sg6 << 2) | (sg6 >> 4);
++      const int sb8 = (sb5 << 3) | (sb5 >> 2);
++
++      const int rr8 = (sr8 * (int)mod_r) >> 8;
++      const int rg8 = (sg8 * (int)mod_g) >> 8;
++      const int rb8 = (sb8 * (int)mod_b) >> 8;
++
++      dp[col] = (Uint16)(((rr8 >> 3) << 11) | ((rg8 >> 2) << 5) | (rb8 >> 3));
++    }
++    sp += src_pitch_pixels;
++    dp += dst_pitch_pixels;
++  }
++  return true;
++}
++
+ // blit the specified portion of the surface to the screen
+ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
+@@ -1679,6 +1932,34 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   ++_fastpath_skipped_block;
+   ++_fastpath_skipped_global;
+ 
++  // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): alpha<255 fast
++  // path. The opaque-fast-path missed; if the only reason is alpha<255
++  // (other gates would still pass), take the hand-rolled alpha-blend
++  // path. This covers the majority of menu/dialog drawcalls per the
++  // 12.3-D slow-path reason histogram which showed alpha-mod dominates
++  // menu inter-flip cost. Falls through on Mach64 / format mismatch /
++  // null src to the existing SDL_RenderTexture path.
++  if (_try_fast_blit_alpha(_renderer, _cached_window_surface,
++                           _renderer_queue_dirty,
++                           src, srcrect, dstrect))
++  {
++    ++_fastpath_alpha_taken_block;
++    ++_fastpath_alpha_taken_global;
++    _bump_drawcall();
++    _record_dirty_rect(dstrect.x, dstrect.y, dstrect.w, dstrect.h);
++    return;
++  }
++  // Skipped counter only bumps when alpha<255 (otherwise the alpha
++  // wrapper returned false on its first gate; not interesting). This
++  // makes alpha_taken+alpha_skipped == count of alpha<255 calls that
++  // went through drawSurface — directly comparable to slow-path's
++  // alpha bucket.
++  if (src->alpha != 255)
++  {
++    ++_fastpath_alpha_skipped_block;
++    ++_fastpath_alpha_skipped_global;
++  }
++
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): categorize WHY this call
+   // missed the fastpath. Re-checks the same gates as _try_fast_blit in
+   // priority order — first match wins. Helps decide which 12.5+
+@@ -1841,6 +2122,107 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+   _renderer_queue_dirty = true;
+ }
+ 
++// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): per-pixel color-mod
++// blit. Replaces the SDL_SetTextureColorMod + SDL_RenderTexture +
++// reset-to-(255,255,255) sequence that Font.cpp used to emit for every
++// glyph shadow + foreground (4 SDL state-mailbox calls per glyph).
++// With Lever B engaged, NONE of those state mailbox calls fire on the
++// hot path — the wave-11 trap class is permanently sidestepped.
++//
++// Three branches per architect design memo §3:
++//   (255,255,255) → no mod, delegate to drawSurface
++//   (0,0,0)       → write 0x0000 for non-colorkey pixels (shadow)
++//   anything else → per-channel multiply via _blit_rgb565_color_mod_general
++//
++// Mach64 fallback (when _ensure_handrolled_surface returns NULL): uses
++// the legacy SDL_SetTextureColorMod + SDL_RenderTexture path, restoring
++// color-mod to (255,255,255) afterward to match Font.cpp's pre-12.5
++// behavior. The reset is essential — leaving the texture's color-mod
++// at (r,g,b) would tint subsequent SDL_RenderTexture calls on the same
++// atlas (e.g., the next glyph in the same string).
++void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
++                                   const SDL_Rect &dstrect,
++                                   uint8_t mod_r, uint8_t mod_g, uint8_t mod_b)
++{
++  assert(_renderer);
++  if (!src || !src->texture())
++  {
++    _log_null_tex("Renderer::drawSurfaceColorMod", src);
++    return;
++  }
++
++  // (255,255,255) — no modulation; equivalent to plain drawSurface.
++  // Counted separately for visibility; should be rare with Font.cpp's
++  // post-12.5 calling convention (always passes (0,0,0) for shadows
++  // and the user-supplied color for foreground; neither is white in
++  // practice).
++  if (mod_r == 255 && mod_g == 255 && mod_b == 255)
++  {
++    ++_color_mod_white_block;
++    ++_color_mod_white_global;
++    drawSurface(src, dstrect.x / scale, dstrect.y / scale,
++                srcrect.x, srcrect.y, srcrect.w, srcrect.h);
++    return;
++  }
++
++  SDL_Surface *win = _ensure_handrolled_surface(_renderer,
++                                                _cached_window_surface,
++                                                _renderer_queue_dirty);
++  SDL_Surface *src_surface = src->surface16bpp();
++
++  if (win && src_surface && src->alpha == 255)
++  {
++    bool ok;
++    if (mod_r == 0 && mod_g == 0 && mod_b == 0)
++    {
++      ok = _blit_rgb565_color_mod_black(win, src_surface, srcrect, dstrect,
++                                        src->colorkey16(), src->hasColorkey());
++      ++_color_mod_black_block;
++      ++_color_mod_black_global;
++    }
++    else
++    {
++      ok = _blit_rgb565_color_mod_general(win, src_surface, srcrect, dstrect,
++                                          src->colorkey16(), src->hasColorkey(),
++                                          mod_r, mod_g, mod_b);
++      ++_color_mod_general_block;
++      ++_color_mod_general_global;
++    }
++    if (ok)
++    {
++      _bump_drawcall();
++      _record_dirty_rect(dstrect.x, dstrect.y, dstrect.w, dstrect.h);
++      return;
++    }
++  }
++
++  // Mach64 fallback / format mismatch / alpha<255 — preserve the legacy
++  // SDL_RenderTexture path with color-mod state-mailbox manipulation.
++  ++_color_mod_fallback_block;
++  ++_color_mod_fallback_global;
++
++  SDL_FRect _srcfr, _dstfr;
++  SDL_RectToFRect(&srcrect, &_srcfr);
++  SDL_RectToFRect(&dstrect, &_dstfr);
++  _conditional_set_texture_alpha_mod(src->texture(), src->alpha);
++  SDL_SetTextureColorMod(src->texture(), mod_r, mod_g, mod_b);
++  if (!SDL_RenderTexture(_renderer, src->texture(), &_srcfr, &_dstfr))
++  {
++    LOG_ERROR("Renderer::drawSurfaceColorMod: SDL_RenderTexture failed: {}", SDL_GetError());
++  }
++  else
++  {
++    _bump_drawcall();
++    _record_dirty_rect(dstrect.x, dstrect.y, dstrect.w, dstrect.h);
++  }
++  // Reset the texture's color-mod so subsequent renders of the same
++  // texture aren't tinted. Required to match Font.cpp's pre-12.5
++  // semantics on the fallback path.
++  SDL_SetTextureColorMod(src->texture(), 255, 255, 255);
++  // DOS-PORT (patch 0051): slow-path queued a command.
++  _renderer_queue_dirty = true;
++}
++
+ // blit the specified surface across the screen in a repeating pattern
+ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src, int height)
+ {
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index 539e151..c0f996f 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -68,6 +68,19 @@ class Renderer
+     void drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht);
+     void drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht);
+ 
++    // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): per-pixel color
++    // modulation blit. Used by Font::draw to render glyph shadow + glyph
++    // foreground without going through SDL_SetTextureColorMod. Three
++    // special-cased branches per architect design memo §3:
++    //   (255,255,255) → delegate to plain drawSurface (no modulation)
++    //   (0,0,0)       → write 0x0000 for non-colorkey pixels (shadow)
++    //   anything else → full per-channel multiply
++    // Falls through to SDL_SetTextureColorMod + SDL_RenderTexture on
++    // Mach64 / 640x480 (preserves the slow path for non-Cirrus targets).
++    void drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
++                             const SDL_Rect &dstrect,
++                             uint8_t mod_r, uint8_t mod_g, uint8_t mod_b);
++
+     void blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src, int height);
+ 
+     void clearScreen(NXColor color);
+diff --git a/src/graphics/Surface.cpp b/src/graphics/Surface.cpp
+index 9225ad3..825813e 100644
+--- a/src/graphics/Surface.cpp
++++ b/src/graphics/Surface.cpp
+@@ -153,6 +153,101 @@ Surface *Surface::fromFile(const std::string &pbm_name, bool use_colorkey)
+   return sfc;
+ }
+ 
++// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): adopt an already-loaded
++// SDL_Surface, applying the same RGB565+colorkey treatment as loadImage.
++// Used by Font::load to convert IMG_Load PNG output into a Surface that
++// the hand-rolled Lever B blit primitives can consume.
++bool Surface::loadFromSDLSurface(SDL_Surface *src, bool flatten_alpha_to_colorkey)
++{
++  cleanup();
++  if (!src)
++  {
++    LOG_ERROR("Surface::loadFromSDLSurface: src is NULL");
++    return false;
++  }
++
++  _width  = src->w * Renderer::getInstance()->scale;
++  _height = src->h * Renderer::getInstance()->scale;
++
++  SDL_Surface *image_scaled = SDL_ZoomSurface(src, Renderer::getInstance()->scale);
++  if (!image_scaled)
++  {
++    LOG_ERROR("Surface::loadFromSDLSurface: SDL_ZoomSurface failed: {}", SDL_GetError());
++    return false;
++  }
++
++  // If the source has alpha and the caller asked for flatten-to-colorkey,
++  // walk the pixels and remap alpha=0 to magenta. Then set the surface
++  // colorkey to magenta so SDL_ConvertSurface preserves it through the
++  // RGB565 conversion. We normalize to RGBA32 first so the per-pixel
++  // walk has a consistent layout.
++  if (flatten_alpha_to_colorkey)
++  {
++    SDL_Surface *rgba = SDL_ConvertSurface(image_scaled, SDL_PIXELFORMAT_RGBA32);
++    SDL_DestroySurface(image_scaled);
++    if (!rgba)
++    {
++      LOG_ERROR("Surface::loadFromSDLSurface: SDL_ConvertSurface to RGBA32 failed: {}", SDL_GetError());
++      return false;
++    }
++    Uint8 *p = (Uint8 *)rgba->pixels;
++    const int row_pixels = rgba->pitch / 4;
++    for (int y = 0; y < rgba->h; ++y)
++    {
++      Uint8 *row = p + y * rgba->pitch;
++      for (int x = 0; x < row_pixels; ++x)
++      {
++        if (row[x * 4 + 3] == 0)
++        {
++          row[x * 4 + 0] = 0xFF;  // R
++          row[x * 4 + 1] = 0x00;  // G
++          row[x * 4 + 2] = 0xFF;  // B
++        }
++      }
++    }
++    SDL_SetSurfaceColorKey(rgba, true, SDL_MapSurfaceRGB(rgba, 0xFF, 0x00, 0xFF));
++    image_scaled = rgba;
++  }
++
++  SDL_Surface *image_rgb565 = SDL_ConvertSurface(image_scaled, SDL_PIXELFORMAT_RGB565);
++  SDL_DestroySurface(image_scaled);
++
++  if (!image_rgb565)
++  {
++    LOG_ERROR("Surface::loadFromSDLSurface: SDL_ConvertSurface to RGB565 failed: {}", SDL_GetError());
++    return false;
++  }
++
++  // Re-assert the colorkey on the RGB565 surface — same belt-and-braces
++  // pattern as loadImage. Magenta in RGB565 = 0xF81F.
++  if (flatten_alpha_to_colorkey)
++  {
++    SDL_SetSurfaceColorKey(image_rgb565, true, SDL_MapSurfaceRGB(image_rgb565, 0xFF, 0x00, 0xFF));
++  }
++
++  _texture = SDL_CreateTextureFromSurface(Renderer::getInstance()->renderer(), image_rgb565);
++  if (!_texture)
++  {
++    LOG_ERROR("Surface::loadFromSDLSurface: SDL_CreateTextureFromSurface failed: {}", SDL_GetError());
++    SDL_DestroySurface(image_rgb565);
++    return false;
++  }
++
++  _surface_rgb565 = image_rgb565;
++  Uint32 ck = 0;
++  if (SDL_GetSurfaceColorKey(image_rgb565, &ck))
++  {
++    _has_colorkey = true;
++    _colorkey16 = (Uint16)(ck & 0xFFFFu);
++  }
++  else
++  {
++    _has_colorkey = false;
++    _colorkey16 = 0;
++  }
++  return true;
++}
++
+ int Surface::width()
+ {
+   return _width / Renderer::getInstance()->scale;
+diff --git a/src/graphics/Surface.h b/src/graphics/Surface.h
+index 0d82d49..8970b15 100644
+--- a/src/graphics/Surface.h
++++ b/src/graphics/Surface.h
+@@ -22,6 +22,21 @@ public:
+   bool loadImage(const std::string &pbm_name, bool use_colorkey = false);
+   static Surface *fromFile(const std::string &pbm_name, bool use_colorkey = false);
+ 
++  // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): adopt an already-
++  // loaded SDL_Surface (e.g., IMG_Load output for Font atlas PNGs) and
++  // give it the same RGB565 + colorkey treatment that loadImage applies
++  // to .pbm files. The caller retains ownership of `src` and is
++  // responsible for destroying it after the call.
++  //
++  // When `flatten_alpha_to_colorkey` is true and `src` has an alpha
++  // channel, alpha=0 pixels are remapped to magenta (0xFF00FF) before
++  // RGB565 conversion, and the colorkey is set to magenta on the
++  // resulting surface. This preserves PNG transparency through the
++  // RGB565 path. Pixels with intermediate alpha (anti-aliased edges)
++  // are NOT preserved — they become opaque. Cave Story's font atlases
++  // are pixel-art with binary alpha, so this is faithful.
++  bool loadFromSDLSurface(SDL_Surface *src, bool flatten_alpha_to_colorkey = true);
++
+   int width();
+   int height();
+   SDL_Texture* texture();
+-- 
+2.47.3
+

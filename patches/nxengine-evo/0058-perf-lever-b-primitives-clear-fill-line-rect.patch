@@ -1,0 +1,281 @@
+From 2a23a5273471bf5e5711da81e2260718eb70965a Mon Sep 17 00:00:00 2001
+From: Claude Code <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 15:13:19 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2012.4=20=E2=80=94=20hand-roll?=
+ =?UTF-8?q?=20primitive=20ops=20(clearScreen,=20fillRect,=20drawRect,=20dr?=
+ =?UTF-8?q?awLine)=20(Lever=20B=20step=204)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/graphics/Renderer.cpp | 207 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 202 insertions(+), 5 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 61a52b8..dbc0b74 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -397,22 +397,50 @@ int _prim_tint_global = 0;
+ int _prim_spotlight_block = 0;
+ int _prim_spotlight_global = 0;
+ 
++// DOS-PORT (patch 0058, Phase 9 wave 12.4 Lever B): hand-rolled engagement
++// counters. Bumped by clearScreen / fillRect / drawRect / drawLine when
++// the hand-rolled fast path actually fires (preconditions match — RGB565
++// 320x240 cached window surface). When `_prim_X_handrolled` < `_prim_X`,
++// the difference is calls that fell through to the SDL_Renderer slow path
++// (Mach64 fallback or surface-format mismatch). Diff > 0 on Cirrus is a
++// regression worth investigating.
++int _prim_clear_handrolled_block = 0;
++int _prim_clear_handrolled_global = 0;
++int _prim_fill_handrolled_block = 0;
++int _prim_fill_handrolled_global = 0;
++int _prim_rect_handrolled_block = 0;
++int _prim_rect_handrolled_global = 0;
++int _prim_line_handrolled_block = 0;
++int _prim_line_handrolled_global = 0;
++
+ void _maybe_flush_primitive_tally()
+ {
+   if ((_flip_total % _dc_tally_every_flips) != 0) return;
+   // Always emit (even when block is all-zero) so absence of a primitive
+   // shows up explicitly in the log; aids real-HW iter analysis.
+-  LOG_INFO("primitive tally block {}: clear={} fill={} rect={} line={} "
+-           "tint={} spotlight={} (over {} flips ending at flip {})",
+-           _dc_block_idx, _prim_clear_block, _prim_fill_block,
+-           _prim_rect_block, _prim_line_block, _prim_tint_block,
+-           _prim_spotlight_block, _dc_tally_every_flips, _flip_total);
++  // (patch 0058) hr=N inside the parens is the hand-rolled engagement
++  // count. hr should equal the total when the fast path is firing on
++  // every call. tint and spotlight have no hand-rolled path yet (12.5+).
++  LOG_INFO("primitive tally block {}: clear={}(hr={}) fill={}(hr={}) "
++           "rect={}(hr={}) line={}(hr={}) tint={} spotlight={} "
++           "(over {} flips ending at flip {})",
++           _dc_block_idx,
++           _prim_clear_block, _prim_clear_handrolled_block,
++           _prim_fill_block, _prim_fill_handrolled_block,
++           _prim_rect_block, _prim_rect_handrolled_block,
++           _prim_line_block, _prim_line_handrolled_block,
++           _prim_tint_block, _prim_spotlight_block,
++           _dc_tally_every_flips, _flip_total);
+   _prim_clear_block = 0;
+   _prim_fill_block = 0;
+   _prim_rect_block = 0;
+   _prim_line_block = 0;
+   _prim_tint_block = 0;
+   _prim_spotlight_block = 0;
++  _prim_clear_handrolled_block = 0;
++  _prim_fill_handrolled_block = 0;
++  _prim_rect_handrolled_block = 0;
++  _prim_line_handrolled_block = 0;
+ }
+ 
+ // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): drawSurface slow-path
+@@ -1533,6 +1561,49 @@ static inline bool _try_fast_blit_mirrored(SDL_Renderer *renderer,
+                                src->colorkey16(), src->hasColorkey());
+ }
+ 
++// DOS-PORT (patch 0058, Phase 9 wave 12.4 Lever B): RGB565 packing helper
++// shared by the hand-rolled clearScreen / fillRect / drawRect / drawLine
++// paths. Inputs are 8-bit per channel (the engine's NXColor / r,g,b
++// format); output is the 16-bit RGB565 word the window surface expects.
++// Top 5 bits of red, middle 6 bits of green, bottom 5 bits of blue —
++// matches SDL_PIXELFORMAT_RGB565 byte order (little-endian Uint16).
++static inline Uint16 _pack_rgb565(uint8_t r, uint8_t g, uint8_t b)
++{
++  return (Uint16)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
++}
++
++// DOS-PORT (patch 0058, Phase 9 wave 12.4 Lever B): hand-rolled fast-path
++// gate shared by all four primitives (clearScreen / fillRect / drawRect /
++// drawLine). Returns the validated window surface on success, or NULL if
++// any precondition fails (caller falls through to its existing
++// SDL_Renderer slow path). On success, also drains any queued slow-path
++// commands so the direct write lands AFTER them — same z-order pattern
++// as `_try_fast_blit` (patch 0051 / 0054).
++//
++// Preconditions (mirror `_try_fast_blit`'s):
++//   - win_surface non-NULL
++//   - format == SDL_PIXELFORMAT_RGB565
++//   - dimensions == 320x240 (no logical-presentation letterboxing —
++//     Cirrus + PIN_WINDOW_TO_NATIVE; Mach64 / 640x480 falls through)
++//
++// Pure write op — does NOT need a Surface* argument since these
++// primitives don't have a source texture.
++static inline SDL_Surface *_ensure_handrolled_surface(SDL_Renderer *renderer,
++                                                     SDL_Surface *win_surface,
++                                                     bool &renderer_queue_dirty)
++{
++  if (!win_surface) return nullptr;
++  if (win_surface->format != SDL_PIXELFORMAT_RGB565) return nullptr;
++  if (win_surface->w != 320 || win_surface->h != 240) return nullptr;
++
++  if (renderer_queue_dirty)
++  {
++    SDL_FlushRenderer(renderer);
++    renderer_queue_dirty = false;
++  }
++  return win_surface;
++}
++
+ // blit the specified portion of the surface to the screen
+ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
+@@ -1857,6 +1928,43 @@ void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
+     if (_check_skip_drawcall(h, bx, by, bw, bh)) return;
+   }
+ 
++  // DOS-PORT (patch 0058, Phase 9 wave 12.4 Lever B): hand-rolled fast
++  // path. Standard integer Bresenham, with per-pixel surface-bounds
++  // clip inside the stepper (avoids clipping the line endpoints
++  // separately). drawLine is single-site (debug overlay only) so
++  // simplest correct implementation wins. Falls through on Mach64.
++  {
++    SDL_Surface *win = _ensure_handrolled_surface(_renderer,
++                                                  _cached_window_surface,
++                                                  _renderer_queue_dirty);
++    if (win)
++    {
++      const Uint16 c565 = _pack_rgb565(color.r, color.g, color.b);
++      const int dst_pitch_pixels = win->pitch / 2;
++      Uint16 *base = (Uint16 *)win->pixels;
++      const int wd = win->w, ht = win->h;
++      int x = sx1, y = sy1;
++      const int dxa = std::abs(sx2 - sx1);
++      const int dya = -std::abs(sy2 - sy1);
++      const int sx = sx1 < sx2 ? 1 : -1;
++      const int sy = sy1 < sy2 ? 1 : -1;
++      int err = dxa + dya;
++      while (true)
++      {
++        if (x >= 0 && x < wd && y >= 0 && y < ht)
++          base[y * dst_pitch_pixels + x] = c565;
++        if (x == sx2 && y == sy2) break;
++        const int e2 = 2 * err;
++        if (e2 >= dya) { err += dya; x += sx; }
++        if (e2 <= dxa) { err += dxa; y += sy; }
++      }
++      _record_dirty_rect(bx, by, bw, bh);
++      ++_prim_line_handrolled_block;
++      ++_prim_line_handrolled_global;
++      return;
++    }
++  }
++
+   SDL_SetRenderDrawColor(_renderer, color.r, color.g, color.b, SDL_ALPHA_OPAQUE);
+   // SDL3: SDL_RenderDrawLine → SDL_RenderLine, float coords.
+   SDL_RenderLine(_renderer, (float)sx1, (float)sy1, (float)sx2, (float)sy2);
+@@ -1884,6 +1992,46 @@ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+     if (_check_skip_drawcall(h, dx, dy, dw, dh)) return;
+   }
+ 
++  // DOS-PORT (patch 0058, Phase 9 wave 12.4 Lever B): hand-rolled fast
++  // path. The 4 outline rects are top row (dx, dy, dw, scale), bottom
++  // row (dx, y2*scale, dw, scale), left column (dx, dy, scale, dh),
++  // right column (x2*scale, dy, scale, dh). With scale=1 (DOS port,
++  // patch 0010 invariant) each is a 1-px-thick line; we re-use fillRect
++  // semantics (per-row memset16) for each, post-clip to surface bounds.
++  // Falls through to SDL_RenderFillRects on Mach64 / 640x480.
++  SDL_Surface *win = _ensure_handrolled_surface(_renderer,
++                                                _cached_window_surface,
++                                                _renderer_queue_dirty);
++  if (win)
++  {
++    const Uint16 c565 = _pack_rgb565(r, g, b);
++    const int dst_pitch_pixels = win->pitch / 2;
++    Uint16 *base = (Uint16 *)win->pixels;
++    // Lambda: clipped per-row fill of (rx, ry, rw, rh) with c565.
++    auto fill = [&](int rx, int ry, int rw, int rh)
++    {
++      if (rx < 0) { rw += rx; rx = 0; }
++      if (ry < 0) { rh += ry; ry = 0; }
++      if (rx + rw > win->w) rw = win->w - rx;
++      if (ry + rh > win->h) rh = win->h - ry;
++      if (rw <= 0 || rh <= 0) return;
++      Uint16 *dp = base + ry * dst_pitch_pixels + rx;
++      for (int row = 0; row < rh; ++row)
++      {
++        for (int col = 0; col < rw; ++col) dp[col] = c565;
++        dp += dst_pitch_pixels;
++      }
++    };
++    fill(dx, dy,           dw,    scale); // top
++    fill(dx, y2 * scale,   dw,    scale); // bottom
++    fill(dx, dy,           scale, dh);    // left
++    fill(x2 * scale, dy,   scale, dh);    // right
++    _record_dirty_rect(dx, dy, dw, dh);
++    ++_prim_rect_handrolled_block;
++    ++_prim_rect_handrolled_global;
++    return;
++  }
++
+   // SDL3: SDL_RenderFillRects takes SDL_FRect.
+   SDL_FRect rects[4] = {{(float)dx, (float)dy, (float)dw, (float)scale},
+   {(float)dx, (float)(y2 * scale), (float)dw, (float)scale},
+@@ -1920,6 +2068,36 @@ void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+     if (_check_skip_drawcall(h, dx, dy, dw, dh)) return;
+   }
+ 
++  // DOS-PORT (patch 0058, Phase 9 wave 12.4 Lever B): hand-rolled fast
++  // path. Per-row memset16 of the packed color, with surface-bounds
++  // clip to handle off-screen partial rects. Falls through on Mach64.
++  SDL_Surface *win = _ensure_handrolled_surface(_renderer,
++                                                _cached_window_surface,
++                                                _renderer_queue_dirty);
++  if (win)
++  {
++    int cx = dx, cy = dy, cw = dw, ch = dh;
++    if (cx < 0) { cw += cx; cx = 0; }
++    if (cy < 0) { ch += cy; cy = 0; }
++    if (cx + cw > win->w) cw = win->w - cx;
++    if (cy + ch > win->h) ch = win->h - cy;
++    if (cw > 0 && ch > 0)
++    {
++      const Uint16 c565 = _pack_rgb565(r, g, b);
++      const int dst_pitch_pixels = win->pitch / 2;
++      Uint16 *dp = (Uint16 *)win->pixels + cy * dst_pitch_pixels + cx;
++      for (int row = 0; row < ch; ++row)
++      {
++        for (int col = 0; col < cw; ++col) dp[col] = c565;
++        dp += dst_pitch_pixels;
++      }
++    }
++    _record_dirty_rect(dx, dy, dw, dh);
++    ++_prim_fill_handrolled_block;
++    ++_prim_fill_handrolled_global;
++    return;
++  }
++
+   // SDL3: SDL_RenderFillRect takes SDL_FRect.
+   SDL_FRect rect;
+ 
+@@ -1998,6 +2176,25 @@ void Renderer::clearScreen(uint8_t r, uint8_t g, uint8_t b)
+     if (_check_skip_drawcall(h, 0, 0, sw, sh)) return;
+   }
+ 
++  // DOS-PORT (patch 0058, Phase 9 wave 12.4 Lever B): hand-rolled fast
++  // path. memset16 the entire 320x240 RGB565 surface to the packed
++  // color. Falls through to SDL_RenderFillRect on Mach64 / 640x480 or
++  // any other surface state we don't recognize.
++  SDL_Surface *win = _ensure_handrolled_surface(_renderer,
++                                                _cached_window_surface,
++                                                _renderer_queue_dirty);
++  if (win)
++  {
++    const Uint16 c565 = _pack_rgb565(r, g, b);
++    Uint16 *dp = (Uint16 *)win->pixels;
++    const int total = (win->pitch / 2) * win->h;
++    for (int i = 0; i < total; ++i) dp[i] = c565;
++    _record_dirty_rect(0, 0, sw, sh);
++    ++_prim_clear_handrolled_block;
++    ++_prim_clear_handrolled_global;
++    return;
++  }
++
+   SDL_SetRenderDrawColor(_renderer, r, g, b, SDL_ALPHA_OPAQUE);
+   SDL_RenderFillRect(_renderer, NULL);
+   _record_dirty_rect(0, 0, sw, sh);
+-- 
+2.47.3
+

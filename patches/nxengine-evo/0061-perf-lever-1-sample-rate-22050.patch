@@ -1,0 +1,54 @@
+From 2ed40d7c54fe9d7e5fbb0015155702bf9fe748a4 Mon Sep 17 00:00:00 2001
+From: Claude Code <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 17:11:58 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2013.1=20=E2=80=94=20reduce=20SA?=
+ =?UTF-8?q?MPLE=5FRATE=2044100=20=E2=86=92=2022050=20stereo=20(Lever=201,?=
+ =?UTF-8?q?=20Tier=201=20target)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/sound/SoundManager.h | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index 765e8ae..ea0d278 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -8,7 +8,31 @@
+ #include <string>
+ #include <vector>
+ 
+-#define SAMPLE_RATE 44100
++// DOS-PORT (patch 0061, Phase 9 wave 13.1 Lever 1): reduced from 44100
++// to 22050 (Cave Story 2004 original spec, Tier 1 reference target per
++// CLAUDE.md "Hardware tiers"). Halves the Organya synth + Pixtone
++// resample work per audio buffer fill, cutting the audio mixer's
++// contribution to per-flip cost on real HW. Wave 12.5-D measurements
++// showed audio+engine_ms = 100 (title) / 213 (menu) per flip on
++// Cirrus + PODP83 — this lever is expected to drop that by ~half.
++//
++// Audit notes:
++//   - Single point of definition; all callers (SoundManager, Organya,
++//     Pixtone, Ogg) reference SAMPLE_RATE. No hardcoded 44100 literals
++//     left in vendor/nxengine-evo/src/sound/.
++//   - Pixtone::_prepareToPlay's src_spec is hardcoded 22050 (line 671)
++//     because that's the raw .pxt storage format (8-bit mono signed
++//     @ 22050 Hz — Cave Story's original on-disk format), NOT the
++//     output rate. After this patch, src_spec.freq == dst_spec.freq
++//     so SDL_AudioStream skips resampling — strictly more efficient.
++//   - Organya's sampling_rate, samples_per_millisecond, samples_per_beat,
++//     phaseinc are all derived from SAMPLE_RATE — they auto-rescale.
++//   - Stereo (2 channels) preserved: mono is Tier 2/3 fallback, future
++//     work behind a per-tier audio config switch.
++//   - Cave Story 2004 ran at 22050 stereo natively, so this is BACK to
++//     the original spec rather than a downgrade. Music + SFX should
++//     sound identical to the 2004 freeware release.
++#define SAMPLE_RATE 22050
+ 
+ namespace NXE
+ {
+-- 
+2.47.3
+

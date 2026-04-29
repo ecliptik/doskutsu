@@ -1,0 +1,258 @@
+From 3685696542ca844750f6d77e215b2b8bdba6ab65 Mon Sep 17 00:00:00 2001
+From: Claude Code <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 17:35:20 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2013.1-D2=20=E2=80=94=20split=20?=
+ =?UTF-8?q?audio-mixer/engine-tick=20timing=20diagnostic?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/Utils/diagnostic_timers.h | 75 +++++++++++++++++++++++++++++++++
+ src/game.cpp                  |  5 +++
+ src/graphics/Renderer.cpp     | 79 +++++++++++++++++++++++++++++++++++
+ src/sound/Organya.cpp         |  5 +++
+ 4 files changed, 164 insertions(+)
+ create mode 100644 src/Utils/diagnostic_timers.h
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+new file mode 100644
+index 0000000..992b7d5
+--- /dev/null
++++ b/src/Utils/diagnostic_timers.h
+@@ -0,0 +1,75 @@
++#ifndef NXE_DIAGNOSTIC_TIMERS_H
++#define NXE_DIAGNOSTIC_TIMERS_H
++
++// DOS-PORT (patch 0062, Phase 9 wave 13.1-D2 Lever B diagnostics): split
++// timing for the "audio+engine_ms" gap surfaced by 12.5-D's phase-timing
++// audit. 13.1's SAMPLE_RATE 44100->22050 reduction had near-zero impact
++// on that gap on real HW (predicted -50ms; measured +17ms within noise),
++// implying the audio mixer is NOT the dominant cost there. We split
++// audio_mixer (Organya synth callback) from engine_tick (Game::tick) so
++// the next pivot is data-driven instead of assumption-based.
++//
++// Storage variables are defined in Renderer.cpp alongside the wave-12.5-D
++// phase-timing infrastructure (single source of truth for the audit
++// flush). Other translation units (Organya.cpp, game.cpp) hit them via
++// the RAII helpers below — placing one timer at the top of a function
++// times that function's entire body, covering all return paths cleanly.
++
++#include <SDL3/SDL.h>
++#include <cstdint>
++
++namespace NXE
++{
++namespace Diag
++{
++
++// Counter storage lives in Renderer.cpp (extern decls below match
++// definitions there). Block stats reset every 100 flips; global stats
++// run for the whole process.
++extern std::uint64_t g_audio_mix_accum_ns_block;
++extern std::uint64_t g_audio_mix_accum_ns_global;
++extern int g_audio_mix_count_block;
++extern int g_audio_mix_count_global;
++extern std::uint64_t g_engine_tick_accum_ns_block;
++extern std::uint64_t g_engine_tick_accum_ns_global;
++extern int g_engine_tick_count_block;
++extern int g_engine_tick_count_global;
++
++// RAII helper for the Organya stream callback (called by SDL3 audio
++// thread when more samples are needed). Place at top of the callback.
++struct AudioMixerTimer
++{
++  std::uint64_t t0;
++  AudioMixerTimer() : t0(SDL_GetTicksNS()) {}
++  ~AudioMixerTimer()
++  {
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_audio_mix_accum_ns_block += dt;
++    g_audio_mix_accum_ns_global += dt;
++    ++g_audio_mix_count_block;
++    ++g_audio_mix_count_global;
++  }
++};
++
++// RAII helper for Game::tick() — the per-frame engine-logic entry point
++// invoked from main.cpp's run_tick(). Sibling costs in run_tick (input
++// poll, runFade) are NOT measured by this timer; they fall into the
++// "misc" remainder = (audio+engine_ms - audio_mixer_ms - engine_tick_ms).
++struct EngineTickTimer
++{
++  std::uint64_t t0;
++  EngineTickTimer() : t0(SDL_GetTicksNS()) {}
++  ~EngineTickTimer()
++  {
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_engine_tick_accum_ns_block += dt;
++    g_engine_tick_accum_ns_global += dt;
++    ++g_engine_tick_count_block;
++    ++g_engine_tick_count_global;
++  }
++};
++
++}  // namespace Diag
++}  // namespace NXE
++
++#endif  // NXE_DIAGNOSTIC_TIMERS_H
+diff --git a/src/game.cpp b/src/game.cpp
+index 8c85c63..c53c0c2 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -4,6 +4,7 @@
+ #include "ObjManager.h"
+ #include "ai/ai.h"
+ #include "Utils/Logger.h"
++#include "Utils/diagnostic_timers.h"  // patch 0062 (wave 13.1-D2)
+ #include "console.h"
+ #include "debug.h"
+ #include "endgame/credits.h"
+@@ -220,6 +221,10 @@ bool Game::pause(int pausemode, int param)
+ 
+ void Game::tick(void)
+ {
++  // patch 0062 (wave 13.1-D2): time the entire engine-tick body. Sibling
++  // costs in run_tick() (input poll, runFade) are NOT counted here;
++  // they fall into the "misc" remainder of the audio/engine split.
++  NXE::Diag::EngineTickTimer _ett;
+   Renderer::getInstance()->clearScreen(BLACK);
+   debug_clear();
+ 
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 0cf15ae..0e90c88 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -14,6 +14,7 @@
+ #  include "pngfuncs.h"
+ #endif
+ #include "../Utils/Logger.h"
++#include "../Utils/diagnostic_timers.h"  // patch 0062 (wave 13.1-D2)
+ 
+ #include <SDL3/SDL.h>
+ #include <SDL3_image/SDL_image.h>
+@@ -24,6 +25,27 @@
+ #include <unordered_map>
+ #include <unordered_set>
+ 
++// DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): storage for the audio-
++// mixer / engine-tick split timing counters. Declared in
++// Utils/diagnostic_timers.h so Organya.cpp + game.cpp can bump them via
++// the RAII helpers without exposing the storage. Audit flush + log
++// emission live in the anonymous Graphics namespace below alongside the
++// existing wave-12.5-D phase-timing audit.
++namespace NXE
++{
++namespace Diag
++{
++std::uint64_t g_audio_mix_accum_ns_block = 0;
++std::uint64_t g_audio_mix_accum_ns_global = 0;
++int g_audio_mix_count_block = 0;
++int g_audio_mix_count_global = 0;
++std::uint64_t g_engine_tick_accum_ns_block = 0;
++std::uint64_t g_engine_tick_accum_ns_global = 0;
++int g_engine_tick_count_block = 0;
++int g_engine_tick_count_global = 0;
++}  // namespace Diag
++}  // namespace NXE
++
+ namespace NXE
+ {
+ namespace Graphics
+@@ -631,6 +653,59 @@ void _maybe_flush_phase_timing_audit()
+   _inter_flip_accum_ms_block = 0;
+ }
+ 
++// DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
++// split audit. Reads counters bumped by AudioMixerTimer (Organya stream
++// callback) and EngineTickTimer (Game::tick) — see Utils/diagnostic_-
++// timers.h. The two new readings PLUS the 12.5-D derived audio+engine_ms
++// give us a 4-way decomposition of inter-flip:
++//   inter_flip = flip_inner + drawcall + (audio_mix + engine_tick + misc)
++// where misc = (12.5-D's audio+engine derived) - audio_mix - engine_tick.
++// "misc" captures DPMI overhead, file I/O, event pump, input poll,
++// runFade — anything in run_tick() outside Game::tick().
++void _maybe_flush_audio_engine_split_audit()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0) return;
++  if (NXE::Diag::g_audio_mix_count_block == 0
++      && NXE::Diag::g_engine_tick_count_block == 0)
++    return;
++
++  // Per-flip averages, x10 (one-decimal). Computed in ms by dividing
++  // ns_total by (flips * 1_000_000) then x10.
++  const long long am_avg_ms_x10 = _dc_tally_every_flips
++      ? (long long)((NXE::Diag::g_audio_mix_accum_ns_block * 10ull)
++                    / ((std::uint64_t)_dc_tally_every_flips * 1000000ull))
++      : 0;
++  const long long et_avg_ms_x10 = _dc_tally_every_flips
++      ? (long long)((NXE::Diag::g_engine_tick_accum_ns_block * 10ull)
++                    / ((std::uint64_t)_dc_tally_every_flips * 1000000ull))
++      : 0;
++  // Per-call averages in microseconds (x10 = one-decimal).
++  const long long am_per_call_us_x10 = (NXE::Diag::g_audio_mix_count_block > 0)
++      ? (long long)((NXE::Diag::g_audio_mix_accum_ns_block * 10ull)
++                    / ((std::uint64_t)NXE::Diag::g_audio_mix_count_block * 1000ull))
++      : 0;
++  const long long et_per_call_us_x10 = (NXE::Diag::g_engine_tick_count_block > 0)
++      ? (long long)((NXE::Diag::g_engine_tick_accum_ns_block * 10ull)
++                    / ((std::uint64_t)NXE::Diag::g_engine_tick_count_block * 1000ull))
++      : 0;
++
++  LOG_INFO("audio/engine split block {}: audio_mixer_calls={} "
++           "audio_mixer_ms_x10={} engine_tick_calls={} engine_tick_ms_x10={} "
++           "(per-flip avg; per-call us_x10: audio_mix={} engine_tick={}; "
++           "global ns: audio_mix={} engine_tick={})",
++           _dc_block_idx,
++           NXE::Diag::g_audio_mix_count_block, am_avg_ms_x10,
++           NXE::Diag::g_engine_tick_count_block, et_avg_ms_x10,
++           am_per_call_us_x10, et_per_call_us_x10,
++           (long long)NXE::Diag::g_audio_mix_accum_ns_global,
++           (long long)NXE::Diag::g_engine_tick_accum_ns_global);
++
++  NXE::Diag::g_audio_mix_accum_ns_block = 0;
++  NXE::Diag::g_audio_mix_count_block = 0;
++  NXE::Diag::g_engine_tick_accum_ns_block = 0;
++  NXE::Diag::g_engine_tick_count_block = 0;
++}
++
+ // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): drawcall-fingerprint
+ // helpers. The hash function is FNV-1a 64-bit on a fixed-shape header
+ // of (op_type, surface_id, srcx, srcy, srcw, srch, dstx, dsty, dstw,
+@@ -1282,6 +1357,10 @@ void Renderer::flip()
+     _flip_inner_accum_ns_global += _flip_inner_dt_ns;
+   }
+   _maybe_flush_phase_timing_audit();
++  // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-
++  // tick split (per-100-flip cadence; reads counters bumped by RAII
++  // helpers in Organya.cpp + game.cpp).
++  _maybe_flush_audio_engine_split_audit();
+ 
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): per-frame
+   // bookkeeping. Tally the skip stats, swap last-frame ↔ current-
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index 353ef2f..b423bd3 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -10,6 +10,7 @@
+ #include "../common/misc.h"
+ #include "../Utils/Logger.h"
+ #include "../Utils/Common.h"
++#include "../Utils/diagnostic_timers.h"  // patch 0062 (wave 13.1-D2)
+ #include "../settings.h"
+ #include "Pixtone.h"
+ #include "SoundManager.h"
+@@ -384,6 +385,10 @@ std::function<void(void *, uint8_t *, int)> musicCallback;
+ void SDLCALL organyaStreamCallback(void *userdata, SDL_AudioStream *stream,
+                                    int additional_amount, int /*total_amount*/)
+ {
++  // patch 0062 (wave 13.1-D2): time the entire callback body, including
++  // the additional_amount<=0 fast-skip — those count as audio-mixer
++  // wakeups even when zero work is done.
++  NXE::Diag::AudioMixerTimer _amt;
+   if (additional_amount <= 0) return;
+ 
+   Organya *self = static_cast<Organya *>(userdata);
+-- 
+2.47.3
+

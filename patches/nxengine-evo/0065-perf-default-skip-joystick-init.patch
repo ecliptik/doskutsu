@@ -1,0 +1,121 @@
+From 975d06cd217e3c2fbbaa2a174f1313e1c4c42db6 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 09:39:04 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2013.4=20=E2=80=94=20default-ski?=
+ =?UTF-8?q?p=20joystick=20init=20on=20DOS=20(patch=200065)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 13.3 measurement on real HW (PODP 5V83, Cirrus + UNIVBE) left ~82
+ms / flip in input_poll() unaccounted for after the SDL-side per-pump
+yield was removed. Root cause: SDL3-DOS's DOS_JoystickUpdate
+(vendor/SDL/src/joystick/dos/SDL_sysjoystick.c:259) runs BIOS INT 15h
+gameport polling on every PumpEvents.
+
+The Vibra16S/SB16 has an onboard gameport at I/O 0x201, so SDL3-DOS's
+detection probe trips even when no physical joystick is attached. The
+BIOS INT 15h call then runs the cap-discharge timing loop to its full
+timeout — measured ~82 ms / flip in wave 13.3 residual.
+
+Cave Story plays fine on keyboard. Default-skip the SDL_OpenJoystick()
+call so SDL3 never polls a non-existent joystick. SDL3 only runs
+driver Update functions for opened joysticks, so skipping the open
+removes the entire BIOS INT 15h cost without needing any hot-path gate.
+
+Opt back in via SET DOSKUTSU_USE_JOYSTICK=1 if a real stick is
+attached. Strict "1" match (matches wave 13.2 / 13.3 helpers) so
+SET FOO=0 / empty value does NOT enable.
+
+Predicted impact: title scene 5.5 fps → ~10-12 fps on PODP 5V83
+(combined with wave 13.3 yield-skip; the 33 ms shifted to flip_inner
+remains, but the 82 ms BIOS gameport cost is reclaimed).
+
+See docs/PHASE9-NEXT-WAVES-PLAN.md §6 wave 13.3 measurement table for
+the residual that motivated this fix.
+---
+ src/input.cpp | 64 +++++++++++++++++++++++++++++++++------------------
+ 1 file changed, 42 insertions(+), 22 deletions(-)
+
+diff --git a/src/input.cpp b/src/input.cpp
+index 228ec5c..c829f76 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -107,32 +107,52 @@ bool input_init(void)
+   mappings[DEBUG_FLY_KEY].key     = SDLK_V;
+   mappings[ENTERKEY].key = SDLK_RETURN;
+ 
+-  SDL_InitSubSystem(SDL_INIT_JOYSTICK);
+-  // SDL3: SDL_NumJoysticks → SDL_GetJoysticks(&count) returning array of instance IDs.
+-  // SDL_JoystickOpen(0) → SDL_OpenJoystick(instance_id).
+-  // SDL_JoystickNameForIndex → SDL_GetJoystickNameForID.
+-  // SDL_JoystickNum{Axes,Buttons,Balls} → SDL_GetNumJoystick{Axes,Buttons,Balls}.
+-  int _joy_count = 0;
+-  SDL_JoystickID *_joy_ids = SDL_GetJoysticks(&_joy_count);
+-  if (_joy_ids && _joy_count > 0)
++  // DOS-PORT (patch 0065, Phase 9 wave 13.4): default-skip joystick init on
++  // DOS. Wave 13.3 left ~82 ms / flip unaccounted for in input_poll(); root
++  // cause is SDL3-DOS's DOS_JoystickUpdate (vendor/SDL/src/joystick/dos/
++  // SDL_sysjoystick.c:259) running BIOS INT 15h gameport polling on every
++  // PumpEvents. The Vibra16S/SB16 has an onboard gameport, so SDL3-DOS
++  // detects "joystick present" even when nothing is plugged in — the BIOS
++  // call then runs to its full cap-discharge timeout. Cave Story plays
++  // fine on keyboard; opt back in via SET DOSKUTSU_USE_JOYSTICK=1 only if
++  // a real stick is attached. Strict "1" match to avoid the wave 13.2
++  // truthiness footgun (SET FOO=0 / empty value should NOT enable).
++  const char *use_js_env = std::getenv("DOSKUTSU_USE_JOYSTICK");
++  const bool open_joystick = use_js_env && use_js_env[0] == '1' && use_js_env[1] == 0;
++  if (!open_joystick)
+   {
+-    SDL_JoystickID _first = _joy_ids[0];
+-    joy = SDL_OpenJoystick(_first);
+-
+-    if (joy)
+-    {
+-      LOG_INFO("Opened Joystick 0");
+-      LOG_INFO("Name: {}", SDL_GetJoystickNameForID(_first));
+-      LOG_INFO("Number of Axes: {}", SDL_GetNumJoystickAxes(joy));
+-      LOG_INFO("Number of Buttons: {}", SDL_GetNumJoystickButtons(joy));
+-      LOG_INFO("Number of Balls: {}", SDL_GetNumJoystickBalls(joy));
+-    }
+-    else
++    LOG_INFO("Joystick: skipped (default; set DOSKUTSU_USE_JOYSTICK=1 to enable — "
++             "skips SDL3-DOS gameport BIOS INT 15h polling, ~82 ms / flip on real HW)");
++  }
++  else
++  {
++    SDL_InitSubSystem(SDL_INIT_JOYSTICK);
++    // SDL3: SDL_NumJoysticks → SDL_GetJoysticks(&count) returning array of instance IDs.
++    // SDL_JoystickOpen(0) → SDL_OpenJoystick(instance_id).
++    // SDL_JoystickNameForIndex → SDL_GetJoystickNameForID.
++    // SDL_JoystickNum{Axes,Buttons,Balls} → SDL_GetNumJoystick{Axes,Buttons,Balls}.
++    int _joy_count = 0;
++    SDL_JoystickID *_joy_ids = SDL_GetJoysticks(&_joy_count);
++    if (_joy_ids && _joy_count > 0)
+     {
+-      LOG_WARN("Couldn't open Joystick 0");
++      SDL_JoystickID _first = _joy_ids[0];
++      joy = SDL_OpenJoystick(_first);
++
++      if (joy)
++      {
++        LOG_INFO("Opened Joystick 0");
++        LOG_INFO("Name: {}", SDL_GetJoystickNameForID(_first));
++        LOG_INFO("Number of Axes: {}", SDL_GetNumJoystickAxes(joy));
++        LOG_INFO("Number of Buttons: {}", SDL_GetNumJoystickButtons(joy));
++        LOG_INFO("Number of Balls: {}", SDL_GetNumJoystickBalls(joy));
++      }
++      else
++      {
++        LOG_WARN("Couldn't open Joystick 0");
++      }
+     }
++    if (_joy_ids) SDL_free(_joy_ids);
+   }
+-  if (_joy_ids) SDL_free(_joy_ids);
+   return 0;
+ }
+ 
+-- 
+2.47.3
+

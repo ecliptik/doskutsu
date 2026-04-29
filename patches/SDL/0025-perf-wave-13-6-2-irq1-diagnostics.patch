@@ -1,0 +1,191 @@
+From 76b31183cd76e0e58e653d15e4a0f5b7a91852e5 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 13:39:06 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2013.6.2?=
+ =?UTF-8?q?=20patch=200025=20=E2=80=94=20IRQ-1=20install-time=20+=20first-?=
+ =?UTF-8?q?fire=20diagnostics?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 13.6.1 patch 0023 added per-IRQ-fire and per-pump-drain counters
+that confirmed IRQ-1 is silently undelivered for ~42 s after main loop
+entry on PODP 5V83 (real HW), then suddenly works at title-menu entry.
+The architect's /tmp/wave-13-6-1-irq-mask-analysis.md identifies four
+plausible causes (3a PIC mask, 3b chain wrapper, 3c memory-locking,
+3d EFLAGS via setjmp/longjmp); the existing two counters cannot
+discriminate between them. This patch adds the install-time and first-
+IRQ-fire snapshots needed to discriminate 3a/3b/3c in a single CF iter.
+
+Five new file-scope volatile uint32_t in SDL_dosevents.c, all
+DOS_LockVariable'd because they are read from IRQ context via the
+engine's phase-timing log:
+
+  - doskutsu_kbd_pump_pass_count  bumped at top of DOSVESA_PumpEvents
+                                  (one per flip on engine's main
+                                  loop). Acts as monotonic ordering
+                                  source for first_irq_ticks.
+
+  - doskutsu_kbd_first_irq_ticks  set on first IRQ-1 entry to
+                                  pump_pass_count + 1 (gate +1 ensures
+                                  the 0-sentinel "never fired" stays
+                                  unambiguous). One-shot.
+
+  - doskutsu_kbd_irq_install_ticks pump_pass_count snapshot at end of
+                                   DOSVESA_InitKeyboard. Always 0 in
+                                   practice (no pumps yet) but logged
+                                   for completeness so first_irq_ticks
+                                   vs install_ticks compare is
+                                   well-defined.
+
+  - doskutsu_kbd_irq_vector_at_install  pm_offset of protected-mode
+                                        IRQ-1 vector (int 0x09) read
+                                        RIGHT AFTER DOS_HookInterrupt.
+                                        Validates chain wrapper installed
+                                        at expected address.
+
+  - doskutsu_kbd_pic1_mask_at_install  inportb(0x21) snapshot at end of
+                                       DOSVESA_InitKeyboard. Bit 1 (0x02)
+                                       cleared = IRQ-1 unmasked at PIC.
+
+Why pump_pass_count and not drain_count as the monotonic source: the
+team-lead's spec-pass suggestion to reuse drain_count fails because at
+first IRQ fire by construction nothing has yet been drained
+(drain_count stays 0). pump_pass_count instead bumps once per
+PumpEvents call regardless of keypress activity — gives a flip-
+correlated ordering for free.
+
+Why pic1_irr is omitted: the architect's §5b 5th field (PIC1 IRR
+read via OCW3 0x0A → port 0x20) momentarily perturbs PIC state. Per
+team-lead direction pic1_mask alone is enough to confirm/refute
+hypothesis 3a; if 3a is refuted, IRR can land in a follow-up.
+
+Default behaviour unchanged — no env vars, no behavioural changes;
+this is a pure read-only diagnostic patch. Pairs with engine-side
+patch 0070 which surfaces the new symbols in DEBUG.LOG.
+
+See architect's /tmp/wave-13-6-1-irq-mask-analysis.md §5a for spec,
+§5c for the discrimination table.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosevents.c | 80 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 80 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosevents.c b/src/video/dos/SDL_dosevents.c
+index 912da585b..b29e07c6d 100644
+--- a/src/video/dos/SDL_dosevents.c
++++ b/src/video/dos/SDL_dosevents.c
+@@ -270,6 +270,49 @@ static int keyevents_tail = 0;
+ volatile uint32_t doskutsu_kbd_irq_count = 0;
+ volatile uint32_t doskutsu_kbd_drain_count = 0;
+ 
++/* DOSKUTSU patch (Phase 9 wave 13.6.2): IRQ-mask diagnostic snapshots
++   to discriminate hypotheses 3a/3b/3c from architect's
++   /tmp/wave-13-6-1-irq-mask-analysis.md §5a. Three install-time facts
++   plus one first-IRQ-fire ordinal:
++
++     - pump_pass_count: monotonic per-PumpEvents-call counter (bumped
++       at top of DOSVESA_PumpEvents below, regardless of keyboard
++       activity). Used as a flip-correlated ordering source for
++       first_irq_ticks. We can't reuse drain_count for this — drain
++       only ticks per byte pulled from the ringbuffer, and at first
++       IRQ fire by construction nothing has yet been drained, so
++       drain_count is necessarily 0 at that instant. pump_pass_count
++       is the cheapest counter that bumps once per flip without
++       needing engine cooperation.
++
++     - first_irq_ticks: 0 = handler never fired. On first IRQ-1 entry,
++       set to (pump_pass_count + 1). The +1 encoding ensures the
++       sentinel "0 = never fired" is unambiguous even if IRQ-1 fires
++       before any pump call (= pump_pass_count is 0 at that instant).
++       Engine subtracts 1 when interpreting; engine's log shows the
++       raw stored value.
++
++     - irq_install_ticks: pump_pass_count snapshot at end of
++       DOSVESA_InitKeyboard. Always 0 in practice (no pump calls have
++       happened yet at install time) but logged for completeness so
++       comparing first_irq_ticks vs install_ticks is well-defined.
++
++     - irq_vector_at_install: protected-mode IRQ-1 vector (.pm_offset)
++       read RIGHT AFTER DOS_HookInterrupt returns. Validates that the
++       chain wrapper installed at the expected address.
++
++     - pic1_mask_at_install: inportb(0x21) byte AT END of
++       DOSVESA_InitKeyboard. Bit 1 (0x02) cleared = IRQ-1 unmasked
++       (good); bit 1 set = IRQ-1 masked at the controller (bad).
++
++   All visible to engine via extern declarations in Renderer.cpp.
++   All DOS_LockVariable'd to allow safe IRQ-context reads. */
++volatile uint32_t doskutsu_kbd_pump_pass_count = 0;
++volatile uint32_t doskutsu_kbd_first_irq_ticks = 0;
++volatile uint32_t doskutsu_kbd_irq_install_ticks = 0;
++volatile uint32_t doskutsu_kbd_irq_vector_at_install = 0;
++volatile uint32_t doskutsu_kbd_pic1_mask_at_install = 0;
++
+ void DOSVESA_PumpEvents(SDL_VideoDevice *device)
+ {
+     /* DOSKUTSU patch (Phase 9 wave 13.3): the per-pump DOS_Yield() was
+@@ -290,6 +333,12 @@ void DOSVESA_PumpEvents(SDL_VideoDevice *device)
+         DOS_Yield();
+     }
+ 
++    /* DOSKUTSU patch (Phase 9 wave 13.6.2): per-pump tick. Bumped here
++       so the engine-side phase-timing log can correlate first_irq_ticks
++       against current pump_pass_count and localize when the first IRQ-1
++       fired in flip terms. ~1 pump per flip on the engine's main loop. */
++    doskutsu_kbd_pump_pass_count++;
++
+     static bool is_extended = false;
+     static int pause_sequence_remaining = 0;
+ 
+@@ -390,6 +439,15 @@ static void KeyboardIRQHandler(void) // this is wrapped in a thing that handles
+     /* DOSKUTSU patch (Phase 9 wave 13.6.1): IRQ-fire counter for
+        keyboard-regression bisect. Read by engine's phase-timing log. */
+     doskutsu_kbd_irq_count++;
++    /* DOSKUTSU patch (Phase 9 wave 13.6.2): record FIRST IRQ-1 fire
++       ordinal so DEBUG.LOG can show whether the handler ever ran and,
++       if so, roughly when in the run (in pump-pass terms ≈ flips).
++       One-shot: after the first non-zero write the gate stops further
++       writes. +1 encoding so the value 0 unambiguously means "never
++       fired" even if pump_pass_count is 0 at the moment of fire. */
++    if (doskutsu_kbd_first_irq_ticks == 0) {
++        doskutsu_kbd_first_irq_ticks = doskutsu_kbd_pump_pass_count + 1;
++    }
+     keyevents_ringbuffer[keyevents_head] = inportb(KBD_DATA_PORT);
+     keyevents_head = (keyevents_head + 1) & (SDL_arraysize(keyevents_ringbuffer) - 1);
+     DOS_EndOfInterrupt(1);
+@@ -408,8 +466,30 @@ void DOSVESA_InitKeyboard(SDL_VideoDevice *device)
+     /* DOSKUTSU patch (Phase 9 wave 13.6.1): IRQ-bisect counters. */
+     DOS_LockVariable(doskutsu_kbd_irq_count);
+     DOS_LockVariable(doskutsu_kbd_drain_count);
++    /* DOSKUTSU patch (Phase 9 wave 13.6.2): IRQ-mask diagnostic
++       snapshots (see file-scope comment block above the variable
++       definitions for the rationale). All read from IRQ context, so
++       lock all of them. */
++    DOS_LockVariable(doskutsu_kbd_pump_pass_count);
++    DOS_LockVariable(doskutsu_kbd_first_irq_ticks);
++    DOS_LockVariable(doskutsu_kbd_irq_install_ticks);
++    DOS_LockVariable(doskutsu_kbd_irq_vector_at_install);
++    DOS_LockVariable(doskutsu_kbd_pic1_mask_at_install);
+ 
+     DOS_HookInterrupt(1, KeyboardIRQHandler, &data->keyboard_interrupt_hook);
++
++    /* DOSKUTSU patch (Phase 9 wave 13.6.2): post-hook install-time
++       snapshots for the IRQ-mask discrimination iter. Ordering of the
++       three reads is not load-bearing — DOS_HookInterrupt has just
++       returned with IRQ-1 unmasked at PIC1 and the protected-mode
++       vector for IRQ-1 (int 0x09) pointing at the chain wrapper. */
++    {
++        _go32_dpmi_seginfo info = { 0 };
++        _go32_dpmi_get_protected_mode_interrupt_vector(DOS_IRQToVector(1), &info);
++        doskutsu_kbd_irq_vector_at_install = (uint32_t)info.pm_offset;
++    }
++    doskutsu_kbd_pic1_mask_at_install = (uint32_t)inportb(PIC1_DATA);
++    doskutsu_kbd_irq_install_ticks = doskutsu_kbd_pump_pass_count;
+ }
+ 
+ void DOSVESA_QuitKeyboard(SDL_VideoDevice *device)
+-- 
+2.47.3
+

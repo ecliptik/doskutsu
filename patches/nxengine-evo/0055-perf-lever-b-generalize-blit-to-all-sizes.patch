@@ -1,0 +1,146 @@
+From dbafb20b1ea061af1c809a5426961774c37a5183 Mon Sep 17 00:00:00 2001
+From: Claude Code <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 13:42:10 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2012.2=20=E2=80=94=20generalize?=
+ =?UTF-8?q?=20fast=20path=20to=20all=20drawSurface=20sizes=20(Lever=20B=20?=
+ =?UTF-8?q?step=202)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/graphics/Renderer.cpp | 69 +++++++++++++++++++++++++--------------
+ 1 file changed, 44 insertions(+), 25 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 45855fe..92baa82 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -589,7 +589,7 @@ bool Renderer::initVideo()
+   SDL_DestroySurface(image);
+ 
+   // DOS-PORT (patch 0050, Phase 9 wave 8): seed the per-frame window-
+-  // surface cache. _try_fast_blit_16x16 reads this on every drawcall;
++  // surface cache. _try_fast_blit reads this on every drawcall;
+   // the first drawcall happens before the first flip() so we need a
+   // valid pointer here. Refreshed after every SDL_RenderPresent in
+   // flip() (post-present is the canonical SDL3 invalidation point —
+@@ -1130,9 +1130,9 @@ static inline bool _blit_rgb565(SDL_Surface *dst, SDL_Surface *src,
+ }
+ 
+ // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — hand-rolled
+-// 16×16 RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's
+-// per-call validation/queue/dispatch overhead (~0.95 ms per call on
+-// real Cirrus per the wave-5 cirrus5 capture).
++// RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's per-call
++// validation/queue/dispatch overhead (~0.95 ms per call on real Cirrus
++// per the wave-5 cirrus5 capture).
+ //
+ // Returns true on success (caller skips slow path), false if conditions
+ // don't match (caller falls through to the SDL_RenderTexture path).
+@@ -1142,9 +1142,6 @@ static inline bool _blit_rgb565(SDL_Surface *dst, SDL_Surface *src,
+ //   - src->alpha == 255 (no per-pixel alpha modulation needed; alpha-mod
+ //     drawcalls fall through so the renderer's alpha-mod plumbing
+ //     handles them correctly)
+-//   - srcrect.w == 16 AND srcrect.h == 16 (the dominant case per wave-5
+-//     drawcall logs — ~95% of drawSurface calls are 16×16 tile blits)
+-//   - dstrect.w == srcrect.w AND dstrect.h == srcrect.h (no scaling)
+ //   - window surface format == SDL_PIXELFORMAT_RGB565 (the active mode
+ //     after patches 0041 + 0045; matches the Surface's RGB565 format)
+ //   - window surface dimensions == 320×240 logical (no logical-
+@@ -1153,6 +1150,24 @@ static inline bool _blit_rgb565(SDL_Surface *dst, SDL_Surface *src,
+ //     remains the only correct option until we bypass logical-
+ //     presentation entirely)
+ //
++// DOS-PORT (patch 0055, Phase 9 wave 12.2): the dim-match precondition
++// (dstrect.w == srcrect.w && dstrect.h == srcrect.h) was dropped along
++// with the 16×16 size gate, but only because Renderer::scale == 1 in the
++// DOS port (locked at 320×240 fullscreen by patch 0010). Every
++// drawSurface call site does:
++//
++//     srcrect.w = wd * scale;   dstrect.w = srcrect.w;
++//     srcrect.h = ht * scale;   dstrect.h = srcrect.h;
++//
++// (see Renderer::drawSurface, ~line 1284). With scale==1 the dst dims
++// are *always* identical to src dims, so dropping the explicit check is
++// a no-op invariant. **If a future widescreen attempt sets scale > 1,
++// this assumption breaks and dim-match must be re-asserted** — or
++// _blit_rgb565 must be extended to handle stretching, which it
++// currently does NOT (it advances src and dst pointers in lockstep at
++// matching pitches). Same caveat applies to drawSurfaceMirrored when
++// it joins Lever B in 12.3.
++//
+ // Ordering correctness with the SW renderer's queue:
+ //
+ //   The SW renderer (SDL_render_sw.c §60-80) writes to data->surface,
+@@ -1174,19 +1189,19 @@ static inline bool _blit_rgb565(SDL_Surface *dst, SDL_Surface *src,
+ //   called or SDL_RenderPresent fires. Either way the slow-path output
+ //   composites on top of fast-path output exactly as it would if both
+ //   went through the renderer.
+-static inline bool _try_fast_blit_16x16(SDL_Renderer *renderer,
+-                                        SDL_Surface *win_surface,
+-                                        bool &renderer_queue_dirty,
+-                                        Surface *src, int srcx, int srcy,
+-                                        const SDL_Rect &srcrect, const SDL_Rect &dstrect)
++static inline bool _try_fast_blit(SDL_Renderer *renderer,
++                                  SDL_Surface *win_surface,
++                                  bool &renderer_queue_dirty,
++                                  Surface *src, int srcx, int srcy,
++                                  const SDL_Rect &srcrect, const SDL_Rect &dstrect)
+ {
+   // Cheap precondition gates first.
+   if (src->alpha != 255)
+     return false;
+-  if (srcrect.w != 16 || srcrect.h != 16)
+-    return false;
+-  if (dstrect.w != srcrect.w || dstrect.h != srcrect.h)
+-    return false;
++  // DOS-PORT (patch 0055, Phase 9 wave 12.2): size gates dropped — see
++  // header comment block for the scale==1 invariant that justifies it.
++  // _blit_rgb565 reads srcrect.w/srcrect.h directly so any size flows
++  // through the same primitive.
+ 
+   SDL_Surface *src_surface = src->surface16bpp();
+   if (!src_surface)
+@@ -1238,9 +1253,11 @@ static inline bool _try_fast_blit_16x16(SDL_Renderer *renderer,
+   }
+ 
+   // DOS-PORT (patch 0054, Phase 9 wave 12 Lever B): delegate the actual
+-  // pixel work to the generic RGB565 primitive. The 16×16 + format +
+-  // win-dim gates above stay here in this wrapper; _blit_rgb565 handles
+-  // dst-bounds clamping and the per-row inner loop.
++  // pixel work to the generic RGB565 primitive. The format + win-dim
++  // gates above stay here in this wrapper; _blit_rgb565 handles
++  // dst-bounds clamping and the per-row inner loop. Wave 12.2 dropped
++  // the 16×16 size gate — every opaque drawSurface call now flows
++  // through here regardless of sprite size.
+   return _blit_rgb565(win_surface, src_surface, srcrect, dstrect,
+                       src->colorkey16(), src->hasColorkey());
+ }
+@@ -1299,15 +1316,17 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   }
+ 
+   // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B): try the
+-  // hand-rolled 16×16 fast path before queuing through SDL_RenderTexture.
+-  // _try_fast_blit_16x16 returns true on success (drawn directly to
++  // hand-rolled fast path before queuing through SDL_RenderTexture.
++  // _try_fast_blit returns true on success (drawn directly to
+   // window->surface) or false if conditions don't match (we fall through
+   // to the slow path below). Per wave-5 drawcall logs, ~95% of drawSurface
+   // calls in the title scene are 16×16 sprites with alpha=255 and no
+-  // scale/clip — those all take the fast path.
+-  if (_try_fast_blit_16x16(_renderer, _cached_window_surface,
+-                           _renderer_queue_dirty,
+-                           src, srcx, srcy, srcrect, dstrect))
++  // scale/clip — those all took the fast path even at wave-10. Wave
++  // 12.2 (patch 0055) drops the 16×16 size gate so larger opaque sprites
++  // (font runs, dialog backgrounds, etc.) take the same path.
++  if (_try_fast_blit(_renderer, _cached_window_surface,
++                     _renderer_queue_dirty,
++                     src, srcx, srcy, srcrect, dstrect))
+   {
+     ++_fastpath_taken_block;
+     ++_fastpath_taken_global;
+-- 
+2.47.3
+

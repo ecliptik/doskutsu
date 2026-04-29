@@ -1,0 +1,222 @@
+From 9e0f73c4a6616662686b13b8ddf0789fc7cd8f24 Mon Sep 17 00:00:00 2001
+From: doskutsu wave-16-2 fixer <wave16@doskutsu.local>
+Date: Tue, 28 Apr 2026 15:32:17 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2016=20patch=200078=20=E2=80=94?=
+ =?UTF-8?q?=20fix=20transparent=E2=86=92magenta=20bleed=20in=20indexed=20m?=
+ =?UTF-8?q?ode?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two interlocking renderer-side bugs cause every transparent region in
+indexed (8bpp) mode to render as solid magenta (CRITICAL visual
+regression vs kill-switch baseline):
+
+1. paletteRemapFor() lookup mismatch — the palmap cache is keyed by
+   relative paths ("Title.pbm") per the format spec, but every
+   callsite passes ResourceManager::getPath() output ("data/Title.pbm").
+   Every lookup missed and every sprite fell through to the truecolor
+   slow path.
+
+2. SDL_ConvertSurface alpha-bake side-effect — _remap_truecolor_to_master
+   called SDL_ConvertSurface(src, RGBA32) on a colorkeyed surface; SDL3
+   invokes SDL_ConvertColorkeyToAlpha when dst format has alpha
+   (vendor/SDL/src/video/SDL_surface.c:2119), baking colorkeyed pixels
+   to alpha=0. The remap then mapped alpha==0 → master 255 (magenta).
+   loadImage afterward set the result colorkey to master 0 (black), so
+   the now-magenta transparent pixels never matched the colorkey-skip
+   test in _blit_indexed and were drawn as solid magenta.
+
+Fixes: paletteRemapFor strips trailing "data/" component on lookup
+miss; _remap_truecolor_to_master strips src colorkey at entry so
+SDL_ConvertSurface preserves alpha=255 (the (0,0,0)→0 and
+(255,0,255)→255 special cases in _nearest_master_index_local handle
+both flavors of transparency via RGB matching alone). Adds a third
+branch in loadImage for INDEX8 source without palmap entry (mod /
+unknown asset) that builds a runtime LUT from the source palette
+instead of routing through the truecolor path. Bounded diagnostic
+(first 8 calls per boot) logs format/remap-status/path for future
+regression detection.
+
+Smoke validated on DOSBox-X stage build: title (curmap=72) and Cave
+Story menu (curmap=1005) both match their kill-switch RGB565 baselines.
+
+Independent of the parallel wave-16-1 corrigendum regenerating
+master.palmap; renderer-side fix coexists with regenerated LUTs.
+---
+ src/graphics/Renderer.cpp | 51 +++++++++++++++++++++++++-
+ src/graphics/Surface.cpp  | 77 ++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 125 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index d34fe70..78d3d62 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -1407,8 +1407,57 @@ truncated:
+ 
+ const std::array<Uint8, 256>* Renderer::paletteRemapFor(const std::string &asset_name) const
+ {
++  // Try a literal lookup first (matches the format spec §2.2 contract:
++  // palmap keys are "Title.pbm", "Npc/NpcGuest.pbm", relative to data/).
+   auto it = _palmap_cache.find(asset_name);
+-  return (it != _palmap_cache.end()) ? &it->second : nullptr;
++  if (it != _palmap_cache.end()) return &it->second;
++
++  // DOS-PORT (patch 0078, Phase 9 wave 16 hotfix): runtime callers go
++  // through ResourceManager::getPath which prepends "data/" (or an
++  // absolute path ending in "/data/"). Without this prefix-strip, every
++  // sprite load missed the palmap cache, fell through to the truecolor
++  // slow path, and that path alpha-flattens colorkey pixels in
++  // SDL_ConvertSurface to RGBA32 — turning source-(0,0,0) pixels into
++  // master 255 (magenta) via the alpha==0 special case. Then loadImage
++  // set colorkey=0 (master black) on the result, so the now-magenta
++  // pixels failed the colorkey test and were drawn — the wave-16
++  // "transparent regions render as solid magenta" regression.
++  //
++  // Strip everything up to and including the trailing "data/" component
++  // and retry. Both forward slashes and backslashes are accepted (the
++  // build tool emits forward, but DOS callsites can produce backslashes
++  // through path concatenation).
++  auto strip_to_relative = [](const std::string &p) -> std::string {
++    // Find the LAST "data/" or "data\" so an absolute path like
++    // "/home/user/data/Foo.pbm" reduces to "Foo.pbm" and a relative
++    // path like "data/Foo.pbm" does the same.
++    size_t best = std::string::npos;
++    for (size_t i = 0; i + 5 <= p.size(); ++i)
++    {
++      if ((p[i] == 'd' || p[i] == 'D') &&
++          (p[i + 1] == 'a' || p[i + 1] == 'A') &&
++          (p[i + 2] == 't' || p[i + 2] == 'T') &&
++          (p[i + 3] == 'a' || p[i + 3] == 'A') &&
++          (p[i + 4] == '/' || p[i + 4] == '\\'))
++      {
++        // Require the "data" component to be at the start, or preceded
++        // by a separator — guards against false matches inside a
++        // longer name like "metadata/foo".
++        if (i == 0 || p[i - 1] == '/' || p[i - 1] == '\\')
++          best = i + 5;
++      }
++    }
++    if (best != std::string::npos) return p.substr(best);
++    return std::string();
++  };
++
++  const std::string rel = strip_to_relative(asset_name);
++  if (!rel.empty())
++  {
++    it = _palmap_cache.find(rel);
++    if (it != _palmap_cache.end()) return &it->second;
++  }
++  return nullptr;
+ }
+ 
+ bool Renderer::flushAll()
+diff --git a/src/graphics/Surface.cpp b/src/graphics/Surface.cpp
+index 9bb5815..facc8d5 100644
+--- a/src/graphics/Surface.cpp
++++ b/src/graphics/Surface.cpp
+@@ -81,10 +81,32 @@ static SDL_Surface *_remap_indexed_to_master(SDL_Surface *src,
+ // 320×240 truecolor background with ~1000 unique colors only does ~1000
+ // nearest-color walks instead of 76800. For the 3 known truecolor
+ // backgrounds at boot this is the difference between ~50 ms and ~3 s.
++//
++// DOS-PORT (patch 0078, Phase 9 wave 16 hotfix): MUTATES `src` —
++// strips its colorkey at function entry. Both call sites (loadImage
++// truecolor branch + loadFromSDLSurface INDEX8 branch) destroy `src`
++// immediately after the call, so the mutation is invisible to other
++// callers. The strip is required because the next line's
++// SDL_ConvertSurface(src, RGBA32) invokes SDL_ConvertColorkeyToAlpha
++// (vendor/SDL/src/video/SDL_surface.c:2119) on the result whenever the
++// source surface has SDL_COPY_COLORKEY set — that side-effect bakes
++// colorkeyed pixels into alpha=0, which then trips the alpha==0 →
++// master 255 (magenta) branch below. Pre-fix, transparent regions in
++// every sprite (`Title.pbm`, Cave Story logo, menu bezels, credits
++// text bg) landed at master 255 while loadImage set the result
++// colorkey to master 0, so _blit_indexed's `byte != 0` test never
++// skipped those pixels and they were drawn as solid magenta.
++//
++// Stripping the colorkey lets SDL_ConvertSurface preserve alpha=255
++// for every pixel; the (0,0,0)→0 and (255,0,255)→255 special cases in
++// _nearest_master_index_local then map both flavors of "transparent"
++// (sprite black, font magenta) to the right master index based on RGB
++// alone — independent of the colorkey-as-alpha mechanism.
+ static SDL_Surface *_remap_truecolor_to_master(SDL_Surface *src,
+                                                SDL_Palette *master_palette)
+ {
+   if (!src || !master_palette) return nullptr;
++  SDL_SetSurfaceColorKey(src, false, 0);  // see header comment for why.
+   SDL_Surface *rgba = SDL_ConvertSurface(src, SDL_PIXELFORMAT_RGBA32);
+   if (!rgba) return nullptr;
+   SDL_Surface *dst = SDL_CreateSurface(src->w, src->h, SDL_PIXELFORMAT_INDEX8);
+@@ -184,15 +206,66 @@ bool Surface::loadImage(const std::string &pbm_name, bool use_colorkey)
+   {
+     SDL_Surface *image_idx = nullptr;
+     const std::array<Uint8, 256> *remap = r->paletteRemapFor(pbm_name);
++    // DOS-PORT (patch 0078, Phase 9 wave 16 hotfix): diagnostic for the
++    // wave-16 magenta-bleed root-cause investigation. Logs the first 8
++    // loads' palmap-hit status + chosen remap path so post-iter grep
++    // confirms the fix routes assets through the precomputed LUT
++    // instead of the alpha-flatten truecolor path. Bounded to 8 lines
++    // total so DEBUG.LOG isn't spammed on subsequent boots.
++    {
++      static int _palmap_diag_count = 0;
++      if (_palmap_diag_count < 8)
++      {
++        ++_palmap_diag_count;
++        const char *path =
++          (image_scaled->format == SDL_PIXELFORMAT_INDEX8 && remap) ? "indexed-LUT" :
++          (image_scaled->format == SDL_PIXELFORMAT_INDEX8) ? "indexed-no-LUT (slow truecolor fallback — BUG TRIGGER)" :
++          "truecolor";
++        LOG_INFO("Surface::loadImage palmap-diag #{}: '{}' fmt={} remap={} → path={}",
++                 _palmap_diag_count, pbm_name,
++                 SDL_GetPixelFormatName(image_scaled->format),
++                 remap ? "HIT" : "MISS", path);
++      }
++    }
+     if (image_scaled->format == SDL_PIXELFORMAT_INDEX8 && remap)
+     {
+       image_idx = _remap_indexed_to_master(image_scaled, remap->data(),
+                                            r->masterPalette());
+     }
++    else if (image_scaled->format == SDL_PIXELFORMAT_INDEX8)
++    {
++      // DOS-PORT (patch 0078, Phase 9 wave 16 hotfix): INDEX8 source
++      // without a precomputed palmap entry (mod / unknown asset).
++      // Build a runtime LUT from the source palette directly — avoids
++      // the SDL_ConvertSurface→RGBA32→alpha-flatten path which loses the
++      // (0,0,0)→master-0 colorkey-stable rule when the source has a
++      // colorkey set. Pre-fix, this fell through to
++      // _remap_truecolor_to_master which produced master-255 (magenta)
++      // for every transparent source pixel, then loadImage set
++      // colorkey=0 (master black) on the result — the post-fix path
++      // routes through paletteRemapFor() above for stock assets, so
++      // this branch only fires for true mods.
++      Uint8 dyn_lut[256] = {0};
++      SDL_Palette *src_pal = SDL_GetSurfacePalette(image_scaled);
++      if (src_pal)
++      {
++        const SDL_Color *master_colors = r->masterPalette()->colors;
++        const int n = src_pal->ncolors;
++        for (int i = 0; i < n; ++i)
++        {
++          dyn_lut[i] = _nearest_master_index_local(master_colors,
++                                                   src_pal->colors[i].r,
++                                                   src_pal->colors[i].g,
++                                                   src_pal->colors[i].b);
++        }
++      }
++      image_idx = _remap_indexed_to_master(image_scaled, dyn_lut,
++                                           r->masterPalette());
++    }
+     else
+     {
+-      // Truecolor source OR indexed source not in remap cache (mod /
+-      // unknown asset). Slow per-pixel nearest-color path.
++      // Genuine truecolor source (32bpp bkHellsh.pbm / bkLight.pbm /
++      // bkSunset.pbm). Slow per-pixel nearest-color path.
+       image_idx = _remap_truecolor_to_master(image_scaled, r->masterPalette());
+     }
+     SDL_DestroySurface(image_scaled);
+-- 
+2.47.3
+

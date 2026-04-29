@@ -1,0 +1,82 @@
+From 114aa42ddeb39d79dd9c296e35adffb969879f36 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 10:25:02 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2013.6=20=E2=80=94=20revert=20sa?=
+ =?UTF-8?q?mple=5Fframes=3D1024=20default;=20pair=20with=20SDL=20ring=20bu?=
+ =?UTF-8?q?mp=20(patch=200067)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 13.5 real-HW data showed bigger sample_frames is SLOWER, not faster
+— per-chunk cost scales superlinearly (likely P54C 8 KB L1 D-cache vs
+chunk memcpy ≥ 8 KB at 2048-frame chunks). Drop the 1024-frame override
+and let SDL3 pick its 512-frame default (2048 B chunks).
+
+Pairs with patches/SDL/0022 which deepens the SB16 ring from 4 chunks
+(92 ms buffer) to 16 chunks (372 ms buffer) so we get audio glitch
+protection without paying the cache-pressure tax.
+
+Predicted: title scene 11.6 fps (vs 10.5 wave 13.4 / 10.2 wave 13.5),
+cleaner audio in transitions. cmod-heavy menus still ~2 fps — that's
+per-pixel cmod cost, addressable by Lever 3 (8bpp + palette) only.
+
+Init log adjusted to show "(default — SDL3 picks 512 at 22050 Hz)"
+when no env override is set, vs the prior "1024" for the wave 13.5
+default.
+---
+ src/sound/SoundManager.cpp | 37 ++++++++++++++++---------------------
+ 1 file changed, 16 insertions(+), 21 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index d2d909e..d5fb824 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -34,28 +34,23 @@ bool SoundManager::init()
+ {
+   LOG_INFO("Sound system init");
+ 
+-  // DOS-PORT (patch 0066, Phase 9 wave 13.5): increase the SDL3 audio
+-  // chunk size from the default 512 frames to 1024 frames at our 22050 Hz
+-  // sample rate. The audio thread does fixed-overhead work per chunk
+-  // (mutex lock + AudioStream pull + ConvertAudio + push to ring),
+-  // measured at ~6-7 ms per chunk on PODP 5V83. Default chunk = 23 ms of
+-  // audio at 22050 stereo S16; with the 4-chunk ring buffer that's a
+-  // 92 ms total buffer, and at our wave 13.4 ~10 fps cadence the audio
+-  // thread refills the entire ring (~4 chunks) per per-flip yield,
+-  // costing ~27 ms / flip. Doubling chunk size halves the per-yield
+-  // refill count to ~2 chunks → predicted ~13 ms / flip yield cost.
+-  // Trade-off: SFX latency grows from 92 ms → 184 ms (still fine for
+-  // Cave Story's gameplay feel). Tunable via env var:
+-  //   SET SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES=2048   (more aggressive)
+-  //   SET SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES=512    (revert to SDL3 default)
+-  // SDL_HINT_OVERRIDE priority lets the env var win over our default.
+-  if (!SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES))
+-  {
+-    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "1024",
+-                            SDL_HINT_NORMAL);
+-  }
++  // DOS-PORT (patch 0066, Phase 9 wave 13.5/13.6): keep SDL3's default
++  // sample_frames=512 (=2048 B chunks, =23 ms audio per chunk).
++  // Wave 13.5 experiment (real-HW PODP 5V83) tested 512 vs 1024 vs 2048:
++  // 512 was fastest (86 ms/flip steady title), 1024 and 2048 were ~99 ms.
++  // Per-chunk cost scales with chunk size — likely L1 cache pressure
++  // (P54C 8 KB D-cache vs 8 KB chunk memcpy at 2048 frames thrashes the
++  // cache for subsequent game-thread work). The audio buffer underrun
++  // risk that motivated chunk increase is fixed instead by bumping
++  // RING_BUFFER_CHUNKS in the SDL-side patch (vendor/SDL/src/audio/dos/
++  // SDL_dosaudio_sb.c) so we get 372 ms of buffer at 512-frame chunks.
++  // Tunable via env var if needed:
++  //   SET SDL_AUDIO_DEVICE_SAMPLE_FRAMES=1024  (probably slower)
++  //   SET SDL_AUDIO_DEVICE_SAMPLE_FRAMES=2048  (probably much slower)
+   LOG_INFO("Sound system: SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES={}",
+-           SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES));
++           SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) ?
++             SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES) :
++             "(default — SDL3 picks 512 at 22050 Hz)");
+ 
+   // DOS-PORT: SDL3_mixer registers decoders at compile time (we built it
+   // with SDLMIXER_VORBIS_STB=ON for stb_vorbis OGG, SDLMIXER_WAVE=ON for
+-- 
+2.47.3
+

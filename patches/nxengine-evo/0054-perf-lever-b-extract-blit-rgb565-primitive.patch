@@ -1,0 +1,221 @@
+From e26ef1c5a690856e3b67540d287a81f8a8578cbc Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 13:00:44 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2012.1=20=E2=80=94=20extract=20?=
+ =?UTF-8?q?=5Fblit=5Frgb565=20generic=20primitive=20(Lever=20B=20step=201,?=
+ =?UTF-8?q?=20refactor=20only)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/graphics/Renderer.cpp | 173 +++++++++++++++++++++++---------------
+ 1 file changed, 105 insertions(+), 68 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index b5cdffc..45855fe 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -1037,6 +1037,98 @@ void Renderer::flip()
+ //  LOG_INFO("===FLIPPED===\n");
+ }
+ 
++// DOS-PORT (patch 0054, Phase 9 wave 12 Lever B): generic RGB565→RGB565
++// blit primitive. Extracted from _try_fast_blit_16x16's inner body so
++// future Lever B sub-phases (12.2 generalize-to-all-sizes, 12.3
++// mirrored, 12.5 color-mod / alpha-mod) can share the dst-clip + per-row
++// inner-loop core without duplicating it.
++//
++// Preconditions are the caller's responsibility: format match (both
++// surfaces RGB565), dst/src dim match, alpha=255, etc. This primitive
++// only does:
++//   1. Clip dstrect against dst surface bounds, with srcrect adjusted
++//      symmetrically (handles partly-off-screen sprite edges).
++//   2. Per-row blit: SDL_memcpy when has_colorkey is false, per-pixel
++//      colorkey skip when true.
++//
++// Returns true on success — including the wholly-off-screen case, which
++// produces no output but matches SDL_RenderTexture's clip semantics.
++//
++// Wave 12.1 is a pure refactor: behavior is identical to the inlined
++// body that lived in _try_fast_blit_16x16 at wave 10.
++static inline bool _blit_rgb565(SDL_Surface *dst, SDL_Surface *src,
++                                SDL_Rect srcrect, SDL_Rect dstrect,
++                                Uint16 colorkey, bool has_colorkey)
++{
++  // Compute clipped dst extents. dst may legitimately be slightly off-
++  // screen for sprites near the edges (player/enemies at the boundaries
++  // of the playfield). Clip to dst bounds before the inner loop.
++  int dst_x = dstrect.x;
++  int dst_y = dstrect.y;
++  int sx = srcrect.x;
++  int sy = srcrect.y;
++  int rows = srcrect.h;
++  int cols = srcrect.w;
++
++  if (dst_x < 0)
++  {
++    cols += dst_x; // dst_x is negative; cols shrinks by |dst_x|
++    sx -= dst_x;   // advance into source
++    dst_x = 0;
++  }
++  if (dst_y < 0)
++  {
++    rows += dst_y;
++    sy -= dst_y;
++    dst_y = 0;
++  }
++  if (dst_x + cols > dst->w)
++    cols = dst->w - dst_x;
++  if (dst_y + rows > dst->h)
++    rows = dst->h - dst_y;
++
++  if (rows <= 0 || cols <= 0)
++  {
++    // Wholly off-screen — succeed with no work. The SDL_RenderTexture
++    // path would have done the same.
++    return true;
++  }
++
++  // Pixel pitch in 16-bit elements.
++  const int src_pitch_pixels = src->pitch / 2;
++  const int dst_pitch_pixels = dst->pitch / 2;
++
++  const Uint16 *sp = (const Uint16 *)src->pixels + sy * src_pitch_pixels + sx;
++  Uint16 *dp = (Uint16 *)dst->pixels + dst_y * dst_pitch_pixels + dst_x;
++
++  if (has_colorkey)
++  {
++    for (int row = 0; row < rows; ++row)
++    {
++      for (int col = 0; col < cols; ++col)
++      {
++        const Uint16 px = sp[col];
++        if (px != colorkey) dp[col] = px;
++      }
++      sp += src_pitch_pixels;
++      dp += dst_pitch_pixels;
++    }
++  }
++  else
++  {
++    // No colorkey: a straight memcpy per row beats the inner branch.
++    const size_t bytes = (size_t)cols * 2;
++    for (int row = 0; row < rows; ++row)
++    {
++      SDL_memcpy(dp, sp, bytes);
++      sp += src_pitch_pixels;
++      dp += dst_pitch_pixels;
++    }
++  }
++
++  return true;
++}
++
+ // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — hand-rolled
+ // 16×16 RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's
+ // per-call validation/queue/dispatch overhead (~0.95 ms per call on
+@@ -1119,40 +1211,6 @@ static inline bool _try_fast_blit_16x16(SDL_Renderer *renderer,
+   if (win_surface->w != 320 || win_surface->h != 240)
+     return false;
+ 
+-  // Compute clipped dst extents. dst may legitimately be slightly off-
+-  // screen for sprites near the edges (player/enemies at the boundaries
+-  // of the playfield). Clip to win bounds before the inner loop.
+-  int dst_x = dstrect.x;
+-  int dst_y = dstrect.y;
+-  int sx = srcrect.x;
+-  int sy = srcrect.y;
+-  int rows = 16;
+-  int cols = 16;
+-
+-  if (dst_x < 0)
+-  {
+-    cols += dst_x; // dst_x is negative; cols shrinks by |dst_x|
+-    sx -= dst_x;   // advance into source
+-    dst_x = 0;
+-  }
+-  if (dst_y < 0)
+-  {
+-    rows += dst_y;
+-    sy -= dst_y;
+-    dst_y = 0;
+-  }
+-  if (dst_x + cols > win_surface->w)
+-    cols = win_surface->w - dst_x;
+-  if (dst_y + rows > win_surface->h)
+-    rows = win_surface->h - dst_y;
+-
+-  if (rows <= 0 || cols <= 0)
+-  {
+-    // Wholly off-screen — succeed with no work. The SDL_RenderTexture
+-    // path would have done the same.
+-    return true;
+-  }
+-
+   // DOS-PORT (patch 0051, Phase 9 wave 8): drain queued slow-path
+   // commands so our overlay lands AFTER them — but ONLY when the queue
+   // is actually dirty. Pre-patch we called SDL_FlushRenderer
+@@ -1166,46 +1224,25 @@ static inline bool _try_fast_blit_16x16(SDL_Renderer *renderer,
+   // RenderFillRects). Cleared here after flush, and again at
+   // SDL_RenderPresent in flip()/flushAll() since present implicitly
+   // flushes.
++  //
++  // DOS-PORT (patch 0054, Phase 9 wave 12 Lever B): wave-12.1 refactor
++  // moves the flush BEFORE the dst-clamp/off-screen check (which now
++  // lives inside _blit_rgb565). For wholly-off-screen calls this means
++  // we may flush a dirty queue without producing any new output — but
++  // those queued commands need flushing eventually anyway, and skipping
++  // the flush only matters for pure correctness, never harm.
+   if (renderer_queue_dirty)
+   {
+     SDL_FlushRenderer(renderer);
+     renderer_queue_dirty = false;
+   }
+ 
+-  // Pixel pitch in 16-bit elements.
+-  const int src_pitch_pixels = src_surface->pitch / 2;
+-  const int win_pitch_pixels = win_surface->pitch / 2;
+-
+-  const Uint16 *sp = (const Uint16 *)src_surface->pixels + sy * src_pitch_pixels + sx;
+-  Uint16 *dp = (Uint16 *)win_surface->pixels + dst_y * win_pitch_pixels + dst_x;
+-
+-  if (src->hasColorkey())
+-  {
+-    const Uint16 ck = src->colorkey16();
+-    for (int row = 0; row < rows; ++row)
+-    {
+-      for (int col = 0; col < cols; ++col)
+-      {
+-        const Uint16 px = sp[col];
+-        if (px != ck) dp[col] = px;
+-      }
+-      sp += src_pitch_pixels;
+-      dp += win_pitch_pixels;
+-    }
+-  }
+-  else
+-  {
+-    // No colorkey: a straight memcpy per row beats the inner branch.
+-    const size_t bytes = (size_t)cols * 2;
+-    for (int row = 0; row < rows; ++row)
+-    {
+-      SDL_memcpy(dp, sp, bytes);
+-      sp += src_pitch_pixels;
+-      dp += win_pitch_pixels;
+-    }
+-  }
+-
+-  return true;
++  // DOS-PORT (patch 0054, Phase 9 wave 12 Lever B): delegate the actual
++  // pixel work to the generic RGB565 primitive. The 16×16 + format +
++  // win-dim gates above stay here in this wrapper; _blit_rgb565 handles
++  // dst-bounds clamping and the per-row inner loop.
++  return _blit_rgb565(win_surface, src_surface, srcrect, dstrect,
++                      src->colorkey16(), src->hasColorkey());
+ }
+ 
+ // blit the specified portion of the surface to the screen
+-- 
+2.47.3
+

@@ -1,0 +1,137 @@
+From 25d1d235acc62003f59735ed21d505a77116bed5 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 13:39:32 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2013.6.2=20patch=200070=20?=
+ =?UTF-8?q?=E2=80=94=20surface=20IRQ-1=20install-time=20+=20first-fire=20d?=
+ =?UTF-8?q?iagnostics=20in=20DEBUG.LOG?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pairs with SDL-side patch 0025 (which defines the new externs this
+patch consumes). Wave 13.6.1 surfaced that IRQ-1 is silently
+undelivered for ~42 s on PODP 5V83 real HW after main-loop entry, but
+existing counters (kbd_irq_count, kbd_drain_count) can't discriminate
+the four candidate causes from architect's
+/tmp/wave-13-6-1-irq-mask-analysis.md §3. This patch adds five new
+fields to the existing kbd/audio block N LOG_INFO line so a single
+CF-card iter can answer:
+
+  pump_pass        — current pump count (≈ flip count). Provides
+                     scale for the *_ticks values below.
+  pic1_mask        — inportb(0x21) snapshot at end of InitKeyboard.
+                     Bit 1 (0x02) clear ⇒ IRQ-1 unmasked at the
+                     controller. STATIC across blocks.
+  first_irq_ticks  — pump_pass at first IRQ-1 fire (+1 encoding;
+                     0 means "handler never fired").
+  install_ticks    — pump_pass at end of InitKeyboard (always 0 in
+                     practice; logged so the first_irq_ticks vs
+                     install_ticks comparison is well-defined).
+  vector_at_install — protected-mode IRQ-1 (.pm_offset) right after
+                      DOS_HookInterrupt. Validates the chain wrapper
+                      installed at the expected handler address.
+                      STATIC across blocks.
+
+Five extern declarations added to the existing extern "C" block at
+namespace scope (matching patch 0068's linkage rationale: a plain
+`extern volatile uint32_t foo;` inside the surrounding NXE::Graphics::
+(anonymous namespace) would bind namespace-qualified and fail to link).
+Qualifiers match the SDL-side definitions byte-for-byte; mismatched
+qualifiers across TUs are UB.
+
+pic1_irr (architect's §5b 5th field) is intentionally omitted for this
+iter per team-lead direction — writing OCW3 (0x0A) to port 0x20 to
+select IRR readback momentarily perturbs PIC state; pic1_mask alone is
+enough to confirm/refute hypothesis 3a. If 3a is refuted, IRR can land
+in a follow-up.
+
+Adds 5 fields to the same line as the existing kbd_irq/kbd_drain/
+ring_chunks. Per-block (every 100 flips) so cost is negligible.
+
+Default behaviour unchanged — pure additive read-only diagnostic.
+
+See architect's /tmp/wave-13-6-1-irq-mask-analysis.md §5b for spec,
+§5c for the discrimination table.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 49 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 47 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 34b59c4..c12a400 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -657,10 +657,23 @@ struct _DrawcallTimer
+ // linkage spec is permitted at namespace scope in C++. Qualifiers MUST
+ // match the SDL-side definitions byte-for-byte; mismatched qualifiers
+ // across TUs are UB.
++//
++// DOS-PORT (patch 0070, Phase 9 wave 13.6.2): five new externs for the
++// IRQ-mask diagnostic log line. Same C-file defining TU as above; same
++// linkage rationale. doskutsu_kbd_pump_pass_count is logged alongside
++// the spec-required four fields so the engineer reading DEBUG.LOG can
++// localize first_irq_ticks against current pump-pass position (one
++// pump per flip) — without it, first_irq_ticks=N is a raw number with
++// no scale.
+ extern "C" {
+   extern volatile std::uint32_t doskutsu_kbd_irq_count;
+   extern volatile std::uint32_t doskutsu_kbd_drain_count;
+   extern int doskutsu_audio_ring_chunks_active;
++  extern volatile std::uint32_t doskutsu_kbd_pump_pass_count;
++  extern volatile std::uint32_t doskutsu_kbd_first_irq_ticks;
++  extern volatile std::uint32_t doskutsu_kbd_irq_install_ticks;
++  extern volatile std::uint32_t doskutsu_kbd_irq_vector_at_install;
++  extern volatile std::uint32_t doskutsu_kbd_pic1_mask_at_install;
+ }
+ 
+ void _maybe_flush_phase_timing_audit()
+@@ -722,11 +735,43 @@ void _maybe_flush_phase_timing_audit()
+   // their comment block for the linkage rationale. The kbd counters
+   // are MONOTONIC across the run (never reset) — read deltas between
+   // consecutive blocks.
+-  LOG_INFO("kbd/audio block {}: kbd_irq={} kbd_drain={} ring_chunks={}",
++  // DOS-PORT (patch 0070, Phase 9 wave 13.6.2): extend the kbd/audio
++  // line with five IRQ-mask diagnostic fields. See architect's
++  // /tmp/wave-13-6-1-irq-mask-analysis.md §5b/§5c for the discrimination
++  // table. Format chosen so a single grep "kbd/audio block" tells the
++  // whole story per measurement run:
++  //   pump_pass        — current pump count (one per flip), gives scale
++  //                      for the *_ticks values below
++  //   pic1_mask        — inportb(0x21) snapshot at end of InitKeyboard.
++  //                      Bit 1 (0x02) clear => IRQ-1 unmasked at PIC.
++  //                      Static value (set once); same in every block.
++  //   first_irq_ticks  — pump_pass at first IRQ-1 fire (+1 encoding;
++  //                      0 means "handler never fired"). Compare to
++  //                      install_ticks and current pump_pass to localize
++  //                      the first fire in flip terms.
++  //   install_ticks    — pump_pass at end of InitKeyboard (always 0).
++  //                      Logged so first_irq_ticks vs install_ticks is
++  //                      well-defined.
++  //   vector_at_install— protected-mode IRQ-1 (.pm_offset) right after
++  //                      DOS_HookInterrupt. Validates chain wrapper
++  //                      installed at expected address. Static.
++  // pic1_irr (architect's §5b 5th field) is intentionally OMITTED for
++  // this iter per team-lead direction: writing OCW3 (0x0A) to port 0x20
++  // momentarily perturbs PIC state. pic1_mask alone suffices to confirm
++  // or refute hypothesis 3a; if 3a is refuted, IRR can be added in a
++  // follow-up patch.
++  LOG_INFO("kbd/audio block {}: kbd_irq={} kbd_drain={} ring_chunks={} "
++           "pump_pass={} pic1_mask=0x{:02x} first_irq_ticks={} "
++           "install_ticks={} vector_at_install=0x{:08x}",
+            _dc_block_idx,
+            (unsigned long)doskutsu_kbd_irq_count,
+            (unsigned long)doskutsu_kbd_drain_count,
+-           doskutsu_audio_ring_chunks_active);
++           doskutsu_audio_ring_chunks_active,
++           (unsigned long)doskutsu_kbd_pump_pass_count,
++           (unsigned)(doskutsu_kbd_pic1_mask_at_install & 0xff),
++           (unsigned long)doskutsu_kbd_first_irq_ticks,
++           (unsigned long)doskutsu_kbd_irq_install_ticks,
++           (unsigned long)doskutsu_kbd_irq_vector_at_install);
+   _drawcall_accum_ns_block = 0;
+   _drawcall_count_block = 0;
+   _flip_inner_accum_ns_block = 0;
+-- 
+2.47.3
+

@@ -1,0 +1,183 @@
+From a87e69f94badc1cfb003d8c35d25a18100645fab Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 11:10:38 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2013.6.1=20patch=200068=20?=
+ =?UTF-8?q?=E2=80=94=20keyboard=20IRQ=20counters=20in=20phase-timing=20log?=
+ =?UTF-8?q?=20+=20ring-chunks=20init=20banner?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pairs with SDL-side patch 0023 (which defines the externs this engine
+patch consumes). Wave 13.6 introduced a keyboard regression on PODP
+5V83 (frozen kbd, 8042 buffer-overflow beep) when ring_chunks was
+bumped 4→16 to fix audio chop. This patch makes that regression
+bisectable in a single CF-card swap by surfacing the relevant runtime
+state in DEBUG.LOG.
+
+Changes:
+
+1. Renderer.cpp::_maybe_flush_phase_timing_audit() — second LOG_INFO
+   line "kbd/audio block N: kbd_irq=X kbd_drain=Y ring_chunks=Z"
+   immediately after the existing phase-timing line. Same block index
+   so the two lines correlate via grep. Adding three more fields to
+   the existing 11-line LOG_INFO would be unreadable; a separate line
+   is materially easier to diff between bisect runs. The kbd counters
+   are MONOTONIC (only increment, never reset) — user reads deltas
+   between consecutive blocks. Per 100 flips so cost is negligible.
+
+2. SoundManager.cpp::init() — wave-13.6.1 init banner "ring_chunks=N
+   FORCE_PUMP_YIELD=on/off" placed AFTER MIX_CreateMixerDevice
+   succeeds.
+
+§5 Option A vs B decision:
+
+   Spec §5 placed the init banner at end of Renderer::initVideo, but
+   in this codebase Renderer::init runs BEFORE SoundManager::init
+   (vendor/nxengine-evo/src/main.cpp lines 482 vs 510). The
+   doskutsu_audio_ring_chunks_active symbol is set inside
+   DOSSOUNDBLASTER_OpenDevice → resolve_ring_chunks(), which doesn't
+   run until MIX_CreateMixerDevice fires inside SoundManager::init().
+   Logging from Renderer::initVideo would always read the initializer
+   value 16 regardless of env-var setting — silently misleading.
+
+   Chose Option A (move the banner to SoundManager.cpp, after
+   MIX_CreateMixerDevice success) over Option B (log the env var as
+   set/unset directly via SDL_getenv) because Option A preserves
+   single-source-of-truth: the SDL-side resolver normalizes garbage
+   inputs (foo, empty, 0, 32) to 16, while SDL_getenv would log the
+   literal string "foo" — misleading. Banner now logically sits in
+   the audio init path where it belongs (it's an audio-system
+   runtime knob).
+
+Externs:
+
+   Three extern decls (volatile uint32_t for the kbd counters; plain
+   int for ring_chunks) declared in `extern "C" { ... }` blocks at
+   namespace scope, NOT inline at point of use. Reason: SDL defines
+   the symbols at file scope in C TUs, but a plain `extern int foo;`
+   inside the surrounding NXE::Graphics::(anonymous namespace) /
+   NXE::Sound namespace binds to a namespace-qualified symbol and
+   the link fails. extern "C" forces unmangled global linkage to
+   match the SDL-side definitions; the linkage spec is permitted
+   at namespace scope (not function-block scope, ruling out the
+   inline approach the spec sketched). Qualifiers match the SDL-
+   side definitions byte-for-byte; mismatched qualifiers across TUs
+   are UB.
+
+Default behaviour unchanged from wave 13.6 (ring_chunks=16) when no
+env vars are set. See docs/PHASE9-WAVE-14-PLAN.md §2.
+
+Co-Authored-By: Claude Code
+---
+ src/graphics/Renderer.cpp  | 34 ++++++++++++++++++++++++++++++++++
+ src/sound/SoundManager.cpp | 34 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 68 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index fd270a9..34b59c4 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -643,6 +643,26 @@ struct _DrawcallTimer
+   }
+ };
+ 
++// DOS-PORT (patch 0068, Phase 9 wave 13.6.1): externs into the SDL3-DOS
++// keyboard / audio backends for the bisect-counters logged below. Defined
++// at file scope in C TUs:
++//   doskutsu_kbd_irq_count, doskutsu_kbd_drain_count
++//     vendor/SDL/src/video/dos/SDL_dosevents.c (volatile uint32_t)
++//   doskutsu_audio_ring_chunks_active
++//     vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c (plain int)
++// extern "C" linkage spec is required: a plain `extern int foo;` inside
++// the surrounding NXE::Graphics::(anonymous namespace) would bind to a
++// namespace-scoped symbol and the link would fail. extern "C" forces
++// unmangled global linkage to match the SDL-side definitions, and the
++// linkage spec is permitted at namespace scope in C++. Qualifiers MUST
++// match the SDL-side definitions byte-for-byte; mismatched qualifiers
++// across TUs are UB.
++extern "C" {
++  extern volatile std::uint32_t doskutsu_kbd_irq_count;
++  extern volatile std::uint32_t doskutsu_kbd_drain_count;
++  extern int doskutsu_audio_ring_chunks_active;
++}
++
+ void _maybe_flush_phase_timing_audit()
+ {
+   if ((_flip_total % _dc_tally_every_flips) != 0) return;
+@@ -693,6 +713,20 @@ void _maybe_flush_phase_timing_audit()
+            audio_engine_ms_x10, dc_avg_us_x10,
+            _abl_no_dc_timing() ? 1 : 0,
+            _abl_cache_winsurf() ? 1 : 0);
++  // DOS-PORT (patch 0068, Phase 9 wave 13.6.1): keyboard-IRQ-delivery
++  // counters and active audio ring-chunks value, logged alongside the
++  // existing phase-timing block so each measurement run self-describes.
++  // Counters bumped in vendor/SDL/src/video/dos/SDL_dosevents.c (irq +
++  // pump drain). ring_chunks resolved in SDL_dosaudio_sb.c on first
++  // OpenDevice. Externs declared at namespace scope just above; see
++  // their comment block for the linkage rationale. The kbd counters
++  // are MONOTONIC across the run (never reset) — read deltas between
++  // consecutive blocks.
++  LOG_INFO("kbd/audio block {}: kbd_irq={} kbd_drain={} ring_chunks={}",
++           _dc_block_idx,
++           (unsigned long)doskutsu_kbd_irq_count,
++           (unsigned long)doskutsu_kbd_drain_count,
++           doskutsu_audio_ring_chunks_active);
+   _drawcall_accum_ns_block = 0;
+   _drawcall_count_block = 0;
+   _flip_inner_accum_ns_block = 0;
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index d5fb824..3191cc6 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -22,6 +22,18 @@ namespace NXE
+ namespace Sound
+ {
+ 
++// DOS-PORT (patch 0068, Phase 9 wave 13.6.1): extern into the SDL3-DOS
++// audio backend for the wave-13.6.1 init banner below. Defined at file
++// scope in vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c (plain int, set
++// on first OpenDevice). extern "C" linkage spec is required: a plain
++// `extern int foo;` inside the surrounding NXE::Sound namespace would
++// bind to a namespace-scoped symbol and the link would fail. extern
++// "C" forces unmangled global linkage; the linkage spec is permitted
++// at namespace scope in C++.
++extern "C" {
++  extern int doskutsu_audio_ring_chunks_active;
++}
++
+ SoundManager::SoundManager() {}
+ SoundManager::~SoundManager() {}
+ 
+@@ -81,6 +93,28 @@ bool SoundManager::init()
+     return false;
+   }
+ 
++  // DOS-PORT (patch 0068, Phase 9 wave 13.6.1): consolidated runtime-knob
++  // banner so DEBUG.LOG records which ring-chunks value and yield mode a
++  // given iter ran with. ring_chunks is sourced from SDL_dosaudio_sb.c's
++  // resolve_ring_chunks() via the extern declared at namespace scope
++  // above — single source of truth. Placed here (NOT in Renderer::
++  // initVideo as the original spec §5 suggested) because in this code-
++  // base Renderer::init runs BEFORE SoundManager::init (see vendor/
++  // nxengine-evo/src/main.cpp lines 482 vs 510), so logging from init-
++  // Video would always read the initializer value 16 regardless of
++  // env-var setting. By the time MIX_CreateMixerDevice returns success-
++  // fully above, DOSSOUNDBLASTER_OpenDevice has run and the symbol
++  // reflects the resolved value.
++  {
++    const char *force_yield = SDL_getenv("SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD");
++    const bool yield_forced = force_yield && force_yield[0] == '1' && force_yield[1] == 0;
++    LOG_INFO("wave-13.6.1: ring_chunks={} FORCE_PUMP_YIELD={} "
++             "(set SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=4|8|16 to override; "
++             "default 16 matches wave 13.6 behaviour)",
++             doskutsu_audio_ring_chunks_active,
++             yield_forced ? "on" : "off");
++  }
++
+   // DOS-PORT: Mix_AllocateChannels(64) is gone in SDL3_mixer — the new
+   // API has no fixed channel count. Tracks are created on-demand by
+   // Pixtone via MIX_CreateTrack(). The 64-channel cap is preserved by
+-- 
+2.47.3
+

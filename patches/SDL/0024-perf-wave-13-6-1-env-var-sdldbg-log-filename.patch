@@ -1,0 +1,84 @@
+From 93cd06fe5fefaa937ac4314e60df068b651fdf61 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 28 Apr 2026 12:06:12 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2013.6.1?=
+ =?UTF-8?q?=20patch=200024=20=E2=80=94=20env-var=20log=20filename=20for=20?=
+ =?UTF-8?q?SDLDBG.LOG?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 13.6.1's primary patch 0023 made RING_BUFFER_CHUNKS env-var-controlled
+to allow a 4-config keyboard-regression bisect in a single CF-card swap.
+The .bat-driven bisect would have to REN logs between configs to avoid
+DOSKUTSU.EXE truncating each prior run's data on next launch — and that
+rename pattern has freeze edge cases (if the keyboard locks before .bat's
+post-rename runs, logs land at SDLDBG.LOG and need pre-rename in the next
+.bat).
+
+This patch makes the SDL trace path overridable via DOSKUTSU_LOG_TAG. When
+set, default becomes /DOSKUTSU/<TAG>SDL.LOG; when unset, default is
+/DOSKUTSU/sdldbg.log. Each .bat just SETs DOSKUTSU_LOG_TAG=R1/R2/R3/R4 and
+the runs land directly at unique paths — no rename, no freeze edge case.
+
+Also moves the default location from C:\ root to C:\DOSKUTSU\ so SDL trace
+lives alongside engine DEBUG.LOG. Single directory to scp from after a
+real-HW iter.
+
+Pairs with engine-side patch 0069 which honours the same env var for
+DEBUG.LOG → <TAG>.LOG (already lives in C:\DOSKUTSU\ via getPrefPath).
+
+Tag length: <TAG>SDL.LOG must fit DOS 8.3, so tag should be ≤5 chars
+(R1..R9 fits; longer tags get truncated by FAT12/16 short-name handling).
+Strict-match: any non-empty value used as-is; empty/unset → default.
+
+See docs/PHASE9-WAVE-14-PLAN.md §2 for the wave 13.6.1 bisect design.
+---
+ src/video/dos/SDL_dosdbg.c | 27 ++++++++++++++++++++++++++-
+ 1 file changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/src/video/dos/SDL_dosdbg.c b/src/video/dos/SDL_dosdbg.c
+index eaf34399d..26e38484a 100644
+--- a/src/video/dos/SDL_dosdbg.c
++++ b/src/video/dos/SDL_dosdbg.c
+@@ -42,11 +42,36 @@
+ // See SDL_dosdbg.h for rationale (gateway4 wave 1 log-race postmortem,
+ // docs/PHASE9-15FPS-PLAN.md §3 Lever 1 wave 2 plan).
+ static FILE *g_dbg_log = NULL;
++static char g_dbg_log_path[64];
++
++// DOSKUTSU patch (Phase 9 wave 13.6.1): the log-file path is overridable via
++// the DOSKUTSU_LOG_TAG env var so a multi-config bisect can write each run's
++// SDL trace to a unique filename without renames between runs. The log lives
++// in the doskutsu game directory alongside DEBUG.LOG (rather than at the CF
++// root) — single dir to scp from after a real-HW iter. When unset
++// (empty/null), default "/DOSKUTSU/sdldbg.log" is used. When set to e.g.
++// "R1", the SDL trace goes to "/DOSKUTSU/R1SDL.LOG". Tag should be short
++// enough that "<TAG>SDL.LOG" fits DOS 8.3 (so max 5 chars). Strict match:
++// any non-empty value is used as-is; we don't try to validate.
++static const char *doskutsu_dbg_resolve_path(void)
++{
++    if (g_dbg_log_path[0] == '\0') {
++        const char *tag = SDL_getenv("DOSKUTSU_LOG_TAG");
++        if (tag && tag[0] != '\0') {
++            SDL_snprintf(g_dbg_log_path, sizeof(g_dbg_log_path),
++                         "/DOSKUTSU/%sSDL.LOG", tag);
++        } else {
++            SDL_strlcpy(g_dbg_log_path, "/DOSKUTSU/sdldbg.log",
++                        sizeof(g_dbg_log_path));
++        }
++    }
++    return g_dbg_log_path;
++}
+ 
+ void doskutsu_dbg_open(void)
+ {
+     if (!g_dbg_log) {
+-        g_dbg_log = fopen("/sdldbg.log", "wb");
++        g_dbg_log = fopen(doskutsu_dbg_resolve_path(), "wb");
+     }
+ }
+ 
+-- 
+2.47.3
+
