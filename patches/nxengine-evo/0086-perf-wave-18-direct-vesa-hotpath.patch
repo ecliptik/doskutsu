@@ -1,0 +1,494 @@
+From f59f89bf9fccdc8732ce4e7bbed6895b2f1ad557 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Thu, 30 Apr 2026 09:40:30 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2018=20patch=200086=20=E2=80=94=20d?=
+ =?UTF-8?q?irect-VESA=20hot=20path=20(env-gated,=20default=20OFF)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0086, Phase 9 wave 18). Hypothesis: bypassing
+SDL_RenderPresent + SDL_UpdateWindowSurface and writing the engine's
+window surface directly into VRAM via SDL/0034's PresentFull helper
+saves the SDL3-state-machine cost on every flip. Wave-16-3's WAVE16-FB-
+FIRSTFLUSH diagnostic measured present=5ms on real HW at 8bpp; that's
+~13% of the 38.7 ms/flip budget at 25.6 fps wave-17.6 baseline.
+
+Predicted +2-5 fps title (framed as a hypothesis to measure per
+memory/perf_predictions_unreliable.md, not a goal to defend).
+Possible outcomes:
+  +5 fps -> follow-up patch promotes to default-ON
+  +0 fps -> SDL layer wasn't the bottleneck; close wave 18, pivot
+            to wave 19 (Cirrus hwblit) with confidence
+  visual artifacts -> revert; risks R1/R2/R3 (per prep doc) manifested
+
+API surface consumed (from SDL/0034 sdl-engine deliverable):
+  SDL_DOSVesaDirectGetState  — snapshot fb_state into POD struct
+  SDL_DOSVesaDirectGetGeneration — cheap mode-change detection
+  SDL_DOSVesaDirectPresentFull   — single-call full-frame flush; picks
+                                   LFB memcpy / banked dosmemput / multi-
+                                   bank flush automatically
+  SDL_DOSVesaDirectProgramPalette — VGA DAC sync on master-palette change
+
+Integration in Renderer.cpp::flip():
+  1. Gate on SDL_HINT_DOSKUTSU_DIRECT_VESA=1 (strict-1 match per
+     wave-16+ default-OFF / strict-1-to-enable convention; matches
+     SDL_HINT_DOSKUTSU_FORCE_LFB / DISPLAY_START_FIX / LFB_SENTINEL /
+     PREVFRAME_DIFF).
+  2. Skip first DIRTY_FIRST_N_FRAMES (init backbuffer undefined) and
+     any flip with _force_full_refresh set (flushAll, scene reset).
+  3. _direct_vesa_present():
+     - SDL_FlushRenderer to drain SW-renderer queue (R1 — SW renderer
+       dst IS the window surface; flush=copy is sufficient without
+       SDL_RenderPresent's page-flip semantics)
+     - SDL_DOSVesaDirectGetGeneration / GetState on first call /
+       generation bump
+     - SDL_DOSVesaDirectProgramPalette on master_palette->version drift
+     - SDL_DOSVesaDirectPresentFull single-call full-frame present
+  4. On any false return (state invalid, dim mismatch, pitches differ,
+     PresentFull failed) fall through to existing SDL path. No visual
+     regression even if direct path never engages.
+
+R2 (window-surface re-allocation drift between flips) is covered by
+SDL/0034 v2's generation counter — populate_fb_state_for_direct_fb
+bumps it on window-create AND lazy-reinit, so a generation bump
+signals BOTH "fb_state changed" AND "window->surface->pixels may have
+moved." Re-snapshotting on bump is the canonical mitigation; no
+separate SDL_RenderPresent heartbeat is required (see SDL/0034
+header § Mode-change semantics).
+
+Diagnostic counters bumped per attempt and reported in the per-100-flip
+phase-timing audit block (extends the existing log line):
+  [direct-vesa: presents=N total_ms=M avg_ms_x10=X failed=N]
+  [ablation: ... DIRECT_VESA=<0|1>]
+
+Initial DEBUG.LOG announce on initVideo and one-shot snapshot log on
+first eligible flip ("direct-vesa: snapshot @gen=...") so each iter's
+configuration is greppable from DEBUG.LOG.
+
+Test plan (subsequent tasks #4-#6):
+  - DOSBox-X visual A/B with both polarities (off=zero-change baseline,
+    on=engaged path)
+  - Real-HW iter: three runs in one boot via DOS REN — OFF baseline,
+    ON banked, ON+SDL_HINT_DOSKUTSU_FORCE_LFB=1
+  - Logback analysis reports measured fps vs wave-17.6 baseline (25.6),
+    vs prediction (+2-5), vs 50 fps KPI
+
+Documentation: docs/BOOT.md updated under Diagnostic / development
+options per memory/env_vars_document_in_user_docs.md convention.
+
+References:
+  docs/PHASE9-WAVE-17-18-PLAN.md § 4
+  /tmp/wave18-nxengine-prep.md (prep doc with R1/R2/R3 risk analysis)
+  /tmp/wave18-sdl-flush-audit.md (sdl-engine SDL_dosframebuffer.c audit)
+  vendor/SDL/include/SDL3/SDL_dosvesa_directaccess.h (SDL/0034 API doc)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 283 +++++++++++++++++++++++++++++++++++++-
+ src/graphics/Renderer.h   |  35 +++++
+ 2 files changed, 313 insertions(+), 5 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 57fa3d3..64754b2 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -89,6 +89,19 @@ inline bool _abl_no_input_poll_env()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0086, Phase 9 wave 18): direct-VESA hot path opt-in.
++// Strict "1" match per the wave-16+ default-OFF / strict-"1" convention
++// (matches SDL_HINT_DOSKUTSU_FORCE_LFB / DISPLAY_START_FIX / LFB_SENTINEL /
++// PREVFRAME_DIFF). Default OFF; experimental opt-in for the wave 18
++// real-HW measurement iter. Predicted +2-5 fps title (per
++// PHASE9-WAVE-17-18-PLAN § 4) — framed as a hypothesis to measure, not
++// a goal to defend (per perf_predictions_unreliable.md).
++inline bool _abl_direct_vesa()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_DIRECT_VESA");
++  return v;
++}
++
+ // drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
+ // Track which Surface objects produce NULL textures so we log each origin
+ // once + a periodic running count, instead of hundreds of identical lines
+@@ -656,6 +669,20 @@ Uint64 _flip_inner_accum_ns_global = 0;
+ Uint64 _inter_flip_accum_ms_block = 0;  // ms sum (12.3-D inter_flip is ms)
+ Uint64 _inter_flip_accum_ms_global = 0;
+ 
++// DOS-PORT (patch 0086, Phase 9 wave 18): direct-VESA hot path counters.
++// Bumped only when SDL_HINT_DOSKUTSU_DIRECT_VESA=1 routes flip() through
++// Renderer::_direct_vesa_present() (skipping SDL_RenderPresent +
++// SDL_UpdateWindowSurface). All zero in the default-OFF configuration.
++//
++// Per-block (reset every _dc_tally_every_flips frames in the audit
++// flush below) so the report shows attribution within each measurement
++// window. Total ns accumulator is summed across direct-present calls
++// only — failed presents that fall through to the SDL_RenderPresent path
++// don't pollute the average.
++Uint32 _direct_vesa_presents_block = 0;
++Uint64 _direct_vesa_present_accum_ns_block = 0;
++Uint32 _direct_vesa_present_failed_block = 0;
++
+ // RAII helper — captures SDL_GetTicksNS at construction, accumulates
+ // elapsed ns to the file-scope counters at destruction. Place at top of
+ // each drawcall method to cover all return paths cleanly.
+@@ -749,17 +776,35 @@ void _maybe_flush_phase_timing_audit()
+   // — under NO_DC_TIMING=1 the dc_total_ms / dc_avg fields will read zero
+   // because the accumulators are gated; this suffix tells a future log-grepper
+   // why without forcing them back to the patch.
++  // patch 0086 (wave 18): also append direct-VESA per-block counters and
++  // the DIRECT_VESA ablation flag. When the env var is unset the
++  // direct-vesa fields all read 0 and DIRECT_VESA=0 — easy to filter A/B
++  // against wave 17 baseline logs. presents_avg_ms_x10 averages over the
++  // direct-present count (NOT the block size) so the figure stays
++  // comparable when only some flips engage the direct path (e.g.
++  // first-N forces, _force_full_refresh fallthroughs, snapshot retries).
++  const long long dv_total_ms = (long long)(_direct_vesa_present_accum_ns_block / 1000000ull);
++  const long long dv_avg_ms_x10 = (_direct_vesa_presents_block > 0)
++      ? (long long)((_direct_vesa_present_accum_ns_block * 10ull)
++                    / ((Uint64)_direct_vesa_presents_block * 1000000ull))
++      : 0;
+   LOG_INFO("phase timing block {}: drawcalls={} dc_total_ms={} "
+            "flip_inner_total_ms={} inter_flip_total_ms={} "
+            "(per-flip avg x10: dc_ms={} fi_ms={} if_ms={} derived audio+engine_ms={}; "
+-           "per-drawcall avg us_x10={}) [ablation: NO_DC_TIMING={} CACHE_WINSURF={}]",
++           "per-drawcall avg us_x10={}) "
++           "[direct-vesa: presents={} total_ms={} avg_ms_x10={} failed={}] "
++           "[ablation: NO_DC_TIMING={} CACHE_WINSURF={} DIRECT_VESA={}]",
+            _dc_block_idx, _drawcall_count_block,
+            (long long)dc_total_ms, (long long)flip_inner_total_ms,
+            (long long)inter_flip_total_ms,
+            dc_avg_ms_x10, fi_avg_ms_x10, if_avg_ms_x10,
+            audio_engine_ms_x10, dc_avg_us_x10,
++           (unsigned long)_direct_vesa_presents_block,
++           dv_total_ms, dv_avg_ms_x10,
++           (unsigned long)_direct_vesa_present_failed_block,
+            _abl_no_dc_timing() ? 1 : 0,
+-           _abl_cache_winsurf() ? 1 : 0);
++           _abl_cache_winsurf() ? 1 : 0,
++           _abl_direct_vesa() ? 1 : 0);
+   // DOS-PORT (patch 0068, Phase 9 wave 13.6.1): keyboard-IRQ-delivery
+   // counters and active audio ring-chunks value, logged alongside the
+   // existing phase-timing block so each measurement run self-describes.
+@@ -810,6 +855,10 @@ void _maybe_flush_phase_timing_audit()
+   _drawcall_count_block = 0;
+   _flip_inner_accum_ns_block = 0;
+   _inter_flip_accum_ms_block = 0;
++  // patch 0086 (wave 18): reset direct-VESA per-block counters.
++  _direct_vesa_presents_block = 0;
++  _direct_vesa_present_accum_ns_block = 0;
++  _direct_vesa_present_failed_block = 0;
+ }
+ 
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
+@@ -1116,10 +1165,28 @@ bool Renderer::initVideo()
+   // DOS-PORT (patch 0063, Phase 9 wave 13.2): log ablation-flag state
+   // so DEBUG.LOG records which surgical-instrumentation ablations were
+   // active for this iter. See docs/PHASE9-NEXT-WAVES-PLAN.md §6.
+-  LOG_INFO("Renderer::initVideo: ablation flags: NO_DC_TIMING={} CACHE_WINSURF={} NO_INPUT_POLL={}",
++  // patch 0086 (wave 18): also log the direct-VESA opt-in so each iter's
++  // configuration is greppable from DEBUG.LOG without cross-referencing
++  // the SDL trace.
++  LOG_INFO("Renderer::initVideo: ablation flags: NO_DC_TIMING={} CACHE_WINSURF={} NO_INPUT_POLL={} DIRECT_VESA={}",
+            _abl_no_dc_timing() ? 1 : 0,
+            _abl_cache_winsurf() ? 1 : 0,
+-           _abl_no_input_poll_env() ? 1 : 0);
++           _abl_no_input_poll_env() ? 1 : 0,
++           _abl_direct_vesa() ? 1 : 0);
++  if (_abl_direct_vesa())
++  {
++    LOG_INFO("Renderer::initVideo: direct-VESA hot path ENABLED via "
++             "SDL_HINT_DOSKUTSU_DIRECT_VESA=1 (experimental opt-in; "
++             "default OFF since wave 18; bypasses SDL_RenderPresent / "
++             "SDL_UpdateWindowSurface and writes via SDL/0034's "
++             "PresentFull helper; R2 mitigation handled by SDL/0034 "
++             "generation counter — no per-N-flip heartbeat needed)");
++  }
++  else
++  {
++    LOG_INFO("Renderer::initVideo: direct-VESA hot path DISABLED "
++             "(default; set SDL_HINT_DOSKUTSU_DIRECT_VESA=1 to opt in)");
++  }
+   // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
+   // PumpEvents yield-skip is active. Default ON (skip); env-var override
+   // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
+@@ -1881,6 +1948,159 @@ static int _doskutsu_diff_against_prev(SDL_Surface *prev,
+   return n_out;
+ }
+ 
++// DOS-PORT (patch 0086, Phase 9 wave 18): direct-VESA hot path. Bypasses
++// SDL_RenderPresent + SDL_UpdateWindowSurface and writes the engine's
++// window surface directly into VRAM via SDL/0034's helper API. Single-
++// call PresentFull integration: the helper picks LFB-memcpy / banked-
++// dosmemput / multi-bank flush automatically based on the snapshot
++// flags. Today's path is single-bank banked on g2k (Cirrus + UNIVBE
++// 6.70, banked-mode default since SDL/0019 auto-disables LFB on Cirrus)
++// or LFB-memcpy when SDL_HINT_DOSKUTSU_FORCE_LFB=1 is also set.
++//
++// Engaged from flip() under two preconditions:
++//   1. SDL_HINT_DOSKUTSU_DIRECT_VESA=1 (strict-1 match; default OFF)
++//   2. _force_full_refresh and _dirty_first_n_frames_remaining clear
++//      (init / scene-reset cases route through SDL_RenderPresent)
++//
++// R2 (window-surface re-allocation drift) is covered by SDL/0034 v2's
++// generation counter — populate_fb_state_for_direct_fb success bumps
++// the counter on both window-create AND lazy-reinit, so a generation
++// bump signals BOTH "fb_state changed" AND "window->surface->pixels
++// may have moved." Re-snapshotting on bump (below) is the canonical
++// mitigation; no separate SDL_RenderPresent heartbeat is required.
++// See vendor/SDL/include/SDL3/SDL_dosvesa_directaccess.h § Mode-change
++// semantics.
++//
++// Returns false on:
++//   - invalid window surface
++//   - SDL/0034 snapshot reports fast path not engaged (fall back to
++//     SDL_UpdateWindowSurface)
++//   - mode-change race (snapshot gen != cached gen and re-snapshot
++//     fails — should not happen post-init but defensively gated)
++//   - surface dims/pitch != VBE mode dims/pitch (catches forced
++//     widescreen / scaling configs we don't expect on the DOS port)
++//   - pitches_match=false (forward-compat: padded surfaces would need
++//     a per-row loop instead of one-shot PresentFull)
++//
++// On false return the caller (flip) falls through to the pre-existing
++// SDL_RenderPresent / SDL_UpdateWindowSurfaceRects path. No visual
++// regression even if the direct path never engages.
++//
++// Predicted: +2-5 fps title vs wave 17.6 baseline (25.6 fps real HW).
++// Framed as a hypothesis to measure, not a goal to defend
++// (perf_predictions_unreliable.md). Possible outcomes:
++//   +5 fps -> follow-up patch promotes to default-ON
++//   +0 fps -> SDL layer wasn't the bottleneck; close wave 18, pivot
++//             to wave 19 (Cirrus hwblit) with confidence
++//   visual artifacts -> revert; risks R1/R2/R3 manifested
++bool Renderer::_direct_vesa_present()
++{
++#ifdef NXE_DOS
++  if (!_cached_window_surface || !_cached_window_surface->pixels)
++    return false;
++
++  // SDL/0034 generation counter detects mode-set / lazy-reinit. Re-
++  // snapshot when bumped (or on the very first direct-vesa call —
++  // _direct_vesa_state.valid is false-initialized).
++  const Uint32 gen_now = SDL_DOSVesaDirectGetGeneration();
++  if (!_direct_vesa_state.valid || gen_now != _direct_vesa_generation)
++  {
++    if (!SDL_DOSVesaDirectGetState(&_direct_vesa_state))
++    {
++      // Fast path not engaged (hint not set, no usable VBE access path,
++      // mode not yet set, etc). Caller falls back to SDL_RenderPresent.
++      _direct_vesa_state.valid = false;
++      return false;
++    }
++    _direct_vesa_generation = gen_now;
++    LOG_INFO("direct-vesa: snapshot @gen={} use_dosmemput={} banked_multibank={} "
++             "pitches_match={} vram_w={} vram_h={} vram_pitch={} bpp={} fb_size={} "
++             "vram_phys=0x{:08x} vram_ptr=0x{:08x}",
++             (unsigned long)gen_now,
++             (int)_direct_vesa_state.use_dosmemput,
++             (int)_direct_vesa_state.banked_multibank,
++             (int)_direct_vesa_state.pitches_match,
++             _direct_vesa_state.vram_w, _direct_vesa_state.vram_h,
++             _direct_vesa_state.vram_pitch, _direct_vesa_state.bpp,
++             (unsigned long)_direct_vesa_state.fb_size,
++             (unsigned long)_direct_vesa_state.vram_phys,
++             (unsigned long)(uintptr_t)_direct_vesa_state.vram_ptr);
++    // Force palette re-program post-snapshot — the new mode's DAC may
++    // not match our master palette state; reset the cached version so
++    // the version-comparison below trips on the next call.
++    _direct_vesa_palette_version = 0;
++  }
++
++  // Drain SW-renderer queue so all engine drawcalls land in
++  // _cached_window_surface->pixels (which is what we read from below).
++  // The SW renderer's destination IS the window surface, so flush is
++  // sufficient — RenderPresent's "page-flip" semantics are what we're
++  // intentionally bypassing. Per sdl-engine task #1 audit R1.
++  if (_renderer_queue_dirty)
++  {
++    SDL_FlushRenderer(_renderer);
++    _renderer_queue_dirty = false;
++  }
++
++  // Sanity: window surface dims must match the VBE mode. NXEngine-evo
++  // resolution-change code clamps to 320x240 fullscreen on DOS (per
++  // CLAUDE.md "NXEngine-evo specifics") so this should never trip in
++  // practice — but if it does, the mismatch would dosmemput the wrong
++  // size buffer and corrupt VRAM. Fall through to SDL_RenderPresent
++  // and force a re-snapshot.
++  if (_cached_window_surface->w != _direct_vesa_state.vram_w
++      || _cached_window_surface->h != _direct_vesa_state.vram_h
++      || _cached_window_surface->pitch != _direct_vesa_state.vram_pitch)
++  {
++    LOG_ERROR("direct-vesa: surface vs VBE mismatch (surface={}x{} pitch={}; "
++              "vbe={}x{} pitch={}); falling back to SDL_RenderPresent + "
++              "forcing snapshot refresh next attempt",
++              _cached_window_surface->w, _cached_window_surface->h,
++              _cached_window_surface->pitch,
++              _direct_vesa_state.vram_w, _direct_vesa_state.vram_h,
++              _direct_vesa_state.vram_pitch);
++    _direct_vesa_state.valid = false;
++    return false;
++  }
++
++  if (!_direct_vesa_state.pitches_match)
++  {
++    // Forward-compat guard: a padded surface would need per-row dosmemput
++    // (n_rows × surface->pitch != fb_size). PresentFull's contract is
++    // "pitch matches"; today's DOS path is always 320×1=320 pitch but a
++    // future widescreen / non-power-of-two path would need this. Fall
++    // through quietly; the SDL_UpdateWindowSurface path handles padded
++    // pitch correctly via per-row dispatch.
++    return false;
++  }
++
++  // Sync VGA DAC if our master palette version drifted. Cheap (~25 us
++  // on PODP83 per SDL/0034 header) — only fires when a palette edit
++  // (cmod, fade, scene transition) bumped the version.
++  if (_indexed_mode && _master_palette
++      && _master_palette->version != _direct_vesa_palette_version)
++  {
++    SDL_DOSVesaDirectProgramPalette(_master_palette);
++    _direct_vesa_palette_version = _master_palette->version;
++  }
++
++  // Single-call full-frame present. PresentFull internally dispatches:
++  //   - LFB path (use_dosmemput=false)         -> SDL_memcpy(vram_ptr, pixels, fb_size)
++  //   - banked single-bank (banked_multibank=false) -> dosmemput(pixels, fb_size, vram_phys)
++  //   - banked multi-bank (banked_multibank=true)   -> SDL_DOSVesaDirectBankedFlush()
++  if (!SDL_DOSVesaDirectPresentFull(&_direct_vesa_state,
++                                     _cached_window_surface->pixels))
++    return false;
++
++  return true;
++#else
++  // Non-DOS builds never engage this path (env helper returns disabled).
++  // Defensive return so the symbol still compiles for ports that include
++  // this TU via the upstream build (Linux / Win desktop / etc).
++  return false;
++#endif
++}
++
+ void Renderer::flip()
+ {
+ //  LOG_INFO("===FLIPPING===\n");
+@@ -2054,7 +2274,60 @@ void Renderer::flip()
+       // with palette plumbing intact.
+       (!_dirty_rects.empty() || _prev_diff_engaged);
+ 
+-  if (can_use_dirty_path)
++  // DOS-PORT (patch 0086, Phase 9 wave 18): direct-VESA hot path
++  // attempt. Sits BEFORE the dirty-path / full-present decision tree.
++  // When env-gated ON and conservative preconditions hold, calls
++  // _direct_vesa_present() (dosmemput / memcpy via SDL/0034 helper)
++  // and SKIPS both SDL_UpdateWindowSurfaceRects and SDL_RenderPresent.
++  //
++  // Conservative preconditions:
++  //   - first_n_force clear: backbuffer is meaningful (not init garbage)
++  //   - _force_full_refresh clear: caller explicitly wanted a full SDL
++  //     present (flushAll, scene reset). Respect it.
++  //
++  // R2 (window-surface re-allocation drift between flips) is covered by
++  // SDL/0034 v2's generation counter — populate_fb_state_for_direct_fb
++  // bumps it on window-create AND lazy-reinit, so a bump signals BOTH
++  // "fb_state changed" AND "window->surface->pixels may have moved."
++  // _direct_vesa_present() re-snapshots on bump; no separate
++  // SDL_RenderPresent heartbeat is required.
++  //
++  // Diagnostic counters bumped per-attempt (success / fail) so the
++  // per-100-flip phase-timing block reports attribution.
++  const bool _dv_attempt =
++      _abl_direct_vesa() && !first_n_force && !_force_full_refresh;
++  bool _direct_vesa_done = false;
++  if (_dv_attempt)
++  {
++    Uint64 _dv_t0 = SDL_GetTicksNS();
++    bool _dv_ok = _direct_vesa_present();
++    Uint64 _dv_dt = SDL_GetTicksNS() - _dv_t0;
++    if (_dv_ok)
++    {
++      _direct_vesa_done = true;
++      ok = true;
++      ++_direct_vesa_presents_block;
++      _direct_vesa_present_accum_ns_block += _dv_dt;
++    }
++    else
++    {
++      ++_direct_vesa_present_failed_block;
++      // Fall through to SDL_RenderPresent path below.
++      // _direct_vesa_present already invalidated its snapshot if needed.
++    }
++  }
++
++  if (_direct_vesa_done)
++  {
++    // Direct-VESA wrote the frame; SDL3 present path skipped entirely.
++    // _force_full_refresh and _dirty_first_n_frames_remaining were
++    // already false/0 (gating preconditions for _dv_attempt) — no
++    // state-machine bookkeeping to do here. Block-level tally counters
++    // (_dr_full_flush_taken_block / _dr_dirty_path_taken_block) stay
++    // untouched so the dirty-rect diagnostic block reports the SDL
++    // paths separately from direct-vesa attribution.
++  }
++  else if (can_use_dirty_path)
+   {
+     // Partial-update path. Drain any queued slow-path commands first
+     // so they reach the window surface; the SW renderer's data->
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index d8f742b..d0b7a12 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -9,6 +9,14 @@
+ #include "Sprites.h"
+ 
+ #include <SDL3/SDL.h>
++#ifdef NXE_DOS
++// DOS-PORT (patch 0086, Phase 9 wave 18): direct-VESA hot path API.
++// Header is a workspace-local SDL/0034 export that lets the engine call
++// dosmemput / memcpy directly into VRAM, bypassing SDL_RenderPresent +
++// SDL_UpdateWindowSurface. Default OFF (gated on
++// SDL_HINT_DOSKUTSU_DIRECT_VESA=1); see Renderer.cpp _direct_vesa_present.
++#  include <SDL3/SDL_dosvesa_directaccess.h>
++#endif
+ #include <array>
+ #include <cstdint>
+ #include <string>
+@@ -285,6 +293,33 @@ class Renderer
+     int _prev_frame_diff_bbox_pct_x10_sum_block = 0;
+     int _prev_frame_diff_bbox_threshold_exceeded_block = 0;
+ 
++    // DOS-PORT (patch 0086, Phase 9 wave 18): direct-VESA hot path state.
++    // Cached snapshot of SDL3-DOS's `fb_state` (vram_ptr / vram_phys /
++    // banked-mode metadata), refreshed when SDL/0034's generation counter
++    // bumps. Per SDL/0034 v2 § Mode-change semantics the generation
++    // counter is bumped on:
++    //   - DOSVESA_InvalidateCachedFramebuffer (mode change)
++    //   - populate_fb_state_for_direct_fb success (window-create + lazy-
++    //     reinit, which also covers SDL3 window->surface re-allocation)
++    //   - DOSVESA_DestroyWindowFramebuffer (window destroy)
++    // i.e. one counter check per flip is the canonical R2 mitigation —
++    // a separate "heartbeat SDL_RenderPresent for state sync" is NOT
++    // needed because window->surface->pixels relocation goes through
++    // the same populate path that bumps the generation. The snapshot
++    // lets us call SDL_DOSVesaDirectPresentFull on each flip without
++    // re-querying the VBE state machine. Default OFF; opt-in via
++    // SDL_HINT_DOSKUTSU_DIRECT_VESA=1 per `wave_17_4_partial_flush_-
++    // regression.md` precedent (measure before flipping default).
++    //
++    // Forward-declared in NXE_DOS-only blocks to keep non-DOS builds
++    // compiling without the SDL/0034 header.
++#ifdef NXE_DOS
++    SDL_DOSVesaDirectState _direct_vesa_state {};
++    Uint32 _direct_vesa_generation = 0;
++    Uint32 _direct_vesa_palette_version = 0;
++#endif
++    bool _direct_vesa_present();
++
+     // DOS-PORT (patch 0071, Phase 9 wave 15): mark a destination rect as
+     // dirty for the current frame. Clips to the 320×240 logical viewport,
+     // drops empty rects, and applies cheap coalescing:
+-- 
+2.47.3
+

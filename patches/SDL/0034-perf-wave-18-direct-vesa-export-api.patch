@@ -1,0 +1,920 @@
+From e7f0c33a45c622ef3deeabb7f6eff7e348958cf9 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 30 Apr 2026 09:32:28 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=209=20wave=2018=20patch=200034=20?=
+ =?UTF-8?q?=E2=80=94=20direct-VESA=20export=20API?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add public-ish SDL_DOSVesaDirect* functions in
+include/SDL3/SDL_dosvesa_directaccess.h that let DOS callers (e.g.
+NXEngine-evo's Renderer::flip()) bypass SDL_RenderPresent and
+SDL_UpdateWindowSurface, calling the SDL3-DOS framebuffer flush
+primitives directly while preserving SDL3's mode management, DPMI
+mapping, palette sync, and Cirrus auto-disable heuristics.
+
+Background — wave 18's measured lever:
+
+Real-HW measurements (PODP83 + Cirrus + UNIVBE 6.7) show that on top
+of the actual VRAM write, SDL_RenderPresent + SDL_UpdateWindowSurface
+add ~5 ms / flip — ~13 % of the 38.7 ms / flip budget at 25.9 fps
+title. The cost lives upstream of DOSVESA_UpdateWindowFramebuffer (in
+SDL_RenderPresent's SW-renderer queue flush + the
+SDL_UpdateWindowSurface state machine), so optimizing the existing
+fast path inside DOSVESA_UpdateWindowFramebuffer can't reclaim it.
+The wave-18 lever is to bypass these layers entirely from engine
+code and call the same dosmemput / banked-flush primitives that
+DOSVESA_UpdateWindowFramebuffer would have called.
+
+API surface (workspace-local; never upstreamed per
+sdl_ai_policy memory):
+
+- SDL_DOSVesaDirectState          — POD snapshot of fb_state
+                                    (LFB ptr, banked window metadata,
+                                    fb_size, page_offset forward-compat)
+- SDL_DOSVesaDirectGetState       — populate snapshot from fb_state
+- SDL_DOSVesaDirectGetGeneration  — Uint32 mode-change counter; bumps
+                                    on invalidate / populate-success /
+                                    DestroyWindowFramebuffer; signals
+                                    both fb_state-changed AND
+                                    window->surface-may-have-changed
+- SDL_DOSVesaDirectSwitchBank     — wrap SwitchBank() (existing inline)
+- SDL_DOSVesaDirectBankedFlush    — wrap BankedDosmemput() (existing inline)
+- SDL_DOSVesaDirectProgramPalette — wrap ProgramVGADAC() for INDEX8 DAC sync
+- SDL_DOSVesaDirectPresentFull    — convenience: cheapest full-screen present
+- SDL_HINT_DOSKUTSU_DIRECT_VESA   — hint name; engine-side gating only
+                                    (SDL itself does not consume it)
+
+Engine integration FAQ baked into header doc-comments:
+
+- "SDL_FlushRenderer vs SDL_RenderPresent": engines using a SW
+  renderer should call SDL_FlushRenderer() before invoking the
+  direct-VESA path. FlushRenderer = FlushRenderCommands +
+  InvalidateCachedState; that drains the queue into
+  window->surface->pixels and is in fact slightly more thorough on
+  the renderer side than SDL_RenderPresent (which skips
+  InvalidateCachedState). The piece RenderPresent does that
+  FlushRenderer doesn't is renderer->RenderPresent → SW_RenderPresent
+  → SDL_UpdateWindowSurface → DOSVESA_UpdateWindowFramebuffer —
+  exactly the chain we want to bypass. Engines hand-rolling all
+  drawcalls directly into window->surface->pixels (Lever B) can skip
+  FlushRenderer entirely.
+- "window->surface re-allocation timing": every code path that
+  destroys + recreates window->surface ALSO re-runs
+  CreateWindowFramebuffer → populate_fb_state_for_direct_fb, which
+  bumps the generation counter here. So generation bump signals BOTH
+  fb_state changed AND window->surface->pixels may have moved. No
+  separate heartbeat SDL_RenderPresent is needed for correctness.
+- "Per-flip housekeeping": current_bank in
+  DOSVESA_UpdateWindowFramebuffer is a function-local automatic, NOT
+  a static. Engine direct path's per-call current_bank=-1 init is
+  correct: chip-side bank state at flush start is irrelevant
+  because the first SwitchBank always hits the bank!=*current_bank
+  branch. WaitForVBlank / cursor logic / page-flip BIOS call only
+  fire on the normal path; fast path (and engine direct path) skip
+  them by design. Palette DAC sync is replicated via
+  SDL_DOSVesaDirectProgramPalette.
+
+Implementation notes:
+
+- The bank-switch + dosmemput primitives stay SDL_FORCE_INLINE static;
+  the public functions are thin same-TU wrappers so both paths
+  benefit from the same wave-14-thru-33 debugging (display-start
+  query, bank-1 offset fix, LFB sentinel, etc).
+
+- Generation counter is a static Uint32 in SDL_dosframebuffer.c,
+  bumped in DOSVESA_InvalidateCachedFramebuffer (mode change),
+  populate_fb_state_for_direct_fb (success path, including lazy-
+  reinit and CreateWindowFramebuffer's fast-path branch), and
+  DOSVESA_DestroyWindowFramebuffer (window destruction). Single-
+  threaded backend — no atomics needed.
+
+- Forward-compat: page_offset field always 0 in the current single-
+  buffered build (post-patch 0014); engine adds it to its
+  dst_offset / vram_ptr arithmetic so a future page-flip revival
+  needs no engine-side change.
+
+- Hint changes (PREFER_LFB / DISABLE_LFB / FORCE_LFB) do NOT bump
+  the generation counter — those are read at mode-set / lazy-reinit
+  time and require a restart. Documented in the header.
+
+- Cursor compositing intentionally NOT exposed — Cave Story doesn't
+  use the system mouse cursor in gameplay, and the cursor logic is
+  the bulk of the SDL3-DOS normal path (which we're bypassing).
+
+The header drops into include/SDL3/ and is automatically picked up
+by CMake's existing file(GLOB SDL3_INCLUDE_FILES …/include/SDL3/*.h)
+at vendor/SDL/CMakeLists.txt:3769 — no CMakeLists.txt edit needed.
+
+The companion engine-side patch (nxengine/0086) consumes this API to
+implement Renderer::_direct_vesa_present() + flip() integration; see
+docs/PHASE9-WAVE-17-18-PLAN.md § 4 for the wave-18 plan.
+
+DOSKUTSU local patch (workspace-local; never upstreamed).
+---
+ include/SDL3/SDL_dosvesa_directaccess.h | 513 ++++++++++++++++++++++++
+ include/SDL3/SDL_hints.h                |  46 +++
+ src/video/dos/SDL_dosframebuffer.c      | 183 +++++++++
+ 3 files changed, 742 insertions(+)
+ create mode 100644 include/SDL3/SDL_dosvesa_directaccess.h
+
+diff --git a/include/SDL3/SDL_dosvesa_directaccess.h b/include/SDL3/SDL_dosvesa_directaccess.h
+new file mode 100644
+index 000000000..034bedf74
+--- /dev/null
++++ b/include/SDL3/SDL_dosvesa_directaccess.h
+@@ -0,0 +1,513 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/**
++ * # CategoryDOSVesaDirectAccess
++ *
++ * **DOSKUTSU local addition (patches/SDL/0034, never upstreamed).** This
++ * header is part of the SDL3-DOS backend's "direct-VESA" escape hatch — an
++ * API for DOS callers (engines, demos) that want to skip the
++ * SDL_RenderPresent → SDL_UpdateWindowSurface → DOSVESA_UpdateWindowFramebuffer
++ * dance and write pixels directly into the VESA framebuffer.
++ *
++ * On the doskutsu Cave Story port, real-HW measurements at title-screen
++ * steady state on a Pentium OverDrive 83 MHz + Cirrus + UNIVBE 6.7 show the
++ * SDL_RenderPresent path costs ~5 ms / flip beyond the actual VRAM write.
++ * That's ~13 % of the 38.7 ms / flip budget at 25.9 fps. The wave-18 lever
++ * exposes the existing SDL3-DOS flush primitives (SwitchBank,
++ * BankedDosmemput, ProgramVGADAC) so the engine can call them directly,
++ * preserving SDL3's mode management + DPMI mapping + Cirrus auto-disable
++ * heuristics while bypassing the SDL_RenderPresent state-machine cost.
++ *
++ * ## When to use this
++ *
++ * **Only on DOS, only when you've already tuned the SDL_RenderPresent path
++ * and need the last few percent.** A normal SDL3 app calling
++ * `SDL_UpdateWindowSurface` already lands in the same VRAM-write code under
++ * the hood (via DOSVESA_UpdateWindowFramebuffer's fast path when
++ * `SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER=1`). This API is the further step
++ * — bypassing the SDL renderer/window machinery entirely.
++ *
++ * ## Lifecycle
++ *
++ * 1. Set `SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER=1` before window creation.
++ * 2. Create your SDL_Window + SDL_Surface as usual. SDL3-DOS populates its
++ *    fast-path cache at `SDL_GetWindowSurface()` (or first
++ *    `SDL_UpdateWindowSurface()` via lazy-reinit, see patch 0011).
++ * 3. Call SDL_DOSVesaDirectGetState() to snapshot the cache. If it returns
++ *    false, fall back to SDL_UpdateWindowSurface — the fast path isn't
++ *    engaged (no usable VBE access path, hint not set, etc).
++ * 4. **Resolve renderer queue into the window surface FIRST.** If you've
++ *    been issuing SDL_Render* drawcalls into a renderer whose target is
++ *    the window's surface (typical SW renderer setup), call
++ *    SDL_FlushRenderer() to drain the command queue into
++ *    `window->surface->pixels` before reading those pixels here. This
++ *    is the equivalent of SDL_RenderPresent's first phase
++ *    (FlushRenderCommands) without its second phase (the SW renderer's
++ *    SW_RenderPresent → SDL_UpdateWindowSurface → DOSVESA_UpdateWindowFramebuffer
++ *    chain that we are deliberately bypassing). SDL_FlushRenderer also
++ *    calls renderer->InvalidateCachedState which is the only renderer-side
++ *    cleanup SDL_RenderPresent does NOT do — so SDL_FlushRenderer is in
++ *    fact slightly more thorough on the renderer side. Engines that hand-
++ *    roll all their drawcalls directly into `window->surface->pixels`
++ *    (e.g. NXEngine-evo's Lever B primitives) can skip this step
++ *    entirely; the surface pixels are already authoritative.
++ * 5. On each flip:
++ *    - Compare SDL_DOSVesaDirectGetGeneration() against your cached
++ *      generation; re-snapshot if it bumped (mode change, lazy-reinit,
++ *      or window-surface destroy/recreate — see "Mode-change semantics"
++ *      below for the full list of triggers).
++ *    - For LFB path (use_dosmemput=false): `SDL_memcpy(vram_ptr +
++ *      page_offset, pixels, fb_size)`.
++ *    - For banked single-bank: `dosmemput(pixels, fb_size, vram_phys +
++ *      page_offset)`.
++ *    - For banked multi-bank: SDL_DOSVesaDirectBankedFlush().
++ *    - If your INDEX8 palette changed: SDL_DOSVesaDirectProgramPalette().
++ * 6. Do NOT call SDL_RenderPresent or SDL_UpdateWindowSurface in the same
++ *    flip. They'd re-flush the (now-stale) window surface to VRAM,
++ *    overwriting your direct write.
++ *
++ * The helpers (SDL_DOSVesaDirectSwitchBank, SDL_DOSVesaDirectBankedFlush)
++ * are thin wrappers around the existing internal SwitchBank() and
++ * BankedDosmemput() primitives in SDL_dosframebuffer.c. Reusing them means
++ * direct-VESA callers benefit from the same bank-switch debugging
++ * (patches 0014/0018/0019/0029) without reimplementing the math.
++ *
++ * ## Caller-owned perf instrumentation
++ *
++ * The "fastpath-timing block" emitted by DOSVESA_UpdateWindowFramebuffer
++ * (patch 0015) does NOT fire on the direct path — DOSVESA_UpdateWindowFramebuffer
++ * is bypassed entirely. Callers that want per-flip ms timing must instrument
++ * their own present routine (e.g. SDL_GetPerformanceCounter brackets around
++ * the dosmemput / memcpy, summary lines every N flips). See
++ * docs/PHASE9-WAVE-17-18-PLAN.md § 4.
++ *
++ * ## Mode-change semantics
++ *
++ * SDL_DOSVesaDirectGetGeneration() is a monotonically-increasing counter
++ * bumped whenever the cached fb_state changes underneath callers.
++ * Specifically the counter is bumped on:
++ *
++ *   - DOSVESA_InvalidateCachedFramebuffer (called from SetDisplayMode
++ *     before freeing the DPMI mapping; mode change is the prototype
++ *     trigger).
++ *   - populate_fb_state_for_direct_fb success path (called from both
++ *     CreateWindowFramebuffer at window creation AND from
++ *     UpdateWindowFramebuffer's lazy-reinit when fb_state was previously
++ *     invalidated — see patch 0011).
++ *   - DOSVESA_DestroyWindowFramebuffer (window destruction).
++ *
++ * Compare against your cached value each flip; on mismatch, re-snapshot.
++ * The counter is `Uint32` — wrapping is theoretically possible but a
++ * 32-bit counter at one bump per mode-change is good for billions of
++ * mode-changes; in practice we mode-change once at startup and once on
++ * quit.
++ *
++ * **Important: window->surface re-allocation.** SDL3 may destroy and
++ * recreate `window->surface` (the system-RAM source surface the engine
++ * has been blitting into) when `window->surface_valid` clears.
++ * Triggers include `SDL_OnWindowPixelSizeChanged`, explicit
++ * `SDL_DestroyWindowSurface`, and the SDL_GetWindowSurface() recreate
++ * branch. Critically: **every path that re-allocates `window->surface`
++ * also re-runs DOSVESA_CreateWindowFramebuffer →
++ * populate_fb_state_for_direct_fb, which bumps the generation here.**
++ * So a generation bump signals BOTH "fb_state changed" AND
++ * "window->surface->pixels pointer may have changed" simultaneously,
++ * and engine code that re-snapshots state on generation change ALSO
++ * needs to re-fetch its `window->surface` pointer in the same step.
++ * No separate heartbeat call (e.g. periodic SDL_RenderPresent) is
++ * needed for correctness — the generation counter alone is sufficient.
++ * (A periodic heartbeat is still useful for diagnostic visibility, but
++ * not for synchronization.)
++ *
++ * The hint-driven path-selection (SDL_HINT_DOS_PREFER_LFB,
++ * SDL_HINT_DOS_DISABLE_LFB, SDL_HINT_DOSKUTSU_FORCE_LFB) is read at
++ * mode-set / lazy-reinit time and DOES NOT bump the generation counter.
++ * Restart the app to apply hint changes.
++ *
++ * ## Per-flip coordination — no SDL-side housekeeping needed
++ *
++ * The `current_bank` memoization variable in DOSVESA_UpdateWindowFramebuffer
++ * is a function-local automatic, NOT a static. Each call initializes it
++ * fresh to -1 before the banked-write loop and discards it on return.
++ * Engine direct-VESA callers do the same (init to -1 once per flip,
++ * pass through to SwitchBank / BankedFlush). The chip's physical bank
++ * state at flush start is irrelevant: the first SwitchBank call always
++ * compares `bank != *current_bank` (`bank=0, *current_bank=-1`) and
++ * issues the BIOS switch unconditionally. So the engine cannot
++ * "miss" a per-flip bank-reset that SDL would have done — there is
++ * no such reset to miss.
++ *
++ * Other per-flip work inside DOSVESA_UpdateWindowFramebuffer:
++ *
++ *   - **WaitForVBlank** — only on the normal (non-fast) path. The
++ *     fast path skips it; engine direct path skips it the same way.
++ *   - **Cursor compositing** — only on the normal path. Skipped here
++ *     by design (Cave Story / NXEngine-evo doesn't use the system
++ *     cursor on DOS).
++ *   - **Palette DAC sync** — fast path checks
++ *     `palette->version != vdata->palette_version` and calls
++ *     ProgramVGADAC. Engine direct path replicates this via its own
++ *     remembered version + SDL_DOSVesaDirectProgramPalette().
++ *   - **Sentinel / audit diagnostic logs** — env-gated, periodic
++ *     (every 100 flushes), have no effect on chip state. Engine
++ *     direct path skips them; no functional miss.
++ *   - **Page-flip BIOS call (VBE 0x4F07)** — only on the LFB nearptr
++ *     path AND when `page_flip_available=true`. Patch 0014 force-
++ *     disabled `page_flip_available` so this is currently a no-op
++ *     branch. Engine skips with no behavioral change. The
++ *     `page_offset` snapshot field is the forward-compat hook for
++ *     when page-flip is re-enabled.
++ *   - **Timing brackets / counters** — diagnostic; engine should
++ *     instrument its own present routine independently (see
++ *     "Caller-owned perf instrumentation" below).
++ *
++ * In summary: an engine that owns palette sync (via
++ * SDL_DOSVesaDirectProgramPalette) and initializes `current_bank=-1`
++ * per flip already covers everything DOSVESA_UpdateWindowFramebuffer's
++ * fast path does. Nothing further from the SDL side is required.
++ *
++ * ## Cursor compositing
++ *
++ * The direct-VESA path bypasses the cursor-compositing logic in the
++ * SDL3-DOS normal path entirely. Apps using the system mouse cursor on
++ * the DOS backend should NOT use this API. Cave Story / NXEngine-evo
++ * doesn't use the system cursor in gameplay, so this is fine for
++ * doskutsu's purposes.
++ *
++ * ## Threading
++ *
++ * The SDL3-DOS backend is single-threaded by design (cooperative DPMI
++ * scheduler; `std::thread` and `SDL_CreateThread` are forbidden in port
++ * glue). The direct-VESA snapshot is therefore not protected by any
++ * locks. Call SDL_DOSVesaDirectGetState() from the same thread that does
++ * the present writes.
++ *
++ * ## License + attribution
++ *
++ * This header is added by patches/SDL/0034 (DOSKUTSU local patch, never
++ * upstreamed). The bank-switch + dosmemput primitives it exposes are
++ * SDL3-DOS code; this header is a thin export layer. Patch policy is
++ * workspace-local per the project's sdl_ai_policy memory entry — these
++ * declarations are not contributed back to libsdl-org/SDL.
++ */
++
++#ifndef SDL_dosvesa_directaccess_h_
++#define SDL_dosvesa_directaccess_h_
++
++#include <SDL3/SDL_stdinc.h>
++#include <SDL3/SDL_pixels.h>
++
++#include <SDL3/SDL_begin_code.h>
++/* Set up for C function definitions, even when using C++ */
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Hint name registered for the SDL3-DOS direct-VESA fast path. SDL itself
++ * does not consume this hint — engine-side code reads it to gate whether
++ * the direct-VESA call sequence runs (vs falling back to
++ * SDL_UpdateWindowSurface). Defined here for symmetry with the API
++ * surface; the canonical declaration is in SDL_hints.h.
++ *
++ * Values:
++ *  - "1": engine should use the direct-VESA path (when state is valid).
++ *  - "0" / unset / empty: engine should use SDL_UpdateWindowSurface.
++ *
++ * Strict-match per CLAUDE.md DOSKUTSU env-var convention: only the
++ * literal string "1" activates.
++ */
++
++/**
++ * Snapshot of the SDL3-DOS direct-FB fast-path cache (`fb_state`).
++ *
++ * This is a plain data struct returned by value — SDL retains the
++ * authoritative copy in a static singleton inside SDL_dosframebuffer.c;
++ * callers receive a shallow snapshot they can read freely. Do NOT
++ * write through `vram_ptr` or call dosmemput at `vram_phys` after
++ * SDL_DOSVesaDirectGetGeneration() has changed without re-snapshotting:
++ * the underlying mapping or mode may have been freed.
++ *
++ * Field semantics:
++ *
++ *  - `valid`: false if the fast path is not engaged (hint unset, no
++ *    usable VBE access path, mode not yet set). Callers MUST check
++ *    this before reading any other field.
++ *
++ *  - `use_dosmemput`: true → write via dosmemput to a banked window
++ *    (typically 0xA0000); false → write via direct LFB nearptr at
++ *    `vram_ptr`.
++ *
++ *  - `banked_multibank`: true when `fb_size > win_size_bytes`. Single-
++ *    bank banked writes can be a single dosmemput; multi-bank requires
++ *    SDL_DOSVesaDirectBankedFlush() to walk bank boundaries.
++ *
++ *  - `pitches_match`: true when source surface pitch == VBE mode pitch.
++ *    The common case at 320×240×8bpp; row-by-row copy is needed when
++ *    false.
++ *
++ *  - `vram_w`, `vram_h`, `vram_pitch`, `bpp`: VBE mode dimensions and
++ *    bytes-per-pixel. `bpp` is BYTES per pixel (1 for INDEX8, 2 for
++ *    RGB565).
++ *
++ *  - `fb_size`: total framebuffer bytes, `vram_pitch * vram_h`.
++ *
++ *  - `vram_ptr`: LFB nearptr — already includes the BIOS-actual
++ *    display-start offset (patch 0018). NULL when banked path is in
++ *    use (`use_dosmemput=true`). Already-`__djgpp_nearptr_enable`-d
++ *    via DOS_PhysicalToLinear; safe for direct dereference from
++ *    protected mode.
++ *
++ *  - `vram_phys`: banked path → window base address (typically
++ *    `0xA0000`), the `dst` argument for `dosmemput`. LFB path →
++ *    informational copy of the LFB physical address (do NOT pass to
++ *    dosmemput; use `vram_ptr` for memcpy instead).
++ *
++ *  - `win_base`, `win_gran_bytes`, `win_size_bytes`, `win_func_ptr`:
++ *    banked-path metadata, mirroring the VBE mode info. Only valid
++ *    when `use_dosmemput=true`. Pass to SDL_DOSVesaDirectBankedFlush().
++ *
++ *  - `page_offset`: forward-compat field for future page-flipped
++ *    double-buffering. **Always 0 in the current single-buffered build
++ *    (post-patch-0014).** Callers should add this to their `dst_offset`
++ *    on the banked path or to `vram_ptr` arithmetic on the LFB path,
++ *    so future page-flip revival doesn't require engine-side changes.
++ *    Today: no-op math; tomorrow: SDL repopulates this with the
++ *    back-page byte offset.
++ */
++typedef struct SDL_DOSVesaDirectState
++{
++    bool   valid;
++    bool   use_dosmemput;
++    bool   banked_multibank;
++    bool   pitches_match;
++    int    vram_w;
++    int    vram_h;
++    int    vram_pitch;
++    int    bpp;
++    Uint32 fb_size;
++    /* LFB path: */
++    Uint8 *vram_ptr;
++    /* Banked path: */
++    Uint32 vram_phys;
++    Uint32 win_base;
++    Uint32 win_gran_bytes;
++    Uint32 win_size_bytes;
++    Uint32 win_func_ptr;
++    /* Forward-compat (currently always 0): */
++    Uint32 page_offset;
++} SDL_DOSVesaDirectState;
++
++/**
++ * Snapshot the SDL3-DOS direct-FB fast-path state into the caller-supplied
++ * struct.
++ *
++ * Returns true when the fast path is engaged and the snapshot is valid;
++ * false when the fast path is not engaged (hint not set, no window/mode
++ * yet, no usable VBE access path detected). On false return `out->valid`
++ * is also set to false; the other fields are zeroed.
++ *
++ * Cheap to call (a single struct copy + counter read); safe to invoke
++ * once per flip without measurable overhead. Most callers cache the
++ * snapshot and re-call only when SDL_DOSVesaDirectGetGeneration()
++ * changes.
++ *
++ * \param out caller-allocated struct that receives the snapshot.
++ * \returns true if `out->valid==true`, false otherwise.
++ *
++ * \threadsafety Single-threaded; call from the SDL thread.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0034).
++ *
++ * \sa SDL_DOSVesaDirectGetGeneration
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSVesaDirectGetState(SDL_DOSVesaDirectState *out);
++
++/**
++ * Get the current generation counter for the SDL3-DOS direct-FB cache.
++ *
++ * Bumps monotonically (modulo 2^32) whenever the cached fb_state is
++ * invalidated or re-populated, and on window-framebuffer destruction.
++ * Callers compare against their cached value to cheaply detect mode
++ * changes / lazy-reinit / window-surface re-allocation without polling
++ * the full state.
++ *
++ * Because every code path that re-allocates `window->surface` also
++ * re-runs the populate-fb_state path (CreateWindowFramebuffer →
++ * populate_fb_state_for_direct_fb), a generation bump is also the
++ * signal that the caller's cached `window->surface->pixels` pointer
++ * may be stale. Re-fetch BOTH the snapshot and the surface pointer
++ * on a generation mismatch — no separate heartbeat SDL_RenderPresent
++ * is needed for correctness. See "Mode-change semantics" in the file
++ * doc-comment for the full trigger list.
++ *
++ * \returns the current generation counter.
++ *
++ * \threadsafety Single-threaded.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0034).
++ *
++ * \sa SDL_DOSVesaDirectGetState
++ */
++extern SDL_DECLSPEC Uint32 SDLCALL SDL_DOSVesaDirectGetGeneration(void);
++
++/**
++ * Switch the VBE banked-window selector to a new bank.
++ *
++ * Wraps the SDL3-DOS internal SwitchBank() primitive — uses the BIOS
++ * PMI (`win_func_ptr`) when available, falling back to INT 10h
++ * AX=4F05h with `bx=0` (Window A). Memoizes via the in/out
++ * `current_bank` argument: a no-op when the requested bank is already
++ * active.
++ *
++ * Initialize `*current_bank = -1` once per flush before calling, then
++ * pass the same pointer to subsequent calls (e.g. across multiple
++ * dirty rects in one flush) so consecutive same-bank writes don't
++ * re-issue the bank switch.
++ *
++ * Most callers don't need this directly — SDL_DOSVesaDirectBankedFlush()
++ * handles bank-walking automatically. Use this only when implementing
++ * a custom multi-region flush that benefits from bank reuse across
++ * non-contiguous regions.
++ *
++ * \param bank target bank index (0, 1, ...).
++ * \param current_bank in/out memoization variable; initialize to -1
++ *                     before the first call per flush.
++ * \param win_func_ptr `SDL_DOSVesaDirectState::win_func_ptr` from your
++ *                     snapshot (0 → INT 10h fallback).
++ *
++ * \threadsafety Single-threaded.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0034).
++ *
++ * \sa SDL_DOSVesaDirectBankedFlush
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSVesaDirectSwitchBank(int bank,
++                                                              int *current_bank,
++                                                              Uint32 win_func_ptr);
++
++/**
++ * Copy a contiguous byte range from a system-RAM buffer to the VBE
++ * banked window, switching banks across boundaries as needed.
++ *
++ * Wraps the SDL3-DOS internal BankedDosmemput() primitive. Handles the
++ * common cases: full-frame flush, single-row band, multi-row band that
++ * straddles the bank boundary. The `dst_offset` is relative to the
++ * start of VRAM in the current mode's pitch — i.e. for a full-frame
++ * flush starting at VRAM offset 0, pass `dst_offset=0`.
++ *
++ * Initialize `*current_bank = -1` before the first call per flush; pass
++ * the same pointer to subsequent calls in the same flush so already-
++ * active banks don't re-issue the BIOS switch.
++ *
++ * For LFB-path snapshots (`st->use_dosmemput == false`) this function
++ * is a no-op and returns without writing — use `SDL_memcpy(st->vram_ptr +
++ * page_offset, ...)` directly instead.
++ *
++ * \param src system-RAM source buffer.
++ * \param nbytes number of bytes to copy.
++ * \param dst_offset destination byte offset within VRAM (typically 0
++ *                   for a full-frame flush). The caller is responsible
++ *                   for adding `st->page_offset` if forward-compat with
++ *                   future page-flipping is desired.
++ * \param st snapshot from SDL_DOSVesaDirectGetState(). Must have
++ *           `valid == true && use_dosmemput == true`.
++ * \param current_bank in/out memoization; init to -1 once per flush.
++ *
++ * \threadsafety Single-threaded.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0034).
++ *
++ * \sa SDL_DOSVesaDirectGetState
++ * \sa SDL_DOSVesaDirectSwitchBank
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSVesaDirectBankedFlush(const void *src,
++                                                               Uint32 nbytes,
++                                                               Uint32 dst_offset,
++                                                               const SDL_DOSVesaDirectState *st,
++                                                               int *current_bank);
++
++/**
++ * Program the VGA DAC from an SDL_Palette, for INDEX8 modes.
++ *
++ * Wraps the SDL3-DOS internal ProgramVGADAC() primitive — writes 256
++ * RGB triples (R, G, B in sequence, 6-bit values) to ports 0x3C8 / 0x3C9.
++ *
++ * The direct-VESA path bypasses SDL_RenderPresent's automatic palette
++ * sync, so callers must invoke this themselves whenever their
++ * `SDL_Palette::version` changes. Compare your remembered version
++ * against `palette->version` and only call when they differ.
++ *
++ * Cheap to call (1024 OUT instructions; ~25 µs on PODP83); negligible
++ * vs the dosmemput / memcpy cost of the present.
++ *
++ * \param palette an SDL_Palette with up to 256 colors. Colors are
++ *                interpreted left-shifted by 2 bits (8-bit RGB → 6-bit
++ *                VGA DAC). Palettes with fewer than 256 entries write
++ *                only that many DAC slots; remaining slots keep their
++ *                prior values.
++ *
++ * \threadsafety Single-threaded.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0034).
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSVesaDirectProgramPalette(const SDL_Palette *palette);
++
++/**
++ * Convenience: present a full-screen frame via the cheapest path
++ * available in `st`.
++ *
++ * Picks LFB memcpy or banked dosmemput automatically based on
++ * `st->use_dosmemput` and `st->banked_multibank`. For the multi-bank
++ * banked path, allocates a per-call `current_bank=-1` and invokes
++ * SDL_DOSVesaDirectBankedFlush() under the hood.
++ *
++ * Suitable as a step-1 integration target — get the direct-VESA path
++ * working with one call before splitting into a per-rect loop. Once
++ * dirty-rect dispatch is implemented on the engine side, switch to
++ * SDL_DOSVesaDirectBankedFlush() / SDL_memcpy() per rect for finer
++ * control.
++ *
++ * Returns false when `st` is invalid, `pixels` is NULL, or the snapshot
++ * indicates an unsupported configuration. On false the caller should
++ * fall back to SDL_UpdateWindowSurface.
++ *
++ * \param st snapshot from SDL_DOSVesaDirectGetState().
++ * \param pixels source pixel buffer; must be at least `st->fb_size`
++ *               bytes and have pitch matching `st->vram_pitch` (check
++ *               `st->pitches_match` before calling).
++ * \returns true on success, false on invalid input.
++ *
++ * \threadsafety Single-threaded.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0034).
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
++                                                               const void *pixels);
++
++/* Ends C function definitions when using C++ */
++#ifdef __cplusplus
++}
++#endif
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_dosvesa_directaccess_h_ */
+diff --git a/include/SDL3/SDL_hints.h b/include/SDL3/SDL_hints.h
+index 2e0bd0f96..9b05b3c45 100644
+--- a/include/SDL3/SDL_hints.h
++++ b/include/SDL3/SDL_hints.h
+@@ -977,6 +977,52 @@ extern "C" {
+  */
+ #define SDL_HINT_DOSKUTSU_FORCE_LFB "SDL_HINT_DOSKUTSU_FORCE_LFB"
+ 
++/**
++ * A variable that, when set to "1", instructs the application (typically
++ * the engine layered on top of SDL3-DOS) to use the SDL_DOSVesaDirect*
++ * API instead of SDL_RenderPresent / SDL_UpdateWindowSurface for the
++ * per-flip present.
++ *
++ * **SDL itself does NOT consume this hint.** It is registered here for
++ * documentation symmetry with the rest of the DOSKUTSU env-var
++ * convention; the canonical readers are engine-side (e.g. NXEngine-evo's
++ * `Renderer::flip()`). The SDL3-DOS backend always populates fb_state
++ * the same way regardless of this hint — only the engine's choice to
++ * call SDL_DOSVesaDirectPresentFull / SDL_DOSVesaDirectBankedFlush vs
++ * SDL_UpdateWindowSurface depends on it.
++ *
++ * Background: per the wave-18 measurements (real HW Pentium OverDrive 83
++ * MHz + Cirrus + UNIVBE 6.7), `SDL_RenderPresent` adds ~5 ms / flip on
++ * top of the actual VRAM write — the SW-renderer queue flush plus the
++ * SDL_UpdateWindowSurface state-machine overhead. Bypassing that via the
++ * SDL_DOSVesaDirect* API (which calls the same dosmemput / banked-flush
++ * primitives directly) reclaims that time. See
++ * docs/PHASE9-WAVE-17-18-PLAN.md § 4 for the full lever rationale and
++ * SDL_dosvesa_directaccess.h for the API surface.
++ *
++ * The variable can be set to the following values:
++ *
++ *  - "0" (or unset, or empty): engine should use SDL_UpdateWindowSurface
++ *    (default; goes through DOSVESA_UpdateWindowFramebuffer's existing
++ *    fast path).
++ *  - "1": engine should call SDL_DOSVesaDirectPresentFull (or the
++ *    finer-grained SDL_DOSVesaDirectBankedFlush + SDL_memcpy for the
++ *    LFB path) instead of SDL_RenderPresent / SDL_UpdateWindowSurface.
++ *
++ * Strict-match per CLAUDE.md DOSKUTSU env-var convention: only `e[0]=='1'
++ * && e[1]==0` activates. Anything else (including "0", empty string, or
++ * the variable being unset) falls back to the standard present path.
++ *
++ * The engine reads this hint at flip-time (or once at init); the value
++ * can be changed at runtime to A/B-test direct-VESA vs SDL3-render
++ * baseline mid-session without re-init. Changes take effect on the
++ * next flip.
++ *
++ * Added by patches/SDL/0034 (DOSKUTSU local patch, never upstreamed).
++ * See docs/PHASE9-WAVE-17-18-PLAN.md § 4 for the wave-18 plan.
++ */
++#define SDL_HINT_DOSKUTSU_DIRECT_VESA "SDL_HINT_DOSKUTSU_DIRECT_VESA"
++
+ /**
+  * Set the level of checking for invalid parameters passed to SDL functions.
+  *
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 0f078e230..42e9ed907 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -31,11 +31,24 @@
+ #include "SDL_dosmouse.h"
+ #include "SDL_dosvideo.h"
+ 
++// DOSKUTSU patch 0034 (Phase 9 wave 18) — direct-VESA export header. The
++// public-ish entry points implemented near the bottom of this file are
++// declared here. Workspace-local patch; never upstreamed.
++#include <SDL3/SDL_dosvesa_directaccess.h>
++
+ #include <pc.h>           // for inportb, outportb
+ #include <sys/movedata.h> // for dosmemput (banked framebuffer writes)
+ #include <stdio.h>        // diagnostic file I/O (DOSKUTSU patches/SDL/0002)
+ #include <unistd.h>       // fsync — crash-survive log writes on DOS (patch 0004)
+ 
++// DOSKUTSU patch 0034 (Phase 9 wave 18) — direct-VESA generation counter.
++// Bumped whenever fb_state is invalidated (DOSVESA_InvalidateCachedFramebuffer)
++// or successfully re-populated (populate_fb_state_for_direct_fb). Engines
++// using SDL_DOSVesaDirectGetState read this via SDL_DOSVesaDirectGetGeneration
++// and re-snapshot when it changes. Single-threaded backend → no atomics
++// needed; plain Uint32 is fine.
++static Uint32 _doskutsu_dvd_generation = 0;
++
+ // note that DOS_SURFACE's value is the same string that the dummy driver uses.
+ #define DOS_SURFACE "SDL.internal.window.surface"
+ 
+@@ -214,6 +227,12 @@ void DOSVESA_InvalidateCachedFramebuffer(void)
+     // Clear the LFB surface pointer so UpdateWindowFramebuffer won't try
+     // to blit into VRAM after the DPMI mapping has been freed.
+     fb_state.lfb_surface = NULL;
++    // DOSKUTSU patch 0034 (wave 18): bump the direct-VESA generation
++    // counter so any SDL_DOSVesaDirect* caller's cached snapshot
++    // becomes stale and gets re-fetched on its next flip. Wraparound at
++    // 2^32 is theoretically possible but in practice this is bumped once
++    // at startup + once at quit, well within Uint32 range.
++    _doskutsu_dvd_generation++;
+ }
+ 
+ // Create a system-RAM surface (with a blank palette if INDEX8 and update the VGA DAC).
+@@ -477,6 +496,12 @@ static bool populate_fb_state_for_direct_fb(SDL_VideoDevice *device,
+         fb_state.win_func_ptr = mdata->win_func_ptr;
+         fb_state.banked_multibank = (fb_state.fb_size > win_bytes);
+     }
++    // DOSKUTSU patch 0034 (wave 18): bump the direct-VESA generation so
++    // SDL_DOSVesaDirect* callers re-fetch their snapshot on the next
++    // flip. Bumped on the success path only; failure returns above
++    // leave the generation untouched (caller's previous snapshot is
++    // still consistent with the not-yet-engaged state).
++    _doskutsu_dvd_generation++;
+     return true;
+ }
+ 
+@@ -1885,6 +1910,164 @@ void DOSVESA_DestroyWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *windo
+     (void)device;
+     SDL_zero(fb_state);
+     SDL_ClearProperty(SDL_GetWindowProperties(window), DOS_SURFACE);
++    // DOSKUTSU patch 0034 (wave 18): mode/window destruction also
++    // invalidates direct-VESA callers' cached snapshots.
++    _doskutsu_dvd_generation++;
++}
++
++// ============================================================================
++// DOSKUTSU patch 0034 (Phase 9 wave 18) — direct-VESA public API.
++//
++// Thin wrappers around the static fb_state cache + SwitchBank() +
++// BankedDosmemput() + ProgramVGADAC() primitives that engines can call to
++// bypass SDL_RenderPresent / SDL_UpdateWindowSurface. See
++// include/SDL3/SDL_dosvesa_directaccess.h for full documentation and
++// docs/PHASE9-WAVE-17-18-PLAN.md § 4 for the wave-18 plan.
++//
++// Workspace-local patch; never upstreamed (per project sdl_ai_policy memory).
++// ============================================================================
++
++bool SDL_DOSVesaDirectGetState(SDL_DOSVesaDirectState *out)
++{
++    if (!out) {
++        return false;
++    }
++    SDL_zerop(out);
++
++    // The fast path is engaged iff fb_state.direct_fb is true AND we have
++    // a usable VRAM access path (vram_ptr for LFB, vram_phys for banked).
++    // This mirrors the guard in DOSVESA_UpdateWindowFramebuffer's fast-path
++    // dispatch — same predicate keeps the two layers in sync.
++    if (!fb_state.direct_fb || (!fb_state.vram_ptr && !fb_state.vram_phys)) {
++        return false;
++    }
++
++    out->valid            = true;
++    out->use_dosmemput    = fb_state.use_dosmemput;
++    out->banked_multibank = fb_state.banked_multibank;
++    out->pitches_match    = fb_state.pitches_match;
++    out->vram_w           = fb_state.vram_w;
++    out->vram_h           = fb_state.vram_h;
++    out->vram_pitch       = fb_state.vram_pitch;
++    out->bpp              = fb_state.bpp;
++    out->fb_size          = fb_state.fb_size;
++    out->vram_ptr         = fb_state.vram_ptr;
++    out->vram_phys        = fb_state.vram_phys;
++    out->win_base         = fb_state.win_base;
++    out->win_gran_bytes   = fb_state.win_gran_bytes;
++    out->win_size_bytes   = fb_state.win_size_bytes;
++    out->win_func_ptr     = fb_state.win_func_ptr;
++    // Forward-compat for future page-flip revival (post-patch 0014 the
++    // LFB direct-FB path is single-buffered and vram_ptr already includes
++    // display_start_offset — page_offset is purely additive on top).
++    // Today we always emit 0; if double-buffering is ever rewired,
++    // populate_fb_state_for_direct_fb will start emitting the back-page
++    // byte offset and engine code that adds page_offset to its dst_offset
++    // becomes correct without any engine-side change.
++    out->page_offset      = 0;
++    return true;
++}
++
++Uint32 SDL_DOSVesaDirectGetGeneration(void)
++{
++    return _doskutsu_dvd_generation;
++}
++
++void SDL_DOSVesaDirectSwitchBank(int bank, int *current_bank, Uint32 win_func_ptr)
++{
++    // SwitchBank is SDL_FORCE_INLINE static — same TU, so the inline
++    // expansion lands here. Behavior is identical to the production
++    // BankedDosmemput's inner SwitchBank call (same bx=0 Window A
++    // selector, same PMI/INT 10h dispatch). Sentinel test in patch 0028
++    // proved this primitive's read/write parity, so direct-VESA callers
++    // get the same correctness guarantee.
++    if (!current_bank) {
++        return; // defensive: refuse without the memoization variable.
++    }
++    SwitchBank(bank, current_bank, win_func_ptr);
++}
++
++void SDL_DOSVesaDirectBankedFlush(const void *src, Uint32 nbytes,
++                                   Uint32 dst_offset,
++                                   const SDL_DOSVesaDirectState *st,
++                                   int *current_bank)
++{
++    if (!src || !nbytes || !st || !current_bank) {
++        return;
++    }
++    if (!st->valid || !st->use_dosmemput) {
++        // No-op for LFB-path snapshots — caller should use SDL_memcpy
++        // through st->vram_ptr instead. Documented in the header; we
++        // return silently rather than SDL_SetError since this is the
++        // hot path and the caller may have already branched on
++        // st->use_dosmemput.
++        return;
++    }
++    if (!st->win_gran_bytes || !st->win_size_bytes) {
++        // Defensive: a banked snapshot with zero window granularity is
++        // a corrupt populate (shouldn't happen — populate gates on
++        // win_a_segment + win_size > 0 before setting use_dosmemput).
++        return;
++    }
++
++    // BankedDosmemput is SDL_FORCE_INLINE static; same-TU expansion. We
++    // pass the snapshot's win_* metadata so the bank-walk math runs on
++    // the engine's intended frame, not whatever fb_state happens to be
++    // mid-mode-change. (In practice the snapshot fields mirror fb_state
++    // because the engine should re-snapshot on generation bump, but
++    // passing through is the conservative choice.)
++    BankedDosmemput((const Uint8 *)src, nbytes, dst_offset,
++                    st->win_gran_bytes, st->win_size_bytes,
++                    st->win_base, st->win_func_ptr, current_bank);
++}
++
++void SDL_DOSVesaDirectProgramPalette(const SDL_Palette *palette)
++{
++    if (!palette) {
++        return;
++    }
++    // ProgramVGADAC takes a non-const SDL_Palette * but only reads from
++    // it (writes to ports 0x3C8 / 0x3C9). The cast is safe; the
++    // const-correctness on the public API is just hygiene for callers
++    // who hold a const palette pointer (e.g. from SDL_GetSurfacePalette
++    // when iterating).
++    ProgramVGADAC((SDL_Palette *)palette);
++}
++
++bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
++                                   const void *pixels)
++{
++    if (!st || !st->valid || !pixels) {
++        return false;
++    }
++    if (!st->pitches_match) {
++        // Convenience path requires pitches_match — the per-row case is
++        // an engine concern (different stride means the engine must
++        // walk rows itself). Documented in the header.
++        return false;
++    }
++    if (!st->use_dosmemput) {
++        // LFB nearptr — single SDL_memcpy. vram_ptr already includes
++        // display_start_offset; page_offset is the future-page-flip
++        // hook and is 0 in the current build.
++        if (!st->vram_ptr) {
++            return false;
++        }
++        SDL_memcpy(st->vram_ptr + st->page_offset, pixels, st->fb_size);
++        return true;
++    }
++    // Banked path: single dosmemput for single-bank, BankedDosmemput
++    // walk for multi-bank. dst_offset is page_offset (0 today; future
++    // page-flip back-page offset).
++    if (!st->banked_multibank) {
++        dosmemput(pixels, st->fb_size, st->vram_phys + st->page_offset);
++        return true;
++    }
++    int current_bank = -1;
++    BankedDosmemput((const Uint8 *)pixels, st->fb_size, st->page_offset,
++                    st->win_gran_bytes, st->win_size_bytes,
++                    st->win_base, st->win_func_ptr, &current_bank);
++    return true;
+ }
+ 
+ #endif // SDL_VIDEO_DRIVER_DOSVESA
+-- 
+2.47.3
+
