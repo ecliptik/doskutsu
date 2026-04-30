@@ -84,7 +84,14 @@ Expected: `i586-pc-msdosdjgpp-gcc (GCC) 12.2.0` or similar.
 
 ## CWSDPMI
 
-`CWSDPMI.EXE` is already vendored at `vendor/cwsdpmi/cwsdpmi.exe` (tracked in this repo per the redistribution-permitted license). No fetch step needed.
+`CWSDPMI.EXE` and the other vendored DOS binaries (LFNDOS, DOSLFN) are no longer tracked in git as of 2026-04-30 — they're fetched on demand from URLs + sha256 pins in `vendor/binaries.manifest`:
+
+```bash
+./scripts/fetch-vendor-binaries.sh           # fetch all four binaries
+./scripts/fetch-vendor-binaries.sh --check   # verify sha256 only, no fetch
+```
+
+`make stage`, `make dist`, `make install`, and `make dpmi-lfn-smoke` invoke the fetch step automatically as an order-only prerequisite — runs once, idempotent thereafter. The accompanying license / `.doc` / `.lsm` / `COPYING` files stay tracked because the redistribution licenses require them to ship with their binaries.
 
 ## Manual steps (if you want to do it without the bootstrap)
 

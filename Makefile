@@ -173,11 +173,26 @@ vendor-check:
 	    fi; \
 	done; \
 	if [ ! -f "$(CWSDPMI_EXE)" ]; then \
-	    echo "error: $(CWSDPMI_EXE) missing — see vendor/cwsdpmi/README.md" >&2; \
+	    echo "error: $(CWSDPMI_EXE) missing — run ./scripts/fetch-vendor-binaries.sh" >&2; \
 	    missing=1; \
 	fi; \
 	if [ "$$missing" = "1" ]; then exit 1; fi
 	@echo "vendor tree OK."
+
+# --- Vendored DOS binaries (CWSDPMI + LFNDOS + DOSLFN) ------------------------
+#
+# As of 2026-04-30 these binaries are no longer tracked in git. The
+# fetch-vendor-binaries.sh script populates them on demand from the URLs +
+# sha256 pins in vendor/binaries.manifest. Idempotent: re-running is a no-op
+# when files already exist with the manifest-pinned hash.
+#
+# Targets that need the binaries (stage, dist, install, dpmi-lfn-smoke) take
+# fetch-binaries as an order-only prerequisite — runs once on first build,
+# subsequent rebuilds short-circuit on the sha check.
+
+.PHONY: fetch-binaries
+fetch-binaries:
+	@scripts/fetch-vendor-binaries.sh
 
 # --- Stage 1: SDL3 ------------------------------------------------------------
 
@@ -409,7 +424,7 @@ $(DPMI_LFN_SMOKE_EXE): $(DPMI_LFN_SMOKE_SRC) | djgpp-check
 	$(STUBEDIT) $@ minstack=256k
 
 .PHONY: dpmi-lfn-smoke
-dpmi-lfn-smoke: $(DPMI_LFN_SMOKE_EXE)
+dpmi-lfn-smoke: $(DPMI_LFN_SMOKE_EXE) | fetch-binaries
 	tests/run-dpmi-lfn-smoke.sh
 
 # --- Phase 2d smoke: SDL3 DOS-backend probe -----------------------------------
@@ -674,8 +689,8 @@ define _dist_list_entry
 endef
 
 .PHONY: dist
-dist: $(BUILD_DIR)/doskutsu.exe
-	@test -f "$(CWSDPMI_EXE)"   || (echo "error: $(CWSDPMI_EXE) missing — see vendor/cwsdpmi/README.md" >&2; exit 1)
+dist: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
+	@test -f "$(CWSDPMI_EXE)"   || (echo "error: $(CWSDPMI_EXE) missing — run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
 	@test -f "$(CWSDPMI_DOC)"   || (echo "error: $(CWSDPMI_DOC) missing" >&2; exit 1)
 	@test -f "$(NX_LICENSE)"    || (echo "error: $(NX_LICENSE) missing — run scripts/fetch-sources.sh" >&2; exit 1)
 	@test -d "$(NX_DATA_SRC)"   || (echo "error: $(NX_DATA_SRC) missing — run scripts/fetch-sources.sh" >&2; exit 1)
@@ -724,8 +739,8 @@ dist: $(BUILD_DIR)/doskutsu.exe
 STAGE_DIR := $(BUILD_DIR)/stage
 
 .PHONY: stage
-stage: $(BUILD_DIR)/doskutsu.exe
-	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing — see vendor/cwsdpmi/README.md" >&2; exit 1)
+stage: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
+	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing — run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
 	@mkdir -p "$(STAGE_DIR)"
 	@install -m 0644 $(BUILD_DIR)/doskutsu.exe "$(STAGE_DIR)/DOSKUTSU.EXE"
 	@install -m 0644 $(CWSDPMI_EXE)            "$(STAGE_DIR)/CWSDPMI.EXE"
@@ -739,12 +754,12 @@ stage: $(BUILD_DIR)/doskutsu.exe
 	fi
 
 .PHONY: install
-install: $(BUILD_DIR)/doskutsu.exe
+install: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 ifeq ($(strip $(CF)),)
 	@echo "error: set CF=/path/to/cf/mount (e.g. make install CF=/mnt/cf)" >&2; exit 1
 else
 	@test -d "$(CF)" || (echo "error: CF=$(CF) is not a directory" >&2; exit 1)
-	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing" >&2; exit 1)
+	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing — run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
 	@test -f "$(CWSDPMI_DOC)" || (echo "error: $(CWSDPMI_DOC) missing" >&2; exit 1)
 	@mkdir -p "$(CF)/DOSKUTSU"
 	@install -m 0644 $(BUILD_DIR)/doskutsu.exe "$(CF)/DOSKUTSU/DOSKUTSU.EXE"
