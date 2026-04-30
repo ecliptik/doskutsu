@@ -31,7 +31,7 @@ The DOS port boots and runs end-to-end on Pentium-class real hardware. Real-HW t
 
 What got us here, in user-facing terms: an 8-bpp indexed framebuffer with a master palette (the largest single gain — roughly halves per-frame VRAM bandwidth), hand-rolled sprite blits that bypass SDL's general software-renderer drawcall path, audio sample rate dropped to 22050 Hz stereo (Cave Story's original 2004 spec) with 11025 Hz mono fallback for slower hardware, and dirty-rect tracking on static scenes.
 
-50 fps (matching original Cave Story's `GAME_FPS` tick rate) is the eventual goal. The remaining levers are a direct-VESA hot path that bypasses SDL's per-flip overhead, and chip-specific hardware-blitter support for the Cirrus 5434 — which would offload the per-frame VRAM copy from the CPU. The latter is the actual swing for fully playable framerates.
+50 fps (matching original Cave Story's `GAME_FPS` tick rate) is the eventual goal. The direct-VESA hot path that bypasses SDL's per-flip overhead has been measured on real hardware — it works correctly but only saves ~1 ms/flip (~0.3-0.7 fps gain), available as opt-in via `SDL_HINT_DOSKUTSU_DIRECT_VESA=1`. The actual swing for fully playable framerates is chip-specific hardware-blitter support for the Cirrus 5434, which would offload the per-frame VRAM copy from the CPU entirely.
 
 ## Requirements
 

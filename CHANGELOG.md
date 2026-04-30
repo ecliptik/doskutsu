@@ -4,7 +4,31 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
-(no entries — `0.1.0` was just cut)
+### Added
+
+- **Wave 18 — direct-VESA hot path** (opt-in via `SDL_HINT_DOSKUTSU_DIRECT_VESA=1`, default OFF). Bypasses `SDL_RenderPresent` + `SDL_UpdateWindowSurface` and writes the framebuffer directly to LFB or banked VRAM via `dosmemput`. New SDL3-DOS public API: `SDL_DOSVesaDirectGetState`, `SDL_DOSVesaDirectGetGeneration`, `SDL_DOSVesaDirectPresentFull`, plus thin wrappers around `SwitchBank` / `BankedDosmemput` (`patches/SDL/0034`). Engine integration in `patches/nxengine-evo/0086`.
+- `scripts/fetch-vendor-binaries.sh` + `vendor/binaries.manifest` for fetching the four DOS binaries (cwsdpmi.exe, lfndos.exe, doslfn.com, doslfnms.com) on demand from pinned URLs + sha256 hashes. Mirrors the existing `vendor/sources.manifest` discipline. The `make stage` / `make dist` / `make install` / `make dpmi-lfn-smoke` targets auto-invoke it as an order-only prerequisite.
+- `make fetch-binaries` target.
+
+### Changed
+
+- `BUILDING.md` moved to `docs/BUILDING.md` so all build/contributor docs live under `docs/`. References updated in `README.md`, `Makefile`, and `scripts/setup-symlinks.sh`.
+- README "Status" section now inlines the user-facing performance summary (current real-HW fps, optimization story, remaining levers) so the public face of the project reads cleanly without cross-references to internal team-coordination docs.
+
+### Performance
+
+- **Real-HW measurement on g2k Pentium OverDrive 83 MHz + Cirrus CL-GD5434 + UNIVBE 6.70:** wave-18 direct-VESA delivered **+0.65 fps** on the LFB path (`FORCE_LFB=1` + `DIRECT_VESA=1` → 26.27 fps title) and **+0.27 fps** on the default banked path (`DIRECT_VESA=1` only → 25.89 fps title). Both below the +2-5 fps prediction. The implementation is correct (100/100 successful presents per phase block, zero failures, snapshot generation stable) — the savings are just small because the VRAM write itself dominates the original SDL `present` cost, not SDL dispatch glue.
+- **Conclusion:** SDL_RenderPresent + UpdateWindowSurface dispatch glue is ~1.1 ms/flip on title (not the ~5 ms the wave-16.3 modeling suggested). The +20-30 fps to 50 fps must come from the framebuffer flush itself, not SDL-layer surgery — i.e., from chip-specific hardware-blitter offload (Cirrus CL-GD5434 BitBlt engine).
+
+### Removed
+
+- Vendored DOS binaries (`vendor/cwsdpmi/cwsdpmi.exe`, `vendor/lfndos/lfndos.exe`, `vendor/doslfn/{doslfn,doslfnms}.com`) are no longer tracked in git. Use `make fetch-binaries` (or `scripts/fetch-vendor-binaries.sh`) to populate them from upstream. The accompanying license/`.doc`/`.lsm` files remain tracked because their respective licenses require redistribution alongside the binaries.
+- `tests/phase8-runs/` (~13 MB of phone-photo JPEGs from g2k runs) removed from tracking. Run captures now live at `/tmp/wave-N/` per the iter loop convention.
+- Internal team-coordination plan docs (`docs/PHASE9-NEXT-WAVES-PLAN.md`, `docs/PHASE9-WAVE-14-PLAN.md`, `docs/PHASE9-WAVE-17-18-PLAN.md`, `docs/PHASE9.md`) removed from tracking. Pattern-based `.gitignore` (`/docs/PHASE*-PLAN.md`, etc.) prevents accidental re-tracking.
+
+### Repository
+
+- Git history rewritten via `git filter-repo` (force-pushed 2026-04-30) to purge the above binary artifacts and internal plan docs from prior commits. All commit SHAs from the project's earliest history forward are new. Prior tag `v0.1.0` recreated to point at the rewritten merge commit.
 
 ---
 
