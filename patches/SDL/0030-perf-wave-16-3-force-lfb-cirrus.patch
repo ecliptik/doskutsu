@@ -1,0 +1,220 @@
+From 03d9f18888e12e4ea33579b4331a843ca3b18259 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 29 Apr 2026 11:38:06 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2016.3=20p?=
+ =?UTF-8?q?atch=200030=20=E2=80=94=20LFB-force=20env=20override?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The wave 16.2 banked-flush real-HW capture (2026-04-29) showed the
+bottom ~35 scanlines (= 11,264 bytes / 320 bytes-per-line) rendering
+black on the g2k Cirrus banked path even with patch 0029's bank-1
+offset rewrite. Sentinel match=1 within a single flush, but the
+audit-readback line `DOSVESA-FB-VRAM-BANK1 00 00 00 00 ...` proves
+bank-1 data does not persist between flushes on this Cirrus.
+
+Modeset log shows `has_lfb=1 use_lfb=0 banked=1 lfb_addr=0x78000000`
+— the BIOS DOES expose an LFB on this Cirrus, but our SDL/0019
+auto-disable forces banked because of the OEM-string fingerprint
+match. SDL/0019 was authored against the cirrus5 wave-5 capture
+where LFB was decoupled from the displayed VRAM region; the wave
+16.3 hypothesis is that this particular Cirrus chip / BIOS does
+have a working LFB, and that engaging it retires the entire
+banked-mode bug class AND gains bandwidth (LFB is direct memcpy,
+no banked overhead).
+
+This patch adds an experimental escape hatch:
+SDL_HINT_DOSKUTSU_FORCE_LFB=1 overrides both the SDL/0019 Cirrus
+auto-detect AND the SDL_HINT_DOS_DISABLE_LFB manual disable, forcing
+LFB at both the mode-set layer (SDL_dosmodes.c:838 force_banked
+calculation, fed to VBE 0x4F02 SETMODE_LFB at line ~855) AND the
+FB-state-populate layer (SDL_dosframebuffer.c:367 force_banked
+calculation, fed to use_lfb_path at line ~370). Both layers stay
+in sync per patch 0020's policy.
+
+The hint is strict-match per CLAUDE.md DOSKUTSU env-var convention
+(`e && e[0] == '1' && e[1] == 0`) so SET FORCE_LFB=0 / empty / unset
+all leave SDL/0019's auto-disable behaviour intact. Default behaviour
+is unchanged; the override only fires when the iter explicitly opts in.
+The env-var name SDL_HINT_DOSKUTSU_FORCE_LFB matches the symbol
+constant identically (same convention as SDL_HINT_DOSKUTSU_BANK_SENTINEL,
+SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD).
+
+One diagnostic line lands in SDLDBG.LOG at modeset time:
+
+    WAVE16-3-LFB-FORCE: hint=<unset|set> use_lfb=<0|1>
+    lfb_addr=0x%08lx fb_size=%lu
+
+so each iter capture has one grep'able token confirming which path
+was taken. Routes through DOSKUTSU_MODES_LOG → doskutsu_dbg_log →
+SDLDBG.LOG (or <TAG>SDL.LOG when DOSKUTSU_LOG_TAG is set, per patch
+0024).
+
+Why DOS needs this
+------------------
+
+Wave 16.1 sentinel confirmed that the banked-flush mechanism does
+work within a single flush iteration on this Cirrus, but data does
+not persist between flushes — pointing at either a Cirrus-specific
+banked-window auto-shadow that VBE doesn't expose, or a BIOS-side
+bank-pointer reset on each VBE call. We've spent two iters trying
+to fix banked at the VRAM-write layer; the next experiment is
+sidestepping banked entirely. If LFB works, retire the banked path
+on this card. If LFB fails the same way it did on cirrus5, leave
+the auto-disable in place and chase the banked persistence bug at
+the VBE 0x4F05 SetWindow level next iter.
+
+This patch only adds the override; the existing diagnostic patches
+(0027 audit, 0028 sentinel, 0029 offset rewrite) remain in place
+as passive observers so the iter capture can correlate banked-side
+behaviour against LFB-side behaviour when the hint flips.
+
+Local-only patch per workspace policy. Never PR'd upstream.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ include/SDL3/SDL_hints.h           | 56 ++++++++++++++++++++++++++++++
+ src/video/dos/SDL_dosframebuffer.c | 13 ++++++-
+ src/video/dos/SDL_dosmodes.c       | 27 +++++++++++++-
+ 3 files changed, 94 insertions(+), 2 deletions(-)
+
+diff --git a/include/SDL3/SDL_hints.h b/include/SDL3/SDL_hints.h
+index d6d9cda0f..2e0bd0f96 100644
+--- a/include/SDL3/SDL_hints.h
++++ b/include/SDL3/SDL_hints.h
+@@ -921,6 +921,62 @@ extern "C" {
+  */
+ #define SDL_HINT_DOS_DISABLE_LFB "SDL_DOS_DISABLE_LFB"
+ 
++/**
++ * A variable that, when set to "1", overrides the SDL/0019 Cirrus
++ * auto-disable AND the SDL_HINT_DOS_DISABLE_LFB manual disable, forcing
++ * the LFB path to be selected at both mode-set and FB-state-populate
++ * layers even on Cirrus chips. Strict-match: only the literal string "1"
++ * activates; any other value (including "0", empty, unset) is treated as
++ * "off" and the existing auto-disable / manual-disable behaviour applies
++ * unchanged.
++ *
++ * Background: the SDL/0019 fingerprint pattern was authored against the
++ * cirrus5 wave-5 evidence (Cirrus CL-GD5434 + UNIVBE 6.7) where the LFB
++ * aperture and the displayed VRAM region appeared decoupled. Subsequent
++ * waves on different Cirrus chips have shown a working LFB aperture, so
++ * the auto-disable is too aggressive for those configurations. Phase 9
++ * wave 16.3 introduces this hint as the experimental escape hatch:
++ * setting it skips the Cirrus heuristic and tries LFB on real hardware,
++ * letting us correlate the modeset log against the resulting on-screen
++ * behaviour.
++ *
++ * The override applies in two places, kept in sync per patch 0020:
++ *
++ *  - **SDL_dosmodes.c (mode-set)**: when this hint is "1", `force_banked`
++ *    is cleared so VBE 0x4F02 is called with VBE_SETMODE_LFB on
++ *    fingerprinted Cirrus cards.
++ *  - **SDL_dosframebuffer.c (FB-state-populate)**: same. The LFB nearptr
++ *    write path is selected when otherwise force_banked would have
++ *    routed writes through the banked window.
++ *
++ * The variable can be set to the following values:
++ *
++ *  - "0" (or unset, or empty): SDL/0019 auto-disable + manual disable
++ *    behaviour applies. (default)
++ *  - "1": LFB is forced on regardless of Cirrus auto-detect or manual
++ *    disable. Mode-set engages VBE_SETMODE_LFB; FB writes go through
++ *    the LFB nearptr path.
++ *
++ * Strict-match per CLAUDE.md DOSKUTSU env-var convention: only `e[0]=='1'
++ * && e[1]==0` activates. Anything else (including "0", empty string, or
++ * the variable being unset) leaves the existing behaviour intact.
++ *
++ * One diagnostic line lands in SDLDBG.LOG at modeset time:
++ *   `WAVE16-3-LFB-FORCE: hint=<unset|set> use_lfb=<0|1>
++ *   lfb_addr=0x%08lx fb_size=%lu`
++ * so each iter capture can confirm which path was taken.
++ *
++ * This hint must be set before the first call to SDL_GetWindowSurface()
++ * (or any function that triggers VBE mode-set). It is read at each
++ * mode-set and each populate_fb_state_for_direct_fb call (cheap, no
++ * caching).
++ *
++ * Added by patches/SDL/0030 (DOSKUTSU local patch, never upstreamed).
++ * See docs/PHASE9-WAVE-17-18-PLAN.md / the wave 16.3 LFB experiment for
++ * context.
++ */
++#define SDL_HINT_DOSKUTSU_FORCE_LFB "SDL_HINT_DOSKUTSU_FORCE_LFB"
++
+ /**
+  * Set the level of checking for invalid parameters passed to SDL functions.
+  *
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 85d4e3d28..6c34ad55d 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -364,7 +364,18 @@ static bool populate_fb_state_for_direct_fb(SDL_VideoDevice *device,
+     // when the mode was technically opened with the LFB attribute on
+     // hardware where banked_usable is true (every card we care about).
+     const bool hint_disable_lfb = SDL_GetHintBoolean(SDL_HINT_DOS_DISABLE_LFB, false);
+-    const bool force_banked = data->force_banked_path || hint_disable_lfb;
++
++    // DOSKUTSU patch 0030 (Phase 9 wave 16.3) — LFB-force override. When
++    // SDL_HINT_DOSKUTSU_FORCE_LFB is strict-match "1", clear the
++    // Cirrus auto-disable + manual-disable so the LFB nearptr write path
++    // is selected here even when force_banked would otherwise route writes
++    // through the banked window. Mirrors the same override at the
++    // mode-set layer in SDL_dosmodes.c so both layers stay in sync per
++    // patch 0020's policy. Strict env-var match per CLAUDE.md convention.
++    const char *force_lfb_env = SDL_getenv("SDL_HINT_DOSKUTSU_FORCE_LFB");
++    const bool hint_force_lfb = (force_lfb_env && force_lfb_env[0] == '1' && force_lfb_env[1] == 0);
++    const bool force_banked = !hint_force_lfb &&
++                              (data->force_banked_path || hint_disable_lfb);
+     const bool use_lfb_path = lfb_usable && !force_banked &&
+                               (prefer_lfb || !banked_usable);
+ 
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 20543df1b..861470cb3 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -835,7 +835,20 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+     // real Cirrus (cirrus6 capture symptom). Gating use_lfb on
+     // !force_banked here keeps both layers in sync.
+     const bool hint_disable_lfb = SDL_GetHintBoolean(SDL_HINT_DOS_DISABLE_LFB, false);
+-    const bool force_banked = (data->force_banked_path || hint_disable_lfb) && is_banked_usable;
++
++    // DOSKUTSU patch 0030 (Phase 9 wave 16.3) — LFB-force override. When
++    // SDL_HINT_DOSKUTSU_FORCE_LFB is strict-match "1", clear the
++    // Cirrus auto-disable + manual-disable so LFB is engaged anyway. The
++    // wave 16.2 banked-flush bottom-strip bug on real Cirrus banked is the
++    // motivating case: if LFB happens to work on this chip, we retire the
++    // entire banked-mode bug class AND gain bandwidth (LFB is direct memcpy,
++    // no banked overhead). Strict env-var match per CLAUDE.md convention so
++    // SET FORCE_LFB=0 / SET FORCE_LFB= keep the auto-disable active.
++    const char *force_lfb_env = SDL_getenv("SDL_HINT_DOSKUTSU_FORCE_LFB");
++    const bool hint_force_lfb = (force_lfb_env && force_lfb_env[0] == '1' && force_lfb_env[1] == 0);
++    const bool force_banked = !hint_force_lfb &&
++                              (data->force_banked_path || hint_disable_lfb) &&
++                              is_banked_usable;
+     const bool use_lfb = modedata->has_lfb &&
+                          !force_banked &&
+                          (hint_prefer_lfb ||
+@@ -880,6 +893,18 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+                        (unsigned long)modedata->win_func_ptr,
+                        (int)hint_allow_direct, (int)hint_prefer_lfb);
+ 
++    // DOSKUTSU patch 0030 (Phase 9 wave 16.3) — single-line LFB-force diag.
++    // Reports whether SDL_DOSKUTSU_FORCE_LFB was set this modeset and the
++    // resulting use_lfb / lfb_addr / fb_size, so each iter capture has one
++    // grep'able token (`WAVE16-3-LFB-FORCE`) showing which path was taken.
++    // The fb_size value is what the FB-state-populate layer will use for
++    // size-based audits (matches padded_bytes_per_frame on the previous line).
++    DOSKUTSU_MODES_LOG("WAVE16-3-LFB-FORCE: hint=%s use_lfb=%d lfb_addr=0x%08lX fb_size=%lu",
++                       hint_force_lfb ? "set" : "unset",
++                       (int)use_lfb,
++                       (unsigned long)modedata->physical_base_addr,
++                       (unsigned long)((Uint32)modedata->h * (Uint32)modedata->pitch));
++
+     // DOSKUTSU patch 0026 (Phase 9 wave 16 — 8bpp mode-pick diagnostic):
+     // single grep'able line summarising what SDL_HINT_DOS_MAX_BPP did to the
+     // mode pick. Pairs with WAVE16-FB-FIRSTFLUSH in SDL_dosframebuffer.c so
+-- 
+2.47.3
+

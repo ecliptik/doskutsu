@@ -1,0 +1,87 @@
+From d2feb72efec29b1ee08ec38818a075dda91b50cf Mon Sep 17 00:00:00 2001
+From: Claude <services.claude@accounts.ecliptik.com>
+Date: Wed, 29 Apr 2026 18:40:31 -0700
+Subject: [PATCH] =?UTF-8?q?fix=20wave=2017.4=20patch=200083=20=E2=80=94=20?=
+ =?UTF-8?q?flip=20TextBox=20alpha=20210=20=E2=86=92=20255=20to=20fix=20men?=
+ =?UTF-8?q?u=20black-boxes=20on=20INDEX8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0083, Phase 9 wave 17.4 bundle).
+
+Bug: TextBox::DrawFrame's three drawSpriteChopped calls passed
+alpha=210 (semi-transparent). In INDEX8 mode (wave 16 default)
+this falls through both fast paths:
+
+- _try_fast_blit (Renderer.cpp): alpha!=255 gate rejects.
+- _try_fast_blit_alpha (Renderer.cpp): RGB565-only — no INDEX8
+  sibling exists in the wave-12.5 lever-B implementation.
+
+Both fast paths miss → SDL_RenderTexture is called → SDL3 drops the
+colorkey when blending alpha onto INDEX8 → transparent pixels around
+the sawtooth-triangle decorations on the menu/dialog frame render
+as opaque black on real HW ("menu black-boxes" bug, diagnosed by
+the menu-debug agent and documented at
+memory/sdl3_index8_alpha_colorkey_bug.md).
+
+Cheap fix this patch ships: change alpha=210 → alpha=255 at the
+three drawSpriteChopped sites in TextBox::DrawFrame. The fast path
+now engages (alpha==255 takes the opaque _try_fast_blit branch which
+honors colorkey correctly), bug goes away. Loses cosmetic semi-
+transparency on the menu / dialog frame.
+
+The proper fix (a new _blit_indexed_alpha primitive mirroring
+wave-12.5's _blit_rgb565_alpha) is queued as a polish-backlog item;
+it's not on the fps critical path and shipping the cheap fix
+unblocks visual correctness now.
+
+3-line content change. Comment block added on the function explains
+the rationale so future readers don't "restore" the 210 alpha not
+realizing it triggers the bug.
+---
+ src/TextBox/TextBox.cpp | 21 ++++++++++++++++++---
+ 1 file changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/src/TextBox/TextBox.cpp b/src/TextBox/TextBox.cpp
+index 74449ab..0ef8f01 100644
+--- a/src/TextBox/TextBox.cpp
++++ b/src/TextBox/TextBox.cpp
+@@ -530,16 +530,31 @@ void c------------------------------() {}
+ 
+ // draws the frame of an empty text box spanning
+ // the specified coordinates.
++//
++// DOS-PORT (patch 0083, Phase 9 wave 17.4 bundle): alpha was 210
++// (semi-transparent) on all three drawSpriteChopped calls. In INDEX8
++// mode (wave 16 default) that alpha value triggers a fall-through:
++// `_try_fast_blit` rejects on alpha != 255 (gate at L2862), and
++// `_try_fast_blit_alpha` is RGB565-only (no INDEX8 sibling — see
++// memory/sdl3_index8_alpha_colorkey_bug.md). Both fast paths miss →
++// SDL_RenderTexture is called → SDL3 drops the colorkey when blending
++// alpha onto INDEX8 → transparent pixels around the sawtooth-triangle
++// decorations render as opaque black ("menu black-boxes" bug).
++//
++// Cheap fix: alpha=255. Loses cosmetic semi-transparency on menu and
++// dialog boxes. Real fix (a new `_blit_indexed_alpha` primitive
++// mirroring wave-12.5's `_blit_rgb565_alpha`) is queued as polish-
++// backlog item; it's not on the fps critical path.
+ void TextBox::DrawFrame(int x, int y, int w, int h)
+ {
+-  Renderer::getInstance()->sprites.drawSpriteChopped(x, y, SPR_TEXTBOX, 0, w, 8, 210); // draw top
++  Renderer::getInstance()->sprites.drawSpriteChopped(x, y, SPR_TEXTBOX, 0, w, 8, 255); // draw top
+   y += 8;
+ 
+   for (int draw = 0; draw < h - 16; draw += 8)
+   {
+-    Renderer::getInstance()->sprites.drawSpriteChopped(x, y, SPR_TEXTBOX, 1, w, 8, 210); // draw middle
++    Renderer::getInstance()->sprites.drawSpriteChopped(x, y, SPR_TEXTBOX, 1, w, 8, 255); // draw middle
+     y += 8;
+   }
+ 
+-  Renderer::getInstance()->sprites.drawSpriteChopped(x, y, SPR_TEXTBOX, 2, w, 8, 210); // draw bottom
++  Renderer::getInstance()->sprites.drawSpriteChopped(x, y, SPR_TEXTBOX, 2, w, 8, 255); // draw bottom
+ }
+-- 
+2.47.3
+

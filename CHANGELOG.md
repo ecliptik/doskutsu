@@ -4,6 +4,137 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 
 ## [Unreleased]
 
+(no entries — `0.1.0` was just cut)
+
+---
+
+## [0.1.0] — 2026-04-30 (Phase 9 — Wave 17 release)
+
+**First playable release.** Real-HW title fps **25.6 fps on the reference Pentium OverDrive 83 MHz / Cirrus CL-GD5434 / UNIVBE 6.70 / Vibra16 hardware** (g2k machine), measured on this binary's PLAY1 release-production config. Cumulative gain since Phase 8 baseline: **0.47 → 25.6 fps = 54× improvement**. Cave Story is now perceptually playable on Pentium-class real DOS hardware.
+
+**Release binary:** `DOSKUTSU.EXE` sha256 `88320e55adf8a79ff0a882d566a80d8b93f153d507726fc3ada85bd2744e21aa`, 6,022,940 bytes, built 2026-04-30 from Phase 9 wave 17.6 patch series.
+
+### Highlights
+
+- Title screen renders cleanly with cloud parallax animation, menu, and decorations
+- Music + audio with occasional minor pauses (improves with LFB; full audio polish backlogged)
+- Keyboard navigation works after initial ~30s IRQ-1 first-fire delay (parked finding; held keys are reliable workaround)
+- Bottom-strip-black bug fixed (incidentally by wave 17.3 cache extension; root cause was legacy `SDL_RenderTexture` clip path, not chip behavior)
+- Menu black-boxes around triangle decorations fixed (wave 17.4 alpha cheap fix)
+- LFB direct-write path available as opt-in for Cirrus chips with working LFB exposure (`SDL_HINT_DOSKUTSU_FORCE_LFB=1`, +0.4 fps)
+
+### Wave 17 release-candidate iter (final, 2026-04-30) — PLAY1/PLAY2/PLAY3 measurements
+
+| Pass | Config | Real-HW title fps | Notes |
+|---|---|---|---|
+| PLAY1 (default) | no env vars set | **25.6** | Production config; backdrop cache active, prev-frame diff disabled |
+| PLAY2 (opt-in) | `SDL_HINT_DOSKUTSU_FORCE_LFB=1` | 26.0 | LFB direct-write engaged; +0.4 fps lift |
+| PLAY3 (experimental) | `FORCE_LFB=1 + PREVFRAME_DIFF=1` | 17.6 | Partial-flush stacked on LFB — regressed; partial-flush stays opt-in only |
+
+PLAY3 conclusively closes the partial-flush direction: same -7-8 fps regression magnitude on LFB as on banked (waves 17.4 banked = -7.1, 17.5 banked = -7.4, this iter LFB = -8.0). The unmodeled cost is in SDL3-DOS's `UpdateWindowSurfaceRects` per-rect dispatch, not bank-switching. No wave 17.7 follow-up; partial-flush mechanism retained as opt-in (`SDL_HINT_DOSKUTSU_PREVFRAME_DIFF=1`) for users on different hardware that might behave differently, but default OFF.
+
+### Phase 9 — Wave 17 release detail
+
+**Cumulative since Phase 9 start:** real-HW title fps **0.47 → 25.6** (54× improvement). Visual + audio + input all functional. Cumulative patch series: ~85 local patches across SDL3-DOS + NXEngine-evo. Per-flip budget at LFB-forced PLAY2 of wave 16.3: 16.4 ms drawcalls + 16.7 ms VRAM flush + 5.0 ms audio/engine glue.
+
+**Real-HW measurement environment:** Gateway 2000 Pentium OverDrive 83 MHz ("g2k"), Cirrus Logic CL-GD5434 PCI 1MB, SciTech UNIVBE 6.70, Vibra16 (SB16-class), MS-DOS 6.22, CWSDPMI r7. All Phase 9 fps numbers below are real-HW measurements.
+
+#### Wave 14 — decoupled engine tick (parked)
+- Investigation only; engine-tick decoupling was scoped but parked because input-IRQ delivery was broken (parked finding from wave 13.6.1 — see `phase9_framerate_first.md`). Code paths left intact for post-50fps polish phase.
+
+#### Wave 15 — dirty-rect re-enable via Lever B per-blit destination tracking (default ON, kill via `SDL_HINT_DOSKUTSU_DIRTY_RECTS=0`)
+- `patches/nxengine-evo/0071-perf-wave-15-dirty-rect-reenable.patch` re-implements dirty-rect tracking on top of Lever B's per-blit destination tracking. Engine accumulates per-drawcall rects; threshold gate (50% screen) decides partial-vs-full flush.
+- Real-HW result: title 10.0 → 13.2 fps. Mechanism is correct but engine's `clearScreen` and `map_draw_backdrop` tile loop both contribute full-screen-ish dirty rects every frame, so the path engages rarely on title — sets up the cache work in wave 17.
+- Killswitch `SDL_HINT_DOSKUTSU_DIRTY_RECTS=0` retained.
+
+#### Wave 16 — 8bpp INDEX8 mode + master palette + cmod LUT (the bandwidth-halving wave)
+- Switches the production pixel format from RGB565 to INDEX8 8bpp. Cuts framebuffer bytes/frame from 153,600 to 76,800 (-50%).
+- Patches `patches/nxengine-evo/0072..0078` introduce `SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8` (default ON, kill via `=0`), Surface INDEX8 fastpath, master palette + per-asset remap LUT, cmod color-mod LUT, and the colorkey-bleed fix.
+- Host tooling: `tools/build-master-palette.py` generates `data/master.pal` (768 B) + `data/master.map` (5,383 B; 8.3-clean rename from `master.palmap`).
+- Real-HW result: title 13.2 → 25.9 fps (+12.7) — the largest single-wave gain in Phase 9. Lever B / 8bpp / palette / cmod-LUT stacked.
+- Wave 16.1 / 16.2 / 16.3 / 16.4 — diagnostic + experiment subseries (see below).
+
+##### Wave 16.1 — banked-flush sentinel diagnostic (`patches/SDL/0028-perf-wave-16-1-banked-flush-sentinel.patch`)
+- Adds `SDL_HINT_DOSKUTSU_BANK_SENTINEL=1` (default OFF, opt-in diagnostic). On enable, every 100 banked-mode flushes writes a 16-byte sentinel pattern to bank-1 offset 0 via the production SwitchBank+dosmemput path, then reads it back.
+- Real-HW result: `match=1` consistently across all sample iters. **Definitively refutes "banked-mode bank-switch broken on Cirrus" hypothesis.** Bank-switch + dosmemput round-trip works correctly.
+
+##### Wave 16.2 — BankedDosmemput offset rewrite (`patches/SDL/0029-perf-wave-16-2-banked-flush-offset-fix.patch`)
+- Defensive rewrite of `BankedDosmemput`'s bank-1 offset math (explicit `bank++ ; off_in_win = 0` counters instead of modulo/division). Originally hypothesized as the bottom-strip-black bug fix.
+- Real-HW result: NO-OP. Pre-rewrite math was already correct (computed `src_off=65536 dst_off=0 bytes=11264`). Bank-1 readback still showed all-zeros after the fix landed. Refutes "BankedDosmemput offset arithmetic wrong" hypothesis. Patch retained as a code-clarity improvement; not a behavior change.
+
+##### Wave 16.3 — LFB-force override + LFB sentinel (`patches/SDL/0030`, `0031`)
+- `0030` adds `SDL_HINT_DOSKUTSU_FORCE_LFB=1` (default OFF, opt-in) which overrides SDL/0019's "auto-disable LFB on Cirrus" check. Engages LFB direct-write path on Cirrus chips that have working LFB exposure.
+- `0031` adds `SDL_HINT_DOSKUTSU_LFB_SENTINEL=1` (default OFF, opt-in diagnostic). One-shot fires on first flip after modeset; samples 5 LFB offsets (0, 65535, 65536, 76799, 131072) — write+readback through same LFB pointer.
+- Real-HW results:
+  - Force-LFB: title 25.8 → 26.2 fps (+0.4 fps over banked baseline). LFB direct-write is faster than banked dosmemput; bandwidth-bound on PCI write speed (~4.6 MB/s on this Cirrus).
+  - Sentinel: ALL FIVE offsets `match=1`. **Definitively refutes "LFB aperture lies past 64KB" hypothesis.** LFB writes work at any offset including past the 64KB boundary.
+- Both env vars retained as opt-in; FORCE_LFB is a real perf win for users on Cirrus chips that have working LFB.
+
+##### Wave 16.4 — VBE 0x4F07 + Cirrus chip-direct CRTC display-start fix (`patches/SDL/0032-perf-wave-16-4-display-start-fix.patch`)
+- Adds `SDL_HINT_DOSKUTSU_DISPLAY_START_FIX=1` (default OFF, opt-in). Two sequential approaches: VBE 0x4F07 BL=0x80 first, then Cirrus CL-GD5434 CRTC chip-direct register manipulation if VBE rejects.
+- Real-HW result: NO-OP. VBE 0x4F07 returned `ax=0x004F ok` but `crtc_pre == crtc_post` for all five logged register indices (0x0C/0x0D/0x13/0x1A/0x1D). Display-start was already 0; pitch register was already correct (0x28 = 40 = 320/8). **Definitively refutes "display controller scan-cap" hypothesis.** Patch retained for other Cirrus configs that may have wrong-register initial state.
+
+#### Wave 17 — backdrop cache + menu visual fix
+The fps gains came from waves 17.2 / 17.3 (cache infrastructure) and the visual win came incidentally from wave 17.3's bypass of the legacy SDL_RenderTexture path. Waves 17.4 / 17.5 attempted partial-flush but regressed and are default-OFF in this release.
+
+##### Wave 17.1 — dirty-rect investigation (reverted in 17.3)
+- Instrumentation patch revealed that the wave-15 dirty-rect path's coalesce-on-overflow branch always collapses 80+ small per-tile rects into a screen-spanning bounding box. Investigation finding adopted; instrumentation reverted because it added ~0.9 ms/flip overhead with no production value.
+
+##### Wave 17.2 — `map_draw_backdrop` cache (`patches/nxengine-evo/0080-perf-wave-17-2-cache-backdrop-render.patch`)
+- Caches the rendered backdrop into a single ~76 KB Surface (lazy-allocated, freed in dtor). `BK_FIXED` scenes (static backdrops) hit the cache 100%. Cache key = `(curmap, backdrop_id, scrolltype, parscroll_x, parscroll_y, indexed_mode_flag, format, dimensions)`.
+- Killswitch `SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` (default ON, kill via `=0`).
+- Real-HW result: title fps unchanged (title uses `BK_FASTLEFT_LAYERS`, bypassed by the simple-backdrop path). Cache infrastructure foundation for wave 17.3.
+
+##### Wave 17.3 — extend cache to BK_FASTLEFT_LAYERS (`patches/nxengine-evo/0081-perf-wave-17-3-cache-fastleft-layers.patch`)
+- Extends wave 17.2's cache to handle the layered scrolling backdrop used by Cave Story's title screen. New `_render_layered_to_surface` uses raw `SDL_BlitSurface` instead of legacy `blitPatternAcross` (which goes through SDL_RenderTexture queue).
+- Real-HW result: title fps `dc_ms` unchanged but bottom-strip-black bug INCIDENTALLY FIXED. The legacy `blitPatternAcross` path was failing to write pixels to the bottom 35 scanlines (cause: SDL_RenderTexture clip-rect or coordinate-truncation bug we didn't fully root-cause). Wave 17.3's bypass writes all pixels everywhere → bottom strip renders.
+- Net real-HW: title 25.0 → 25.7 fps after also reverting wave-17.1 instrumentation.
+- **Visual win:** clouds fill the full 240 scanlines on title for the first time since the bug emerged in early Phase 8. Confirmed by user real-HW report 2026-04-29.
+
+##### Wave 17.4 — engine-side prev-frame diff (`patches/nxengine-evo/0082`, `patches/SDL/0033`) — REGRESSED
+- Engine maintains a prev-frame Surface, runs per-scanline `SDL_memcmp` to compute REAL dirty rects, passes to `SDL_UpdateWindowSurfaceRects`. SDL/0033 makes the `pitches_match` flush branches actually honor the rect list (previously ignored rects and dosmemput'd full frame).
+- DOSBox-X smoke showed 70% partial-flush engagement at 44% avg dirty area — predicted +5-10 fps.
+- Real-HW result: **-7.1 fps regression** (25.7 → 18.5). Per-rect dosmemput overhead (~3-5 ms × 2-4 rects/flush) dominated the bytes-saved win. Bytes-saved math correct; cost model missed per-call DPMI/banked setup overhead.
+- Patches retained, default flipped to OFF in wave 17.6.
+
+##### Wave 17.5 — bbox partial-flush (`patches/nxengine-evo/0084-perf-wave-17-5-bbox-partial-flush.patch`) — REGRESSED
+- Replaces wave-17.4's per-rect pattern with ONE dosmemput of the dirty bounding box. Trades fewer-bytes-more-calls for more-bytes-fewer-calls.
+- DOSBox-X smoke: bbox lands 45-46% on title, 0/100 frames trip 75% threshold.
+- Real-HW result: **-7.4 fps regression** (25.7 → 18.3). Same magnitude as wave 17.4. Effective bandwidth: full-flush 4.4 MB/s, bbox-flush 1.07 MB/s. Per-byte cost is ~4× worse for partial vs full regardless of rect-vs-bbox structure — unmodeled cost in SDL3-DOS partial dispatch path or our diff CPU.
+- Patch retained, default OFF as of wave 17.6.
+
+##### Wave 17.6 — flip prev-frame-diff default to OFF (release prep, `patches/nxengine-evo/0085-perf-wave-17-6-prev-frame-diff-default-off.patch`)
+- Changes `SDL_HINT_DOSKUTSU_PREVFRAME_DIFF` polarity from opt-out (default ON, regressed) to opt-in (default OFF). Production behavior matches wave-17.3 baseline.
+- Wave 17.4/17.5 mechanisms stay in tree as opt-in for users to experiment.
+
+#### Visual fixes (wave 17 cluster)
+
+- **Bottom-strip-black on real HW Cirrus banked mode** — clouds bottom 35 scanlines were rendering as black. Originally hypothesized as banked-mode flush / chip scan-cap; correct cause was legacy SDL_RenderTexture clip-rect bug. Fixed incidentally by wave 17.3's raw-SDL_BlitSurface bypass.
+- **Menu black-boxes around triangle decorations** (`patches/nxengine-evo/0083-fix-menu-alpha-opaque-on-index8.patch`) — Cave Story title menu's textbox renders alpha=210 (semi-transparent). In INDEX8 mode this falls through both fast paths into SDL_RenderTexture which silently drops colorkey for INDEX8+alpha+colorkey combo. Cheap fix: literal `210 → 255` in `TextBox::DrawFrame()` at three call sites. Loses cosmetic semi-transparency but original Cave Story shipped fully opaque. Proper fix (`_blit_indexed_alpha` primitive mirroring wave-12.5's RGB565 sibling) deferred to polish phase per `memory/sdl3_index8_alpha_colorkey_bug.md`.
+
+#### Hypothesis tree corrections (this session)
+
+The bottom-strip-black bug went through three wrong interpretations before the right answer surfaced:
+- ❌ H-A: display-start origin offset (refuted by audit)
+- ❌ H-B: display controller scan-cap at 64KB (refuted by wave-16.4 — registers were already correct)
+- ❌ H-C: bank-switch broken (refuted by wave-16.1 sentinel match=1)
+- ❌ H-D: aperture-lies-past-64KB (refuted by wave-16.3 sentinel all-five-offsets match=1)
+- ✅ Actual: legacy `blitPatternAcross` was simply not writing those pixels. Discovered when wave-17.3's bypass incidentally fixed it.
+
+Lesson: always question "is the engine actually writing those pixels?" before blaming the chip/display side. See `memory/lfb_sentinel_result_hypothesis_b.md`.
+
+#### Known issues (parked for polish phase)
+
+- Keyboard IRQ-1 first-fire delay ~30s after launch (parked from wave 13.6.1)
+- Keyboard buffer overflow after ~10 keypresses on real HW (PC speaker beeps; engine drains BIOS buffer at 1 key/flip)
+- Audio chop in cmod-heavy scenes (improves with higher fps; LFB-engaged config slightly smoother than banked)
+- Graphics options menu shows "640x480" (cosmetic UI bug; actual mode is 320×240 per modeset log)
+- Other alpha<255 + colorkey + INDEX8 sites likely affected by SDL3 SW renderer bug — full audit pending in polish phase
+
+#### Documentation
+
+- `docs/BOOT.md` — env var reference updated with all wave 16.x and 17.x hints; PREVFRAME_DIFF moved to dev/diagnostic section after wave 17.6 default-OFF flip
+
 ### Added
 - Initial repository scaffold per `DOSKUTSU-PLAN.md` (now `PLAN.md`)
 - Top-level `Makefile` orchestrating the five-stage build (SDL3 → sdl2-compat → SDL2_mixer + SDL2_image → NXEngine-evo)

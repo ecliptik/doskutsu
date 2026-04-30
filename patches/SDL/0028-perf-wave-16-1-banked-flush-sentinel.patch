@@ -1,0 +1,203 @@
+From 1800ceecfc4038ff557a6df676744ab05d4bbc34 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 28 Apr 2026 19:10:57 -0700
+Subject: [PATCH] [DOSKUTSU] dos: Phase 9 wave 16.1 patch 0028 - banked-flush
+ sentinel
+
+Wave 16's master-palette + 8bpp framebuffer landed 25.9 fps title on real
+HW (g2k Pentium OverDrive 83 MHz + Cirrus + UNIVBE 6.70), but the bottom
+~35 scanlines render as black on banked mode. Patch 0027 added a per-
+flush audit + bank-1 readback. The data REFUTED both originally-framed
+hypotheses:
+
+  H-A (display-start origin) -- bank-1 readback returned all-zero, so
+       bank 1 in VRAM is genuinely empty (not just hidden by an offset).
+  H-B (flush stops at bank 0) -- audit shows switches/flush=2 and
+       bytes/flush=76800, so SDL is calling SwitchBank twice and is
+       handing the full 76,800-byte frame to dosmemput.
+
+Two surviving hypotheses:
+
+  H-C: SwitchBank() is being called but does not take effect on this HW.
+       Cirrus + UNIVBE may need IO-delay / chip-direct register writes
+       / VBE PMI for the bank switch to land. SDL "writes to bank 1"
+       physically reach bank 0 again, overwriting cloudscape pixels
+       with cloudscape pixels (invisible). Bank 1 stays empty.
+
+  H-D: Write path and audit-readback path use different bank-window
+       mechanisms (Cirrus has separate bank registers per Window A/B).
+       SDL's dosmemput could be landing correctly in bank 1, but the
+       audit's dosmemget would always see Window A which never moved.
+
+Code review of SwitchBank() at src/video/dos/SDL_dosframebuffer.c:542
+shows it uses bx=0 (Window A) for ALL switches; both BankedDosmemput's
+production write path (line 582) and patch-0027's audit readback (line
+1046) call the same primitive. So H-D is refuted by reading code -- but
+the symptom persists, so we want positive evidence rather than a code
+read.
+
+This patch adds a sentinel write+readback in the same flush, gated by
+SDL_HINT_DOSKUTSU_BANK_SENTINEL=1 (strict "1" match, default OFF so it
+does NOT affect prod fps measurement). On the same 100-flush cadence as
+the existing audit, it:
+
+  1. Calls SwitchBank(bank=1, ...) using the production primitive.
+  2. dosmemput()s a 16-byte sentinel pattern (0xAA 0xBB 0xCC 0xDD x4)
+     to bank-1 offset 0 -- IDENTICAL to BankedDosmemput's inner step.
+  3. Calls SwitchBank(bank=1, ...) again (no-op short-circuit, same
+     bx=0 selector) and dosmemget()s the 16 bytes back.
+  4. Logs "WAVE16-1-SENTINEL @flush=N: write_via=switchbank-bx0
+     read_via=switchbank-bx0 match=<0|1> wrote=... readback=..." to
+     SDLDBG.LOG.
+  5. Restores bank 0 so subsequent flushes see the expected start state.
+
+Interpretation by next-session team:
+
+  match=1  --> SwitchBank+dosmemput WORKS for writes, AND immediate
+               readback through the same primitive sees the data.
+               Bottom-strip black is NOT a bank-switch failure. Suspect
+               either (a) audit-readback in patch 0027 is reading the
+               wrong VRAM offset / wrong bank index, or (b) the
+               production BankedDosmemput dst_offset math drifts on the
+               second bank's writes (off-by-pitch, off-by-bank-base).
+               Re-audit with sentinel positioned at the actual byte
+               offset where pixel 320*205 lands in VRAM.
+
+  match=0  --> SwitchBank silently fails on this HW. H-C confirmed.
+               Fix paths to investigate next:
+                 - outportb(0x80, 0) IO-delay between switch and write
+                 - chip-direct Cirrus bank register
+                   (outportb(0x3CE,0x09); outportb(0x3CF, bank))
+                 - VBE 0x05 protected-mode interface (eliminates the
+                   real-mode round-trip overhead; faster + more
+                   reliable on PCI-bus VBE drivers)
+
+The sentinel write itself overwrites 16 bytes of garbage at the start
+of the bank-1 region (= scanline 205 cols 0-15), but that region is
+already in the bottom-strip-black area on real HW, so visual impact is
+masked by the existing bug. On DOSBox-X which renders bank 1 correctly,
+the sentinel may briefly show as a colored pixel run -- acceptable
+because the env is OFF by default.
+
+The existing patch-0027 audit (DOSVESA-FB-VRAM-BANK1, WAVE16-FB-FLUSH-
+AUDIT) is unchanged so a single iter can run with the env on and
+collect both signals for cross-correlation.
+
+Per docs/BOOT.md convention every new env var is documented in the
+"Diagnostic / development options" subsection. The sentinel is dev-only,
+not user-facing.
+
+See docs/PHASE9-WAVE-17-18-PLAN.md s 1.5 for hypothesis context.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c | 93 ++++++++++++++++++++++++++++++
+ 1 file changed, 93 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index c0ec89709..6d60fc050 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -1051,6 +1051,99 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 int reset_bank_dummy = -1;
+                 SwitchBank(0, &reset_bank_dummy, fb_state.win_func_ptr);
+             }
++
++            // DOSKUTSU patch 0028 (wave 16.1 banked-flush bottom-strip
++            // disambiguation). Patch-0027 audit refuted both H-A
++            // (display-start origin) and H-B (flush stops at bank 0).
++            // Surviving hypotheses:
++            //   H-C: SwitchBank() is called but doesn't take effect on
++            //        this HW (Cirrus + UNIVBE). Writes "to bank 1" land
++            //        physically in bank 0. Bank 1 stays empty → bottom
++            //        ~35 scanlines render as black.
++            //   H-D: SDL writes via one window, audit reads via another
++            //        — Cirrus banks-per-window split. Bank-1 readback in
++            //        the audit above is wrong-mechanism, not wrong data.
++            //
++            // Code review (2026-04-28): SwitchBank() at line 542 of this
++            // file uses bx=0 (Window A) for ALL bank switches, both the
++            // production BankedDosmemput write path (line 582) AND the
++            // audit's bank-1 readback (line 1046). So write and read use
++            // the SAME bx selector. That makes H-D look refuted by code
++            // — but we want positive evidence, not just code reading.
++            //
++            // This sentinel test writes a known 16-byte pattern to bank
++            // 1 offset 0 via dosmemput (production path), then reads it
++            // back via dosmemget through the SAME SwitchBank primitive,
++            // all within one flush. Result interpretation:
++            //   match=1 → SwitchBank+dosmemput WORKS for writes; the
++            //             audit's all-zero readback is reading from the
++            //             wrong place (likely H-D after all, or stale-
++            //             dst_offset math in the production path on the
++            //             previous frame).
++            //   match=0 → SwitchBank+dosmemput is silently failing on
++            //             this HW. H-C confirmed; fix paths are chip-
++            //             direct Cirrus bank registers, IO-delay between
++            //             SwitchBank and dosmemput, or VBE 0x05 PMI.
++            //
++            // Env-gated by SDL_HINT_DOSKUTSU_BANK_SENTINEL=1 (strict "1"
++            // match, default OFF) so it does NOT affect prod perf
++            // measurement. Same 100-flush cadence as the audit so a
++            // single iter can run with the env on and capture both.
++            //
++            // Side-effects: writes 16 bytes of garbage to bank-1 offset
++            // 0 every 100 flushes. On a 320-stride 8bpp surface that's
++            // the first 16 pixels of scanline 205 (the start of the
++            // bank-1 region) — already in the visible-but-broken
++            // bottom strip, so visual impact is masked by the existing
++            // bug. Restores bank 0 before exit so subsequent flushes
++            // start clean.
++            if (fb_state.use_dosmemput && fb_state.banked_multibank &&
++                fb_state.win_gran_bytes > 0 && fb_state.fb_size > fb_state.win_size_bytes) {
++                static int _sentinel_enabled_cached = -1;
++                if (_sentinel_enabled_cached == -1) {
++                    const char *e = SDL_getenv("SDL_HINT_DOSKUTSU_BANK_SENTINEL");
++                    _sentinel_enabled_cached = (e && e[0] == '1' && e[1] == 0) ? 1 : 0;
++                }
++                if (_sentinel_enabled_cached) {
++                    Uint8 sentinel_w[16] = {
++                        0xAA, 0xBB, 0xCC, 0xDD, 0xAA, 0xBB, 0xCC, 0xDD,
++                        0xAA, 0xBB, 0xCC, 0xDD, 0xAA, 0xBB, 0xCC, 0xDD,
++                    };
++                    Uint8 sentinel_r[16] = { 0 };
++                    int sb_bank_dummy = -1;
++                    int sb_bank = (int)(fb_state.win_size_bytes / fb_state.win_gran_bytes);
++                    // Write via SwitchBank + dosmemput — IDENTICAL to the
++                    // production BankedDosmemput inner step at line 582-583.
++                    SwitchBank(sb_bank, &sb_bank_dummy, fb_state.win_func_ptr);
++                    dosmemput(sentinel_w, 16, fb_state.win_base);
++                    // Read back via SwitchBank + dosmemget — the SwitchBank
++                    // call here is a no-op because sb_bank_dummy still
++                    // equals sb_bank (same primitive's "already there"
++                    // short-circuit), guaranteeing read happens through
++                    // the SAME bx=0 selector used for the write.
++                    SwitchBank(sb_bank, &sb_bank_dummy, fb_state.win_func_ptr);
++                    dosmemget(fb_state.win_base, 16, sentinel_r);
++                    int match = (SDL_memcmp(sentinel_w, sentinel_r, 16) == 0) ? 1 : 0;
++                    doskutsu_dbg_log(
++                        "WAVE16-1-SENTINEL @flush=%d: write_via=switchbank-bx0 "
++                        "read_via=switchbank-bx0 match=%d "
++                        "wrote=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x "
++                        "readback=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
++                        _doskutsu_dbg_call_total, match,
++                        sentinel_w[0], sentinel_w[1], sentinel_w[2], sentinel_w[3],
++                        sentinel_w[4], sentinel_w[5], sentinel_w[6], sentinel_w[7],
++                        sentinel_w[8], sentinel_w[9], sentinel_w[10], sentinel_w[11],
++                        sentinel_w[12], sentinel_w[13], sentinel_w[14], sentinel_w[15],
++                        sentinel_r[0], sentinel_r[1], sentinel_r[2], sentinel_r[3],
++                        sentinel_r[4], sentinel_r[5], sentinel_r[6], sentinel_r[7],
++                        sentinel_r[8], sentinel_r[9], sentinel_r[10], sentinel_r[11],
++                        sentinel_r[12], sentinel_r[13], sentinel_r[14], sentinel_r[15]);
++                    // Restore bank 0 so subsequent flushes don't see a
++                    // pre-positioned bank-1 window from this diagnostic.
++                    int sb_reset_dummy = -1;
++                    SwitchBank(0, &sb_reset_dummy, fb_state.win_func_ptr);
++                }
++            }
+         }
+ 
+         // DOSKUTSU patch 0027 (wave 16 banked-flush audit) — per-flush
+-- 
+2.47.3
+

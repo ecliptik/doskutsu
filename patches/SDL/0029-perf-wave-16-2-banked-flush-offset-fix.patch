@@ -1,0 +1,158 @@
+From 2f6a670f1fba7e2897e667d40cadd8de90ec43d2 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 29 Apr 2026 08:32:10 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2016.2=20p?=
+ =?UTF-8?q?atch=200029=20=E2=80=94=20banked-flush=20bank-1=20offset=20fix?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fix the missing-bottom-strip visual regression introduced by patch 0026's
+8bpp mode pick (wave 16). On real HW Cirrus + UNIVBE 6.70 in 320×240×8bpp
+banked mode (mode 0x01F8), the bottom ~35 scanlines of every frame
+rendered as black despite BankedDosmemput logging "76,800 bytes / 2
+switches per flush" — bytes were going somewhere not visible.
+
+Diagnostic chain:
+- Patch 0027 audit (wave 16): bank-1 readback at win_base+0 was zero on
+  5/5 occurrences. Refuted H-A (display-start origin) and H-B (flush
+  stops at bank 0); proved bank 1 in VRAM is genuinely empty after the
+  production write.
+- Patch 0028 sentinel (wave 16.1): explicit SwitchBank(1) +
+  dosmemput(buf, 16, win_base) + SwitchBank(1) + dosmemget(win_base)
+  match=1 on 5/5 flushes. Refuted H-C (bank-switch ineffective) and H-D
+  (write/read window mismatch). The SwitchBank+dosmemput primitive
+  itself works correctly; the bug is specifically in the production
+  BankedDosmemput call's bank-1 dosmemput dst.
+
+Original BankedDosmemput recomputed `bank = dst_offset / win_gran_bytes`
+and `off_in_win = dst_offset % win_gran_bytes` afresh each loop
+iteration. With dst_offset=65536 and win_gran_bytes=65536 in iter 2,
+that's mathematically bank=1 and off_in_win=0 — correct on paper. But
+the SDL_FORCE_INLINE expansion at the call site (line 929) produced a
+bank-1 dosmemput that didn't reach VRAM bank 1 in practice. Symptom
+matches: 76800 - 65536 = 11264 bytes / 320 bytes-per-line = 35.2
+scanlines black, exactly the visible bottom-strip width.
+
+Fix: explicit bank-and-off_in_win loop-carried locals, advanced by
+`bank++; off_in_win = 0` at end of each iteration. Same byte count, same
+two bank switches, just a defensive form that doesn't depend on
+modular-arithmetic recomputation. Added one-shot WAVE16-2-BANK1-FIX
+diagnostic on first non-bank-0 dosmemput so build-qa can grep the
+binary's strings to verify the patch landed and the next real-HW iter's
+SDLDBG.LOG positively confirms the per-call args.
+
+Predicted outcome: no fps impact (same bytes, same switches); cloud bg
+extends across all 240 scanlines; DOSVESA-FB-VRAM-BANK1 readback shows
+real cloud-pixel data instead of zeros.
+
+Refs: docs/PHASE9-WAVE-17-18-PLAN.md § 1.5; patches 0027 (audit), 0028
+(sentinel).
+---
+ src/video/dos/SDL_dosframebuffer.c | 70 ++++++++++++++++++++++++++++--
+ 1 file changed, 66 insertions(+), 4 deletions(-)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 6d60fc050..85d4e3d28 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -565,30 +565,92 @@ SDL_FORCE_INLINE void SwitchBank(int bank, int *current_bank, Uint32 win_func_pt
+ 
+ // Copy a contiguous byte range from system RAM to VRAM through the banked
+ // window, switching banks as needed.
++//
++// DOSKUTSU patch 0029 (wave 16.2): bank-1 dst-offset fix.
++//
++// Wave-16 visual regression: bottom ~35 scanlines render as black on real
++// HW Cirrus + UNIVBE 6.70 in 320×240×8bpp banked mode (mode 0x01F8). The
++// wave-16.1 sentinel test (patch 0028) proved that an explicit
++// SwitchBank(1) + dosmemput(buf, 16, win_base) + SwitchBank(1) +
++// dosmemget(win_base) round-trip works correctly (match=1) — so the
++// SwitchBank primitive itself is fine. But the wave-16 audit's bank-1
++// readback (also via SwitchBank(1) + dosmemget(win_base)) showed all-zero
++// 5/5 occurrences, meaning the production write into bank 1 didn't land
++// at win_base+0 as it should have. Bottom 11264 bytes of the framebuffer
++// (76800 - 65536 = 11264 B = 35.2 scanlines × 320 B/line) were going
++// somewhere else.
++//
++// The original implementation computed `off_in_win = dst_offset %
++// win_gran_bytes` and `bank = dst_offset / win_gran_bytes` afresh each
++// iteration. With dst_offset=65536 and win_gran_bytes=65536, that's
++// mathematically 0 and 1 respectively — correct on paper. But the
++// SDL_FORCE_INLINE expansion of this function at the call site (line 929)
++// produced bank-1 dosmemput writes that didn't reach VRAM bank 1 in
++// practice. The defensive rewrite here:
++//   1. Tracks `bank` and `off_in_win` as explicit loop-carried locals
++//      rather than recomputing modulo every iteration. After each bank is
++//      filled, `bank++` and `off_in_win = 0` reset cleanly.
++//   2. Adds a one-shot WAVE16-2-BANK1-FIX diagnostic on the first
++//      multi-bank flush so the next iter's SDLDBG.LOG confirms the math
++//      runtime: bank=1 src_off=65536 dst_off=0 bytes=11264 win_base=0xA0000.
++//
++// Same number of bytes (76800) and bank switches (2) per flush; pure
++// visual fix, no perf delta. Verification: post-fix DOSVESA-FB-VRAM-BANK1
++// readback should show real cloud-pixel data, not zeros.
+ SDL_FORCE_INLINE void BankedDosmemput(const Uint8 *src, Uint32 total_bytes, Uint32 dst_offset,
+                                       Uint32 win_gran_bytes, Uint32 win_size_bytes,
+                                       Uint32 win_base, Uint32 win_func_ptr,
+                                       int *current_bank)
+ {
+     Uint32 src_off = 0;
++    // DOS-PORT (wave 16.2): explicit bank index + per-bank offset, advanced
++    // by `bank++; off_in_win = 0` at end of each iteration. Avoids the
++    // `dst_offset / win_gran_bytes` and `dst_offset % win_gran_bytes`
++    // recomputation that wave-16.1 sentinel evidence suggests was silently
++    // miscompiling the bank-1 dosmemput dst.
++    int bank = (int)(dst_offset / win_gran_bytes);
++    Uint32 off_in_win = dst_offset - (Uint32)bank * win_gran_bytes;
+     while (total_bytes > 0) {
+-        int bank = (int)(dst_offset / win_gran_bytes);
+-        Uint32 off_in_win = dst_offset % win_gran_bytes;
+         Uint32 avail = win_size_bytes - off_in_win;
+         Uint32 n = total_bytes;
+         if (n > avail) {
+             n = avail;
+         }
+         SwitchBank(bank, current_bank, win_func_ptr);
+-        dosmemput(src + src_off, n, win_base + off_in_win);
++        const Uint32 dst_phys = win_base + off_in_win;
++        dosmemput(src + src_off, n, dst_phys);
++        // DOSKUTSU patch 0029 (wave 16.2 bank-1 offset fix) one-shot
++        // diagnostic: log the math the FIRST time we issue a non-bank-0
++        // dosmemput, so SDLDBG.LOG positively confirms src_off, dst_off,
++        // bytes, and win_base for the bank-1 (and any subsequent bank)
++        // write. Build-qa greps `strings build/doskutsu.exe` for
++        // "WAVE16-2-BANK1-FIX" to verify the fix landed in the binary.
++        {
++            static int _w162_logged = 0;
++            if (bank > 0 && _w162_logged == 0) {
++                _w162_logged = 1;
++                doskutsu_dbg_log(
++                    "WAVE16-2-BANK1-FIX: bank=%d src_off=%lu dst_off=%lu "
++                    "bytes=%lu win_base=0x%08lx win_gran=%lu win_size=%lu "
++                    "(first non-bank-0 dosmemput; defensive offset rewrite "
++                    "active)",
++                    bank, (unsigned long)src_off, (unsigned long)off_in_win,
++                    (unsigned long)n, (unsigned long)win_base,
++                    (unsigned long)win_gran_bytes, (unsigned long)win_size_bytes);
++            }
++        }
+         // DOSKUTSU patch 0027 (wave 16 banked-flush audit): count
+         // bytes pushed through the banked window. Used to confirm the
+         // full fb_size lands per flush at 8bpp (76,800 B) vs falling
+         // off after the first bank (would show ~65,536 B / flush).
+         _dbg_bytes_written_total += n;
+         src_off += n;
+-        dst_offset += n;
+         total_bytes -= n;
++        // DOS-PORT (wave 16.2): advance to next bank explicitly. The
++        // next iteration writes from offset 0 of the new bank, not
++        // dst_offset % win_gran_bytes of an accumulated dst_offset.
++        bank++;
++        off_in_win = 0;
+     }
+ }
+ 
+-- 
+2.47.3
+
