@@ -25,6 +25,14 @@ This project is 100% built agentically using [Claude Code](https://docs.anthropi
 
 A proof-of-concept port using SDL to DOS with agentic coding.
 
+## Status
+
+The DOS port boots and runs end-to-end on Pentium-class real hardware. Real-HW title fps on the reference target (Gateway 2000 Pentium OverDrive 83 MHz + Cirrus CL-GD5434 + UNIVBE 6.70 + Vibra16) is **25.6 fps** as of the v0.1.0 release — a 55× improvement over the initial Phase 8 baseline of 0.47 fps. Music, parallax, menus, and combat all render correctly.
+
+What got us here, in user-facing terms: an 8-bpp indexed framebuffer with a master palette (the largest single gain — roughly halves per-frame VRAM bandwidth), hand-rolled sprite blits that bypass SDL's general software-renderer drawcall path, audio sample rate dropped to 22050 Hz stereo (Cave Story's original 2004 spec) with 11025 Hz mono fallback for slower hardware, and dirty-rect tracking on static scenes.
+
+50 fps (matching original Cave Story's `GAME_FPS` tick rate) is the eventual goal. The remaining levers are a direct-VESA hot path that bypasses SDL's per-flip overhead, and chip-specific hardware-blitter support for the Cirrus 5434 — which would offload the per-frame VRAM copy from the CPU. The latter is the actual swing for fully playable framerates.
+
 ## Requirements
 
 **Minimum**
@@ -87,7 +95,7 @@ Save files live in `DATA\Profile.dat` alongside the binary.
 
 ## Building
 
-See [BUILDING.md](./BUILDING.md) for prerequisites, DJGPP cross-compiler install, the full four-stage build (SDL3 → SDL3_mixer → SDL3_image → NXEngine-evo), testing in DOSBox-X, and common errors.
+See [docs/BUILDING.md](./docs/BUILDING.md) for prerequisites, DJGPP cross-compiler install, the full four-stage build (SDL3 → SDL3_mixer → SDL3_image → NXEngine-evo), testing in DOSBox-X, and common errors.
 
 Short version, once DJGPP is installed:
 

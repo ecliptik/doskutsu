@@ -28,7 +28,7 @@ If you have the 2004 EN freeware `Doukutsu.exe` already, point the script at it:
 ./scripts/bootstrap.sh --cave-story-exe /path/to/Doukutsu.exe
 ```
 
-The script extracts `wavetbl.dat`, `stage.dat`, and `endpic/pixel.bmp` from the EXE into `./data/`, runs the 8.3 rename helper, and stages the runtime layout. The remaining game content (sprites, maps, music, TSC scripts) you'll still need to extract via `doukutsu-rs` / `NXExtract` / `cavestory.one` and drop into `./data/` per [docs/ASSETS.md](./docs/ASSETS.md) — then re-run `./scripts/rename-user-data-83.sh data && make stage` to finish.
+The script extracts `wavetbl.dat`, `stage.dat`, and `endpic/pixel.bmp` from the EXE into `./data/`, runs the 8.3 rename helper, and stages the runtime layout. The remaining game content (sprites, maps, music, TSC scripts) you'll still need to extract via `doukutsu-rs` / `NXExtract` / `cavestory.one` and drop into `./data/` per [ASSETS.md](./ASSETS.md) — then re-run `./scripts/rename-user-data-83.sh data && make stage` to finish.
 
 ### Override locations
 
@@ -224,7 +224,7 @@ THIRD-PARTY.TXT       attribution matrix (CRLF)
 README.TXT            DOS-readable quick-start + how to obtain Cave Story data
 ```
 
-`dist/doskutsu-cf.zip` does **not** include Cave Story game data. Users must extract it from the 2004 freeware `Doukutsu.exe` themselves — see [docs/ASSETS.md](./docs/ASSETS.md).
+`dist/doskutsu-cf.zip` does **not** include Cave Story game data. Users must extract it from the 2004 freeware `Doukutsu.exe` themselves — see [ASSETS.md](./ASSETS.md).
 
 ### Direct install to a mounted CF card
 
@@ -272,7 +272,7 @@ Organya synth CPU cost at 22050 stereo is the likely culprit. Fallback is `Mix_O
 
 ### `make distclean` removed my Cave Story data
 
-`distclean` only wipes `build/` and cloned `vendor/` subdirectories. `data/base/` is yours — it is gitignored but never touched by the Makefile. If it's gone, re-extract per `docs/ASSETS.md`.
+`distclean` only wipes `build/` and cloned `vendor/` subdirectories. `data/base/` is yours — it is gitignored but never touched by the Makefile. If it's gone, re-extract per `ASSETS.md`.
 
 ---
 

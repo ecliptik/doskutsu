@@ -9,7 +9,7 @@
 #   4. sdl2-image  — SDL_image release-2.8.x, built against sdl2-compat
 #   5. nxengine    — nxengine/nxengine-evo, links everything into build/doskutsu.exe
 #
-# See PLAN.md for the phased rationale behind each stage; see BUILDING.md
+# See PLAN.md for the phased rationale behind each stage; see docs/BUILDING.md
 # for prerequisites and troubleshooting.
 
 # --- Toolchain ----------------------------------------------------------------

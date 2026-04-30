@@ -29,7 +29,7 @@ log() { printf '[setup-symlinks] %s\n' "$*" >&2; }
 
 if [[ ! -d "$EMULATORS_ROOT" ]]; then
     log "error: $EMULATORS_ROOT does not exist."
-    log "       Expected the ~/emulators/ hub to be cloned. See doskutsu's BUILDING.md."
+    log "       Expected the ~/emulators/ hub to be cloned. See doskutsu's docs/BUILDING.md."
     exit 1
 fi
 
