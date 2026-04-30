@@ -1,0 +1,218 @@
+From e94e64ae1d89dd647e81839f65eab09750a456d7 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 28 Apr 2026 11:07:12 -0700
+Subject: =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2013.6.1=20patch?=
+ =?UTF-8?q?=200023=20=E2=80=94=20env-var=20RING=5FBUFFER=5FCHUNKS=20+=20ke?=
+ =?UTF-8?q?yboard=20IRQ=20counters?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 13.6 (patch 0022) hardcoded RING_BUFFER_CHUNKS=16 to fix audio chop
+on PODP 5V83. That introduced a keyboard regression on real HW (frozen
+keyboard input after engine startup, 8042 buffer-overflow beep on
+keypress). See docs/PHASE9-WAVE-14-PLAN.md §2.
+
+This patch makes wave 13.6 bisectable in a single CF-card swap:
+
+1. SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=4|8|16 toggles the audio ring
+   depth at runtime. Default = 16 (matches wave 13.6 behaviour with no
+   env vars set; the regression is intentionally still in the default —
+   this slot is for diagnosis, not a pre-emptive fix). Strict-match
+   parsing per the project convention: anything other than the exact
+   strings "4", "8", "16" → 16. Cached on first OpenDevice call so
+   re-entry never re-reads the env. resolve_ring_chunks() also exports
+   the resolved value to a linkage-visible int
+   doskutsu_audio_ring_chunks_active that the engine's phase-timing log
+   reads — single source of truth, avoids engine-side parser drift.
+
+2. IRQ-delivery counters doskutsu_kbd_irq_count and
+   doskutsu_kbd_drain_count (volatile uint32_t, DOS_LockVariable'd)
+   bumped from KeyboardIRQHandler and DOSVESA_PumpEvents drain loop
+   respectively. Engine's phase-timing log block reads both via extern
+   declarations. Locked with DOS_LockVariable since they're read across
+   IRQ/main-thread context. If the kbd freeze on g2k coincides with
+   irq_count plateauing → DPMI/scheduler problem; if irq_count keeps
+   climbing but drain_count falls behind → game-thread starvation.
+
+3. New SDL_Log line at OpenDevice records the active ring_chunks,
+   chunk_size, ring_size, and the raw env-var string (or "(unset)") so
+   each DEBUG.LOG run self-describes which audio config it ran with.
+
+Default behaviour unchanged from wave 13.6 when no env vars are set.
+Pairs with engine-side patch 0068 (Renderer.cpp phase-timing log
+extension + ring-chunks init banner).
+
+See docs/PHASE9-WAVE-14-PLAN.md §2 for the full bisect plan.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 78 +++++++++++++++++++++++++--------
+ src/video/dos/SDL_dosevents.c   | 27 ++++++++++++
+ 2 files changed, 87 insertions(+), 18 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index eb3e50b2c..327260a8b 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -85,22 +85,51 @@ static Uint8 ReadSoundBlasterDSP(void)
+ // (using the full SDL pipeline with all its allocations and mutexes), and
+ // the ISR just does a memcpy (no SDL calls, no DPMI, no allocator).
+ 
+-// Number of DMA half-buffers that fit in the ring. Must be a power of two.
+-// 4 chunks is ~45 ms at 44100 Hz, enough headroom for 22 fps frame times.
+-/* DOSKUTSU patch (Phase 9 wave 13.6): bump from 4 to 16 chunks. With
+-   SDL3's default sample_frames=512 (2048-byte chunks at 22050 stereo S16),
+-   16 chunks = 32 KB = 372 ms of buffer. Wave 13.5 real-HW measurements
+-   (PODP 5V83) showed bigger sample_frames is SLOWER per-flip (cache
+-   pressure on the P54C's 8 KB L1 D-cache when chunk memcpy ≥ 8 KB), so
+-   we keep small chunks for speed but use a deeper ring to avoid audio
+-   underrun in slow scenes (cmod-heavy menus drop to ~2 fps = 500 ms
+-   between game-yields → buffer needs ≥500 ms to never miss). 372 ms is
+-   not enough for the worst-case 500 ms cmod-menu gap but covers the
+-   common 10 fps title scene with margin and dramatically improves the
+-   chop frequency vs the 92 ms of the original 4-chunk ring. Memory
+-   cost: 32 KB ring + 2 KB staging vs 8 KB ring + 2 KB staging — 24 KB
+-   extra, trivial against 48 MB XMS budget. */
+-#define RING_BUFFER_CHUNKS 16
++// Number of DMA half-buffers that fit in the ring. Must be a power of two
++// (we accept 4, 8, 16). Resolved from SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS;
++// see resolve_ring_chunks() below.
++//
++// DOSKUTSU patch (Phase 9 wave 13.6.1): wave 13.6 hardcoded this to 16
++// (372 ms buffer at 22050 Hz stereo S16, default chunk_size 2048 B) to
++// fix audio chop on PODP 5V83. That introduced a keyboard regression
++// — see docs/PHASE9-WAVE-14-PLAN.md §2. Wave 13.6.1 makes the value
++// runtime-overridable so the regression can be bisected in a single
++// CF-card swap by setting:
++//   SET SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=4   (8 KB ring, 92 ms — wave 13.5 baseline)
++//   SET SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=8   (16 KB ring, 184 ms — intermediate)
++//   SET SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=16  (32 KB ring, 372 ms — wave 13.6 default)
++// Default (unset / unrecognized) = 16 to match wave 13.6 behaviour
++// when no env vars are set.
++//
++// EXPORTED: doskutsu_audio_ring_chunks_active is read by the engine's
++// phase-timing log block (Renderer.cpp). Single source of truth.
++
++/* doskutsu_audio_ring_chunks_active: linkage-visible to engine. Set on
++   the first call to resolve_ring_chunks(). Reads default to 16 if the
++   audio device has not been opened yet. */
++int doskutsu_audio_ring_chunks_active = 16;
++
++static int resolve_ring_chunks(void)
++{
++    static int cached = -1;
++    if (cached == -1) {
++        const char *e = SDL_getenv("SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS");
++        int v = 16; /* default — matches wave 13.6 behaviour */
++        if (e) {
++            if (e[0] == '4' && e[1] == 0) {
++                v = 4;
++            } else if (e[0] == '8' && e[1] == 0) {
++                v = 8;
++            } else if (e[0] == '1' && e[1] == '6' && e[2] == 0) {
++                v = 16;
++            }
++            /* else: keep default 16 */
++        }
++        cached = v;
++        doskutsu_audio_ring_chunks_active = v;
++    }
++    return cached;
++}
+ 
+ // All of the following statics are memory-locked, making them safe to access
+ // from the ISR without risking a page fault or DPMI re-entrance.
+@@ -313,8 +342,10 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+     // Set up the IRQ-driven ring buffer.
+     hidden->chunk_size = device->buffer_size; // one DMA half-buffer
+ 
+-    // Ring size must be a power of two and hold RING_BUFFER_CHUNKS chunks.
+-    hidden->ring_size = hidden->chunk_size * RING_BUFFER_CHUNKS;
++    // Ring size must be a power of two and hold N chunks, N resolved
++    // from SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS (4/8/16, default 16).
++    const int ring_chunks = resolve_ring_chunks();
++    hidden->ring_size = hidden->chunk_size * ring_chunks;
+     // Ensure power-of-two (chunk_size itself comes from SDL and may not be).
+     {
+         int rs = hidden->ring_size;
+@@ -337,6 +368,17 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         return SDL_SetError("Couldn't allocate staging buffer for IRQ-driven audio");
+     }
+ 
++    /* DOSKUTSU patch (Phase 9 wave 13.6.1): log the active ring-chunks
++       value alongside the resolved ring_size and chunk_size so a single
++       DEBUG.LOG line tells us which audio config a run used. */
++    {
++        const char *env = SDL_getenv("SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS");
++        SDL_Log("SOUNDBLASTER: ring_chunks=%d chunk_size=%d ring_size=%d (env "
++                "SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=%s)",
++                ring_chunks, hidden->chunk_size, hidden->ring_size,
++                env ? env : "(unset)");
++    }
++
+     hidden->ring_read = 0;
+     hidden->ring_write = 0;
+ 
+diff --git a/src/video/dos/SDL_dosevents.c b/src/video/dos/SDL_dosevents.c
+index 22906c6b6..912da585b 100644
+--- a/src/video/dos/SDL_dosevents.c
++++ b/src/video/dos/SDL_dosevents.c
+@@ -252,6 +252,24 @@ static Uint8 keyevents_ringbuffer[256];
+ static int keyevents_head = 0;
+ static int keyevents_tail = 0;
+ 
++/* DOSKUTSU patch (Phase 9 wave 13.6.1): IRQ-delivery counters for the
++   keyboard regression bisect. These are bumped:
++     - kbd_irq_count: in KeyboardIRQHandler, once per IRQ-1 fire. If
++       this stops incrementing during the freeze, IRQ delivery is
++       dead → DPMI-side problem (audio thread / scheduler hogging).
++     - kbd_drain_count: in DOSVESA_PumpEvents, once per byte drained
++       from keyevents_ringbuffer. If kbd_irq keeps incrementing but
++       drain falls behind, pump scheduling is the bottleneck →
++       game-thread starvation.
++   Both visible to engine via extern declarations in Renderer.cpp.
++   Both DOS_LockVariable'd: kbd_irq_count is updated from IRQ
++   context and must be locked. kbd_drain_count is bumped from the
++   main thread BUT torn-read from IRQ context isn't impossible
++   (engine thread reading via extern, IRQ firing) — the lock costs
++   nothing once and avoids reasoning about atomicity. Lock both. */
++volatile uint32_t doskutsu_kbd_irq_count = 0;
++volatile uint32_t doskutsu_kbd_drain_count = 0;
++
+ void DOSVESA_PumpEvents(SDL_VideoDevice *device)
+ {
+     /* DOSKUTSU patch (Phase 9 wave 13.3): the per-pump DOS_Yield() was
+@@ -278,6 +296,9 @@ void DOSVESA_PumpEvents(SDL_VideoDevice *device)
+     while (keyevents_head != keyevents_tail) {
+         const Uint8 event = keyevents_ringbuffer[keyevents_tail];
+         keyevents_tail = (keyevents_tail + 1) & (SDL_arraysize(keyevents_ringbuffer) - 1);
++        /* DOSKUTSU patch (Phase 9 wave 13.6.1): drain-rate counter
++           for keyboard-regression bisect. */
++        doskutsu_kbd_drain_count++;
+ 
+         // Handle remaining bytes of E1 Pause key sequence (E1 1D 45 E1 9D C5).
+         if (pause_sequence_remaining > 0) {
+@@ -366,6 +387,9 @@ void DOSVESA_PumpEvents(SDL_VideoDevice *device)
+ 
+ static void KeyboardIRQHandler(void) // this is wrapped in a thing that handles IRET, etc.
+ {
++    /* DOSKUTSU patch (Phase 9 wave 13.6.1): IRQ-fire counter for
++       keyboard-regression bisect. Read by engine's phase-timing log. */
++    doskutsu_kbd_irq_count++;
+     keyevents_ringbuffer[keyevents_head] = inportb(KBD_DATA_PORT);
+     keyevents_head = (keyevents_head + 1) & (SDL_arraysize(keyevents_ringbuffer) - 1);
+     DOS_EndOfInterrupt(1);
+@@ -381,6 +405,9 @@ void DOSVESA_InitKeyboard(SDL_VideoDevice *device)
+     DOS_LockVariable(keyevents_ringbuffer);
+     DOS_LockVariable(keyevents_head);
+     DOS_LockVariable(keyevents_tail);
++    /* DOSKUTSU patch (Phase 9 wave 13.6.1): IRQ-bisect counters. */
++    DOS_LockVariable(doskutsu_kbd_irq_count);
++    DOS_LockVariable(doskutsu_kbd_drain_count);
+ 
+     DOS_HookInterrupt(1, KeyboardIRQHandler, &data->keyboard_interrupt_hook);
+ }
+-- 
+2.47.3
+

@@ -1,0 +1,251 @@
+From 2005c44908a8a9e88134430800da50fe7d4a3ee3 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 10:18:37 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=208=20patc?=
+ =?UTF-8?q?h=200051=20=E2=80=94=20skip=20FlushRenderer=20on=20empty=20queu?=
+ =?UTF-8?q?e?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Patch 0048's hand-rolled fast path calls SDL_FlushRenderer(_renderer)
+before each direct write to ensure prior queued slow-path drawcalls
+land in window->surface before our fast-path overlay. This is required
+for z-order correctness when slow-path and fast-path drawcalls
+interleave.
+
+But on title scene cirrus7 fastpath audit reports ~98.9% of drawcalls
+take the fast path. So the renderer queue is almost always already
+empty when fast path calls FlushRenderer. SDL_FlushRenderer's
+empty-queue early-return at SDL_render.c §343 is cheap, but it's
+still a function-call + parameter validation pass per drawcall ×
+340/frame.
+
+Fix: track a per-renderer "queue dirty" bit. Set in every slow-path
+render call site (RenderTexture / RenderTextureRotated / RenderLine /
+RenderFillRect / RenderFillRects). Read in fast-path: skip the flush
+when clean. Cleared after flush, and after SDL_RenderPresent in flip()
+and flushAll() since RenderPresent implicitly flushes.
+
+Slow-path call sites instrumented with `_renderer_queue_dirty = true`:
+  * Renderer::drawSurface         (SDL_RenderTexture via timed helper)
+  * Renderer::drawSurfaceMirrored (SDL_RenderTextureRotated via timed helper)
+  * Renderer::blitPatternAcross   (SDL_RenderTexture)
+  * Renderer::drawLine            (SDL_RenderLine)
+  * Renderer::drawRect            (SDL_RenderFillRects)
+  * Renderer::fillRect            (SDL_RenderFillRect)
+  * Renderer::tintScreen          (SDL_RenderFillRect)
+  * Renderer::clearScreen         (SDL_RenderFillRect)
+  * Renderer::drawSpotLight       (SDL_RenderTexture)
+
+Cleared in:
+  * Renderer::flip       (after SDL_RenderPresent)
+  * Renderer::flushAll   (after SDL_RenderPresent)
+  * _try_fast_blit_16x16 (after the conditional SDL_FlushRenderer)
+
+First slow-path → fast-path transition behavior: slow path sets
+dirty=true, fast path on next call sees dirty, performs SDL_Flush-
+Renderer (which empties the queue and lands the slow-path output on
+window->surface), clears dirty=false, then performs its direct write.
+Z-order is preserved exactly as in the unconditional-flush version.
+
+Reverse case (fast-path → slow-path): patch 0048's analysis still
+applies — the slow-path queues a command and the fast-path's prior
+direct write is already on window->surface, so when SDL_RenderPresent
+or the next fast-path's flush drains the queue, the slow-path output
+composites on top of the fast-path output exactly as if both went
+through the renderer.
+
+Smoke-tested under DOSBox-X parity (build/stage runs cleanly, title
+renders correctly, intro scene proceeds, character moves).
+fastpath audit shows the same ~415/2370 ratio as wave 7, so the
+gating logic is unchanged — only the cost-per-fastpath-call is
+reduced.
+
+Expected real-HW saving: ~340 × N µs per frame where N is the per-
+SDL_FlushRenderer-empty-queue cost on real HW. Combined with patch
+0050's GetWindowSurface-cache, the per-call overhead in the fast
+path drops by both contributors.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 51 +++++++++++++++++++++++++++++++++++----
+ src/graphics/Renderer.h   | 10 ++++++++
+ 2 files changed, 56 insertions(+), 5 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 7980cae..8d9c52d 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -541,6 +541,8 @@ bool Renderer::flushAll()
+   // queue and may have invalidated the SW-renderer's window-surface
+   // pointer. Refresh, mirroring flip().
+   _cached_window_surface = SDL_GetWindowSurface(_window);
++  // DOS-PORT (patch 0051): SDL_RenderPresent flushed the queue.
++  _renderer_queue_dirty = false;
+   sprites.flushSheets();
+   tileset.reload();
+   map_flush_graphics();
+@@ -713,6 +715,9 @@ void Renderer::flip()
+   // invalidate the underlying window surface — re-querying once per
+   // flip is the safe invalidation hook.
+   _cached_window_surface = SDL_GetWindowSurface(_window);
++  // DOS-PORT (patch 0051, Phase 9 wave 8): SDL_RenderPresent
++  // implicitly flushed the queue, so the dirty bit is now clean.
++  _renderer_queue_dirty = false;
+   if (!ok)
+   {
+     ++_flip_failed;
+@@ -791,6 +796,7 @@ void Renderer::flip()
+ //   went through the renderer.
+ static inline bool _try_fast_blit_16x16(SDL_Renderer *renderer,
+                                         SDL_Surface *win_surface,
++                                        bool &renderer_queue_dirty,
+                                         Surface *src, int srcx, int srcy,
+                                         const SDL_Rect &srcrect, const SDL_Rect &dstrect)
+ {
+@@ -859,10 +865,24 @@ static inline bool _try_fast_blit_16x16(SDL_Renderer *renderer,
+     return true;
+   }
+ 
+-  // Drain any queued slow-path commands so our overlay lands AFTER
+-  // them. Empty-queue path is essentially free (early-return at
+-  // FlushRenderCommands SDL_render.c §343).
+-  SDL_FlushRenderer(renderer);
++  // DOS-PORT (patch 0051, Phase 9 wave 8): drain queued slow-path
++  // commands so our overlay lands AFTER them — but ONLY when the queue
++  // is actually dirty. Pre-patch we called SDL_FlushRenderer
++  // unconditionally on every fast-path drawcall; on title scene 98.9%
++  // of drawcalls take the fast path so the queue is almost always
++  // already empty. SDL_FlushRenderer's empty-queue early-return at
++  // SDL_render.c §343 is cheap but not free: still a function call,
++  // validation pass, etc., per drawcall × 340/frame. The dirty bit is
++  // set by every slow-path render command (RenderTexture /
++  // RenderTextureRotated / RenderLine / RenderFillRect /
++  // RenderFillRects). Cleared here after flush, and again at
++  // SDL_RenderPresent in flip()/flushAll() since present implicitly
++  // flushes.
++  if (renderer_queue_dirty)
++  {
++    SDL_FlushRenderer(renderer);
++    renderer_queue_dirty = false;
++  }
+ 
+   // Pixel pitch in 16-bit elements.
+   const int src_pitch_pixels = src_surface->pitch / 2;
+@@ -943,6 +963,7 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   // calls in the title scene are 16×16 sprites with alpha=255 and no
+   // scale/clip — those all take the fast path.
+   if (_try_fast_blit_16x16(_renderer, _cached_window_surface,
++                           _renderer_queue_dirty,
+                            src, srcx, srcy, srcrect, dstrect))
+   {
+     ++_fastpath_taken_block;
+@@ -977,6 +998,9 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   {
+     _bump_drawcall();
+   }
++  // DOS-PORT (patch 0051): slow-path queued a command — fast path
++  // must flush before its next direct surface write.
++  _renderer_queue_dirty = true;
+ }
+ 
+ // blit the specified portion of the surface to the screen
+@@ -1026,6 +1050,8 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+   {
+     _bump_drawcall();
+   }
++  // DOS-PORT (patch 0051): slow-path queued a command.
++  _renderer_queue_dirty = true;
+ }
+ 
+ // blit the specified surface across the screen in a repeating pattern
+@@ -1065,6 +1091,8 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+     {
+       _bump_drawcall();
+     }
++    // DOS-PORT (patch 0051): slow-path queued a command.
++    _renderer_queue_dirty = true;
+     x += sfc->width()  * scale;
+   } while (x < destwd);
+ }
+@@ -1074,6 +1102,8 @@ void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
+   SDL_SetRenderDrawColor(_renderer, color.r, color.g, color.b, SDL_ALPHA_OPAQUE);
+   // SDL3: SDL_RenderDrawLine → SDL_RenderLine, float coords.
+   SDL_RenderLine(_renderer, (float)(x1 * scale), (float)(y1 * scale), (float)(x2 * scale), (float)(y2 * scale));
++  // DOS-PORT (patch 0051): slow-path queued a command.
++  _renderer_queue_dirty = true;
+ }
+ 
+ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b)
+@@ -1086,6 +1116,8 @@ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+ 
+   SDL_SetRenderDrawColor(_renderer, r, g, b, SDL_ALPHA_OPAQUE);
+   SDL_RenderFillRects(_renderer, rects, 4);
++  // DOS-PORT (patch 0051): slow-path queued a command.
++  _renderer_queue_dirty = true;
+ }
+ 
+ void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b)
+@@ -1099,13 +1131,18 @@ void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+   rect.h = (float)(((y2 - y1) + 1) * scale);
+ 
+   SDL_SetRenderDrawColor(_renderer, r, g, b, SDL_ALPHA_OPAQUE);
+-  SDL_RenderFillRect(_renderer, &rect);}
++  SDL_RenderFillRect(_renderer, &rect);
++  // DOS-PORT (patch 0051): slow-path queued a command.
++  _renderer_queue_dirty = true;
++}
+ 
+ void Renderer::tintScreen()
+ {
+   SDL_SetRenderDrawBlendMode(_renderer,SDL_BLENDMODE_BLEND);
+   SDL_SetRenderDrawColor(_renderer, 0, 0, 0, 150);
+   SDL_RenderFillRect(_renderer, NULL);
++  // DOS-PORT (patch 0051): slow-path queued a command.
++  _renderer_queue_dirty = true;
+ }
+ 
+ void Renderer::drawPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b)
+@@ -1117,6 +1154,8 @@ void Renderer::clearScreen(uint8_t r, uint8_t g, uint8_t b)
+ {
+   SDL_SetRenderDrawColor(_renderer, r, g, b, SDL_ALPHA_OPAQUE);
+   SDL_RenderFillRect(_renderer, NULL);
++  // DOS-PORT (patch 0051): slow-path queued a command.
++  _renderer_queue_dirty = true;
+ }
+ 
+ void Renderer::setClip(int x, int y, int w, int h)
+@@ -1290,6 +1329,8 @@ void Renderer::drawSpotLight(int x, int y, Object* o, int r, int g, int b, int u
+   SDL_FRect _dstfr;
+   SDL_RectToFRect(&dstrec, &_dstfr);
+   SDL_RenderTexture(_renderer, _spot_light, NULL, &_dstfr);
++  // DOS-PORT (patch 0051): slow-path queued a command.
++  _renderer_queue_dirty = true;
+ }
+ 
+ 
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index 26daf9f..1c7ce4c 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -122,6 +122,16 @@ class Renderer
+     // refresh on RenderPresent. Public so the inline drawSurface()
+     // helper can read it; nullable until first flip() runs.
+     SDL_Surface *_cached_window_surface = nullptr;
++    // DOS-PORT (patch 0051, Phase 9 wave 8): tracks whether any slow-
++    // path renderer command has been queued since the last flush. Set
++    // by every SDL_RenderTexture / SDL_RenderTextureRotated /
++    // SDL_RenderLine / SDL_RenderFillRect / SDL_RenderFillRects call
++    // site below. Read by _try_fast_blit_16x16: if clean, skip
++    // SDL_FlushRenderer (the empty-queue call is cheap but still SDL3-
++    // side function-call + validation overhead per drawcall × 340/
++    // frame). Cleared on flush, and on SDL_RenderPresent (which
++    // implicitly flushes).
++    bool _renderer_queue_dirty = false;
+ 
+   protected:
+     friend class Singleton<Renderer>;
+-- 
+2.47.3
+

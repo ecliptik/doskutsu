@@ -1,0 +1,109 @@
+From 7f4ccb594239483b848bf3fd237f263337077eb6 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 14:26:51 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2016=20patch=200072=20=E2=80=94?=
+ =?UTF-8?q?=20flip=20SDL=5FHINT=5FDOS=5FMAX=5FBPP=20to=208=20(Lever=203=20?=
+ =?UTF-8?q?mode=20select)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 wave 16 (Lever 3) is the 8bpp end-to-end pass. This patch is
+sub-phase 16.3: drop the SDL3-DOS VESA mode-enumeration cap from "16" to
+"8" so SDL3-DOS picks an INDEX8 mode (320x240x8 mode 0x10F on Cirrus +
+UNIVBE 6.70, or 640x480x8 mode 0x101 on Mach64) instead of the wave-15
+16bpp mode. Halves the per-frame VRAM bandwidth (614 KB -> 307 KB on the
+g2k Pentium OverDrive 83 MHz reference HW, the dominant cost on real
+hardware per dosbox_not_perf_proxy.md memory + docs/PHASE8-FINDINGS.md).
+
+This patch alone DOES NOT make the engine render correctly at 8bpp — the
+NXEngine renderer still produces RGB565 surfaces. The renderer-side 8bpp
+path (master-palette loader, INDEX8 blit primitives, cmod LUT) is
+sub-phase 16.2, expected to land as patches 0073/0074. The integration
+test (16.1 + 16.2 + 16.3 all applied) is the only meaningful end-to-end
+validation; this patch in isolation will produce visual corruption or
+fall back to whatever bpp SDL3-DOS finds available — that's expected and
+documented in the wave-16 spec (/tmp/wave-16-spec.md §3) as a known
+partial-integration state, not a 16.3 bug.
+
+Also adds a single grep'able LOG_INFO line in Renderer::initVideo so
+DEBUG.LOG records that the engine asked for 8bpp. Pairs with the
+companion SDL-side WAVE16-MODESET / WAVE16-FB-FIRSTFLUSH lines in
+SDLDBG.LOG (patches/SDL/0026) — three lines together confirm the cap
+flip propagated end-to-end.
+
+See docs/PHASE9-WAVE-14-PLAN.md §5 for the wave-16 plan and
+/tmp/wave-16-spec.md §3 for the implementation spec this patch executes.
+
+Predicted bandwidth halving: 614 KB/frame -> 307 KB/frame.
+---
+ src/graphics/Renderer.cpp | 12 ++++++++++++
+ src/main.cpp              | 28 ++++++++++++++++++----------
+ 2 files changed, 30 insertions(+), 10 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 69d065c..800e758 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -893,6 +893,18 @@ bool Renderer::initVideo()
+   // getResolutions() remain compiled in for possible future use per CLAUDE.md
+   // locked decision #5 — we don't rip the table out, we just skip past it.
+   window_flags |= SDL_WINDOW_FULLSCREEN;
++
++  // Patch 0072 (Phase 9 wave 16 — Lever 3 mode select, 2026-04-28): record
++  // in DEBUG.LOG that we asked SDL3-DOS for an 8bpp mode via
++  // SDL_HINT_DOS_MAX_BPP. The hint itself is set in main.cpp before SDL_Init;
++  // this line just gives us a single grep'able anchor in the engine log so a
++  // post-run "did wave 16 land?" check is one line of grep. The companion
++  // SDL-side WAVE16-MODESET line in SDLDBG.LOG (patches/SDL/0026) records
++  // what mode SDL3-DOS actually picked under that cap — pairing the two
++  // lines confirms end-to-end engagement.
++  LOG_INFO("Renderer::initVideo: 8bpp mode requested via SDL_HINT_DOS_MAX_BPP=8 "
++           "(wave 16); SDL3-DOS will pick the highest-bpp <= 8 mode at requested "
++           "resolution");
+ #endif
+ 
+   const NXE::Graphics::gres_t *res = getResolutions(true);
+diff --git a/src/main.cpp b/src/main.cpp
+index 49ae2d4..b4d7674 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -402,17 +402,25 @@ int main(int argc, char *argv[])
+   SDL_SetHintWithPriority(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, "1", SDL_HINT_OVERRIDE);
+ 
+   // Patch 0041 (Phase 8 perf, 2026-04-26): cap SDL3-DOS VESA mode
+-  // enumeration at 16bpp. Without this, SDL3's closest-mode matching picks
+-  // 24bpp (mode 0x112 on the g2k Mach64; 32bpp 0x190 on DOSBox-X). 16-cap
+-  // forces 0x111 (640×480×16) on Mach64 — drops per-frame framebuffer flush
+-  // from 921 KB to 614 KB (~1.5× speedup).
++  // enumeration at a chosen bpp ceiling. Without this, SDL3's closest-mode
++  // matching picks 24bpp (mode 0x112 on the g2k Mach64; 32bpp 0x190 on
++  // DOSBox-X). The cap forces a smaller per-frame framebuffer flush —
++  // bandwidth on the Mach64 PCI bus is the dominant cost on real HW
++  // (docs/PHASE8-FINDINGS.md, dosbox_not_perf_proxy memory).
+   //
+-  // We don't go to 8bpp (which would be ~3× speedup) because NXEngine's
+-  // renderer pipeline isn't palette-ready end-to-end yet — a quick test
+-  // produced "Texture doesn't have a palette" errors flooding DEBUG.LOG.
+-  // 8bpp end-to-end is Phase 9 lever 3 work; needs palette management on
+-  // stage transitions. Tracked in docs/PHASE8-FINDINGS.md.
+-  SDL_SetHintWithPriority(SDL_HINT_DOS_MAX_BPP, "16", SDL_HINT_OVERRIDE);
++  // Patch 0072 (Phase 9 wave 16 — Lever 3 mode select, 2026-04-28): cap
++  // dropped to 8bpp. SDL3-DOS will pick INDEX8 320×240×8bpp (mode 0x10F on
++  // Cirrus + UNIVBE) or 640×480×8bpp (mode 0x101 on Mach64), halving VRAM
++  // bandwidth vs the 16bpp wave-15 baseline (614 → 307 KB/frame). Pairs
++  // with the renderer-side 8bpp path landing in patches 0073/0074
++  // (master-palette loader + INDEX8 blit primitives + cmod LUT) which is
++  // sub-phase 16.2 work; this patch (16.3) is the SDL3-DOS mode flip alone.
++  // Without 16.2, the engine still produces RGB565 surfaces and SDL3-DOS
++  // will either render wrong colors or fall back to a higher bpp mode it
++  // happens to find — that's expected and documented in the wave-16 spec
++  // (/tmp/wave-16-spec.md §3) as a partial-integration state, not a 16.3
++  // bug. See docs/PHASE9-WAVE-14-PLAN.md §5 for the wave-16 plan.
++  SDL_SetHintWithPriority(SDL_HINT_DOS_MAX_BPP, "8", SDL_HINT_OVERRIDE);
+ 
+   // Patch 0045 (Phase 9 lever 1, 2026-04-26): prefer LFB over banked at the
+   // SDL3-DOS LFB-vs-banked decision (vendor/SDL/src/video/dos/SDL_dosmodes.c).
+-- 
+2.47.3
+

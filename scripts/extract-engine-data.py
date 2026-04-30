@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Cave Story engine-data extractor (wavetbl.dat + stage.dat + pixel.bmp).
+Cave Story engine-data extractor (wavetbl.dat + stage.dat + pixel.bmp +
+credit*.bmp end-credits images).
 
 Mirrors the relevant parts of vendor/nxengine-evo/src/extract/extractfiles.cpp
 and extractstages.cpp:
@@ -23,6 +24,16 @@ and extractstages.cpp:
                     drawSurface flood (silenced by NXEngine patch 0030,
                     but the missing-file warning still appears in
                     debug.log).
+  - data/endpic/credit01.bmp..credit18.bmp: 17 end-credits images
+                    (160x240 4bpp), each 25-byte BMP file-header prefix +
+                    19293 bytes of palette+pixel data = 19318 bytes per
+                    output file. Offsets and CRCs lifted verbatim from
+                    extractfiles.cpp's files[] table. credit13.bmp is
+                    intentionally absent from the table (the EXE has
+                    contiguous slots only for credit01..12 and 14..18).
+                    Without these, the post-game credits scene
+                    (vendor/nxengine-evo/src/endgame/credits.cpp) shows
+                    blank images.
 
 This script is the freestanding-Python sibling of NXEngine's own extract
 tools — we don't ship those because (a) we don't want to cross-build them
@@ -65,6 +76,46 @@ PIXEL_BMP_HEADER = bytes([
     0x00, 0x00, 0x10, 0x00, 0x00,
 ])
 assert len(PIXEL_BMP_HEADER) == 25, "pixel.bmp header must be 25 bytes"
+
+# --- data/endpic/credit01.bmp..credit18.bmp ---------------------------------
+#
+# Same shape as pixel.bmp but for the larger 160x240 4bpp end-credits images.
+# 17 entries (credit13 intentionally absent — the EXE's contiguous run jumps
+# straight from credit12 to credit14). Each output file is the 25-byte
+# CREDIT_HEADER + 19293 bytes lifted from the EXE = 19318 bytes total.
+# CRC-32 is computed over the EXE-resident 19293 bytes only (header is not
+# CRC'd), matching extractfiles.cpp's behaviour where crc_calc(file, ...) is
+# called on the buffer position past the prepended header.
+CREDIT_PAYLOAD_LENGTH = 19293
+CREDIT_HEADER = bytes([
+    0x42, 0x4D, 0x76, 0x4B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x76, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0xA0, 0x00,
+    0x00, 0x00, 0xF0, 0x00, 0x00,
+])
+assert len(CREDIT_HEADER) == 25, "credit*.bmp header must be 25 bytes"
+
+# (filename, offset, crc32) — verbatim from extractfiles.cpp lines 33-49.
+CREDIT_FILES = [
+    ("credit01.bmp", 0x117047, 0xEB87B19B),
+    ("credit02.bmp", 0x11BBAF, 0x239C1A37),
+    ("credit03.bmp", 0x120717, 0x4398BBDA),
+    ("credit04.bmp", 0x12527F, 0x44BAE3AC),
+    ("credit05.bmp", 0x129DE7, 0xD1B876AD),
+    ("credit06.bmp", 0x12E94F, 0x5A60082E),
+    ("credit07.bmp", 0x1334B7, 0xC1E9DB91),
+    ("credit08.bmp", 0x13801F, 0xCBBCC7FA),
+    ("credit09.bmp", 0x13CB87, 0xFA7177B1),
+    ("credit10.bmp", 0x1416EF, 0x56390A07),
+    ("credit11.bmp", 0x146257, 0xFF3D6D83),
+    ("credit12.bmp", 0x14ADBF, 0x9E948DC2),
+    # credit13.bmp intentionally absent — not in extractfiles.cpp's files[].
+    ("credit14.bmp", 0x14F927, 0x32B6CE2D),
+    ("credit15.bmp", 0x15448F, 0x88539803),
+    ("credit16.bmp", 0x158FF7, 0xC0EF9ADF),
+    ("credit17.bmp", 0x15DB5F, 0x8C5A003D),
+    ("credit18.bmp", 0x1626C7, 0x66BCBF22),
+]
+assert len(CREDIT_FILES) == 17, "expected exactly 17 credit*.bmp entries"
 
 # --- stage.dat --------------------------------------------------------------
 
@@ -217,6 +268,41 @@ def extract_pixel_bmp(exe, out_dir):
     print(f"extracted endpic/pixel.bmp ({total} bytes, CRC verified) to {out_dir}/")
 
 
+def extract_credit_bmps(exe, out_dir):
+    """
+    Extract data/endpic/credit01.bmp..credit18.bmp (17 files; credit13 is
+    intentionally absent). Each output file is the 25-byte CREDIT_HEADER +
+    19293 bytes from the EXE at the entry's offset = 19318 bytes per file.
+    CRC-32 is verified over the EXE-resident 19293 bytes only — the header
+    is reconstructed locally and not CRC'd, matching extractfiles.cpp's
+    crc_calc(file, files[i].length) call which runs on the buffer position
+    past the prepended header.
+    """
+    out_subdir = os.path.join(out_dir, "endpic")
+    os.makedirs(out_subdir, exist_ok=True)
+    total_size = len(CREDIT_HEADER) + CREDIT_PAYLOAD_LENGTH  # 19318
+
+    for filename, offset, expected_crc in CREDIT_FILES:
+        exe.seek(offset)
+        blob = exe.read(CREDIT_PAYLOAD_LENGTH)
+        if len(blob) != CREDIT_PAYLOAD_LENGTH:
+            sys.exit(f"{filename}: short read at 0x{offset:x} "
+                     f"({len(blob)}/{CREDIT_PAYLOAD_LENGTH} bytes)")
+
+        actual_crc = zlib.crc32(blob) & 0xFFFFFFFF
+        if actual_crc != expected_crc:
+            sys.exit(f"{filename}: CRC mismatch at 0x{offset:x} — "
+                     f"expected 0x{expected_crc:08x}, got 0x{actual_crc:08x}. "
+                     "The Doukutsu.exe at the given path is probably not the "
+                     "2004 EN freeware build extractfiles.cpp's offsets target.")
+
+        out_path = os.path.join(out_subdir, filename)
+        with open(out_path, "wb") as fp:
+            fp.write(CREDIT_HEADER)
+            fp.write(blob)
+        print(f"extracted endpic/{filename} ({total_size} bytes, CRC verified) to {out_dir}/")
+
+
 def main():
     if len(sys.argv) != 3:
         sys.exit(f"usage: {sys.argv[0]} <Doukutsu.exe> <output-data-dir>")
@@ -228,6 +314,7 @@ def main():
         extract_wavetable(exe, out_dir)
         extract_stages(exe, out_dir)
         extract_pixel_bmp(exe, out_dir)
+        extract_credit_bmps(exe, out_dir)
 
 
 if __name__ == "__main__":

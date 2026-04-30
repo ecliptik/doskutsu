@@ -1,0 +1,836 @@
+From b0ee565b4654f384f06f87ff1af08e511627a283 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 17:11:56 -0700
+Subject: [PATCH] [DOSKUTSU] dos: comprehensive mode-set lifecycle trace + log
+ writer coordination (lever 1 diag)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 1 wave 2 diagnostic. Wave 1 capture (gateway4, real Mach64
+HW, 2026-04-26) revealed two issues with the patch 0008 lifecycle trace:
+
+1. Patch 0008 only caught the FINAL CreateWindowFramebuffer invocation —
+   earlier mode-sets did not visibly trigger the [lifecycle] handlers, so
+   we couldn't tell whether the SDL3 surface-recreation lifecycle ran for
+   the splash-screen mode-set, NXEngine's window-create mode-set, etc.
+
+2. Two log writers raced and produced a truncated/interleaved log line:
+     "DOSVESA-MODESET: ... lfb_[lifecycle] CreateWindowFramebuffer:"
+   fsync-per-write doesn't help: each FILE* (one in SDL_dosmodes.c, one
+   in SDL_dosframebuffer.c, one in SDL_video.c, one for the older
+   DOSVESA-FB-* trace) had its own libc buffer, so lines from one writer
+   could land mid-line of another.
+
+Patch 0009 fixes both.
+
+Log writer coordination
+-----------------------
+
+New shared writer in src/video/dos/SDL_dosdbg.{c,h} exposes a single
+funnel function `doskutsu_dbg_log(fmt, ...)` that holds ONE FILE* on
+/sdldbg.log and emits one fprintf+fflush+fsync per call. All four
+existing writers in the DOS backend + SDL_video.c are migrated to it:
+
+  - DOSVESA-MODESET / DOSVESA-MODELIST / DOSVESA-CTRL (SDL_dosmodes.c)
+  - [lifecycle] (SDL_dosframebuffer.c CreateWindow/Invalidate/Update +
+    SDL_video.c GetWindowSurface/OnWindowResized/CheckPixelSizeChanged/
+    OnWindowPixelSizeChanged)
+  - DOSVESA-FB-INIT/CALL/VRAM/NORMAL (SDL_dosframebuffer.c)
+
+Per-line prefix tags are kept verbatim so existing greps still work.
+
+Comprehensive mode-set lifecycle trace
+--------------------------------------
+
+Three new traces added to SDL_dosmodes.c DOSVESA_SetDisplayMode:
+
+  - "mode-set #N (entry): requested id=0xNNNN WxH bpp= ... (prev id=0xX)"
+    fires at the very top of every SetDisplayMode call, before the
+    no-op-when-mode-id-matches early return. Sequence counter so we can
+    correlate with downstream CreateWindowFramebuffer #N traces.
+
+  - "mode-set #N (no-op): mode_id matches current ..." when the early
+    return fires (so a mode-set that DIDN'T trigger CreateWindowFramebuffer
+    is visibly attributable).
+
+  - "LFB-decision #N: hint_allow_direct=X lfb_available=X
+     is_banked_usable=X -> use_lfb=X" fires immediately before the VBE
+    INT 10h SetMode call. Makes the policy decision (LFB vs banked)
+    explicit and per-call, rather than implicit in the
+    DOSVESA-MODESET trailer. Sets up the diagnostic for patch 0010,
+    which adds SDL_HINT_DOS_PREFER_LFB to flip the decision the other
+    way.
+
+  - "mode-set #N (exit ok): banked_mode=X mapping.size=X page_flip=X"
+    at the end of SetDisplayMode so the trace reads cleanly entry → exit.
+
+CreateWindowFramebuffer is also now sequence-counted with entry + exit
+log lines (replacing patch 0008's single-line trace), so we see EVERY
+invocation regardless of how the surface lifecycle chains downstream.
+
+Why DOS needs this
+------------------
+
+DOS-only diagnostics for tracing the SDL3-DOS framebuffer + mode-set
+lifecycle path. Required to pick between the lever-1 implementation
+paths (A: backend manual lifecycle, B: lazy re-init in
+UpdateWindowFramebuffer, C: idempotent CreateWindowFramebuffer, D:
+NXEngine-side renderer recreation) — see docs/PHASE9-15FPS-PLAN.md
+§3 Lever 1.4. SDL_video.c additions are guarded by
+SDL_VIDEO_DRIVER_DOSVESA so non-DOS builds aren't perturbed.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream, sidestepping
+vendor/SDL/CLAUDE.md's no-AI-PRs restriction.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/video/SDL_video.c              |  35 ++---
+ src/video/dos/SDL_dosdbg.c         |  73 ++++++++++
+ src/video/dos/SDL_dosdbg.h         |  67 +++++++++
+ src/video/dos/SDL_dosframebuffer.c | 160 +++++++++++----------
+ src/video/dos/SDL_dosmodes.c       | 214 +++++++++++++++++------------
+ 5 files changed, 348 insertions(+), 201 deletions(-)
+ create mode 100644 src/video/dos/SDL_dosdbg.c
+ create mode 100644 src/video/dos/SDL_dosdbg.h
+
+diff --git a/src/video/SDL_video.c b/src/video/SDL_video.c
+index d3038a609..e11ffe7ba 100644
+--- a/src/video/SDL_video.c
++++ b/src/video/SDL_video.c
+@@ -25,34 +25,15 @@
+ 
+ #include "SDL_sysvideo.h"
+ 
+-// DOSKUTSU diagnostic (patches/SDL/0008 — Phase 9 lever 1 investigation).
+-// Window-surface lifecycle tracing. We need to know which of these handlers
+-// fires (and in what order) when SDL3-DOS resizes the framebuffer between
+-// the splash screen's first mode-set and NXEngine's mode-set, so we can
+-// pick between the lever-1 implementation paths (A-D in
+-// docs/PHASE9-15FPS-PLAN.md §3 Lever 1.4). Output appended to /sdldbg.log
+-// (sibling of NXEngine's /debug.log) — same convention as patches 0002,
+-// 0003, 0006, 0007. Diagnostic-only; does not change runtime behaviour.
+-// Guarded to the DOS backend so non-DOS builds aren't perturbed.
++// DOSKUTSU diagnostic (patches/SDL/0008 + 0009 — Phase 9 lever 1).
++// Window-surface lifecycle tracing for the DOS backend. As of patch 0009,
++// all log writes route through the shared doskutsu_dbg_log helper in
++// SDL_dosdbg.c — single FILE* on /sdldbg.log, atomic per-line, eliminates
++// the gateway4 wave 1 mid-line race between this writer and the
++// DOSVESA-MODESET / DOSVESA-FB-* writers in the DOS backend.
+ #ifdef SDL_VIDEO_DRIVER_DOSVESA
+-#include <stdio.h>
+-#include <unistd.h>
+-static FILE *_doskutsu_lifecycle_log = NULL;
+-static void _doskutsu_lifecycle_open(void)
+-{
+-    if (!_doskutsu_lifecycle_log) {
+-        _doskutsu_lifecycle_log = fopen("/sdldbg.log", "ab");
+-    }
+-}
+-#define DOSKUTSU_LIFECYCLE_LOG(...)                                  \
+-    do {                                                             \
+-        _doskutsu_lifecycle_open();                                  \
+-        if (_doskutsu_lifecycle_log) {                               \
+-            fprintf(_doskutsu_lifecycle_log, "[lifecycle] " __VA_ARGS__); \
+-            fflush(_doskutsu_lifecycle_log);                         \
+-            fsync(fileno(_doskutsu_lifecycle_log));                  \
+-        }                                                            \
+-    } while (0)
++#include "dos/SDL_dosdbg.h"
++#define DOSKUTSU_LIFECYCLE_LOG(...) doskutsu_dbg_log("[lifecycle] " __VA_ARGS__)
+ #else
+ #define DOSKUTSU_LIFECYCLE_LOG(...) ((void)0)
+ #endif
+diff --git a/src/video/dos/SDL_dosdbg.c b/src/video/dos/SDL_dosdbg.c
+new file mode 100644
+index 000000000..f70fdc8a6
+--- /dev/null
++++ b/src/video/dos/SDL_dosdbg.c
+@@ -0,0 +1,73 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++#include "SDL_internal.h"
++
++#ifdef SDL_VIDEO_DRIVER_DOSVESA
++
++#include "SDL_dosdbg.h"
++
++#include <stdio.h>
++#include <stdarg.h>
++#include <unistd.h>
++
++// DOSKUTSU shared diagnostic logger (patches/SDL/0009).
++//
++// Single shared FILE* on /sdldbg.log so concurrent log writers from
++// SDL_dosmodes.c, SDL_dosframebuffer.c, and SDL_video.c can't interleave
++// mid-line. fsync after every line so the trace survives a hard reset
++// (matches patch 0004's per-line fsync pattern).
++//
++// See SDL_dosdbg.h for rationale (gateway4 wave 1 log-race postmortem,
++// docs/PHASE9-15FPS-PLAN.md §3 Lever 1 wave 2 plan).
++static FILE *g_dbg_log = NULL;
++
++void doskutsu_dbg_open(void)
++{
++    if (!g_dbg_log) {
++        g_dbg_log = fopen("/sdldbg.log", "ab");
++    }
++}
++
++void doskutsu_dbg_vlog(const char *fmt, va_list ap)
++{
++    doskutsu_dbg_open();
++    if (!g_dbg_log) {
++        return;
++    }
++    vfprintf(g_dbg_log, fmt, ap);
++    // Append newline if the caller didn't include one.
++    size_t len = strlen(fmt);
++    if (len == 0 || fmt[len - 1] != '\n') {
++        fputc('\n', g_dbg_log);
++    }
++    fflush(g_dbg_log);
++    fsync(fileno(g_dbg_log));
++}
++
++void doskutsu_dbg_log(const char *fmt, ...)
++{
++    va_list ap;
++    va_start(ap, fmt);
++    doskutsu_dbg_vlog(fmt, ap);
++    va_end(ap);
++}
++
++#endif // SDL_VIDEO_DRIVER_DOSVESA
+diff --git a/src/video/dos/SDL_dosdbg.h b/src/video/dos/SDL_dosdbg.h
+new file mode 100644
+index 000000000..454246bef
+--- /dev/null
++++ b/src/video/dos/SDL_dosdbg.h
+@@ -0,0 +1,67 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++// DOSKUTSU shared diagnostic logger (patches/SDL/0009 — Phase 9 lever 1).
++//
++// All DOS-backend diagnostic log writers (DOSVESA-MODESET, DOSVESA-MODELIST,
++// DOSVESA-FB-INIT/CALL, [lifecycle], LFB-decision, mode-set) used to each
++// hold their own static FILE* opened on /sdldbg.log with independent libc
++// buffers. On real HW (gateway4 wave 1, 2026-04-26), two writers raced and
++// produced a truncated/interleaved log line:
++//
++//   "DOSVESA-MODESET: ... lfb_[lifecycle] CreateWindowFramebuffer:"
++//
++// fsync-per-write doesn't help: each FILE* still has its own buffer, so
++// lines from one writer can land mid-line of another. The shared writer
++// below funnels every log site through one FILE* + one fprintf+fflush+
++// fsync, eliminating the race.
++//
++// Per-line prefix tags are kept so existing greps (DOSVESA-MODESET,
++// [lifecycle], LFB-decision, etc.) still pull the relevant slices.
++//
++// Local-only patch per workspace policy (memory note "SDL upstream —
++// local patches only"): never PR'd upstream.
++#ifndef SDL_dosdbg_h_
++#define SDL_dosdbg_h_
++
++#ifdef SDL_VIDEO_DRIVER_DOSVESA
++
++#include <stdarg.h>
++
++// Lazy-open the shared /sdldbg.log on first use. Returns the FILE* or NULL.
++extern void doskutsu_dbg_open(void);
++
++// Write one fully-formatted log line (caller adds the prefix tag, e.g.
++// "[lifecycle]" or "DOSVESA-MODESET:"). Internally appends a newline if the
++// caller's fmt doesn't end in one. Atomic per call: fprintf + fflush +
++// fsync run sequentially with no interleaving from other doskutsu_dbg_*
++// callers, since they all share one FILE*.
++extern void doskutsu_dbg_log(const char *fmt, ...);
++
++// Variadic-args version for forwarding from variadic macros.
++extern void doskutsu_dbg_vlog(const char *fmt, va_list ap);
++
++#else
++#define doskutsu_dbg_open() ((void)0)
++#define doskutsu_dbg_log(...) ((void)0)
++#endif // SDL_VIDEO_DRIVER_DOSVESA
++
++#endif // SDL_dosdbg_h_
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 649d67696..ee69c3c95 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -25,6 +25,7 @@
+ #include "../../SDL_properties_c.h"
+ #include "../../events/SDL_mouse_c.h"
+ #include "../SDL_sysvideo.h"
++#include "SDL_dosdbg.h" // shared diagnostic logger (DOSKUTSU patch 0009)
+ #include "SDL_dosframebuffer_c.h"
+ #include "SDL_dosmodes.h"
+ #include "SDL_dosmouse.h"
+@@ -155,26 +156,13 @@ static SDL_Surface *GetConvertedCursorSurface(SDL_CursorData *curdata, SDL_Surfa
+     return conv;
+ }
+ 
+-// DOSKUTSU diagnostic (patches/SDL/0008 — Phase 9 lever 1 investigation).
+-// Lazy-open helper that reuses /sdldbg.log from patch 0002. Lifecycle log
+-// lines are prefixed `[lifecycle]` so they're grep-able alongside SDL_video.c
+-// log lines from the same patch. See docs/PHASE9-15FPS-PLAN.md §3 Lever 1.3.
+-static FILE *_doskutsu_lc_log = NULL;
+-static void _doskutsu_lc_open(void)
+-{
+-    if (!_doskutsu_lc_log) {
+-        _doskutsu_lc_log = fopen("/sdldbg.log", "ab");
+-    }
+-}
+-#define DOSKUTSU_LC_LOG(...)                                                  \
+-    do {                                                                      \
+-        _doskutsu_lc_open();                                                  \
+-        if (_doskutsu_lc_log) {                                               \
+-            fprintf(_doskutsu_lc_log, "[lifecycle] " __VA_ARGS__);            \
+-            fflush(_doskutsu_lc_log);                                         \
+-            fsync(fileno(_doskutsu_lc_log));                                  \
+-        }                                                                     \
+-    } while (0)
++// DOSKUTSU diagnostic (patches/SDL/0008 + 0009).
++// Lifecycle log lines are prefixed `[lifecycle]` so they're grep-able
++// alongside DOSVESA-* lines from other DOS-backend log sites. Patch 0009
++// migrated the per-FILE* lazy-open to the shared doskutsu_dbg_log helper
++// in SDL_dosdbg.c — single FILE* + atomic-per-line fprintf+fflush+fsync
++// eliminates the gateway4 wave 1 mid-line race. See SDL_dosdbg.h.
++#define DOSKUTSU_LC_LOG(...) doskutsu_dbg_log("[lifecycle] " __VA_ARGS__)
+ 
+ //  Invalidation (called from SetDisplayMode before freeing DPMI mapping)
+ void DOSVESA_InvalidateCachedFramebuffer(void)
+@@ -287,16 +275,19 @@ static bool CreateNormalFramebuffer(SDL_VideoDevice *device, SDL_Window *window,
+ 
+ bool DOSVESA_CreateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window, SDL_PixelFormat *format, void **pixels, int *pitch)
+ {
+-    // DOSKUTSU diagnostic (patches/SDL/0008): log fb_state pre-clear state.
+-    // If we're entering CreateWindowFramebuffer with a non-zero fb_state, the
+-    // SDL_zero(fb_state) below will discard it without freeing the surface
+-    // pointer first — that's the staleness path Lever 1 needs to chase. See
+-    // docs/PHASE9-15FPS-PLAN.md §3 Lever 1.3 + Path C.
+-    DOSKUTSU_LC_LOG("CreateWindowFramebuffer: window=%p pre-clear fb_state surface=%p lfb_surface=%p "
+-                    "direct_fb=%d vram_ptr=%p fb_size=%lu vram_w=%d vram_h=%d -> SDL_zero next\n",
+-                    (void *)window, (void *)fb_state.surface, (void *)fb_state.lfb_surface,
+-                    (int)fb_state.direct_fb, (void *)fb_state.vram_ptr,
+-                    (unsigned long)fb_state.fb_size, fb_state.vram_w, fb_state.vram_h);
++    // DOSKUTSU diagnostic (patches/SDL/0008 + 0009): per-call entry trace
++    // for EVERY CreateWindowFramebuffer invocation. Patch 0008 caught only
++    // the final invocation in a real-HW capture; the new sequence counter
++    // (cw_calls) and shared-writer log line make every call visible.
++    static int cw_calls = 0;
++    ++cw_calls;
++    DOSKUTSU_LC_LOG("CreateWindowFramebuffer #%d (entry): window=%p pre-clear fb_state surface=%p "
++                    "lfb_surface=%p direct_fb=%d vram_ptr=%p fb_size=%lu vram_w=%d vram_h=%d "
++                    "-> SDL_zero next",
++                    cw_calls, (void *)window, (void *)fb_state.surface,
++                    (void *)fb_state.lfb_surface, (int)fb_state.direct_fb,
++                    (void *)fb_state.vram_ptr, (unsigned long)fb_state.fb_size,
++                    fb_state.vram_w, fb_state.vram_h);
+     SDL_zero(fb_state);
+ 
+     SDL_VideoData *data = device->internal;
+@@ -379,12 +370,22 @@ bool DOSVESA_CreateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+             *format = surface_format;
+             *pixels = surface->pixels;
+             *pitch = surface->pitch;
++            DOSKUTSU_LC_LOG("CreateWindowFramebuffer #%d (exit fast): direct_fb=%d use_dosmemput=%d "
++                            "vram_ptr=%p vram_phys=0x%08lx fb_size=%lu vram_w=%d vram_h=%d",
++                            cw_calls, (int)fb_state.direct_fb, (int)fb_state.use_dosmemput,
++                            (void *)fb_state.vram_ptr, (unsigned long)fb_state.vram_phys,
++                            (unsigned long)fb_state.fb_size, fb_state.vram_w, fb_state.vram_h);
+             return true;
+         }
+         // else: couldn't get a direct pointer, fall through to normal path.
+     }
+ 
+-    return CreateNormalFramebuffer(device, window, format, pixels, pitch);
++    bool nrm_ok = CreateNormalFramebuffer(device, window, format, pixels, pitch);
++    DOSKUTSU_LC_LOG("CreateWindowFramebuffer #%d (exit normal): ok=%d direct_fb=%d "
++                    "surface=%p lfb_surface=%p",
++                    cw_calls, (int)nrm_ok, (int)fb_state.direct_fb,
++                    (void *)fb_state.surface, (void *)fb_state.lfb_surface);
++    return nrm_ok;
+ }
+ 
+ bool DOSVESA_SetWindowFramebufferVSync(SDL_VideoDevice *device, SDL_Window *window, int vsync)
+@@ -514,34 +515,32 @@ static void ProgramVGADAC(SDL_Palette *palette)
+     }
+ }
+ 
+-// DOSKUTSU diagnostic (patches/SDL/0002, task #21). Trace the framebuffer
+-// flush path to discriminate between (a) early-return guard fails so no
+-// VRAM write happens, (b) source backbuffer is empty when written, (c)
+-// VRAM write succeeds but readback shows it didn't land, (d) write +
+-// readback both succeed but display still black. Output to /sdldbg.log
+-// (sibling of NXEngine's /debug.log) instead of stdout/stderr — by the
+-// time we reach this code the DOS console is in a VESA graphics mode
+-// and stdout/stderr would be invisible.
+-static FILE *_doskutsu_dbg_log = NULL;
++// DOSKUTSU diagnostic (patches/SDL/0002, task #21; updated by patch 0009).
++// Trace the framebuffer flush path to discriminate between (a) early-return
++// guard fails so no VRAM write happens, (b) source backbuffer is empty when
++// written, (c) VRAM write succeeds but readback shows it didn't land,
++// (d) write + readback both succeed but display still black.
++//
++// Output goes to /sdldbg.log via the shared doskutsu_dbg_log helper from
++// patch 0009 — single shared FILE* so this writer can't interleave mid-line
++// with [lifecycle] / DOSVESA-MODESET writers in other DOS-backend files.
+ static int _doskutsu_dbg_call_total = 0;
+ 
+-static void _doskutsu_dbg_open(void)
+-{
+-    if (!_doskutsu_dbg_log) {
+-        _doskutsu_dbg_log = fopen("/sdldbg.log", "ab");
+-    }
+-}
+-
++// Build "<tag> NN NN NN ..." into a string and emit one atomic log line.
++// Caller must NOT include a trailing newline in `tag`. Buffer sized for
++// 16 bytes × 3 chars + tag + slack = ~80; bumped to 160 for safety.
+ static void _doskutsu_dbg_dump_first16(const char *tag, const Uint8 *src, int n)
+ {
+-    if (!_doskutsu_dbg_log) {
+-        return;
+-    }
+-    fprintf(_doskutsu_dbg_log, "%s", tag);
+-    for (int i = 0; i < n; i++) {
+-        fprintf(_doskutsu_dbg_log, " %02x", src[i]);
++    char buf[160];
++    int off = 0;
++    int rem = (int)sizeof(buf);
++    int w = SDL_snprintf(buf + off, rem, "%s", tag);
++    if (w > 0 && w < rem) { off += w; rem -= w; }
++    for (int i = 0; i < n && rem > 4; i++) {
++        w = SDL_snprintf(buf + off, rem, " %02x", src[i]);
++        if (w > 0 && w < rem) { off += w; rem -= w; }
+     }
+-    fprintf(_doskutsu_dbg_log, "\n");
++    doskutsu_dbg_log("%s", buf);
+ }
+ 
+ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window, const SDL_Rect *rects, int numrects)
+@@ -571,15 +570,15 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+         }
+     }
+ 
+-    // DOSKUTSU diagnostic header (patches/SDL/0002, task #21).
+-    _doskutsu_dbg_open();
++    // DOSKUTSU diagnostic header (patches/SDL/0002, task #21; routed
++    // through shared doskutsu_dbg_log by patch 0009).
+     ++_doskutsu_dbg_call_total;
+-    if (_doskutsu_dbg_log && _doskutsu_dbg_call_total == 1) {
+-        fprintf(_doskutsu_dbg_log,
++    if (_doskutsu_dbg_call_total == 1) {
++        doskutsu_dbg_log(
+                 "DOSVESA-FB-INIT: direct_fb=%d use_dosmemput=%d banked_multibank=%d "
+                 "pitches_match=%d fb_size=%lu bpp=%d src_pitch=%d vram_pitch=%d "
+                 "vram_w=%d vram_h=%d vram_phys=0x%08lx vram_ptr=0x%08lx "
+-                "win_base=0x%08lx win_gran=%lu win_size=%lu pixels=0x%08lx\n",
++                "win_base=0x%08lx win_gran=%lu win_size=%lu pixels=0x%08lx",
+                 (int)fb_state.direct_fb, (int)fb_state.use_dosmemput,
+                 (int)fb_state.banked_multibank, (int)fb_state.pitches_match,
+                 (unsigned long)fb_state.fb_size, fb_state.bpp,
+@@ -591,24 +590,27 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 (unsigned long)fb_state.win_gran_bytes,
+                 (unsigned long)fb_state.win_size_bytes,
+                 (unsigned long)(uintptr_t)fb_state.pixels);
+-        fflush(_doskutsu_dbg_log);
+-        fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
+     }
+     {
+         bool guard = (fb_state.direct_fb && (fb_state.vram_ptr || fb_state.vram_phys));
+-        if (_doskutsu_dbg_log &&
+-            (_doskutsu_dbg_call_total == 1 || (_doskutsu_dbg_call_total % 100) == 0)) {
+-            fprintf(_doskutsu_dbg_log,
+-                    "DOSVESA-FB-CALL #%d: guard=%d numrects=%d ",
+-                    _doskutsu_dbg_call_total, (int)guard, numrects);
++        if (_doskutsu_dbg_call_total == 1 || (_doskutsu_dbg_call_total % 100) == 0) {
++            // Build the "src[0..15]= NN NN ..." trailer in one atomic line so
++            // it can't be split by another writer mid-fprintf.
+             if (fb_state.pixels) {
+-                _doskutsu_dbg_dump_first16("src[0..15]=", fb_state.pixels, 16);
++                char trailer[160];
++                int off = 0, rem = (int)sizeof(trailer);
++                int w = SDL_snprintf(trailer + off, rem, "src[0..15]=");
++                if (w > 0 && w < rem) { off += w; rem -= w; }
++                for (int i = 0; i < 16 && rem > 4; i++) {
++                    w = SDL_snprintf(trailer + off, rem, " %02x", fb_state.pixels[i]);
++                    if (w > 0 && w < rem) { off += w; rem -= w; }
++                }
++                doskutsu_dbg_log("DOSVESA-FB-CALL #%d: guard=%d numrects=%d %s",
++                                 _doskutsu_dbg_call_total, (int)guard, numrects, trailer);
+             } else {
+-                fprintf(_doskutsu_dbg_log, "src=NULL\n");
++                doskutsu_dbg_log("DOSVESA-FB-CALL #%d: guard=%d numrects=%d src=NULL",
++                                 _doskutsu_dbg_call_total, (int)guard, numrects);
+             }
+-            fflush(_doskutsu_dbg_log);
+-            fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
+-        fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
+         }
+     }
+ 
+@@ -770,8 +772,7 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+         // nearptr LFB path, read directly from vram_ptr. If these differ
+         // from src[0..15] logged above, the write didn't land or landed
+         // somewhere wrong (bank-switch / address calc bug).
+-        if (_doskutsu_dbg_log &&
+-            (_doskutsu_dbg_call_total == 1 || (_doskutsu_dbg_call_total % 100) == 0)) {
++        if (_doskutsu_dbg_call_total == 1 || (_doskutsu_dbg_call_total % 100) == 0) {
+             Uint8 vram_first[16] = { 0 };
+             if (fb_state.use_dosmemput) {
+                 dosmemget(fb_state.vram_phys, 16, vram_first);
+@@ -779,9 +780,6 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 SDL_memcpy(vram_first, fb_state.vram_ptr, 16);
+             }
+             _doskutsu_dbg_dump_first16("DOSVESA-FB-VRAM ", vram_first, 16);
+-            fflush(_doskutsu_dbg_log);
+-            fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
+-        fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
+         }
+ 
+         // Page flipping is only used with the nearptr LFB path. The banked
+@@ -815,13 +813,9 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+     // ===================================================================
+ 
+     // DOSKUTSU diagnostic: log entry into the normal (non-fast) path.
+-    if (_doskutsu_dbg_log &&
+-        (_doskutsu_dbg_call_total == 1 || (_doskutsu_dbg_call_total % 100) == 0)) {
+-        fprintf(_doskutsu_dbg_log,
+-                "DOSVESA-FB-NORMAL #%d: entered normal-path (fast-path guard failed)\n",
+-                _doskutsu_dbg_call_total);
+-        fflush(_doskutsu_dbg_log);
+-        fsync(fileno(_doskutsu_dbg_log)); // crash-survive on DOS (patch 0004)
++    if (_doskutsu_dbg_call_total == 1 || (_doskutsu_dbg_call_total % 100) == 0) {
++        doskutsu_dbg_log("DOSVESA-FB-NORMAL #%d: entered normal-path (fast-path guard failed)",
++                         _doskutsu_dbg_call_total);
+     }
+ 
+     SDL_Surface *src = fb_state.surface;
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 20051a983..ce25712d1 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -26,6 +26,7 @@
+ // SDL internals
+ #include "../../events/SDL_mouse_c.h"
+ #include "../SDL_sysvideo.h"
++#include "SDL_dosdbg.h" // shared diagnostic logger (DOSKUTSU patch 0009)
+ #include "SDL_dosframebuffer_c.h"
+ 
+ // DOS declarations
+@@ -35,19 +36,23 @@
+ #include <stdio.h>        // diagnostic file I/O (DOSKUTSU patches/SDL/0003)
+ #include <unistd.h>       // fsync — crash-survive log writes on DOS (patch 0004)
+ 
+-// DOSKUTSU diagnostic (patches/SDL/0003). Companion to patches/SDL/0002:
+-// 0002 traces the per-flush framebuffer write path; 0003 dumps controller
+-// info + per-mode-set details once at boot, so we can attribute slow flushes
+-// to the VBE mode attributes we're given (LFB vs banked, pitch, etc).
+-// Output appended to /sdldbg.log alongside 0002's output. Local-only patch
+-// per workspace policy (memory note "SDL upstream — local patches only").
+-static FILE *_doskutsu_modes_dbg_log = NULL;
+-static void _doskutsu_modes_dbg_open(void)
+-{
+-    if (!_doskutsu_modes_dbg_log) {
+-        _doskutsu_modes_dbg_log = fopen("/sdldbg.log", "ab");
+-    }
+-}
++// DOSKUTSU diagnostic (patches/SDL/0003; updated by patch 0009).
++// Companion to patches/SDL/0002: 0002 traces the per-flush framebuffer
++// write path; 0003 dumps controller info + per-mode-set details once at
++// boot, so we can attribute slow flushes to the VBE mode attributes we're
++// given (LFB vs banked, pitch, etc).
++//
++// As of patch 0009, all output is routed through the shared
++// doskutsu_dbg_log helper (single FILE* on /sdldbg.log) so we can't
++// interleave mid-line with [lifecycle] / DOSVESA-FB-* writers.
++//
++// Local-only patch per workspace policy (memory note "SDL upstream —
++// local patches only").
++//
++// Backward-compatibility shim: existing call sites still call
++// _doskutsu_modes_dbg_open() and write to _doskutsu_modes_dbg_log.
++// Patch 0009 replaces those mechanically — see the per-line edits below.
++#define DOSKUTSU_MODES_LOG(...) doskutsu_dbg_log(__VA_ARGS__)
+ 
+ // Some VESA usage information:
+ //   https://delorie.com/djgpp/doc/ug/graphics/vesa.html.en
+@@ -240,30 +245,32 @@ static const SDL_VESAInfo *GetVESAInfo(void)
+     // Mach64 / M64VBE investigation where flips run 30-50× slower than
+     // DOSBox-X parity (docs/PHASE8-FINDINGS.md).
+     if (vesa_info) {
+-        _doskutsu_modes_dbg_open();
+-        if (_doskutsu_modes_dbg_log) {
+-            fprintf(_doskutsu_modes_dbg_log,
+-                    "DOSVESA-CTRL: VBE %d.%d  total_vram=%lu_KB  oem_sw_rev=0x%04X\n"
+-                    "DOSVESA-CTRL: oem_string='%s'\n"
+-                    "DOSVESA-CTRL: oem_vendor='%s'  product='%s'  rev='%s'\n"
+-                    "DOSVESA-CTRL: %d modes enumerated:",
+-                    vesa_info->version >> 8, vesa_info->version & 0xFF,
+-                    (unsigned long)(vesa_info->total_memory / 1024),
+-                    vesa_info->oem_software_revision,
+-                    vesa_info->oem_string ? vesa_info->oem_string : "(empty)",
+-                    vesa_info->oem_vendor ? vesa_info->oem_vendor : "(empty)",
+-                    vesa_info->oem_product ? vesa_info->oem_product : "(empty)",
+-                    vesa_info->oem_revision ? vesa_info->oem_revision : "(empty)",
+-                    vesa_info->num_modes);
+-            for (int i = 0; i < vesa_info->num_modes; i++) {
+-                if ((i % 16) == 0) {
+-                    fprintf(_doskutsu_modes_dbg_log, "\n  ");
+-                }
+-                fprintf(_doskutsu_modes_dbg_log, " 0x%04X", vesa_info->mode_list[i]);
++        // Patch 0009: route through shared writer to avoid mid-line race.
++        // The dump is structurally multiple lines (DOSVESA-CTRL header +
++        // wrapped mode-id list); to keep it atomic against [lifecycle] /
++        // DOSVESA-FB-* writers, emit each logical line via a single
++        // doskutsu_dbg_log call. The mode-id list is built into one buffer.
++        DOSKUTSU_MODES_LOG("DOSVESA-CTRL: VBE %d.%d  total_vram=%lu_KB  oem_sw_rev=0x%04X",
++                           vesa_info->version >> 8, vesa_info->version & 0xFF,
++                           (unsigned long)(vesa_info->total_memory / 1024),
++                           vesa_info->oem_software_revision);
++        DOSKUTSU_MODES_LOG("DOSVESA-CTRL: oem_string='%s'",
++                           vesa_info->oem_string ? vesa_info->oem_string : "(empty)");
++        DOSKUTSU_MODES_LOG("DOSVESA-CTRL: oem_vendor='%s'  product='%s'  rev='%s'",
++                           vesa_info->oem_vendor ? vesa_info->oem_vendor : "(empty)",
++                           vesa_info->oem_product ? vesa_info->oem_product : "(empty)",
++                           vesa_info->oem_revision ? vesa_info->oem_revision : "(empty)");
++        DOSKUTSU_MODES_LOG("DOSVESA-CTRL: %d modes enumerated:", vesa_info->num_modes);
++        // Mode list: 16 ids per logical line, atomic per-line.
++        for (int i = 0; i < vesa_info->num_modes; i += 16) {
++            char line[256] = "  ";
++            int off = (int)strlen(line);
++            int rem = (int)sizeof(line) - off;
++            for (int j = i; j < vesa_info->num_modes && j < i + 16 && rem > 8; j++) {
++                int w = SDL_snprintf(line + off, rem, " 0x%04X", vesa_info->mode_list[j]);
++                if (w > 0 && w < rem) { off += w; rem -= w; }
+             }
+-            fprintf(_doskutsu_modes_dbg_log, "\n");
+-            fflush(_doskutsu_modes_dbg_log);
+-            fsync(fileno(_doskutsu_modes_dbg_log)); // crash-survive on DOS (patch 0004)
++            DOSKUTSU_MODES_LOG("%s", line);
+         }
+     }
+ 
+@@ -393,41 +400,31 @@ bool DOSVESA_GetDisplayModes(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_disp
+         static int dumped = 0;
+         if (!dumped && vinfo) {
+             dumped = 1;
+-            _doskutsu_modes_dbg_open();
+-            if (_doskutsu_modes_dbg_log) {
+-                fprintf(_doskutsu_modes_dbg_log,
+-                        "DOSVESA-MODELIST: enumerating %d BIOS-reported modes (lever 0b diagnostic)\n",
+-                        vinfo->num_modes);
+-                for (int mi = 0; mi < vinfo->num_modes; mi++) {
+-                    const Uint16 modeid = vinfo->mode_list[mi];
+-                    SDL_DisplayModeData info;
+-                    if (!GetVESAModeInfo(modeid, &info)) {
+-                        fprintf(_doskutsu_modes_dbg_log,
+-                                "  mode 0x%04X: GetVESAModeInfo FAILED\n",
+-                                modeid);
+-                        continue;
+-                    }
+-                    const bool sup = (info.attributes & VBE_MODEATTR_SUPPORTED) != 0;
+-                    const bool gfx = (info.attributes & VBE_MODEATTR_GRAPHICS) != 0;
+-                    const bool color = (info.attributes & VBE_MODEATTR_COLOR) != 0;
+-                    fprintf(_doskutsu_modes_dbg_log,
+-                            "  mode 0x%04X: %4dx%-4d bpp=%-2d planes=%d "
+-                            "model=%d attrs=0x%04X lfb=%d sup=%d gfx=%d color=%d "
+-                            "pitch=%d pages=%d win_seg=0x%04X win_size=%uKB win_gran=%uKB win_attr=0x%02X "
+-                            "lfb_addr=0x%08lX\n",
+-                            info.mode_id, info.w, info.h, info.bpp, info.num_planes,
+-                            info.memory_model, info.attributes,
+-                            (int)info.has_lfb, (int)sup, (int)gfx, (int)color,
+-                            info.pitch, info.num_image_pages,
+-                            info.win_a_segment, (unsigned)info.win_size,
+-                            (unsigned)info.win_granularity, info.win_a_attributes,
+-                            (unsigned long)info.physical_base_addr);
++            DOSKUTSU_MODES_LOG("DOSVESA-MODELIST: enumerating %d BIOS-reported modes (lever 0b diagnostic)",
++                               vinfo->num_modes);
++            for (int mi = 0; mi < vinfo->num_modes; mi++) {
++                const Uint16 modeid = vinfo->mode_list[mi];
++                SDL_DisplayModeData info;
++                if (!GetVESAModeInfo(modeid, &info)) {
++                    DOSKUTSU_MODES_LOG("  mode 0x%04X: GetVESAModeInfo FAILED", modeid);
++                    continue;
+                 }
+-                fprintf(_doskutsu_modes_dbg_log,
+-                        "DOSVESA-MODELIST: end of BIOS-reported mode dump\n");
+-                fflush(_doskutsu_modes_dbg_log);
+-                fsync(fileno(_doskutsu_modes_dbg_log));
++                const bool sup = (info.attributes & VBE_MODEATTR_SUPPORTED) != 0;
++                const bool gfx = (info.attributes & VBE_MODEATTR_GRAPHICS) != 0;
++                const bool color = (info.attributes & VBE_MODEATTR_COLOR) != 0;
++                DOSKUTSU_MODES_LOG("  mode 0x%04X: %4dx%-4d bpp=%-2d planes=%d "
++                                   "model=%d attrs=0x%04X lfb=%d sup=%d gfx=%d color=%d "
++                                   "pitch=%d pages=%d win_seg=0x%04X win_size=%uKB win_gran=%uKB win_attr=0x%02X "
++                                   "lfb_addr=0x%08lX",
++                                   info.mode_id, info.w, info.h, info.bpp, info.num_planes,
++                                   info.memory_model, info.attributes,
++                                   (int)info.has_lfb, (int)sup, (int)gfx, (int)color,
++                                   info.pitch, info.num_image_pages,
++                                   info.win_a_segment, (unsigned)info.win_size,
++                                   (unsigned)info.win_granularity, info.win_a_attributes,
++                                   (unsigned long)info.physical_base_addr);
+             }
++            DOSKUTSU_MODES_LOG("DOSVESA-MODELIST: end of BIOS-reported mode dump");
+         }
+     }
+ 
+@@ -611,7 +608,25 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+     SDL_VideoData *data = device->internal;
+     const SDL_DisplayModeData *modedata = mode->internal;
+ 
++    // DOSKUTSU diagnostic (patch 0009 — Phase 9 lever 1 wave 2):
++    // every SetDisplayMode entry is logged with a sequence counter, the
++    // requested mode params (so we can tell which NXEngine call site
++    // triggered each mode-set), and whether this is a no-op (same mode_id
++    // as current). Patch 0008's [lifecycle] CreateWindowFramebuffer trace
++    // only caught the FINAL call in real-HW capture; this entry log makes
++    // every mode-set visible regardless of how the surface lifecycle
++    // chains downstream.
++    static int ms_calls = 0;
++    ++ms_calls;
++    const int prev_mode_id = data->current_mode.internal ? (int)data->current_mode.internal->mode_id : -1;
++    DOSKUTSU_MODES_LOG("mode-set #%d (entry): requested id=0x%04X %dx%d %dbpp fmt=0x%08X "
++                       "(prev id=0x%X)",
++                       ms_calls, modedata->mode_id, mode->w, mode->h,
++                       modedata->bpp, (unsigned)mode->format, prev_mode_id);
++
+     if (data->current_mode.internal && (data->current_mode.internal->mode_id == modedata->mode_id)) {
++        DOSKUTSU_MODES_LOG("mode-set #%d (no-op): mode_id matches current, returning true",
++                           ms_calls);
+         return true;
+     }
+ 
+@@ -670,40 +685,48 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+     const bool is_banked_usable = modedata->win_a_segment &&
+                                   modedata->win_size > 0 &&
+                                   (modedata->win_a_attributes & VBE_WINATTR_USABLE) == VBE_WINATTR_USABLE;
++    const bool hint_allow_direct = SDL_GetHintBoolean(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, false);
+     const bool use_lfb = modedata->has_lfb &&
+-                         (!is_banked_usable || !SDL_GetHintBoolean(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, false));
++                         (!is_banked_usable || !hint_allow_direct);
++
++    // DOSKUTSU diagnostic (patch 0009): make the LFB-vs-banked decision
++    // explicit so we can SEE *why* each mode-set chose what it chose.
++    // hint_allow_direct=1 forces banked even when LFB is available — this
++    // is the policy lever patch 0010 will invert. lfb_available comes
++    // straight from BIOS-reported mode attrs.
++    DOSKUTSU_MODES_LOG("LFB-decision #%d: hint_allow_direct=%d lfb_available=%d "
++                       "is_banked_usable=%d -> use_lfb=%d",
++                       ms_calls, (int)hint_allow_direct, (int)modedata->has_lfb,
++                       (int)is_banked_usable, (int)use_lfb);
+ 
+     regs.x.ax = 0x4F02;
+     regs.x.bx = modedata->mode_id | (use_lfb ? VBE_SETMODE_LFB : 0);
+     __dpmi_int(0x10, &regs);
+ 
+     if (regs.x.ax != 0x004F) {
++        DOSKUTSU_MODES_LOG("mode-set #%d (FAIL): VBE INT 10h ax=0x%04X", ms_calls, regs.x.ax);
+         return SDL_SetError("Failed to set VESA video mode");
+     }
+ 
+     data->banked_mode = !use_lfb;
+ 
+-    // DOSKUTSU diagnostic (patches/SDL/0003): every mode-set dumps the chosen
+-    // mode's full attributes so we can attribute slow flushes / wrong stride
+-    // / banked-vs-LFB to specific BIOS-reported values. Investigation tracker:
+-    // docs/PHASE8-FINDINGS.md "What we have not confirmed" list.
+-    _doskutsu_modes_dbg_open();
+-    if (_doskutsu_modes_dbg_log) {
+-        fprintf(_doskutsu_modes_dbg_log,
+-                "DOSVESA-MODESET: id=0x%04X %dx%d %dbpp pitch=%d attr=0x%04X memmodel=%d "
+-                "has_lfb=%d use_lfb=%d banked=%d "
+-                "lfb_addr=0x%08lX win_seg=0x%04X win_size=%uKB win_gran=%uKB win_attr=0x%02X "
+-                "win_func=0x%08lX hint_direct_fb=%d\n",
+-                modedata->mode_id, modedata->w, modedata->h, modedata->bpp, modedata->pitch,
+-                modedata->attributes, modedata->memory_model,
+-                (int)modedata->has_lfb, (int)use_lfb, (int)data->banked_mode,
+-                (unsigned long)modedata->physical_base_addr,
+-                modedata->win_a_segment, (unsigned)modedata->win_size,
+-                (unsigned)modedata->win_granularity, modedata->win_a_attributes,
+-                (unsigned long)modedata->win_func_ptr,
+-                (int)SDL_GetHintBoolean(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, false));
+-        fflush(_doskutsu_modes_dbg_log);
+-    }
++    // DOSKUTSU diagnostic (patches/SDL/0003; routed through shared writer
++    // by patch 0009): every mode-set dumps the chosen mode's full
++    // attributes so we can attribute slow flushes / wrong stride /
++    // banked-vs-LFB to specific BIOS-reported values. Investigation
++    // tracker: docs/PHASE8-FINDINGS.md "What we have not confirmed" list.
++    DOSKUTSU_MODES_LOG("DOSVESA-MODESET: id=0x%04X %dx%d %dbpp pitch=%d attr=0x%04X memmodel=%d "
++                       "has_lfb=%d use_lfb=%d banked=%d "
++                       "lfb_addr=0x%08lX win_seg=0x%04X win_size=%uKB win_gran=%uKB win_attr=0x%02X "
++                       "win_func=0x%08lX hint_direct_fb=%d",
++                       modedata->mode_id, modedata->w, modedata->h, modedata->bpp, modedata->pitch,
++                       modedata->attributes, modedata->memory_model,
++                       (int)modedata->has_lfb, (int)use_lfb, (int)data->banked_mode,
++                       (unsigned long)modedata->physical_base_addr,
++                       modedata->win_a_segment, (unsigned)modedata->win_size,
++                       (unsigned)modedata->win_granularity, modedata->win_a_attributes,
++                       (unsigned long)modedata->win_func_ptr,
++                       (int)hint_allow_direct);
+ 
+     if (use_lfb) {
+         data->mapping.address = modedata->physical_base_addr;
+@@ -818,6 +841,15 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+         __dpmi_int(0x33, &regs);
+     }
+ 
++    // DOSKUTSU diagnostic (patch 0009): mode-set exit. After this returns,
++    // SDL3 may or may not call CreateWindowFramebuffer to refresh fb_state
++    // for the new mode (the lifecycle bug Lever 1 hunts). Pair this with
++    // CreateWindowFramebuffer #N (entry/exit) traces from
++    // SDL_dosframebuffer.c to see whether the lifecycle ran.
++    DOSKUTSU_MODES_LOG("mode-set #%d (exit ok): banked_mode=%d mapping.size=%lu page_flip=%d",
++                       ms_calls, (int)data->banked_mode,
++                       (unsigned long)data->mapping.size, (int)data->page_flip_available);
++
+     return true;
+ }
+ 
+-- 
+2.47.3
+

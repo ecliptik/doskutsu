@@ -1,0 +1,194 @@
+From fa9cc805370410f52ab618d10fbec540cb96ba3d Mon Sep 17 00:00:00 2001
+From: Claude <services.claude@accounts.ecliptik.com>
+Date: Wed, 29 Apr 2026 18:30:50 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=209=20wave=2017.4=20patch=200033?=
+ =?UTF-8?q?=20=E2=80=94=20honor=20partial-flush=20rect=20list=20in=20DOSVE?=
+ =?UTF-8?q?SA=5FUpdateWindowFramebuffer?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0033, Phase 9 wave 17.4).
+
+Pre-patch: DOSVESA_UpdateWindowFramebuffer's three pitches_match
+branches (single-bank dosmemput, multi-bank BankedDosmemput, nearptr
+LFB SDL_memcpy) IGNORED the rect list and pushed the entire fb_size
+to VRAM unconditionally. Only the !pitches_match branches honored
+rects (per-rect dosmemput / SDL_memcpy with bank switching).
+
+This defeated SDL_UpdateWindowSurfaceRects callers that wanted
+partial flush — including the wave-15 nxengine engine when its
+dirty-rect list was small enough to bypass the threshold check. The
+engine layer correctly chose the partial path; the SDL layer flushed
+the whole frame anyway.
+
+This patch fixes the three pitches_match branches to:
+
+1. Use the existing full-fb fast path (dosmemput / BankedDosmemput /
+   SDL_memcpy of fb_state.fb_size in one shot) ONLY when the rect
+   list represents a full-screen flush (single rect with x=0, y=0,
+   w >= vram_w, h >= vram_h). This is the common case from
+   SDL_UpdateWindowSurface, which constructs a single full-window
+   rect before calling UpdateWindowSurfaceRects.
+
+2. Otherwise dispatch to a per-rect loop that honors the partial
+   list. Inside the loop, when pitches match AND the rect spans the
+   full row width (rx=0, rw==vram_w), do a single contiguous
+   dosmemput / BankedDosmemput / SDL_memcpy of (rh × src_pitch)
+   bytes — bypasses the per-row inner loop. Engine prev-frame diff
+   (companion patch nxengine/0082) produces full-row band rects, so
+   this fast path is the common case post-wave-17.4.
+
+3. Otherwise (pitches don't match OR rect is sub-row width) fall
+   back to per-row dosmemput as before.
+
+Helper added: _doskutsu_is_full_fb_rect_list — single-rect
+full-screen-coverage check, called once per dispatch.
+
+No behavioral change in the !pitches_match branches.
+No regression for full-screen flushes (existing fast path still fires).
+The new per-rect partial path delivers the win when the engine sends
+small rects.
+
+This is a doskutsu-local patch; it's not upstreamed (per the doskutsu
+CLAUDE.md no-upstream policy and the user's sdl_ai_policy memory).
+---
+ src/video/dos/SDL_dosframebuffer.c | 80 ++++++++++++++++++++++++++++--
+ 1 file changed, 76 insertions(+), 4 deletions(-)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 3486258c1..0f078e230 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -84,6 +84,28 @@ static DOSFramebufferState fb_state;
+ static Uint32 _dbg_bank_switches_total = 0;
+ static Uint32 _dbg_bytes_written_total = 0;
+ 
++// DOSKUTSU patch 0033 (wave 17.4): partial-flush detector. The engine
++// passes a rect list to UpdateWindowFramebuffer; the wave-15 dirty-rect
++// fast path passes small rects when only a sub-region of the frame
++// changed (after the wave-17.4 nxengine patch 0082 prev-frame diff
++// produces real partial-flush rect lists). Pre-patch, the pitches_match
++// branches in this file ignored the rect list and dosmemput'd the
++// entire fb_size — defeating partial flush. This helper detects the
++// "single full-screen rect" case, which is the SDL_UpdateWindowSurface
++// path's behavior (it constructs a single rect covering the whole
++// window). When that's what we got, the existing full-fb fast path is
++// optimal. When numrects > 1 OR the rect is sub-screen, switch to the
++// per-rect path with a row-contiguous optimization for pitches_match.
++static bool _doskutsu_is_full_fb_rect_list(const SDL_Rect *rects,
++                                            int numrects,
++                                            int vw, int vh)
++{
++    if (numrects != 1) return false;
++    return rects[0].x <= 0 && rects[0].y <= 0 &&
++           rects[0].x + rects[0].w >= vw &&
++           rects[0].y + rects[0].h >= vh;
++}
++
+ // Convert cursor to the current format.
+ static SDL_Surface *GetConvertedCursorSurface(SDL_CursorData *curdata, SDL_Surface *dst)
+ {
+@@ -954,8 +976,17 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+ 
+             if (!fb_state.banked_multibank) {
+                 // Single-bank: entire FB fits in one window (e.g. mode 13h).
+-                // Full-surface fast path when pitches match.
+-                if (fb_state.pitches_match) {
++                //
++                // DOS-PORT (patch 0033, wave 17.4): partial-flush dispatch.
++                // Full-surface fast path when pitches match AND the rect
++                // list represents a full-screen flush (single rect spanning
++                // the mode dimensions). Otherwise per-rect dosmemput, with
++                // a row-contiguous optimization that bulk-copies a full-
++                // width rect band as one dosmemput when pitches match.
++                if (fb_state.pitches_match &&
++                    _doskutsu_is_full_fb_rect_list(rects, numrects,
++                                                   fb_state.vram_w,
++                                                   fb_state.vram_h)) {
+                     dosmemput(pixels, fb_state.fb_size, fb_state.vram_phys);
+                 } else {
+                     for (int i = 0; i < numrects; i++) {
+@@ -978,6 +1009,16 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                         if (rw <= 0 || rh <= 0) {
+                             continue;
+                         }
++                        // DOS-PORT (patch 0033, wave 17.4): bulk row-contiguous
++                        // dosmemput when pitches match and rect spans full row.
++                        // Engine prev-frame diff produces full-width row bands,
++                        // so this fast path is the common case post-patch 0082.
++                        if (fb_state.pitches_match && rx == 0 && rw == fb_state.vram_w) {
++                            dosmemput(pixels + ry * src_pitch,
++                                      (Uint32)rh * (Uint32)src_pitch,
++                                      fb_state.vram_phys + ry * dst_pitch);
++                            continue;
++                        }
+                         const int bx = rx * fb_state.bpp;
+                         const int bw = rw * fb_state.bpp;
+                         const Uint8 *sp = pixels + ry * src_pitch + bx;
+@@ -997,7 +1038,12 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 const Uint32 wfunc = fb_state.win_func_ptr;
+                 int current_bank = -1;
+ 
+-                if (fb_state.pitches_match) {
++                // DOS-PORT (patch 0033, wave 17.4): partial-flush dispatch
++                // for multi-bank, mirroring the single-bank branch above.
++                if (fb_state.pitches_match &&
++                    _doskutsu_is_full_fb_rect_list(rects, numrects,
++                                                   fb_state.vram_w,
++                                                   fb_state.vram_h)) {
+                     // Contiguous: stream the entire framebuffer through banks.
+                     BankedDosmemput(pixels, fb_state.fb_size, 0,
+                                     gran, wsize, wbase, wfunc, &current_bank);
+@@ -1023,6 +1069,18 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                         if (rw <= 0 || rh <= 0) {
+                             continue;
+                         }
++                        // DOS-PORT (patch 0033, wave 17.4): row-contiguous
++                        // bulk BankedDosmemput when pitches match and rect
++                        // spans full row — band shaped rects from the engine
++                        // prev-frame diff (patch 0082) hit this branch.
++                        if (fb_state.pitches_match && rx == 0 && rw == fb_state.vram_w) {
++                            Uint32 dst_offset = (Uint32)ry * dst_pitch;
++                            BankedDosmemput(pixels + ry * src_pitch,
++                                            (Uint32)rh * (Uint32)src_pitch,
++                                            dst_offset,
++                                            gran, wsize, wbase, wfunc, &current_bank);
++                            continue;
++                        }
+                         const int bx = rx * fb_state.bpp;
+                         const int bw = rw * fb_state.bpp;
+ 
+@@ -1037,7 +1095,13 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+             }
+         } else {
+             // nearptr path (LFB fallback)
+-            if (fb_state.pitches_match) {
++            //
++            // DOS-PORT (patch 0033, wave 17.4): partial-flush dispatch
++            // for the nearptr LFB path, mirroring the dosmemput branches.
++            if (fb_state.pitches_match &&
++                _doskutsu_is_full_fb_rect_list(rects, numrects,
++                                                fb_state.vram_w,
++                                                fb_state.vram_h)) {
+                 SDL_memcpy(fb_state.vram_ptr, fb_state.pixels, fb_state.fb_size);
+             } else {
+                 const int bpp = fb_state.bpp;
+@@ -1065,6 +1129,14 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                     if (rw <= 0 || rh <= 0) {
+                         continue;
+                     }
++                    // DOS-PORT (patch 0033, wave 17.4): contiguous bulk
++                    // memcpy when pitches match and rect spans full row.
++                    if (fb_state.pitches_match && rx == 0 && rw == fb_state.vram_w) {
++                        SDL_memcpy(fb_state.vram_ptr + ry * dst_pitch,
++                                   pixels + ry * src_pitch,
++                                   (size_t)rh * (size_t)src_pitch);
++                        continue;
++                    }
+                     const int bw = rw * bpp;
+                     const Uint8 *sp = pixels + ry * src_pitch + rx * bpp;
+                     Uint8 *dp = fb_state.vram_ptr + ry * dst_pitch + rx * bpp;
+-- 
+2.47.3
+

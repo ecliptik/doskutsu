@@ -1,0 +1,76 @@
+From 10f18c41185e8e26e93166cdbce3245543de51db Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 17:18:29 -0700
+Subject: [PATCH] sdl3-dos: opt into SDL_HINT_DOS_PREFER_LFB for Mach64 perf
+ (lever 1)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 1 NXEngine-side companion to patches/SDL/0010 + 0011.
+
+Sets SDL_HINT_DOS_PREFER_LFB="1" at OVERRIDE priority before SDL_Init,
+identical shape to the existing SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER
+and SDL_HINT_DOS_MAX_BPP setters in the same #ifdef NXE_DOS block.
+
+Effect: SDL3-DOS's LFB-vs-banked decision in DOSVESA_SetDisplayMode
+flips from "prefer banked when usable" to "prefer LFB when available".
+On the g2k Pentium OverDrive's Mach64 BIOS (M64VBE), this swaps the
+~500 KB/s banked-window write path for a 5-10× faster LFB nearptr
+copy through DPMI-mapped VRAM — the largest single perf lever in
+the Phase 9 plan.
+
+Why DOS needs this
+------------------
+
+DOS-only hint that targets the SDL3-DOS backend specifically. Has
+no effect on non-DOS builds. Guarded by NXE_DOS to keep desktop
+behaviour unchanged.
+
+Layered with patches/SDL/0011 (lazy fb_state re-init) which is what
+makes the hint actually engage LFB across mode-change boundaries.
+Without 0011, the hint correctly flips the policy but fb_state stays
+partial-stale after the second mode-set (Phase 8 attempt's failure
+mode — see docs/PHASE8-FINDINGS.md).
+
+See docs/PHASE9-15FPS-PLAN.md §3 Lever 1 for the full lever stack.
+---
+ src/main.cpp | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 0b7b828..a161313 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -379,6 +379,28 @@ int main(int argc, char *argv[])
+   // 8bpp end-to-end is Phase 9 lever 3 work; needs palette management on
+   // stage transitions. Tracked in docs/PHASE8-FINDINGS.md.
+   SDL_SetHintWithPriority(SDL_HINT_DOS_MAX_BPP, "16", SDL_HINT_OVERRIDE);
++
++  // Patch 0045 (Phase 9 lever 1, 2026-04-26): prefer LFB over banked at the
++  // SDL3-DOS LFB-vs-banked decision (vendor/SDL/src/video/dos/SDL_dosmodes.c).
++  // Default DOS-backend policy prefers banked when both are usable, which is
++  // correct on the cards SDL3-DOS PR #15377 was developed against. On the
++  // g2k Pentium OverDrive's ATI Mach64 with M64VBE, banked-mode VESA writes
++  // through the 0xA0000 window are bandwidth-bound at ~500 KB/s effective;
++  // LFB through DPMI-mapped VRAM is 5-10× faster. The new hint
++  // SDL_HINT_DOS_PREFER_LFB (added by patches/SDL/0010) flips the policy.
++  //
++  // PREFER_LFB takes precedence over the existing
++  // SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER hint in the LFB-vs-banked decision
++  // — we keep both set so the fast-path init's side-effect on fb_state
++  // population (the original reason patch 0032 set ALLOW_DIRECT_FRAMEBUFFER)
++  // remains active alongside the LFB preference.
++  //
++  // The lazy-fb_state-init lifecycle fix in patches/SDL/0011 is what makes
++  // this hint actually engage LFB across the engine's mode-change boundaries.
++  // Without 0011, this hint flipped the policy but fb_state stayed zero on
++  // the LFB code path (the wave-1 / Phase 8 attempt's failure mode).
++  // See docs/PHASE9-15FPS-PLAN.md §3 Lever 1 and docs/PHASE8-FINDINGS.md.
++  SDL_SetHintWithPriority(SDL_HINT_DOS_PREFER_LFB, "1", SDL_HINT_OVERRIDE);
+ #endif
+ 
+   // SDL3: SDL_Init returns bool (true on success); old `< 0` check would always be false.
+-- 
+2.47.3
+

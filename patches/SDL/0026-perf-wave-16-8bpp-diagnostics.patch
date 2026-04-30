@@ -1,0 +1,113 @@
+From 8aee66d166e4d6ee18e0d110a5aded23d77b10dd Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 14:27:05 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2016=20pat?=
+ =?UTF-8?q?ch=200026=20=E2=80=94=208bpp=20mode-pick=20+=20flush=20diagnost?=
+ =?UTF-8?q?ics?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 wave 16 (Lever 3) sub-phase 16.3 flips SDL_HINT_DOS_MAX_BPP from
+"16" to "8" on the engine side (nxengine-evo patch 0072). This SDL-side
+patch adds the matching diagnostic lines in SDLDBG.LOG so we can confirm
+the cap propagated through SDL3-DOS's mode-enumeration filter and
+through the framebuffer flush path.
+
+Two new log lines, both gated by the existing doskutsu_dbg_log /
+DOSKUTSU_LOG_TAG infrastructure (patches/SDL/0009 + 0024):
+
+  1. WAVE16-MODESET in DOSVESA_SetDisplayMode logs the requested
+     SDL_HINT_DOS_MAX_BPP value, the actual bpp/mode-id picked, the
+     resolution, scanline pitch, raw vs padded bytes-per-frame, and
+     whether the mode landed on LFB or banked. One line per mode-set;
+     answers "did the cap actually steer the picker to an 8bpp mode?".
+
+  2. WAVE16-FB-FIRSTFLUSH in DOSVESA_UpdateWindowFramebuffer logs the
+     bytes-per-pixel (SDL_BYTESPERPIXEL of the format), the padded
+     fb_size in bytes, src vs vram pitch, and whether the dosmemput or
+     nearptr LFB path is in use. Fires once at the first flush; sanity-
+     checks that 8bpp = ~half the bytes/frame of the 16bpp wave-15
+     baseline.
+
+Diagnostic-only — no perf or behavioural changes. Pairs with the
+LOG_INFO line in Renderer::initVideo (nxengine patch 0072) so a single
+grep across DEBUG.LOG + SDLDBG.LOG is enough to verify wave 16's mode
+flip engaged end-to-end on real hardware.
+
+Workspace-local patch per the SDL upstream policy (memory note
+sdl_ai_policy.md): never upstreamed; sidesteps vendor/SDL/CLAUDE.md's
+no-AI-authoring restriction since we commit to never opening a PR
+against libsdl-org/SDL from this repo.
+
+See /tmp/wave-16-spec.md §3 for the spec this patch implements.
+---
+ src/video/dos/SDL_dosframebuffer.c | 16 ++++++++++++++++
+ src/video/dos/SDL_dosmodes.c       | 24 ++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index d19ae2844..4005c1d5d 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -783,6 +783,22 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 (unsigned long)fb_state.win_gran_bytes,
+                 (unsigned long)fb_state.win_size_bytes,
+                 (unsigned long)(uintptr_t)fb_state.pixels);
++
++        // DOSKUTSU patch 0026 (Phase 9 wave 16 — 8bpp first-flush diagnostic):
++        // companion to WAVE16-MODESET in SDL_dosmodes.c. Logs the per-flush
++        // byte count math at first flush so we can confirm 8bpp = ~half the
++        // bytes/frame of the 16bpp wave-15 baseline. fb_state.fb_size is the
++        // padded frame size dosmemput / SDL_memcpy actually pushes; bpp here
++        // is BYTES per pixel (SDL_BYTESPERPIXEL on the mode format), so 1 at
++        // INDEX8 and 2 at RGB565. A sanity check in the logback: the value
++        // should be close to (W * H * bpp), allowing for VBE pitch padding.
++        doskutsu_dbg_log(
++                "WAVE16-FB-FIRSTFLUSH: bytes_per_pixel=%d fb_size_bytes=%lu "
++                "src_pitch=%d vram_pitch=%d pitches_match=%d use_dosmemput=%d "
++                "(expected ~half of wave-15 16bpp baseline at 8bpp)",
++                fb_state.bpp, (unsigned long)fb_state.fb_size,
++                fb_state.src_pitch, fb_state.vram_pitch,
++                (int)fb_state.pitches_match, (int)fb_state.use_dosmemput);
+     }
+     {
+         bool guard = (fb_state.direct_fb && (fb_state.vram_ptr || fb_state.vram_phys));
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index c7cc9eb04..20543df1b 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -880,6 +880,30 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+                        (unsigned long)modedata->win_func_ptr,
+                        (int)hint_allow_direct, (int)hint_prefer_lfb);
+ 
++    // DOSKUTSU patch 0026 (Phase 9 wave 16 — 8bpp mode-pick diagnostic):
++    // single grep'able line summarising what SDL_HINT_DOS_MAX_BPP did to the
++    // mode pick. Pairs with WAVE16-FB-FIRSTFLUSH in SDL_dosframebuffer.c so
++    // we can verify both halves of the wave-16 path end-to-end:
++    //   1. mode-pick honoured the bpp cap (this line),
++    //   2. the framebuffer flush is pushing roughly bytes_per_frame bytes
++    //      per call (the FB-FIRSTFLUSH line).
++    // bytes_per_frame uses the BIOS-reported pitch (which may be padded over
++    // raw_w*bpp/8) so the value matches what dosmemput / SDL_memcpy actually
++    // moves through the bus.
++    {
++        const char *max_bpp_hint = SDL_GetHint(SDL_HINT_DOS_MAX_BPP);
++        const Uint32 raw_bytes = (Uint32)modedata->w * (Uint32)modedata->h * (Uint32)((modedata->bpp + 7) / 8);
++        const Uint32 padded_bytes = (Uint32)modedata->h * (Uint32)modedata->pitch;
++        DOSKUTSU_MODES_LOG("WAVE16-MODESET: requested_max_bpp=%s actual_bpp=%d mode=0x%04X "
++                           "%dx%d pitch=%d raw_bytes_per_frame=%lu padded_bytes_per_frame=%lu "
++                           "fb_base=%s",
++                           max_bpp_hint ? max_bpp_hint : "(unset)",
++                           modedata->bpp, modedata->mode_id, modedata->w, modedata->h,
++                           modedata->pitch,
++                           (unsigned long)raw_bytes, (unsigned long)padded_bytes,
++                           use_lfb ? "LFB" : "banked");
++    }
++
+     if (use_lfb) {
+         data->mapping.address = modedata->physical_base_addr;
+         data->mapping.size = DOSVESA_GetVESATotalMemory();
+-- 
+2.47.3
+

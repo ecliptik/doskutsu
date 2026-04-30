@@ -1,0 +1,384 @@
+From 5da8747c549a56a787f25f53bc491e953de3b6e0 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 18:59:43 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=204=20patc?=
+ =?UTF-8?q?h=200017=20=E2=80=94=20SDL=5FRenderPresent=20timing=20brackets?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 3 establishes a clear gap: nxengine flip-probe sees ~353 ms per
+flip on real Cirrus, but SDL3-DOS's fastpath-timing block (patch 0015)
+only attributes ~10 ms of that to UpdateWindowFramebuffer itself. The
+~340 ms gap is upstream of DOSVESA_UpdateWindowFramebuffer — somewhere
+between SDL_RenderPresent's entry and the fast-path DOS backend. This
+patch instruments three nested layers so the next CF capture can
+attribute the gap precisely:
+
+1. SDL_render.c SDL_RenderPresent: bracket the two phases —
+   FlushRenderCommands (queue_flush_ms = drawcalls executing into the
+   software renderer's backbuffer via SW_RunCommandQueue) and
+   renderer->RenderPresent (render_present_ms = the rest of the chain
+   into the platform window-surface update).
+
+2. SDL_render_sw.c SW_RenderPresent: bracket the single delegating
+   call to SDL_UpdateWindowSurface. Should ≈ render_present_ms above
+   and ≈ update_window_surface bracket below; any large delta means
+   dispatcher overhead between SDL_render's renderer->RenderPresent
+   thunk and SW_RenderPresent itself.
+
+3. SDL_video.c SDL_UpdateWindowSurface: bracket entry-to-exit. This
+   is the layer that calls SDL_UpdateWindowSurfaceRects → the DOS
+   driver's UpdateWindowFramebuffer (which already has the patch
+   0015 fastpath-timing bracket).
+
+All three brackets log the first 5 calls in detail (warm-up
+visibility) and a per-100-call summary thereafter, formatted to match
+the existing fastpath-timing block style. All output routes through
+doskutsu_dbg_log, so lines interleave atomically with the existing
+[lifecycle] / DOSVESA-MODESET / fastpath-timing writers.
+
+DOSBox-X parity capture (build/stage/SDLDBG.LOG, 100-present block):
+  sw-present-timing block @present=100:
+    queue_flush_ms_avg=644.607 (min=4.672 max=1025.007)
+    render_present_ms_avg=1.430 (min=1.253 max=6.941)
+    total_ms_avg=646.037 (min=11.175 max=1026.262)
+  sw-renderpresent-timing block @present=100:  ms_avg=1.359
+  sw-updatesurface-timing block @call=100:     ms_avg=1.302
+  fastpath-timing block @flush=100:            total_ms_avg=1.276
+
+DOSBox-X numbers are not perf-faithful for real-HW (memory note
+dosbox_not_perf_proxy.md) — a 644 ms FlushRenderCommands here would
+project differently to PCI-bus-bound real-HW writes. But the BRACKET
+STRUCTURE is what matters; cirrus4 will fill in the real numbers.
+
+Why DOS needs this
+------------------
+Diagnostic-only: identifies which layer of the SDL render → present
+chain absorbs the wave-3 ~340 ms gap. With SDL3-DOS hitting ~10 ms
+per UpdateWindowFramebuffer call (LFB engaged, projected band met),
+the next optimization target depends on whether the gap is in
+drawcall execution (would point to Lever 2 — surface-direct blits to
+shorten the queue) or in a renderer-internal copy/conversion stage we
+hadn't anticipated. Build-time effects: three new SDL_GetPerformance
+Counter calls per present + log writes; expected overhead ≪ 1 ms /
+present.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/render/SDL_render.c             | 115 ++++++++++++++++++++++++++++
+ src/render/software/SDL_render_sw.c |  67 +++++++++++++++-
+ src/video/SDL_video.c               |  63 ++++++++++++++-
+ 3 files changed, 243 insertions(+), 2 deletions(-)
+
+diff --git a/src/render/SDL_render.c b/src/render/SDL_render.c
+index 4d76a7405..d10379aeb 100644
+--- a/src/render/SDL_render.c
++++ b/src/render/SDL_render.c
+@@ -29,6 +29,33 @@
+ #include "../video/SDL_pixels_c.h"
+ #include "../video/SDL_video_c.h"
+ 
++// DOSKUTSU patch 0017 (Phase 9 wave 4) — SDL_RenderPresent timing
++// instrumentation. The wave-3 cirrus3 capture established a ~340 ms gap
++// between the per-flip total reported by NXEngine's flip-probe (~353 ms)
++// and the per-flush total reported by SDL3-DOS's fastpath-timing (~10
++// ms). This file's SDL_RenderPresent is the bridge: it calls
++// FlushRenderCommands (which actually executes queued drawcalls into
++// the renderer backbuffer via SW_RunCommandQueue) and then
++// renderer->RenderPresent (which on the software renderer immediately
++// delegates to SDL_UpdateWindowSurface → DOSVESA_UpdateWindowFramebuffer).
++// We bracket the two phases separately so the next CF capture's
++// SDLDBG.LOG can attribute the missing 340 ms to either drawcall
++// execution (queue_flush) or window-surface update (which we already
++// have a 10 ms fast-path bracket for, so the difference would be in the
++// SDL_UpdateWindowSurface dispatch overhead itself).
++//
++// All output routes through doskutsu_dbg_log so the lines interleave
++// cleanly with the existing [lifecycle] / DOSVESA-MODESET / fastpath-
++// timing writers. Per-call detail logged for the first 5 presents
++// (warm-up); per-100-call summary thereafter to avoid log spam at the
++// 30+ presents/sec rate the title scene approaches in DOSBox-X parity.
++#ifdef SDL_VIDEO_DRIVER_DOSVESA
++#include "../video/dos/SDL_dosdbg.h"
++#define DOSKUTSU_PRESENT_LOG(...) doskutsu_dbg_log(__VA_ARGS__)
++#else
++#define DOSKUTSU_PRESENT_LOG(...) ((void)0)
++#endif
++
+ #ifdef SDL_PLATFORM_ANDROID
+ #include "../core/android/SDL_android.h"
+ #include "../video/android/SDL_androidevents.h"
+@@ -5534,8 +5561,25 @@ bool SDL_RenderPresent(SDL_Renderer *renderer)
+         SDL_RenderApplyWindowShape(renderer);
+     }
+ 
++    // DOSKUTSU patch 0017: bracket the two phases of SDL_RenderPresent so
++    // we can attribute the wave-3 ~340 ms gap. _ts_p0=entry,
++    // _ts_p1=after FlushRenderCommands (drawcall queue → backbuffer),
++    // _ts_p2=after renderer->RenderPresent (backbuffer → window surface
++    // → VRAM). On software renderer with DOS backend, the chain is:
++    //   FlushRenderCommands → SW_RunCommandQueue (one SDL_BlitSurface
++    //     per drawcall, into renderer->target / window->surface)
++    //   renderer->RenderPresent → SW_RenderPresent →
++    //     SDL_UpdateWindowSurface → DOSVESA_UpdateWindowFramebuffer
++    static Uint64 _ts_freq = 0;
++    if (!_ts_freq) {
++        _ts_freq = SDL_GetPerformanceFrequency();
++    }
++    const Uint64 _ts_p0 = SDL_GetPerformanceCounter();
++
+     FlushRenderCommands(renderer); // time to send everything to the GPU!
+ 
++    const Uint64 _ts_p1 = SDL_GetPerformanceCounter();
++
+ #if DONT_DRAW_WHILE_HIDDEN
+     // Don't present while we're hidden
+     if (renderer->hidden) {
+@@ -5546,6 +5590,77 @@ bool SDL_RenderPresent(SDL_Renderer *renderer)
+         presented = false;
+     }
+ 
++    const Uint64 _ts_p2 = SDL_GetPerformanceCounter();
++
++    // Aggregate-and-log the bracket. Sample first 5 presents at full
++    // detail (one log line each, not every-call to keep the log readable
++    // at boot). Aggregated summary every 100 presents thereafter.
++    {
++        static int _pn = 0;
++        static Uint64 _pn_total = 0;
++        static Uint64 _qf_sum_us = 0, _rp_sum_us = 0, _tot_sum_us = 0;
++        static Uint32 _qf_max_us = 0, _rp_max_us = 0, _tot_max_us = 0;
++        static Uint32 _qf_min_us = 0xFFFFFFFFu, _rp_min_us = 0xFFFFFFFFu, _tot_min_us = 0xFFFFFFFFu;
++
++        const Uint64 us_per_tick_num = 1000000ULL;
++        const Uint32 qf_us  = (Uint32)(((_ts_p1 - _ts_p0) * us_per_tick_num) / _ts_freq);
++        const Uint32 rp_us  = (Uint32)(((_ts_p2 - _ts_p1) * us_per_tick_num) / _ts_freq);
++        const Uint32 tot_us = (Uint32)(((_ts_p2 - _ts_p0) * us_per_tick_num) / _ts_freq);
++
++        _pn_total++;
++        _pn++;
++        _qf_sum_us  += qf_us;
++        _rp_sum_us  += rp_us;
++        _tot_sum_us += tot_us;
++        if (qf_us  > _qf_max_us)  _qf_max_us  = qf_us;
++        if (rp_us  > _rp_max_us)  _rp_max_us  = rp_us;
++        if (tot_us > _tot_max_us) _tot_max_us = tot_us;
++        if (qf_us  < _qf_min_us)  _qf_min_us  = qf_us;
++        if (rp_us  < _rp_min_us)  _rp_min_us  = rp_us;
++        if (tot_us < _tot_min_us) _tot_min_us = tot_us;
++
++        if (_pn_total <= 5) {
++            DOSKUTSU_PRESENT_LOG("sw-present-detail #%lu: queue_flush=%lu.%03lu ms "
++                                 "render_present=%lu.%03lu ms total=%lu.%03lu ms",
++                                 (unsigned long)_pn_total,
++                                 (unsigned long)(qf_us  / 1000), (unsigned long)(qf_us  % 1000),
++                                 (unsigned long)(rp_us  / 1000), (unsigned long)(rp_us  % 1000),
++                                 (unsigned long)(tot_us / 1000), (unsigned long)(tot_us % 1000));
++        }
++
++        if (_pn >= 100) {
++            DOSKUTSU_PRESENT_LOG("sw-present-timing block @present=%lu: "
++                                 "queue_flush_ms_avg=%lu.%03lu (min=%lu.%03lu max=%lu.%03lu) "
++                                 "render_present_ms_avg=%lu.%03lu (min=%lu.%03lu max=%lu.%03lu) "
++                                 "total_ms_avg=%lu.%03lu (min=%lu.%03lu max=%lu.%03lu) "
++                                 "[over %d presents]",
++                                 (unsigned long)_pn_total,
++                                 (unsigned long)((_qf_sum_us / _pn) / 1000),
++                                 (unsigned long)((_qf_sum_us / _pn) % 1000),
++                                 (unsigned long)(_qf_min_us / 1000),
++                                 (unsigned long)(_qf_min_us % 1000),
++                                 (unsigned long)(_qf_max_us / 1000),
++                                 (unsigned long)(_qf_max_us % 1000),
++                                 (unsigned long)((_rp_sum_us / _pn) / 1000),
++                                 (unsigned long)((_rp_sum_us / _pn) % 1000),
++                                 (unsigned long)(_rp_min_us / 1000),
++                                 (unsigned long)(_rp_min_us % 1000),
++                                 (unsigned long)(_rp_max_us / 1000),
++                                 (unsigned long)(_rp_max_us % 1000),
++                                 (unsigned long)((_tot_sum_us / _pn) / 1000),
++                                 (unsigned long)((_tot_sum_us / _pn) % 1000),
++                                 (unsigned long)(_tot_min_us / 1000),
++                                 (unsigned long)(_tot_min_us % 1000),
++                                 (unsigned long)(_tot_max_us / 1000),
++                                 (unsigned long)(_tot_max_us % 1000),
++                                 _pn);
++            _pn = 0;
++            _qf_sum_us = _rp_sum_us = _tot_sum_us = 0;
++            _qf_max_us = _rp_max_us = _tot_max_us = 0;
++            _qf_min_us = _rp_min_us = _tot_min_us = 0xFFFFFFFFu;
++        }
++    }
++
+     if (renderer->simulate_vsync ||
+         (!presented && renderer->wanted_vsync)) {
+         SDL_SimulateRenderVSync(renderer);
+diff --git a/src/render/software/SDL_render_sw.c b/src/render/software/SDL_render_sw.c
+index 160e2a10b..0e3eefcf8 100644
+--- a/src/render/software/SDL_render_sw.c
++++ b/src/render/software/SDL_render_sw.c
+@@ -25,6 +25,19 @@
+ #include "../SDL_sysrender.h"
+ #include "SDL_render_sw_c.h"
+ 
++// DOSKUTSU patch 0017 (Phase 9 wave 4) — SW_RenderPresent timing bracket.
++// Pairs with the SDL_RenderPresent brackets in SDL_render.c. The
++// software-renderer present is just a thin wrapper around
++// SDL_UpdateWindowSurface, so the bracket here is expected to closely
++// match the SDL_UpdateWindowSurface bracket; any large delta indicates
++// dispatch overhead in the SDL_UpdateWindowSurface entry path itself.
++#ifdef SDL_VIDEO_DRIVER_DOSVESA
++#include "../../video/dos/SDL_dosdbg.h"
++#define DOSKUTSU_SWPRESENT_LOG(...) doskutsu_dbg_log(__VA_ARGS__)
++#else
++#define DOSKUTSU_SWPRESENT_LOG(...) ((void)0)
++#endif
++
+ #include "SDL_draw.h"
+ #include "SDL_blendfillrect.h"
+ #include "SDL_blendline.h"
+@@ -1030,7 +1043,59 @@ static bool SW_RenderPresent(SDL_Renderer *renderer)
+     if (!window) {
+         return false;
+     }
+-    return SDL_UpdateWindowSurface(window);
++
++    // DOSKUTSU patch 0017: bracket SW_RenderPresent's single delegating
++    // call so we can verify it matches SDL_UpdateWindowSurface's
++    // measured time (any delta = dispatcher overhead). Per-100-call
++    // summary; first 5 detailed.
++    static Uint64 _ts_freq = 0;
++    if (!_ts_freq) {
++        _ts_freq = SDL_GetPerformanceFrequency();
++    }
++    const Uint64 _ts0 = SDL_GetPerformanceCounter();
++
++    bool result = SDL_UpdateWindowSurface(window);
++
++    const Uint64 _ts1 = SDL_GetPerformanceCounter();
++    {
++        static Uint64 _n_total = 0;
++        static int _n = 0;
++        static Uint64 _sum_us = 0;
++        static Uint32 _max_us = 0;
++        static Uint32 _min_us = 0xFFFFFFFFu;
++
++        const Uint32 us = (Uint32)(((_ts1 - _ts0) * 1000000ULL) / _ts_freq);
++        _n_total++;
++        _n++;
++        _sum_us += us;
++        if (us > _max_us) _max_us = us;
++        if (us < _min_us) _min_us = us;
++
++        if (_n_total <= 5) {
++            DOSKUTSU_SWPRESENT_LOG("sw-renderpresent-detail #%lu: %lu.%03lu ms",
++                                   (unsigned long)_n_total,
++                                   (unsigned long)(us / 1000),
++                                   (unsigned long)(us % 1000));
++        }
++        if (_n >= 100) {
++            DOSKUTSU_SWPRESENT_LOG("sw-renderpresent-timing block @present=%lu: "
++                                   "ms_avg=%lu.%03lu (min=%lu.%03lu max=%lu.%03lu) [over %d]",
++                                   (unsigned long)_n_total,
++                                   (unsigned long)((_sum_us / _n) / 1000),
++                                   (unsigned long)((_sum_us / _n) % 1000),
++                                   (unsigned long)(_min_us / 1000),
++                                   (unsigned long)(_min_us % 1000),
++                                   (unsigned long)(_max_us / 1000),
++                                   (unsigned long)(_max_us % 1000),
++                                   _n);
++            _n = 0;
++            _sum_us = 0;
++            _max_us = 0;
++            _min_us = 0xFFFFFFFFu;
++        }
++    }
++
++    return result;
+ }
+ 
+ static void SW_DestroyTexture(SDL_Renderer *renderer, SDL_Texture *texture)
+diff --git a/src/video/SDL_video.c b/src/video/SDL_video.c
+index e11ffe7ba..14cf0fb35 100644
+--- a/src/video/SDL_video.c
++++ b/src/video/SDL_video.c
+@@ -3749,11 +3749,72 @@ bool SDL_UpdateWindowSurface(SDL_Window *window)
+ 
+     CHECK_WINDOW_MAGIC(window, false);
+ 
++    // DOSKUTSU patch 0017 (Phase 9 wave 4): bracket entry-to-exit. This
++    // is the public API the SW renderer's RenderPresent calls, and the
++    // dispatcher into the platform's UpdateWindowFramebuffer. Together
++    // with SW_RenderPresent's bracket and SDL_RenderPresent's two-phase
++    // bracket, this nails down where the wave-3 ~340 ms gap lives:
++    //   total (renderpresent_ms in nxengine flip-probe) =
++    //     queue_flush_ms (FlushRenderCommands)
++    //   + render_present_ms (renderer->RenderPresent)
++    //     ≈ sw_renderpresent_ms (this layer)
++    //     ≈ update_window_surface_ms (this bracket)
++    //     ≈ ~10 ms fastpath-timing total (DOSVESA path)
++    // Sample first 5 calls, summary every 100.
++    static Uint64 _ts_freq = 0;
++    if (!_ts_freq) {
++        _ts_freq = SDL_GetPerformanceFrequency();
++    }
++    const Uint64 _ts0 = SDL_GetPerformanceCounter();
++
+     full_rect.x = 0;
+     full_rect.y = 0;
+     SDL_GetWindowSizeInPixels(window, &full_rect.w, &full_rect.h);
+ 
+-    return SDL_UpdateWindowSurfaceRects(window, &full_rect, 1);
++    bool result = SDL_UpdateWindowSurfaceRects(window, &full_rect, 1);
++
++#ifdef SDL_VIDEO_DRIVER_DOSVESA
++    {
++        const Uint64 _ts1 = SDL_GetPerformanceCounter();
++        static Uint64 _n_total = 0;
++        static int _n = 0;
++        static Uint64 _sum_us = 0;
++        static Uint32 _max_us = 0;
++        static Uint32 _min_us = 0xFFFFFFFFu;
++
++        const Uint32 us = (Uint32)(((_ts1 - _ts0) * 1000000ULL) / _ts_freq);
++        _n_total++;
++        _n++;
++        _sum_us += us;
++        if (us > _max_us) _max_us = us;
++        if (us < _min_us) _min_us = us;
++
++        if (_n_total <= 5) {
++            doskutsu_dbg_log("sw-updatesurface-detail #%lu: %lu.%03lu ms",
++                             (unsigned long)_n_total,
++                             (unsigned long)(us / 1000),
++                             (unsigned long)(us % 1000));
++        }
++        if (_n >= 100) {
++            doskutsu_dbg_log("sw-updatesurface-timing block @call=%lu: "
++                             "ms_avg=%lu.%03lu (min=%lu.%03lu max=%lu.%03lu) [over %d]",
++                             (unsigned long)_n_total,
++                             (unsigned long)((_sum_us / _n) / 1000),
++                             (unsigned long)((_sum_us / _n) % 1000),
++                             (unsigned long)(_min_us / 1000),
++                             (unsigned long)(_min_us % 1000),
++                             (unsigned long)(_max_us / 1000),
++                             (unsigned long)(_max_us % 1000),
++                             _n);
++            _n = 0;
++            _sum_us = 0;
++            _max_us = 0;
++            _min_us = 0xFFFFFFFFu;
++        }
++    }
++#endif
++
++    return result;
+ }
+ 
+ bool SDL_UpdateWindowSurfaceRects(SDL_Window *window, const SDL_Rect *rects,
+-- 
+2.47.3
+

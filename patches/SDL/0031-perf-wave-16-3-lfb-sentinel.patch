@@ -1,0 +1,235 @@
+From 9b31ad3d7846516e79752deb33566de6f58b8b00 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 29 Apr 2026 12:27:55 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2016.3=20p?=
+ =?UTF-8?q?atch=200031=20=E2=80=94=20LFB=20sentinel=20test?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 16.3 confirmed bottom-strip-black persists with LFB engaged via
+patch 0030's force-LFB override. The bug is NOT banked-mode-specific;
+something on the g2k Cirrus + UNIVBE 6.70 caps either the aperture
+itself or the display controller's scan region at the bank-0 boundary.
+
+Two surviving hypotheses:
+
+  H-a "LFB aperture lies past 64KB": writes to LFB+>=65536 land in the
+       aperture but the chip never propagates them to VRAM (or routes
+       them to the wrong VRAM region). Readback through the SAME
+       aperture returns garbage / zeros / pre-write value.
+
+  H-b "writes land in VRAM but display controller doesn't scan past
+       64KB": writes round-trip cleanly through the aperture (data IS
+       in VRAM), but the display generator's scan-out region caps at
+       the bank-0 boundary regardless of pitch / height. VRAM is
+       correct; only the displayed picture truncates.
+
+This patch disambiguates: write a known 16-byte sentinel pattern
+(0xDEADBEEF repeating) via the SAME LFB pointer SDL3-DOS uses for
+production writes (fb_state.vram_ptr at line ~1041 / 1072), then
+read it back through the SAME pointer. Sample 5 offsets:
+
+  LFB+0       — control (top-of-screen, must round-trip cleanly)
+  LFB+65535   — last byte of bank 0 (boundary control)
+  LFB+65536   — first byte past bank-0 boundary (the suspected hot zone)
+  LFB+76799   — last byte of displayed frame (320×240 - 1)
+  LFB+131072  — well past boundary, into off-screen VRAM
+
+For each: snapshot original 16 bytes, write sentinel, read back, log
+match=<0|1>, restore original — so the displayed picture isn't
+corrupted by the diagnostic.
+
+One-shot fire on first flip when LFB is engaged (static fired flag).
+If the hypothesis-(a) aperture is broken, it's broken on every flush
+— single-shot is enough and we don't pay per-frame overhead. Same
+single-shot pattern as patch 0029 (bank-1 offset fix) one-shot logging.
+
+Env-gated by SDL_HINT_DOSKUTSU_LFB_SENTINEL=1 (strict "1" match per
+CLAUDE.md DOSKUTSU env-var convention; default OFF so production
+iters aren't impacted). Pairs with patch 0030's
+SDL_HINT_DOSKUTSU_FORCE_LFB=1 to engage LFB on the Cirrus auto-disable
+fingerprint.
+
+Interpretation playbook (next-iter fix path):
+
+  match=1 at LFB+65536 → H-b confirmed. Aperture works; the chip is
+         selectively NOT scanning past 64KB. Investigate VBE 0x4F07
+         display-start, pitch fields, or a Cirrus-specific scan-cap
+         register the BIOS doesn't expose. Possible escape hatches:
+         320×200 mode (fits in 64KB), 4bpp planar, smaller logical
+         surface.
+
+  match=0 at LFB+65536 → H-a confirmed. Aperture broken past 64KB.
+         Investigate alternate apertures (some Cirrus chips expose a
+         separate "extended" aperture), Cirrus chip-direct LFB-window-
+         base register writes, or fall back to banked + alternate
+         Cirrus-specific bank-switch primitive. DO NOT push LFB; revert
+         to banked + chase H-C from patch 0028's playbook.
+
+  match=1 everywhere (all 5 offsets round-trip) and bottom-strip-black
+         persists → H-b confirmed for the entire post-bank-0 region.
+         Display is the bottleneck, not the write path.
+
+Side-effects: writes 16 bytes at each of 5 offsets into the aperture,
+then restores the original bytes. On DOSBox-X (LFB known-good) the
+restore makes the diagnostic visually invisible. On the g2k Cirrus
+where the aperture may be broken at some offsets, the "restore" write
+goes through the same aperture so any visual artifact is bounded to
+those 16-byte regions for ≤1 frame and is masked by the existing
+bottom-strip-black bug at offsets ≥65536.
+
+Sample offsets are within the DPMI-mapped VRAM region (mapping size =
+DOSVESA_GetVESATotalMemory(), ≥1024 KB on this Cirrus per the modeset
+log). All reads/writes are safe.
+
+Existing diagnostic patches (0027 audit, 0028 banked sentinel, 0029
+offset rewrite, 0030 force-LFB override) remain in place as passive
+observers so a single iter capture can correlate banked-side and
+LFB-side behaviour.
+
+Per docs/BOOT.md convention every new env var is documented in the
+"Diagnostic / development options" subsection. The LFB sentinel is
+dev-only, not user-facing.
+
+Local-only patch per workspace policy. Never PR'd upstream.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c | 120 +++++++++++++++++++++++++++++
+ 1 file changed, 120 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 6c34ad55d..3486258c1 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -1279,6 +1279,126 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+             }
+         }
+ 
++        // DOSKUTSU patch 0031 (wave 16.3 LFB sentinel — bottom-strip-black
++        // disambiguation when LFB is engaged via patch 0030's force-LFB
++        // override). The wave 16.3 result confirmed bottom-strip-black
++        // persists with LFB engaged on the g2k Cirrus + UNIVBE 6.70 — so
++        // the bug is NOT banked-mode-specific. Two surviving hypotheses:
++        //
++        //   H-a "LFB aperture lies past 64KB": writes to LFB+>=65536 land
++        //        in the aperture but the chip never propagates them to
++        //        VRAM (or routes them to the wrong VRAM region). Readback
++        //        through the SAME aperture returns garbage / zeros / the
++        //        pre-write value.
++        //
++        //   H-b "writes land in VRAM but display controller doesn't scan
++        //        past 64KB": writes round-trip cleanly through the
++        //        aperture (data IS in VRAM), but the display generator's
++        //        scan-out region caps at the bank-0 boundary regardless
++        //        of the configured fb pitch / height. VRAM is correct;
++        //        only the displayed picture truncates.
++        //
++        // Disambiguation: write a known sentinel via the SAME LFB pointer
++        // SDL3-DOS uses for production writes (fb_state.vram_ptr), then
++        // read it back through the SAME pointer. Sample 5 offsets:
++        //
++        //   LFB+0       — control (top-of-screen, must round-trip cleanly)
++        //   LFB+65535   — last byte of bank 0 (control for the boundary)
++        //   LFB+65536   — first byte past the bank-0 boundary (the hot zone)
++        //   LFB+76799   — last byte of the displayed frame (320×240×1bpp - 1)
++        //   LFB+131072  — well past the boundary, into off-screen VRAM
++        //
++        // Restore each region's original 16 bytes after the test so the
++        // displayed picture isn't corrupted by the diagnostic. One-shot
++        // (static fired flag) — if H-a is true it's true on every flush,
++        // so single-shot is enough and we don't pay per-frame overhead.
++        //
++        // Interpretation playbook (next-iter fix path):
++        //   match=1 at LFB+65536 → H-b confirmed. Aperture works; the
++        //          chip is selectively NOT scanning past 64KB. Investigate
++        //          VBE 0x4F07 display-start, pitch fields, or a Cirrus-
++        //          specific scan-cap register the BIOS doesn't expose.
++        //          Possible escape hatches: 320×200 mode (fits in 64KB),
++        //          4bpp planar, or a smaller logical surface.
++        //   match=0 at LFB+65536 → H-a confirmed. Aperture is broken past
++        //          64KB. Investigate alternate apertures (some Cirrus
++        //          chips expose a separate "extended" aperture), Cirrus
++        //          chip-direct LFB-window-base register writes, or fall
++        //          back to the banked path with an alternate Cirrus-
++        //          specific bank-switch primitive (chip register vs VBE).
++        //          DO NOT push LFB; revert to banked + chase H-C from
++        //          patch 0028's interpretation playbook.
++        //   match=1 at +0 / +65535 / +76799 / +131072 (i.e., everywhere)
++        //          → aperture works at all sampled offsets. If
++        //          bottom-strip-black persists, reads/writes are clean
++        //          but display is the bottleneck — H-b confirmed for
++        //          ALL of post-bank-0 region.
++        //
++        // Env-gated by SDL_HINT_DOSKUTSU_LFB_SENTINEL=1 (strict "1" match,
++        // default OFF) per CLAUDE.md DOSKUTSU env-var convention. Default
++        // OFF so no impact on production fps measurement when the iter
++        // isn't deliberately running this diagnostic. The sample offsets
++        // are within the DPMI-mapped VRAM region (mapping size =
++        // DOSVESA_GetVESATotalMemory(), which is ≥1024 KB on the target
++        // Cirrus per modeset log) so all reads/writes are safe.
++        if (!fb_state.use_dosmemput && fb_state.vram_ptr) {
++            static int  _lfb_sentinel_enabled_cached = -1;
++            static bool _lfb_sentinel_fired = false;
++            if (_lfb_sentinel_enabled_cached == -1) {
++                const char *e = SDL_getenv("SDL_HINT_DOSKUTSU_LFB_SENTINEL");
++                _lfb_sentinel_enabled_cached = (e && e[0] == '1' && e[1] == 0) ? 1 : 0;
++            }
++            if (_lfb_sentinel_enabled_cached && !_lfb_sentinel_fired) {
++                _lfb_sentinel_fired = true;
++                static const Uint32 lfb_sentinel_offsets[5] = {
++                    0u, 65535u, 65536u, 76799u, 131072u,
++                };
++                static const Uint8 lfb_sentinel_pat[16] = {
++                    0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
++                    0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
++                };
++                for (int s = 0; s < 5; s++) {
++                    const Uint32 off = lfb_sentinel_offsets[s];
++                    Uint8 *dp = fb_state.vram_ptr + off;
++                    Uint8 saved[16];
++                    Uint8 readback[16];
++                    // Snapshot the original 16 bytes BEFORE the write so we
++                    // can restore them — keeps the displayed picture clean
++                    // (no garbage pixels from the sentinel diagnostic).
++                    SDL_memcpy(saved, dp, 16);
++                    // Write sentinel via the SAME LFB pointer SDL3-DOS uses
++                    // in the production write path at line ~1041 / 1072
++                    // (SDL_memcpy(fb_state.vram_ptr, ...)). If the aperture
++                    // is broken at this offset, the write goes nowhere or
++                    // somewhere wrong.
++                    SDL_memcpy(dp, lfb_sentinel_pat, 16);
++                    // Read back through the SAME pointer. If readback ==
++                    // sentinel_pat, the aperture round-trips at this offset.
++                    // If readback != sentinel_pat, the aperture is broken
++                    // here — the data went somewhere we can't read back.
++                    SDL_memcpy(readback, dp, 16);
++                    const int match = (SDL_memcmp(lfb_sentinel_pat, readback, 16) == 0) ? 1 : 0;
++                    doskutsu_dbg_log(
++                        "WAVE16-3-LFB-SENTINEL @off=%lu: write_via=lfb_vram_ptr "
++                        "read_via=lfb_vram_ptr match=%d "
++                        "wrote=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x "
++                        "readback=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
++                        (unsigned long)off, match,
++                        lfb_sentinel_pat[0],  lfb_sentinel_pat[1],  lfb_sentinel_pat[2],  lfb_sentinel_pat[3],
++                        lfb_sentinel_pat[4],  lfb_sentinel_pat[5],  lfb_sentinel_pat[6],  lfb_sentinel_pat[7],
++                        lfb_sentinel_pat[8],  lfb_sentinel_pat[9],  lfb_sentinel_pat[10], lfb_sentinel_pat[11],
++                        lfb_sentinel_pat[12], lfb_sentinel_pat[13], lfb_sentinel_pat[14], lfb_sentinel_pat[15],
++                        readback[0],  readback[1],  readback[2],  readback[3],
++                        readback[4],  readback[5],  readback[6],  readback[7],
++                        readback[8],  readback[9],  readback[10], readback[11],
++                        readback[12], readback[13], readback[14], readback[15]);
++                    // Restore original bytes via the SAME pointer so the
++                    // displayed region returns to the post-flush state.
++                    SDL_memcpy(dp, saved, 16);
++                }
++            }
++        }
++
+         // Page flipping is only used with the nearptr LFB path. The banked
+         // dosmemput path always writes to page 0 (the visible page) and
+         // accepts tearing, avoiding a BIOS call.
+-- 
+2.47.3
+

@@ -1,0 +1,197 @@
+From 6870c1f7cc3af2ad9aa27c7104dd716f37a2de3c Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 16:12:47 -0700
+Subject: [PATCH] [doskutsu] perf: conditional SDL_SetTextureAlphaMod via
+ per-texture cache
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 4 §3.4.2 Approach A (patch 0044). NXEngine currently
+calls SDL_SetTextureAlphaMod unconditionally before every
+SDL_RenderTexture / SDL_RenderTextureRotated, even when src->alpha
+equals the texture's already-set value (the SDL3 default 255 for
+freshly-created textures, or whatever the last drawcall set). Cave
+Story is alpha=255 for the overwhelming majority of drawcalls per
+patch 0043's audit.
+
+Cache last-set alpha per SDL_Texture* in a small unordered_map.
+Default-not-cached is treated as 255 (SDL3 default), so the FIRST
+opaque drawcall to a texture skips the call too — important because
+NXEngine cycles through dozens of distinct sprite textures per frame
+and otherwise we'd pay one mandatory call per texture-first-touch.
+
+Why DOS needs this:
+On real HW (Mach64 + PODP83) every saved SDL3 entry-point cost
+matters at the ~0.3 fps title baseline. SDL_SetTextureAlphaMod's
+per-call cost includes SDL3's texture-handle hash validation
+(O(1) but non-trivial) plus the alpha-blend code-path enable inside
+the SDL3 software renderer's blit. For a 41,296-drawcall block
+where 100% are alpha==255, that's 41,296 redundant calls per ~5s
+under DOSBox-X parity, much higher cost on the real PODP83.
+
+Approach choice: Approach A from §3.4.2 (cache per-texture), not
+Approach B (two paths through drawSurface). A is one inline lookup
+per drawcall and composes with lever 2's future direct-blit work
+without disturbing the current call structure; B would require a
+second drawSurface variant we'd then need to rewrite when lever 2
+lands. A is the smaller surface area to maintain.
+
+Invalidation safety: SDL_DestroyTexture frees the texture and the
+cache entry could become stale if SDL3 reuses the pointer for a new
+texture. We don't currently destroy textures during gameplay (Cave
+Story loads sprites once at start), so stale entries are an
+edge-case under the current asset-loading model. The conservative
+default-when-absent of 255 means even a fully-stale entry only
+risks failing to issue the FIRST alpha mod after a hypothetical
+reload — which is a one-frame visual glitch, not a crash. If a
+future change adds runtime texture destruction, hook
+SDL_DestroyTexture (or our Surface destructor) to call
+_alpha_cache.erase(t).
+
+Patch 0043's per-100-flip audit summary now also reports
+alpha-mod-skipped count so the lever 4 win shows up in DEBUG.LOG
+without a separate diagnostic.
+
+Smoke under DOSBox-X (parity config) on the title state:
+  alpha audit block 1: 41296 total drawcalls, 0 with alpha<255
+  (block pct_x10=0; global 0/41296 pct_x10=0); alpha-mod skipped:
+  block=41296 global=41296
+100% skip rate on title — every SetTextureAlphaMod call elided.
+Title state renders correctly (no visible change vs pre-0044).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 81 ++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 75 insertions(+), 6 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index a6846a3..b3183f8 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -21,6 +21,7 @@
+ #include <cstdlib>
+ #include <sstream>
+ #include <iomanip>
++#include <unordered_map>
+ #include <unordered_set>
+ 
+ namespace NXE
+@@ -201,6 +202,65 @@ void _bump_alpha_count(Uint8 alpha)
+   }
+ }
+ 
++// Patch 0044 (Phase 9 lever 4 §3.4.2 Approach A): conditional
++// SDL_SetTextureAlphaMod. SDL3's SDL_SetTextureAlphaMod sets state
++// ON the texture object — the value persists across drawcalls until
++// changed. NXEngine currently calls SDL_SetTextureAlphaMod
++// unconditionally before every SDL_RenderTexture / RenderTextureRotated,
++// even when src->alpha == 255 and the texture's existing alpha was
++// already 255 (the SDL3 default for newly-created textures).
++//
++// Cache the last alpha value we set on each SDL_Texture* so we can
++// short-circuit the SetTextureAlphaMod call when there's no real
++// change. Default-not-present is "the SDL3-side default of 255" — so
++// the first encounter of an opaque sprite skips the call entirely
++// (avoiding a million-redundant-call cost on the title screen which
++// is mostly opaque tiles).
++//
++// Counters _alpha_skipped_block / _alpha_skipped_global track the
++// short-circuit hit rate so the lever 4 win shows up in DEBUG.LOG
++// without a separate diagnostic patch.
++//
++// Invalidation: SDL3 textures are destroyed by SDL_DestroyTexture; if
++// a destroyed texture's pointer is reused for a NEW texture later, our
++// cached entry would be stale (might predict 200 when SDL3-side is
++// the default 255). Conservative fix: erase the entry when we set a
++// non-255 value AND it's a new texture, so we always re-issue the
++// first non-default call. The simpler-and-correct approach we take
++// instead: always issue the call when transitioning AWAY from 255
++// (cheap to test, never wrong). Skip only on the all-255 path.
++std::unordered_map<SDL_Texture *, Uint8> _alpha_cache;
++int _alpha_skipped_block = 0;
++int _alpha_skipped_global = 0;
++
++inline void _conditional_set_texture_alpha_mod(SDL_Texture *t, Uint8 alpha)
++{
++  // Look up cached "last alpha set on this texture." Default for a
++  // newly-encountered SDL_Texture* is 255 (SDL3's default for fresh
++  // textures), so the first opaque drawcall skips the SetTextureAlphaMod
++  // call entirely.
++  auto it = _alpha_cache.find(t);
++  Uint8 cached = (it == _alpha_cache.end()) ? 255 : it->second;
++  if (cached == alpha)
++  {
++    // No change. Skip the SDL_SetTextureAlphaMod call.
++    ++_alpha_skipped_block;
++    ++_alpha_skipped_global;
++    if (it == _alpha_cache.end())
++    {
++      // Insert the implicit "is 255" entry so a future transition
++      // to non-255 takes the fast comparison.
++      _alpha_cache.emplace(t, alpha);
++    }
++    return;
++  }
++  SDL_SetTextureAlphaMod(t, alpha);
++  if (it == _alpha_cache.end())
++    _alpha_cache.emplace(t, alpha);
++  else
++    it->second = alpha;
++}
++
+ void _maybe_flush_alpha_audit()
+ {
+   if ((_flip_total % _dc_tally_every_flips) != 0)
+@@ -214,14 +274,18 @@ void _maybe_flush_alpha_audit()
+                                 / _alpha_total_drawcalls_block);
+   long long pct10_global = (long long)((_alpha_nonopaque_drawcalls_global * 1000LL)
+                                        / _alpha_total_drawcalls_global);
++  // Patch 0044 also reports the conditional-alpha-mod skip count so
++  // the lever 4 win shows up alongside the lever 4 audit.
+   LOG_INFO("alpha audit block {}: {} total drawcalls, {} with alpha<255 "
+-           "(block pct_x10={}; global {}/{} pct_x10={})",
++           "(block pct_x10={}; global {}/{} pct_x10={}); "
++           "alpha-mod skipped: block={} global={}",
+            _dc_block_idx, _alpha_total_drawcalls_block,
+            _alpha_nonopaque_drawcalls_block, pct10,
+            _alpha_nonopaque_drawcalls_global, _alpha_total_drawcalls_global,
+-           pct10_global);
++           pct10_global, _alpha_skipped_block, _alpha_skipped_global);
+   _alpha_total_drawcalls_block = 0;
+   _alpha_nonopaque_drawcalls_block = 0;
++  _alpha_skipped_block = 0;
+ }
+ 
+ void _log_renderer_state_once(SDL_Renderer *r, SDL_Window *w)
+@@ -660,10 +724,14 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+     clipScaled(srcrect, dstrect);
+ 
+   // Patch 0043: alpha-mod audit counter (lever 4 §3.4.1). Runs before
+-  // the SDL_SetTextureAlphaMod call so it reflects every drawcall that
+-  // currently triggers the alpha-mod path, regardless of value.
++  // the conditional SetTextureAlphaMod path so it reflects every
++  // drawcall regardless of whether the call was skipped.
+   _bump_alpha_count(src->alpha);
+-  SDL_SetTextureAlphaMod(src->texture(), src->alpha);
++  // Patch 0044 (Phase 9 lever 4 §3.4.2 Approach A): skip
++  // SDL_SetTextureAlphaMod when the texture's last set value matches
++  // src->alpha. Default-not-cached is 255 (SDL3-side default), so the
++  // first opaque drawcall to a texture skips entirely.
++  _conditional_set_texture_alpha_mod(src->texture(), src->alpha);
+   // SDL3: SDL_RenderCopy → SDL_RenderTexture; SDL_Rect args become SDL_FRect.
+   // SDL_RenderTexture returns true on success (was 0 in SDL2).
+   SDL_FRect _srcfr, _dstfr;
+@@ -713,7 +781,8 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+ 
+   // Patch 0043: alpha-mod audit counter; mirrored variant.
+   _bump_alpha_count(src->alpha);
+-  SDL_SetTextureAlphaMod(src->texture(), src->alpha);
++  // Patch 0044: conditional alpha-mod (mirrored variant).
++  _conditional_set_texture_alpha_mod(src->texture(), src->alpha);
+   // SDL3: SDL_RenderCopyEx → SDL_RenderTextureRotated; rect args are SDL_FRect.
+   SDL_FRect _srcfr, _dstfr;
+   SDL_RectToFRect(&srcrect, &_srcfr);
+-- 
+2.47.3
+

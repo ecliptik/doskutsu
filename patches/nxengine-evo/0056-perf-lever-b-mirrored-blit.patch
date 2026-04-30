@@ -1,0 +1,202 @@
+From 2ec3f2dd0e719d7b598295664ba7de6648314d90 Mon Sep 17 00:00:00 2001
+From: Claude Code <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 14:03:14 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2012.3=20=E2=80=94=20hand-roll?=
+ =?UTF-8?q?=20drawSurfaceMirrored=20fast=20path=20(Lever=20B=20step=203)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/graphics/Renderer.cpp | 161 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 161 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 92baa82..e022e10 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -1129,6 +1129,104 @@ static inline bool _blit_rgb565(SDL_Surface *dst, SDL_Surface *src,
+   return true;
+ }
+ 
++// DOS-PORT (patch 0056, Phase 9 wave 12.3 Lever B): horizontally-flipped
++// RGB565→RGB565 blit primitive — the column-reverse sibling of
++// _blit_rgb565. Used by drawSurfaceMirrored. Same scale==1 invariant
++// applies (see _try_fast_blit's header comment): srcrect.w == dstrect.w
++// always, so mirroring is a pure column reversal with no stretch.
++//
++// Clipping math is subtle because horizontal mirroring inverts which
++// source columns get dropped when dst is partly off-screen:
++//   - dst_x < 0 (clip from LEFT of dst): drops the RIGHTMOST source
++//     columns, because dst[0..k-1] in unclipped form would have read
++//     src[w-1..w-k]. Tracked by lowering `src_first_col` (the source
++//     column the new dst[0] reads) by k.
++//   - dst_x + cols > dst->w (clip from RIGHT of dst): drops the LEFTMOST
++//     source columns. `src_first_col` is unchanged; only `cols` shrinks.
++//
++// No memcpy fast-path for the no-colorkey branch — column reversal
++// requires per-pixel writes; SDL_memcpy can't run in reverse stride.
++// Worst case is ~2x slower per pixel than _blit_rgb565's no-colorkey
++// memcpy path; that's fine because mirrored sprites are mostly NPCs and
++// projectiles (smaller and less frequent than the tile-blit hot path
++// _blit_rgb565 serves).
++static inline bool _blit_rgb565_mirrored(SDL_Surface *dst, SDL_Surface *src,
++                                         SDL_Rect srcrect, SDL_Rect dstrect,
++                                         Uint16 colorkey, bool has_colorkey)
++{
++  int dst_x = dstrect.x;
++  int dst_y = dstrect.y;
++  int sy = srcrect.y;
++  int rows = srcrect.h;
++  int cols = srcrect.w;
++  // src_first_col = source column read at dst column 0 (the leftmost
++  // visible dst column post-clip). Unclipped: dst[0] reads src[w-1].
++  int src_first_col = srcrect.w - 1;
++
++  if (dst_x < 0)
++  {
++    // Clip from LEFT of dst. With mirroring this drops the RIGHTMOST
++    // source columns (which would have mapped to dst[0..-dst_x-1]).
++    // src_first_col shifts left by |dst_x|; cols shrinks by |dst_x|.
++    src_first_col += dst_x;  // dst_x is negative, so this subtracts
++    cols += dst_x;
++    dst_x = 0;
++  }
++  if (dst_y < 0)
++  {
++    rows += dst_y;
++    sy -= dst_y;
++    dst_y = 0;
++  }
++  if (dst_x + cols > dst->w)
++  {
++    // Clip from RIGHT of dst. With mirroring this drops the LEFTMOST
++    // source columns; src_first_col stays at the rightmost-visible
++    // source position (unchanged). Only cols shrinks.
++    cols = dst->w - dst_x;
++  }
++  if (dst_y + rows > dst->h)
++    rows = dst->h - dst_y;
++
++  if (rows <= 0 || cols <= 0)
++    return true;
++
++  const int src_pitch_pixels = src->pitch / 2;
++  const int dst_pitch_pixels = dst->pitch / 2;
++
++  const Uint16 *sp = (const Uint16 *)src->pixels + sy * src_pitch_pixels + srcrect.x;
++  Uint16 *dp = (Uint16 *)dst->pixels + dst_y * dst_pitch_pixels + dst_x;
++
++  if (has_colorkey)
++  {
++    for (int row = 0; row < rows; ++row)
++    {
++      for (int col = 0; col < cols; ++col)
++      {
++        const Uint16 px = sp[src_first_col - col];
++        if (px != colorkey) dp[col] = px;
++      }
++      sp += src_pitch_pixels;
++      dp += dst_pitch_pixels;
++    }
++  }
++  else
++  {
++    // Column flip — no SDL_memcpy possible. Per-pixel reverse copy.
++    for (int row = 0; row < rows; ++row)
++    {
++      for (int col = 0; col < cols; ++col)
++      {
++        dp[col] = sp[src_first_col - col];
++      }
++      sp += src_pitch_pixels;
++      dp += dst_pitch_pixels;
++    }
++  }
++
++  return true;
++}
++
+ // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — hand-rolled
+ // RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's per-call
+ // validation/queue/dispatch overhead (~0.95 ms per call on real Cirrus
+@@ -1262,6 +1360,48 @@ static inline bool _try_fast_blit(SDL_Renderer *renderer,
+                       src->colorkey16(), src->hasColorkey());
+ }
+ 
++// DOS-PORT (patch 0056, Phase 9 wave 12.3 Lever B): mirrored-blit
++// fast-path wrapper. Same preconditions as _try_fast_blit (alpha=255,
++// RGB565 src + win, win 320x240, scale==1 dim invariant), delegates to
++// _blit_rgb565_mirrored for the column-reversed inner loop. Used by
++// Renderer::drawSurfaceMirrored to bypass SDL_RenderTextureRotated for
++// the common opaque-mirrored-sprite case (NPCs, projectiles, Quote
++// facing left). The Mach64 640x480 fallback path falls through to
++// SDL_RenderTextureRotated as before.
++static inline bool _try_fast_blit_mirrored(SDL_Renderer *renderer,
++                                           SDL_Surface *win_surface,
++                                           bool &renderer_queue_dirty,
++                                           Surface *src,
++                                           const SDL_Rect &srcrect, const SDL_Rect &dstrect)
++{
++  if (src->alpha != 255)
++    return false;
++
++  SDL_Surface *src_surface = src->surface16bpp();
++  if (!src_surface)
++    return false;
++
++  if (!win_surface)
++    return false;
++
++  if (win_surface->format != SDL_PIXELFORMAT_RGB565)
++    return false;
++
++  if (win_surface->w != 320 || win_surface->h != 240)
++    return false;
++
++  // Drain queued slow-path commands so our overlay lands AFTER them —
++  // same dirty-bit pattern as _try_fast_blit (patch 0051 / wave-12.1).
++  if (renderer_queue_dirty)
++  {
++    SDL_FlushRenderer(renderer);
++    renderer_queue_dirty = false;
++  }
++
++  return _blit_rgb565_mirrored(win_surface, src_surface, srcrect, dstrect,
++                               src->colorkey16(), src->hasColorkey());
++}
++
+ // blit the specified portion of the surface to the screen
+ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
+@@ -1412,6 +1552,27 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+     }
+   }
+ 
++  // DOS-PORT (patch 0056, Phase 9 wave 12.3 Lever B): try the hand-rolled
++  // mirrored fast path before queuing through SDL_RenderTextureRotated.
++  // Same shape as drawSurface's _try_fast_blit but with column reversal
++  // in the inner loop. Per the wave-9 mirrored-drawcall audit, every NPC
++  // and projectile that has a left-facing variant goes through here, so
++  // the fastpath uplift in gameplay scenes (First Cave onwards) is
++  // meaningful. Counters are shared with drawSurface (patch 0048) — see
++  // the comment block at line 185.
++  if (_try_fast_blit_mirrored(_renderer, _cached_window_surface,
++                              _renderer_queue_dirty,
++                              src, srcrect, dstrect))
++  {
++    ++_fastpath_taken_block;
++    ++_fastpath_taken_global;
++    _bump_drawcall();
++    _record_dirty_rect(dstrect.x, dstrect.y, dstrect.w, dstrect.h);
++    return;
++  }
++  ++_fastpath_skipped_block;
++  ++_fastpath_skipped_global;
++
+   // Patch 0044: conditional alpha-mod (mirrored variant).
+   _conditional_set_texture_alpha_mod(src->texture(), src->alpha);
+   // SDL3: SDL_RenderCopyEx → SDL_RenderTextureRotated; rect args are SDL_FRect.
+-- 
+2.47.3
+

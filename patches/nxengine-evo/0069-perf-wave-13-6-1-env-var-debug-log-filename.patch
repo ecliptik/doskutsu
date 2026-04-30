@@ -1,0 +1,55 @@
+From 3665f470501b623440f9b4cd573590383fa4c35d Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 12:06:12 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2013.6.1=20patch=200069=20?=
+ =?UTF-8?q?=E2=80=94=20env-var=20log=20filename=20for=20DEBUG.LOG?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Companion to SDL-side patch 0024. When DOSKUTSU_LOG_TAG env var is set (e.g.
+"R1"), the engine writes to "<TAG>.LOG" instead of "debug.log". Path
+resolution still goes through ResourceManager::getPrefPath so the file lands
+at the same prefdir (game directory on DOS = C:\DOSKUTSU\).
+
+Together patches 0024 + 0069 let the wave-13.6.1 keyboard-regression bisect
+use trivial .bat files: each .bat SETs DOSKUTSU_LOG_TAG=R{N} along with the
+config-specific RING_CHUNKS / FORCE_PUMP_YIELD vars, runs DOSKUTSU.EXE, and
+that's it — logs land directly at R{N}.LOG and R{N}SDL.LOG, no rename
+needed, no freeze edge case where logs get clobbered on the next launch.
+
+Slot was originally tentatively reserved for wave 14 (decouple engine tick)
+per docs/PHASE9-WAVE-14-PLAN.md §6; wave 14 renumbers to 0070.
+
+See docs/PHASE9-WAVE-14-PLAN.md §2 for the wave 13.6.1 bisect design.
+---
+ src/main.cpp | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 5f091ae..49ae2d4 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -353,7 +353,18 @@ int main(int argc, char *argv[])
+   std::freopen("NUL", "w", stderr);
+ #endif
+ 
+-  Logger::init(ResourceManager::getInstance()->getPrefPath("debug.log"));
++  // DOS-PORT (patch 0069, Phase 9 wave 13.6.1): the log-file basename is
++  // overridable via the DOSKUTSU_LOG_TAG env var so a multi-config bisect can
++  // write each run's engine log to a unique filename without renames. When
++  // unset, default "debug.log" is used. When set to e.g. "R1", logs go to
++  // "R1.LOG" (uppercase per DOS convention). Pairs with SDL-side patch 0024
++  // which uses the same env var for "/<TAG>SDL.LOG".
++  std::string _log_basename = "debug.log";
++  const char *_log_tag = std::getenv("DOSKUTSU_LOG_TAG");
++  if (_log_tag && _log_tag[0] != '\0') {
++    _log_basename = std::string(_log_tag) + ".LOG";
++  }
++  Logger::init(ResourceManager::getInstance()->getPrefPath(_log_basename));
+ //  SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+ 
+ #ifdef NXE_DOS
+-- 
+2.47.3
+

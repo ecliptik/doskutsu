@@ -1,0 +1,246 @@
+From 987e0808a38c8987d596f15d47f46e38b5b1037b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 16:05:11 -0700
+Subject: [PATCH] [DOSKUTSU] dos: trace window-surface lifecycle (lever 1 diag)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 1 investigation. We have circumstantial evidence (Phase 8
+SDLDBG.LOG) that the SDL3 surface-invalidation lifecycle isn't firing
+correctly across mode-set boundaries on the DOS backend: the LFB-prefer
+attempt during Phase 8 saw fb_state cleared by InvalidateCachedFramebuffer
+but never re-populated by CreateWindowFramebuffer, leading to a partial-
+stale fb_state with cleared direct_fb / vram_ptr but intact fb_size from
+the prior mode. To pick between Lever 1's implementation paths (A: DOS-
+backend manual lifecycle, B: lazy re-init in UpdateWindowFramebuffer,
+C: idempotent CreateWindowFramebuffer, D: NXEngine-side renderer
+recreation), we need to know the actual handler call sequence on a real
+mode change. See docs/PHASE9-15FPS-PLAN.md §3 Lever 1.1-1.3.
+
+Adds a `[lifecycle]`-prefixed log line at six points:
+
+  src/video/SDL_video.c:
+    - SDL_OnWindowResized:           entry + window dims + last_pixel dims
+    - SDL_CheckWindowPixelSizeChanged: entry + new pixel dims + comparison
+    - SDL_OnWindowPixelSizeChanged:    surface_valid before/after, surface ptr
+    - SDL_GetWindowSurface:            surface_valid + cached/recreated decision,
+                                       new surface ptr after recreation
+
+  src/video/dos/SDL_dosframebuffer.c:
+    - DOSVESA_CreateWindowFramebuffer: pre-clear fb_state pointers + dims
+    - DOSVESA_InvalidateCachedFramebuffer: pre-state direct_fb/vram_ptr
+    - DOSVESA_UpdateWindowFramebuffer: first call + every 100th; logs
+                                       fb_state pointers + window->surface
+                                       + window->surface_valid
+
+Output appended to /sdldbg.log (sibling of NXEngine's /debug.log) — same
+convention as patches 0002/0003/0006/0007. SDL_video.c lines are guarded
+by `#ifdef SDL_VIDEO_DRIVER_DOSVESA` so non-DOS builds aren't perturbed.
+Each log line is prefixed `[lifecycle]` so a single grep pulls the full
+trace from sdldbg.log alongside DOSVESA-MODELIST / DOSVESA-MODESET /
+DOSVESA-FB-* lines.
+
+This is purely additive logging. Does not change runtime behaviour;
+fsync-per-line (matching patch 0004's pattern) means the trace survives
+crashes and reboots even when DOSBox-X / DOS exits abnormally.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream, sidestepping
+vendor/SDL/CLAUDE.md's no-AI-PRs restriction.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/video/SDL_video.c              | 53 +++++++++++++++++++++++++++
+ src/video/dos/SDL_dosframebuffer.c | 59 ++++++++++++++++++++++++++++++
+ 2 files changed, 112 insertions(+)
+
+diff --git a/src/video/SDL_video.c b/src/video/SDL_video.c
+index 8308eba5d..d3038a609 100644
+--- a/src/video/SDL_video.c
++++ b/src/video/SDL_video.c
+@@ -24,6 +24,39 @@
+ // The high-level video driver subsystem
+ 
+ #include "SDL_sysvideo.h"
++
++// DOSKUTSU diagnostic (patches/SDL/0008 — Phase 9 lever 1 investigation).
++// Window-surface lifecycle tracing. We need to know which of these handlers
++// fires (and in what order) when SDL3-DOS resizes the framebuffer between
++// the splash screen's first mode-set and NXEngine's mode-set, so we can
++// pick between the lever-1 implementation paths (A-D in
++// docs/PHASE9-15FPS-PLAN.md §3 Lever 1.4). Output appended to /sdldbg.log
++// (sibling of NXEngine's /debug.log) — same convention as patches 0002,
++// 0003, 0006, 0007. Diagnostic-only; does not change runtime behaviour.
++// Guarded to the DOS backend so non-DOS builds aren't perturbed.
++#ifdef SDL_VIDEO_DRIVER_DOSVESA
++#include <stdio.h>
++#include <unistd.h>
++static FILE *_doskutsu_lifecycle_log = NULL;
++static void _doskutsu_lifecycle_open(void)
++{
++    if (!_doskutsu_lifecycle_log) {
++        _doskutsu_lifecycle_log = fopen("/sdldbg.log", "ab");
++    }
++}
++#define DOSKUTSU_LIFECYCLE_LOG(...)                                  \
++    do {                                                             \
++        _doskutsu_lifecycle_open();                                  \
++        if (_doskutsu_lifecycle_log) {                               \
++            fprintf(_doskutsu_lifecycle_log, "[lifecycle] " __VA_ARGS__); \
++            fflush(_doskutsu_lifecycle_log);                         \
++            fsync(fileno(_doskutsu_lifecycle_log));                  \
++        }                                                            \
++    } while (0)
++#else
++#define DOSKUTSU_LIFECYCLE_LOG(...) ((void)0)
++#endif
++
+ #include "SDL_clipboard_c.h"
+ #include "SDL_egl_c.h"
+ #include "SDL_surface_c.h"
+@@ -3685,6 +3718,10 @@ SDL_Surface *SDL_GetWindowSurface(SDL_Window *window)
+ {
+     CHECK_WINDOW_MAGIC(window, NULL);
+ 
++    DOSKUTSU_LIFECYCLE_LOG("GetWindowSurface: window=%p surface_valid=%d existing=%p (will %s)\n",
++                           (void *)window, (int)window->surface_valid,
++                           (void *)window->surface,
++                           window->surface_valid ? "return cached" : "destroy+recreate");
+     if (!window->surface_valid) {
+         if (window->surface) {
+             window->surface->internal_flags &= ~SDL_INTERNAL_SURFACE_DONTFREE;
+@@ -3697,6 +3734,10 @@ SDL_Surface *SDL_GetWindowSurface(SDL_Window *window)
+             window->surface_valid = true;
+             window->surface->internal_flags |= SDL_INTERNAL_SURFACE_DONTFREE;
+         }
++        DOSKUTSU_LIFECYCLE_LOG("GetWindowSurface: window=%p new surface=%p (%dx%d)\n",
++                               (void *)window, (void *)window->surface,
++                               window->surface ? window->surface->w : 0,
++                               window->surface ? window->surface->h : 0);
+     }
+     return window->surface;
+ }
+@@ -4273,6 +4314,9 @@ void SDL_OnWindowMoved(SDL_Window *window)
+ 
+ void SDL_OnWindowResized(SDL_Window *window)
+ {
++    DOSKUTSU_LIFECYCLE_LOG("OnWindowResized: window=%p w=%d h=%d (last_pixel=%dx%d)\n",
++                           (void *)window, window ? window->w : 0, window ? window->h : 0,
++                           window ? window->last_pixel_w : 0, window ? window->last_pixel_h : 0);
+     SDL_CheckWindowDisplayChanged(window);
+     SDL_CheckWindowPixelSizeChanged(window);
+     SDL_CheckWindowSafeAreaChanged(window);
+@@ -4290,6 +4334,11 @@ void SDL_CheckWindowPixelSizeChanged(SDL_Window *window)
+     int pixel_w = 0, pixel_h = 0;
+ 
+     SDL_GetWindowSizeInPixels(window, &pixel_w, &pixel_h);
++    DOSKUTSU_LIFECYCLE_LOG("CheckWindowPixelSizeChanged: window=%p got %dx%d (last_pixel=%dx%d) -> %s event\n",
++                           (void *)window, pixel_w, pixel_h,
++                           window ? window->last_pixel_w : 0, window ? window->last_pixel_h : 0,
++                           (window && (pixel_w != window->last_pixel_w || pixel_h != window->last_pixel_h)) ?
++                               "WILL-SEND-PIXEL_SIZE_CHANGED" : "no-op (sizes match)");
+     SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED, pixel_w, pixel_h);
+ 
+     SDL_CheckWindowDisplayScaleChanged(window);
+@@ -4297,6 +4346,10 @@ void SDL_CheckWindowPixelSizeChanged(SDL_Window *window)
+ 
+ void SDL_OnWindowPixelSizeChanged(SDL_Window *window)
+ {
++    DOSKUTSU_LIFECYCLE_LOG("OnWindowPixelSizeChanged: window=%p setting surface_valid=false (was %d) "
++                           "old surface=%p\n",
++                           (void *)window, window ? (int)window->surface_valid : -1,
++                           (void *)(window ? window->surface : NULL));
+     window->surface_valid = false;
+ }
+ 
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index e8bc847b4..649d67696 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -155,9 +155,35 @@ static SDL_Surface *GetConvertedCursorSurface(SDL_CursorData *curdata, SDL_Surfa
+     return conv;
+ }
+ 
++// DOSKUTSU diagnostic (patches/SDL/0008 — Phase 9 lever 1 investigation).
++// Lazy-open helper that reuses /sdldbg.log from patch 0002. Lifecycle log
++// lines are prefixed `[lifecycle]` so they're grep-able alongside SDL_video.c
++// log lines from the same patch. See docs/PHASE9-15FPS-PLAN.md §3 Lever 1.3.
++static FILE *_doskutsu_lc_log = NULL;
++static void _doskutsu_lc_open(void)
++{
++    if (!_doskutsu_lc_log) {
++        _doskutsu_lc_log = fopen("/sdldbg.log", "ab");
++    }
++}
++#define DOSKUTSU_LC_LOG(...)                                                  \
++    do {                                                                      \
++        _doskutsu_lc_open();                                                  \
++        if (_doskutsu_lc_log) {                                               \
++            fprintf(_doskutsu_lc_log, "[lifecycle] " __VA_ARGS__);            \
++            fflush(_doskutsu_lc_log);                                         \
++            fsync(fileno(_doskutsu_lc_log));                                  \
++        }                                                                     \
++    } while (0)
++
+ //  Invalidation (called from SetDisplayMode before freeing DPMI mapping)
+ void DOSVESA_InvalidateCachedFramebuffer(void)
+ {
++    DOSKUTSU_LC_LOG("InvalidateCachedFramebuffer: pre-state direct_fb=%d "
++                    "vram_ptr=%p surface=%p lfb_surface=%p fb_size=%lu\n",
++                    (int)fb_state.direct_fb, (void *)fb_state.vram_ptr,
++                    (void *)fb_state.surface, (void *)fb_state.lfb_surface,
++                    (unsigned long)fb_state.fb_size);
+     fb_state.direct_fb = false;
+     fb_state.vram_ptr = NULL;
+     fb_state.vram_phys = 0;
+@@ -261,6 +287,16 @@ static bool CreateNormalFramebuffer(SDL_VideoDevice *device, SDL_Window *window,
+ 
+ bool DOSVESA_CreateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window, SDL_PixelFormat *format, void **pixels, int *pitch)
+ {
++    // DOSKUTSU diagnostic (patches/SDL/0008): log fb_state pre-clear state.
++    // If we're entering CreateWindowFramebuffer with a non-zero fb_state, the
++    // SDL_zero(fb_state) below will discard it without freeing the surface
++    // pointer first — that's the staleness path Lever 1 needs to chase. See
++    // docs/PHASE9-15FPS-PLAN.md §3 Lever 1.3 + Path C.
++    DOSKUTSU_LC_LOG("CreateWindowFramebuffer: window=%p pre-clear fb_state surface=%p lfb_surface=%p "
++                    "direct_fb=%d vram_ptr=%p fb_size=%lu vram_w=%d vram_h=%d -> SDL_zero next\n",
++                    (void *)window, (void *)fb_state.surface, (void *)fb_state.lfb_surface,
++                    (int)fb_state.direct_fb, (void *)fb_state.vram_ptr,
++                    (unsigned long)fb_state.fb_size, fb_state.vram_w, fb_state.vram_h);
+     SDL_zero(fb_state);
+ 
+     SDL_VideoData *data = device->internal;
+@@ -512,6 +548,29 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+ {
+     SDL_VideoData *vdata = device->internal;
+ 
++    // DOSKUTSU diagnostic (patches/SDL/0008 — Lever 1 lifecycle trace).
++    // Logs once on first call and every 100th call. Surfaces the staleness
++    // bug where fb_state was invalidated by InvalidateCachedFramebuffer but
++    // not re-populated by CreateWindowFramebuffer — partial-stale fb_size
++    // from a prior mode-set with cleared direct_fb / vram_ptr. See
++    // docs/PHASE9-15FPS-PLAN.md §3 Lever 1.3.
++    {
++        static int lc_calls = 0;
++        ++lc_calls;
++        if (lc_calls == 1 || (lc_calls % 100) == 0) {
++            DOSKUTSU_LC_LOG("UpdateWindowFramebuffer #%d: window=%p direct_fb=%d "
++                            "vram_ptr=%p surface=%p lfb_surface=%p fb_size=%lu "
++                            "vram_w=%d vram_h=%d window->surface=%p window->surface_valid=%d\n",
++                            lc_calls, (void *)window,
++                            (int)fb_state.direct_fb, (void *)fb_state.vram_ptr,
++                            (void *)fb_state.surface, (void *)fb_state.lfb_surface,
++                            (unsigned long)fb_state.fb_size,
++                            fb_state.vram_w, fb_state.vram_h,
++                            (void *)(window ? window->surface : NULL),
++                            window ? (int)window->surface_valid : -1);
++        }
++    }
++
+     // DOSKUTSU diagnostic header (patches/SDL/0002, task #21).
+     _doskutsu_dbg_open();
+     ++_doskutsu_dbg_call_total;
+-- 
+2.47.3
+

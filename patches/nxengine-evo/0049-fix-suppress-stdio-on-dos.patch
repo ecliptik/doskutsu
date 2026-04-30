@@ -1,0 +1,90 @@
+From c93e6d84f9d86af97e176fa5347633a6609ecfe3 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 10:07:40 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=208=20patc?=
+ =?UTF-8?q?h=200049=20=E2=80=94=20suppress=20stdio=20on=20DOS?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Real-hardware screenshots from wave 7 (Cirrus + UNIVBE,
+/tmp/cirrus7/IMG_2777.jpeg and IMG_2780.jpeg) show green-text overlay
+lines composited over the rendered framebuffer with content like:
+
+  [09:52:00] [info] flip-probe: renderer=software window_ptr=...
+  [09:52:00] [info] Sound system init
+  BLASTER: Opening at 22050 Hz, 2 channels, format 0x8010, ...
+  LOADING..
+  gameloop: iter 2 ticks=43287 mapno=-1
+
+These match DEBUG.LOG content exactly. The path is the
+Logger_djgpp.h shim's per-line `fwrite(_buf.data(), 1, _buf.size(),
+stderr);` (also any stray printf / SDL_Log / abort messages). On DOS
+in graphics mode the BIOS / VGA hardware still composites text-mode
+console writes (INT 21h / INT 10h) onto the same display alongside the
+SDL3-DOS framebuffer, producing the overlay.
+
+Fix: redirect stdout and stderr to NUL via freopen() at the top of
+main(), before Logger::init / SDL_Init. DEBUG.LOG remains intact —
+Logger.cpp opens its own FILE* via std::fopen(filename, "w") which is
+independent of the freopen'd standard streams. Smoke-tested under
+DOSBox-X parity; DEBUG.LOG continues to flush per-line (patch 0036
+fsync) and reaches the title scene normally.
+
+Cost: lose the stderr-mirror of LOG_* lines, but the file sink is
+canonical and stderr-mirror was always invisible in graphics mode
+anyway. Lose any unstructured printf/abort warnings, which are
+acceptable to silence in a graphics-mode game.
+
+Patch lives only on DOS targets (`__DJGPP__ || NXE_DOS`) — Linux/Mac/
+Windows builds keep the standard streams.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/main.cpp | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 7652352..5f091ae 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -2,6 +2,7 @@
+ #include "nx.h"
+ 
+ #include <cstdarg>
++#include <cstdio>
+ #include <cstdlib>
+ #if !defined(_WIN32)
+ #include <unistd.h>
+@@ -330,6 +331,28 @@ int main(int argc, char *argv[])
+ 
+   (void)ResourceManager::getInstance();
+ 
++#if defined(__DJGPP__) || defined(NXE_DOS)
++  // DOS-PORT (patch 0049, Phase 9 wave 8): redirect stdout/stderr to NUL
++  // before Logger::init / SDL_Init so that any libc / SDL_Log / spdlog-
++  // shim writes to the standard streams do NOT reach the DOS console. On
++  // real hardware (Cirrus + UNIVBE confirmed wave 7, /tmp/cirrus7/IMG_2777
++  // and IMG_2780) DOS routes stdout/stderr writes through INT 21h to the
++  // VGA text-mode console. While SDL3-DOS owns the framebuffer in graphics
++  // mode, the BIOS / VGA hardware still composites text-mode writes onto
++  // the same display, producing green-text overlay lines on top of the
++  // game. The Logger_djgpp.h shim writes every LOG_* call to stderr in
++  // addition to djgpp_log_fp; the file path is the canonical sink we want
++  // and it stays intact (Logger::init's std::fopen(filename) is unaffected
++  // by freopen(stderr,...)). Any non-logger printf paths (SDL warnings,
++  // libc abort messages, etc.) also vanish, which is the correct behavior
++  // for a graphics-mode game.
++  //
++  // DEBUG.LOG file logging is unaffected — Logger.cpp opens its own FILE*
++  // via std::fopen, independent of the freopen'd stdio streams.
++  std::freopen("NUL", "w", stdout);
++  std::freopen("NUL", "w", stderr);
++#endif
++
+   Logger::init(ResourceManager::getInstance()->getPrefPath("debug.log"));
+ //  SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+ 
+-- 
+2.47.3
+

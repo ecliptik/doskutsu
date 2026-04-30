@@ -1,0 +1,71 @@
+From 1471085ffbe4e70b6a16b6c2f20798a4cf0b1898 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 08:53:31 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2013.3=20=E2=80=94=20explicit=20?=
+ =?UTF-8?q?per-flip=20yield=20+=20log=20SDL=20pump=20yield=20state=20(patc?=
+ =?UTF-8?q?h=200064)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pairs with the SDL-side patch (patches/SDL/0021-…) that default-skips
+the DOS_Yield in DOSVESA_PumpEvents. With that yield removed, the
+cooperative audio thread no longer gets scheduled time on every input
+poll — it would starve. Add an explicit SDL_Delay(0) once per flip in
+Renderer::flip() after RenderPresent / GetWindowSurface refresh, which
+routes through SDL_SYS_DelayNS(0) → DOS_Yield() on the DOS backend.
+
+At 15 fps target this is one yield every ~67 ms — well within one
+audio chunk's worth of buffering (186 ms at 22050 Hz stereo S16,
+default 4096-frame chunks).
+
+Also extends initVideo's diagnostic block to log whether the SDL-side
+pump yield is "skipped (default)" or "FORCED-ON" via env var, so
+DEBUG.LOG iter captures record which mode is active.
+
+See docs/PHASE9-NEXT-WAVES-PLAN.md §6 wave 13.2 ablation table for the
+115 ms NO_INPUT_POLL measurement that motivated this fix.
+---
+ src/graphics/Renderer.cpp | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 02e171e..fd270a9 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -1028,6 +1028,17 @@ bool Renderer::initVideo()
+            _abl_no_dc_timing() ? 1 : 0,
+            _abl_cache_winsurf() ? 1 : 0,
+            _abl_no_input_poll_env() ? 1 : 0);
++  // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
++  // PumpEvents yield-skip is active. Default ON (skip); env-var override
++  // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
++  {
++    const char *force_yield = SDL_getenv("SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD");
++    const bool yield_forced = force_yield && force_yield[0] == '1' && force_yield[1] == 0;
++    LOG_INFO("Renderer::initVideo: DOSVESA pump yield: {} "
++             "(per-flip explicit SDL_Delay(0) yield is always on; "
++             "set SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 to restore old per-pump yield)",
++             yield_forced ? "FORCED-ON" : "skipped (default)");
++  }
+   // First frame must be a full refresh — we have no last-frame
+   // history to compare against and the backbuffer state is whatever
+   // SDL3 initialized it to.
+@@ -1368,6 +1379,14 @@ void Renderer::flip()
+   // — re-query may be running fb_state populate inside SDL3-DOS).
+   if (!_abl_cache_winsurf())
+     _cached_window_surface = SDL_GetWindowSurface(_window);
++
++  // DOS-PORT (patch 0064, Phase 9 wave 13.3): explicit cooperative-thread
++  // yield once per flip. Pairs with the SDL-side patch that removes the
++  // per-pump DOS_Yield from DOSVESA_PumpEvents. SDL_Delay(0) routes to
++  // SDL_SYS_DelayNS(0) → DOS_Yield() on the DOS backend, giving the
++  // audio thread scheduled time without the 115 ms round-trip cost
++  // measured in wave 13.2 NO_INPUT_POLL ablation.
++  SDL_Delay(0);
+   if (!ok)
+   {
+     ++_flip_failed;
+-- 
+2.47.3
+

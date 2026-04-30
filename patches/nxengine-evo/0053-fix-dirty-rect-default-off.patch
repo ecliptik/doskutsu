@@ -1,0 +1,104 @@
+From d2a7b9bcfac320af2cfa7ea1b5fa521dabc00a42 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 11:09:04 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2010=20pat?=
+ =?UTF-8?q?ch=200053=20=E2=80=94=20dirty-rect=20default=20OFF=20(correctne?=
+ =?UTF-8?q?ss=20regression)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 9 cirrus9 real-HW capture (/tmp/cirrus9/IMG_2784.jpeg + IMG_2786.jpeg)
+showed two correctness regressions from patch 0052's dirty-rect skip-blit:
+
+  1. Sprite trails / ghosts during cutscenes — when a sprite moves from
+     position A to position B between frames, the static-prefix skip
+     leaves the sprite's old pixels at A in the backbuffer (because we
+     skip the bg-tile drawcall whose pixels would have erased them).
+
+  2. Menu items missing — title menu shows only "New game" instead of
+     all 5 items. The first-divergence-cliff fires somewhere in the
+     menu-text drawcalls, leaving later items un-drawn (or not visibly
+     in the dirty rect list).
+
+Both root causes trace to the single-pass algorithm's inability to
+identify drawcalls whose output depends on PRIOR drawcalls in the same
+frame. A correct implementation needs a 2-pass model (compute all
+hashes + dirty regions, THEN execute drawcalls intersecting dirty
+region). That's substantial NXEngine refactoring deferred to wave 11+.
+
+This patch flips the default from ON to OFF: existing infrastructure
+stays in tree (vector tracking, hash logic, diagnostic instrumentation)
+for future debugging, but every drawcall now runs the slow-path /
+Approach-B path that worked correctly in waves 6-8. Re-enable for
+experimentation via SDL_HINT_DOSKUTSU_DIRTY_RECTS=1.
+
+Per-flip perf returns to wave-8 baseline (~6.4 fps title on real Cirrus)
+with wave-8's clean visual.
+---
+ src/graphics/Renderer.cpp | 22 +++++++++++-----------
+ src/graphics/Renderer.h   |  9 ++++++---
+ 2 files changed, 17 insertions(+), 14 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 692aec1..b5cdffc 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -597,23 +597,23 @@ bool Renderer::initVideo()
+   // mode change or window-surface invalidation).
+   _cached_window_surface = SDL_GetWindowSurface(_window);
+ 
+-  // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): env-var override
+-  // for the dirty-rect optimization. Default ON; setting
+-  // SDL_HINT_DOSKUTSU_DIRTY_RECTS=0 in CONFIG.SYS / AUTOEXEC.BAT
+-  // forces every drawcall through the slow path, useful when chasing
+-  // a suspected fingerprint-collision regression.
++  // DOS-PORT (patch 0052 + 0053, Phase 9 wave 9/10): env-var override
++  // for the dirty-rect optimization. Default OFF — wave 9 cirrus9
++  // capture showed sprite-trail / menu-fragment correctness bugs.
++  // Setting SDL_HINT_DOSKUTSU_DIRTY_RECTS=1 in CONFIG.SYS / AUTOEXEC.BAT
++  // re-enables the optimization for testing.
+   {
+     const char *dr = SDL_getenv("SDL_HINT_DOSKUTSU_DIRTY_RECTS");
+-    if (dr && dr[0] == '0' && dr[1] == 0)
++    if (dr && dr[0] == '1' && dr[1] == 0)
+     {
+-      _dirty_rect_enabled = false;
+-      LOG_INFO("Renderer::initVideo: dirty-rect tracking DISABLED via "
+-               "SDL_HINT_DOSKUTSU_DIRTY_RECTS=0");
++      _dirty_rect_enabled = true;
++      LOG_INFO("Renderer::initVideo: dirty-rect tracking ENABLED via "
++               "SDL_HINT_DOSKUTSU_DIRTY_RECTS=1 (experimental)");
+     }
+     else
+     {
+-      LOG_INFO("Renderer::initVideo: dirty-rect tracking ENABLED "
+-               "(set SDL_HINT_DOSKUTSU_DIRTY_RECTS=0 to disable)");
++      LOG_INFO("Renderer::initVideo: dirty-rect tracking DISABLED "
++               "(set SDL_HINT_DOSKUTSU_DIRTY_RECTS=1 to enable, experimental)");
+     }
+   }
+   // First frame must be a full refresh — we have no last-frame
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index b578e2d..539e151 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -176,9 +176,12 @@ class Renderer
+     // Periodic paranoia refresh — re-seed the dirty-rect tracker every
+     // N flips so any accumulated invariant drift gets corrected.
+     static constexpr int FORCE_FULL_REFRESH_EVERY = 60;
+-    // Master enable. Default ON; flipped to OFF if the
+-    // SDL_HINT_DOSKUTSU_DIRTY_RECTS env var is set to "0".
+-    bool _dirty_rect_enabled = true;
++    // Master enable. Default OFF (Phase 9 wave 9 cirrus9 capture
++    // surfaced sprite-trail / menu-fragment correctness bugs in the
++    // single-pass first-divergence-cliff algorithm — full 2-pass
++    // refactor needed for correctness, deferred to a future wave).
++    // Flipped to ON only if SDL_HINT_DOSKUTSU_DIRTY_RECTS is "1".
++    bool _dirty_rect_enabled = false;
+     // Diagnostic counters (per-100-flip block + lifetime totals).
+     int _dr_total_calls_block = 0;
+     int _dr_skipped_calls_block = 0;
+-- 
+2.47.3
+

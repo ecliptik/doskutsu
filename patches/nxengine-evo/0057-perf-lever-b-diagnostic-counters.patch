@@ -1,0 +1,327 @@
+From 475eafbac63623f44e064421e4deb41dee8d83fd Mon Sep 17 00:00:00 2001
+From: Claude Code <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 14:20:13 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2012.3-D=20=E2=80=94=20diagnosti?=
+ =?UTF-8?q?c=20counters=20(primitives,=20slow-path=20reasons,=20mirrored?=
+ =?UTF-8?q?=20fastpath,=20inter-flip)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/graphics/Renderer.cpp | 215 ++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 206 insertions(+), 9 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index e022e10..61a52b8 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -347,6 +347,121 @@ void _maybe_flush_fastpath_audit()
+   _fastpath_skipped_block = 0;
+ }
+ 
++// DOS-PORT (patch 0057, Phase 9 wave 12.3-D Lever B diagnostics): split
++// fastpath counters for drawSurfaceMirrored. Wave 12.3 wired the
++// mirrored fastpath but reused the drawSurface counters, conflating
++// hit-rates between the two ops in audit lines. Wave 12.3-D adds
++// dedicated mirrored counters so we can tell the two apart in DEBUG.LOG.
++int _fastpath_mirror_taken_block = 0;
++int _fastpath_mirror_taken_global = 0;
++int _fastpath_mirror_skipped_block = 0;
++int _fastpath_mirror_skipped_global = 0;
++
++void _maybe_flush_fastpath_mirror_audit()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0) return;
++  if (_fastpath_mirror_taken_block + _fastpath_mirror_skipped_block == 0) return;
++  const int total_block = _fastpath_mirror_taken_block + _fastpath_mirror_skipped_block;
++  const long long pct10_block = total_block
++      ? (long long)((_fastpath_mirror_taken_block * 1000LL) / total_block)
++      : 0;
++  const int total_global = _fastpath_mirror_taken_global + _fastpath_mirror_skipped_global;
++  const long long pct10_global = total_global
++      ? (long long)((_fastpath_mirror_taken_global * 1000LL) / total_global)
++      : 0;
++  LOG_INFO("mirrored fastpath audit block {}: taken={} skipped={} pct_x10={}; "
++           "global taken={} skipped={} pct_x10={}",
++           _dc_block_idx, _fastpath_mirror_taken_block,
++           _fastpath_mirror_skipped_block, pct10_block,
++           _fastpath_mirror_taken_global, _fastpath_mirror_skipped_global,
++           pct10_global);
++  _fastpath_mirror_taken_block = 0;
++  _fastpath_mirror_skipped_block = 0;
++}
++
++// DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
++// Counts how many times clearScreen / fillRect / drawRect / drawLine /
++// tintScreen / drawSpotLight are invoked per 100-flip block. Drives
++// 12.4 sizing — primitives below ~5 calls/block are not worth a
++// hand-rolled fast path.
++int _prim_clear_block = 0;
++int _prim_clear_global = 0;
++int _prim_fill_block = 0;
++int _prim_fill_global = 0;
++int _prim_rect_block = 0;
++int _prim_rect_global = 0;
++int _prim_line_block = 0;
++int _prim_line_global = 0;
++int _prim_tint_block = 0;
++int _prim_tint_global = 0;
++int _prim_spotlight_block = 0;
++int _prim_spotlight_global = 0;
++
++void _maybe_flush_primitive_tally()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0) return;
++  // Always emit (even when block is all-zero) so absence of a primitive
++  // shows up explicitly in the log; aids real-HW iter analysis.
++  LOG_INFO("primitive tally block {}: clear={} fill={} rect={} line={} "
++           "tint={} spotlight={} (over {} flips ending at flip {})",
++           _dc_block_idx, _prim_clear_block, _prim_fill_block,
++           _prim_rect_block, _prim_line_block, _prim_tint_block,
++           _prim_spotlight_block, _dc_tally_every_flips, _flip_total);
++  _prim_clear_block = 0;
++  _prim_fill_block = 0;
++  _prim_rect_block = 0;
++  _prim_line_block = 0;
++  _prim_tint_block = 0;
++  _prim_spotlight_block = 0;
++}
++
++// DOS-PORT (patch 0057, Phase 9 wave 12.3-D): drawSurface slow-path
++// reason histogram. Categorizes WHY a drawSurface call fell through
++// _try_fast_blit. Helps decide which 12.5+ extension to prioritize:
++// alpha != 255 → wire alpha-mod path (already planned for 12.5);
++// format mismatch → investigate why win surface lost RGB565 (rare —
++// shouldn't happen post wave-7); windim mismatch → Mach64 fallback
++// (expected on g2k 640x480 path); null_src → Surface lifecycle bug
++// (should be zero); other → unknown gate (escape hatch — non-zero
++// here means a precondition got added that we forgot to mirror in
++// the histogram).
++int _slow_reason_alpha_block = 0;
++int _slow_reason_alpha_global = 0;
++int _slow_reason_format_block = 0;
++int _slow_reason_format_global = 0;
++int _slow_reason_windim_block = 0;
++int _slow_reason_windim_global = 0;
++int _slow_reason_null_src_block = 0;
++int _slow_reason_null_src_global = 0;
++int _slow_reason_other_block = 0;
++int _slow_reason_other_global = 0;
++
++void _maybe_flush_slowpath_reason_audit()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0) return;
++  const int total_block = _slow_reason_alpha_block + _slow_reason_format_block
++                        + _slow_reason_windim_block + _slow_reason_null_src_block
++                        + _slow_reason_other_block;
++  if (total_block == 0) return;
++  LOG_INFO("slowpath reason block {}: alpha={} format={} windim={} "
++           "null_src={} other={} (of {} total drawSurface slow-path)",
++           _dc_block_idx, _slow_reason_alpha_block, _slow_reason_format_block,
++           _slow_reason_windim_block, _slow_reason_null_src_block,
++           _slow_reason_other_block, total_block);
++  _slow_reason_alpha_block = 0;
++  _slow_reason_format_block = 0;
++  _slow_reason_windim_block = 0;
++  _slow_reason_null_src_block = 0;
++  _slow_reason_other_block = 0;
++}
++
++// DOS-PORT (patch 0057, Phase 9 wave 12.3-D): inter-flip wall clock.
++// Captures (start_of_this_flip - start_of_previous_flip) so we can
++// reason about whole-frame budget on real HW (where SDL_RenderPresent
++// dominates but is not the only cost). Reset to 0 if SDL_GetTicks
++// somehow goes backwards (clock glitch on real HW).
++Uint64 _last_flip_t0 = 0;
++
+ // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): drawcall-fingerprint
+ // helpers. The hash function is FNV-1a 64-bit on a fixed-shape header
+ // of (op_type, surface_id, srcx, srcy, srcw, srch, dstx, dsty, dstw,
+@@ -880,6 +995,15 @@ void Renderer::flip()
+   // resolution at the slow pace and stays bounded if/when fps recovers.
+   Uint64 _t0 = SDL_GetTicks();
+ 
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): inter-flip wall clock.
++  // (this_flip_t0 - _last_flip_t0) measures the WHOLE-FRAME budget
++  // (logic + drawcalls + flip), not just the present cost. On real HW
++  // the present cost dominates today, but as Lever B reduces it, the
++  // logic-side cost becomes the next bottleneck — this counter surfaces
++  // it before we get there. First flip emits 0 (no prior frame).
++  Uint64 _inter_flip_ms = (_last_flip_t0 == 0) ? 0 : (_t0 - _last_flip_t0);
++  _last_flip_t0 = _t0;
++
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): when dirty-rect
+   // tracking is enabled and we have a partial dirty list, flush any
+   // queued slow-path commands then update only the dirty rects via
+@@ -941,14 +1065,15 @@ void Renderer::flip()
+   if (_flip_total == 1)
+   {
+     _log_renderer_state_once(_renderer, _window);
+-    LOG_INFO("flip-probe: first flip ok={} present={}ms drawcalls-since-flip={} drawcalls-total={}",
+-             ok, (long long)_present_ms, _drawcalls_since_flip, _drawcalls_total);
++    LOG_INFO("flip-probe: first flip ok={} present={}ms inter_flip_ms={} drawcalls-since-flip={} drawcalls-total={}",
++             ok, (long long)_present_ms, (long long)_inter_flip_ms,
++             _drawcalls_since_flip, _drawcalls_total);
+   }
+   else if ((_flip_total % 10) == 0)
+   {
+-    LOG_INFO("flip-probe: flip #{} ok={} present={}ms drawcalls-since-flip={} drawcalls-total={} fail-total={} null-skips-total={}",
+-             _flip_total, ok, (long long)_present_ms, _drawcalls_since_flip,
+-             _drawcalls_total, _flip_failed, _null_tex_total);
++    LOG_INFO("flip-probe: flip #{} ok={} present={}ms inter_flip_ms={} drawcalls-since-flip={} drawcalls-total={} fail-total={} null-skips-total={}",
++             _flip_total, ok, (long long)_present_ms, (long long)_inter_flip_ms,
++             _drawcalls_since_flip, _drawcalls_total, _flip_failed, _null_tex_total);
+   }
+   _drawcalls_since_flip = 0;
+   // Patch 0042: end-of-flip drawcall tally (block summary every N flips).
+@@ -957,6 +1082,12 @@ void Renderer::flip()
+   _maybe_flush_alpha_audit();
+   // Patch 0048: fast-path hit-rate audit (shares the same cadence).
+   _maybe_flush_fastpath_audit();
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): new diagnostic flushes —
++  // mirrored fastpath audit, per-primitive call tally, slow-path reason
++  // histogram. All share the same per-100-flip cadence.
++  _maybe_flush_fastpath_mirror_audit();
++  _maybe_flush_primitive_tally();
++  _maybe_flush_slowpath_reason_audit();
+ 
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): per-frame
+   // bookkeeping. Tally the skip stats, swap last-frame ↔ current-
+@@ -1477,6 +1608,42 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   ++_fastpath_skipped_block;
+   ++_fastpath_skipped_global;
+ 
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): categorize WHY this call
++  // missed the fastpath. Re-checks the same gates as _try_fast_blit in
++  // priority order — first match wins. Helps decide which 12.5+
++  // extension to prioritize. Bucket order matches the gate order in
++  // _try_fast_blit so misses align with the first failed precondition.
++  {
++    if (src->alpha != 255)
++    {
++      ++_slow_reason_alpha_block;
++      ++_slow_reason_alpha_global;
++    }
++    else if (!src->surface16bpp())
++    {
++      ++_slow_reason_null_src_block;
++      ++_slow_reason_null_src_global;
++    }
++    else if (!_cached_window_surface ||
++             _cached_window_surface->format != SDL_PIXELFORMAT_RGB565)
++    {
++      ++_slow_reason_format_block;
++      ++_slow_reason_format_global;
++    }
++    else if (_cached_window_surface->w != 320 || _cached_window_surface->h != 240)
++    {
++      ++_slow_reason_windim_block;
++      ++_slow_reason_windim_global;
++    }
++    else
++    {
++      // Catch-all. If non-zero on real HW it means a precondition got
++      // added to _try_fast_blit but not mirrored here.
++      ++_slow_reason_other_block;
++      ++_slow_reason_other_global;
++    }
++  }
++
+   // Patch 0044 (Phase 9 lever 4 §3.4.2 Approach A): skip
+   // SDL_SetTextureAlphaMod when the texture's last set value matches
+   // src->alpha. Default-not-cached is 255 (SDL3-side default), so the
+@@ -1564,14 +1731,20 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+                               _renderer_queue_dirty,
+                               src, srcrect, dstrect))
+   {
+-    ++_fastpath_taken_block;
+-    ++_fastpath_taken_global;
++    // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): split mirrored
++    // counters from drawSurface counters so audit lines distinguish
++    // the two ops. Wave 12.3 reused drawSurface's counters here,
++    // conflating fastpath rates between mirrored and non-mirrored
++    // sprites in DEBUG.LOG.
++    ++_fastpath_mirror_taken_block;
++    ++_fastpath_mirror_taken_global;
+     _bump_drawcall();
+     _record_dirty_rect(dstrect.x, dstrect.y, dstrect.w, dstrect.h);
+     return;
+   }
+-  ++_fastpath_skipped_block;
+-  ++_fastpath_skipped_global;
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): mirrored slow-path bump.
++  ++_fastpath_mirror_skipped_block;
++  ++_fastpath_mirror_skipped_global;
+ 
+   // Patch 0044: conditional alpha-mod (mirrored variant).
+   _conditional_set_texture_alpha_mod(src->texture(), src->alpha);
+@@ -1660,6 +1833,9 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+ 
+ void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
+ {
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
++  ++_prim_line_block;
++  ++_prim_line_global;
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): hash op, endpoints
+   // and color. dst rect is the line's bounding box (1-px-thick).
+   const int sx1 = x1 * scale, sy1 = y1 * scale;
+@@ -1691,6 +1867,9 @@ void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
+ 
+ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b)
+ {
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
++  ++_prim_rect_block;
++  ++_prim_rect_global;
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): hash op + color +
+   // rect bounds. The 4-line outline lives within the bounding box so
+   // we use that as the dirty rect.
+@@ -1720,6 +1899,12 @@ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+ 
+ void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b)
+ {
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
++  // Note: drawPixel and clearScreen delegate here, so this counter
++  // includes their calls indirectly. clearScreen has its own counter
++  // (bumped at its entry, before delegating).
++  ++_prim_fill_block;
++  ++_prim_fill_global;
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): hash op + color +
+   // rect bounds. fillRect is also the path drawPixel/clearScreen lean
+   // on; for those callers the bounding rect resolves correctly via
+@@ -1752,6 +1937,9 @@ void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+ 
+ void Renderer::tintScreen()
+ {
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
++  ++_prim_tint_block;
++  ++_prim_tint_global;
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): full-screen alpha-
+   // blend op; if the same op ran at the same index last frame the
+   // backbuffer is already tinted from then. (NB: tintScreen is
+@@ -1784,6 +1972,12 @@ void Renderer::drawPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b)
+ 
+ void Renderer::clearScreen(uint8_t r, uint8_t g, uint8_t b)
+ {
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
++  // Bumped at entry, BEFORE delegating to fillRect — so the fillRect
++  // counter double-counts these. The 12.4 sizing is interested in
++  // clearScreen vs other fillRect callers separately, so we keep both.
++  ++_prim_clear_block;
++  ++_prim_clear_global;
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): clearScreen is the
+   // canonical "everything on screen is now this color" op. We hash
+   // it as op type + color into the per-call fingerprint, AND track
+@@ -1965,6 +2159,9 @@ void Renderer::saveScreenshot()
+ 
+ void Renderer::drawSpotLight(int x, int y, Object* o, int r, int g, int b, int upscale)
+ {
++  // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
++  ++_prim_spotlight_block;
++  ++_prim_spotlight_global;
+   SDL_Rect dstrec;
+   int width = o->Width() / CSFI;
+   int height = o->Height() / CSFI;
+-- 
+2.47.3
+

@@ -1,0 +1,244 @@
+From 7eb7a9e05c861435b7ca9e61865d0cc87c945707 Mon Sep 17 00:00:00 2001
+From: Claude Code <services.claude@accounts.ecliptik.com>
+Date: Mon, 27 Apr 2026 16:14:31 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2012.5-D=20=E2=80=94=20phase=20t?=
+ =?UTF-8?q?iming=20diagnostic=20(drawcall/flip-inner/inter-flip=20breakdow?=
+ =?UTF-8?q?n)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ src/graphics/Renderer.cpp | 125 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 125 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 1e6738c..0cf15ae 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -538,6 +538,99 @@ void _maybe_flush_color_alpha_audit()
+   _color_mod_fallback_block = 0;
+ }
+ 
++// DOS-PORT (patch 0060, Phase 9 wave 12.5-D Lever B diagnostics): phase
++// timing accumulators. Captures three time slices per 100-flip block so
++// we can decompose an inter-flip period into its components on real HW:
++//
++//   drawcall_total = sum of all 10 public drawcall methods' durations
++//   flip_inner_total = sum of all flip() inner-block durations
++//   inter_flip_total = sum of (this_flip_t0 - prev_flip_t0) measurements
++//   audio+engine = inter_flip - flip_inner - drawcall  (derived)
++//
++// All wall-clock via SDL_GetTicksNS for microsecond resolution. Nanos
++// summed in Uint64 (rolls over after 584 years; we're fine). Audit log
++// converts to ms with one-decimal precision via x10 scaling.
++//
++// Cost: ~2 SDL_GetTicksNS calls per drawcall. On menu (5500 dc/flip),
++// that's ~11000 SDL_GetTicksNS calls per flip — measurable but bounded.
++// If overhead distorts measurements unacceptably, instrument can be
++// stripped post-investigation.
++Uint64 _drawcall_accum_ns_block = 0;
++Uint64 _drawcall_accum_ns_global = 0;
++int    _drawcall_count_block = 0;     // counts wraps that fired (for avg)
++int    _drawcall_count_global = 0;
++Uint64 _flip_inner_accum_ns_block = 0;
++Uint64 _flip_inner_accum_ns_global = 0;
++Uint64 _inter_flip_accum_ms_block = 0;  // ms sum (12.3-D inter_flip is ms)
++Uint64 _inter_flip_accum_ms_global = 0;
++
++// RAII helper — captures SDL_GetTicksNS at construction, accumulates
++// elapsed ns to the file-scope counters at destruction. Place at top of
++// each drawcall method to cover all return paths cleanly.
++struct _DrawcallTimer
++{
++  Uint64 _t0;
++  _DrawcallTimer() : _t0(SDL_GetTicksNS()) {}
++  ~_DrawcallTimer()
++  {
++    const Uint64 dt = SDL_GetTicksNS() - _t0;
++    _drawcall_accum_ns_block += dt;
++    _drawcall_accum_ns_global += dt;
++    ++_drawcall_count_block;
++    ++_drawcall_count_global;
++  }
++};
++
++void _maybe_flush_phase_timing_audit()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0) return;
++  if (_drawcall_count_block == 0 && _flip_inner_accum_ns_block == 0
++      && _inter_flip_accum_ms_block == 0)
++    return;
++  // Convert ns totals to ms totals for the report. Per-flip averages are
++  // computed against _dc_tally_every_flips (block size = 100).
++  const Uint64 dc_total_ms       = _drawcall_accum_ns_block / 1000000ull;
++  const Uint64 flip_inner_total_ms = _flip_inner_accum_ns_block / 1000000ull;
++  const Uint64 inter_flip_total_ms = _inter_flip_accum_ms_block;
++  // Per-flip averages, x10 (one-decimal). avg_ms_x10 = (total_ns * 10) /
++  // (flips * 1_000_000).
++  const long long dc_avg_ms_x10 = _dc_tally_every_flips
++      ? (long long)((_drawcall_accum_ns_block * 10ull)
++                    / ((Uint64)_dc_tally_every_flips * 1000000ull))
++      : 0;
++  const long long fi_avg_ms_x10 = _dc_tally_every_flips
++      ? (long long)((_flip_inner_accum_ns_block * 10ull)
++                    / ((Uint64)_dc_tally_every_flips * 1000000ull))
++      : 0;
++  const long long if_avg_ms_x10 = _dc_tally_every_flips
++      ? (long long)((_inter_flip_accum_ms_block * 10ull)
++                    / (Uint64)_dc_tally_every_flips)
++      : 0;
++  // Derived: audio+engine_ms = inter_flip - flip_inner - drawcall.
++  // Signed math — if it goes negative on real HW, the timer wraps are
++  // mismeasuring something.
++  const long long audio_engine_ms_x10 = if_avg_ms_x10 - fi_avg_ms_x10 - dc_avg_ms_x10;
++  // Per-drawcall avg in microseconds (x10 = one-decimal).
++  // avg_us_x10 = (ns_total * 10) / (count * 1000)
++  const long long dc_avg_us_x10 = (_drawcall_count_block > 0)
++      ? (long long)((_drawcall_accum_ns_block * 10ull)
++                    / ((Uint64)_drawcall_count_block * 1000ull))
++      : 0;
++  LOG_INFO("phase timing block {}: drawcalls={} dc_total_ms={} "
++           "flip_inner_total_ms={} inter_flip_total_ms={} "
++           "(per-flip avg x10: dc_ms={} fi_ms={} if_ms={} derived audio+engine_ms={}; "
++           "per-drawcall avg us_x10={})",
++           _dc_block_idx, _drawcall_count_block,
++           (long long)dc_total_ms, (long long)flip_inner_total_ms,
++           (long long)inter_flip_total_ms,
++           dc_avg_ms_x10, fi_avg_ms_x10, if_avg_ms_x10,
++           audio_engine_ms_x10, dc_avg_us_x10);
++  _drawcall_accum_ns_block = 0;
++  _drawcall_count_block = 0;
++  _flip_inner_accum_ns_block = 0;
++  _inter_flip_accum_ms_block = 0;
++}
++
+ // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): drawcall-fingerprint
+ // helpers. The hash function is FNV-1a 64-bit on a fixed-shape header
+ // of (op_type, surface_id, srcx, srcy, srcw, srch, dstx, dsty, dstw,
+@@ -1071,6 +1164,12 @@ void Renderer::flip()
+   // resolution at the slow pace and stays bounded if/when fps recovers.
+   Uint64 _t0 = SDL_GetTicks();
+ 
++  // DOS-PORT (patch 0060, Phase 9 wave 12.5-D): nanosecond start for
++  // flip-inner timing. SDL_GetTicks above is ms-resolution and used by
++  // the existing _present_ms / _inter_flip_ms diagnostics; this finer
++  // ns sample drives the per-100-flip phase-timing audit.
++  Uint64 _flip_inner_t0_ns = SDL_GetTicksNS();
++
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): inter-flip wall clock.
+   // (this_flip_t0 - _last_flip_t0) measures the WHOLE-FRAME budget
+   // (logic + drawcalls + flip), not just the present cost. On real HW
+@@ -1079,6 +1178,11 @@ void Renderer::flip()
+   // it before we get there. First flip emits 0 (no prior frame).
+   Uint64 _inter_flip_ms = (_last_flip_t0 == 0) ? 0 : (_t0 - _last_flip_t0);
+   _last_flip_t0 = _t0;
++  // DOS-PORT (patch 0060, Phase 9 wave 12.5-D): inter-flip accumulator
++  // for the per-100-flip phase-timing audit. First flip's _inter_flip_ms
++  // is 0 — accumulating it is harmless.
++  _inter_flip_accum_ms_block += _inter_flip_ms;
++  _inter_flip_accum_ms_global += _inter_flip_ms;
+ 
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): when dirty-rect
+   // tracking is enabled and we have a partial dirty list, flush any
+@@ -1167,6 +1271,17 @@ void Renderer::flip()
+   // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): alpha-blend +
+   // color-mod audit (shares the same cadence).
+   _maybe_flush_color_alpha_audit();
++  // DOS-PORT (patch 0060, Phase 9 wave 12.5-D): close the flip-inner
++  // window and accumulate. Place AFTER all other audit flushes so the
++  // flip-inner duration includes the audit-flush cost itself (small,
++  // but accounting-honest). The audit-flush *for* phase timing fires
++  // afterwards, naturally including this flip's own inner duration.
++  {
++    const Uint64 _flip_inner_dt_ns = SDL_GetTicksNS() - _flip_inner_t0_ns;
++    _flip_inner_accum_ns_block += _flip_inner_dt_ns;
++    _flip_inner_accum_ns_global += _flip_inner_dt_ns;
++  }
++  _maybe_flush_phase_timing_audit();
+ 
+   // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): per-frame
+   // bookkeeping. Tally the skip stats, swap last-frame ↔ current-
+@@ -1860,6 +1975,7 @@ static inline bool _blit_rgb565_color_mod_general(SDL_Surface *dst, SDL_Surface
+ // blit the specified portion of the surface to the screen
+ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   assert(_renderer);
+   // Diagnostic NULL-checks (task #14 / patch 0030). assert() is a no-op in
+   // Release where NDEBUG is defined; without these explicit checks NULL
+@@ -2029,6 +2145,7 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+ // blit the specified portion of the surface to the screen
+ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   assert(_renderer);
+   if (!src || !src->texture())
+   {
+@@ -2144,6 +2261,7 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
+                                    const SDL_Rect &dstrect,
+                                    uint8_t mod_r, uint8_t mod_g, uint8_t mod_b)
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   assert(_renderer);
+   if (!src || !src->texture())
+   {
+@@ -2226,6 +2344,7 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
+ // blit the specified surface across the screen in a repeating pattern
+ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src, int height)
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   if (!sfc || !sfc->texture())
+   {
+     _log_null_tex("Renderer::blitPatternAcross", sfc);
+@@ -2286,6 +2405,7 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+ 
+ void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
+   ++_prim_line_block;
+   ++_prim_line_global;
+@@ -2357,6 +2477,7 @@ void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
+ 
+ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b)
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
+   ++_prim_rect_block;
+   ++_prim_rect_global;
+@@ -2429,6 +2550,7 @@ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+ 
+ void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b)
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
+   // Note: drawPixel and clearScreen delegate here, so this counter
+   // includes their calls indirectly. clearScreen has its own counter
+@@ -2497,6 +2619,7 @@ void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+ 
+ void Renderer::tintScreen()
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
+   ++_prim_tint_block;
+   ++_prim_tint_global;
+@@ -2532,6 +2655,7 @@ void Renderer::drawPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b)
+ 
+ void Renderer::clearScreen(uint8_t r, uint8_t g, uint8_t b)
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
+   // Bumped at entry, BEFORE delegating to fillRect — so the fillRect
+   // counter double-counts these. The 12.4 sizing is interested in
+@@ -2738,6 +2862,7 @@ void Renderer::saveScreenshot()
+ 
+ void Renderer::drawSpotLight(int x, int y, Object* o, int r, int g, int b, int upscale)
+ {
++  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): per-primitive call tally.
+   ++_prim_spotlight_block;
+   ++_prim_spotlight_global;
+-- 
+2.47.3
+

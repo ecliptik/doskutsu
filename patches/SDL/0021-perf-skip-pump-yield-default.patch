@@ -1,0 +1,67 @@
+From 81b50f53a5d4e9ae453e8574453046a0c5dbe8e3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 28 Apr 2026 08:53:21 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2013.3=20p?=
+ =?UTF-8?q?atch=200021=20=E2=80=94=20skip=20DOS=5FYield=20in=20DOSVESA=5FP?=
+ =?UTF-8?q?umpEvents=20(default),=20env-var=20fallback?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 13.2 NO_INPUT_POLL ablation on real HW (PODP 5V83, Cirrus + UNIVBE)
+measured the per-pump DOS_Yield() at ~115 ms / flip — the cooperative-
+thread round-trip into the audio thread's WaitDevice spin
+(SDL_dosaudio_sb.c:189), not the keyboard/mouse drain.
+
+Default-skip the yield. The doskutsu engine pairs this with an explicit
+SDL_Delay(0) once per flip in Renderer::flip() to keep the audio thread
+scheduled — at 15 fps that's ~67 ms between yields, well under one
+audio chunk's worth of buffer (186 ms at 22050 Hz stereo S16, default
+4096-frame chunk size).
+
+Set SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 in the env to restore the
+original per-pump yield (debug fallback if audio glitches).
+
+Predicted impact: title scene 5.5 fps → ~15 fps on PODP 5V83.
+
+See docs/PHASE9-NEXT-WAVES-PLAN.md §6 wave 13.2 ablation table.
+---
+ src/video/dos/SDL_dosevents.c | 22 +++++++++++++++++-----
+ 1 file changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/src/video/dos/SDL_dosevents.c b/src/video/dos/SDL_dosevents.c
+index 78a50b649..22906c6b6 100644
+--- a/src/video/dos/SDL_dosevents.c
++++ b/src/video/dos/SDL_dosevents.c
+@@ -254,11 +254,23 @@ static int keyevents_tail = 0;
+ 
+ void DOSVESA_PumpEvents(SDL_VideoDevice *device)
+ {
+-    /* Give cooperative threads a chance to run.  Audio mixing now runs
+-       in its own cooperative thread (via SDL's normal audio thread),
+-       so it will execute during this yield along with loading threads
+-       and anything else that is runnable. */
+-    DOS_Yield();
++    /* DOSKUTSU patch (Phase 9 wave 13.3): the per-pump DOS_Yield() was
++       measured at ~115 ms / flip on real HW (PODP 5V83, Cirrus + UNIVBE)
++       — see docs/PHASE9-NEXT-WAVES-PLAN.md §6 wave 13.2 ablation results.
++       Cost is the cooperative-thread round-trip into the audio thread's
++       WaitDevice spin (SDL_dosaudio_sb.c:189), not the keyboard/mouse
++       drain below. Default-skip the yield here; the engine is expected
++       to call SDL_Delay(0) once per flip to keep the audio thread
++       scheduled. Set SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 in the env to
++       restore the original behavior (debug fallback if audio glitches). */
++    static int yield_skip_cached = -1;
++    if (yield_skip_cached == -1) {
++        const char *force = SDL_getenv("SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD");
++        yield_skip_cached = (force && force[0] == '1' && force[1] == 0) ? 0 : 1;
++    }
++    if (!yield_skip_cached) {
++        DOS_Yield();
++    }
+ 
+     static bool is_extended = false;
+     static int pause_sequence_remaining = 0;
+-- 
+2.47.3
+

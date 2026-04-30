@@ -1,0 +1,281 @@
+From 949202aa883e1e99165cd4cd3da2728e3162bcca Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 29 Apr 2026 14:50:41 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2016.4=20p?=
+ =?UTF-8?q?atch=200032=20=E2=80=94=20display-start=20scan-cap=20fix?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 16.3 LFB sentinel (patch 0031) returned match=1 at all 5 sample
+offsets (LFB+0/65535/65536/76799/131072) — writes round-trip cleanly
+through the aperture into VRAM. Yet the bottom ~35 scanlines render
+black on g2k Cirrus CL-GD5434 + UNIVBE 6.70. Conclusion: hypothesis
+(b) confirmed — the display controller scan-caps at 64KB and never
+reads bytes ≥65536 for display output, regardless of the configured
+mode pitch / height.
+
+This is now a DISPLAY-START register problem, not an LFB / banked /
+aperture problem.
+
+Two approaches, both env-gated by SDL_HINT_DOSKUTSU_DISPLAY_START_FIX
+(strict "1" match per CLAUDE.md DOSKUTSU env-var convention; default
+OFF preserves current patch-0018 behaviour). Sequential — the
+chip-direct display-start writes only fire if the VBE call failed.
+
+Approach 1 — VBE 0x4F07 SET (during retrace) with BL=0x80, CX=DX=0.
+
+  The pre-existing patch 0018 already calls 0x4F07 with BL=0x00
+  (immediate SET) when use_lfb is true; the wave 16.3 capture saw
+  that returning ax=0x004F (apparent success) yet bottom-strip-black
+  persisted, suggesting the BIOS variant didn't actually commit the
+  requested origin. BL=0x80 is the VBE 2.0+ variant explicitly
+  waiting for the next vertical retrace before applying. Some
+  Cirrus + UNIVBE BIOSes treat the two BL values differently —
+  this is the cheap test before falling to chip-direct.
+
+Approach 2 (display-start branch) — Cirrus chip-direct CRTC writes,
+fired only when Approach 1 returned non-0x004F.
+
+  CRTC at I/O 0x3D4 (index) / 0x3D5 (data). Display-start spread
+  across:
+    index 0x0C — display-start hi (bits 8-15)
+    index 0x0D — display-start lo (bits 0-7)
+    index 0x1A — bits 1-0 carry display-start bits 16-17 on 5434
+                 ("Miscellaneous Control")
+    index 0x1D — bit 7 carries display-start bit 18 on 5434
+                 ("Display Start Address Extension")
+
+  Zeroing 0x0C, 0x0D and bits 1-0 of 0x1A places the scan origin at
+  byte 0 of the framebuffer. 0x1A is read-modified-written so other
+  bits in that register are preserved.
+
+Approach 2 (offset-register branch) — independent of display-start,
+unconditional check.
+
+  CRTC index 0x13 ("Offset Register") controls how many bytes the
+  controller reads per scanline. For 320×240×8bpp packed the expected
+  value is pitch/8 = 320/8 = 0x28. If the BIOS programmed something
+  else (rare but possible on UNIVBE-rewritten BIOSes), the controller
+  scans the wrong stride — symptom = horizontal repetition or shift.
+  Always check this register and write the correct value if it
+  mismatches.
+
+Diagnostic logging — single token WAVE16-4-DISPLAY-START. Multiple
+lines per modeset:
+  - vbe_4F07 result (BX/CX/DX/AX values)
+  - crtc_pre 5-register snapshot (0x0C 0x0D 0x13 0x1A 0x1D)
+  - chip_direct displayStart_zero | displayStart_skipped
+  - chip_direct offset_fix | offset_ok
+  - crtc_post 5-register snapshot (verifies what stuck)
+
+This lets us see exactly what the BIOS programmed during the mode
+set vs what we wrote, and lets us correlate the visual outcome
+against the register state that took effect.
+
+Risks:
+
+  1. Wrong register write → screen blanks / shows garbage. The hint
+     is OFF by default so this only fires on opt-in. First iter is
+     the test; visual fail = revert env, no rebuild needed.
+  2. VBE 0x4F07 unsupported → AX != 0x004F triggers Approach 2's
+     chip-direct path. Patch 0018's wave 16.3 logs already confirm
+     0x4F07 IS supported on this BIOS, so Approach 1 is the
+     expected primary path; Approach 2 is fallback only.
+  3. CRTC index 0x1A bits we DON'T touch may carry chip-config state
+     that should be preserved — using read-modify-write for 0x1A
+     instead of full write to keep other bits intact.
+  4. Reading uninitialised CRTC indices via inportb may return
+     undefined values — we always set the index via outportb(0x3D4,
+     idx) BEFORE inportb(0x3D5).
+  5. 5434 extended index range is 0x18-0x1F per Cirrus 5434
+     datasheet; 0x1D is in-range. Other Cirrus variants (5428, 5429,
+     5446) may locate display-start bit 18 differently — if the chip
+     isn't a 5434, the values are still logged but the user must
+     verify the chip.
+
+Predicted:
+
+  - fps movement: 0 (display-controller fix, doesn't change CPU /
+    bandwidth)
+  - visual: bottom 35 scanlines render correctly + menu black-boxes
+    around triangles resolve
+
+Anchored at SDL_dosmodes.c line ~1145 (right after the patch 0018
+display-start GET-SET-GET block, before the mouse min/max setup).
+inportb / outportb are already used in this file (line 344, the
+DAC pixel-mask probe) so the include chain is established.
+
+Per docs/BOOT.md convention every new env var is documented in the
+"Diagnostic / development options" subsection. The display-start fix
+is dev-only for the wave 16.4 iter — promote to user-facing when
+the fix is confirmed working.
+
+Local-only patch per workspace policy. Never PR'd upstream.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosmodes.c | 147 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 147 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 861470cb3..c734f8964 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -1143,6 +1143,153 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+         }
+     }
+ 
++    // DOSKUTSU patch 0032 (Phase 9 wave 16.4): display-start scan-cap fix.
++    // Wave 16.3 LFB sentinel (patch 0031) returned match=1 at all 5 sample
++    // offsets (LFB+0/65535/65536/76799/131072) — writes round-trip cleanly
++    // through the aperture into VRAM. Yet the bottom ~35 scanlines render
++    // black on g2k Cirrus + UNIVBE 6.70. Conclusion: hypothesis (b)
++    // confirmed — the display controller scan-caps at 64KB and never
++    // reads bytes ≥65536 for display output, regardless of pitch / height.
++    //
++    // Two approaches, both env-gated by SDL_HINT_DOSKUTSU_DISPLAY_START_FIX
++    // (strict "1" match per CLAUDE.md DOSKUTSU env-var convention; default
++    // OFF preserves current patch-0018 behaviour). Sequential — Approach 2
++    // display-start writes only fire if Approach 1 failed.
++    //
++    //   Approach 1: VBE 0x4F07 SET DISPLAY START (during retrace) with
++    //     BL=0x80, CX=0, DX=0. The pre-existing patch 0018 already calls
++    //     0x4F07 with BL=0x00 (immediate SET) when use_lfb is true; in the
++    //     wave 16.3 capture this returned ax=0x004F (apparent success) yet
++    //     bottom-strip-black persisted, suggesting that BIOS variant didn't
++    //     actually commit the requested origin. BL=0x80 is the VBE 2.0+
++    //     variant explicitly waiting for the next vertical retrace before
++    //     applying. Some Cirrus + UNIVBE BIOSes treat the two BL values
++    //     differently — this is the cheap test.
++    //
++    //   Approach 2 (display-start): if Approach 1 returned non-0x004F,
++    //     fall back to chip-direct CRTC writes. The Cirrus CL-GD5434
++    //     uses VGA-compatible CRTC at I/O 0x3D4 (index) / 0x3D5 (data):
++    //       index 0x0C: display-start hi (bits 8-15)
++    //       index 0x0D: display-start lo (bits 0-7)
++    //       index 0x1A: extended bits — bits 1-0 carry display-start
++    //                   bits 16-17 (Cirrus 5434 "Miscellaneous Control")
++    //       index 0x1D: extended bit 7 carries display-start bit 18
++    //                   (Cirrus 5434 "Display Start Address Extension")
++    //     Zeroing 0x0C and 0x0D and bits 1-0 of 0x1A places the display
++    //     scan origin at byte 0 of the framebuffer regardless of what
++    //     the BIOS programmed during the mode set.
++    //
++    //   Approach 2 (offset-register) — independent of display-start.
++    //     CRTC index 0x13 ("Offset Register") controls how many bytes
++    //     the display controller reads per scanline. For a 320×240×8bpp
++    //     packed framebuffer the expected value is pitch/8 = 320/8 = 0x28.
++    //     If the BIOS programmed something else (rare but possible on
++    //     UNIVBE-rewritten BIOSes), the controller will scan the wrong
++    //     stride — symptom would be horizontal repetition / scrolling.
++    //     Always check this register and write the correct value if it
++    //     mismatches. The team-lead specifically called out this
++    //     possibility, separate from display-start.
++    //
++    // Diagnostic logging: WAVE16-4-DISPLAY-START token. Multiple lines:
++    //   - vbe_4F07 result
++    //   - crtc_pre values for 0x0C/0x0D/0x13/0x1A/0x1D
++    //   - chip_direct write log lines (when triggered)
++    //   - crtc_post values for verification
++    //
++    // Risks:
++    //   - Wrong register write → screen blanks or shows garbage. Hint is
++    //     OFF by default so this only fires when user opts in. First iter
++    //     IS the test.
++    //   - VBE 0x4F07 unsupported → AX != 0x004F triggers Approach 2.
++    //   - Read of unset CRTC index → set the index via outportb(0x3D4, ...)
++    //     BEFORE inportb(0x3D5). Done correctly here.
++    //   - 5434 extended index range is 0x18-0x1F per Cirrus 5434 datasheet;
++    //     0x1D is in-range. Other Cirrus variants (5428, 5429, 5446) may
++    //     locate display-start bit 18 differently — if the chip isn't a
++    //     5434, log the values but the user must verify the chip target.
++    //
++    // No fps movement expected — display-controller fix, not CPU/bandwidth.
++    // Visual win expected: bottom 35 scanlines render correctly + menu
++    // black-boxes around triangles resolve.
++    {
++        static int _ds_fix_enabled_cached = -1;
++        if (_ds_fix_enabled_cached == -1) {
++            const char *e = SDL_getenv("SDL_HINT_DOSKUTSU_DISPLAY_START_FIX");
++            _ds_fix_enabled_cached = (e && e[0] == '1' && e[1] == 0) ? 1 : 0;
++        }
++        if (_ds_fix_enabled_cached) {
++            // ---- Approach 1: VBE 0x4F07 SET (during retrace), CX:DX = 0,0
++            __dpmi_regs ds_regs;
++            SDL_zero(ds_regs);
++            ds_regs.x.ax = 0x4F07;
++            ds_regs.x.bx = 0x0080; // BL=0x80 SET DISPLAY START during vertical retrace
++            ds_regs.x.cx = 0;      // X = 0 (first pixel of scanline)
++            ds_regs.x.dx = 0;      // Y = 0 (first scanline of frame)
++            __dpmi_int(0x10, &ds_regs);
++            const bool a1_ok = ((ds_regs.x.ax & 0x00FF) == 0x004F);
++            DOSKUTSU_MODES_LOG("WAVE16-4-DISPLAY-START: vbe_4F07 bx=0x0080 cx=0 dx=0 "
++                               "ax=0x%04X %s",
++                               ds_regs.x.ax, a1_ok ? "ok" : "FAIL");
++
++            // ---- Read pre-state of all relevant CRTC registers
++            outportb(0x3D4, 0x0C); const Uint8 pre_0C = inportb(0x3D5);
++            outportb(0x3D4, 0x0D); const Uint8 pre_0D = inportb(0x3D5);
++            outportb(0x3D4, 0x13); const Uint8 pre_13 = inportb(0x3D5);
++            outportb(0x3D4, 0x1A); const Uint8 pre_1A = inportb(0x3D5);
++            outportb(0x3D4, 0x1D); const Uint8 pre_1D = inportb(0x3D5);
++            DOSKUTSU_MODES_LOG("WAVE16-4-DISPLAY-START: crtc_pre 0x0C=0x%02X 0x0D=0x%02X "
++                               "0x13=0x%02X 0x1A=0x%02X 0x1D=0x%02X",
++                               pre_0C, pre_0D, pre_13, pre_1A, pre_1D);
++
++            // ---- Approach 2 (display-start branch): only if Approach 1 failed
++            if (!a1_ok) {
++                outportb(0x3D4, 0x0C);
++                outportb(0x3D5, 0x00);                            // hi byte = 0
++                outportb(0x3D4, 0x0D);
++                outportb(0x3D5, 0x00);                            // lo byte = 0
++                // 0x1A bits 1-0 = display-start bits 16-17 on 5434.
++                // Read-modify-write so other bits in this register are preserved.
++                outportb(0x3D4, 0x1A);
++                const Uint8 read_1A = inportb(0x3D5);
++                const Uint8 new_1A = (Uint8)(read_1A & ~0x03);
++                outportb(0x3D5, new_1A);
++                DOSKUTSU_MODES_LOG("WAVE16-4-DISPLAY-START: chip_direct displayStart_zero "
++                                   "wrote 0x0C=0x00 0x0D=0x00 0x1A=0x%02X (was=0x%02X)",
++                                   new_1A, read_1A);
++            } else {
++                DOSKUTSU_MODES_LOG("WAVE16-4-DISPLAY-START: chip_direct displayStart_skipped "
++                                   "(VBE 0x4F07 succeeded, no need for chip-direct)");
++            }
++
++            // ---- Approach 2 (offset-register branch): unconditional check
++            // Pitch/8 for 320×240×8bpp = 320/8 = 0x28. If the chip's offset
++            // register doesn't match, the controller is reading the wrong
++            // stride and the scan will repeat / shift horizontally.
++            const Uint8 expected_offset = (Uint8)(modedata->pitch / 8);
++            if (pre_13 != expected_offset) {
++                outportb(0x3D4, 0x13);
++                outportb(0x3D5, expected_offset);
++                DOSKUTSU_MODES_LOG("WAVE16-4-DISPLAY-START: chip_direct offset_fix "
++                                   "wrote 0x13=0x%02X (was=0x%02X expected=pitch/8=0x%02X)",
++                                   expected_offset, pre_13, expected_offset);
++            } else {
++                DOSKUTSU_MODES_LOG("WAVE16-4-DISPLAY-START: chip_direct offset_ok "
++                                   "0x13=0x%02X matches expected=pitch/8=0x%02X",
++                                   pre_13, expected_offset);
++            }
++
++            // ---- Read post-state of all CRTC registers for verification
++            outportb(0x3D4, 0x0C); const Uint8 post_0C = inportb(0x3D5);
++            outportb(0x3D4, 0x0D); const Uint8 post_0D = inportb(0x3D5);
++            outportb(0x3D4, 0x13); const Uint8 post_13 = inportb(0x3D5);
++            outportb(0x3D4, 0x1A); const Uint8 post_1A = inportb(0x3D5);
++            outportb(0x3D4, 0x1D); const Uint8 post_1D = inportb(0x3D5);
++            DOSKUTSU_MODES_LOG("WAVE16-4-DISPLAY-START: crtc_post 0x0C=0x%02X 0x0D=0x%02X "
++                               "0x13=0x%02X 0x1A=0x%02X 0x1D=0x%02X",
++                               post_0C, post_0D, post_13, post_1A, post_1D);
++        }
++    }
++
+     if (SDL_GetMouse()->internal != NULL) { // internal != NULL) == int 33h services available.
+         regs.x.ax = 0x7;                    // set mouse min/max horizontal position.
+         regs.x.cx = 0;
+-- 
+2.47.3
+

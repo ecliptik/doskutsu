@@ -1,0 +1,299 @@
+From e9462ec67c1cf3ce7718137d0ea6e6ae820c9b74 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 27 Apr 2026 08:46:40 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=205=20patc?=
+ =?UTF-8?q?h=200018=20=E2=80=94=20query=20VBE=20display-start=20instead=20?=
+ =?UTF-8?q?of=20forcing=20it=20(Fix=20A=20v3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave-4 real-Cirrus capture (/tmp/cirrus4/SDLDBG.LOG line 38) showed
+the patch-0016 strategy is broken on Cirrus + UNIVBE 6.7:
+
+    display-start pinned to (0,0) via VBE 0x4F07: ax=0x004F
+
+VBE returns success per spec, but the display origin does not actually
+move. SET is a silent no-op on this BIOS. Result: writes to LFB offset
+0 land on a non-displayed page; the user sees the Loading splash stuck
+forever despite 100+ fast-path flushes per second hitting LFB.
+
+Wave-3 + wave-4 both stuck on Loading; wave-2 (page-flipping enabled,
+vram_ptr alternating between offset 0 and offset 0x25800 per flush)
+saw "Loading + occasional title flashes" — exactly what page 1 being
+the visible page would produce. Conclusion: on this Cirrus the BIOS
+puts display-start at offset 0x25800 (Y=240) on mode-set, and we
+cannot force it back.
+
+Patch 0016's stance was "force display-start to 0, then write to 0".
+v3's stance is "ask the BIOS what it actually committed to, then
+write there". After mode-set succeeds:
+
+  1. GET pre-set display-start (VBE 0x4F07 sub 1) — log it.
+  2. Try SET (0,0) — best effort, idempotent, harmless when no-op.
+  3. GET post-set — what the BIOS actually committed regardless of
+     what SET reported.
+
+The (Y * pitch + X * bytes_per_pixel) byte offset gets stored in a
+new SDL_VideoData::display_start_offset field.
+populate_fb_state_for_direct_fb (Path B helper from patch 0011) reads
+that field instead of hardcoding page_offset[0]. Now writes always
+hit the actually-displayed page, no matter what the BIOS does:
+
+  BIOSes where SET works (DOSBox-X, most desktops):
+    GET pre-set:  X=0 Y=0   (offset=0)
+    SET attempt:  ax=0x004F
+    GET post-set: X=0 Y=0   (offset=0)        -> identical to patch 0014/0016
+
+  BIOSes where SET is a silent no-op (Cirrus + UNIVBE):
+    GET pre-set:  X=0 Y=240 (offset=153600)
+    SET attempt:  ax=0x004F                     <- reports success but...
+    GET post-set: X=0 Y=240 (offset=153600)     <- ...nothing changed
+
+Pre-VBE-1.2 BIOSes that lack 0x4F07 entirely fall through with
+display_start_offset = 0 (its mode-set default), behaving exactly
+like the patch-0014 baseline — no regression for the BIOSes that
+were already working.
+
+Verified under DOSBox-X parity smoke (build/stage/SDLDBG.LOG):
+  display-start GET (pre-set):  X=0 Y=0 (offset=0) ax=0x004F
+  display-start SET attempt:    X=0 Y=0 ax=0x004F
+  display-start GET (post-set): X=0 Y=0 (offset=0) ax=0x004F
+
+Title scene renders full-window with no upper-left artifact and no
+Loading-screen stick — matches wave-2's lever0b-title.png baseline
+and patch-0016's DOSBox-X behaviour.
+
+Why DOS needs this
+------------------
+SDL3's DOS backend can no longer assume VBE 0x4F07 SET commits. On
+hardware where it doesn't, the only way to find the displayed origin
+is to ask the BIOS. The cost is two extra DPMI INT 10h calls per
+mode-set (negligible — mode-set already does at least one), in
+exchange for "writes always reach the visible page" on every BIOS.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c |  33 +++++---
+ src/video/dos/SDL_dosmodes.c       | 123 ++++++++++++++++++++---------
+ src/video/dos/SDL_dosvideo.h       |  13 +++
+ 3 files changed, 119 insertions(+), 50 deletions(-)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 2f4dfcb08..62a525f34 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -362,19 +362,26 @@ static bool populate_fb_state_for_direct_fb(SDL_VideoDevice *device,
+         // 2-15 fps target this is invisible. If a higher-fps mode wants
+         // proper double-buffering later, restore VBE PageSet plumbing
+         // then.
+-        fb_state.vram_ptr = (Uint8 *)DOS_PhysicalToLinear(data->mapping.address) + data->page_offset[0];
+-        // DOSKUTSU patch 0016: record the BIOS-reported LFB physical
+-        // address (e.g. 0x78000000 on the cirrus3 capture) instead of the
+-        // sentinel 0 patch 0014 left here. The fast-path guard at the
+-        // bottom of UpdateWindowFramebuffer accepts either vram_ptr OR
+-        // vram_phys as proof of "we have a destination", so the previous
+-        // value worked operationally — but the diagnostic line in
+-        // SDLDBG.LOG (DOSVESA-FB-INIT vram_phys=...) carried a misleading
+-        // 0x00000000, which made it look like the LFB mapping itself was
+-        // bad during the wave-3 visual-stuck investigation. Recording
+-        // the real LFB base makes the diag accurate without changing
+-        // runtime behaviour.
+-        fb_state.vram_phys = (Uint32)data->mapping.address + data->page_offset[0];
++        // DOSKUTSU patch 0018 (Phase 9 wave 5, Fix A v3): write to the
++        // BIOS's actual displayed origin instead of LFB offset 0. Patches
++        // 0014/0016 hardcoded `data->page_offset[0]` (= 0) under the
++        // assumption that "page 0" of the LFB is the displayed page; on
++        // real Cirrus + UNIVBE that assumption is wrong (display-start
++        // sits at offset 153600 = 0x25800 = scanline 240) AND VBE 0x4F07
++        // SET is a silent no-op so we cannot force it. SetDisplayMode
++        // now queries the post-SET origin via VBE 0x4F07 sub 1 and stores
++        // the byte offset in data->display_start_offset; we read that
++        // here so writes always hit the visible page.
++        //
++        // BIOSes where SET works (DOSBox-X parity):
++        //   data->display_start_offset == 0 -> identical to patch-0014 path.
++        // BIOSes where SET is a no-op (Cirrus + UNIVBE):
++        //   data->display_start_offset != 0 -> writes land on the visible page.
++        // Pre-VBE-1.2 BIOSes (no 0x4F07 at all):
++        //   data->display_start_offset stays 0 (SetDisplayMode default) ->
++        //   no regression vs patch 0014.
++        fb_state.vram_ptr = (Uint8 *)DOS_PhysicalToLinear(data->mapping.address) + data->display_start_offset;
++        fb_state.vram_phys = (Uint32)data->mapping.address + data->display_start_offset;
+         fb_state.use_dosmemput = false;
+         fb_state.banked_multibank = false;
+     } else {
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 72bb62f77..9a68dd3c9 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -892,53 +892,102 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+         data->page_offset[1] = 0;
+     }
+ 
+-    // DOSKUTSU patch 0016 (Phase 9 wave 4, fixes Fix A's broken assumption):
+-    // unconditionally pin the displayed page to LFB offset (0,0) for any
+-    // successful LFB mode-set. The original page-flip block above only
+-    // calls VBE 0x4F07 inside its true branch, so when patch 0014's
+-    // `prefer_lfb_no_flip` gate forces us into the `else` branch the BIOS
+-    // never receives a Set-Display-Start call and the displayed page
+-    // retains whatever scan-line offset the BIOS left it at on mode-set.
++    // DOSKUTSU patch 0018 (Phase 9 wave 5, Fix A v3 — supersedes patch
++    // 0016's "force display-start to (0,0) and trust SET succeeded"):
+     //
+-    // Wave-3 real-Cirrus capture (/tmp/cirrus3 SDLDBG.LOG): the engine
+-    // wrote into LFB offset 0 (page_offset[0]) at vram_ptr=0x77c00000 for
+-    // 160+ flips, but the user saw the boot Loading splash stuck and
+-    // never updated. Inference: Cirrus's BIOS left display-start pointing
+-    // at a different page after mode-set, so writes to "page 0" landed in
+-    // a non-displayed page. Wave-2 saw "Loading + flashes" on the same
+-    // hardware — that pattern matches page 1 being the displayed page and
+-    // the per-flush VBE 0x4F07 swap intermittently bringing page 0 into
+-    // view.
++    // Wave-4 real-Cirrus capture (/tmp/cirrus4/SDLDBG.LOG line 38): VBE
++    // 0x4F07 sub 0 with X=0,Y=0 returns ax=0x004F (success per spec) but
++    // the displayed image still doesn't update on Cirrus + UNIVBE — the
++    // user sees the boot Loading splash stuck while LFB writes hit a
++    // non-displayed page. The SET call is a silent no-op on this BIOS:
++    // it reports success but does not actually move the display origin.
+     //
+-    // The fix: after the BIOS mode-set succeeds, call VBE 0x4F07
+-    // subfunction 0 with X=0,Y=0 to FORCE display-start to LFB offset 0.
+-    // Now "page 0" IS the displayed page, regardless of what the BIOS
+-    // left behind. This is unconditional for LFB modes (use_lfb true)
+-    // and only logs a soft warning if the BIOS rejects the call — older
+-    // VBE 1.0 ROMs lacked function 0x4F07 but every VBE 1.2+ BIOS we'd
+-    // actually run on supports it.
++    // Wave-2 saw "Loading + occasional title flashes" with page-flipping
++    // enabled (the per-flush 0x4F07 swap occasionally brought page 0
++    // into view); wave-3 + wave-4 see solid "Loading" because we forced
++    // single-buffered writes to LFB offset 0 — but that offset isn't
++    // the visible scanline range. Conclusion: on this Cirrus the BIOS
++    // leaves display-start pointing somewhere ELSE on mode-set (likely
++    // a second page = offset 0x25800 = scanline 240), and SET is a no-op,
++    // so we cannot force it back.
+     //
+-    // Why it's safe to do twice when the page-flip branch above also
+-    // called it: VBE 0x4F07 with the same arguments is idempotent. The
+-    // duplication exists for the (unlikely) future case where someone
+-    // reverts patch 0014 and wants page-flipping back; the above branch
+-    // sets up page_offset[1] correctly and starts at page 0, this block
+-    // re-asserts (0,0) for the no-page-flip case.
++    // v3 strategy: stop fighting the BIOS. After mode-set:
++    //
++    //   1. GET the current display-start (sub 1) — log it.
++    //   2. Try to SET it to (0,0) — best effort, idempotent, harmless on
++    //      BIOSes where SET works (DOSBox-X parity).
++    //   3. GET it again — what the BIOS actually committed to, no matter
++    //      what SET reported. This is the offset we'll write to.
++    //
++    // The (Y * pitch + X * bpp) byte offset gets stored in
++    // data->display_start_offset. populate_fb_state_for_direct_fb (Path B
++    // helper) reads it instead of hardcoding page_offset[0]. Now writes
++    // land on the actually-displayed page even when SET is a no-op.
++    //
++    // BIOSes where SET works (DOSBox-X, most desktop VBEs):
++    //   GET pre-set:  X=0   Y=0     (offset=0)
++    //   SET attempt:  ax=0x004F
++    //   GET post-set: X=0   Y=0     (offset=0)         <- unchanged, fine
++    //
++    // BIOSes where SET is a silent no-op (Cirrus + UNIVBE 6.7):
++    //   GET pre-set:  X=0   Y=240   (offset=153600)
++    //   SET attempt:  ax=0x004F
++    //   GET post-set: X=0   Y=240   (offset=153600)    <- unchanged from pre-set
++    //
++    // Either way display_start_offset ends up correct.
++    data->display_start_offset = 0;
+     if (use_lfb) {
+         __dpmi_regs sds_regs;
++        const Uint32 bytes_per_pixel = (Uint32)((modedata->bpp + 7) / 8);
++
++        // (1) GET pre-SET display-start.
+         SDL_zero(sds_regs);
+         sds_regs.x.ax = 0x4F07;
+-        sds_regs.x.bx = 0x0000; // BH=0 set display start, BL=0 wait for retrace
++        sds_regs.x.bx = 0x0001; // BH=0 BL=1: GET display start
++        __dpmi_int(0x10, &sds_regs);
++        const bool pre_get_ok = ((sds_regs.x.ax & 0x00FF) == 0x004F);
++        const Uint32 pre_x = pre_get_ok ? (Uint32)sds_regs.x.cx : 0;
++        const Uint32 pre_y = pre_get_ok ? (Uint32)sds_regs.x.dx : 0;
++        const Uint32 pre_offset = pre_y * (Uint32)modedata->pitch + pre_x * bytes_per_pixel;
++        DOSKUTSU_MODES_LOG("display-start GET (pre-set): X=%lu Y=%lu (offset=%lu) ax=0x%04X%s",
++                           (unsigned long)pre_x, (unsigned long)pre_y,
++                           (unsigned long)pre_offset, sds_regs.x.ax,
++                           pre_get_ok ? "" : " -- GET unsupported, continuing");
++
++        // (2) SET (0,0) — best effort, harmless when it's a no-op.
++        SDL_zero(sds_regs);
++        sds_regs.x.ax = 0x4F07;
++        sds_regs.x.bx = 0x0000; // BH=0 BL=0: SET display start, wait for retrace
+         sds_regs.x.cx = 0;      // first pixel in scan line
+         sds_regs.x.dx = 0;      // first scan line
+         __dpmi_int(0x10, &sds_regs);
+-        if ((sds_regs.x.ax & 0x00FF) == 0x004F) {
+-            DOSKUTSU_MODES_LOG("display-start pinned to (0,0) via VBE 0x4F07: ax=0x%04X",
+-                               sds_regs.x.ax);
+-        } else {
+-            DOSKUTSU_MODES_LOG("display-start force FAILED (VBE 0x4F07 unsupported?): ax=0x%04X "
+-                               "-- continuing; visible page may be wrong",
+-                               sds_regs.x.ax);
++        DOSKUTSU_MODES_LOG("display-start SET attempt: X=0 Y=0 ax=0x%04X",
++                           sds_regs.x.ax);
++
++        // (3) GET post-SET — the actual committed offset.
++        SDL_zero(sds_regs);
++        sds_regs.x.ax = 0x4F07;
++        sds_regs.x.bx = 0x0001; // GET
++        __dpmi_int(0x10, &sds_regs);
++        const bool post_get_ok = ((sds_regs.x.ax & 0x00FF) == 0x004F);
++        const Uint32 post_x = post_get_ok ? (Uint32)sds_regs.x.cx : 0;
++        const Uint32 post_y = post_get_ok ? (Uint32)sds_regs.x.dx : 0;
++        const Uint32 post_offset = post_y * (Uint32)modedata->pitch + post_x * bytes_per_pixel;
++        DOSKUTSU_MODES_LOG("display-start GET (post-set): X=%lu Y=%lu (offset=%lu) ax=0x%04X%s",
++                           (unsigned long)post_x, (unsigned long)post_y,
++                           (unsigned long)post_offset, sds_regs.x.ax,
++                           post_get_ok ? "" : " -- GET unsupported, falling back to offset 0");
++
++        // Use the post-SET offset when GET succeeded; otherwise fall back
++        // to 0 (pre-VBE-1.2 BIOSes that lack 0x4F07 will hit this path
++        // and behave exactly like the patch-0014 baseline, no regression).
++        if (post_get_ok) {
++            data->display_start_offset = post_offset;
++            if (post_offset != 0) {
++                DOSKUTSU_MODES_LOG("display-start NO-OP detected: SET to (0,0) didn't move BIOS origin "
++                                   "-- adapting writes to offset=%lu",
++                                   (unsigned long)post_offset);
++            }
+         }
+     }
+ 
+diff --git a/src/video/dos/SDL_dosvideo.h b/src/video/dos/SDL_dosvideo.h
+index c5646e9d8..ad27e3018 100644
+--- a/src/video/dos/SDL_dosvideo.h
++++ b/src/video/dos/SDL_dosvideo.h
+@@ -74,6 +74,19 @@ struct SDL_VideoData
+     Uint32 page_offset[2];    // byte offset of each page within video memory
+     bool page_flip_available; // true if mode supports double-buffering
+     bool banked_mode;         // true if current mode uses banked (not LFB) access
++
++    // DOSKUTSU patch 0018 (Phase 9 wave 5, Fix A v3) — discovered display
++    // start offset. Patches 0014/0016's "force display-start to (0,0) and
++    // assume the displayed page is at LFB offset 0" approach silently
++    // breaks on real Cirrus + UNIVBE: VBE 0x4F07 sub 0 returns ax=0x004F
++    // (success) but does not actually move the display origin, so writes
++    // to LFB offset 0 land on a non-displayed page. v3 inverts the policy
++    // — query the BIOS post-mode-set for the true display-start position
++    // (VBE 0x4F07 sub 1) and write to wherever the BIOS is actually
++    // displaying from.
++    Uint32 display_start_offset; // byte offset (Y*pitch + X*bpp) of the
++                                 // displayed origin, queried via VBE 0x4F07
++                                 // sub 1. 0 if unknown / pre-LFB-set.
+ };
+ 
+ struct SDL_DisplayData
+-- 
+2.47.3
+

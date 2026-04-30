@@ -1,0 +1,167 @@
+From 11835e4057029d1296b4029c372e9a9e8a5b2b7b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 17:13:42 -0700
+Subject: [PATCH] [DOSKUTSU] dos: SDL_HINT_DOS_PREFER_LFB to flip the
+ LFB-vs-banked decision (lever 1 perf)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 1. Adds a new public hint SDL_HINT_DOS_PREFER_LFB that, when
+set to "1", flips the LFB-vs-banked decision in DOSVESA_SetDisplayMode so
+LFB wins over banked when the BIOS reports both available.
+
+Default behaviour stays exactly as before: prefer banked when usable,
+which is correct on the cards SDL3-DOS PR #15377 was developed against.
+
+The flip is required for ATI Mach64 / M64VBE on the g2k Pentium OverDrive
+reference machine where banked-mode VESA writes through the 0xA0000
+window are bandwidth-bound at ~500 KB/s effective and LFB through
+DPMI-mapped VRAM is 5-10× faster (docs/PHASE8-FINDINGS.md).
+
+Precedence
+----------
+
+When BOTH SDL_HINT_DOS_PREFER_LFB and SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER
+are set, PREFER_LFB wins at the use_lfb decision. The older hint is then
+treated as a fast-path opt-in only — for our DOSKUTSU build that's
+exactly right: ALLOW_DIRECT_FRAMEBUFFER stays "1" because patch 0032's
+side-effect is what makes the fb_state init populate correctly on the
+banked path; PREFER_LFB="1" overrides the policy choice on top.
+
+Patch 0011 will follow up with the lazy-fb_state-init fix that makes
+LFB actually engage in fb_state across mode-change boundaries — Phase 8
+attempt at this same hint failed because the surface-recreation
+lifecycle was missing the fb_state re-population step. The hint is
+no-op without 0011's fix; ship them together.
+
+Why DOS needs this
+------------------
+
+DOS-only hint to flip a DOS-backend-only policy. No effect on non-DOS
+builds.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream, sidestepping
+vendor/SDL/CLAUDE.md's no-AI-PRs restriction.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ include/SDL3/SDL_hints.h     | 35 +++++++++++++++++++++++++++++++++++
+ src/video/dos/SDL_dosmodes.c | 35 ++++++++++++++++++++++-------------
+ 2 files changed, 57 insertions(+), 13 deletions(-)
+
+diff --git a/include/SDL3/SDL_hints.h b/include/SDL3/SDL_hints.h
+index da0481360..486a0d3ab 100644
+--- a/include/SDL3/SDL_hints.h
++++ b/include/SDL3/SDL_hints.h
+@@ -741,6 +741,41 @@ extern "C" {
+  */
+ #define SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER "SDL_DOS_ALLOW_DIRECT_FRAMEBUFFER"
+ 
++/**
++ * A variable that requests Linear Framebuffer (LFB) over the banked VGA
++ * window when both are available on a DOS VBE mode.
++ *
++ * Default behaviour at the LFB-vs-banked decision in
++ * src/video/dos/SDL_dosmodes.c is: prefer banked when banked is usable,
++ * even if the BIOS reports LFB available. This is correct on cards
++ * where the banked window is faster than nearptr writes through DPMI-
++ * mapped LFB (some NVIDIA cards in older BIOSes; the SDL3-DOS PR
++ * #15377 author's empirical finding).
++ *
++ * On other cards (notably ATI Mach64 with M64VBE on the g2k Pentium
++ * OverDrive reference machine), banked-mode VESA writes are bandwidth-
++ * bound at ~500 KB/s effective, while LFB through DPMI-mapped VRAM is
++ * 5-10× faster. Setting this hint to "1" flips the policy so LFB wins
++ * the decision when available.
++ *
++ * The variable can be set to the following values:
++ *
++ * - "0": Use the existing logic (prefer banked when usable). (default)
++ * - "1": Prefer LFB when available. Banked is fallback.
++ *
++ * When BOTH this hint and SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER are set,
++ * SDL_HINT_DOS_PREFER_LFB takes precedence at the use_lfb decision —
++ * the older hint is interpreted as "fast-path opt-in" only.
++ *
++ * This hint must be set before the first call to SDL_GetWindowSurface()
++ * (or any function that triggers VBE mode-set, including SDL_CreateWindow
++ * with the SDL_WINDOW_FULLSCREEN flag).
++ *
++ * Added by patches/SDL/0010 (DOSKUTSU local patch, never upstreamed).
++ * See docs/PHASE9-15FPS-PLAN.md §3 Lever 1.
++ */
++#define SDL_HINT_DOS_PREFER_LFB "SDL_DOS_PREFER_LFB"
++
+ /**
+  * A variable that caps VESA mode enumeration on DOS to a maximum bits-per-
+  * pixel.
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index ce25712d1..732061960 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -682,22 +682,31 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+ 
+     // When the direct-FB hint is active, prefer banked mode. This needs
+     // to be set explicitly for some cards (Intel 740).
++    //
++    // DOSKUTSU patch 0010: SDL_HINT_DOS_PREFER_LFB inverts that policy —
++    // when set, LFB wins over banked even when banked is usable. Required
++    // for ATI Mach64 / M64VBE on the g2k Pentium OverDrive reference
++    // hardware where banked-mode VESA writes are bandwidth-bound and LFB
++    // is 5-10× faster (docs/PHASE8-FINDINGS.md). PREFER_LFB takes
++    // precedence over ALLOW_DIRECT_FRAMEBUFFER when both are set.
+     const bool is_banked_usable = modedata->win_a_segment &&
+                                   modedata->win_size > 0 &&
+                                   (modedata->win_a_attributes & VBE_WINATTR_USABLE) == VBE_WINATTR_USABLE;
+     const bool hint_allow_direct = SDL_GetHintBoolean(SDL_HINT_DOS_ALLOW_DIRECT_FRAMEBUFFER, false);
++    const bool hint_prefer_lfb = SDL_GetHintBoolean(SDL_HINT_DOS_PREFER_LFB, false);
+     const bool use_lfb = modedata->has_lfb &&
+-                         (!is_banked_usable || !hint_allow_direct);
+-
+-    // DOSKUTSU diagnostic (patch 0009): make the LFB-vs-banked decision
+-    // explicit so we can SEE *why* each mode-set chose what it chose.
+-    // hint_allow_direct=1 forces banked even when LFB is available — this
+-    // is the policy lever patch 0010 will invert. lfb_available comes
+-    // straight from BIOS-reported mode attrs.
+-    DOSKUTSU_MODES_LOG("LFB-decision #%d: hint_allow_direct=%d lfb_available=%d "
+-                       "is_banked_usable=%d -> use_lfb=%d",
+-                       ms_calls, (int)hint_allow_direct, (int)modedata->has_lfb,
+-                       (int)is_banked_usable, (int)use_lfb);
++                         (hint_prefer_lfb ||
++                          !is_banked_usable ||
++                          !hint_allow_direct);
++
++    // DOSKUTSU diagnostic (patch 0009 + 0010): make the LFB-vs-banked
++    // decision explicit so we can SEE *why* each mode-set chose what it
++    // chose. hint_allow_direct=1 historically forced banked; patch 0010
++    // adds hint_prefer_lfb which now wins over hint_allow_direct.
++    DOSKUTSU_MODES_LOG("LFB-decision #%d: hint_allow_direct=%d hint_prefer_lfb=%d "
++                       "lfb_available=%d is_banked_usable=%d -> use_lfb=%d",
++                       ms_calls, (int)hint_allow_direct, (int)hint_prefer_lfb,
++                       (int)modedata->has_lfb, (int)is_banked_usable, (int)use_lfb);
+ 
+     regs.x.ax = 0x4F02;
+     regs.x.bx = modedata->mode_id | (use_lfb ? VBE_SETMODE_LFB : 0);
+@@ -718,7 +727,7 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+     DOSKUTSU_MODES_LOG("DOSVESA-MODESET: id=0x%04X %dx%d %dbpp pitch=%d attr=0x%04X memmodel=%d "
+                        "has_lfb=%d use_lfb=%d banked=%d "
+                        "lfb_addr=0x%08lX win_seg=0x%04X win_size=%uKB win_gran=%uKB win_attr=0x%02X "
+-                       "win_func=0x%08lX hint_direct_fb=%d",
++                       "win_func=0x%08lX hint_direct_fb=%d hint_prefer_lfb=%d",
+                        modedata->mode_id, modedata->w, modedata->h, modedata->bpp, modedata->pitch,
+                        modedata->attributes, modedata->memory_model,
+                        (int)modedata->has_lfb, (int)use_lfb, (int)data->banked_mode,
+@@ -726,7 +735,7 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+                        modedata->win_a_segment, (unsigned)modedata->win_size,
+                        (unsigned)modedata->win_granularity, modedata->win_a_attributes,
+                        (unsigned long)modedata->win_func_ptr,
+-                       (int)hint_allow_direct);
++                       (int)hint_allow_direct, (int)hint_prefer_lfb);
+ 
+     if (use_lfb) {
+         data->mapping.address = modedata->physical_base_addr;
+-- 
+2.47.3
+

@@ -1,0 +1,59 @@
+From 98bfa2cc3cbd4daddb07b485587b32e15cd88270 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 28 Apr 2026 10:25:02 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20Phase=209=20wave=2013.6=20p?=
+ =?UTF-8?q?atch=200022=20=E2=80=94=20bump=20RING=5FBUFFER=5FCHUNKS=204?=
+ =?UTF-8?q?=E2=86=9216?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 13.5 real-HW measurements (PODP 5V83) showed sample_frames > 512
+runs SLOWER per-flip, not faster, due to L1 D-cache pressure on the
+P54C (8 KB cache vs 8 KB+ chunk memcpy at 2048-frame chunks). The
+expected per-fill overhead was instead a per-byte cost.
+
+Keeping SDL3's default sample_frames=512 (= 2048 B chunks, fast per-fill)
+but bumping RING_BUFFER_CHUNKS from 4 → 16 to deepen the buffer from
+92 ms → 372 ms. This protects against audio underrun in slow scenes
+(cmod-heavy menus drop to ~2 fps = 500 ms between game-yields) without
+the per-flip overhead increase.
+
+Memory cost: 32 KB ring + 2 KB staging vs prior 8 KB ring + 2 KB
+staging — 24 KB extra, trivial against 48 MB XMS budget.
+
+Pairs with engine-side patch 0067 (revert wave 13.5's hint override
+since the SDL3 default is now the right choice).
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index c9c174a58..eb3e50b2c 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -87,7 +87,20 @@ static Uint8 ReadSoundBlasterDSP(void)
+ 
+ // Number of DMA half-buffers that fit in the ring. Must be a power of two.
+ // 4 chunks is ~45 ms at 44100 Hz, enough headroom for 22 fps frame times.
+-#define RING_BUFFER_CHUNKS 4
++/* DOSKUTSU patch (Phase 9 wave 13.6): bump from 4 to 16 chunks. With
++   SDL3's default sample_frames=512 (2048-byte chunks at 22050 stereo S16),
++   16 chunks = 32 KB = 372 ms of buffer. Wave 13.5 real-HW measurements
++   (PODP 5V83) showed bigger sample_frames is SLOWER per-flip (cache
++   pressure on the P54C's 8 KB L1 D-cache when chunk memcpy ≥ 8 KB), so
++   we keep small chunks for speed but use a deeper ring to avoid audio
++   underrun in slow scenes (cmod-heavy menus drop to ~2 fps = 500 ms
++   between game-yields → buffer needs ≥500 ms to never miss). 372 ms is
++   not enough for the worst-case 500 ms cmod-menu gap but covers the
++   common 10 fps title scene with margin and dramatically improves the
++   chop frequency vs the 92 ms of the original 4-chunk ring. Memory
++   cost: 32 KB ring + 2 KB staging vs 8 KB ring + 2 KB staging — 24 KB
++   extra, trivial against 48 MB XMS budget. */
++#define RING_BUFFER_CHUNKS 16
+ 
+ // All of the following statics are memory-locked, making them safe to access
+ // from the ISR without risking a page fault or DPMI re-entrance.
+-- 
+2.47.3
+

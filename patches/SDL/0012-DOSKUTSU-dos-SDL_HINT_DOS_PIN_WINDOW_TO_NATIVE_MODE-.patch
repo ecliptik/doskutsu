@@ -1,0 +1,217 @@
+From 41a8a9df43477e00511dbc425073ddc6ae1b9a6a Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 26 Apr 2026 17:43:49 -0700
+Subject: [PATCH] =?UTF-8?q?[DOSKUTSU]=20dos:=20SDL=5FHINT=5FDOS=5FPIN=5FWI?=
+ =?UTF-8?q?NDOW=5FTO=5FNATIVE=5FMODE=20=E2=80=94=20pin=20to=20first=20mode?=
+ =?UTF-8?q?=20(lever=200b)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 9 lever 0b. Wave 2 DOSBox-X smoke after lever 1 (patches 0009-0011
++ nx 0045) showed a visible-rendering regression: title scene painted only
+into a 320×240 box in the upper-left of a 640×480 framebuffer, leaving the
+rest as garbage. SDLDBG.LOG sequence (build/stage/SDLDBG.LOG):
+
+  mode-set #1 (entry): requested id=0x0136 320x240 16bpp (prev id=0xFFFFFFFF)
+  mode-set #1 (exit ok)
+  mode-set #2 (no-op): mode_id matches current, returning true
+  [lifecycle] CreateWindowFramebuffer #1 (exit fast): vram_w=320 vram_h=240
+  [lifecycle] GetWindowSurface: new surface=6dcd30 (320x240)
+  mode-set #3 (entry): requested id=0x0111 640x480 16bpp (prev id=0x136)
+  mode-set #3 (exit ok)
+  [lifecycle] UpdateWindowFramebuffer: lazy-reinit ok=1 ... fb_size=614400
+                                       vram_w=640 vram_h=480
+
+So the SDL3-DOS backend correctly picked the closest match for the app's
+SDL_CreateWindow(320, 240, FULLSCREEN) at mode-set #1, the renderer was
+created against the 320×240 surface, and then SDL3 fired mode-set #3 to
+640×480 — which lever 1's lazy-fb_state-init helpfully extended fb_state
+to 640×480 dimensions, but the renderer still has its 320×240 backbuffer
+and writes only the upper-left corner into VRAM.
+
+Root cause
+----------
+
+SDL3's window/fullscreen reconciliation in SDL_video.c paths through
+SDL_UpdateFullscreenMode → SDL_GetWindowFullscreenMode →
+SDL_SetDisplayModeForDisplay. When SDL_GetWindowFullscreenMode finds no
+explicit mode set on the window AND the window has SDL_WINDOW_FULLSCREEN,
+it falls back to the display's desktop mode. DOSVESA_VideoInit hard-codes
+desktop_mode to whatever's closest to 640×480 (SDL_dosvideo.c:169) — even
+on a card with native 320×240 modes available. The fallback fires from
+ApplyWindowFlags → SDL_SetWindowFullscreen during SDL_FinishWindowCreation,
+which is what produces mode-set #3 in our trace.
+
+This is the SDL3 framework's documented behaviour, not a bug per se — but
+on the SDL3-DOS backend specifically, mode-set #3 is destructive: it
+changes VRAM dimensions out from under a renderer that has no event-loop
+integration to react to PIXEL_SIZE_CHANGED with a backbuffer rebuild.
+
+Fix
+---
+
+New hint SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE. When set, the SDL3-DOS
+backend's DOSVESA_SetDisplayMode rejects any subsequent mode-set request
+whose dimensions differ from the active mode (rather than going ahead and
+breaking the renderer's geometry). Suppression is by-dimension; the
+existing same-mode-id no-op early return handles the same-dimensions
+case. Suppressed calls return true (claiming success) so SDL3's window
+setup machinery keeps believing fullscreen worked — we just don't do the
+hardware mode change.
+
+The gate logs through doskutsu_dbg_log so the suppression appears in
+sdldbg.log alongside the mode-set traces from patches 0008/0009. Look
+for "mode-set #N (suppressed by PIN_WINDOW_TO_NATIVE_MODE hint)".
+
+Targets and non-targets
+-----------------------
+
+Designed for cards that natively expose the app's requested mode (e.g.
+Cirrus + UNIVBE has 320×240 at modes 0x01D9 / 0x01F8 / etc, per the
+gateway4 wave-1 UNIVBE capture). On Mach64 + M64VBE (no 320-wide modes
+because the Mach64-CT chip lacks line-doubling), mode-set #1 is ALREADY
+the 640×480 fallback, so this hint becomes a no-op — confirmed by the
+build/stage SDLDBG.LOG dump which shows mode-set #1 picking 0x0111 on
+the M64 path. No regression risk on the Mach64 target.
+
+A separate future patch will address the Mach64 stretch case (no native
+320×240 mode) — out of scope for lever 0b.
+
+Local-only patch per workspace policy (memory note "SDL upstream —
+local patches only"): never PR'd upstream, sidestepping
+vendor/SDL/CLAUDE.md's no-AI-PRs restriction. Documented in the new
+hint's doxygen block.
+
+Why DOS needs this
+------------------
+
+DOS-only fix in the DOS backend's mode-set chokepoint. No effect on
+non-DOS builds (the hint is a string never read by other backends).
+Layered on patches 0009 (mode-set lifecycle trace), 0010 (PREFER_LFB),
+and 0011 (lazy fb_state re-init); the trace from 0009 is what made
+mode-set #3 visible enough to write this fix against.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ include/SDL3/SDL_hints.h     | 52 ++++++++++++++++++++++++++++++++++++
+ src/video/dos/SDL_dosmodes.c | 40 +++++++++++++++++++++++++++
+ 2 files changed, 92 insertions(+)
+
+diff --git a/include/SDL3/SDL_hints.h b/include/SDL3/SDL_hints.h
+index 486a0d3ab..d1187e41a 100644
+--- a/include/SDL3/SDL_hints.h
++++ b/include/SDL3/SDL_hints.h
+@@ -805,6 +805,58 @@ extern "C" {
+  */
+ #define SDL_HINT_DOS_MAX_BPP "SDL_DOS_MAX_BPP"
+ 
++/**
++ * A variable that pins the DOS VBE mode to whatever was set first and
++ * suppresses any subsequent SDL3 internal mode-change request whose
++ * dimensions differ from the active mode.
++ *
++ * Background: SDL3's window/fullscreen/renderer reconciliation flow can
++ * fire multiple SDL_SetDisplayModeForDisplay calls during window setup —
++ * one for the dimensions the app passed to SDL_CreateWindow, then a
++ * second one to the display's "desktop mode" (which on the SDL3-DOS
++ * backend is hard-coded to 640×480 in DOSVESA_VideoInit). The second
++ * mode-set is always called WITH the app's renderer already configured
++ * for the FIRST mode's dimensions; the renderer's logical-presentation
++ * scaler does NOT re-evaluate after the mode-change, so it keeps blitting
++ * its old-dimension backbuffer into the upper-left of the new larger
++ * framebuffer. The visible result is "game renders only in a small box
++ * in the corner of the screen, surrounded by garbage".
++ *
++ * On hardware where the FIRST mode (the app-requested one) is what we
++ * actually want to keep — for example a Cirrus card via UNIVBE that
++ * exposes 320×240 modes natively, where a small 320×240 backbuffer is
++ * faster to flush than a 640×480 letterboxed render — this hint tells
++ * the SDL3-DOS backend to refuse the second mode-set.
++ *
++ * The variable can be set to the following values:
++ *
++ * - "0": Honour every mode-change request (default, original behaviour).
++ * - "1": After the first successful mode-set, suppress any subsequent
++ *        DOSVESA_SetDisplayMode call whose width or height differs from
++ *        the active mode. The call returns success without touching the
++ *        VBE state, the DPMI mapping, or fb_state. Same-dimension /
++ *        same-mode-id calls always pass through (handled by the existing
++ *        no-op-when-mode-id-matches early return).
++ *
++ * On hardware that has no mode matching the app-requested dimensions
++ * (e.g. ATI Mach64 + M64VBE which doesn't expose any 320×240 modes
++ * because the Mach64-CT chip lacks line-doubling circuitry), the FIRST
++ * mode-set will already have been the 640×480 fallback chosen by
++ * SDL_GetClosestFullscreenDisplayMode, and the second mode-set is a
++ * no-op anyway — so this hint is harmless on those targets.
++ *
++ * This hint must be set before the first call to SDL_CreateWindow (or
++ * any function that triggers VBE mode-set). Reading the hint each time
++ * SetDisplayMode runs is cheap; we do not cache it.
++ *
++ * Added by patches/SDL/0012 (DOSKUTSU local patch, never upstreamed).
++ * See docs/PHASE9-15FPS-PLAN.md §3 Lever 0b for the discovery context
++ * (Cirrus + UNIVBE smoke 2026-04-26 showing the upper-left rendering
++ * bug after Lever 1's lazy-fb_state-init started honouring 640×480
++ * mode-set #3).
++ */
++#define SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE "SDL_DOS_PIN_WINDOW_TO_NATIVE_MODE"
++
+ /**
+  * Set the level of checking for invalid parameters passed to SDL functions.
+  *
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 732061960..8cdbf34bc 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -630,6 +630,46 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+         return true;
+     }
+ 
++    // DOSKUTSU patch 0012 — Phase 9 lever 0b (Cirrus + UNIVBE pin):
++    // SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE suppresses any subsequent
++    // mode-change request whose dimensions differ from the active mode.
++    // Suppression is by-dimension, not by-mode-id, so a same-dimension
++    // alternative-id mode (e.g. a 320×240 mode at a different bpp the
++    // display hash maps to) would still be rejected — that's intentional:
++    // changing pitch/bpp under a live renderer is the same kind of
++    // upper-left-rendering breakage as changing dimensions outright.
++    //
++    // The above no-op-when-mode-id-matches early return handles the
++    // common "internal reconciliation calls SetDisplayMode with the same
++    // mode SDL just set" case without ever reaching here. This pin gate
++    // catches the OTHER case: SDL3 internal flow asks for the display's
++    // desktop mode (which DOSVESA_VideoInit hard-codes to 640×480) after
++    // the app's CreateWindow has already negotiated a smaller native mode.
++    //
++    // Why returning success rather than failing: SDL3 callers downstream
++    // assume mode-set either succeeded or the whole window is broken; a
++    // failure return propagates as "couldn't enter fullscreen" and breaks
++    // window setup. We want the FIRST mode to keep being the active one,
++    // so claiming success keeps the rest of the window/renderer setup
++    // happy without doing any actual hardware mode change.
++    //
++    // See docs/PHASE9-15FPS-PLAN.md §3 Lever 0b and the Cirrus + UNIVBE
++    // wave-2 capture (2026-04-26) showing the upper-left rendering bug
++    // after Lever 1's lazy-fb_state-init started honouring 640×480
++    // mode-set #3.
++    if (data->current_mode.internal &&
++        SDL_GetHintBoolean(SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE, false) &&
++        (data->current_mode.internal->w != modedata->w ||
++         data->current_mode.internal->h != modedata->h)) {
++        DOSKUTSU_MODES_LOG("mode-set #%d (suppressed by PIN_WINDOW_TO_NATIVE_MODE hint): "
++                           "requested %dx%d differs from active %dx%d (current id=0x%X) "
++                           "-> returning true without VBE mode-set",
++                           ms_calls, modedata->w, modedata->h,
++                           data->current_mode.internal->w, data->current_mode.internal->h,
++                           data->current_mode.internal->mode_id);
++        return true;
++    }
++
+     DOSVESA_InvalidateCachedFramebuffer();
+ 
+     if (data->mapping.size) {
+-- 
+2.47.3
+

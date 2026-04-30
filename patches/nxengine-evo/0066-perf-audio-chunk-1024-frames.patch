@@ -1,0 +1,72 @@
+From 7cccd30e134aec42d1d9cff72aaabcac4e29c35a Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 28 Apr 2026 09:59:00 -0700
+Subject: [PATCH] =?UTF-8?q?phase9:=20wave=2013.5=20=E2=80=94=20increase=20?=
+ =?UTF-8?q?audio=20chunk=20size=20to=201024=20frames=20(patch=200066)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave 13.4 left ~27 ms / flip in flip_inner attributable to the per-flip
+SDL_Delay(0) yield triggering the audio cooperative thread to refill the
+SB16 ring. Decomposition: at 22050 Hz stereo S16, SDL3's default
+sample_frames=512 → chunk=2048 B (~23 ms audio); ring (4 chunks)=92 ms
+buffer; with our wave 13.4 ~10 fps cadence the audio thread refills the
+entire ring (~4 chunks) per yield. Each chunk-fill iteration carries
+fixed overhead (mutex lock + AudioStream pull + ConvertAudio + push) —
+measured at ~6-7 ms per chunk on PODP 5V83 — so 4 fills = ~27 ms.
+
+Override sample_frames to 1024 → chunk=4096 B (~46 ms audio); ring=184
+ms buffer; per-yield refill drops to ~2 chunks → predicted ~13 ms /
+flip yield cost. Predicted inter_flip 95 ms → ~82 ms = 12 fps title.
+
+Trade-off: SFX latency grows 92 ms → 184 ms, still imperceptible for
+Cave Story's gameplay feel. Tunable via env:
+  SET SDL_AUDIO_DEVICE_SAMPLE_FRAMES=2048   (more aggressive)
+  SET SDL_AUDIO_DEVICE_SAMPLE_FRAMES=512    (revert to SDL3 default)
+
+SDL_HINT_NORMAL priority lets env-var override our default. Active
+value logged at startup so DEBUG.LOG records what was used.
+
+See docs/PHASE9-NEXT-WAVES-PLAN.md §6 wave 13.4 measurement decomposition.
+---
+ src/sound/SoundManager.cpp | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 075463a..d2d909e 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -34,6 +34,29 @@ bool SoundManager::init()
+ {
+   LOG_INFO("Sound system init");
+ 
++  // DOS-PORT (patch 0066, Phase 9 wave 13.5): increase the SDL3 audio
++  // chunk size from the default 512 frames to 1024 frames at our 22050 Hz
++  // sample rate. The audio thread does fixed-overhead work per chunk
++  // (mutex lock + AudioStream pull + ConvertAudio + push to ring),
++  // measured at ~6-7 ms per chunk on PODP 5V83. Default chunk = 23 ms of
++  // audio at 22050 stereo S16; with the 4-chunk ring buffer that's a
++  // 92 ms total buffer, and at our wave 13.4 ~10 fps cadence the audio
++  // thread refills the entire ring (~4 chunks) per per-flip yield,
++  // costing ~27 ms / flip. Doubling chunk size halves the per-yield
++  // refill count to ~2 chunks → predicted ~13 ms / flip yield cost.
++  // Trade-off: SFX latency grows from 92 ms → 184 ms (still fine for
++  // Cave Story's gameplay feel). Tunable via env var:
++  //   SET SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES=2048   (more aggressive)
++  //   SET SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES=512    (revert to SDL3 default)
++  // SDL_HINT_OVERRIDE priority lets the env var win over our default.
++  if (!SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES))
++  {
++    SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "1024",
++                            SDL_HINT_NORMAL);
++  }
++  LOG_INFO("Sound system: SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES={}",
++           SDL_GetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES));
++
+   // DOS-PORT: SDL3_mixer registers decoders at compile time (we built it
+   // with SDLMIXER_VORBIS_STB=ON for stb_vorbis OGG, SDLMIXER_WAVE=ON for
+   // WAV; everything else OFF). The SDL2-era Mix_Init(MIX_INIT_OGG) gate
+-- 
+2.47.3
+
