@@ -132,6 +132,7 @@ help:
 	@echo "  make smoke-fast                  run hello.exe in DOSBox-X (cycles=max)"
 	@echo "  make smoke                       run hello.exe in DOSBox-X (parity cycles)"
 	@echo "  make dpmi-lfn-smoke              Phase 8 prereq: DPMI LFN propagation probe"
+	@echo "  make probes                      Phase 9 wave 20 P0 probes (dacprog + hwlog)"
 	@echo
 	@echo "Deploy:"
 	@echo "  make dist                        dist/doskutsu-cf.zip (CF-ready bundle)"
@@ -514,6 +515,119 @@ $(SDL3_IMAGE_SMOKE_EXE): $(SDL3_IMAGE_SMOKE_SRC) $(SYSROOT)/lib/libSDL3_image.a 
 .PHONY: sdl3-image-smoke
 sdl3-image-smoke: $(SDL3_IMAGE_SMOKE_EXE)
 	tests/run-sdl3-image-smoke.sh
+
+# --- Phase 9 wave 20 standalone diagnostic probes ----------------------------
+#
+# Builds tests/probes/*.c — small, isolated DJGPP probes that characterize
+# real-HW behavior in ways the live binary's in-context instrumentation can't
+# reach. Each probe is a single .c file, pure DJGPP libc + chip-direct I/O,
+# NO SDL / NO engine dependency, NO DPMI assumptions beyond what `dosmemput`
+# and `__dpmi_int` need.
+#
+# Source + binaries are gitignored under /tests/probes/ (per
+# memory/never_commit_internal_plans.md — dev-only test scratch). The
+# `probes` target itself is the discoverability anchor.
+#
+# Per-probe DOSBox-X smoke is correctness-only — DOSBox-X is NOT a
+# perf proxy (see memory/dosbox_not_perf_proxy.md). Real numbers require
+# the CF-swap iter loop on g2k.
+#
+# 8.3 DOS filename rule: basename ≤ 8 chars, .ext ≤ 3 chars
+# (memory/dos_filename_8_3.md). All probe binaries pass.
+#
+# P0 (load-bearing for Lever C go/no-go + every future iter):
+#   DACPROG.EXE  — VGA DAC programming-cost ablation (FULL/PART64/SINGLE)
+#   HWLOG.EXE    — VBE info + CRTC + chip ID + PCI config-space dump
+#
+# P1 / P2 probes will land here when authored.
+
+PROBES_DIR     := $(BUILD_DIR)/probes
+PROBES_CFLAGS  := -march=i486 -mtune=pentium -O2 -Wall
+PROBES_MINSTK  := 512k
+
+PROBE_DACPROG_SRC := tests/probes/dacprog.c
+PROBE_DACPROG_EXE := $(PROBES_DIR)/dacprog.exe
+
+PROBE_HWLOG_SRC   := tests/probes/hwlog.c
+PROBE_HWLOG_EXE   := $(PROBES_DIR)/hwlog.exe
+
+# P1 — bandwidth/cost characterization (task #8)
+PROBE_DPMITHN_SRC := tests/probes/dpmithn.c
+PROBE_DPMITHN_EXE := $(PROBES_DIR)/dpmithn.exe
+
+PROBE_L1FILL_SRC  := tests/probes/l1fill.c
+PROBE_L1FILL_EXE  := $(PROBES_DIR)/l1fill.exe
+
+PROBE_PARTIAL_SRC := tests/probes/partial.c
+PROBE_PARTIAL_EXE := $(PROBES_DIR)/partial.exe
+
+# P3 — diagnostic probes for the 13.5 ms flip() body baseline (task #12).
+# YIELD.EXE links libSDL3 because SDL_Delay / SDL_PumpEvents are SDL3 entry
+# points. CFFSYNC + IRQRATE remain pure-DJGPP.
+PROBE_YIELD_SRC   := tests/probes/yield.c
+PROBE_YIELD_EXE   := $(PROBES_DIR)/yield.exe
+
+PROBE_CFFSYNC_SRC := tests/probes/cffsync.c
+PROBE_CFFSYNC_EXE := $(PROBES_DIR)/cffsync.exe
+
+PROBE_IRQRATE_SRC := tests/probes/irqrate.c
+PROBE_IRQRATE_EXE := $(PROBES_DIR)/irqrate.exe
+
+# Generic build rule for any probe .c with no library deps (P0/P1/P3-pure).
+$(PROBES_DIR)/%.exe: tests/probes/%.c | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# Explicit rule for SDL3-linked probes — overrides the pattern rule above
+# because Make picks the more-specific dep + recipe when both match.
+PROBES_SDL_CFLAGS := $(PROBES_CFLAGS) -I$(SYSROOT)/include
+PROBES_SDL_LDLIBS := -L$(SYSROOT)/lib -lSDL3 -lm
+PROBES_SDL_MINSTK := 2048k
+
+$(PROBE_YIELD_EXE): $(PROBE_YIELD_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate probes probes-p0 probes-p1 probes-p3
+dacprog: $(PROBE_DACPROG_EXE)
+	@echo "Built $(PROBE_DACPROG_EXE) — ship via real-HW iter (DOSBox-X is correctness-only)."
+
+hwlog: $(PROBE_HWLOG_EXE)
+	@echo "Built $(PROBE_HWLOG_EXE) — ship via real-HW iter (DOSBox-X PCI/VBE values differ from real HW)."
+
+dpmithn: $(PROBE_DPMITHN_EXE)
+	@echo "Built $(PROBE_DPMITHN_EXE)"
+
+l1fill: $(PROBE_L1FILL_EXE)
+	@echo "Built $(PROBE_L1FILL_EXE)"
+
+partial: $(PROBE_PARTIAL_EXE)
+	@echo "Built $(PROBE_PARTIAL_EXE)"
+
+yield: $(PROBE_YIELD_EXE)
+	@echo "Built $(PROBE_YIELD_EXE) — SDL3-linked; ship via real-HW iter."
+
+cffsync: $(PROBE_CFFSYNC_EXE)
+	@echo "Built $(PROBE_CFFSYNC_EXE)"
+
+irqrate: $(PROBE_IRQRATE_EXE)
+	@echo "Built $(PROBE_IRQRATE_EXE)"
+
+probes-p0: $(PROBE_DACPROG_EXE) $(PROBE_HWLOG_EXE)
+	@echo "Built P0 probe set: dacprog.exe + hwlog.exe"
+
+probes-p1: $(PROBE_DPMITHN_EXE) $(PROBE_L1FILL_EXE) $(PROBE_PARTIAL_EXE)
+	@echo "Built P1 probe set: dpmithn.exe + l1fill.exe + partial.exe"
+
+probes-p3: $(PROBE_YIELD_EXE) $(PROBE_CFFSYNC_EXE) $(PROBE_IRQRATE_EXE)
+	@echo "Built P3 probe set: yield.exe + cffsync.exe + irqrate.exe"
+
+probes: probes-p0 probes-p1 probes-p3
+	@echo "Built ALL P0+P1+P3 probes."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
+	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG"
 
 # --- Distribution -------------------------------------------------------------
 #

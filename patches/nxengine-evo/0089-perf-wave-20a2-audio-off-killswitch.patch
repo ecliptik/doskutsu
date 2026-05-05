@@ -1,0 +1,158 @@
+From 69df5e142c5f7ff29e01cc7b83a38c4b09b445be Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Thu, 30 Apr 2026 14:25:32 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2020=20W20A2=20patch=200089=20?=
+ =?UTF-8?q?=E2=80=94=20audio-off=20ablation=20killswitch?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0089, Phase 9 wave 20 iter W20A2). Adds
+SDL_HINT_DOSKUTSU_AUDIO_OFF=1 (strict-1 match per CLAUDE.md
+convention; default OFF) — when set, the engine init path:
+
+  1. Omits SDL_INIT_AUDIO from the SDL_Init flags (so the SDL3-DOS
+     audio backend never runs SB16 DSP probe → never hooks the IRQ-5
+     handler → never starts the audio mixer thread).
+  2. Skips SoundManager::init() (skips MIX_CreateMixerDevice +
+     Organya / Pixtone init).
+
+This is DEEPER than the pre-existing DOSKUTSU_NO_AUDIO=1 diagnostic
+(which only skipped SoundManager::init() but still inited the SDL
+audio subsystem and hooked the SB16 IRQ). For the W20A2 ablation
+hypothesis test, the deeper skip is required: we need the audio IRQ
+removed entirely from the timing equation.
+
+Hypothesis test (per docs/PHASE9-WAVE-20-COLD-PICKUP.md plan +
+memory/wave_20_misc_slice_in_flip_body.md): does flip_inner late-block
+growth correlate with audio IRQ wall-clock cost?
+
+Possible outcomes:
+  flip_inner stays ~18 ms early AND ~18 ms late (no growth)
+    → audio-IRQ wall-clock hypothesis CONFIRMED for late-block
+      degradation. The audio-off CEILING at 25.6 fps in early blocks
+      is a separate question (W20B answers that).
+  flip_inner stays ~18 ms early but climbs in late blocks
+    → audio is NOT the wall-clock culprit; something else correlates
+      with late-game state. Pivot to W20B without committing the
+      audio-IRQ rewrite.
+
+Either way, the early-block CEILING at 25.6 fps with audio_mix=0 is
+already a fixed observable from W20A — W20A2 only addresses the
+late-block GROWTH question.
+
+Implementation:
+  src/main.cpp ~line 500: read AUDIO_OFF env var into _audio_off bool;
+    when set, mask out SDL_INIT_AUDIO from _sdl_init_flags and emit a
+    LOG_INFO line so DEBUG.LOG self-describes the iter config.
+  src/main.cpp ~line 542: when _audio_off, skip SoundManager::init()
+    via a new branch that takes precedence over the existing
+    DOSKUTSU_NO_AUDIO branch (different scope; the two should not
+    stack but if both are set AUDIO_OFF wins).
+
+Shutdown safety: SoundManager::shutdown() (called unconditionally
+near program exit) is gated on `if (_mixer)` so calling it on an
+uninit'd SoundManager is a safe no-op. Organya / Pixtone shutdowns
+are similarly defensive. Verified by reading
+vendor/nxengine-evo/src/sound/SoundManager.cpp:190.
+
+W20A2 iter env stack (single PLAY, ~5 min wall time):
+  SET DOSKUTSU_LOG_TAG=W20A2
+  SET SDL_HINT_DOSKUTSU_FLIP_INSTR=1
+  SET SDL_HINT_DOSKUTSU_FORCE_LFB=1
+  SET SDL_HINT_DOSKUTSU_DIRECT_VESA=1
+  SET SDL_HINT_DOSKUTSU_AUDIO_OFF=1
+  DOSKUTSU.EXE
+
+LOG_TAG=W20A2 is 5 chars (within the 8.3 cap per
+memory/log_tag_8_3_limit.md).
+
+Documentation: docs/BOOT.md gains an SDL_HINT_DOSKUTSU_AUDIO_OFF=1
+entry under the Diagnostic / development section per
+memory/env_vars_document_in_user_docs.md.
+
+Test plan (subsequent task):
+  - DOSBox-X smoke (build-qa): with the env set, DEBUG.LOG should
+    show "SDL_HINT_DOSKUTSU_AUDIO_OFF=1 — skipping SDL_INIT_AUDIO ..."
+    and NO Mix_OpenAudio / SoundManager::init success log lines. With
+    env unset, behavior identical to wave-20 baseline.
+  - Real-HW iter W20A2 (realhw): bundle the new binary with
+    CWSDPMI.EXE + a PLAY1.BAT-W20A2 setting the full env stack above.
+
+Reference:
+  patches/nxengine-evo/0087-perf-wave-20-flip-instrumentation.patch
+    (provides flip-stat / flip-counters that W20A2 measures)
+  patches/nxengine-evo/0086-perf-wave-18-direct-vesa-hotpath.patch
+    (W20A2 stacks DIRECT_VESA=1 to match W20A's hot-path config)
+  memory/wave_20_misc_slice_in_flip_body.md
+  memory/log_tag_8_3_limit.md
+  memory/env_vars_document_in_user_docs.md
+  docs/PHASE9-WAVE-20-COLD-PICKUP.md
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 41 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 10c17dd..e4392b0 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -497,7 +497,32 @@ int main(int argc, char *argv[])
+ #endif
+ 
+   // SDL3: SDL_Init returns bool (true on success); old `< 0` check would always be false.
+-  if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO))
++  // DOS-PORT (patch 0089, Phase 9 wave 20 W20A2): audio-off ablation
++  // killswitch. Set SDL_HINT_DOSKUTSU_AUDIO_OFF=1 (strict-1 match) to
++  // omit SDL_INIT_AUDIO from the SDL_Init flags, AND skip
++  // SoundManager::init() below. This is DEEPER than the pre-existing
++  // DOSKUTSU_NO_AUDIO=1 (which only skipped SoundManager::init() but
++  // still inited the SDL audio subsystem and hooked the SB16 IRQ).
++  // Hypothesis test: does flip_inner late-block growth correlate with
++  // audio IRQ wall-clock, or with something else? AUDIO_OFF removes
++  // audio from the timing equation entirely so the W20A2 iter can
++  // confirm or refute the audio-IRQ hypothesis (per
++  // memory/wave_20_misc_slice_in_flip_body.md).
++  Uint32 _sdl_init_flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO;
++  bool _audio_off = false;
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_OFF");
++    _audio_off = e && e[0] == '1' && e[1] == 0;
++  }
++  if (_audio_off)
++  {
++    _sdl_init_flags &= ~SDL_INIT_AUDIO;
++    LOG_INFO("SDL_HINT_DOSKUTSU_AUDIO_OFF=1 — skipping SDL_INIT_AUDIO "
++             "(W20A2 audio-off ablation; SB16 IRQ never hooked, audio "
++             "subsystem not initialized; SoundManager::init() will also "
++             "be skipped below)");
++  }
++  if (!SDL_Init(_sdl_init_flags))
+   {
+     LOG_CRITICAL("ack, sdl_init failed: {}.", SDL_GetError());
+     return 1;
+@@ -539,7 +564,19 @@ int main(int argc, char *argv[])
+   // title screen with this set, audio init is confirmed as the wall and the
+   // SB DSP probe needs a real fix. Not for shipping — leaving this in place
+   // means no audio.
+-  if (std::getenv("DOSKUTSU_NO_AUDIO"))
++  // DOS-PORT (patch 0089, Phase 9 wave 20 W20A2): AUDIO_OFF check is
++  // OR'd with the pre-existing DOSKUTSU_NO_AUDIO so either env var
++  // skips SoundManager::init(). The two have different SDL-init
++  // semantics though — DOSKUTSU_NO_AUDIO leaves SDL_INIT_AUDIO active
++  // (and the SB16 IRQ hooked); SDL_HINT_DOSKUTSU_AUDIO_OFF removed
++  // SDL_INIT_AUDIO above. For W20A2's hypothesis test, the deeper
++  // AUDIO_OFF skip is required.
++  if (_audio_off)
++  {
++    LOG_INFO("SDL_HINT_DOSKUTSU_AUDIO_OFF=1 — bypassing SoundManager::init() "
++             "(deeper than DOSKUTSU_NO_AUDIO; SDL_INIT_AUDIO already omitted)");
++  }
++  else if (std::getenv("DOSKUTSU_NO_AUDIO"))
+   {
+     LOG_INFO("DOSKUTSU_NO_AUDIO set; bypassing SoundManager::init() for diagnostics");
+   }
+-- 
+2.47.3
+

@@ -1,0 +1,660 @@
+From 4e674e9fc324530955a1f6b96fdd80342285a312 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Thu, 30 Apr 2026 13:25:57 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2020=20patch=200087=20=E2=80=94=20e?=
+ =?UTF-8?q?ngine-side=20flip-phase=20instrumentation=20(Lever=20A)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0087, Phase 9 wave 20 Lever A). Per-phase timing
+brackets inside `Renderer::flip()` decompose the 16.7 ms wave-18
+measured per-flip flush into named buckets so wave-20 analysis can
+identify what dominates the unaccounted ~11.6 ms misc slice
+(per docs/PHASE9-WAVE-20-COLD-PICKUP.md § 1).
+
+Pairs with patches/SDL/0035 (sdl-engine deliverable) which
+instruments the SDL3-DOS flush primitives. Together: SDL/0035 names
+the slow-path / fast-path internals; nxengine/0087 names the
+engine-visible bucket each flip falls into. Cross-side correlation
+in the W20A iter readout identifies misc-slice attribution.
+
+Env gate: SDL_HINT_DOSKUTSU_FLIP_INSTR (strict "1" match per CLAUDE.md
+convention; default OFF). Cached once at init via static-const-bool
+so the optimizer can hoist the per-flip guard at -O2. When unset the
+patch adds:
+  - one branch-on-cached-bool per phase site (5 sites)
+  - one comparison in _direct_vesa_present (gen-bumps tap)
+  - the env-var read at first call (one getenv)
+  - sample-array storage (~4 KB static state, never written)
+Per the "default OFF means zero added cost" contract requirement.
+
+Phase brackets (inside flip()):
+  drain_ns        — SDL_FlushRenderer durations summed across both
+                    diff-path and dirty-path drain sites. Only one
+                    fires per flip (gated on _renderer_queue_dirty)
+                    but we sum defensively.
+  dirty_ns        — diff/bbox compute window; subtracts in-window
+                    drain time so drain + dirty are non-overlapping
+                    buckets.
+  present_ns      — duration of the actual flush call. One of three
+                    paths fires per flip:
+                      SDL_DOSVesaDirectPresentFull (DV path)
+                      SDL_UpdateWindowSurfaceRects (partial)
+                      SDL_RenderPresent             (full)
+                    Each branch bumps its path-mix counter.
+  housekeeping_ns — post-present SDL_GetWindowSurface + palette
+                    rebind. Sub-ms when DOSKUTSU_CACHE_WINSURF=1
+                    short-circuits.
+  total_ns        — reuses the existing _flip_inner_dt_ns measurement
+                    (SDL_GetTicksNS at flip entry → flip exit).
+                    Composed with the other 4 buckets for math:
+                    dirty + drain + present + housekeeping ≤ total
+                    (residual = engine-tick + audio + misc at outer
+                    flip granularity).
+
+Aggregation: every 100 flips, sort 100-element sample arrays once
+each (5 × ~700 std::sort comparisons = << 1 ms on PODP83), compute
+{min, median, mean, p95, max} in ms (two-decimal), emit 5
+[flip-stat ...] lines + 1 [flip-counters ...] line, reset.
+
+Output format (per flush-instr's contract; matches wave-19 DELTA-STAT
+shape so the W20A analysis can reuse parsing):
+
+  [flip-stat n=100 phase=drain        min=X.XX med=Y.YY mean=Z.ZZ p95=P.PP max=M.MM ms]
+  [flip-stat n=100 phase=dirty        min=X.XX med=Y.YY mean=Z.ZZ p95=P.PP max=M.MM ms]
+  [flip-stat n=100 phase=present      min=X.XX med=Y.YY mean=Z.ZZ p95=P.PP max=M.MM ms]
+  [flip-stat n=100 phase=housekeeping min=X.XX med=Y.YY mean=Z.ZZ p95=P.PP max=M.MM ms]
+  [flip-stat n=100 phase=total        min=X.XX med=Y.YY mean=Z.ZZ p95=P.PP max=M.MM ms]
+  [flip-counters present_path_direct_vesa=N present_path_render=N
+                 present_path_partial=N gen_bumps=N housekeeping_skipped=N]
+
+Path-mix counters disambiguate which present primitive fired. Per
+flush-instr's contract addendum, three of these likely show 100/0/0
+in the W20A direct-VESA-default config — that's the confirmation we
+need that present_ns is timing the DV path, not a fall-back.
+
+gen_bumps counts mid-run fb_state re-inits ONLY (excludes first-call
+init); steady-state should read 0/100. A non-zero value correlates
+with sdl-engine's `direct_vesa_lazy_reinit_calls` and signals a mode
+change / window re-create / similar event during the block.
+
+housekeeping_skipped counts DOSKUTSU_CACHE_WINSURF=1 ablation hits
+per flip. Helps interpret housekeeping_ns distribution: 100/100 means
+the cheap path; 0/100 means the expensive SDL_GetWindowSurface +
+palette rebind every flip.
+
+Output routes through nxengine LOG_INFO macro → patch 0036
+fsync-per-line → DEBUG.LOG (or W20A.LOG when DOSKUTSU_LOG_TAG=W20A
+per nxengine/0069). Mid-run grep works on both DOSBox-X and real HW
+per memory/sdl3_dos_quirks.md.
+
+docs/BOOT.md: env var documentation belongs to sdl-engine's SDL/0035
+patch (single canonical entry; this patch references the shared hint
+in its initVideo log line for grep-ability but doesn't double-write
+the docs entry per coordination with flush-instr).
+
+Test plan (subsequent task #3 / #4):
+  - DOSBox-X smoke (build-qa): visual A/B with FLIP_INSTR off + on;
+    LOG line greps for [flip-stat ... phase=...] and [flip-counters ...]
+    blocks. Must show 5 stat lines + 1 counter line per 100 flips when
+    enabled, zero added log lines when disabled.
+  - Real-HW iter W20A (realhw): single PLAY, FLIP_INSTR=1 +
+    FORCE_LFB=1 stack (DIRECT_VESA defaults ON post-0088). 3 min title
+    + 1 min cmod scene. Logback to /tmp/wave20A/W20A.LOG +
+    /tmp/wave20A/W20ASDL.LOG.
+  - Analysis (task #5): identify which phase dominates the misc slice
+    per phase9_misc_dominates.md framing; advance Lever C/D/E based
+    on dominant phase + counter signal.
+
+Reference:
+  patches/SDL/0035 (paired SDL-side flush instrumentation)
+  patches/nxengine-evo/0086-perf-wave-18-direct-vesa-hotpath.patch
+  patches/nxengine-evo/0036-djgpp-fsync-debug-log-per-line.patch
+  memory/phase9_misc_dominates.md
+  memory/perf_predictions_unreliable.md
+  docs/PHASE9-WAVE-20-COLD-PICKUP.md § 3 Lever A
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 389 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 381 insertions(+), 8 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 64754b2..ff7ebb4 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -102,6 +102,20 @@ inline bool _abl_direct_vesa()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): per-phase flip()
++// timing brackets opt-in. Strict "1" match, default OFF (instrumentation
++// has its own cost — 5 SDL_GetTicksNS calls per flip + per-100-flip
++// std::sort + 5 LOG_INFO emissions). Pairs with patches/SDL/0035 which
++// instruments the SDL3-DOS flush primitives. Together they decompose
++// the 16.7 ms wave-18 measured per-flip flush into named phases so we
++// can identify what dominates the unaccounted ~11.6 ms misc slice
++// (per docs/PHASE9-WAVE-20-COLD-PICKUP.md § 1).
++inline bool _abl_flip_instr()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_FLIP_INSTR");
++  return v;
++}
++
+ // drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
+ // Track which Surface objects produce NULL textures so we log each origin
+ // once + a periodic running count, instead of hundreds of identical lines
+@@ -683,6 +697,113 @@ Uint32 _direct_vesa_presents_block = 0;
+ Uint64 _direct_vesa_present_accum_ns_block = 0;
+ Uint32 _direct_vesa_present_failed_block = 0;
+ 
++// DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): per-phase flip()
++// timing samples + path-mix counters. Engaged only under
++// SDL_HINT_DOSKUTSU_FLIP_INSTR=1; default-OFF emits zero bytes / does
++// no work beyond the cached static-bool check.
++//
++// 100 raw uint64-ns samples per phase (~4 KB total static state). Each
++// flip() invocation adds one sample to each of {drain, dirty, present,
++// housekeeping, total}. _maybe_flush_phase_timing_audit fires every 100
++// flips, sorts a stack-local copy of each array, computes
++// {min, median, mean, p95, max} in ms (two-decimal), emits 5
++// `[flip-stat ...]` lines + 1 `[flip-counters ...]` line, then resets.
++//
++// The cadence (every 100 flips) aligns with _dc_tally_every_flips so
++// the existing audit-flush gate (_flip_total % _dc_tally_every_flips)
++// is the same trigger; our index always wraps cleanly at 100.
++//
++// Path-mix counters disambiguate which present primitive the engine
++// reached on each flip (per flush-instr's contract addendum):
++//   _present_path_dv_block      — SDL_DOSVesaDirectPresentFull
++//   _present_path_render_block  — SDL_RenderPresent (full-frame fallback)
++//   _present_path_partial_block — SDL_UpdateWindowSurfaceRects (dirty)
++//   _gen_bumps_block            — fb_state generation re-snapshot count
++//                                 (excludes first-call init; only
++//                                 mid-run re-inits — see
++//                                 Renderer::_direct_vesa_present)
++//   _housekeeping_skipped_block — DOSKUTSU_CACHE_WINSURF=1 ablation hits
++constexpr int _flip_phase_block_size = 100;
++Uint64 _flip_phase_samples_drain[_flip_phase_block_size]        = {};
++Uint64 _flip_phase_samples_dirty[_flip_phase_block_size]        = {};
++Uint64 _flip_phase_samples_present[_flip_phase_block_size]      = {};
++Uint64 _flip_phase_samples_housekeeping[_flip_phase_block_size] = {};
++Uint64 _flip_phase_samples_total[_flip_phase_block_size]        = {};
++int    _flip_phase_sample_idx = 0;
++Uint32 _present_path_dv_block        = 0;
++Uint32 _present_path_render_block    = 0;
++Uint32 _present_path_partial_block   = 0;
++Uint32 _gen_bumps_block              = 0;
++Uint32 _housekeeping_skipped_block   = 0;
++
++// DOS-PORT (patch 0087, Phase 9 wave 20 Lever A; contract extension
++// added per flush-instr DM 2026-04-30): per-helper brackets around the
++// SDL/0034 direct-VESA primitives that fire INSIDE _direct_vesa_present.
++// SDL/0035 shipped slow-path-only, so these engine-side brackets supply
++// the per-helper decomposition that fast-path bucketing would have.
++//
++//   program_palette  — SDL_DOSVesaDirectProgramPalette (palette DAC sync)
++//                      Fires only when master_palette->version drifts;
++//                      most flips this is a no-op (sample stays absent).
++//                      Sample compaction: store only ACTUAL firings;
++//                      block n = fires-this-block, may be < 100.
++//   get_generation   — SDL_DOSVesaDirectGetGeneration (cheap mode-change
++//                      probe). Fires once per _direct_vesa_present call,
++//                      i.e. once per flip while DV path engaged. Block n
++//                      tracks actual firings (= present_path_direct_vesa
++//                      in steady state).
++//
++// Both arrays sized at _flip_phase_block_size so they overflow-protect
++// the way the others do; in practice get_generation tops out at the DV
++// attempt count (≤ block size) and program_palette is even sparser.
++//
++// Skipped helpers per flush-instr's contract:
++//   - SDL_DOSVesaDirectGetState : only on gen bump → covered by gen_bumps
++//                                 counter; subsumed in housekeeping_ns.
++//   - SDL_DOSVesaDirectBankedFlush : engine doesn't call this directly.
++Uint64 _flip_phase_samples_program_palette[_flip_phase_block_size] = {};
++Uint64 _flip_phase_samples_get_generation[_flip_phase_block_size]  = {};
++int    _flip_phase_idx_pp = 0;
++int    _flip_phase_idx_gg = 0;
++
++// DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): summarize a sample
++// array. n must be ≤ _flip_phase_block_size; copy is on-stack so total
++// stack pressure is ~4 KB across the 5 phases × invocation site (one
++// site, in _maybe_flush_phase_timing_audit). std::sort is O(n log n)
++// for n=100 → ~700 comparisons → << 1 ms on PODP83. Output ms with
++// nanosecond → millisecond conversion as a double; libfmt {:.2f}
++// gives two-decimal output for the LOG line per the contract.
++//
++// p95 index = floor(n * 0.95). For n=100 that's index 95 (the 96th
++// element of the sorted array, 0-indexed) — i.e. the value at the 95th
++// percentile boundary. min/max are positions 0 and n-1; median is n/2
++// (50 for n=100, the 51st element). mean is a sum-divided-by-n.
++struct _FlipPhaseStats
++{
++  double min_ms;
++  double med_ms;
++  double mean_ms;
++  double p95_ms;
++  double max_ms;
++};
++
++inline void _compute_flip_phase_stats(const Uint64 *samples, int n,
++                                       _FlipPhaseStats &out)
++{
++  Uint64 buf[_flip_phase_block_size];
++  for (int i = 0; i < n; i++) buf[i] = samples[i];
++  std::sort(buf, buf + n);
++  Uint64 sum = 0;
++  for (int i = 0; i < n; i++) sum += buf[i];
++  const Uint64 mean_ns = (n > 0) ? (sum / (Uint64)n) : 0;
++  const int p95_idx = (n > 0) ? ((int)((double)n * 0.95)) : 0;
++  out.min_ms  = (double)buf[0] / 1000000.0;
++  out.med_ms  = (double)buf[n / 2] / 1000000.0;
++  out.mean_ms = (double)mean_ns / 1000000.0;
++  out.p95_ms  = (double)buf[p95_idx >= n ? n - 1 : p95_idx] / 1000000.0;
++  out.max_ms  = (double)buf[n - 1] / 1000000.0;
++}
++
+ // RAII helper — captures SDL_GetTicksNS at construction, accumulates
+ // elapsed ns to the file-scope counters at destruction. Place at top of
+ // each drawcall method to cover all return paths cleanly.
+@@ -851,6 +972,73 @@ void _maybe_flush_phase_timing_audit()
+            (unsigned long)doskutsu_kbd_first_irq_ticks,
+            (unsigned long)doskutsu_kbd_irq_install_ticks,
+            (unsigned long)doskutsu_kbd_irq_vector_at_install);
++  // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): emit per-phase flip
++  // statistics + path-mix counters when SDL_HINT_DOSKUTSU_FLIP_INSTR=1.
++  // Default OFF: skip the std::sort + 5 LOG_INFO emissions entirely.
++  // Sample arrays were filled by flip() at the cadence; here we
++  // summarize, emit, and reset. Format mirrors flush-instr's contract:
++  //   [flip-stat n=N phase=<name> min=X.XX med=Y.YY mean=Z.ZZ p95=P.PP max=M.MM ms]
++  //   [flip-counters present_path_direct_vesa=N ...]
++  // n echoes the sample-block size (always 100 in steady state; could
++  // be < 100 if the env var was flipped mid-run, but it's a static-
++  // const-bool so this never happens in practice).
++  if (_abl_flip_instr() && _flip_phase_sample_idx > 0)
++  {
++    const int n = _flip_phase_sample_idx;
++    const int n_pp = _flip_phase_idx_pp;
++    const int n_gg = _flip_phase_idx_gg;
++    _FlipPhaseStats st_drain, st_dirty, st_present, st_hk, st_total,
++                    st_pp, st_gg;
++    _compute_flip_phase_stats(_flip_phase_samples_drain,        n, st_drain);
++    _compute_flip_phase_stats(_flip_phase_samples_dirty,        n, st_dirty);
++    _compute_flip_phase_stats(_flip_phase_samples_present,      n, st_present);
++    _compute_flip_phase_stats(_flip_phase_samples_housekeeping, n, st_hk);
++    _compute_flip_phase_stats(_flip_phase_samples_total,        n, st_total);
++    // Order matches flush-instr's contract addendum: drain, dirty,
++    // present, program_palette, get_generation, housekeeping, total.
++    // program_palette and get_generation use their own n (firings, not
++    // total flips) per the contract — the reader infers fire frequency
++    // from `n=N` vs the other phases' `n=100`.
++    LOG_INFO("[flip-stat n={} phase=drain            min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n, st_drain.min_ms,   st_drain.med_ms,   st_drain.mean_ms,   st_drain.p95_ms,   st_drain.max_ms);
++    LOG_INFO("[flip-stat n={} phase=dirty            min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n, st_dirty.min_ms,   st_dirty.med_ms,   st_dirty.mean_ms,   st_dirty.p95_ms,   st_dirty.max_ms);
++    LOG_INFO("[flip-stat n={} phase=present          min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n, st_present.min_ms, st_present.med_ms, st_present.mean_ms, st_present.p95_ms, st_present.max_ms);
++    if (n_pp > 0)
++    {
++      _compute_flip_phase_stats(_flip_phase_samples_program_palette, n_pp, st_pp);
++      LOG_INFO("[flip-stat n={} phase=program_palette  min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_pp, st_pp.min_ms,    st_pp.med_ms,    st_pp.mean_ms,    st_pp.p95_ms,    st_pp.max_ms);
++    }
++    else
++    {
++      // Zero-fire block: still emit a placeholder so the per-block log
++      // grep is uniform-shape regardless of palette-stability flips.
++      LOG_INFO("[flip-stat n=0 phase=program_palette  min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    if (n_gg > 0)
++    {
++      _compute_flip_phase_stats(_flip_phase_samples_get_generation, n_gg, st_gg);
++      LOG_INFO("[flip-stat n={} phase=get_generation   min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_gg, st_gg.min_ms,    st_gg.med_ms,    st_gg.mean_ms,    st_gg.p95_ms,    st_gg.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[flip-stat n=0 phase=get_generation   min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    LOG_INFO("[flip-stat n={} phase=housekeeping     min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n, st_hk.min_ms,      st_hk.med_ms,      st_hk.mean_ms,      st_hk.p95_ms,      st_hk.max_ms);
++    LOG_INFO("[flip-stat n={} phase=total            min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n, st_total.min_ms,   st_total.med_ms,   st_total.mean_ms,   st_total.p95_ms,   st_total.max_ms);
++    LOG_INFO("[flip-counters present_path_direct_vesa={} present_path_render={} "
++             "present_path_partial={} gen_bumps={} housekeeping_skipped={}]",
++             (unsigned long)_present_path_dv_block,
++             (unsigned long)_present_path_render_block,
++             (unsigned long)_present_path_partial_block,
++             (unsigned long)_gen_bumps_block,
++             (unsigned long)_housekeeping_skipped_block);
++  }
+   _drawcall_accum_ns_block = 0;
+   _drawcall_count_block = 0;
+   _flip_inner_accum_ns_block = 0;
+@@ -859,6 +1047,20 @@ void _maybe_flush_phase_timing_audit()
+   _direct_vesa_presents_block = 0;
+   _direct_vesa_present_accum_ns_block = 0;
+   _direct_vesa_present_failed_block = 0;
++  // patch 0087 (wave 20 Lever A): reset per-phase sample buffers + path-
++  // mix counters. Sample contents are overwritten next flip; index reset
++  // to 0 lets the cadence repeat cleanly. Per-block counters: zero out.
++  _flip_phase_sample_idx = 0;
++  _present_path_dv_block        = 0;
++  _present_path_render_block    = 0;
++  _present_path_partial_block   = 0;
++  _gen_bumps_block              = 0;
++  _housekeeping_skipped_block   = 0;
++  // patch 0087 ext (wave 20 Lever A flush-instr DM): reset extension
++  // sample indexes for program_palette + get_generation per-helper
++  // brackets. Sample-array contents are overwritten on next firing.
++  _flip_phase_idx_pp = 0;
++  _flip_phase_idx_gg = 0;
+ }
+ 
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
+@@ -1187,6 +1389,22 @@ bool Renderer::initVideo()
+     LOG_INFO("Renderer::initVideo: direct-VESA hot path DISABLED "
+              "(default; set SDL_HINT_DOSKUTSU_DIRECT_VESA=1 to opt in)");
+   }
++  // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): record FLIP_INSTR
++  // state in DEBUG.LOG so each iter's configuration is greppable
++  // without cross-referencing the SDL trace.
++  if (_abl_flip_instr())
++  {
++    LOG_INFO("Renderer::initVideo: flip-phase instrumentation ENABLED via "
++             "SDL_HINT_DOSKUTSU_FLIP_INSTR=1 — per-100-flip [flip-stat] + "
++             "[flip-counters] blocks emitted; pairs with SDL/0035 for "
++             "wave-20 Lever A misc-slice decomposition");
++  }
++  else
++  {
++    LOG_INFO("Renderer::initVideo: flip-phase instrumentation DISABLED "
++             "(default; set SDL_HINT_DOSKUTSU_FLIP_INSTR=1 to opt in for "
++             "wave-20 Lever A diagnostic)");
++  }
+   // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
+   // PumpEvents yield-skip is active. Default ON (skip); env-var override
+   // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
+@@ -2002,9 +2220,29 @@ bool Renderer::_direct_vesa_present()
+   // SDL/0034 generation counter detects mode-set / lazy-reinit. Re-
+   // snapshot when bumped (or on the very first direct-vesa call —
+   // _direct_vesa_state.valid is false-initialized).
++  // patch 0087 ext (wave 20 Lever A flush-instr DM): bracket the
++  // generation-probe call. Sampled into the get_generation phase
++  // array; one sample per DV-attempt flip. Per-call cost is expected
++  // to be a single Uint32 read — sub-µs — but we want to confirm.
++  const bool _flip_instr_now = _abl_flip_instr();
++  const Uint64 _gg_t0 = _flip_instr_now ? SDL_GetTicksNS() : 0;
+   const Uint32 gen_now = SDL_DOSVesaDirectGetGeneration();
++  if (_flip_instr_now && _flip_phase_idx_gg < _flip_phase_block_size)
++  {
++    _flip_phase_samples_get_generation[_flip_phase_idx_gg++] =
++        SDL_GetTicksNS() - _gg_t0;
++  }
+   if (!_direct_vesa_state.valid || gen_now != _direct_vesa_generation)
+   {
++    // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): bump gen-bump
++    // counter for the per-100-flip phase audit ONLY on true mid-run
++    // re-inits (state was already valid + gen counter advanced). The
++    // first-call init (state.valid==false) is excluded — that's a one-
++    // time bootstrap, not a re-init signal. With this gating the
++    // counter reads 0/100 in steady state and >0 only when something
++    // re-initialized fb_state on the SDL side mid-run (which would
++    // correlate with sdl-engine's `direct_vesa_lazy_reinit_calls`).
++    const bool was_valid = _direct_vesa_state.valid;
+     if (!SDL_DOSVesaDirectGetState(&_direct_vesa_state))
+     {
+       // Fast path not engaged (hint not set, no usable VBE access path,
+@@ -2012,6 +2250,7 @@ bool Renderer::_direct_vesa_present()
+       _direct_vesa_state.valid = false;
+       return false;
+     }
++    if (was_valid) ++_gen_bumps_block;
+     _direct_vesa_generation = gen_now;
+     LOG_INFO("direct-vesa: snapshot @gen={} use_dosmemput={} banked_multibank={} "
+              "pitches_match={} vram_w={} vram_h={} vram_pitch={} bpp={} fb_size={} "
+@@ -2077,10 +2316,20 @@ bool Renderer::_direct_vesa_present()
+   // Sync VGA DAC if our master palette version drifted. Cheap (~25 us
+   // on PODP83 per SDL/0034 header) — only fires when a palette edit
+   // (cmod, fade, scene transition) bumped the version.
++  // patch 0087 ext (wave 20 Lever A flush-instr DM): bracket the
++  // ProgramPalette call. Sampled into program_palette phase array
++  // ONLY when actually fired (sample compaction; block n =
++  // fires-this-block, may be << 100 since palette syncs are rare).
+   if (_indexed_mode && _master_palette
+       && _master_palette->version != _direct_vesa_palette_version)
+   {
++    const Uint64 _pp_t0 = _flip_instr_now ? SDL_GetTicksNS() : 0;
+     SDL_DOSVesaDirectProgramPalette(_master_palette);
++    if (_flip_instr_now && _flip_phase_idx_pp < _flip_phase_block_size)
++    {
++      _flip_phase_samples_program_palette[_flip_phase_idx_pp++] =
++          SDL_GetTicksNS() - _pp_t0;
++    }
+     _direct_vesa_palette_version = _master_palette->version;
+   }
+ 
+@@ -2118,6 +2367,41 @@ void Renderer::flip()
+   // ns sample drives the per-100-flip phase-timing audit.
+   Uint64 _flip_inner_t0_ns = SDL_GetTicksNS();
+ 
++  // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): per-flip phase
++  // accumulators. Hot-path cost is exactly two SDL_GetTicksNS calls per
++  // bracketed phase + one Uint64 subtract / add — bounded and only
++  // engaged when the env var is set (cached static const bool, the
++  // optimizer can hoist the check out of the loop body at -O2).
++  //
++  //   _drain_ns          — sum of SDL_FlushRenderer durations this flip
++  //                        (covers BOTH the diff-path drain and the
++  //                        dirty-path drain; only one fires per flip
++  //                        because _renderer_queue_dirty resets between
++  //                        them, but we sum defensively).
++  //   _dirty_ns          — diff/bbox compute time (excluding the drain
++  //                        that may have run inside it; we subtract
++  //                        _dirty_drain_subtract_ns at close).
++  //   _present_ns        — duration of the actual flush call. One of:
++  //                        SDL_DOSVesaDirectPresentFull (DV path),
++  //                        SDL_UpdateWindowSurfaceRects (partial),
++  //                        SDL_RenderPresent (full). Each branch bumps
++  //                        the matching path-mix counter.
++  //   _hk_ns             — duration of the post-present housekeeping
++  //                        block (SDL_GetWindowSurface + palette
++  //                        rebind, OR a near-zero short-circuit when
++  //                        DOSKUTSU_CACHE_WINSURF=1 is active).
++  //
++  // _flip_instr_on is captured once here so the body of flip() can use
++  // it as a constexpr-equivalent guard. `static const bool` makes the
++  // result stable for the run; capturing into a local lets the compiler
++  // assume invariance across the function body.
++  const bool _flip_instr_on = _abl_flip_instr();
++  Uint64 _drain_ns = 0;
++  Uint64 _dirty_ns = 0;
++  Uint64 _dirty_drain_subtract_ns = 0;
++  Uint64 _present_ns = 0;
++  Uint64 _hk_ns = 0;
++
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): inter-flip wall clock.
+   // (this_flip_t0 - _last_flip_t0) measures the WHOLE-FRAME budget
+   // (logic + drawcalls + flip), not just the present cost. On real HW
+@@ -2146,6 +2430,13 @@ void Renderer::flip()
+   // for this frame. Otherwise the queued slow-path output wouldn't show
+   // up in `_cached_window_surface->pixels` at memcmp time and we'd
+   // miss-mark rows clean that actually contain new pixels.
++  // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): start of the dirty-
++  // compute phase window. Captures the diff (if engaged) + bbox-prep
++  // (computed below in the bbox block). We deduct `_dirty_drain_subtract_ns`
++  // at close so the drain duration (counted separately under _drain_ns)
++  // doesn't double-count.
++  const Uint64 _dirty_t0_ns = _flip_instr_on ? SDL_GetTicksNS() : 0;
++
+   bool _prev_diff_engaged = false;
+   if (!_doskutsu_prev_frame_diff_is_disabled(_prev_frame_diff_disabled) &&
+       _prev_frame_surface && _cached_window_surface &&
+@@ -2156,7 +2447,17 @@ void Renderer::flip()
+   {
+     if (_renderer_queue_dirty)
+     {
++      // patch 0087 (wave 20 Lever A): bracket the drain. dt feeds both
++      // _drain_ns (the drain phase total) AND _dirty_drain_subtract_ns
++      // (so the dirty phase's window doesn't include drain time).
++      const Uint64 _t = _flip_instr_on ? SDL_GetTicksNS() : 0;
+       SDL_FlushRenderer(_renderer);
++      if (_flip_instr_on)
++      {
++        const Uint64 _dt = SDL_GetTicksNS() - _t;
++        _drain_ns += _dt;
++        _dirty_drain_subtract_ns += _dt;
++      }
+       _renderer_queue_dirty = false;
+     }
+     SDL_Rect diff_rects[DIRTY_RECTS_MAX];
+@@ -2248,6 +2549,18 @@ void Renderer::flip()
+         denom ? ((bbox_pixels * 1000) / denom) : 0;
+   }
+ 
++  // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): close the dirty-
++  // compute phase window. Subtract any drain time that ran inside the
++  // window so drain and dirty are non-overlapping buckets.
++  if (_flip_instr_on)
++  {
++    const Uint64 _dirty_t1_ns = SDL_GetTicksNS();
++    const Uint64 _dirty_total = _dirty_t1_ns - _dirty_t0_ns;
++    _dirty_ns = (_dirty_total > _dirty_drain_subtract_ns)
++                  ? (_dirty_total - _dirty_drain_subtract_ns)
++                  : 0;
++  }
++
+   const bool first_n_force = (_dirty_first_n_frames_remaining > 0);
+   // DOS-PORT (patch 0084, Phase 9 wave 17.5): threshold check now uses
+   // bbox area against the 75% threshold (DIRTY_BBOX_THRESHOLD_PIXELS).
+@@ -2308,6 +2621,14 @@ void Renderer::flip()
+       ok = true;
+       ++_direct_vesa_presents_block;
+       _direct_vesa_present_accum_ns_block += _dv_dt;
++      // patch 0087 (wave 20 Lever A): fold the direct-VESA present cost
++      // into the present-phase bucket + bump the path-mix counter so the
++      // [flip-counters] line attributes this flip to the DV path.
++      if (_flip_instr_on)
++      {
++        _present_ns += _dv_dt;
++        ++_present_path_dv_block;
++      }
+     }
+     else
+     {
+@@ -2334,7 +2655,13 @@ void Renderer::flip()
+     // surface IS the window surface so this is the canonical flush.
+     if (_renderer_queue_dirty)
+     {
++      // patch 0087 (wave 20 Lever A): bracket the dirty-path drain.
++      // Sums into _drain_ns. NOT subtracted from _dirty_ns because
++      // this drain happens AFTER the dirty-compute window closed —
++      // it's part of present-prep, not dirty-compute.
++      const Uint64 _t = _flip_instr_on ? SDL_GetTicksNS() : 0;
+       SDL_FlushRenderer(_renderer);
++      if (_flip_instr_on) _drain_ns += SDL_GetTicksNS() - _t;
+       _renderer_queue_dirty = false;
+     }
+     // DOS-PORT (patch 0084, Phase 9 wave 17.5): pass &bbox, 1 — single
+@@ -2344,21 +2671,39 @@ void Renderer::flip()
+     // the same bytes-pushed as the prior &_dirty_rects.data(), N call
+     // would have. The win is in the diff-engaged case where N could
+     // have been 2-4 and we collapse to 1.
+-    if (bbox.w > 0 && bbox.h > 0)
++    // patch 0087 (wave 20 Lever A): bracket the actual flush call.
++    // Folds into _present_ns + bumps the partial path-mix counter.
+     {
+-      ok = SDL_UpdateWindowSurfaceRects(_window, &bbox, 1);
+-    }
+-    else
+-    {
+-      // Empty diff (screen unchanged) — call with 0 rects. SDL3-DOS
+-      // still runs palette / cursor plumbing without any dosmemput.
+-      ok = SDL_UpdateWindowSurfaceRects(_window, NULL, 0);
++      const Uint64 _t = _flip_instr_on ? SDL_GetTicksNS() : 0;
++      if (bbox.w > 0 && bbox.h > 0)
++      {
++        ok = SDL_UpdateWindowSurfaceRects(_window, &bbox, 1);
++      }
++      else
++      {
++        // Empty diff (screen unchanged) — call with 0 rects. SDL3-DOS
++        // still runs palette / cursor plumbing without any dosmemput.
++        ok = SDL_UpdateWindowSurfaceRects(_window, NULL, 0);
++      }
++      if (_flip_instr_on)
++      {
++        _present_ns += SDL_GetTicksNS() - _t;
++        ++_present_path_partial_block;
++      }
+     }
+     ++_dr_dirty_path_taken_block;
+   }
+   else
+   {
++    // patch 0087 (wave 20 Lever A): bracket SDL_RenderPresent. Folds
++    // into _present_ns + bumps the render path-mix counter.
++    const Uint64 _t = _flip_instr_on ? SDL_GetTicksNS() : 0;
+     ok = SDL_RenderPresent(_renderer);
++    if (_flip_instr_on)
++    {
++      _present_ns += SDL_GetTicksNS() - _t;
++      ++_present_path_render_block;
++    }
+     _renderer_queue_dirty = false;
+     // Consume the force-full and decrement the first-N-frames guard.
+     _force_full_refresh = false;
+@@ -2378,6 +2723,12 @@ void Renderer::flip()
+   // flip is the safe invalidation hook.
+   // patch 0063 ablation: gate on DOSKUTSU_CACHE_WINSURF (R3 hypothesis
+   // — re-query may be running fb_state populate inside SDL3-DOS).
++  // patch 0087 (wave 20 Lever A): bracket the housekeeping phase.
++  // _hk_ns is sub-ms when CACHE_WINSURF is on (just the if-check); else
++  // it includes SDL_GetWindowSurface + palette rebind. The counter
++  // _housekeeping_skipped_block rises 1/flip when CACHE_WINSURF=1 so
++  // the [flip-counters] line attributes the ablation engagement.
++  const Uint64 _hk_t0 = _flip_instr_on ? SDL_GetTicksNS() : 0;
+   if (!_abl_cache_winsurf())
+   {
+     _cached_window_surface = SDL_GetWindowSurface(_window);
+@@ -2386,6 +2737,11 @@ void Renderer::flip()
+     if (_indexed_mode && _cached_window_surface && _master_palette)
+       SDL_SetSurfacePalette(_cached_window_surface, _master_palette);
+   }
++  else if (_flip_instr_on)
++  {
++    ++_housekeeping_skipped_block;
++  }
++  if (_flip_instr_on) _hk_ns = SDL_GetTicksNS() - _hk_t0;
+ 
+   // DOS-PORT (patch 0082, Phase 9 wave 17.4): refresh prev-frame buffer
+   // for next flip's diff. Lazy-(re)alloc to match window dimensions/
+@@ -2482,6 +2838,23 @@ void Renderer::flip()
+     const Uint64 _flip_inner_dt_ns = SDL_GetTicksNS() - _flip_inner_t0_ns;
+     _flip_inner_accum_ns_block += _flip_inner_dt_ns;
+     _flip_inner_accum_ns_global += _flip_inner_dt_ns;
++    // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): record all five
++    // phase samples for this flip into the per-block sample arrays.
++    // Index wraps at _flip_phase_block_size (=100) but in steady state
++    // _maybe_flush_phase_timing_audit (called immediately below) resets
++    // it to 0 every 100 flips, so the modulo guard is defensive — never
++    // tripped if both fire at the same cadence (they share the
++    // _flip_total % 100 trigger).
++    if (_flip_instr_on
++        && _flip_phase_sample_idx < _flip_phase_block_size)
++    {
++      _flip_phase_samples_drain[_flip_phase_sample_idx]        = _drain_ns;
++      _flip_phase_samples_dirty[_flip_phase_sample_idx]        = _dirty_ns;
++      _flip_phase_samples_present[_flip_phase_sample_idx]      = _present_ns;
++      _flip_phase_samples_housekeeping[_flip_phase_sample_idx] = _hk_ns;
++      _flip_phase_samples_total[_flip_phase_sample_idx]        = _flip_inner_dt_ns;
++      ++_flip_phase_sample_idx;
++    }
+   }
+   _maybe_flush_phase_timing_audit();
+   // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-
+-- 
+2.47.3
+

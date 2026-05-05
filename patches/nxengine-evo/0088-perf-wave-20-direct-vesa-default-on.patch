@@ -1,0 +1,166 @@
+From 1b5417fe00d822bd5dcb4ee402f2b56359b0c924 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Thu, 30 Apr 2026 13:14:43 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2020=20patch=200088=20=E2=80=94=20d?=
+ =?UTF-8?q?irect-VESA=20hot=20path:=20default-OFF=20->=20default-ON?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0088, Phase 9 wave 20). Polarity flip of patch 0086.
+Wave 18 shipped DIRECT_VESA default-OFF as an experimental opt-in.
+Real-HW measurement (wave 18 W18A.LOG / W18B.LOG) confirmed:
+  - 100/100 attempted presents engaged the direct path, 0 failures
+  - +0.27 fps title on banked path
+  - +0.65 fps title on LFB path (FORCE_LFB=1 stack)
+  - No visual regressions in any tested scene (title / cmod / dialog)
+
+Per memory/wave_18_sdl_overhead_closed.md the SDL-layer dispatch cost
+hypothesis is closed at ~1.1 ms/flip — the direct path saves exactly
+that much. Small but free, and "free" matters when the wave-19
+display-contention hypothesis closed at 0 fps and the gap to the
+revised 30 fps KPI is 4.4 fps (per memory/main_kpi_framerate.md).
+
+Wave 20 promotes this from opt-in to DEFAULT-ON. The
+SDL_HINT_DOSKUTSU_DIRECT_VESA env var keeps its name but inverts its
+semantics:
+  - default (unset / empty / "1" / any non-"0"): direct-VESA ENGAGED
+  - "0" (literal): killswitch reverts to wave-17.6 baseline path
+    (SDL_RenderPresent + SDL_UpdateWindowSurface)
+
+This is the inverse of wave-16+ "strict 1-only enables" convention.
+The killswitch convention mirrors wave-17.6 patch 0085 (PREVFRAME_DIFF
+default-ON -> default-OFF after regression surfaced) — a single env
+var lets a user revert to bisect-able prior behaviour without a
+rebuild. Documented in docs/BOOT.md (re-categorized from "Diagnostic /
+development" to "Compatibility / fallback").
+
+Implementation is a 36-line diff in src/graphics/Renderer.cpp:
+  1. _abl_direct_vesa() helper body: changed from
+     `_strict_truthy_env("SDL_HINT_DOSKUTSU_DIRECT_VESA")` to inline
+     `!(e && e[0]=='0' && e[1]==0)` lambda. Strict killswitch — any
+     other value (including unset) keeps the path ON.
+  2. Renderer::initVideo log emission: ENABLED / DISABLED branches
+     swap their default messaging. The DISABLED branch now references
+     the killswitch instead of the opt-in.
+  3. No code changes in flip() — patch 0086's gate (_abl_direct_vesa()
+     && !first_n_force && !_force_full_refresh) reads the same way;
+     only the helper's polarity changed.
+
+What stays unchanged from 0086:
+  - First-N-frames force fallthrough (init backbuffer undefined)
+  - _force_full_refresh fallthrough (flushAll, scene reset)
+  - SDL/0034 generation counter R2 mitigation
+  - Phase-timing diagnostic block format ([direct-vesa: ...])
+  - DEBUG.LOG snapshot line on first eligible flip
+
+Risk: low. The path itself is identical to 0086's; only the gate's
+default flips. If a regression surfaces on a fingerprint we haven't
+tested (e.g. a Cirrus variant other than 5434, a non-Mach64 / non-
+Cirrus PCI VESA card), the user can SET SDL_HINT_DOSKUTSU_DIRECT_VESA=0
+and reboot to recover the wave-17.6 baseline. The wave-18 measurement
+already covered the two main g2k-machine-flavored configs (banked
+default + LFB-forced).
+
+Test plan (task #6 wave-20 W20B 2-PLAY ablation iter):
+  - PLAY1.BAT: default config (no env vars) — should reproduce wave-18
+    PLAY2 fps figure (+0.27 fps over wave-17.6 baseline on banked).
+  - PLAY2.BAT: SET SDL_HINT_DOSKUTSU_DIRECT_VESA=0 — should reproduce
+    wave-17.6 baseline fps (25.6 title) confirming killswitch reverts.
+  - Visual A/B between PLAY1 and PLAY2: both must render correctly.
+  - Phase-timing block grep: PLAY1 should show non-zero presents=N;
+    PLAY2 should show presents=0 with DIRECT_VESA=0 ablation flag.
+
+Reference:
+  patches/nxengine-evo/0086-perf-wave-18-direct-vesa-hotpath.patch
+  patches/nxengine-evo/0085-perf-wave-17-6-prev-frame-diff-default-off.patch
+    (precedent for default-OFF polarity flip via killswitch convention)
+  memory/wave_18_sdl_overhead_closed.md
+  memory/main_kpi_framerate.md
+  docs/PHASE9-WAVE-20-COLD-PICKUP.md § 3 Lever B
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 52 +++++++++++++++++++++++++++------------
+ 1 file changed, 36 insertions(+), 16 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 61c97c8..5d47d01 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -89,16 +89,33 @@ inline bool _abl_no_input_poll_env()
+   return v;
+ }
+ 
+-// DOS-PORT (patch 0086, Phase 9 wave 18): direct-VESA hot path opt-in.
+-// Strict "1" match per the wave-16+ default-OFF / strict-"1" convention
+-// (matches SDL_HINT_DOSKUTSU_FORCE_LFB / DISPLAY_START_FIX / LFB_SENTINEL /
+-// PREVFRAME_DIFF). Default OFF; experimental opt-in for the wave 18
+-// real-HW measurement iter. Predicted +2-5 fps title (per
+-// PHASE9-WAVE-17-18-PLAN § 4) — framed as a hypothesis to measure, not
+-// a goal to defend (per perf_predictions_unreliable.md).
++// DOS-PORT (patch 0086, Phase 9 wave 18; polarity flipped patch 0088,
++// wave 20): direct-VESA hot path. Wave 18 shipped this default-OFF as an
++// experimental opt-in. Wave-18 real-HW measurement (W18A.LOG / W18B.LOG)
++// confirmed the path engaged 100/100 attempted presents with 0 failures
++// AND delivered a small but consistent +0.27-0.65 fps title win
++// (banked / LFB respectively) over the wave-17.6 baseline of 25.6 fps.
++// Per memory/wave_18_sdl_overhead_closed.md the SDL-layer hypothesis is
++// closed at ~1.1 ms/flip dispatch — small but free. Wave 20 patch 0088
++// promotes the path to DEFAULT-ON with `SDL_HINT_DOSKUTSU_DIRECT_VESA=0`
++// as the killswitch. Mirror of wave-17.6's polarity flip (patch 0085)
++// where PREVFRAME_DIFF went default-ON->default-OFF after a regression
++// surfaced; the killswitch convention lets a single env var revert to
++// the bisect-able prior behaviour without a rebuild.
++//
++// Strict-match convention: only the literal string "0" disables. Any
++// other value (including unset, empty, "1", "yes", garbage) leaves the
++// hot path engaged. This is the inverse of the wave-16+ strict-"1"
++// convention used for opt-in flags — patch 0088 documents the pattern.
+ inline bool _abl_direct_vesa()
+ {
+-  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_DIRECT_VESA");
++  static const bool v = []() {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_DIRECT_VESA");
++    // killswitch: only literal "0" disables. Default ON; set =0 to revert
++    // to the wave-17.6-baseline SDL_RenderPresent / SDL_UpdateWindowSurface
++    // path if a regression surfaces on a fingerprint we haven't tested.
++    return !(e && e[0] == '0' && e[1] == 0);
++  }();
+   return v;
+ }
+ 
+@@ -1310,19 +1327,22 @@ bool Renderer::initVideo()
+            _abl_cache_winsurf() ? 1 : 0,
+            _abl_no_input_poll_env() ? 1 : 0,
+            _abl_direct_vesa() ? 1 : 0);
++  // patch 0088 (wave 20): polarity flipped. Default ON, killswitch =0.
+   if (_abl_direct_vesa())
+   {
+-    LOG_INFO("Renderer::initVideo: direct-VESA hot path ENABLED via "
+-             "SDL_HINT_DOSKUTSU_DIRECT_VESA=1 (experimental opt-in; "
+-             "default OFF since wave 18; bypasses SDL_RenderPresent / "
+-             "SDL_UpdateWindowSurface and writes via SDL/0034's "
+-             "PresentFull helper; R2 mitigation handled by SDL/0034 "
+-             "generation counter — no per-N-flip heartbeat needed)");
++    LOG_INFO("Renderer::initVideo: direct-VESA hot path ENABLED "
++             "(default since wave 20 patch 0088; bypasses "
++             "SDL_RenderPresent / SDL_UpdateWindowSurface and writes via "
++             "SDL/0034's PresentFull helper; R2 mitigation handled by "
++             "SDL/0034 generation counter — no per-N-flip heartbeat "
++             "needed; set SDL_HINT_DOSKUTSU_DIRECT_VESA=0 to revert)");
+   }
+   else
+   {
+-    LOG_INFO("Renderer::initVideo: direct-VESA hot path DISABLED "
+-             "(default; set SDL_HINT_DOSKUTSU_DIRECT_VESA=1 to opt in)");
++    LOG_INFO("Renderer::initVideo: direct-VESA hot path DISABLED via "
++             "SDL_HINT_DOSKUTSU_DIRECT_VESA=0 killswitch (reverts to "
++             "wave-17.6-baseline SDL_RenderPresent / "
++             "SDL_UpdateWindowSurface path)");
+   }
+   // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): record FLIP_INSTR
+   // state in DEBUG.LOG so each iter's configuration is greppable
+-- 
+2.47.3
+

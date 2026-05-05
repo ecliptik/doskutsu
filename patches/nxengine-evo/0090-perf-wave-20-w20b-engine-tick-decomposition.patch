@@ -1,0 +1,582 @@
+From 1a627bf9e27f23a80e30abf2076ec9f40eb927d9 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Thu, 30 Apr 2026 15:33:33 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2020=20W20B=20patch=200090=20?=
+ =?UTF-8?q?=E2=80=94=20engine-tick=20decomposition=20(Lever=20A=20finer)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0090, Phase 9 wave 20 W20B). Decomposes the engine_tick
+budget (17.8 ms audio-off / 21.1 ms audio-on per W20A2 + W20A
+measurements) into 4 named sub-buckets + 1 residual derived stat.
+
+Scope reduction: original W20B plan was flip()-body brackets
+(yield_call / flush_renderer_call / dirty_rects_clear /
+maybe_flush_audits) + engine_tick brackets. After W20C probe results
+(YIELD.EXE 0.515 µs flat, CFFSYNC.EXE explained the LOG-line tail
+cost, IRQRATE.EXE confirmed timer/keyboard IRQs ~18 Hz are
+negligible), all 4 flip()-body brackets dropped — they would have
+measured sub-ms work that doesn't compose to meaningful fps gains.
+The flip()-body draft (263+/1-) parked to
+tests/probes/wip-w20b-flip-body-brackets.diff (gitignored) for
+salvage if 50 fps stretch work surfaces a need for that decomposition.
+
+The engine_tick decomposition stays load-bearing because:
+  - The 17.8 ms audio-off engine_tick is where remaining audio-
+    independent time lives. Lever G (audio rate reduction) doesn't
+    address it; needs separate analysis.
+  - The 3.3 ms delta between audio-off and audio-on engine_tick is
+    audio-IRQ-in-Game::tick wall-clock cost. Useful cross-check
+    against Lever G's predicted savings.
+  - 50 fps stretch goal needs to identify which sub-bucket is the
+    largest fixed cost; this decomposition tells us.
+
+Implementation:
+
+1. **`SDL_HINT_DOSKUTSU_FINE_INSTR=1`** env helper (strict-1, default
+   OFF). Cached static-const-bool — -O2 hoists per-tick guards.
+   Originally introduced for the parked flip-body brackets; reused
+   here.
+
+2. **4 RAII timer structs** in
+   `vendor/nxengine-evo/src/Utils/diagnostic_timers.h`, mirroring
+   the existing `EngineTickTimer` pattern from patch 0062:
+   - `ClearScreenTimer` — wraps `Renderer::clearScreen(BLACK)` at
+     game.cpp:228.
+   - `TscInterpTimer` — wraps `tsc->RunScripts()` at game.cpp:238
+     (only fires on `!game.paused` branch; n=actual_count).
+   - `ModeTickTimer` — wraps `tickfunctions[].OnTick()` at game.cpp
+     line 233 (paused branch) AND line 247 (normal branch); one or
+     other always fires; n=100/100. THIS IS THE BIG ONE — captures
+     sprite update + AI + drawcall exec + room logic.
+   - `DebugOverlayTimer` — wraps `DrawDebug() + console.Draw()`
+     lumped at lines 250-251.
+
+   Each timer's destructor: read elapsed ns, write to per-tick dt
+   local (file-scope, used for residual computation), bounds-check
+   sample-array idx, push if room. All gated on
+   `engine_tick_fine_instr_active()` (free-function wrapper around
+   the anonymous-namespace `_abl_fine_instr()` helper).
+
+3. **Storage** (file-scope in Renderer.cpp's `NXE::Diag` namespace):
+   - 4 sample arrays + 4 idx counters (mirrors the W20A
+     `_flip_phase_samples_*` pattern at the engine-tick layer).
+   - 4 per-tick dt locals (reset at Game::tick entry; written by
+     each timer's destructor; consumed by residual computation).
+   - 1 residual sample array + idx.
+
+4. **Residual derived stat** computed at end of `Game::tick`:
+   ```
+   _residual = engine_tick_total_dt
+             - clear_screen_dt - tsc_interp_dt
+             - mode_tick_dt - debug_overlay_dt
+   ```
+   Signed math + clamp at 0. Reflects un-bracketed time inside
+   `Game::tick` body — `debug_clear`, the esc-pause check, branch
+   overhead, and any uncaught small calls. Self-validating: small
+   residual (<1 ms median) means brackets are exhaustive; large
+   residual means there's still an unbracketed chunk worth
+   investigating.
+
+5. **Audit-flush emission** in
+   `_maybe_flush_phase_timing_audit()`: 5 new
+   `[engine-tick-stat n=N phase=<NAME> min=X.XX med=Y.YY mean=Z.ZZ
+   p95=P.PP max=M.MM ms]` lines per 100-tick block when
+   FINE_INSTR=1. Distinct prefix `engine-tick-stat` (vs W20A's
+   `flip-stat` and parked W20B-flip-body's `flip-fine-stat`) so
+   grep tooling separates the three layers without ambiguity.
+   Empty-block placeholder lines emitted when n=0 (e.g.
+   tsc_interp on paused-only blocks) so per-block log shape is
+   uniform.
+
+6. **Same `_compute_flip_phase_stats` helper** reused (W20A's
+   sort/min/med/mean/p95/max/2-decimal infrastructure is
+   layer-agnostic).
+
+Skipped per flush-instr's earlier guidance:
+- `audio_mix_stage` separate bracket: SoundManager / Mix_HookMusic
+  fires off-thread (audio IRQ context); no clean call site in
+  Game::tick body. The audio-IRQ wall-clock cost shows up in the
+  delta between audio-on and audio-off engine_tick_total which W20A
+  + W20A2 already measure.
+- `drawcall_exec` separate from `mode_tick`: drawcalls happen
+  INSIDE per-mode `OnTick` handlers in modes/*.cpp; bracketing
+  them separately would require touching 10+ files. Per
+  flush-instr: collapse to mode_tick; let the residual catch
+  sub-decomposition for later if needed.
+- Fifth `debug_clear` bracket: tiny call (probably ns); leave in
+  residual to keep output bracket count at 4.
+
+Cross-namespace plumbing: `_abl_fine_instr()` is in
+`NXE::Graphics::(anonymous namespace)` (TU-local internal linkage).
+The RAII timer destructors in `diagnostic_timers.h` need to gate on
+the env. Solution: forward-declared free function
+`NXE::Diag::engine_tick_fine_instr_active()` at namespace scope, with
+a 1-line wrapper definition in Renderer.cpp after the anonymous
+namespace closes that calls `::NXE::Graphics::_abl_fine_instr()`.
+Anonymous-namespace symbols are accessible by their parent-namespace
+qualified name within the same TU per ISO C++.
+
+Hot-path cost when FINE_INSTR unset:
+- 4 RAII destructors per tick (each reads SDL_GetTicksNS at
+  construction unconditionally; gating happens at destruction).
+- Construction overhead: 4 SDL_GetTicksNS reads per tick
+  (~unavoidable; mirrors EngineTickTimer's existing pattern).
+- ~5 KB unused static state.
+- Residual computation: gated on engine_tick_fine_instr_active(),
+  so 0 cost when env unset.
+
+If construction-time SDL_GetTicksNS ever shows up as overhead in
+real-HW data, gate the constructors too (constructor only sets t0
+if active). Not done in this patch — keeps consistency with the
+existing EngineTickTimer pattern; can be optimized later.
+
+Test plan (subsequent task #3 / #4 / #5 equivalents for W20B iter):
+- DOSBox-X smoke (build-qa): 3 configs.
+  - A: env-unset baseline (no [flip-stat], no [engine-tick-stat]).
+  - B: SDL_HINT_DOSKUTSU_FLIP_INSTR=1 alone (W20A coarse only;
+       no engine-tick-stat lines).
+  - C: SDL_HINT_DOSKUTSU_FLIP_INSTR=1 + SDL_HINT_DOSKUTSU_FINE_INSTR=1
+       (W20A coarse + W20B engine-tick decomp; both layers emit).
+- Real-HW iter (realhw): single PLAY at config C; W20B LOG_TAG.
+- Analysis (flush-instr): identify which sub-bucket dominates the
+  17.8 ms audio-off engine_tick. Guides 50 fps stretch lever
+  selection.
+
+Documentation: docs/BOOT.md FINE_INSTR entry already exists from
+patch 0090's flip-body draft (now archived); engine-tick reuses
+the same env var so docs entry stays as-is. May need editorial
+pass to rewrite the FINE_INSTR description for engine-tick semantics
+but the env var name is unchanged.
+
+Reference:
+  patches/nxengine-evo/0087-perf-wave-20-flip-instrumentation.patch
+    (W20A coarse brackets — drain/dirty/present/housekeeping/total)
+  patches/nxengine-evo/0089-perf-wave-20a2-audio-off-killswitch.patch
+    (audio-off ablation that answered the 13.5 ms baseline question)
+  vendor/nxengine-evo/src/Utils/diagnostic_timers.h
+    (existing AudioMixerTimer + EngineTickTimer pattern that this
+     patch mirrors)
+  tests/probes/wip-w20b-flip-body-brackets.diff
+    (gitignored; archived flip-body draft for salvage)
+  docs/PHASE9-WAVE-20-FINDINGS.md § 9
+    (W20C probe results that drove scope reduction)
+  memory/wave_20_misc_slice_in_flip_body.md
+  memory/audio_mix_zero_is_not_audio_off.md
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h | 122 +++++++++++++++++++++++++++++
+ src/game.cpp                  |  68 ++++++++++++++--
+ src/graphics/Renderer.cpp     | 143 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 328 insertions(+), 5 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 992b7d5..12dc544 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -69,6 +69,128 @@ struct EngineTickTimer
+   }
+ };
+ 
++// DOS-PORT (patch 0090, Phase 9 wave 20 W20B engine-tick decomposition):
++// 4 sub-bracket RAII timers + residual derivation. Decomposes the
++// 17.8 ms (audio-off) / 21.1 ms (audio-on) engine_tick budget into
++// named sub-buckets so we can identify what work lives in there
++// independently of audio IRQ cost (the ~3.3 ms audio-IRQ-in-tick
++// component is captured by the audio-off vs audio-on delta on the
++// existing engine_tick_total measurement).
++//
++// Gated on the wave-20 W20B SDL_HINT_DOSKUTSU_FINE_INSTR=1 env var.
++// `engine_tick_fine_instr_active()` is a forward-declared accessor
++// (definition in Renderer.cpp where the env-helper cluster lives).
++// Cached static-const-bool semantics so -O2 hoists the per-tick guards.
++//
++// Sub-buckets (sibling, non-overlapping inside Game::tick scope):
++//   ClearScreenTimer   - Renderer::clearScreen(BLACK) at game.cpp:228
++//   TscInterpTimer     - tsc->RunScripts() at game.cpp:238 (only fires
++//                        when !game.paused; n=actual_count)
++//   ModeTickTimer      - tickfunctions[].OnTick() at game.cpp:233/247
++//                        (one-or-other branch always fires; n=100)
++//   DebugOverlayTimer  - DrawDebug() + console.Draw() lumped at
++//                        game.cpp:250-251
++//
++// Residual = engine_tick_total - sum(sub-buckets), clamped at 0,
++// computed at end-of-Game::tick by reading SDL_GetTicksNS() once more.
++// Self-validating: small residual (<1 ms median) means brackets are
++// exhaustive; large residual means there's still an unfound chunk in
++// Game::tick body (likely the small calls debug_clear / esc-pause check
++// / branch overhead, or — surprise — something we didn't anticipate).
++//
++// Storage: 4 sample arrays + idxes + per-tick dt locals + 1 residual
++// array + idx, all extern-declared here, defined in Renderer.cpp where
++// the per-100-flip audit-flush lives.
++//
++// Forward-declare the env helper. Definition lives in Renderer.cpp's
++// ablation-flag cluster (alongside _abl_flip_instr / _abl_fine_instr /
++// _abl_direct_vesa). Capturing as a free function lets this header
++// stay decoupled from the Renderer class.
++bool engine_tick_fine_instr_active();
++
++// Sample-array storage (extern; defined in Renderer.cpp). Sized at 100
++// to match the existing _flip_phase_block_size cadence.
++constexpr int g_eng_tick_block_size = 100;
++extern std::uint64_t g_eng_clear_screen_samples[g_eng_tick_block_size];
++extern std::uint64_t g_eng_tsc_interp_samples[g_eng_tick_block_size];
++extern std::uint64_t g_eng_mode_tick_samples[g_eng_tick_block_size];
++extern std::uint64_t g_eng_debug_overlay_samples[g_eng_tick_block_size];
++extern std::uint64_t g_eng_residual_samples[g_eng_tick_block_size];
++extern int g_eng_clear_screen_idx;
++extern int g_eng_tsc_interp_idx;
++extern int g_eng_mode_tick_idx;
++extern int g_eng_debug_overlay_idx;
++extern int g_eng_residual_idx;
++
++// Per-tick dt locals — written by each timer's destructor, consumed by
++// the residual computation at end-of-Game::tick. Reset by caller at
++// Game::tick entry (so leftover-from-prior-tick doesn't pollute).
++extern std::uint64_t g_eng_clear_screen_dt_this_tick;
++extern std::uint64_t g_eng_tsc_interp_dt_this_tick;
++extern std::uint64_t g_eng_mode_tick_dt_this_tick;
++extern std::uint64_t g_eng_debug_overlay_dt_this_tick;
++
++// Sub-bucket RAII timers. Destructor pattern: capture dt, write to
++// per-tick local, push to sample array (with bounds-check + env gate).
++// Cost when env unset: 1 SDL_GetTicksNS at construction (always) +
++// 1 at destruction + 1 branch-on-cached-bool. Mirrors existing
++// EngineTickTimer pattern; -O2 should fold the env-off path tightly.
++struct ClearScreenTimer
++{
++  std::uint64_t t0;
++  ClearScreenTimer() : t0(SDL_GetTicksNS()) {}
++  ~ClearScreenTimer()
++  {
++    if (!engine_tick_fine_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_eng_clear_screen_dt_this_tick = dt;
++    if (g_eng_clear_screen_idx < g_eng_tick_block_size)
++      g_eng_clear_screen_samples[g_eng_clear_screen_idx++] = dt;
++  }
++};
++
++struct TscInterpTimer
++{
++  std::uint64_t t0;
++  TscInterpTimer() : t0(SDL_GetTicksNS()) {}
++  ~TscInterpTimer()
++  {
++    if (!engine_tick_fine_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_eng_tsc_interp_dt_this_tick = dt;
++    if (g_eng_tsc_interp_idx < g_eng_tick_block_size)
++      g_eng_tsc_interp_samples[g_eng_tsc_interp_idx++] = dt;
++  }
++};
++
++struct ModeTickTimer
++{
++  std::uint64_t t0;
++  ModeTickTimer() : t0(SDL_GetTicksNS()) {}
++  ~ModeTickTimer()
++  {
++    if (!engine_tick_fine_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_eng_mode_tick_dt_this_tick = dt;
++    if (g_eng_mode_tick_idx < g_eng_tick_block_size)
++      g_eng_mode_tick_samples[g_eng_mode_tick_idx++] = dt;
++  }
++};
++
++struct DebugOverlayTimer
++{
++  std::uint64_t t0;
++  DebugOverlayTimer() : t0(SDL_GetTicksNS()) {}
++  ~DebugOverlayTimer()
++  {
++    if (!engine_tick_fine_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_eng_debug_overlay_dt_this_tick = dt;
++    if (g_eng_debug_overlay_idx < g_eng_tick_block_size)
++      g_eng_debug_overlay_samples[g_eng_debug_overlay_idx++] = dt;
++  }
++};
++
+ }  // namespace Diag
+ }  // namespace NXE
+ 
+diff --git a/src/game.cpp b/src/game.cpp
+index c53c0c2..8ac2a48 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -225,17 +225,48 @@ void Game::tick(void)
+   // costs in run_tick() (input poll, runFade) are NOT counted here;
+   // they fall into the "misc" remainder of the audio/engine split.
+   NXE::Diag::EngineTickTimer _ett;
+-  Renderer::getInstance()->clearScreen(BLACK);
++
++  // DOS-PORT (patch 0090, Phase 9 wave 20 W20B): engine-tick decomposition.
++  // 4 sub-bracket RAII timers + residual derivation. Each timer wraps one
++  // top-level call inside Game::tick body; the destructor (in
++  // diagnostic_timers.h) writes per-tick dt + pushes to the per-100-tick
++  // sample array (gated on SDL_HINT_DOSKUTSU_FINE_INSTR=1, default OFF).
++  // residual = Game::tick total - sum(sub-bucket dts), clamped at 0,
++  // computed at end of this function via SDL_GetTicksNS read.
++  //
++  // Reset per-tick dt locals before bracketing so leftover-from-prior-
++  // tick doesn't pollute the residual computation. Each timer destructor
++  // overwrites its bucket; if a bucket's call doesn't fire this tick
++  // (e.g. tsc_interp on paused branch), the local stays at 0 and the
++  // residual subtraction sees 0 for that bucket.
++  NXE::Diag::g_eng_clear_screen_dt_this_tick   = 0;
++  NXE::Diag::g_eng_tsc_interp_dt_this_tick     = 0;
++  NXE::Diag::g_eng_mode_tick_dt_this_tick      = 0;
++  NXE::Diag::g_eng_debug_overlay_dt_this_tick  = 0;
++  // Capture engine-tick start; used for residual computation at the
++  // very end of this function. Duplicates EngineTickTimer's t0 but
++  // EngineTickTimer's destructor fires at scope-exit — we need the
++  // value here to read once more BEFORE that destructor runs.
++  const Uint64 _engine_tick_t0 = SDL_GetTicksNS();
++
++  {
++    NXE::Diag::ClearScreenTimer _cst;
++    Renderer::getInstance()->clearScreen(BLACK);
++  }
+   debug_clear();
+ 
+   if (game.paused)
+   {
++    NXE::Diag::ModeTickTimer _mtt;
+     tickfunctions[game.paused].OnTick();
+   }
+   else
+   {
+     // run scripts
+-    tsc->RunScripts();
++    {
++      NXE::Diag::TscInterpTimer _tit;
++      tsc->RunScripts();
++    }
+ 
+     if (justpushed(ESCKEY)
+         && (game.mode == GM_NORMAL || game.mode == GM_INVENTORY || game.mode == GM_MAP_SYSTEM || game.mode == GM_ISLAND
+@@ -244,11 +275,38 @@ void Game::tick(void)
+       game.pause(GP_PAUSED);
+     }
+     // call the tick function for the current game mode
+-    tickfunctions[game.mode].OnTick();
++    {
++      NXE::Diag::ModeTickTimer _mtt;
++      tickfunctions[game.mode].OnTick();
++    }
+   }
+ 
+-  DrawDebug();
+-  console.Draw();
++  {
++    NXE::Diag::DebugOverlayTimer _dot;
++    DrawDebug();
++    console.Draw();
++  }
++
++  // patch 0090 (wave 20 W20B): compute engine-tick residual. Read total
++  // dt by sampling SDL_GetTicksNS once more here (cheap; same call site
++  // pattern as W20A's _flip_inner_dt_ns). Subtract per-tick dt locals
++  // populated by the 4 sub-bucket timers above. Residual reflects
++  // un-bracketed time inside Game::tick body — debug_clear, the
++  // esc-pause check, branch overhead, and any uncaught small calls.
++  // Signed math + clamp at 0 in case measurement noise produces a
++  // tiny negative.
++  if (NXE::Diag::engine_tick_fine_instr_active()
++      && NXE::Diag::g_eng_residual_idx < NXE::Diag::g_eng_tick_block_size)
++  {
++    const Uint64 _engine_tick_dt = SDL_GetTicksNS() - _engine_tick_t0;
++    Sint64 _res = (Sint64)_engine_tick_dt
++                - (Sint64)NXE::Diag::g_eng_clear_screen_dt_this_tick
++                - (Sint64)NXE::Diag::g_eng_tsc_interp_dt_this_tick
++                - (Sint64)NXE::Diag::g_eng_mode_tick_dt_this_tick
++                - (Sint64)NXE::Diag::g_eng_debug_overlay_dt_this_tick;
++    if (_res < 0) _res = 0;
++    NXE::Diag::g_eng_residual_samples[NXE::Diag::g_eng_residual_idx++] = (Uint64)_res;
++  }
+ }
+ 
+ void Game::switchmap(int mapno, int scriptno, int px, int py)
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 6a13b32..171fea7 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -45,9 +45,42 @@ std::uint64_t g_engine_tick_accum_ns_block = 0;
+ std::uint64_t g_engine_tick_accum_ns_global = 0;
+ int g_engine_tick_count_block = 0;
+ int g_engine_tick_count_global = 0;
++
++// DOS-PORT (patch 0090, Phase 9 wave 20 W20B): engine-tick decomposition
++// storage. 4 sub-bracket sample arrays + idxes + per-tick dt locals + 1
++// residual array + idx. Decls in vendor/nxengine-evo/src/Utils/
++// diagnostic_timers.h; definitions live here alongside the
++// existing audio_mix / engine_tick storage so audit-flush can read all
++// of them from a single TU. RAII timers in the header reference these
++// via extern; bounds-check + env-gate at destruction.
++std::uint64_t g_eng_clear_screen_samples[g_eng_tick_block_size]   = {};
++std::uint64_t g_eng_tsc_interp_samples[g_eng_tick_block_size]     = {};
++std::uint64_t g_eng_mode_tick_samples[g_eng_tick_block_size]      = {};
++std::uint64_t g_eng_debug_overlay_samples[g_eng_tick_block_size]  = {};
++std::uint64_t g_eng_residual_samples[g_eng_tick_block_size]       = {};
++int g_eng_clear_screen_idx   = 0;
++int g_eng_tsc_interp_idx     = 0;
++int g_eng_mode_tick_idx      = 0;
++int g_eng_debug_overlay_idx  = 0;
++int g_eng_residual_idx       = 0;
++std::uint64_t g_eng_clear_screen_dt_this_tick   = 0;
++std::uint64_t g_eng_tsc_interp_dt_this_tick     = 0;
++std::uint64_t g_eng_mode_tick_dt_this_tick      = 0;
++std::uint64_t g_eng_debug_overlay_dt_this_tick  = 0;
+ }  // namespace Diag
+ }  // namespace NXE
+ 
++// DOS-PORT (patch 0090, Phase 9 wave 20 W20B): forward-declared accessor
++// for the FINE_INSTR env helper. Defined just below at namespace scope
++// after _abl_fine_instr() is available; lets the diagnostic_timers.h
++// RAII timers gate on it without exposing the renderer's internal
++// ablation cluster. Symbol lives at global scope (extern "C++" by
++// default for free functions); diagnostic_timers.h declares the same
++// signature.
++namespace NXE { namespace Diag {
++bool engine_tick_fine_instr_active();
++}}
++
+ namespace NXE
+ {
+ namespace Graphics
+@@ -133,6 +166,21 @@ inline bool _abl_flip_instr()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0090, Phase 9 wave 20 W20B): finer-grain engine_tick
++// brackets opt-in. Originally drafted alongside flip-body brackets; the
++// flip-body brackets were parked to tests/probes/wip-w20b-flip-body-
++// brackets.diff (gitignored) per W20C probe results that showed sub-ms
++// for all 4 flip-body candidates. The engine_tick decomposition stays
++// load-bearing — captures what's in the 17.8 ms (audio-off) /
++// 21.1 ms (audio-on) engine_tick budget. Strict "1" match per CLAUDE.md
++// convention; default OFF (instrumentation has its own per-tick cost).
++// Cached static const bool — -O2 hoists per-tick guards.
++inline bool _abl_fine_instr()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_FINE_INSTR");
++  return v;
++}
++
+ // drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
+ // Track which Surface objects produce NULL textures so we log each origin
+ // once + a periodic running count, instead of hundreds of identical lines
+@@ -1078,6 +1126,81 @@ void _maybe_flush_phase_timing_audit()
+   // brackets. Sample-array contents are overwritten on next firing.
+   _flip_phase_idx_pp = 0;
+   _flip_phase_idx_gg = 0;
++  // patch 0090 (wave 20 W20B): engine-tick decomposition emit + reset.
++  // Gated on FINE_INSTR (separate from FLIP_INSTR per flush-instr's
++  // contract). 4 sub-bracket stat lines + 1 derived residual line.
++  // Output prefix `engine-tick-stat` distinct from W20A's `flip-stat`
++  // and the parked W20B-flip-body's `flip-fine-stat` so grep tooling
++  // can separate the three layers without ambiguity.
++  if (_abl_fine_instr() && NXE::Diag::g_eng_residual_idx > 0)
++  {
++    using NXE::Diag::g_eng_clear_screen_samples;
++    using NXE::Diag::g_eng_tsc_interp_samples;
++    using NXE::Diag::g_eng_mode_tick_samples;
++    using NXE::Diag::g_eng_debug_overlay_samples;
++    using NXE::Diag::g_eng_residual_samples;
++    using NXE::Diag::g_eng_clear_screen_idx;
++    using NXE::Diag::g_eng_tsc_interp_idx;
++    using NXE::Diag::g_eng_mode_tick_idx;
++    using NXE::Diag::g_eng_debug_overlay_idx;
++    using NXE::Diag::g_eng_residual_idx;
++    const int n_cs  = g_eng_clear_screen_idx;
++    const int n_ti  = g_eng_tsc_interp_idx;
++    const int n_mt  = g_eng_mode_tick_idx;
++    const int n_do  = g_eng_debug_overlay_idx;
++    const int n_res = g_eng_residual_idx;
++    _FlipPhaseStats st_cs, st_ti, st_mt, st_do, st_res;
++    if (n_cs > 0)
++    {
++      _compute_flip_phase_stats(g_eng_clear_screen_samples, n_cs, st_cs);
++      LOG_INFO("[engine-tick-stat n={} phase=clear_screen          min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_cs, st_cs.min_ms, st_cs.med_ms, st_cs.mean_ms, st_cs.p95_ms, st_cs.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[engine-tick-stat n=0 phase=clear_screen          min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    if (n_ti > 0)
++    {
++      _compute_flip_phase_stats(g_eng_tsc_interp_samples, n_ti, st_ti);
++      LOG_INFO("[engine-tick-stat n={} phase=tsc_interp            min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_ti, st_ti.min_ms, st_ti.med_ms, st_ti.mean_ms, st_ti.p95_ms, st_ti.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[engine-tick-stat n=0 phase=tsc_interp            min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    if (n_mt > 0)
++    {
++      _compute_flip_phase_stats(g_eng_mode_tick_samples, n_mt, st_mt);
++      LOG_INFO("[engine-tick-stat n={} phase=mode_tick             min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_mt, st_mt.min_ms, st_mt.med_ms, st_mt.mean_ms, st_mt.p95_ms, st_mt.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[engine-tick-stat n=0 phase=mode_tick             min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    if (n_do > 0)
++    {
++      _compute_flip_phase_stats(g_eng_debug_overlay_samples, n_do, st_do);
++      LOG_INFO("[engine-tick-stat n={} phase=debug_overlay         min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_do, st_do.min_ms, st_do.med_ms, st_do.mean_ms, st_do.p95_ms, st_do.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[engine-tick-stat n=0 phase=debug_overlay         min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    _compute_flip_phase_stats(g_eng_residual_samples, n_res, st_res);
++    LOG_INFO("[engine-tick-stat n={} phase=engine_tick_residual  min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_res, st_res.min_ms, st_res.med_ms, st_res.mean_ms, st_res.p95_ms, st_res.max_ms);
++  }
++  // Reset engine-tick sample arrays + idxes regardless of FINE_INSTR
++  // state — keeps storage cleanly zeroed for the next block.
++  NXE::Diag::g_eng_clear_screen_idx  = 0;
++  NXE::Diag::g_eng_tsc_interp_idx    = 0;
++  NXE::Diag::g_eng_mode_tick_idx     = 0;
++  NXE::Diag::g_eng_debug_overlay_idx = 0;
++  NXE::Diag::g_eng_residual_idx      = 0;
+ }
+ 
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
+@@ -4957,3 +5080,23 @@ void Renderer::drawSpotLight(int x, int y, Object* o, int r, int g, int b, int u
+ 
+ };
+ };
++
++// DOS-PORT (patch 0090, Phase 9 wave 20 W20B): engine-tick decomposition
++// env-helper accessor. Forward-declared in diagnostic_timers.h; definition
++// at file scope (after BOTH outer NXE::Graphics namespace braces close at
++// the lines above) so it lands cleanly in NXE::Diag without nesting under
++// NXE::Graphics::NXE. The RAII timers in diagnostic_timers.h call this
++// from their destructors. The 1-line body forwards to the anonymous-
++// namespace _abl_fine_instr() helper via its parent-namespace qualified
++// name (anonymous-namespace symbols are accessible by `<parent>::<name>`
++// within the same TU per ISO C++).
++//
++// Build-fix amend (caught by build-qa post-format-patch): the prior
++// placement at "after the anonymous namespace closes but BEFORE the
++// outer NXE::Graphics closes" produced a nested NXE::Graphics::NXE::Diag
++// because the namespace-NXE token at that position re-opens NXE INSIDE
++// NXE::Graphics. After this fix, the wrapper is at file scope and
++// NXE::Diag resolves at the top-level NXE.
++namespace NXE { namespace Diag {
++bool engine_tick_fine_instr_active() { return ::NXE::Graphics::_abl_fine_instr(); }
++}}
+-- 
+2.47.3
+
