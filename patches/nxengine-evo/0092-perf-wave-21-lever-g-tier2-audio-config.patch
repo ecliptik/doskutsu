@@ -1,0 +1,424 @@
+From d00307dfcd7a2046b63debc9c84cc588b16babee Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Thu, 30 Apr 2026 16:11:13 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2021=20patch=200092=20=E2=80=94=20L?=
+ =?UTF-8?q?ever=20G:=20Tier-2=20audio=20config=20(11025=20mono,=20opt-in)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0092, Phase 9 wave 21 Lever G). Adds runtime audio
+config selection via SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 (strict-1, default
+OFF). Tier-1 path (env unset) preserves patch-0061 behavior bit-
+identical; Tier-2 opt-in flips to 11025 Hz mono with buffer pinned at
+256 sample frames.
+
+Mechanism (per docs/PHASE9-LEVER-G-PLAN.md § 1):
+  Tier-1: 22050 stereo × 256-frame buffer ≈ 86 Hz IRQ rate, 11.6 ms
+          latency. Per-IRQ data: 1024 B (256 × 2 × 2). Mix CPU: full.
+  Tier-2: 11025 mono × 256-frame buffer ≈ 43 Hz IRQ rate, 23.2 ms
+          latency. Per-IRQ data: 512 B (256 × 1 × 2). Mix CPU: ~half.
+
+Halved IRQ rate IS the dominant Lever G mechanism. W20A2 ablation
+showed audio interference is ~14 ms/flip baseline (~13 ms IRQ wall-
+clock + audio mix). Halving IRQ rate predicts -6.5 ms/flip baseline
+(hardware-deterministic; the IRQ rate IS halved when the buffer size
+is held constant). Heavy-music mix-CPU savings range -3 to -22 ms/
+flip per spec (mixer-implementation-dependent; measure in W21A iter).
+
+Combined hypothesis: opening 25.6 → ~30-32 fps; heavy-music ~9 → ~12-
+25 fps. Predictions framed as range per `perf_predictions_unreliable.md`.
+
+Implementation (Path B per spec § 2.1):
+
+1. SoundManager.h: replaced `#define SAMPLE_RATE 22050` with
+   `extern uint32_t SAMPLE_RATE;` + new `extern uint32_t AUDIO_CHANNELS;`
+   at global namespace scope (matches prior `#define` global-scope
+   semantics; all consumers reference unqualified). Initial values
+   (22050 / 2) preserve patch-0061 behavior. Updated header comment
+   block to describe Tier-1 / Tier-2 runtime semantics + singleton-
+   init ordering.
+
+2. SoundManager.cpp:
+   a. Defines both vars at TU global scope. Linkage: definition is
+      here; other TUs see only extern decls.
+   b. At top of SoundManager::init() (BEFORE MIX_CreateMixerDevice
+      AND before any Pixtone/Organya singleton construction): read
+      SDL_HINT_DOSKUTSU_AUDIO_TIER2; when "1", set SAMPLE_RATE=11025,
+      AUDIO_CHANNELS=1, AND pin SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES
+      to "256" via SDL_SetHintWithPriority(...,OVERRIDE).
+   c. Buffer-pin is load-bearing (per spec § 2.3): without it, SDL3's
+      heuristic preserves the ~11.6 ms latency target → would pick
+      128 samples at 11025 mono → IRQ rate stays at ~86 Hz → the
+      6.5 ms IRQ-rate-halving savings collapse. SDL_HINT_OVERRIDE
+      ensures user-set SAMPLE_FRAMES doesn't accidentally un-pin.
+   d. spec.channels = (int)::AUDIO_CHANNELS (was hard-coded 2).
+   e. LOG_INFO line announces Tier-1 vs Tier-2 selection at startup
+      with full mechanism prose for log-grep readability.
+
+3. Pixtone.cpp: converts 8 hard-coded `2` channel sites to runtime
+   `(int)::AUDIO_CHANNELS`. Sites:
+   a. 501-502: paired src/dst SDL_AudioStream resample specs.
+   b. 539: audio_spec for MIX_LoadRawAudioNoCopy on resampled buffer.
+   c. 598-599: paired src/dst resample specs (mirror of 501-502).
+   d. 629: audio_spec for resampled buffer (mirror of 539).
+   e. 681 (was 672): master-chunk dst_spec (src stays at S8/1/22050
+      = .pxt on-disk format per SoundManager.h:24-27 comment).
+   f. 725 (was 710): audio_spec for master chunk's MIX_LoadRawAudio.
+
+   NOTE: spec § 2.2 listed only 5 of these (501, 598, 672, 710 +
+   Organya 476); audit found 4 additional sibling sites (502, 539,
+   599, 629). Patched all 9 (Pixtone) + 1 (Organya) for correctness.
+   Flagged to flush-instr in pre-format-patch DM — patching only the
+   5 originally listed would produce broken mono playback (resample
+   mismatch between src/dst channels at the missed sites).
+
+4. Organya.cpp: line 476 converted to runtime AUDIO_CHANNELS.
+   Organya synth's sampling_rate (line 187) already used SAMPLE_RATE
+   so it auto-rescales at synth init.
+
+5. docs/BOOT.md: new SDL_HINT_DOSKUTSU_AUDIO_TIER2 entry under
+   "User-facing options" (NOT diagnostic — this is a hardware-tier
+   config, not a debug flag). Documents the strict-1 match, audio
+   quality trade, log-grep pattern, mechanism summary.
+
+Singleton-init ordering verified:
+- main.cpp:546 calls SoundManager::getInstance()->init() after
+  SDL_Init + Renderer::init.
+- SoundManager::init() runs the AUDIO_TIER2 env check FIRST (sets
+  SAMPLE_RATE / AUDIO_CHANNELS), then MIX_CreateMixerDevice.
+- Pixtone / Organya / Ogg singletons construct on first getInstance()
+  from inside the SoundManager init flow — picks up runtime values.
+- Pixtone.h:128's resampled_rate[NUM_RESAMPLED_BUFFERS] = {SAMPLE_RATE}
+  in-class initializer evaluates at Pixtone object construction (post
+  SoundManager::init in our init order), so it captures the runtime
+  value, not the initial 22050.
+
+Hot-path cost when AUDIO_TIER2 unset:
+- Zero. The env check runs once at SoundManager::init.
+- Subsequent code paths use the same SAMPLE_RATE / AUDIO_CHANNELS
+  reads they used pre-0092 — just now via extern variable load
+  instead of macro substitution. Single load per use, no functional
+  difference. Tier-1 path is bit-identical to pre-0092.
+
+OGG playback (if any user has OGG music installed): SDL3 OGG decoder
+auto-resamples to whatever output rate is set. No manual changes
+needed in Ogg.cpp. Confirmed per spec § 2.6.
+
+No SDL-side patches expected. Mix_OpenAudio params are runtime-passed;
+SDL3 audio device handles different rates/channels transparently. If
+build-qa surfaces SDL3-DOS-at-11025-mono issues, sdl-engine investigates
+in a separate patch — not pre-emptively patching SDL.
+
+Test plan (subsequent W21A iter):
+- Build-qa DOSBox-X smoke (3 configs):
+  A. env-unset baseline (Tier-1; no behavior change).
+  B. AUDIO_TIER2=1 (Tier-2 engaged; verify init log lines + audio
+     plays without crash + 256-frame buffer pinned).
+  C. AUDIO_TIER2=0 explicit (Tier-1 via killswitch path; same as A).
+- Real-HW iter W21A (realhw): 2-PLAY ablation per spec § 5.
+  - PLAY1 (W21A1): no AUDIO_TIER2 (Tier-1 baseline).
+  - PLAY2 (W21A2): AUDIO_TIER2=1 (Tier-2 engaged).
+  - Same FLIP_INSTR + DV+LFB compound config as W20A.
+  - LOG_TAGs 5 chars (W21A1, W21A2) — fits 8.3.
+- Audio quality A/B (operator subjective listening pass per spec § 4):
+  title attract music, first-room ambient, SFX (gunshot/chime/dialogue),
+  music+SFX overlap. Verdict: acceptable / borderline / unacceptable.
+- 0093 default-flip (mirror 0086 → 0088 DIRECT_VESA pattern): post-
+  W21A measurement + audio-quality validation, separate patch flips
+  default to Tier-2 with `=0` killswitch reverting to Tier-1.
+
+Reference:
+  docs/PHASE9-LEVER-G-PLAN.md (spec)
+  patches/nxengine-evo/0061-perf-wave-13-1-sample-rate-22050.patch
+    (preceded patch — Tier-1 default 22050)
+  patches/nxengine-evo/0089-perf-wave-20a2-audio-off-killswitch.patch
+    (W20A2 ablation that quantified audio-IRQ wall-clock; the 13.5 ms
+     answer that led to Lever G)
+  memory/audio_mix_zero_is_not_audio_off.md
+  memory/perf_predictions_unreliable.md
+  memory/wave_18_sdl_overhead_closed.md (similar two-stage rollout
+    pattern with default-OFF → default-ON via env-killswitch)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Organya.cpp      |  7 +++-
+ src/sound/Pixtone.cpp      | 37 +++++++++++++----
+ src/sound/SoundManager.cpp | 85 +++++++++++++++++++++++++++++++++++++-
+ src/sound/SoundManager.h   | 41 +++++++++++++-----
+ 4 files changed, 148 insertions(+), 22 deletions(-)
+
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index b423bd3..3f18110 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -473,7 +473,12 @@ bool Organya::start(int startBeat)
+   // across pause/resume/stop; explicitly destroyed in shutdown().
+   if (!_organya_stream)
+   {
+-    SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
++    // patch 0092 (Phase 9 wave 21 Lever G): runtime channels + rate.
++    // Organya's synth output rate is sampling_rate (= SAMPLE_RATE per
++    // line 187); when AUDIO_TIER2=1 the synth rescales to 11025 mono.
++    // src=dst here (no resample; just buffer queueing) so passing the
++    // same spec twice is intentional.
++    SDL_AudioSpec spec = { SDL_AUDIO_S16, (int)::AUDIO_CHANNELS, (int)::SAMPLE_RATE };
+     _organya_stream = SDL_CreateAudioStream(&spec, &spec);
+     if (!_organya_stream)
+     {
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index aada037..64dca02 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -498,8 +498,12 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+ 
+     if (idx == -1)
+     {
+-      SDL_AudioSpec src_spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
+-      SDL_AudioSpec dst_spec = { SDL_AUDIO_S16, 2, (int)resampled_rate };
++      // patch 0092 (Lever G): runtime channels for both src + dst
++      // resample specs. Both must agree (resample changes rate, not
++      // channel count). When AUDIO_CHANNELS=1 (Tier-2), this is a
++      // mono→mono resample; when =2 (Tier-1), stereo→stereo.
++      SDL_AudioSpec src_spec = { SDL_AUDIO_S16, (int)::AUDIO_CHANNELS, (int)::SAMPLE_RATE };
++      SDL_AudioSpec dst_spec = { SDL_AUDIO_S16, (int)::AUDIO_CHANNELS, (int)resampled_rate };
+ 
+       SDL_AudioStream *stream = SDL_CreateAudioStream(&src_spec, &dst_spec);
+       if (!stream)
+@@ -536,7 +540,10 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+       // free_when_done=true is correct here. Master chunk is the
+       // exception, see _prepareToPlay.)
+       MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
+-      SDL_AudioSpec audio_spec = { SDL_AUDIO_S16, 2, (int)resampled_rate };
++      // patch 0092 (Lever G): runtime channels for the resampled-buffer
++      // audio_spec. Must match the resample dst_spec channels above
++      // (and the SDL audio device's spec.channels at SoundManager::init).
++      SDL_AudioSpec audio_spec = { SDL_AUDIO_S16, (int)::AUDIO_CHANNELS, (int)resampled_rate };
+       _sound_fx[slot].resampled[rslot] = MIX_LoadRawAudioNoCopy(mixer, sound_buf, converted_len, &audio_spec, true);
+       _sound_fx[slot].resampled_rate[rslot] = resampled_rate;
+       idx = rslot;
+@@ -595,8 +602,9 @@ int Pixtone::prepareResampled(int32_t slot, uint32_t percent)
+ 
+     if (idx == -1) // not found
+     {
+-      SDL_AudioSpec src_spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
+-      SDL_AudioSpec dst_spec = { SDL_AUDIO_S16, 2, (int)resampled_rate };
++      // patch 0092 (Lever G): runtime channels (mirror site at line ~501).
++      SDL_AudioSpec src_spec = { SDL_AUDIO_S16, (int)::AUDIO_CHANNELS, (int)::SAMPLE_RATE };
++      SDL_AudioSpec dst_spec = { SDL_AUDIO_S16, (int)::AUDIO_CHANNELS, (int)resampled_rate };
+ 
+       SDL_AudioStream *stream = SDL_CreateAudioStream(&src_spec, &dst_spec);
+       if (!stream)
+@@ -626,7 +634,8 @@ int Pixtone::prepareResampled(int32_t slot, uint32_t percent)
+       // DOS-PORT: see equivalent comment in playResampled() above for
+       // MIX_LoadRawAudioNoCopy ownership-semantic rationale.
+       MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
+-      SDL_AudioSpec audio_spec = { SDL_AUDIO_S16, 2, (int)resampled_rate };
++      // patch 0092 (Lever G): runtime channels (mirror site at line ~539).
++      SDL_AudioSpec audio_spec = { SDL_AUDIO_S16, (int)::AUDIO_CHANNELS, (int)resampled_rate };
+       _sound_fx[slot].resampled[rslot] = MIX_LoadRawAudioNoCopy(mixer, sound_buf, converted_len, &audio_spec, true);
+       _sound_fx[slot].resampled_rate[rslot] = resampled_rate;
+     }
+@@ -667,9 +676,15 @@ void Pixtone::pxtSoundDone(int channel)
+ 
+ void Pixtone::_prepareToPlay(stPXSound *snd, int32_t slot)
+ {
+-  // convert the buffer from 8-bit mono signed to 16-bit stereo signed
++  // convert the buffer from 8-bit mono signed (.pxt on-disk format)
++  // to S16 at the runtime output config. src_spec stays hardcoded at
++  // (S8, 1, 22050) per the SoundManager.h:24-27 comment — that's the
++  // raw .pxt storage format on disk, NOT the output rate.
++  // patch 0092 (Lever G): dst_spec runtime channels (Tier-1 stereo /
++  // Tier-2 mono). Output rate is whatever AUDIO_TIER2 selected; SDL
++  // resamples from the on-disk 22050 mono to runtime config.
+   SDL_AudioSpec src_spec = { SDL_AUDIO_S8,  1, 22050 };
+-  SDL_AudioSpec dst_spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
++  SDL_AudioSpec dst_spec = { SDL_AUDIO_S16, (int)::AUDIO_CHANNELS, (int)::SAMPLE_RATE };
+ 
+   SDL_AudioStream *stream = SDL_CreateAudioStream(&src_spec, &dst_spec);
+   if (!stream)
+@@ -707,7 +722,11 @@ void Pixtone::_prepareToPlay(stPXSound *snd, int32_t slot)
+   // borrow. The resampled[] buffers don't need this dance — they're
+   // terminal (never re-resampled), so they keep free_when_done=true.
+   MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
+-  SDL_AudioSpec audio_spec = { SDL_AUDIO_S16, 2, SAMPLE_RATE };
++  // patch 0092 (Lever G): runtime channels for the master chunk. This
++  // is the master Pixtone SFX buffer that resampled[] derives from;
++  // its rate/channels MUST match the SDL audio device config so playback
++  // doesn't trigger an implicit resample on every fire.
++  SDL_AudioSpec audio_spec = { SDL_AUDIO_S16, (int)::AUDIO_CHANNELS, (int)::SAMPLE_RATE };
+   _sound_fx[slot].chunk           = MIX_LoadRawAudioNoCopy(mixer, sound_buf, converted_len, &audio_spec, false);
+   _sound_fx[slot].raw_master_buf  = sound_buf;
+   _sound_fx[slot].raw_master_len  = converted_len;
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 3191cc6..155de1e 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -17,6 +17,21 @@
+ #define MUSIC_ON 1
+ #define MUSIC_BOSS_ONLY 2
+ 
++// DOS-PORT (patch 0092, Phase 9 wave 21 Lever G): runtime audio config.
++// Initial values preserve patch-0061 Tier-1 behavior (22050 stereo).
++// Reset to Tier-2 (11025 mono) at SoundManager::init() entry when
++// SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 is set. Both at global namespace
++// scope (NOT inside NXE::Sound) to match the prior `#define
++// SAMPLE_RATE` global-scope semantics — all consumers (Pixtone, Organya,
++// Ogg) reference unqualified `SAMPLE_RATE` / `AUDIO_CHANNELS`.
++//
++// Linkage: `extern uint32_t` in the header → external linkage. Must be
++// defined exactly once across the linked binary. This TU is the
++// canonical definition site (paired with the header decl); other TUs
++// see only the extern decl and link to this storage.
++uint32_t SAMPLE_RATE    = 22050;
++uint32_t AUDIO_CHANNELS = 2;
++
+ namespace NXE
+ {
+ namespace Sound
+@@ -46,6 +61,68 @@ bool SoundManager::init()
+ {
+   LOG_INFO("Sound system init");
+ 
++  // DOS-PORT (patch 0092, Phase 9 wave 21 Lever G): Tier-2 audio
++  // config selection. Read SDL_HINT_DOSKUTSU_AUDIO_TIER2 (strict-1
++  // match per CLAUDE.md convention); when set, flip global SAMPLE_RATE
++  // + AUDIO_CHANNELS to 11025 mono AND pin the SDL3 audio buffer size
++  // to 256 sample frames via SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES.
++  //
++  // Buffer-pin reasoning (load-bearing for the lever's mechanism, per
++  // docs/PHASE9-LEVER-G-PLAN.md § 2.3): without explicit pin, SDL3's
++  // default heuristic preserves ~11.6 ms latency target → would pick
++  // 128 samples at 11025 mono → IRQ rate stays at ~86 Hz → the
++  // ~6.5 ms IRQ-rate-halving savings collapse. Pin to 256 explicitly:
++  //   11025 mono × 256 samples = 23.2 ms latency = ~43 Hz IRQ rate
++  // = halved IRQ rate = the actual lever gain. Latency goes 11.6 →
++  // 23.2 ms (one extra 30 fps frame); acceptable for non-rhythm games.
++  //
++  // Tier-1 path (env unset / not "1"): SAMPLE_RATE / AUDIO_CHANNELS
++  // stay at their initial values (22050 / 2); SDL3's existing buffer
++  // heuristic chooses 512 frames per the patch-0066 comment below.
++  // Behaviorally bit-identical to pre-0092.
++  //
++  // Order-of-operations note: this MUST run BEFORE MIX_CreateMixerDevice
++  // (which reads SAMPLE_RATE via the spec.freq assignment) AND before
++  // any Pixtone/Organya singleton construction (Pixtone.h:128's
++  // resampled_rate[0] = SAMPLE_RATE in-class-init evaluates at Pixtone
++  // object construction; deferred to post-init by lazy singleton
++  // semantics + SoundManager::init() driving the first construction
++  // chain).
++  {
++    const char *tier2 = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_TIER2");
++    const bool tier2_on = tier2 && tier2[0] == '1' && tier2[1] == 0;
++    if (tier2_on)
++    {
++      ::SAMPLE_RATE    = 11025;
++      ::AUDIO_CHANNELS = 1;
++      // Pin buffer size to 256 frames so the IRQ rate halves (43 Hz vs
++      // Tier-1's 86 Hz). SDL_SetHintWithPriority OVERRIDE so a user-
++      // set SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES doesn't accidentally
++      // un-pin and collapse the lever's mechanism.
++      SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES,
++                              "256", SDL_HINT_OVERRIDE);
++      LOG_INFO("Sound system: SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 — Tier-2 "
++               "audio config engaged ({} Hz, {} channel{}, buffer pinned "
++               "to 256 frames). Predicted savings: -6.5 ms/flip opening "
++               "(IRQ-rate halving, hardware-deterministic) + audio-mix "
++               "CPU reduction (range -3 to -22 ms/flip; mixer-impl "
++               "dependent, measured in W21A iter). Subjective audio A/B "
++               "expected post-W21A; killswitch reverts via "
++               "SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 (or any non-'1' value).",
++               (unsigned long)::SAMPLE_RATE, (unsigned long)::AUDIO_CHANNELS,
++               ::AUDIO_CHANNELS == 1 ? "" : "s");
++    }
++    else
++    {
++      LOG_INFO("Sound system: Tier-1 audio config (default; {} Hz, {} "
++               "channels). Set SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 to opt "
++               "into Tier-2 (11025 Hz mono, 256-frame buffer) for fps "
++               "gain on Tier 2/3 hardware (per docs/HARDWARE.md hardware "
++               "tiers + docs/PHASE9-LEVER-G-PLAN.md mechanism).",
++               (unsigned long)::SAMPLE_RATE, (unsigned long)::AUDIO_CHANNELS);
++    }
++  }
++
+   // DOS-PORT (patch 0066, Phase 9 wave 13.5/13.6): keep SDL3's default
+   // sample_frames=512 (=2048 B chunks, =23 ms audio per chunk).
+   // Wave 13.5 experiment (real-HW PODP 5V83) tested 512 vs 1024 vs 2048:
+@@ -82,8 +159,12 @@ bool SoundManager::init()
+   SDL_AudioSpec spec;
+   SDL_zero(spec);
+   spec.format   = SDL_AUDIO_S16;
+-  spec.channels = 2;
+-  spec.freq     = SAMPLE_RATE;
++  // patch 0092 (Lever G): runtime channel count. Tier-1 default is 2
++  // (stereo, preserves patch-0061 behavior); Tier-2 flips to 1 (mono)
++  // via the AUDIO_TIER2 env hint logic above. Both vars are file-scope
++  // globals at the top of this TU.
++  spec.channels = ::AUDIO_CHANNELS;
++  spec.freq     = ::SAMPLE_RATE;
+ 
+   _mixer = MIX_CreateMixerDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec);
+   if (!_mixer)
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index ea0d278..636131a 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -16,23 +16,44 @@
+ // showed audio+engine_ms = 100 (title) / 213 (menu) per flip on
+ // Cirrus + PODP83 — this lever is expected to drop that by ~half.
+ //
+-// Audit notes:
++// DOS-PORT (patch 0092, Phase 9 wave 21 Lever G): converted from
++// `#define` to runtime `extern uint32_t` so the Tier-2 audio config
++// (11025 Hz mono) can be selected at runtime via the env hint
++// SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 without a rebuild. Pairs with new
++// `extern uint32_t AUDIO_CHANNELS` for the stereo/mono switch.
++// Mechanism (per docs/PHASE9-LEVER-G-PLAN.md): halving sample rate +
++// halving channels at the SDL audio device level halves IRQ rate
++// (when buffer size is pinned at 256 — see SoundManager.cpp init)
++// AND halves per-IRQ data + mix CPU. W20A2 ablation showed audio
++// IRQ wall-clock + mix work eats ~14 ms/flip; Lever G targets ~half
++// of that as fps gain (predicted ~30 fps target landing).
++//
++// Audit notes (from patch 0061; updated for runtime semantics):
+ //   - Single point of definition; all callers (SoundManager, Organya,
+ //     Pixtone, Ogg) reference SAMPLE_RATE. No hardcoded 44100 literals
+ //     left in vendor/nxengine-evo/src/sound/.
+ //   - Pixtone::_prepareToPlay's src_spec is hardcoded 22050 (line 671)
+ //     because that's the raw .pxt storage format (8-bit mono signed
+ //     @ 22050 Hz — Cave Story's original on-disk format), NOT the
+-//     output rate. After this patch, src_spec.freq == dst_spec.freq
+-//     so SDL_AudioStream skips resampling — strictly more efficient.
++//     output rate. SAMPLE_RATE controls the dst_spec (output) only.
+ //   - Organya's sampling_rate, samples_per_millisecond, samples_per_beat,
+-//     phaseinc are all derived from SAMPLE_RATE — they auto-rescale.
+-//   - Stereo (2 channels) preserved: mono is Tier 2/3 fallback, future
+-//     work behind a per-tier audio config switch.
+-//   - Cave Story 2004 ran at 22050 stereo natively, so this is BACK to
+-//     the original spec rather than a downgrade. Music + SFX should
+-//     sound identical to the 2004 freeware release.
+-#define SAMPLE_RATE 22050
++//     phaseinc are all derived from SAMPLE_RATE — they auto-rescale at
++//     each Organya init (singleton's first getInstance after SoundManager
++//     ::init runs).
++//   - With patch 0092: Tier-1 default-OFF (env unset) preserves the
++//     original 22050 stereo behavior bit-for-bit. Tier-2 opt-in flips
++//     both vars at SoundManager::init() entry, BEFORE
++//     MIX_CreateMixerDevice and BEFORE any Pixtone/Organya audio-
++//     subsystem usage. Singleton-init ordering: SoundManager::init()
++//     runs first; Pixtone::getInstance() / Organya::getInstance() lazy-
++//     init on first use afterwards, picking up the runtime values.
++//   - Initial values (22050 / 2) preserve current behavior if anyone
++//     references SAMPLE_RATE / AUDIO_CHANNELS BEFORE SoundManager::init
++//     runs (defensive — Pixtone.h:128's resampled_rate[0] = SAMPLE_RATE
++//     in-class-init evaluates at Pixtone object construction, which is
++//     post-init by ordering).
++extern uint32_t SAMPLE_RATE;
++extern uint32_t AUDIO_CHANNELS;
+ 
+ namespace NXE
+ {
+-- 
+2.47.3
+

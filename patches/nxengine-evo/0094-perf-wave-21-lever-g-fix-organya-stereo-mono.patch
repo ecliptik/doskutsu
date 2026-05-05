@@ -1,0 +1,215 @@
+From e3993bb2492bc04d0eefe27671efcf57f103cc77 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Thu, 30 Apr 2026 16:48:51 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2021=20patch=200094=20=E2=80=94=20L?=
+ =?UTF-8?q?ever=20G=20fix:=20Organya=20stereo-vs-mono=20mismatch?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0094, Phase 9 wave 21 Lever G fix). Closes the audio
+quality regression surfaced by W21A real-HW measurement: Tier-2
+(AUDIO_CHANNELS=1) audio played slow + distorted, blocking 0093
+default-flip.
+
+Bug diagnosis:
+
+`Song::Synth()` always produces stereo-interleaved samples (L/R at
+samples[p*2+0] / samples[p*2+1] at Organya.cpp lines ~325-326)
+regardless of `AUDIO_CHANNELS`. The pre-0094 `_musicCallback` copies
+`samples[]` LINEARLY into the audio device's output stream. When SDL
+device is mono (Tier-2), it interprets `L,R,L,R,...` as MONO FRAMES
+→ playback steps through the synth buffer at HALF the intended rate
+→ music plays at half speed + sub-Nyquist aliasing distortion.
+
+Why this slipped through 0092: the patch correctly substituted
+AUDIO_CHANNELS at the SDL audio device spec (SoundManager.cpp:91)
+and at all 9 Pixtone resample-spec sites (which use SDL_AudioStream
+conversion paths that handle mono/stereo correctly). It missed the
+Organya-internal-stereo assumption because the synth's stereo
+interleave is hardcoded into the per-tone panning math at lines
+325-326, NOT at any SDL spec site that the spec audit flagged.
+
+NOT a phase-math bug, NOT a stale SAMPLE_RATE capture. The
+sampling_rate at line 187 correctly captures the runtime SAMPLE_RATE
+(post SoundManager::init flips it). Phase-inc computations at lines
+222/229 use the captured value correctly.
+
+Why the W21A fps measurement was inflated:
+
+Half-speed playback meant `Synth()` refilled the synth buffer half as
+often per real second → audio_mix CPU work distributed over 2× as
+long → per-callback measurement showed 0.40 ms vs Tier-1's 6.55 ms
+(94% reduction). That was a measurement artifact of the bug, not a
+real CPU saving.
+
+Post-0094, audio_mix per-call cost will rise (mono-downmix adds an
+L+R average per output sample), so the fps gain measured in W21A
+(-26.6 ms/flip, above predicted upper bound -22) will fall back into
+the spec's predicted range (-3 to -22 ms/flip). Still positive
+(IRQ-rate halving + reduced data still apply), just not the inflated
+buggy figure.
+
+Fix:
+
+Mono-downmix at the `_musicCallback` boundary. Synth stays internally-
+stereo (the per-tone L/R panning math at lines ~325-326 depends on
+producing two independent channels; rewriting synth would be
+invasive + lose the stereo separation in Tier-1 too). The callback
+gets a branch:
+
+  Tier-1 (AUDIO_CHANNELS == 2): linear copy of synth samples
+                                (bit-identical to pre-0094).
+  Tier-2 (AUDIO_CHANNELS == 1): average synth's interleaved L/R pair
+                                into one mono sample per output frame;
+                                each output frame consumes 2 synth
+                                entries (idx += 2 vs Tier-1's idx++).
+
+Bounds check on R-channel index: defensive belt-and-braces in case
+idx wraps to an odd value (synth.Synth() always produces an even
+number of samples, so idx+1 < size when idx is even, but the existing
+`if (idx >= song.samples.size())` guard only checks idx — not idx+1).
+Pathological fallback uses L value if R would OOB.
+
+Audit re-confirmed clean for other rate / channel hardcoding:
+
+- `22050` literal in Organya.cpp / Organya.h: none (besides my own
+  comment at line 478 that references the .pxt on-disk format).
+- `* SAMPLE_RATE` / `/ SAMPLE_RATE` patterns: only the 2 phase-inc
+  sites at 222/229 which use `sampling_rate` (captured runtime
+  value, not stale).
+- Bit shifts encoding power-of-2 rate ratios: none found.
+- Pixtone clean: uses SDL_AudioStream conversion path (line 681
+  dst_spec = { S16, AUDIO_CHANNELS, SAMPLE_RATE }); SDL handles
+  mono/stereo conversion automatically. No internal stereo-
+  interleave in Pixtone's data path.
+- OGG clean: SDL3 OGG decoder auto-resamples to whatever device
+  config is set (per docs/PHASE9-LEVER-G-PLAN.md § 2.6).
+
+The "Organya phase math has a hardcoded SAMPLE_RATE" hypothesis (per
+team-lead's diagnostic direction) was a good first guess but the
+issue was actually a CHANNEL-COUNT mismatch at the callback boundary.
+Symptom (slow + distorted) is identical for both root causes.
+
+Slot 0094 (NOT amend 0092) per the two-stage rollout pattern: keeps
+0092 as the working-modulo-this-bug baseline; if 0094 surfaces a
+regression the rollback is just dropping 0094 alone. Mirrors
+0086→0088 / 0085 polarity-flip / 0087+ext patterns.
+
+Test plan:
+- DOSBox-X smoke (build-qa): verify Tier-2 init clean, audio plays
+  without crash. Subjective audio A/B in DOSBox-X is approximate
+  (audio path is similar to real HW but not identical); real-HW
+  validation is the load-bearing test.
+- Real-HW iter W21B (realhw): single-PLAY at Tier-2 (env stack
+  matches W21A2). Operator listens to title attract music + first-
+  room ambient + SFX + music+SFX overlap per
+  docs/PHASE9-LEVER-G-PLAN.md § 4 canonical scene checklist.
+- If "acceptable / borderline" verdict: 0095 ships default-flip
+  (mirrors 0092 → would-be-0093 / 0086 → 0088 pattern).
+- If "unacceptable": investigate further (could be the simple-average
+  downmix loses too much spectral content; alternatives are
+  max-of-L/R, weighted-by-pan, or single-channel synth which would
+  be a more invasive rewrite).
+
+Reference:
+  patches/nxengine-evo/0092-perf-wave-21-lever-g-tier2-audio-config.patch
+    (the working baseline this fixes)
+  docs/PHASE9-LEVER-G-PLAN.md (Lever G spec)
+  W21A real-HW data (referenced in commit at top of session via
+    team-lead's W20B closure → 0092 dispatch chain)
+  memory/audio_mix_zero_is_not_audio_off.md (similar measurement-
+    artifact-vs-reality lesson)
+  memory/perf_predictions_unreliable.md
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Organya.cpp | 57 +++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index 3f18110..bca66f9 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -424,7 +424,35 @@ void Organya::_musicCallback(void *udata, uint8_t *stream, uint32_t len)
+     return;
+   int16_t *str = reinterpret_cast<int16_t *>(stream);
+ 
++  // DOS-PORT (patch 0094, Phase 9 wave 21 Lever G fix). Bug surfaced
++  // post-W21A real-HW measurement: Tier-2 (AUDIO_CHANNELS=1) audio
++  // played slow + distorted because Song::Synth() ALWAYS produces
++  // stereo-interleaved samples (samples[p*2+0]=L, samples[p*2+1]=R at
++  // lines ~325-326) regardless of the SDL audio device's channel
++  // count. The pre-0094 callback below copied samples[] linearly into
++  // the output stream — for a mono-configured device, this stuffs
++  // L,R,L,R,... into a stream the device interprets as MONO FRAMES, so
++  // playback steps through the synth buffer at HALF the intended rate
++  // (each "frame" of intended stereo = 2 mono frames at the consumer)
++  // → music plays at half speed + sub-Nyquist aliasing distortion.
++  //
++  // Fix: mono branch averages the synth's interleaved L/R pair into a
++  // single mono sample per output frame, advancing the read index by 2
++  // synth entries per output. Stereo branch (Tier-1) preserves the
++  // pre-0094 linear-copy behavior bit-identical.
++  //
++  // The synth itself stays internally-stereo because the per-tone L/R
++  // panning math at lines ~325-326 (`samples[p*2+0] += sample * left`
++  // / `samples[p*2+1] += sample * right`) depends on producing two
++  // independent channels. Mono-downmix at the callback boundary is
++  // the minimum-correctness fix; it loses the stereo separation but
++  // recovers proper playback rate. The fps win from W21A's measurement
++  // (-26.6 ms/flip vs predicted -3 to -22) was inflated by the
++  // half-speed playback artifact (synth's Synth() refilled half as
++  // often per real second). Post-0094 fps gain will fall into the
++  // predicted range — still significant, just not the buggy figure.
+   uint32_t idx = song.last_pos;
++  const bool mono_output = (::AUDIO_CHANNELS == 1);
+   for (uint32_t i = 0; i < len / 2; i++)
+   {
+     if (idx >= song.samples.size())
+@@ -433,7 +461,33 @@ void Organya::_musicCallback(void *udata, uint8_t *stream, uint32_t len)
+       idx = 0;
+     }
+     // extended range
+-    int32_t sample = song.samples[idx] * 32767.0 * volume * (double)(settings->music_volume / 100.);
++    double synth_sample;
++    if (mono_output)
++    {
++      // Tier-2 path: average the synth's interleaved L/R pair into one
++      // mono sample. Each output frame consumes 2 synth entries.
++      // Defensive bounds check on idx+1 — Synth() always produces an
++      // even number of samples (samples_per_beat * 2 at line ~202) so
++      // idx+1 < song.samples.size() is guaranteed when idx is even,
++      // but the size() check above only guards idx < size; if idx
++      // somehow wrapped to an odd number we'd OOB. Belt-and-braces:
++      // re-check before reading the second channel.
++      const float L = song.samples[idx];
++      const float R = (idx + 1 < song.samples.size())
++                        ? song.samples[idx + 1]
++                        : song.samples[idx]; // pathological fallback
++      synth_sample = (L + R) * 0.5;
++      idx += 2;
++    }
++    else
++    {
++      // Tier-1 path: linear copy (pre-0094 behavior). Each output
++      // sample is one synth entry; SDL device interprets pairs as
++      // L/R interleaved frames at 2-channel config.
++      synth_sample = song.samples[idx];
++      idx++;
++    }
++    int32_t sample = synth_sample * 32767.0 * volume * (double)(settings->music_volume / 100.);
+     // clip to int16
+     if (sample > 32767)
+     {
+@@ -445,7 +499,6 @@ void Organya::_musicCallback(void *udata, uint8_t *stream, uint32_t len)
+     }
+ 
+     str[i] = (int16_t)sample;
+-    idx++;
+   }
+ 
+   song.last_pos = idx;
+-- 
+2.47.3
+
