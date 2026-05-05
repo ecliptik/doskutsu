@@ -1,0 +1,228 @@
+From 4c20269c6ce770e0cb94c3715c3d4fbb070d1acf Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 5 May 2026 09:17:27 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2021=20patch=200093=20=E2=80=94=20L?=
+ =?UTF-8?q?ever=20G=20default-flip:=20Tier-2=20becomes=20default?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0093, Phase 9 wave 21 Lever G default-flip). Polarity
+flip of patch 0092. Mirrors the wave-18 0086→0088 (DIRECT_VESA) and
+wave-17.6 0085 (PREVFRAME_DIFF) two-stage rollout patterns.
+
+Wave 21 outcomes leading to this patch:
+- W21A real-HW measured Lever G mechanism working (per spec § 1).
+  Fps gain: -26.6 ms/flip vs Tier-1 baseline in heavy-music scenes.
+- W21A audio-quality regression: "slow + distorted music" surfaced.
+- Slot 0094 fixed the root cause (Organya stereo-vs-mono mismatch at
+  the _musicCallback boundary).
+- Post-0094 fps gain settles into spec's predicted range (~+11 fps in
+  heavy-music scenes; W21A's pre-fix -26.6 ms figure was inflated by
+  the half-speed playback artifact).
+- W21B real-HW listening test confirmed Tier-2 audio quality
+  user-acceptable per direction 2026-05-05 (mono-11025 trade for
+  +11 fps accepted).
+
+Wave 21 patch 0093 promotes Tier-2 to DEFAULT-ON. The
+SDL_HINT_DOSKUTSU_AUDIO_TIER2 env var keeps its name but inverts its
+semantics:
+  - default (unset / empty / "1" / any non-"0"): Tier-2 ENGAGED
+    (11025 Hz mono, 256-frame buffer, ~43 Hz IRQ rate)
+  - "0" (literal): killswitch reverts to Tier-1 baseline (22050 Hz
+    stereo, original Cave Story 2004 spec; full audio quality, ~+11 fps
+    fps gain forfeited)
+
+This is the inverse of wave-16+ "strict 1-only enables" convention.
+Mirrors patch 0088's `_abl_direct_vesa()` killswitch logic (and
+patch 0085's PREVFRAME_DIFF polarity flip pattern) — single env var
+lets a user revert to bisect-able prior behaviour without a rebuild.
+
+Implementation:
+
+1. `SoundManager.cpp::SoundManager::init()` env-helper polarity:
+   ```cpp
+   const bool tier2_on = !(tier2 && tier2[0] == '0' && tier2[1] == 0);
+   ```
+   (was `tier2 && tier2[0] == '1' && tier2[1] == 0` for opt-in).
+   Default ON; only literal "0" disables.
+
+2. LOG_INFO init banner messages updated:
+   - ENABLED branch (= default since wave 21 patch 0093) now references
+     "default since wave 21 patch 0093" + "set =0 to revert" rather
+     than "experimental opt-in".
+   - DISABLED branch references the killswitch + spec-§-1-original-
+     22050-stereo + "trades fps for fidelity" framing.
+
+3. No SAMPLE_RATE / AUDIO_CHANNELS code changes — those externs
+   already exist from 0092. Buffer-pin logic unchanged. Pixtone
+   resample-spec sites + Organya callback (patch 0094) unchanged.
+
+4. docs/BOOT.md edit: AUDIO_TIER2 entry MOVED from "User-facing
+   options" (where 0092 placed it as opt-in) to "Compatibility /
+   fallback options" (where killswitches live, alongside DIRTY_RECTS
+   / PIXEL_FORMAT_8 / BACKDROP_CACHE / DIRECT_VESA). Documents the
+   `=0` killswitch + "for hardware above Tier 1 reference / purist
+   playthroughs" use case.
+
+What stays unchanged from 0092:
+- Runtime SAMPLE_RATE / AUDIO_CHANNELS extern variable plumbing
+- Buffer pin to 256 frames via SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES
+  OVERRIDE (load-bearing for IRQ-rate-halving mechanism)
+- 10 channel-count substitution sites in Pixtone + Organya
+- Singleton-init ordering (env check → MIX_CreateMixerDevice → lazy
+  Pixtone/Organya construction picks up runtime values)
+
+What stays unchanged from 0094:
+- Mono-downmix logic in Organya::_musicCallback (averages L+R per
+  output frame when AUDIO_CHANNELS == 1)
+- Tier-1 path bit-identical to pre-0094
+
+Risk: low. The path itself is identical to 0092+0094's; only the
+gate's default flips. If a regression surfaces on a fingerprint we
+haven't tested, the user can `SET SDL_HINT_DOSKUTSU_AUDIO_TIER2=0`
+and reboot to recover Tier-1.
+
+Test plan:
+- Build-qa DOSBox-X smoke (3 configs):
+  A. env-unset (default Tier-2 engaged; verify Tier-2 init log + 256
+     buffer + Pixtone regen at 11025).
+  B. AUDIO_TIER2=1 explicit (same as A; bit-identical to default).
+  C. AUDIO_TIER2=0 killswitch (Tier-1 reverted; same audio quality
+     as wave-17.6 baseline).
+- No new real-HW iter needed — W21A measured the fps mechanism +
+  W21B validated audio quality. Polarity flip is a 1-line semantic
+  change, no behavioral surprises.
+
+User-facing impact:
+- New users get +11 fps with the audio quality trade out-of-the-box.
+- Power users / purists set `=0` to keep original 22050 stereo audio.
+- README / CHANGELOG should document the new default (team-lead
+  coordinating the README update separately).
+
+Reference:
+  patches/nxengine-evo/0086-perf-wave-18-direct-vesa-hotpath.patch
+  patches/nxengine-evo/0088-perf-wave-20-direct-vesa-default-on.patch
+    (canonical two-stage rollout: opt-in 0086 → default-on 0088 with
+     `=0` killswitch; this patch is the audio analog)
+  patches/nxengine-evo/0085-perf-wave-17-6-prev-frame-diff-default-off.patch
+    (precedent for default-OFF polarity flip via killswitch convention)
+  patches/nxengine-evo/0092-perf-wave-21-lever-g-tier2-audio-config.patch
+    (the Tier-2 implementation this patch promotes to default)
+  patches/nxengine-evo/0094-perf-wave-21-lever-g-fix-organya-stereo-mono.patch
+    (the audio-quality fix that made the default-flip viable)
+  docs/PHASE9-LEVER-G-PLAN.md (Lever G spec § 3 two-stage rollout
+    pattern)
+  W21A real-HW data (fps measurement)
+  W21B real-HW listening test (audio quality verdict)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 65 ++++++++++++++++++++++++--------------
+ 1 file changed, 42 insertions(+), 23 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 155de1e..f3544ba 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -61,11 +61,22 @@ bool SoundManager::init()
+ {
+   LOG_INFO("Sound system init");
+ 
+-  // DOS-PORT (patch 0092, Phase 9 wave 21 Lever G): Tier-2 audio
+-  // config selection. Read SDL_HINT_DOSKUTSU_AUDIO_TIER2 (strict-1
+-  // match per CLAUDE.md convention); when set, flip global SAMPLE_RATE
+-  // + AUDIO_CHANNELS to 11025 mono AND pin the SDL3 audio buffer size
+-  // to 256 sample frames via SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES.
++  // DOS-PORT (patch 0092, Phase 9 wave 21 Lever G; polarity flipped
++  // patch 0093, wave 21 default-flip). Wave 21 W21A measured Lever G
++  // working as designed; W21B confirmed audio quality "acceptable" per
++  // user verdict 2026-05-05 (mono-11025 trade for +11 fps in heavy-
++  // music scenes accepted). Wave 21 patch 0093 promotes Tier-2 to
++  // DEFAULT-ON with `SDL_HINT_DOSKUTSU_AUDIO_TIER2=0` as the killswitch.
++  // Mirror of wave-18 patch 0086→0088 (DIRECT_VESA polarity flip) and
++  // wave-17.6 patch 0085 (PREVFRAME_DIFF polarity flip) — the same
++  // killswitch convention lets a user revert to Tier-1 (full Cave Story
++  // 2004 audio quality) without a rebuild.
++  //
++  // Strict-match convention: only the literal string "0" disables. Any
++  // other value (including unset, empty, "1", "yes", garbage) leaves
++  // Tier-2 engaged. This is the inverse of the wave-16+ strict-"1"
++  // convention used for opt-in flags — patch 0093 documents the pattern
++  // alongside 0088's `_abl_direct_vesa()` killswitch.
+   //
+   // Buffer-pin reasoning (load-bearing for the lever's mechanism, per
+   // docs/PHASE9-LEVER-G-PLAN.md § 2.3): without explicit pin, SDL3's
+@@ -76,10 +87,10 @@ bool SoundManager::init()
+   // = halved IRQ rate = the actual lever gain. Latency goes 11.6 →
+   // 23.2 ms (one extra 30 fps frame); acceptable for non-rhythm games.
+   //
+-  // Tier-1 path (env unset / not "1"): SAMPLE_RATE / AUDIO_CHANNELS
+-  // stay at their initial values (22050 / 2); SDL3's existing buffer
+-  // heuristic chooses 512 frames per the patch-0066 comment below.
+-  // Behaviorally bit-identical to pre-0092.
++  // Killswitch path (env="0"): SAMPLE_RATE / AUDIO_CHANNELS stay at
++  // their initial values (22050 / 2); SDL3's existing buffer heuristic
++  // chooses 512 frames per the patch-0066 comment below. Behaviorally
++  // identical to pre-0092 (= wave-17.6-baseline audio config).
+   //
+   // Order-of-operations note: this MUST run BEFORE MIX_CreateMixerDevice
+   // (which reads SAMPLE_RATE via the spec.freq assignment) AND before
+@@ -90,7 +101,9 @@ bool SoundManager::init()
+   // chain).
+   {
+     const char *tier2 = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_TIER2");
+-    const bool tier2_on = tier2 && tier2[0] == '1' && tier2[1] == 0;
++    // patch 0093 (wave 21 default-flip): killswitch logic — only literal
++    // "0" disables. Default ON; set =0 to revert to Tier-1.
++    const bool tier2_on = !(tier2 && tier2[0] == '0' && tier2[1] == 0);
+     if (tier2_on)
+     {
+       ::SAMPLE_RATE    = 11025;
+@@ -101,24 +114,30 @@ bool SoundManager::init()
+       // un-pin and collapse the lever's mechanism.
+       SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES,
+                               "256", SDL_HINT_OVERRIDE);
+-      LOG_INFO("Sound system: SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 — Tier-2 "
+-               "audio config engaged ({} Hz, {} channel{}, buffer pinned "
+-               "to 256 frames). Predicted savings: -6.5 ms/flip opening "
+-               "(IRQ-rate halving, hardware-deterministic) + audio-mix "
+-               "CPU reduction (range -3 to -22 ms/flip; mixer-impl "
+-               "dependent, measured in W21A iter). Subjective audio A/B "
+-               "expected post-W21A; killswitch reverts via "
+-               "SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 (or any non-'1' value).",
++      LOG_INFO("Sound system: Tier-2 audio config (default since wave 21 "
++               "patch 0093; {} Hz, {} channel{}, buffer pinned to 256 "
++               "frames). Measured savings on g2k Pentium OverDrive 83 MHz "
++               "(W21A): heavy-music scenes ~+11 fps vs Tier-1 baseline "
++               "(measured -10 to -15 ms/flip post-0094 audio fix; W21A's "
++               "pre-fix -26.6 ms figure was inflated by stereo-vs-mono "
++               "playback bug, see patch 0094). Audio quality is reduced "
++               "vs Tier-1 (mono, 11025 Hz, simple-average L+R downmix) "
++               "but recognizable; user accepted the trade per direction "
++               "2026-05-05. Set SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 to "
++               "revert to Tier-1 22050 stereo (full Cave Story 2004 "
++               "audio quality; trades fps for fidelity).",
+                (unsigned long)::SAMPLE_RATE, (unsigned long)::AUDIO_CHANNELS,
+                ::AUDIO_CHANNELS == 1 ? "" : "s");
+     }
+     else
+     {
+-      LOG_INFO("Sound system: Tier-1 audio config (default; {} Hz, {} "
+-               "channels). Set SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 to opt "
+-               "into Tier-2 (11025 Hz mono, 256-frame buffer) for fps "
+-               "gain on Tier 2/3 hardware (per docs/HARDWARE.md hardware "
+-               "tiers + docs/PHASE9-LEVER-G-PLAN.md mechanism).",
++      LOG_INFO("Sound system: Tier-1 audio config ({} Hz, {} channels) "
++               "via SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 killswitch — reverts "
++               "to wave-17.6-baseline 22050 stereo, the original Cave "
++               "Story 2004 spec. Trades the wave-21 Tier-2 fps gain "
++               "(~+11 fps in heavy-music scenes on Pentium OverDrive "
++               "83 MHz) for full audio fidelity. Unset the env var to "
++               "go back to Tier-2 default.",
+                (unsigned long)::SAMPLE_RATE, (unsigned long)::AUDIO_CHANNELS);
+     }
+   }
+-- 
+2.47.3
+

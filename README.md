@@ -27,11 +27,13 @@ A proof-of-concept port using SDL to DOS with agentic coding.
 
 ## Status
 
-The DOS port boots and runs end-to-end on Pentium-class real hardware. Real-HW title fps on the reference target (Gateway 2000 Pentium OverDrive 83 MHz + Cirrus CL-GD5434 + UNIVBE 6.70 + Vibra16) is **25.6 fps** as of the v0.1.0 release — a 55× improvement over the initial Phase 8 baseline of 0.47 fps. Music, parallax, menus, and combat all render correctly.
+The DOS port boots and runs end-to-end on Pentium-class real hardware. On the reference target (Gateway 2000 Pentium OverDrive 83 MHz + Cirrus CL-GD5434 + UNIVBE 6.70 + Vibra16) real-HW title fps is **~20 fps** in both music-heavy and lighter scenes — a 40× improvement over the initial Phase 8 baseline of 0.47 fps. Music, parallax, menus, and combat all render correctly.
 
-What got us here, in user-facing terms: an 8-bpp indexed framebuffer with a master palette (the largest single gain — roughly halves per-frame VRAM bandwidth), hand-rolled sprite blits that bypass SDL's general software-renderer drawcall path, audio sample rate dropped to 22050 Hz stereo (Cave Story's original 2004 spec) with 11025 Hz mono fallback for slower hardware, and dirty-rect tracking on static scenes.
+What got us here, in user-facing terms: an 8-bpp indexed framebuffer with a master palette (the largest single gain — roughly halves per-frame VRAM bandwidth), hand-rolled sprite blits that bypass SDL's general software-renderer drawcall path, audio at 11025 Hz mono by default (the SB16 IRQ-5 wall-clock during the per-flip render timer was the dominant bottleneck per wave 20 ablation), and dirty-rect tracking on static scenes.
 
-**30 fps title** is the practical goal on this hardware/engine combination — matching original Cave Story's tick rate isn't realistic on a Pentium 83 MHz with a software-renderer-on-DJGPP architecture. Two consecutive perf hypotheses have closed under real-HW measurement: SDL_RenderPresent dispatch glue is only ~1 ms/flip (wave 18, opt-in via `SDL_HINT_DOSKUTSU_DIRECT_VESA=1` for +0.3-0.7 fps), and Cirrus 5434 chip-side BLT engine works fine but back-surface vs visible-FB writes are equally fast on this PCI bus (wave 19 path B, no display-contention savings to harvest). The remaining ~12 ms of unidentified flush-path cost — the gap between pure dosmemput (~4 ms) and the measured per-flip flush (~16 ms) — is the next target. Diagnostic-first instrumentation will identify whether it's palette DAC programming, cursor compositing, surface bookkeeping, or something else, before further optimization.
+The wave-21 11025 Hz mono mix is rougher than the original Cave Story 22050 Hz stereo Organya sound — a deliberate trade for the +11 fps gain in music-heavy scenes (without it the title-attract scene drops to ~9 fps). To opt back into 22050 Hz stereo at the cost of dropping back to ~9 fps in heavy-music scenes, set `SDL_HINT_DOSKUTSU_AUDIO_TIER2=0` before launch.
+
+**30 fps with original audio quality** is the next milestone — requires hardware audio offload (OPL3 / WaveBlaster MIDI dual-backend) so the SB16 audio IRQ stops dominating the per-flip wall-clock. Plan staged for a future implementation phase.
 
 ## Requirements
 
@@ -64,7 +66,7 @@ What got us here, in user-facing terms: an 8-bpp indexed framebuffer with a mast
 **Audio**
 - Organya music synthesis
 - Pixtone sound effects
-- Sound Blaster 16 at 22050 Hz stereo (11025 Hz mono fallback)
+- Sound Blaster 16 at 11025 Hz mono by default (set `SDL_HINT_DOSKUTSU_AUDIO_TIER2=0` for 22050 Hz stereo)
 - Optional OGG Vorbis for custom soundtracks
 
 **Compatibility**
