@@ -200,11 +200,24 @@ fetch-binaries:
 .PHONY: sdl3
 sdl3: $(SYSROOT)/lib/libSDL3.a
 
+# DOSKUTSU: pin SDL_REVISION to a deterministic string to keep build sha
+# reproducible across agent rebuilds. By default SDL3's CMakeLists.txt does
+# `git describe` on vendor/SDL/, which embeds the current HEAD commit hash
+# into the binary as `SDL-<version>-<sha>`. apply-patches.sh re-applies our
+# patch series via `git am`, and `git am` uses wall-clock time for the
+# COMMITTER timestamp — so HEAD commit hashes change every time apply runs,
+# making the embedded revision string non-deterministic. Pin it explicitly
+# to the base manifest SHA + a doskutsu marker so the binary's embedded
+# revision is determined purely by the source content, not by when
+# apply-patches happened to run.
+SDL_REVISION_PIN := SDL-3.5.0-74a746281+doskutsu
+
 $(SYSROOT)/lib/libSDL3.a: | djgpp-check
 	@test -d "$(SDL3_SRC)" || (echo "error: $(SDL3_SRC) not present — run scripts/fetch-sources.sh" >&2; exit 1)
 	@test -f "$(TOOLCHAIN_FILE)" || (echo "error: $(TOOLCHAIN_FILE) not found — PR #15377 not in this SDL checkout?" >&2; exit 1)
 	cmake -S $(SDL3_SRC) -B $(SDL3_BUILD) $(CMAKE_COMMON) \
-	    -DSDL_SHARED=OFF -DSDL_STATIC=ON
+	    -DSDL_SHARED=OFF -DSDL_STATIC=ON \
+	    -DSDL_REVISION="$(SDL_REVISION_PIN)"
 	cmake --build $(SDL3_BUILD) -j$(NPROC)
 	cmake --install $(SDL3_BUILD)
 
