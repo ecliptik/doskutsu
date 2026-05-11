@@ -1,0 +1,266 @@
+From 4c6da7325dc5790d347f22f1e37dbe267e668994 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 14:11:01 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200113=20=E2=80=94=20?=
+ =?UTF-8?q?off-screen=20tile=20bbox=20skip=20in=20FG-tilemap=20loop?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0113, Phase 11 iter H opt #2). Pre-clip iteration
+range in `_tilemap_render_uncached_full_loop` to the map-bounds-
+clipped visible window when SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP=1.
+Eliminates per-iteration `(mapx+x) >= 0 && (mapx+x) < map.xsize &&
+...` OOB bounds check AND skips OOB tiles entirely (no iterations
+spent on tiles outside the map). Wave-22.5 measurement: ~30000
+tiles visited / ~1900 drawn per 100 flips on PAUSE-equivalent state
+(94% wasted iteration); this lever cuts the iteration overhead.
+
+Killswitch: SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP=1 strict-1, default OFF
+(iter H PLAY2 is the A/B opt-in test).
+
+Mechanism: at FG-loop entry, compute clipped iteration range from
+camera position + screen size + map bounds:
+  x_loop_start          = max(0, -mapx)
+  x_loop_end_inclusive  = min(x_max_inclusive, map.xsize - mapx - 1)
+  y_loop_start          = max(0, -mapy)
+  y_loop_end_inclusive  = min(y_max_inclusive, map.ysize - mapy - 1)
+  blit_x_start         += x_loop_start * TILE_W   (preserve screen-
+                                                   position alignment)
+  blit_y               += y_loop_start * TILE_H
+
+When env unset: clipped range = full bbox = existing behavior bit-
+for-bit. Zero behavioral change (clean killswitch).
+
+When env set: outer loops iterate ONLY in the clipped range. The
+inner OOB bounds-check still present (tautologically true when
+clipped; the clipped range is correctness-preserving), but redundant
+in the ON path. Compiler may not eliminate the redundant check (vars
+not constant-foldable across function boundary), so per-iter cost
+of the redundant check remains. Real-HW W22-WB-H PLAY2 measures
+actual fps gain — primary gains come from skipped OOB iterations,
+secondary gains from reduced branch-misprediction pressure.
+
+Smoke (DOSBox-X-fast, A/B comparison with wave-25 instrumentation):
+
+  Gate 1 — env unset (baseline):
+    [mds-tfg-tiles n=100 visited=37400 drawn_normal=1900
+     drawn_special=0 skipped_attr=31700 skipped_oob=3800
+     visit_overhead_per_tile_us=-1.51
+     dispatch_overhead_per_tile_us=16.40]
+    60 flips, no crashes.
+
+  Gate 2 — TILE_BBOX_SKIP=1:
+    [mds-tfg-tiles n=100 visited=33600 drawn_normal=1900
+     drawn_special=0 skipped_attr=31700 skipped_oob=0
+     visit_overhead_per_tile_us=-1.71
+     dispatch_overhead_per_tile_us=16.57]
+    59 flips, no crashes.
+
+  A/B math:
+    37400 (off) - 33600 (on) = 3800 (the OOB iterations skipped)
+    skipped_oob dropped from 3800 → 0 in ON path (bbox-skip elides
+                                                  all OOB iterations)
+    drawn_normal + skipped_attr unchanged across modes (1900 +
+                                                        31700 = 33600
+                                                        in both)
+                                                        — correctness
+                                                        preserved
+                                                        (no in-bounds
+                                                        tiles dropped)
+
+  Self-check `visited == drawn_normal + drawn_special + skipped_attr
+  + skipped_oob` holds in BOTH modes:
+    OFF: 37400 = 1900 + 0 + 31700 + 3800 ✓
+    ON:  33600 = 1900 + 0 + 31700 + 0    ✓
+
+  Zero [mds-tfg-selfcheck WARN] lines in either gate.
+
+  strings-grep verifies SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP env-var
+  symbol + tile_bbox_skip_active() function symbol present in
+  binary.
+
+  ~10% reduction in tile iterations under DOSBox-X. Real-HW W22-WB-H
+  PLAY2 measures fps gain on g2k Pentium-OD-83. Per dispatch's "save
+  2-4 ms / flip in mds_tilemap_fg" estimate.
+
+NEW infrastructure:
+  diagnostic_timers.h: tile_bbox_skip_active() forward-decl
+  Renderer.cpp:
+    - _abl_tile_bbox_skip() in anonymous namespace (strict-1
+      cached static-const-bool per W22A/W22.5/W23 family pattern)
+    - tile_bbox_skip_active() file-scope wrapper at end-of-file
+      per W20B build-fix amendment placement
+
+MODIFIED:
+  map.cpp _tilemap_render_uncached_full_loop:
+    - bbox_skip_on local read at function entry
+    - x_loop_start / x_loop_end_inclusive / y_loop_start /
+      y_loop_end_inclusive variables computed from camera + map
+      bounds when bbox_skip_on; defaults to full-bbox when off
+    - blit_x_start / blit_y adjusted to preserve screen-position
+      alignment for clipped first column/row
+    - Outer for-loops iterate clipped range; inner body unchanged
+      (preserves wave-25 instrumentation + tile-category counter
+      logic)
+  docs/BOOT.md: SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP entry added
+
+Out of scope (per silent_narrow_pattern.md):
+  - In-loop bounds-check elimination (compiler may not const-fold;
+    if real-HW iter shows insufficient gain, slot 0114a could split
+    the body into two variants — bounds-checked + bounds-known —
+    keyed off bbox_skip_on)
+  - mds_tilemap_bg loop bbox skip (BG = 3.77 ms / flip per W22.5;
+    smaller slice; deferred until FG lever proven on real HW)
+  - Pre-cached bbox state across consecutive frames (camera moves
+    smoothly; could compute once per camera-update vs per-flip).
+    Negligible compute cost (4 max/min ops per flip); not worth
+    architectural complexity for slot 0113.
+---
+ src/Utils/diagnostic_timers.h | 13 +++++++++
+ src/graphics/Renderer.cpp     | 21 ++++++++++++++
+ src/map.cpp                   | 53 +++++++++++++++++++++++++++++++++--
+ 3 files changed, 85 insertions(+), 2 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 3056a5f..39ca150 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -652,6 +652,19 @@ extern bool g_mds_tfg_loop_active;
+ // SDL_HINT_DOSKUTSU_MDS_TFG_INSTR.
+ bool mds_tfg_instr_active();
+ 
++// patch 0113 (Phase 11 iter H opt #2: off-screen tile bbox skip).
++// Forward-decl env helper for the killswitch. When ENABLED, the
++// FG-tilemap loop pre-computes a clipped (mapx, mapy)-rectangle
++// matching the visible window's intersection with the map bounds,
++// then iterates only inside that rectangle — eliminating the per-
++// iteration OOB bounds check on every tile + skipping OOB tiles
++// entirely (no iterations spent on tiles outside the map). Wave-22.5
++// data shows ~30000 tiles visited / ~1900 drawn per 100 flips
++// (94% wasted iteration); this lever cuts the iteration overhead
++// out. Default OFF (killswitch via SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP=1).
++// Per-tile rendering correctness preserved (in-bounds path unchanged).
++bool tile_bbox_skip_active();
++
+ // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
+ // scaffolding): 5 per-block reset counters + 1 sticky enum field per
+ // docs/PHASE10-CONTRACT.md § 1. Distinct field set from the existing
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 65de4ba..3ab7f56 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -317,6 +317,9 @@ bool p10_audio_instr_active();
+ // mds_tfg_instr_active() forward-decl joins the family. Same file-
+ // scope-after-both-namespace-closes definition pattern.
+ bool mds_tfg_instr_active();
++// patch 0113 (Phase 11 iter H opt #2: off-screen tile bbox skip):
++// tile_bbox_skip_active() forward-decl. Same pattern.
++bool tile_bbox_skip_active();
+ }}
+ 
+ namespace NXE
+@@ -542,6 +545,18 @@ inline bool _abl_mds_tfg_instr()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0113, Phase 11 iter H opt #2: off-screen tile
++// bbox skip). Killswitch for the FG-tilemap loop's OOB-tile skip
++// optimization. When ENABLED, the loop pre-clips iteration range to
++// the map-bounds-clipped visible window, eliminating per-iteration
++// OOB bounds checks + OOB iterations entirely. Default OFF (so iter
++// H PLAY2 is the A/B opt-in test). Strict-1 match.
++inline bool _abl_tile_bbox_skip()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP");
++  return v;
++}
++
+ // drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
+ // Track which Surface objects produce NULL textures so we log each origin
+ // once + a periodic running count, instead of hundreds of identical lines
+@@ -6312,3 +6327,9 @@ bool p10_audio_instr_active() { return ::NXE::Graphics::_abl_p10_audio_instr();
+ namespace NXE { namespace Diag {
+ bool mds_tfg_instr_active() { return ::NXE::Graphics::_abl_mds_tfg_instr(); }
+ }}
++
++// DOS-PORT (patch 0113, Phase 11 iter H opt #2: off-screen tile bbox
++// skip): tile_bbox_skip_active() env-helper accessor. Same pattern.
++namespace NXE { namespace Diag {
++bool tile_bbox_skip_active() { return ::NXE::Graphics::_abl_tile_bbox_skip(); }
++}}
+diff --git a/src/map.cpp b/src/map.cpp
+index 79f8c0f..e37c2d4 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1418,16 +1418,65 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+     NXE::Diag::g_mds_tfg_loop_active = true;
+   }
+ 
++  // patch 0113 (Phase 11 iter H opt #2: off-screen tile bbox skip).
++  // When SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP=1, the loop pre-clips
++  // iteration range to [x_start..x_end] × [y_start..y_end] computed
++  // from camera position + screen size + map bounds. Eliminates the
++  // per-iteration `(mapx+x) >= 0 && (mapx+x) < map.xsize && ...` OOB
++  // bounds check (always-passes in the clipped range) AND skips OOB
++  // tiles entirely (no iterations spent on tiles outside the map).
++  // Wave-22.5 data: ~30000 tiles visited / ~1900 drawn per 100 flips
++  // (94% wasted iteration); this lever cuts the iteration overhead
++  // out. Default OFF (killswitch — iter H PLAY2 is the A/B opt-in).
++  //
++  // Wave-25 instrumentation note: when bbox-skip is ON, the visited
++  // count drops by the OOB-skip count vs OFF (no iterations spent on
++  // OOB), so the wave-25 self-check `visited == drawn_normal +
++  // drawn_special + skipped_attr + skipped_oob` still holds with
++  // skipped_oob=0 in the bbox-skip-ON case. Operator can A/B compare
++  // wave-25 counters with bbox-skip OFF vs ON to measure the OOB
++  // lever's actual fps gain on real HW.
++  const bool bbox_skip_on = NXE::Diag::tile_bbox_skip_active();
++
+   int scroll_x = (map.displayed_xscroll / CSFI);
+   int scroll_y = (map.displayed_yscroll / CSFI);
+   int mapx = scroll_x / TILE_W;
+   int mapy = scroll_y / TILE_H;
+   int blit_y = -(scroll_y % TILE_H);
+   int blit_x_start = -(scroll_x % TILE_W);
+-  for (int y = 0; y <= (Renderer::getInstance()->screenHeight / TILE_H) + MAP_DRAW_EXTRA_Y; y++)
++
++  const int x_max_inclusive = (Renderer::getInstance()->screenWidth  / TILE_W) + MAP_DRAW_EXTRA_X;
++  const int y_max_inclusive = (Renderer::getInstance()->screenHeight / TILE_H) + MAP_DRAW_EXTRA_Y;
++
++  // patch 0113: pre-compute bbox-clipped iteration range when killswitch
++  // is ON. mapx+x >= 0 → x >= -mapx (clamped to 0 lower bound, since
++  // x can't be negative). mapx+x < map.xsize → x < map.xsize - mapx,
++  // so x_end_inclusive = map.xsize - mapx - 1 (clamped to x_max_inclusive
++  // upper bound). Same logic for y.
++  int x_loop_start = 0;
++  int x_loop_end_inclusive = x_max_inclusive;
++  int y_loop_start = 0;
++  int y_loop_end_inclusive = y_max_inclusive;
++  if (bbox_skip_on)
++  {
++    if (-mapx > x_loop_start) x_loop_start = -mapx;
++    if (map.xsize - mapx - 1 < x_loop_end_inclusive)
++      x_loop_end_inclusive = map.xsize - mapx - 1;
++    if (-mapy > y_loop_start) y_loop_start = -mapy;
++    if (map.ysize - mapy - 1 < y_loop_end_inclusive)
++      y_loop_end_inclusive = map.ysize - mapy - 1;
++    // Defensive: if the clipped range is empty (camera entirely
++    // outside map; shouldn't happen in normal play, but rare edge
++    // cases on small test maps could), skip the loops entirely.
++    // Apply the blit_x/blit_y adjustment for x_loop_start so the
++    // clipped first column blits at the correct screen position.
++    blit_x_start += x_loop_start * TILE_W;
++    blit_y       += y_loop_start * TILE_H;
++  }
++  for (int y = y_loop_start; y <= y_loop_end_inclusive; y++)
+   {
+     int blit_x = blit_x_start;
+-    for (int x = 0; x <= (Renderer::getInstance()->screenWidth / TILE_W) + MAP_DRAW_EXTRA_X; x++)
++    for (int x = x_loop_start; x <= x_loop_end_inclusive; x++)
+     {
+       // patch 0111: tile-category counters. tiles_visited bumps on
+       // every (x,y) iteration regardless of bounds. Bounds check
+-- 
+2.47.3
+

@@ -1,0 +1,816 @@
+From 2eb0dfbfda0c635598bbdffeff430dea8ced2af4 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 5 May 2026 10:10:43 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2022=20W22A=20patch=200095=20?=
+ =?UTF-8?q?=E2=80=94=20mode-tick=20decomposition?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0095, Phase 9 wave 22 W22A). Decomposes the wave-20
+W20B-measured mode_tick=23.94 ms median (91% of engine_tick) into 4
+named sub-buckets + 1 derived residual. Single generic bracket-naming
+scheme covers BOTH GM_NORMAL gameplay (game_tick_normal) AND title
+attract (title_tick); bracket names describe work TYPE rather than
+mode-specific terms so the same grep pattern reads across both
+modes' samples.
+
+Decomposes mode_tick because it is the dominant remaining engine-side
+cost on real HW per W20B (docs/PHASE11-COLD-PICKUP.md § 1) and gates
+wave-23+ optimization candidate selection. Wave-23 candidates ranked
+in PHASE11-COLD-PICKUP.md § 4 (sprite cull / AI caching / skip-when-
+unchanged / fixed-rate effects / drawcall batching / bullet pool) are
+NOT pre-authored — per perf_predictions_unreliable.md and the wave-20
+Levers C/D/E lesson (3 optimizations dropped on cross-validated
+zero counters). Measure first; pick the dominant bucket; then act.
+
+Implementation per docs/PHASE11-WAVE-22-CONTRACT.md (gitignored, on-
+disk only):
+
+1. **SDL_HINT_DOSKUTSU_MODE_TICK_INSTR=1** env helper (strict-1, default
+   OFF). NEW separate hint from W20B's FINE_INSTR per contract § 2 —
+   preserves the strict-"1" convention from CLAUDE.md (rejecting
+   numeric escalation `=2` on FINE_INSTR which would create an
+   exception class) and keeps each instrumentation layer
+   independently toggleable. Cached static-const-bool — -O2 hoists
+   per-tick guards.
+
+2. **4 RAII timer structs** in src/Utils/diagnostic_timers.h, mirroring
+   W20B's ClearScreenTimer / TscInterpTimer / ModeTickTimer /
+   DebugOverlayTimer pattern from patch 0090. Each gates on
+   mode_tick_instr_active() at destruction; same construction-time
+   SDL_GetTicksNS read as W20B (no constructor-side gate, consistent
+   with EngineTickTimer + W20B precedent).
+
+   - ModeSimTimer       — non-render game-state mutation
+                          (HandlePlayer + AI + physics + scroll +
+                           cull for GM_NORMAL; handle_input() for
+                           title)
+   - ModeDrawSceneTimer — primary scene drawcall pass
+                          (DrawScene() for GM_NORMAL; draw_title()
+                           for title — includes the in-OnTick
+                           clearScreen on either mode)
+   - ModeDrawHudTimer   — secondary HUD drawcalls
+                          (StatusBar + fade + niku for GM_NORMAL;
+                           empty for title — bracket fires n=0)
+   - ModePostTimer      — post-render overlays + screen-effects
+                          (textbox.Tick + ScreenEffects::Draw +
+                           map_draw_map_name for GM_NORMAL;
+                           textbox.Tick on the in_multiload-and-
+                           SaveSelect-visible branch for title)
+
+3. **Storage** (file-scope in Renderer.cpp's NXE::Diag namespace,
+   alongside W20B's storage so audit-flush emits 3 layers from a
+   single TU):
+   - 4 sample arrays + 4 idx counters
+   - 1 residual sample array + 1 residual idx
+   - 4 per-tick dt locals (reset at Game::tick entry; written by
+     each timer's destructor; consumed by the residual block)
+
+   Reuses W20B's g_eng_tick_block_size = 100 (per contract § 3 — no
+   new block_size constant introduced).
+
+4. **Residual derivation** (option α from contract § 4) at end of
+   Game::tick body, gated separately from W20B's residual block.
+   Reuses W20B's g_eng_mode_tick_dt_this_tick (populated by
+   ModeTickTimer in patch 0090) as the parent total — NO new
+   SDL_GetTicksNS read at end-of-tick because W20B already captures
+   the dispatch-call delta.
+
+       _mt_residual = g_eng_mode_tick_dt_this_tick
+                    - mode_sim_dt - mode_draw_scene_dt
+                    - mode_draw_hud_dt - mode_post_dt
+
+   Signed math + clamp at 0. Self-validating: small mode_residual
+   median (<1 ms) means brackets are exhaustive for that scene;
+   large residual surfaces an unbracketed chunk.
+
+   IMPORTANT: this is residual within mode_tick, NOT residual within
+   engine_tick. W20B's engine_tick_residual block continues to tell
+   you what's in Game::tick body OUTSIDE tickfunctions[].OnTick().
+   Both layers stay independently meaningful.
+
+   COUPLING: the W22A residual block reads g_eng_mode_tick_dt_this_-
+   tick which is only written when FINE_INSTR=1. With MODE_TICK_INSTR=1
+   but FINE_INSTR=0, residual silently clamps to 0 every tick (sub-
+   bucket samples remain valid). Operator's W22A iter (contract § 6)
+   sets both hints, so this is not a real-world issue; documented
+   in BOOT.md (on-disk only).
+
+5. **Audit-flush emission** in _maybe_flush_phase_timing_audit() in
+   Renderer.cpp: 5 new
+
+       [mode-tick-stat n=N phase=<NAME> min=N.NN med=N.NN mean=N.NN
+        p95=N.NN max=N.NN ms]
+
+   lines per 100-tick block when MODE_TICK_INSTR=1. Distinct prefix
+   `mode-tick-stat` (vs W20A's `flip-stat` and W20B's
+   `engine-tick-stat`) so 3-layer grep tooling separates the layers
+   without ambiguity. Empty-block placeholder lines (n=0, all
+   numerics 0.00) emitted for buckets with zero firings so per-block
+   log shape stays uniform — critical for W22A1 (title) where
+   mode_draw_hud always fires n=0 and the title common branch fires
+   mode_post n=0. Analysis tooling expects 5 lines per block.
+
+   Order in the log per block: [flip-stat] (W20A) → [engine-tick-stat]
+   (W20B) → [mode-tick-stat] (W22A) → counters. Outer-to-inner
+   decomposition; greppable in priority order.
+
+6. **Same _compute_flip_phase_stats helper** reused (W20A's
+   sort/min/med/mean/p95/max/2-decimal infrastructure is layer-
+   agnostic; same _FlipPhaseStats struct). NO fourth-layer copy of
+   the helper introduced — three copies would diverge over time.
+
+7. **Cross-namespace plumbing** mirrors W20B precedent: forward-
+   declared free function NXE::Diag::mode_tick_instr_active() at
+   namespace scope (alongside engine_tick_fine_instr_active() in the
+   file-top wrapper) with a 1-line definition at file scope after
+   BOTH outer NXE::Graphics namespace braces close. Heeds the W20B
+   build-fix amendment — placement at "after the anonymous namespace
+   closes but BEFORE the outer NXE::Graphics closes" would re-open
+   NXE inside NXE::Graphics, producing nested NXE::Graphics::NXE::Diag.
+   File-scope placement after-both-namespace-closes is correct;
+   same trap, same fix.
+
+Bracket-placement decisions vs contract § 1 (transparent flag of
+contract-text-vs-implementation deltas, per silent-narrow rule —
+all 3 acked by flush-instr at Task #3 review):
+
+a. game_tick_normal()'s 2 player-init lines (player->riding = NULL;
+   player->bopped_object = NULL) at game.cpp:345-346 fall into
+   mode_residual rather than mode_sim. Contract § 1 enumerated
+   "lines 347-371" (UpdateBlockStates onwards) for mode_sim;
+   the 2 NULL-writes weren't in scope. Sub-µs work; residual
+   absorbs without distorting headlines.
+
+b. title_tick()'s seldelay-branch clearScreen + in_multiload-non-
+   textbox-branch clearScreen fall into mode_residual rather than
+   mode_post. Contract § 1 said "the clearScreen(BLACK) at
+   title.cpp:346 / 360 (inside the bracket, since these are post-
+   input frames)" but those clearScreens are on alternative control-
+   flow branches that don't visit the textbox.Tick() call site at
+   all — wrapping them with mode_post would be artificial. Drop to
+   residual is the cleaner code-faithful reading. Per pressure_-
+   test_tidy_narratives.md the contract over-prescribed; flush-instr
+   acked the placement at review.
+
+c. mode_draw_hud (375-380) placed before mode_post (382-385) in
+   game_tick_normal() — matches contract § 1 left-to-right
+   enumeration.
+
+Non-coverage (intentional, per contract § 1):
+- audio_mix_stage NOT bracketed as a sibling — Pixtone/Organya
+  output staging fires off-thread in audio-IRQ context (no clean
+  call site inside OnTick body). Audio-IRQ wall-clock cost continues
+  to be captured by the audio-on vs audio-off engine_tick_total
+  delta from W20B + W20A2.
+- Per-OnTick clearScreen INSIDE the mode_draw_scene bracket, NOT
+  separate. The W20B ClearScreenTimer brackets the OUTER Game::tick-
+  level clearScreen at game.cpp:254; per-mode clearScreens are
+  different call sites and separate work.
+- Non-load-bearing modes (inventory_tick, ms_tick, island_tick,
+  credit_tick, intro_tick, pause_tick, options_tick, mods_tick) get
+  NO instrumentation. Operator's W22A iter doesn't enter them in
+  measured frames. Brackets add cleanly later if a future scene
+  surfaces a need.
+
+Hot-path cost when MODE_TICK_INSTR unset (mirrors W20B):
+- 4 RAII destructors per OnTick (each reads SDL_GetTicksNS at
+  construction unconditionally; gating happens at destruction)
+- ~5 KB unused static state (5 sample arrays × 100 × sizeof(uint64)
+  + 4 dt locals + 5 idxes)
+- Residual block: gated on mode_tick_instr_active(), 0 cost when
+  env unset
+
+Documentation: docs/BOOT.md gets a comprehensive MODE_TICK_INSTR
+entry covering bracket scheme, residual semantics, empty-block
+placeholder behavior, FINE_INSTR pairing dependency, and the
+strict-match convention. BOOT.md is gitignored per pre-existing
+convention (.gitignore:95) — internal-only docs that live on-disk
+for reference, not in the public repo. Same situation as W20B's
+FINE_INSTR doc gap (flagged by flush-instr's W22A side-observation).
+
+Test plan (subsequent tasks):
+- DOSBox-X smoke (build-qa Task #5): 3 configs.
+  - A: env-unset baseline (no [flip-stat], no [engine-tick-stat],
+       no [mode-tick-stat]).
+  - B: SDL_HINT_DOSKUTSU_FLIP_INSTR=1 + SDL_HINT_DOSKUTSU_FINE_INSTR=1
+       alone (no [mode-tick-stat] lines).
+  - C: SDL_HINT_DOSKUTSU_FLIP_INSTR=1 + SDL_HINT_DOSKUTSU_FINE_INSTR=1
+       + SDL_HINT_DOSKUTSU_MODE_TICK_INSTR=1 (W20A coarse + W20B
+       engine-tick decomp + W22A mode-tick decomp; all three layers
+       emit).
+- Real-HW iter (realhw Task #6): 2-PLAY ablation per contract § 6.
+  - W22A1 — title attract (cross-validates W20B mode_tick=23.94 ms)
+  - W22A2 — GM_NORMAL gameplay (the actual fps-critical case)
+- Analysis (flush-instr Task #8): identifies dominant sub-bucket;
+  recommends wave-23+ optimization candidate from the cold-pickup
+  option-space.
+
+References:
+  patches/nxengine-evo/0090-perf-wave-20-w20b-engine-tick-decomposition.patch
+    (W20B authoring model — same RAII pattern, same accessor
+     wrapper convention, same audit-flush extension shape)
+  patches/nxengine-evo/0087-perf-wave-20-flip-instrumentation.patch
+    (W20A coarse brackets — outer of the 3-layer instrumentation
+     stack; provides _compute_flip_phase_stats reused here)
+  vendor/nxengine-evo/src/Utils/diagnostic_timers.h
+    (existing AudioMixerTimer + EngineTickTimer + W20B ClearScreen/
+     TscInterp/ModeTick/DebugOverlay + W22A 4 new ModeSim/Draw*/Post
+     timers — single header, 8 timer structs total)
+  docs/PHASE11-COLD-PICKUP.md § 1, § 3
+    (W20B mode_tick=23.94 ms finding, wave-22 spec)
+  docs/PHASE11-WAVE-22-CONTRACT.md (gitignored, on-disk only)
+    § 1 (bracket scheme), § 2 (hint name rationale), § 3 (output
+    format), § 4 (residual derivation), § 5 (file footprint),
+    § 6 (W22A iter shape), § 8 (anti-patterns), § 9 (acceptance
+    gate satisfied at flush-instr Task #3 review)
+  memory/silent_narrow_pattern.md
+  memory/patch_cascade_trap.md
+  memory/perf_predictions_unreliable.md
+  memory/measurements_above_prediction_are_red_flags.md
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h | 142 ++++++++++++++++++++++++++++++++
+ src/game.cpp                  | 134 +++++++++++++++++++++++-------
+ src/graphics/Renderer.cpp     | 150 ++++++++++++++++++++++++++++++++++
+ src/intro/title.cpp           |  32 +++++++-
+ 4 files changed, 426 insertions(+), 32 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 12dc544..56e5507 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -191,6 +191,148 @@ struct DebugOverlayTimer
+   }
+ };
+ 
++// DOS-PORT (patch 0095, Phase 9 wave 22 W22A mode_tick decomposition):
++// 4 sub-bracket RAII timers + residual derivation. Decomposes the
++// 23.94 ms mode_tick budget (W20B median = 91% of engine_tick) into
++// named sub-buckets so wave 23+ optimization picks the right lever.
++// Single generic naming covers both `game_tick_normal()` (GM_NORMAL
++// gameplay) AND `title_tick()` (GM_TITLE attract). Bracket names
++// describe **work type**, not mode-specific terms; sample sizes per
++// phase will not match across the two PLAYs because each mode hits a
++// different subset of buckets.
++//
++// Gated on SDL_HINT_DOSKUTSU_MODE_TICK_INSTR=1 (NEW; separate from
++// FINE_INSTR to preserve strict-"1" convention and independent layer
++// toggle — see docs/PHASE11-WAVE-22-CONTRACT.md § 2). Cached
++// static-const-bool semantics so -O2 hoists the per-tick guards.
++//
++// Sub-buckets (sibling, non-overlapping inside `tickfunctions[].OnTick()`
++// scope):
++//   ModeSimTimer       - non-render game-state mutation
++//                        (HandlePlayer + AI + physics + scroll for
++//                         GM_NORMAL; handle_input() for title)
++//   ModeDrawSceneTimer - primary scene drawcall pass
++//                        (DrawScene() for GM_NORMAL;
++//                         draw_title() for title)
++//   ModeDrawHudTimer   - secondary HUD drawcalls
++//                        (StatusBar + fade + niku for GM_NORMAL;
++//                         empty for title — bracket sees n=0)
++//   ModePostTimer      - post-render overlays + screen-effects
++//                        (textbox.Tick + ScreenEffects::Draw +
++//                         map_draw_map_name for GM_NORMAL;
++//                         conditional textbox.Tick on the
++//                         in_multiload branch for title)
++//
++// Residual = mode_tick_total - sum(sub-buckets), clamped at 0.
++// Reuses W20B's `g_eng_mode_tick_dt_this_tick` populated by
++// `ModeTickTimer` (patch 0090) as the parent total — NO new
++// SDL_GetTicksNS read needed at end-of-Game::tick because W20B already
++// captures the dispatch-call delta. The new residual block in
++// game.cpp gates separately on `mode_tick_instr_active()` so layered
++// gates stay independent.
++//
++// Self-validation: small mode_residual median (<1 ms) means brackets
++// are exhaustive for that scene; large residual means there's still
++// an unfound chunk in the OnTick() body that wave 23 candidate-
++// selection has to account for.
++//
++// Storage: 4 sample arrays + idxes + per-tick dt locals + 1 residual
++// array + idx, all extern-declared here, defined in Renderer.cpp where
++// the audit-flush emission lives. Same `g_eng_tick_block_size = 100`
++// cadence as W20B (NO new block_size constant introduced; per
++// contract § 3).
++
++// Forward-declare the env helper. Definition lives in Renderer.cpp's
++// ablation-flag cluster (alongside _abl_flip_instr / _abl_fine_instr /
++// _abl_mode_tick_instr / _abl_direct_vesa). Capturing as a free
++// function lets this header stay decoupled from the Renderer class —
++// mirrors the W20B `engine_tick_fine_instr_active()` precedent.
++bool mode_tick_instr_active();
++
++// Sample-array storage (extern; defined in Renderer.cpp). Sized at
++// `g_eng_tick_block_size` (= 100), shared with W20B per contract § 3.
++extern std::uint64_t g_mt_sim_samples[g_eng_tick_block_size];
++extern std::uint64_t g_mt_draw_scene_samples[g_eng_tick_block_size];
++extern std::uint64_t g_mt_draw_hud_samples[g_eng_tick_block_size];
++extern std::uint64_t g_mt_post_samples[g_eng_tick_block_size];
++extern std::uint64_t g_mt_residual_samples[g_eng_tick_block_size];
++extern int g_mt_sim_idx;
++extern int g_mt_draw_scene_idx;
++extern int g_mt_draw_hud_idx;
++extern int g_mt_post_idx;
++extern int g_mt_residual_idx;
++
++// Per-tick dt locals — written by each timer's destructor, consumed
++// by the new residual block at end-of-Game::tick. Reset by caller at
++// Game::tick entry so leftover-from-prior-tick doesn't pollute the
++// residual subtraction (mirrors W20B's reset cluster at game.cpp:242).
++extern std::uint64_t g_mt_sim_dt_this_tick;
++extern std::uint64_t g_mt_draw_scene_dt_this_tick;
++extern std::uint64_t g_mt_draw_hud_dt_this_tick;
++extern std::uint64_t g_mt_post_dt_this_tick;
++
++// Sub-bucket RAII timers. Same destructor pattern as W20B: capture
++// dt, write to per-tick local, push to sample array (with bounds-
++// check + env gate). Cost when env unset: 1 SDL_GetTicksNS at
++// construction (always) + 1 at destruction + 1 branch-on-cached-bool.
++// Mirrors W20B's `ClearScreenTimer` etc. — same pattern, layered
++// independently behind the new `mode_tick_instr_active()` gate.
++struct ModeSimTimer
++{
++  std::uint64_t t0;
++  ModeSimTimer() : t0(SDL_GetTicksNS()) {}
++  ~ModeSimTimer()
++  {
++    if (!mode_tick_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_mt_sim_dt_this_tick = dt;
++    if (g_mt_sim_idx < g_eng_tick_block_size)
++      g_mt_sim_samples[g_mt_sim_idx++] = dt;
++  }
++};
++
++struct ModeDrawSceneTimer
++{
++  std::uint64_t t0;
++  ModeDrawSceneTimer() : t0(SDL_GetTicksNS()) {}
++  ~ModeDrawSceneTimer()
++  {
++    if (!mode_tick_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_mt_draw_scene_dt_this_tick = dt;
++    if (g_mt_draw_scene_idx < g_eng_tick_block_size)
++      g_mt_draw_scene_samples[g_mt_draw_scene_idx++] = dt;
++  }
++};
++
++struct ModeDrawHudTimer
++{
++  std::uint64_t t0;
++  ModeDrawHudTimer() : t0(SDL_GetTicksNS()) {}
++  ~ModeDrawHudTimer()
++  {
++    if (!mode_tick_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_mt_draw_hud_dt_this_tick = dt;
++    if (g_mt_draw_hud_idx < g_eng_tick_block_size)
++      g_mt_draw_hud_samples[g_mt_draw_hud_idx++] = dt;
++  }
++};
++
++struct ModePostTimer
++{
++  std::uint64_t t0;
++  ModePostTimer() : t0(SDL_GetTicksNS()) {}
++  ~ModePostTimer()
++  {
++    if (!mode_tick_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_mt_post_dt_this_tick = dt;
++    if (g_mt_post_idx < g_eng_tick_block_size)
++      g_mt_post_samples[g_mt_post_idx++] = dt;
++  }
++};
++
+ }  // namespace Diag
+ }  // namespace NXE
+ 
+diff --git a/src/game.cpp b/src/game.cpp
+index 8ac2a48..bf752be 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -243,6 +243,21 @@ void Game::tick(void)
+   NXE::Diag::g_eng_tsc_interp_dt_this_tick     = 0;
+   NXE::Diag::g_eng_mode_tick_dt_this_tick      = 0;
+   NXE::Diag::g_eng_debug_overlay_dt_this_tick  = 0;
++
++  // patch 0095 (wave 22 W22A): mode_tick sub-bracket per-tick dt locals.
++  // Same reset rationale as W20B's cluster above — leftover-from-prior-
++  // tick must not pollute the new mode_tick_residual computation at
++  // end-of-Game::tick. Each ModeSimTimer / ModeDrawSceneTimer /
++  // ModeDrawHudTimer / ModePostTimer destructor overwrites its bucket
++  // when its bracket fires; if a bucket doesn't fire this tick (e.g.
++  // mode_draw_hud on a title-attract frame), the local stays at 0 and
++  // the residual subtraction sees 0 for that bucket. Layered
++  // independently of W20B — these locals exist whether MODE_TICK_INSTR
++  // is set or not (zero cost when env unset; storage is small).
++  NXE::Diag::g_mt_sim_dt_this_tick         = 0;
++  NXE::Diag::g_mt_draw_scene_dt_this_tick  = 0;
++  NXE::Diag::g_mt_draw_hud_dt_this_tick    = 0;
++  NXE::Diag::g_mt_post_dt_this_tick        = 0;
+   // Capture engine-tick start; used for residual computation at the
+   // very end of this function. Duplicates EngineTickTimer's t0 but
+   // EngineTickTimer's destructor fires at scope-exit — we need the
+@@ -307,6 +322,35 @@ void Game::tick(void)
+     if (_res < 0) _res = 0;
+     NXE::Diag::g_eng_residual_samples[NXE::Diag::g_eng_residual_idx++] = (Uint64)_res;
+   }
++
++  // patch 0095 (wave 22 W22A): compute mode_tick residual. Reuses W20B's
++  // g_eng_mode_tick_dt_this_tick (populated by ModeTickTimer in patch
++  // 0090) as the parent total — NO new SDL_GetTicksNS read needed
++  // because W20B already captures the outer dispatch-call dt. Subtract
++  // the 4 W22A sub-bucket dts; signed math + clamp at 0 in case
++  // measurement noise produces a tiny negative.
++  //
++  // Self-validating: if the sum of the 4 sub-buckets ≈ the parent
++  // mode_tick total, residual is small; if a chunk in OnTick() body
++  // wasn't bracketed, residual surfaces it.
++  //
++  // Per contract § 4 / option α: separate gate from the W20B residual
++  // block above. Layered independently — when MODE_TICK_INSTR unset,
++  // 0 cost from this block. Note: this is residual within mode_tick,
++  // NOT residual within engine_tick (W20B's block above tells you
++  // that). Both layers stay independently meaningful.
++  if (NXE::Diag::mode_tick_instr_active()
++      && NXE::Diag::g_mt_residual_idx < NXE::Diag::g_eng_tick_block_size)
++  {
++    const Uint64 _mt_total = NXE::Diag::g_eng_mode_tick_dt_this_tick;
++    Sint64 _mt_res = (Sint64)_mt_total
++                   - (Sint64)NXE::Diag::g_mt_sim_dt_this_tick
++                   - (Sint64)NXE::Diag::g_mt_draw_scene_dt_this_tick
++                   - (Sint64)NXE::Diag::g_mt_draw_hud_dt_this_tick
++                   - (Sint64)NXE::Diag::g_mt_post_dt_this_tick;
++    if (_mt_res < 0) _mt_res = 0;
++    NXE::Diag::g_mt_residual_samples[NXE::Diag::g_mt_residual_idx++] = (Uint64)_mt_res;
++  }
+ }
+ 
+ void Game::switchmap(int mapno, int scriptno, int px, int py)
+@@ -344,45 +388,75 @@ void game_tick_normal(void)
+ {
+   player->riding        = NULL;
+   player->bopped_object = NULL;
+-  Objects::UpdateBlockStates();
+ 
+-  if (!game.frozen)
++  // patch 0095 (wave 22 W22A): mode_tick decomposition — 4 sub-bracket
++  // RAII timers wrapping non-overlapping work types per contract § 1.
++  // Bracket scopes match the contract enumeration exactly:
++  //   - ModeSimTimer wraps UpdateBlockStates + the !game.frozen block
++  //     + CullDeleted (the non-render game-state mutation cluster).
++  //   - ModeDrawSceneTimer wraps DrawScene() (primary scene drawcall
++  //     pass, including the in-DrawScene clearScreen + map draw + per-
++  //     object loop + DrawPlayer).
++  //   - ModeDrawHudTimer wraps DrawStatusBar + fade.Draw + niku_run +
++  //     niku_draw (secondary HUD drawcalls).
++  //   - ModePostTimer wraps textbox.Tick + ScreenEffects::Draw +
++  //     map_draw_map_name (post-render overlays + screen-effects).
++  //
++  // The `player->riding = NULL` + `player->bopped_object = NULL`
++  // 2-line init above the brackets falls into mode_residual (sub-µs;
++  // residual stays small).
+   {
+-    // run AI for player and stageboss first
+-    HandlePlayer();
+-    game.stageboss.Run();
+-
+-    // now objects AI and move all objects to their new positions
+-    Objects::RunAI();
+-    Objects::PhysicsSim();
+-
+-    // run the "aftermove" AI routines
+-    HandlePlayer_am();
+-    game.stageboss.RunAftermove();
+-    Objects::RunAfterMove();
+-    Carets::UpdateAll();
+-    FloatText::UpdateAll();
+-    map_scroll_do();
+-    AnimateMotionTiles();
++    NXE::Diag::ModeSimTimer _mst;
++    Objects::UpdateBlockStates();
++
++    if (!game.frozen)
++    {
++      // run AI for player and stageboss first
++      HandlePlayer();
++      game.stageboss.Run();
++
++      // now objects AI and move all objects to their new positions
++      Objects::RunAI();
++      Objects::PhysicsSim();
++
++      // run the "aftermove" AI routines
++      HandlePlayer_am();
++      game.stageboss.RunAftermove();
++      Objects::RunAfterMove();
++      Carets::UpdateAll();
++      FloatText::UpdateAll();
++      map_scroll_do();
++      AnimateMotionTiles();
++    }
++
++    // important to put this before and not after DrawScene(), or non-existant objects
++    // can wind up in the onscreen_objects[] array, and blow up the program on the next tick.
++    Objects::CullDeleted();
+   }
+ 
+-  // important to put this before and not after DrawScene(), or non-existant objects
+-  // can wind up in the onscreen_objects[] array, and blow up the program on the next tick.
+-  Objects::CullDeleted();
+ 
++  {
++    NXE::Diag::ModeDrawSceneTimer _mdst;
++    DrawScene();
++  }
+ 
+-  DrawScene();
+-  DrawStatusBar();
+-  fade.Draw();
++  {
++    NXE::Diag::ModeDrawHudTimer _mdht;
++    DrawStatusBar();
++    fade.Draw();
+ 
+-  niku_run();
+-  if (player->equipmask & EQUIP_NIKUMARU)
+-    niku_draw(game.counter);
++    niku_run();
++    if (player->equipmask & EQUIP_NIKUMARU)
++      niku_draw(game.counter);
++  }
+ 
+-  textbox.Tick();
++  {
++    NXE::Diag::ModePostTimer _mpt;
++    textbox.Tick();
+ 
+-  ScreenEffects::Draw();
+-  map_draw_map_name(); // stage name overlay as on entry
++    ScreenEffects::Draw();
++    map_draw_map_name(); // stage name overlay as on entry
++  }
+ }
+ 
+ // shake screen.
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 171fea7..6a6c1b6 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -67,6 +67,30 @@ std::uint64_t g_eng_clear_screen_dt_this_tick   = 0;
+ std::uint64_t g_eng_tsc_interp_dt_this_tick     = 0;
+ std::uint64_t g_eng_mode_tick_dt_this_tick      = 0;
+ std::uint64_t g_eng_debug_overlay_dt_this_tick  = 0;
++
++// DOS-PORT (patch 0095, Phase 9 wave 22 W22A): mode_tick decomposition
++// storage. 4 sub-bracket sample arrays + idxes + per-tick dt locals + 1
++// residual array + idx. Decls in vendor/nxengine-evo/src/Utils/
++// diagnostic_timers.h; definitions live here alongside the W20B
++// engine_tick storage so audit-flush emits all 3 layers from a single
++// TU. RAII timers in the header reference these via extern; bounds-
++// check + env-gate at destruction. Reuses W20B's
++// g_eng_tick_block_size = 100 cadence (per contract § 3 — no new
++// block-size constant introduced).
++std::uint64_t g_mt_sim_samples[g_eng_tick_block_size]         = {};
++std::uint64_t g_mt_draw_scene_samples[g_eng_tick_block_size]  = {};
++std::uint64_t g_mt_draw_hud_samples[g_eng_tick_block_size]    = {};
++std::uint64_t g_mt_post_samples[g_eng_tick_block_size]        = {};
++std::uint64_t g_mt_residual_samples[g_eng_tick_block_size]    = {};
++int g_mt_sim_idx          = 0;
++int g_mt_draw_scene_idx   = 0;
++int g_mt_draw_hud_idx     = 0;
++int g_mt_post_idx         = 0;
++int g_mt_residual_idx     = 0;
++std::uint64_t g_mt_sim_dt_this_tick         = 0;
++std::uint64_t g_mt_draw_scene_dt_this_tick  = 0;
++std::uint64_t g_mt_draw_hud_dt_this_tick    = 0;
++std::uint64_t g_mt_post_dt_this_tick        = 0;
+ }  // namespace Diag
+ }  // namespace NXE
+ 
+@@ -77,8 +101,15 @@ std::uint64_t g_eng_debug_overlay_dt_this_tick  = 0;
+ // ablation cluster. Symbol lives at global scope (extern "C++" by
+ // default for free functions); diagnostic_timers.h declares the same
+ // signature.
++//
++// patch 0095 (wave 22 W22A): mode_tick_instr_active() forward-decl
++// joins the W20B accessor here. Same pattern — definition lives at
++// file-scope-after-both-namespace-closes block at end-of-file (heeds
++// the W20B build-fix amendment about avoiding the nested
++// NXE::Graphics::NXE::Diag trap).
+ namespace NXE { namespace Diag {
+ bool engine_tick_fine_instr_active();
++bool mode_tick_instr_active();
+ }}
+ 
+ namespace NXE
+@@ -181,6 +212,23 @@ inline bool _abl_fine_instr()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0095, Phase 9 wave 22 W22A): mode_tick decomposition
++// brackets opt-in. NEW separate hint from FINE_INSTR (option (b) in
++// docs/PHASE11-WAVE-22-CONTRACT.md § 2) — preserves the strict-"1"
++// convention from CLAUDE.md (rejecting numeric escalation `=2` on
++// FINE_INSTR) and keeps each instrumentation layer independently
++// toggleable. Captures the W20B mode_tick=23.94 ms median (91% of
++// engine_tick) decomposed into 4 named sub-buckets covering both
++// game_tick_normal() and title_tick(). Strict "1" match; default OFF
++// (instrumentation has its own per-tick cost — 4 RAII destructors per
++// OnTick + bounds-checked array stores). Cached static const bool —
++// -O2 hoists per-tick guards.
++inline bool _abl_mode_tick_instr()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_MODE_TICK_INSTR");
++  return v;
++}
++
+ // drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
+ // Track which Surface objects produce NULL textures so we log each origin
+ // once + a periodic running count, instead of hundreds of identical lines
+@@ -1201,6 +1249,92 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_eng_mode_tick_idx     = 0;
+   NXE::Diag::g_eng_debug_overlay_idx = 0;
+   NXE::Diag::g_eng_residual_idx      = 0;
++
++  // patch 0095 (wave 22 W22A): mode-tick decomposition emit + reset.
++  // Gated on MODE_TICK_INSTR (separate from FLIP_INSTR / FINE_INSTR
++  // per contract § 2 — independent layer toggle). 4 sub-bracket stat
++  // lines + 1 derived residual line. Output prefix `mode-tick-stat`
++  // distinct from W20A's `flip-stat` and W20B's `engine-tick-stat`
++  // so 3-layer grep stays clean.
++  //
++  // Per contract § 3, emit block lives AFTER the W20B engine-tick
++  // emission and BEFORE the function closing brace (outer-to-inner
++  // decomposition ordering: flip-stat → engine-tick-stat →
++  // mode-tick-stat). Empty-block placeholder lines (n=0) emitted for
++  // every bucket regardless of activity so per-block log shape stays
++  // uniform — critical for W22A1 (title) where mode_draw_hud always
++  // fires n=0, and for the title common branch where mode_post is
++  // n=0 too. Analysis tooling expects 5 lines per block, not 4.
++  if (_abl_mode_tick_instr() && NXE::Diag::g_mt_residual_idx > 0)
++  {
++    using NXE::Diag::g_mt_sim_samples;
++    using NXE::Diag::g_mt_draw_scene_samples;
++    using NXE::Diag::g_mt_draw_hud_samples;
++    using NXE::Diag::g_mt_post_samples;
++    using NXE::Diag::g_mt_residual_samples;
++    using NXE::Diag::g_mt_sim_idx;
++    using NXE::Diag::g_mt_draw_scene_idx;
++    using NXE::Diag::g_mt_draw_hud_idx;
++    using NXE::Diag::g_mt_post_idx;
++    using NXE::Diag::g_mt_residual_idx;
++    const int n_sim = g_mt_sim_idx;
++    const int n_ds  = g_mt_draw_scene_idx;
++    const int n_dh  = g_mt_draw_hud_idx;
++    const int n_p   = g_mt_post_idx;
++    const int n_res = g_mt_residual_idx;
++    _FlipPhaseStats st_sim, st_ds, st_dh, st_p, st_res;
++    if (n_sim > 0)
++    {
++      _compute_flip_phase_stats(g_mt_sim_samples, n_sim, st_sim);
++      LOG_INFO("[mode-tick-stat n={} phase=mode_sim         min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_sim, st_sim.min_ms, st_sim.med_ms, st_sim.mean_ms, st_sim.p95_ms, st_sim.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[mode-tick-stat n=0 phase=mode_sim         min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    if (n_ds > 0)
++    {
++      _compute_flip_phase_stats(g_mt_draw_scene_samples, n_ds, st_ds);
++      LOG_INFO("[mode-tick-stat n={} phase=mode_draw_scene  min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_ds, st_ds.min_ms, st_ds.med_ms, st_ds.mean_ms, st_ds.p95_ms, st_ds.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[mode-tick-stat n=0 phase=mode_draw_scene  min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    if (n_dh > 0)
++    {
++      _compute_flip_phase_stats(g_mt_draw_hud_samples, n_dh, st_dh);
++      LOG_INFO("[mode-tick-stat n={} phase=mode_draw_hud    min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_dh, st_dh.min_ms, st_dh.med_ms, st_dh.mean_ms, st_dh.p95_ms, st_dh.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[mode-tick-stat n=0 phase=mode_draw_hud    min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    if (n_p > 0)
++    {
++      _compute_flip_phase_stats(g_mt_post_samples, n_p, st_p);
++      LOG_INFO("[mode-tick-stat n={} phase=mode_post        min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_p, st_p.min_ms, st_p.med_ms, st_p.mean_ms, st_p.p95_ms, st_p.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[mode-tick-stat n=0 phase=mode_post        min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
++    _compute_flip_phase_stats(g_mt_residual_samples, n_res, st_res);
++    LOG_INFO("[mode-tick-stat n={} phase=mode_residual    min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_res, st_res.min_ms, st_res.med_ms, st_res.mean_ms, st_res.p95_ms, st_res.max_ms);
++  }
++  // Reset mode-tick sample arrays + idxes regardless of MODE_TICK_INSTR
++  // state — keeps storage cleanly zeroed for the next block (mirrors
++  // W20B's reset cluster above).
++  NXE::Diag::g_mt_sim_idx        = 0;
++  NXE::Diag::g_mt_draw_scene_idx = 0;
++  NXE::Diag::g_mt_draw_hud_idx   = 0;
++  NXE::Diag::g_mt_post_idx       = 0;
++  NXE::Diag::g_mt_residual_idx   = 0;
+ }
+ 
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
+@@ -5100,3 +5234,19 @@ void Renderer::drawSpotLight(int x, int y, Object* o, int r, int g, int b, int u
+ namespace NXE { namespace Diag {
+ bool engine_tick_fine_instr_active() { return ::NXE::Graphics::_abl_fine_instr(); }
+ }}
++
++// DOS-PORT (patch 0095, Phase 9 wave 22 W22A): mode_tick decomposition
++// env-helper accessor. Forward-declared in diagnostic_timers.h (and
++// also at the file-top wrapper alongside engine_tick_fine_instr_active);
++// definition at file scope here, after BOTH outer NXE::Graphics
++// namespace braces close, mirrors W20B's wrapper directly above.
++//
++// Heeds the W20B build-fix amendment: placement at "after the anonymous
++// namespace closes but BEFORE the outer NXE::Graphics closes" would
++// re-open NXE inside NXE::Graphics, producing a nested
++// NXE::Graphics::NXE::Diag instead of the intended top-level NXE::Diag.
++// File-scope-after-both-namespace-closes is the correct placement; same
++// trap, same fix.
++namespace NXE { namespace Diag {
++bool mode_tick_instr_active() { return ::NXE::Graphics::_abl_mode_tick_instr(); }
++}}
+diff --git a/src/intro/title.cpp b/src/intro/title.cpp
+index 6cea97c..eab5b32 100644
+--- a/src/intro/title.cpp
++++ b/src/intro/title.cpp
+@@ -4,6 +4,7 @@
+ #include "../TextBox/TextBox.h"
+ #include "../autogen/sprites.h"
+ #include "../Utils/Logger.h"
++#include "../Utils/diagnostic_timers.h"  // patch 0095 (wave 22 W22A)
+ #include "../graphics/Renderer.h"
+ #include "../input.h"
+ #include "../map.h"
+@@ -339,6 +340,26 @@ bool title_init(int param)
+ 
+ void title_tick()
+ {
++  // patch 0095 (wave 22 W22A): mode_tick decomposition — 2 (sometimes
++  // 3) sub-bracket RAII timers covering title-attract work, per
++  // contract § 1. Bracket scopes:
++  //   - ModeSimTimer wraps handle_input() (non-render game-state
++  //     mutation; menu navigation poll). Empty in the seldelay
++  //     early-return branch and the in_multiload branch — bracket
++  //     sees 0 firings on those frames.
++  //   - ModeDrawSceneTimer wraps draw_title() (primary scene
++  //     drawcall pass; includes the in-draw_title clearScreen +
++  //     map_draw_backdrop + drawSprite + font.draw calls).
++  //   - ModePostTimer wraps textbox.Tick() inside the in_multiload
++  //     branch (post-render overlay; only fires on that branch).
++  // mode_draw_hud is empty for title (no HUD on title attract);
++  // bracket sees n=0 always — empty-block placeholder line emitted
++  // by the audit-flush per contract § 3.
++  //
++  // The seldelay-branch clearScreen + seldelay-- + selectoption
++  // fall into mode_residual (covered by the W22A residual block in
++  // game.cpp end-of-Game::tick). Same for the in_multiload-branch
++  // clearScreen + SaveSelect logic + playSfx.
+   if (!title.in_multiload)
+   {
+     if (title.seldelay > 0)
+@@ -352,8 +373,14 @@ void title_tick()
+       return;
+     }
+ 
+-    handle_input();
+-    draw_title();
++    {
++      NXE::Diag::ModeSimTimer _mst;
++      handle_input();
++    }
++    {
++      NXE::Diag::ModeDrawSceneTimer _mdst;
++      draw_title();
++    }
+   }
+   else
+   {
+@@ -374,6 +401,7 @@ void title_tick()
+     }
+     else
+     {
++      NXE::Diag::ModePostTimer _mpt;
+       textbox.Tick();
+     }
+   }
+-- 
+2.47.3
+

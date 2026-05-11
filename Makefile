@@ -586,6 +586,107 @@ PROBE_CFFSYNC_EXE := $(PROBES_DIR)/cffsync.exe
 PROBE_IRQRATE_SRC := tests/probes/irqrate.c
 PROBE_IRQRATE_EXE := $(PROBES_DIR)/irqrate.exe
 
+# P4 — Phase 11 wave-22.5 path-B (tilemap caching) decision probe (task #14).
+# 76800-byte read/write/memcpy decomposition + cache-tier sweep. Pure DJGPP.
+PROBE_MEMBW_SRC   := tests/probes/membw.c
+PROBE_MEMBW_EXE   := $(PROBES_DIR)/membw.exe
+
+# P5 — Phase 10 wave-22-WB-E MPU-401 / WaveBlaster init-sequence probe.
+# Source name `mpuwbprobe.c` is host-side (no 8.3 limit); binary renamed to
+# the 8.3-fitting MPUPROBE.EXE via explicit Makefile rule below (the generic
+# %.exe pattern would emit `mpuwbprobe.exe` whose 9-char basename DOS would
+# truncate to MPUWBPRO.EXE, breaking the matching MPUPROBE.LOG fopen).
+# Pure DJGPP; no SDL deps. Targets the gate-blocker on g2k Vibra16S+S2 where
+# SDL/0042 (probe) + SDL/0044 (blind init) both hang the ISA bus on direct
+# MPU port access. See file header comment for full forensic protocol.
+PROBE_MPUWB_SRC   := tests/probes/mpuwbprobe.c
+PROBE_MPUWB_EXE   := $(PROBES_DIR)/mpuprobe.exe
+
+# P6 — Phase 10 wave W22-WB iter H reduced-scope SDL+MPU probe.
+# Authors: SDL_Init(AUDIO) + audio device open + 1-sec service + direct-port
+# MPU-401 init + MIDI byte writes — all under SDL audio runtime. Discriminates
+# "is SDL audio init alone enough to break direct-port MPU access?" — a
+# question MPUPROBE iter F (zero SDL) couldn't answer. SDL3-linked; minstack
+# 2048k matches PROBE_YIELD recipe. Source basename `mpusdlprobe` (host-side,
+# 11 chars) → binary basename `mpusdl` (8.3-fit) via explicit rule below.
+PROBE_MPUSDL_SRC  := tests/probes/mpusdlprobe.c
+PROBE_MPUSDL_EXE  := $(PROBES_DIR)/mpusdl.exe
+
+# P7 — Phase 11 wave-22.5 / iter H visit-loop overhead measurement.
+# Decides nx-engine slot 0113 (off-screen tile skip) ship/no-ship: measures
+# real cost of iterating 30000 tiles vs 1900 tiles in tight loop with
+# RDTSC timing. Source basename `tileprobe` (9 chars host-side) → binary
+# basename `tileprob` (8.3-fit) via explicit Makefile rule. Pure DJGPP.
+PROBE_TILE_SRC    := tests/probes/tileprobe.c
+PROBE_TILE_EXE    := $(PROBES_DIR)/tileprob.exe
+
+# P8 — Phase 11 wave-22.5 / iter H Pixtone synth cost characterization.
+# Decides nx-engine slot 0114 (alternate-flip Pixtone mix) ship/no-ship via
+# RDTSC-timed Pixtone-equivalent synth. Source basename `pixprobe` (8 chars
+# host-side) → binary `pixprob` (7+3 fits 8.3) per team-lead brief naming.
+# Pure DJGPP + libm (math.h: sin in init only).
+PROBE_PIX_SRC     := tests/probes/pixprobe.c
+PROBE_PIX_EXE     := $(PROBES_DIR)/pixprob.exe
+
+# P9 — Phase 11 wave-25 / iter J probe suite (4 probes).
+#
+# AUDBUF.EXE — SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES sweep (slot 0116 verify).
+#   Sweeps buffer sizes {default,512,1024,2048,4096}, opens audio device at
+#   each, samples doskutsu_audio_irq_count over 1 sec wall, computes IRQ-rate
+#   ratio. SDL3-linked (PROBES_SDL_* recipe).
+PROBE_AUDBUF_SRC  := tests/probes/audbuf.c
+PROBE_AUDBUF_EXE  := $(PROBES_DIR)/audbuf.exe
+#
+# IDLEPROB.EXE — DSP idle-pause CPU yield (slot 0115 verify).
+#   Scenarios A (audio active) vs B (SDL_DOSAudioForcePause), both running
+#   identical synth-engine loop for 1.0 sec wall; reports yield ms/flip.
+#   SDL3-linked. Watchdog: 200 ms pause-engagement cap, 30 sec total cap.
+PROBE_IDLE_SRC    := tests/probes/idleprob.c
+PROBE_IDLE_EXE    := $(PROBES_DIR)/idleprob.exe
+#
+# OPAQUE.EXE — opaque-tile bitmask audit (FPS-DEEPDIVE Cand #2 gating).
+#   Pure DJGPP, no SDL. Parses 4bpp Windows BMP (data/Stage/PrtCave.pbm),
+#   walks 16x16 tiles, counts colorkey (master-black palette index 0)
+#   pixels per tile, reports pct_opaque + per-tile bitmask.
+PROBE_OPAQUE_SRC  := tests/probes/opaque.c
+PROBE_OPAQUE_EXE  := $(PROBES_DIR)/opaque.exe
+#
+# BLTFILL.EXE — Cirrus 5434 BLT solid-fill vs dosmemput head-to-head
+#               (FPS-DEEPDIVE Cand #4 gating).
+#   v2 in iter K with 3-mode fallback ladder (COLOR_EXPAND -> PATTERN_COPY
+#   -> BULK_COPY) + bit-3 busy poll + GR[0x0B] errata clear.
+PROBE_BLTFILL_SRC := tests/probes/bltfill.c
+PROBE_BLTFILL_EXE := $(PROBES_DIR)/bltfill.exe
+#
+# CHIPID.EXE — Cirrus chip-detect + BLT-engagement forensic dump
+#              (BLTFILL v2 companion for iter K).
+#   Read-only register dump; lighter than HWLOG.EXE focused on
+#   the BLT-engagement question. Dumps full CRTC + SR + GR + VBE info +
+#   PCI config + decodes BLT engine extension regs.
+PROBE_CHIPID_SRC  := tests/probes/chipid.c
+PROBE_CHIPID_EXE  := $(PROBES_DIR)/chipid.exe
+
+# SDLPROB1 + SDLPROB2 — SDL3-DOS cost decomposition split into two binaries
+#   per docs/PHASE11-SDLPROBE-CONTRACT.md (sdl-engine task #23 designs the
+#   contract + authors sdlprob1; probe-engineer task #24 authors sdlprob2 +
+#   shared sdlprobe_common.h forensic-protocol header).
+#
+#   SDLPROB1.EXE — sdl-engine: per-primitive § 1 22 sub-cells + auxiliary § 3
+#   SDLPROB2.EXE — probe-engineer: composites § 2 A-D (this task #24)
+#   sdlprobe_common.h — probe-engineer: shared § 4 forensic-protocol header
+#                       (BEGIN/DONE markers, watchdog, sample-stash, RDTSC
+#                       calibration, scenario-emit framework). Both binaries
+#                       #include this header.
+#
+# Both binaries link against post-slot-0048 libSDL3.a; ~5 min wall each on
+# real HW.
+PROBE_SDLPROB2_SRC := tests/probes/sdlprob2.c
+PROBE_SDLPROB2_EXE := $(PROBES_DIR)/sdlprob2.exe
+# sdlprob1.c (sdl-engine task #23): per-primitive § 1 22+ sub-cells +
+# auxiliary § 3 PR #15377 hint status.
+PROBE_SDLPROB1_SRC := tests/probes/sdlprob1.c
+PROBE_SDLPROB1_EXE := $(PROBES_DIR)/sdlprob1.exe
+
 # Generic build rule for any probe .c with no library deps (P0/P1/P3-pure).
 $(PROBES_DIR)/%.exe: tests/probes/%.c | djgpp-check
 	@mkdir -p $(PROBES_DIR)
@@ -603,7 +704,70 @@ $(PROBE_YIELD_EXE): $(PROBE_YIELD_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
 	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
 	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate probes probes-p0 probes-p1 probes-p3
+# Explicit rule for MPU-401/WB probe — maps source basename `mpuwbprobe`
+# (host-side, descriptive) to binary basename `mpuprobe` (8.3-clean for DOS).
+# Without this, the generic pattern rule `$(PROBES_DIR)/%.exe: tests/probes/%.c`
+# would produce `mpuprobe.exe` from a `mpuprobe.c` source — but team-lead
+# requested the source filename be `mpuwbprobe.c`. Explicit rule has
+# precedence over the pattern rule, so this works without conflicts.
+$(PROBE_MPUWB_EXE): $(PROBE_MPUWB_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# Explicit rule for the reduced-scope SDL+MPU probe — same source-vs-binary
+# basename divergence as PROBE_MPUWB (mpusdlprobe.c → mpusdl.exe; the source
+# name is descriptive and host-side, the binary fits 8.3 for DOS). This probe
+# links libSDL3.a (PROBES_SDL_* recipe) + minstack=2048k to match YIELD.
+$(PROBE_MPUSDL_EXE): $(PROBE_MPUSDL_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
+# Explicit rule for visit-loop measurement probe — same source-vs-binary
+# basename divergence as PROBE_MPUWB (tileprobe.c → tileprob.exe). Pure
+# DJGPP, no SDL deps; uses the same PROBES_CFLAGS as P0/P1 probes.
+$(PROBE_TILE_EXE): $(PROBE_TILE_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# Explicit rule for Pixtone-synth-cost probe — pixprobe.c → pixprob.exe per
+# team-lead brief naming convention. Links libm for sin() used in wavetable
+# init only; the timed synth loop has no libm calls. Pure DJGPP otherwise.
+$(PROBE_PIX_EXE): $(PROBE_PIX_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $< -lm
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# P9 explicit rules — iter J probe suite.
+# AUDBUF + IDLEPROB are SDL3-linked (PROBES_SDL_* recipe, minstack 2048k).
+$(PROBE_AUDBUF_EXE): $(PROBE_AUDBUF_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
+$(PROBE_IDLE_EXE): $(PROBE_IDLE_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
+PROBE_SDLPROB2_HDR := tests/probes/sdlprobe_common.h
+$(PROBE_SDLPROB2_EXE): $(PROBE_SDLPROB2_SRC) $(PROBE_SDLPROB2_HDR) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
+PROBE_SDLPROB1_HDR := tests/probes/sdlprobe_common.h
+$(PROBE_SDLPROB1_EXE): $(PROBE_SDLPROB1_SRC) $(PROBE_SDLPROB1_HDR) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
+# OPAQUE + BLTFILL are pure DJGPP (use the generic %.exe pattern rule above).
+# No explicit rules needed; the pattern handles them.
+
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) — ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -628,6 +792,40 @@ cffsync: $(PROBE_CFFSYNC_EXE)
 irqrate: $(PROBE_IRQRATE_EXE)
 	@echo "Built $(PROBE_IRQRATE_EXE)"
 
+membw: $(PROBE_MEMBW_EXE)
+	@echo "Built $(PROBE_MEMBW_EXE) — phase11 wave-22.5 path-B decision probe."
+	@echo "  Real-HW iter: bundle MEMBW.EXE + CWSDPMI.EXE + tests/probes/membw.bat;"
+	@echo "  operator runs MEMBW.BAT once; output -> MEMBW.OUT (logback collects)."
+
+mpuwbprobe: $(PROBE_MPUWB_EXE)
+	@echo "Built $(PROBE_MPUWB_EXE) — phase10 wave-22-WB-E MPU-401 / WaveBlaster"
+	@echo "  init-sequence probe. Real-HW iter: bundle as MPUPROBE.EXE alongside"
+	@echo "  CWSDPMI.EXE + tests/probes/mpuprobe.bat; operator runs MPUPROBE.BAT;"
+	@echo "  output -> MPUPROBE.LOG (logback collects). HAZARD: this probe may"
+	@echo "  hang the ISA bus on real Vibra16S+S2 — that's the diagnostic signal."
+	@echo "  Per-step BEGIN/DONE markers in the log identify the hung instruction."
+
+mpusdlprobe: $(PROBE_MPUSDL_EXE)
+	@echo "Built $(PROBE_MPUSDL_EXE) — phase10 wave-22-WB iter H reduced-scope"
+	@echo "  SDL+MPU probe. Tests direct-port MPU-401 init AFTER SDL audio is"
+	@echo "  running (1 sec service). Real-HW iter: bundle as MPUSDL.EXE +"
+	@echo "  CWSDPMI.EXE + tests/probes/mpusdl.bat. Output -> MPUSDL.LOG."
+	@echo "  HAZARD: probe may hang mid-step on real HW; that IS the diagnostic."
+
+tileprobe: $(PROBE_TILE_EXE)
+	@echo "Built $(PROBE_TILE_EXE) — phase11 wave-22.5 / iter H visit-loop"
+	@echo "  overhead probe. Decides slot 0113 ship/no-ship via 30000-tile"
+	@echo "  full-loop vs 1900-tile bbox-loop RDTSC measurement. Real-HW iter:"
+	@echo "  bundle as TILEPROB.EXE + CWSDPMI.EXE + tests/probes/tileprob.bat."
+	@echo "  Output -> TILEPROB.LOG. No hang risk; runtime ~1-3 sec."
+
+pixprobe: $(PROBE_PIX_EXE)
+	@echo "Built $(PROBE_PIX_EXE) — phase11 wave-22.5 / iter H Pixtone synth"
+	@echo "  cost probe. Decides slot 0114 (alternate-flip mix) ship/no-ship"
+	@echo "  via faithful Pixtone-equivalent synth × 9-scenario sweep with"
+	@echo "  RDTSC timing. Real-HW iter: bundle as PIXPROB.EXE + CWSDPMI.EXE +"
+	@echo "  tests/probes/pixprob.bat. Output -> PIXPROB.LOG. No hang risk."
+
 probes-p0: $(PROBE_DACPROG_EXE) $(PROBE_HWLOG_EXE)
 	@echo "Built P0 probe set: dacprog.exe + hwlog.exe"
 
@@ -637,10 +835,98 @@ probes-p1: $(PROBE_DPMITHN_EXE) $(PROBE_L1FILL_EXE) $(PROBE_PARTIAL_EXE)
 probes-p3: $(PROBE_YIELD_EXE) $(PROBE_CFFSYNC_EXE) $(PROBE_IRQRATE_EXE)
 	@echo "Built P3 probe set: yield.exe + cffsync.exe + irqrate.exe"
 
-probes: probes-p0 probes-p1 probes-p3
-	@echo "Built ALL P0+P1+P3 probes."
+probes-p4: $(PROBE_MEMBW_EXE)
+	@echo "Built P4 probe set: membw.exe (wave-22.5 path-B decision)"
+
+probes-p5: $(PROBE_MPUWB_EXE)
+	@echo "Built P5 probe set: mpuprobe.exe (wave-22-WB-E MPU/WB init diagnosis)"
+
+probes-p6: $(PROBE_MPUSDL_EXE)
+	@echo "Built P6 probe set: mpusdl.exe (wave-22-WB iter H — reduced-scope SDL+MPU)"
+
+probes-p7: $(PROBE_TILE_EXE)
+	@echo "Built P7 probe set: tileprob.exe (wave-22.5 / iter H — visit-loop overhead)"
+
+probes-p8: $(PROBE_PIX_EXE)
+	@echo "Built P8 probe set: pixprob.exe (wave-22.5 / iter H — Pixtone synth cost)"
+
+audbuf: $(PROBE_AUDBUF_EXE)
+	@echo "Built $(PROBE_AUDBUF_EXE) — phase11 wave-25 / iter J SAMPLE_FRAMES sweep"
+	@echo "  (slot 0116 deferred 2026-05-07; AUDBUF data-driven for iter K choice)."
+	@echo "  Sweeps 256/384/512/1024/2048/4096; argmin(irq_wall_pct) = recommended."
+	@echo "  SDL3-linked. Real-HW iter: bundle alongside CWSDPMI.EXE +"
+	@echo "  tests/probes/audbuf.bat. Output -> AUDBUF.LOG."
+
+idleprob: $(PROBE_IDLE_EXE)
+	@echo "Built $(PROBE_IDLE_EXE) — phase11 wave-25 / iter J slot 0115 verify."
+	@echo "  SDL3-linked. Real-HW iter: bundle alongside CWSDPMI.EXE +"
+	@echo "  tests/probes/idleprob.bat. Output -> IDLEPROB.LOG."
+	@echo "  HAZARD: SDL_DOSAudioForcePause manipulates DSP DMA — bus-lock"
+	@echo "  potential on real Vibra16S; BEGIN/DONE markers in log identify"
+	@echo "  the stalling instruction if hung."
+
+opaque: $(PROBE_OPAQUE_EXE)
+	@echo "Built $(PROBE_OPAQUE_EXE) — phase11 wave-25 / iter J cand #2 gating."
+	@echo "  Pure DJGPP, no hardware-IO. Real-HW iter: bundle alongside"
+	@echo "  CWSDPMI.EXE + tests/probes/opaque.bat. Loads PrtCave.pbm from"
+	@echo "  data/Stage/, outputs OPAQUE.LOG with pct_opaque + per-tile bitmask."
+
+bltfill: $(PROBE_BLTFILL_EXE)
+	@echo "Built $(PROBE_BLTFILL_EXE) — phase11 wave-27 / iter K cand #4 gating (v2)."
+	@echo "  Pure DJGPP. v2: bit-3 BLT_PROGRESS busy poll + GR[0x0B] errata clear +"
+	@echo "  3-mode fallback ladder (COLOR_EXPAND -> PATTERN_COPY -> BULK_COPY)."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/bltfill.bat."
+	@echo "  Output -> BLTFILL.LOG. Companion: CHIPID.EXE forensic dump."
+
+chipid: $(PROBE_CHIPID_EXE)
+	@echo "Built $(PROBE_CHIPID_EXE) — phase11 wave-27 / iter K BLTFILL v2 companion."
+	@echo "  Pure DJGPP, read-only chip-state probe (only side-effect: SR[0x06]"
+	@echo "  Cirrus extension unlock — non-destructive). Dumps full CRTC + SR + GR"
+	@echo "  + VBE info + PCI config + decodes BLT engine extension regs."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/chipid.bat."
+	@echo "  Output -> CHIPID.LOG."
+
+sdlprob2: $(PROBE_SDLPROB2_EXE)
+	@echo "Built $(PROBE_SDLPROB2_EXE) — phase11 iter L composites § 2 (task #24)."
+	@echo "  SDL3-linked. 4 composite scenarios A-D per docs/PHASE11-SDLPROBE-CONTRACT.md:"
+	@echo "  A=tile_pre_0117  B=tile_post_0117  C=sprite_full  D=menu_INDEX8_alpha_CK_slow."
+	@echo "  Includes shared sdlprobe_common.h forensic-protocol header (also used by"
+	@echo "  sdl-engine's sdlprob1.c per task #23). Real-HW iter L is the data gate."
+	@echo "  Output -> SDLPROB2.LOG. flush-instr authors SDLPROB2.BAT for iter L bundle."
+
+sdlprob1: $(PROBE_SDLPROB1_EXE)
+	@echo "Built $(PROBE_SDLPROB1_EXE) — phase11 iter L per-primitive § 1 + aux § 3 (task #23)."
+	@echo "  SDL3-linked. 24 sub-cell scenarios per docs/PHASE11-SDLPROBE-CONTRACT.md:"
+	@echo "  GetTicks / PumpEvents (2) / BlitSurface (12 = 3 sizes × ±CK × ±alpha) /"
+	@echo "  CreateTex+Destroy / RenderTexture (2) / ColorMod+BlendMode / RenderPresent /"
+	@echo "  Delay(1) / audio_callback_overhead / irq_count_baseline. Auxiliary section 3"
+	@echo "  emits PR #15377 hint status block at probe init. Includes shared sdlprobe_common.h."
+	@echo "  Output -> SDLPROB1.LOG. flush-instr authors SDLPROB1.BAT for iter L bundle."
+
+probes-p9: $(PROBE_AUDBUF_EXE) $(PROBE_IDLE_EXE) $(PROBE_OPAQUE_EXE) $(PROBE_BLTFILL_EXE)
+	@echo "Built P9 probe set: audbuf.exe + idleprob.exe + opaque.exe + bltfill.exe"
+	@echo "  Phase 11 wave-25 / iter J — AUDBUF/IDLEPROB verify slot 0115/0116;"
+	@echo "  OPAQUE/BLTFILL gate FPS-DEEPDIVE candidates #2/#4 for iter K."
+
+# P10 — Phase 11 wave-27 / iter K probe additions: BLTFILL v2 fixup + CHIPID
+# forensic companion. BLTFILL v2 supersedes iter J's v1 (build target unchanged).
+probes-p10: $(PROBE_BLTFILL_EXE) $(PROBE_CHIPID_EXE)
+	@echo "Built P10 probe set: bltfill.exe (v2) + chipid.exe"
+	@echo "  Phase 11 wave-27 / iter K — BLTFILL v2 fixes register encoding +"
+	@echo "  CHIPID forensic dump runs alongside as fallback diagnostic."
+
+# P11 — Phase 11 iter L SDL3-DOS cost decomposition: split into SDLPROB1
+# (sdl-engine task #23) + SDLPROB2 (probe-engineer task #24, this lane).
+# Aggregate target builds whichever is currently authored; sdlprob1 lands
+# when sdl-engine completes their work.
+probes-p11: $(PROBE_SDLPROB2_EXE)
+	@echo "Built P11 probe set (partial): sdlprob2.exe (iter L — composites § 2)"
+	@echo "  sdlprob1.exe (sdl-engine task #23) lands separately."
+
+probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11
+	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
-	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG"
+	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (BAT redirect)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"
 
 # --- Distribution -------------------------------------------------------------
 #

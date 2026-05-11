@@ -1,0 +1,235 @@
+From 58839cea58c57c7962d62ba2c13dd530fb4b53f2 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 18:25:14 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200118=20=E2=80=94=20?=
+ =?UTF-8?q?fix=20slot=200111=20ordering=20bug=20(mds=5Ffg=5Ftotal=5Fms=20s?=
+ =?UTF-8?q?napshot)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0118, Phase 11 iter K). Fix the slot 0111 emit-block
+ordering bug that produced negative `visit_overhead_per_tile_us` in
+every block under MDS_TFG_INSTR=1.
+
+Root cause:
+  Slot 0111 emit block reads `g_mds_tilemap_fg_idx` +
+  `g_mds_tilemap_fg_samples[]` to compute mds_fg_total_ms (the parent
+  W22.5 bracket total, used to derive iter_overhead_ms = mds_fg_-
+  total_ms - dt_ms). But the original slot 0111 emit ran AFTER the
+  W22.5 sample-array reset cluster — which zeros g_mds_tilemap_fg_idx
+  every audit-flush. So the slot 0111 sum was always 0 →
+  iter_overhead_ms = 0 - dt_ms = NEGATIVE → visit_overhead_per_-
+  tile_us NEGATIVE every block.
+
+Symptom in iter J (real-HW PODP-OD-83):
+  visit_overhead_per_tile_us = -58.03 µs / tile (load-bearing — should
+                               be positive iteration overhead)
+Smoke baseline pre-fix:
+  visit_overhead_per_tile_us = -1.26 µs / tile (smaller magnitude only
+                               because smoke was minimal-scene with
+                               few drawn tiles)
+
+Fix:
+  Snapshot mds_fg_total_ms BEFORE the W22.5 reset cluster, store in
+  file-scope `g_slot_0118_mds_fg_total_ms_snapshot` (double; declared
+  in Utils/diagnostic_timers.h alongside the slot 0111 storage cluster).
+  Slot 0111 emit block consumes the snapshot via the same name.
+  Snapshot is reset to 0.0 at end-of-audit-flush alongside the slot
+  0111 11-counter reset cluster (defensive lifetime discipline; the
+  snapshot is overwritten unconditionally at next audit-flush entry).
+
+Code surface (~25 lines net change):
+  Utils/diagnostic_timers.h:
+    extern decl `extern double g_slot_0118_mds_fg_total_ms_snapshot;`
+    alongside slot 0111's g_mds_tfg_* externs.
+  Renderer.cpp:
+    - Storage definition `double g_slot_0118_mds_fg_total_ms_snapshot
+      = 0.0;` alongside the slot 0111 storage cluster.
+    - Snapshot computation block at the W22.5 reset site (gated on
+      _abl_mds_tfg_instr() — no cost when env unset; identical
+      6-line loop body to original slot 0111 compute, just earlier
+      in the function).
+    - Slot 0111 emit block's mds_fg_total_ms initializer changed
+      from inline-compute-from-samples to
+      `g_slot_0118_mds_fg_total_ms_snapshot`.
+    - End-of-block reset of snapshot alongside slot 0111 counter
+      reset.
+
+Why file-scope-static instead of function-scope local:
+  The slot 0111 emit lives 4 if-blocks deeper in
+  _maybe_flush_phase_timing_audit. A function-scope local would be
+  in scope but the patch surface is cleaner with a named file-scope
+  variable that mirrors the slot 0111 storage discipline. Single-
+  writer (this function); no concurrency. Minimal extra storage
+  footprint (8 bytes).
+
+Self-checks preserved (per slot 0111 contract § 6):
+  - tiles_visited == drawn_normal + drawn_special + skipped_attr +
+    skipped_oob (instrumentation drift check) — unaffected by this
+    fix; the bug was downstream in the derived metrics layer.
+  - drawtile_count + drawsprite_count == drawn_normal +
+    drawn_special — unaffected.
+
+Expected iter K-1 emit (PLAY1, real-HW, drawTileFast=ON):
+  drawtile_per_us drops from ~58.0 µs (iter J) toward
+  blit_indexed_per_us (~25.7 µs iter J)
+  dispatch_overhead_per_tile_us drops from ~32.4 µs toward 0
+  visit_overhead_per_tile_us NOW POSITIVE (iteration loop overhead;
+  expected ~5-15 µs / tile per FPS-DEEPDIVE Cand #5 H3 hypothesis
+  if iter-loop is significant; could also be near-zero if H1 / H2
+  outcomes dominate)
+
+Per pressure_test_tidy_narratives.md: this is a measurement-bug fix,
+not a perf lever. No fps gain comes from this patch alone. Iter K-1
+must still measure the slot 0117 lever's contribution. The
+visit_overhead_per_tile_us going from negative to positive is a
+sanity check that the instrumentation is now self-consistent —
+flush-instr can use it to discriminate which of H1/H2/H3 (or
+combination) dominates the residual mds_tilemap_fg cost after
+slot 0117.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h | 11 +++++
+ src/graphics/Renderer.cpp     | 81 +++++++++++++++++++++++++++--------
+ 2 files changed, 74 insertions(+), 18 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 704f9a3..03856f8 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -644,6 +644,17 @@ extern std::uint32_t g_mds_tfg_tiles_skipped_oob;
+ // non-tilemap render paths).
+ extern bool g_mds_tfg_loop_active;
+ 
++// patch 0118 (Phase 11 iter K, slot 0111 ordering bug fix). Snapshot
++// of W22.5 mds_tilemap_fg sample-sum (ms). Populated by
++// _maybe_flush_phase_timing_audit BEFORE the W22.5 sample-array reset
++// runs; consumed by the slot 0111 emit block (which used to read the
++// sample idx directly AFTER the reset, always seeing 0 → negative
++// visit_overhead_per_tile_us). See Renderer.cpp's snapshot block at
++// the top of _maybe_flush_phase_timing_audit for the ordering-bug
++// analysis. Reset to 0.0 at end-of-audit-flush alongside the slot
++// 0111 counter cluster.
++extern double g_slot_0118_mds_fg_total_ms_snapshot;
++
+ // Forward-decl env helper. Definition at Renderer.cpp's anonymous-
+ // namespace ablation cluster (alongside _abl_flip_instr / _abl_-
+ // fine_instr / _abl_mode_tick_instr / _abl_mode_draw_scene_instr);
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 6a11746..e30a44c 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -215,6 +215,16 @@ std::uint32_t g_mds_tfg_tiles_skipped_attr        = 0;
+ std::uint32_t g_mds_tfg_tiles_skipped_oob         = 0;
+ bool          g_mds_tfg_loop_active               = false;
+ 
++// patch 0118 (Phase 11 iter K, slot 0111 ordering bug fix). Snapshot
++// of the W22.5 mds_tilemap_fg sample-sum (in ms). Written by
++// _maybe_flush_phase_timing_audit BEFORE the W22.5 reset cluster
++// zeroes g_mds_tilemap_fg_idx; read by the slot 0111 emit block
++// further down in the same function (the emit ran AFTER the reset
++// pre-fix → always saw idx=0 → mds_fg_total_ms=0 →
++// visit_overhead_per_tile_us NEGATIVE every block). Reset to 0.0
++// at end-of-audit-flush alongside the slot 0111 counter cluster.
++double        g_slot_0118_mds_fg_total_ms_snapshot = 0.0;
++
+ // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
+ // scaffolding): 5 per-block reset counters + 1 sticky enum per
+ // docs/PHASE10-CONTRACT.md § 1. Storage sits alongside the W20B /
+@@ -1858,6 +1868,44 @@ void _maybe_flush_phase_timing_audit()
+     LOG_INFO("[mode-draw-scene-stat n={} phase=mds_residual               min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
+              n_res, st_res.min_ms, st_res.med_ms, st_res.mean_ms, st_res.p95_ms, st_res.max_ms);
+   }
++  // patch 0118 (Phase 11 iter K, slot 0111 ordering bug fix). Slot
++  // 0111's emit block (further below) reads `g_mds_tilemap_fg_idx` +
++  // `g_mds_tilemap_fg_samples[]` to compute `mds_fg_total_ms` —
++  // the parent W22.5 bracket total used to derive
++  // `iter_overhead_ms = mds_fg_total_ms - dt_ms` and
++  // `visit_overhead_per_tile_us`. But the original slot 0111 emit
++  // ran AFTER the W22.5 sample-array reset just below (line moved
++  // here; was at the spot below this fix). Result: the slot 0111
++  // emit always saw `g_mds_tilemap_fg_idx == 0` → mds_fg_total_ms
++  // computed as 0 → iter_overhead_ms = 0 - dt_ms = NEGATIVE →
++  // visit_overhead_per_tile_us NEGATIVE every block (operator
++  // observed -58.03 µs / tile in iter J real-HW; smoke baseline
++  // -1.26 µs).
++  //
++  // Fix: snapshot mds_fg_total_ms NOW, before the reset zeroes out
++  // the sample idx. Function-scope local persists across the reset;
++  // slot 0111 emit block consumes the snapshotted value via
++  // g_slot_0118_mds_fg_total_ms_snapshot (file-scope static, written
++  // here, read by emit block, reset back to 0.0 at end of audit-flush
++  // alongside slot 0111's counter reset cluster).
++  //
++  // Why file-scope-static instead of function-scope local: the slot
++  // 0111 emit block lives 4 if-blocks deeper in this same function;
++  // a function-scope local would be in scope but the patch surface
++  // is cleaner with a named file-scope variable. Same lifetime
++  // discipline as the existing ABL counters; single writer (this
++  // function); no concurrency.
++  NXE::Diag::g_slot_0118_mds_fg_total_ms_snapshot = 0.0;
++  if (_abl_mds_tfg_instr())
++  {
++    const int n_pre_reset = NXE::Diag::g_mds_tilemap_fg_idx;
++    for (int i = 0; i < n_pre_reset; ++i)
++    {
++      NXE::Diag::g_slot_0118_mds_fg_total_ms_snapshot +=
++          (double)NXE::Diag::g_mds_tilemap_fg_samples[i] / 1.0e6;
++    }
++  }
++
+   // Reset mode-draw-scene sample arrays + idxes regardless of
+   // MODE_DRAW_SCENE_INSTR state — same pattern as W22A reset cluster.
+   NXE::Diag::g_mds_clear_idx                = 0;
+@@ -2203,24 +2251,14 @@ void _maybe_flush_phase_timing_audit()
+     // mds_tilemap_fg total minus this gives loop-iteration cost.
+     const double dt_ms = drawtile_total_ms + drawsprite_total_ms;
+ 
+-    // visit_overhead_per_tile_us = (mds_tilemap_fg_total_ms - dt_ms) /
+-    // tiles_visited × 1000. mds_tilemap_fg_total_ms is the parent W22.5
+-    // bracket total — accessed via g_mds_tilemap_fg_dt_this_tick? No,
+-    // wait: the W22.5 dt_this_tick value is per-TICK not per-block;
+-    // the BLOCK aggregate is in g_mds_tilemap_fg_samples[]. Computing
+-    // a per-block sum from the samples is straightforward. Per § 3
+-    // derived metrics: iter_overhead_ms = mds_tilemap_fg_total_ms -
+-    // drawtile_total_ms - drawsprite_total_ms. Since we don't have
+-    // mds_tilemap_fg_total_ms readily aggregated here at block-flush
+-    // time, compute by summing the W22.5 sample array.
+-    double mds_fg_total_ms = 0.0;
+-    {
+-      const int n = NXE::Diag::g_mds_tilemap_fg_idx;
+-      for (int i = 0; i < n; ++i)
+-      {
+-        mds_fg_total_ms += (double)NXE::Diag::g_mds_tilemap_fg_samples[i] / 1.0e6;
+-      }
+-    }
++    // patch 0118 (Phase 11 iter K, slot 0111 ordering bug fix):
++    // consume the pre-reset snapshot computed above (BEFORE the
++    // W22.5 reset cluster zeroes g_mds_tilemap_fg_idx). Original
++    // slot 0111 read the post-reset idx → always 0 → negative
++    // visit_overhead_per_tile_us. See the snapshot block ~150
++    // lines above for the full ordering-bug analysis.
++    const double mds_fg_total_ms =
++        NXE::Diag::g_slot_0118_mds_fg_total_ms_snapshot;
+     const double iter_overhead_ms = mds_fg_total_ms - dt_ms;
+     const double visit_overhead_per_tile_us =
+         (g_mds_tfg_tiles_visited > 0)
+@@ -2286,6 +2324,13 @@ void _maybe_flush_phase_timing_audit()
+     }
+   }
+ 
++  // patch 0118 (Phase 11 iter K, slot 0111 ordering bug fix): reset
++  // snapshot to 0.0 alongside the wave-25 counter cluster. Defensive —
++  // the snapshot is overwritten unconditionally at the next audit-
++  // flush entry, but explicit-reset keeps the lifetime discipline
++  // visible in this cluster.
++  NXE::Diag::g_slot_0118_mds_fg_total_ms_snapshot = 0.0;
++
+   // Per-block reset of all 11 wave-25 counters regardless of env-var
+   // state (matches existing audit-flush family pattern; counters
+   // accumulate per-tick + reset per-block). The g_mds_tfg_loop_active
+-- 
+2.47.3
+

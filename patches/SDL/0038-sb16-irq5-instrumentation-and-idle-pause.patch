@@ -1,0 +1,309 @@
+From 6280f117de003c1985bba9c8b8f60e8c1014fda3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 6 May 2026 12:49:33 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=2010=20patch=200038=20=E2=80=94=20?=
+ =?UTF-8?q?SB16=20IRQ-5=20instrumentation=20+=20idle-pause?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Companion to patch 0037 (audio synth helpers + public-API state).
+This patch wires the SB16 audio backend's IRQ-5 path to:
+  1. Bracket each IRQ entry/exit with BIOS-tick timing for the
+     `doskutsu_audio_irq_wall_us` cumulative wall-clock counter.
+  2. Increment `doskutsu_audio_irq_count` per IRQ.
+  3. Increment `doskutsu_audio_sfx_active_count` when ring contains
+     non-silence content (semantically: SFX-active under WB/OPL3
+     backend; degenerates to ≈ irq_count under Organya per
+     docs/PHASE10-CONTRACT.md cross-PLAY ablation framing).
+  4. Track consecutive-silent-IRQs; when threshold met (4 IRQs ~92 ms
+     at 43 Hz IRQ rate) AND idle-pause enabled, signal pause request
+     to non-IRQ service path.
+  5. Service pause/resume requests in WaitDevice and PlayDevice from
+     non-IRQ context; issue DSP commands 0xD5 / 0xD6 (16-bit) or
+     0xD0 / 0xD4 (8-bit) per soundblaster_is_sb16; fire registered
+     idle-pause callback at resume with measured paused_ns.
+
+Per audio_mix_zero_is_not_audio_off.md (W20A2 ablation finding):
+the IRQ entry/exit wall-clock itself is ~13.5 ms / flip on real HW;
+DSP-pause suppresses the IRQ entirely during silent gameplay,
+removing that cost without IDT modification (per docs/PHASE10-DESIGN.md
+§ E.7 framing — DSP pause vs IRQ unhook).
+
+IRQ-handler timing uses BIOS tick at 0040:006C (atomic single-bus-cycle
+far peek; guaranteed IRQ-safe; no DPMI, no function call). Resolution
+is coarse (~55 ms per tick) but cumulative-mean over many IRQs
+converges to true wall-clock at the µs-aggregate granularity the
+contract requires.
+
+ISR variables locked alongside existing isr_* state at OpenDevice:
+  isr_consecutive_silent_irqs, isr_dsp_paused, idle-pause flags +
+  callback pointer, doskutsu_audio_* counters.
+
+Per CLAUDE.md threading-zero invariant: no threads. Pause/resume
+requests are flag-driven; serviced synchronously from WaitDevice
+loop and PlayDevice path. ForcePause/ForceResume helpers in
+patch 0037 set the same flags for ablation testing.
+
+Risk per sdl3_dos_quirks.md PR #15377 author note: DSP pause
+behavior on real Vibra16S CT2490 untested. Failure-mode-graceful
+per § E.7: if pause command doesn't take effect, IRQs keep firing
+(worst case = same as Phase 9 baseline). Validation iter
+(W22-WB-A) measures `audio_irq_count` delta between baseline and
+WB/OPL3 backends to confirm idle-pause actually suppressed IRQs.
+
+Engine-side counter readers in nxengine slot 0100 (already in tree
+post-0099 wave-23.7 closure) resolve cleanly against the externs
+defined in patch 0037.
+
+Patch 0038 modifies vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c only;
+no new files.
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 174 ++++++++++++++++++++++++++++++++
+ 1 file changed, 174 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 327260a8b..7f44cbfc6 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -23,9 +23,24 @@
+ #ifdef SDL_AUDIO_DRIVER_DOS_SOUNDBLASTER
+ 
+ #include "../../core/dos/SDL_dos.h"
++#include "../../core/dos/SDL_dos_audio_synth.h"
+ #include "../../core/dos/SDL_dos_scheduler.h"
+ #include "SDL_dosaudio_sb.h"
+ 
++/* DOSKUTSU patch (Phase 10 patch 0038): IRQ-5 instrumentation +
++   idle-pause coordination state. The public-API state vars are defined
++   in SDL_dos_audio_synth.c (patch 0037); we access them as externs and
++   service the request flags + DSP pause/resume command issuing here so
++   all DSP-port mechanics stay co-located in this audio backend.
++
++   See docs/PHASE10-DESIGN.md § E.2 / § E.3 / § E.7 for the mechanism
++   rationale (DSP-pause vs IDT-unhook framing; failure-mode-graceful
++   semantics on real Vibra16S CT2490 untested per sdl3_dos_quirks.md). */
++extern volatile bool g_dos_audio_idle_pause_enabled;
++extern volatile bool g_dos_audio_pause_request;
++extern volatile bool g_dos_audio_resume_request;
++extern SDL_DOSIdlePauseCallback g_dos_audio_idle_pause_cb;
++
+ // Set to 1 to force 8-bit mono (pre-SB16) code path even on SB16 hardware.
+ // Useful for testing in DOSBox which always emulates an SB16 (DSP 4.x).
+ #define FORCE_SB_8BIT 0
+@@ -137,6 +152,26 @@ static int resolve_ring_chunks(void)
+ // ISR-cached copies of device state (avoids chasing heap pointers in IRQ context).
+ static volatile int isr_irq_ack_port = 0;
+ 
++/* DOSKUTSU patch (Phase 10 patch 0038): IRQ-handler instrumentation
++   state. Memory-locked alongside the existing isr_* state at OpenDevice.
++
++   isr_consecutive_silent_irqs: count of consecutive IRQs where ring was
++     empty (filled with silence). Reset to 0 on any non-silent IRQ.
++     When >= IDLE_PAUSE_THRESHOLD AND idle-pause is enabled, the ISR
++     sets g_dos_audio_pause_request to be serviced by non-IRQ context.
++
++   IDLE_PAUSE_THRESHOLD: 4 IRQs ≈ 92 ms at 43 Hz IRQ rate. Long enough
++     to avoid pausing during brief Pixtone gaps; short enough that bulk
++     silent gameplay gets the savings. Per § E.2 design.
++
++   Per audio_mix_zero_is_not_audio_off.md: the IRQ entry/exit wall-clock
++   ITSELF is the cost (~13.5 ms / flip on real HW). Idle-pause is the
++   mechanism to suppress IRQs entirely during silent gameplay. */
++#define IDLE_PAUSE_THRESHOLD 4
++static volatile uint32_t isr_consecutive_silent_irqs = 0;
++static volatile bool isr_dsp_paused = false; /* set/cleared by non-IRQ service path */
++static Uint64 s_dsp_pause_start_ns = 0;      /* set when pause issued; read at resume to compute paused_ns */
++
+ // ISR-visible ring buffer state (all memory-locked).
+ static volatile int isr_ring_read = 0;
+ static volatile int isr_ring_write = 0;
+@@ -190,8 +225,29 @@ static void ISR_GetDMAHalf_End(void) {}
+ //
+ // This function touches ONLY memory-locked data and does ONLY port I/O and
+ // memcpy. No DPMI, no malloc, no mutex, no FPU.
++//
++// DOSKUTSU patch (Phase 10 patch 0038): added per-IRQ instrumentation
++// counters + silent-IRQ tracking for idle-pause coordination. Wall-clock
++// timing uses BIOS tick at 0040:006C — atomic single-bus-cycle far peek,
++// guaranteed IRQ-safe (no DPMI, no function call, no memory allocation).
++// 1 BIOS tick = 54925 µs (~54.9 ms). Per-IRQ resolution is coarse (most
++// IRQs are sub-tick); cumulative-mean over many IRQs converges to true
++// wall-clock. Sufficient for the µs-aggregate `audio_irq_wall_us` counter
++// per docs/PHASE10-CONTRACT.md § 1.3.
++//
++// Per audio_mix_zero_is_not_audio_off.md: the IRQ entry/exit wall-clock
++// itself is what we're measuring; the time spent INSIDE this function is
++// a small subset. The "wall-clock" we accumulate here therefore captures
++// only the locally-observable part of the cost — DPMI thunk overhead at
++// the wrapper-into-handler boundary is invisible to us. The contract
++// reconciles via cross-correlation with engine flip-timing.
+ static void SoundBlasterIRQHandler(void)
+ {
++    /* DOSKUTSU patch (Phase 10 patch 0038): IRQ-handler instrumentation.
++       BIOS tick at 0040:006C is atomic + IRQ-safe; resolution coarse but
++       cumulative-mean converges. */
++    const uint32_t entry_tick = (uint32_t)_farpeekl(_dos_ds, 0x46Cul);
++
+     // Acknowledge hardware first.
+     inportb(isr_irq_ack_port);
+     DOS_EndOfInterrupt(soundblaster_irq);
+@@ -201,16 +257,101 @@ static void SoundBlasterIRQHandler(void)
+     // How many bytes are available in the ring?
+     const int avail = isr_ring_write - isr_ring_read; // both are monotonic
+ 
++    bool ring_had_audio = false;
+     if (avail >= isr_chunk_size) {
+         RingCopyOut(dma_dst, isr_ring_read, isr_chunk_size);
+         isr_ring_read += isr_chunk_size;
++        /* DOSKUTSU patch (Phase 10): ring had non-silence content available.
++           Reset silent-IRQ counter; flag this IRQ as "audio active" for
++           the SFX-active counter. (Under WB/OPL3 backend, music is offloaded;
++           any ring content == SFX. Under Organya, ring always has music
++           so the counter degenerates to ≈ irq_count — semantically correct
++           for the cross-PLAY ablation per docs/PHASE10-CONTRACT.md.) */
++        isr_consecutive_silent_irqs = 0;
++        ring_had_audio = true;
+     } else {
+         // Ring underrun: fill with silence so we don't replay stale audio.
+         SDL_memset(dma_dst, isr_silence_value, isr_chunk_size);
++        /* DOSKUTSU patch (Phase 10): consecutive-silent-IRQ tracking.
++           When threshold met AND idle-pause enabled, signal non-IRQ
++           context to issue DSP pause command. Pre-pause state is preserved
++           via single increment + atomic flag set; service path handles
++           the actual DSP command. */
++        isr_consecutive_silent_irqs++;
++        if (isr_consecutive_silent_irqs >= IDLE_PAUSE_THRESHOLD &&
++            g_dos_audio_idle_pause_enabled && !isr_dsp_paused) {
++            g_dos_audio_pause_request = true;
++        }
++    }
++
++    /* DOSKUTSU patch (Phase 10): bump per-block extern counters. Single
++       32-bit volatile increment is atomic on x86 per kbd-counter
++       precedent (patches 0023+0025); engine reads via extern. */
++    doskutsu_audio_irq_count++;
++    if (ring_had_audio) {
++        doskutsu_audio_sfx_active_count++;
++    }
++
++    /* DOSKUTSU patch (Phase 10): wall-clock accumulate via BIOS tick
++       delta. uint32_t modular arithmetic handles wrap (BIOS tick cycles
++       through uint32_t over ~63 hours). 1 tick = 54925 µs. */
++    const uint32_t exit_tick = (uint32_t)_farpeekl(_dos_ds, 0x46Cul);
++    const uint32_t delta_ticks = exit_tick - entry_tick; /* modular */
++    if (delta_ticks > 0) {
++        doskutsu_audio_irq_wall_us += delta_ticks * 54925u;
+     }
+ }
+ static void SoundBlasterIRQHandler_End(void) {}
+ 
++/* DOSKUTSU patch (Phase 10 patch 0038): service the pause/resume request
++   flags from non-IRQ context. The IRQ handler sets g_dos_audio_pause_request
++   when consecutive silent IRQs cross the threshold; the audio writer path
++   (PlayDevice) clears it via implicit resume on next ring write. ForcePause/
++   ForceResume in patch 0037's API also set these flags. The actual DSP
++   command issuing happens here so it stays co-located with the rest of
++   the SB16 DSP-port mechanics.
++
++   DSP commands per design § E.2:
++     0xD5 = pause 16-bit DMA (SB16-class)
++     0xD0 = pause 8-bit DMA  (pre-SB16)
++     0xD6 = resume 16-bit DMA
++     0xD4 = resume 8-bit DMA
++
++   On pause: capture s_dsp_pause_start_ns for the resume callback's
++   paused_ns argument. On resume: compute paused_ns + fire registered
++   callback. Single-listener model; if callback is NULL, just measure
++   silently.
++
++   Note: the DSP pause behavior on real Vibra16S CT2490 is untested per
++   sdl3_dos_quirks.md PR #15377 author note. Failure-mode-graceful per
++   § E.7: if pause command doesn't take effect, IRQs keep firing as
++   today. Worst case = same as Phase 9 baseline. */
++static void MaybeServiceIdlePauseRequests(void)
++{
++    if (g_dos_audio_resume_request) {
++        if (isr_dsp_paused) {
++            const Uint8 cmd = soundblaster_is_sb16 ? 0xD6 : 0xD4;
++            WriteSoundBlasterDSP(cmd);
++            isr_dsp_paused = false;
++            isr_consecutive_silent_irqs = 0; /* reset for next pause cycle */
++            const Uint64 paused_ns = SDL_GetTicksNS() - s_dsp_pause_start_ns;
++            if (g_dos_audio_idle_pause_cb) {
++                g_dos_audio_idle_pause_cb(paused_ns);
++            }
++        }
++        g_dos_audio_resume_request = false;
++        g_dos_audio_pause_request = false; /* resume always wins */
++        return;
++    }
++    if (g_dos_audio_pause_request && !isr_dsp_paused) {
++        const Uint8 cmd = soundblaster_is_sb16 ? 0xD5 : 0xD0;
++        s_dsp_pause_start_ns = SDL_GetTicksNS();
++        WriteSoundBlasterDSP(cmd);
++        isr_dsp_paused = true;
++        g_dos_audio_pause_request = false;
++    }
++}
++
+ // Wait until the ring buffer has room for one more chunk.
+ // The audio thread keeps yielding so the game's main thread can run while
+ // we wait. Because the ISR is steadily draining the ring, this only blocks
+@@ -221,6 +362,14 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+     const int size = hidden->ring_size;
+ 
+     for (;;) {
++        /* DOSKUTSU patch (Phase 10 patch 0038): service pause/resume
++           requests on each WaitDevice loop iteration. Pause requests
++           come from the IRQ handler (consecutive-silent-IRQ threshold
++           met); resume requests come from PlayDevice or ForceResume.
++           Servicing here ensures DSP commands are issued from non-IRQ
++           context as required. */
++        MaybeServiceIdlePauseRequests();
++
+         // Available space = ring_size - (write - read).
+         // ring_write is ours (audio thread only), ring_read is advanced by
+         // the ISR. Read the ISR's copy so we see the latest drain position.
+@@ -413,6 +562,20 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+     DOS_LockVariable(isr_silence_value);
+     DOS_LockVariable(isr_irq_ack_port);
+     DOS_LockVariable(soundblaster_irq);
++    /* DOSKUTSU patch (Phase 10 patch 0038): lock IRQ-handler
++       instrumentation + idle-pause coordination state. The pause
++       request flag, silent-IRQ counter, and DSP-paused flag are all
++       read or written from IRQ context. The wall-clock and count
++       counters in SDL_dos_audio_synth.c (patch 0037) are also touched
++       from IRQ context and must be locked. */
++    DOS_LockVariable(isr_consecutive_silent_irqs);
++    DOS_LockVariable(isr_dsp_paused);
++    DOS_LockVariable(g_dos_audio_idle_pause_enabled);
++    DOS_LockVariable(g_dos_audio_pause_request);
++    DOS_LockVariable(g_dos_audio_resume_request);
++    DOS_LockVariable(doskutsu_audio_irq_count);
++    DOS_LockVariable(doskutsu_audio_irq_wall_us);
++    DOS_LockVariable(doskutsu_audio_sfx_active_count);
+ 
+     DOS_HookInterrupt(soundblaster_irq, SoundBlasterIRQHandler, &hidden->interrupt_hook);
+ 
+@@ -510,6 +673,17 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+     isr_ring_write = hidden->ring_write;
+     DOS_EnableInterrupts();
+ 
++    /* DOSKUTSU patch (Phase 10 patch 0038): if DSP is paused (no music
++       backend was streaming + ring went idle), this PlayDevice call
++       means the audio writer has fresh data to play — almost certainly
++       a Pixtone SFX trigger. Request resume; service it now so the new
++       data starts playing immediately rather than after the next
++       WaitDevice cycle. */
++    if (isr_dsp_paused) {
++        g_dos_audio_resume_request = true;
++        MaybeServiceIdlePauseRequests();
++    }
++
+     return true;
+ }
+ 
+-- 
+2.47.3
+

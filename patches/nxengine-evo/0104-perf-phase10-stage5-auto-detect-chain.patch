@@ -1,0 +1,495 @@
+From 26b776276f41d529cd95ade08dfeca62f7e61105 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 6 May 2026 16:38:29 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2010=20stage=205=20patch=200104=20?=
+ =?UTF-8?q?=E2=80=94=20auto-detect=20chain=20(closes=20Phase=2010)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0104, Phase 10 Stage 5). Auto-detect runtime selection
+chain WB → OPL3 → Organya for SDL_HINT_DOSKUTSU_AUDIO_BACKEND=auto and
+the new default (env unset). Per user's locked Tier-1 decision
+2026-05-06: AUDIO_BACKEND default flipped from organya (slot 0100) to
+auto (this slot) — operator no longer needs to set the env var to
+engage Phase 10 audio offload; engine picks the best available music
+backend at startup automatically.
+
+CLOSES Phase 10 audio offload (Stages 1-5):
+  Stage 1   (slot —, scripts/fetch-cs-midi.py): 41/41 .mid coverage
+  Stage 2   (slot 0101): MidiScheduler + MidiBackendStub
+  Stage 3   (slot 0102): MidiBackendWaveBlaster
+  Stage 4   (slot 0103): MidiBackendOpl3 (8-patch placeholder bank)
+  Stage 5   (slot 0104, this): auto-detect chain + default flip
+  Phase 10.5 follow-ups deferred (idle-pause flip-on, fuller GM bank,
+  velocity/CC dispatch refinements) — await flush-instr W22-WB-B
+  real-HW findings to inform prioritization.
+
+MODIFIED (4):
+
+  src/Utils/diagnostic_timers.h — extend AudioBackend enum with
+    auto_select = 6 (transient state for "chain not yet resolved";
+    SoundManager::init resolves to organya/wb/opl3 before any
+    counters fire).
+
+  src/graphics/Renderer.cpp — backend_to_string handles auto_select
+    case (renders as "auto"; transient; should never appear in
+    [audio-block] emit since init resolves before counters fire).
+
+  src/sound/AudioBackend.cpp — selectBackendFromEnv: env "auto" /
+    unset / empty all map to AudioBackend::auto_select (was organya
+    at slot 0100). Explicit overrides (organya / wb / opl3 / midi-
+    stub / tracker) skip the chain and instantiate directly per
+    existing slot-0102/0103 logic.
+
+  src/sound/SoundManager.cpp — refactored backend-install dispatch:
+    1. File-scope helper functions: _try_install_wb_backend(),
+       _try_install_opl3_backend(), _install_midi_stub_backend(),
+       _narrate_organya_fallback(const char *which). Each helper
+       handles probe + install + sticky-enum-mutation + log
+       narration; auto-detect chain calls them in sequence without
+       code duplication.
+    2. SoundManager::init backend dispatch: replaced 3-block
+       if/else if chain with switch on g_p10_audio_backend_active.
+       New auto_select case runs the chain:
+         LOG_INFO("auto-detect: probing wb...")
+         _try_install_wb_backend() ? "wb selected" : continue
+         LOG_INFO("auto-detect: wb probe failed, trying opl3...")
+         _try_install_opl3_backend() ? "opl3 selected" : continue
+         LOG_INFO("auto-detect: opl3 probe failed, falling back to organya")
+         _narrate_organya_fallback("auto-detect chain (WB + OPL3 both)")
+    3. organya / tracker / none cases: no MidiScheduler involvement;
+       fall through to existing Organya / OGG dispatch in music() /
+       runFade(). No-op.
+
+Smoke (DOSBox-X-fast, 6 gates per team-lead 2026-05-06 dispatch):
+
+  Gate 1 — AUDIO_BACKEND=auto explicit: chain probes wb → DOSBox-X
+    MPU-401 emulation responds → "wb backend ready (MPU-401 at
+    0x0330, UART mode active)" → MidiBackendWaveBlaster armed →
+    "auto-detect: wb selected." 39 flips, no crashes.
+
+  Gate 2 — AUDIO_BACKEND unset (DEFAULT-FLIP): IDENTICAL behavior
+    to Gate 1; selectBackendFromEnv treats null/empty value the
+    same as "auto". Confirms the default-flip is in effect — no
+    operator action required to engage Phase 10 audio offload.
+    39 flips, no crashes.
+
+  Gate 3 — AUDIO_BACKEND=organya forced: "audio backend: organya
+    (forced; Phase 10 baseline)" — explicit override skips the
+    chain. 38 flips, no crashes. Regression unchanged.
+
+  Gate 4 — AUDIO_BACKEND=wb forced: direct wb install; "wb backend
+    ready" + "MidiScheduler armed with MidiBackendWaveBlaster".
+    37 flips, no crashes. Regression unchanged.
+
+  Gate 5 — AUDIO_BACKEND=opl3 forced: direct opl3 attempt; probe
+    fails under DOSBox-X (Adlib timer-1 sequence); roll back to
+    organya gracefully. 37 flips, no crashes. Regression unchanged.
+
+  Gate 6 — AUDIO_BACKEND=midi-stub forced: "MidiScheduler armed
+    with MidiBackendStub". 37 flips, no crashes. Regression
+    unchanged.
+
+Quality gates per team-lead's dispatch:
+  1. ✓ AUDIO_BACKEND=auto chain probes WB → succeeds → narration
+     confirms (Gate 1)
+  2. ✓ Real-HW alternative path verified by code-inspection: when
+     WB probe fails OR is unavailable (e.g., g2k without S2),
+     chain attempts OPL3; on g2k BLASTER T6 = SB16 = OPL3 present,
+     OPL3 probe succeeds. Narration: "auto-detect: wb probe
+     failed, trying opl3..." → "opl3 backend ready..." →
+     "auto-detect: opl3 selected." (string-grep verified in
+     binary; not exercised under DOSBox-X 2025.02 because WB
+     probe always succeeds first)
+  3. ✓ No env var set: same behavior as auto (Gate 2; default-flip
+     confirmed)
+  4. ✓ Explicit organya/wb/opl3/midi-stub regressions unchanged
+     (Gates 3, 4, 5, 6)
+  5. ✓ Patch applies cleanly on top of nxengine-evo/0103
+  6. ✓ strings-grep verifies auto-detect chain narration:
+     "auto-detect: probing wb..." / "auto-detect: wb selected." /
+     "auto-detect: wb probe failed, trying opl3..." /
+     "auto-detect: opl3 selected." / "auto-detect: opl3 probe
+     failed, falling back to organya." / "auto-detect chain (WB +
+     OPL3 both)"
+
+docs/BOOT.md updated: AUDIO_BACKEND value list extended with
+default-flip notice + full slot-0104 chain description; added
+above the existing slot-0101 midi-stub paragraph so the
+chronological narrative reads top-to-bottom (newest first per
+the slot-0104 default).
+
+Out of scope (Phase 10.5 backlog):
+  - Idle-pause coordination flip-on for WB+OPL3 backends (~30 min
+    once flush-instr W22-WB-B findings inform timing). Engine
+    should call SDL_DOSAudioSetIdlePauseEnabled(true) post-WB-or-
+    OPL3-install to engage the ~12 ms / flip W20A2 savings.
+  - Fuller GM patch bank for OPL3 backend via runtime
+    data/opl3-patches.dat loader (~2-3 hours).
+  - Velocity / volume / expression dynamic TL adjustment in OPL3
+    backend (slot 0103 uses pre-baked TL from patch bank).
+  - Sustain pedal / pan / modulation CC dispatch in OPL3 backend.
+---
+ src/Utils/diagnostic_timers.h |  19 ++-
+ src/graphics/Renderer.cpp     |  13 +-
+ src/sound/AudioBackend.cpp    |  25 ++--
+ src/sound/SoundManager.cpp    | 239 +++++++++++++++++++++-------------
+ 4 files changed, 182 insertions(+), 114 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index e01fd18..72f0449 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -655,14 +655,21 @@ void tilemap_cache_reset();
+ // infrastructure without producing audio output. Pixtone SFX still
+ // runs on SB16 DAC unchanged. Stage 3 (slot 0102+) replaces the stub
+ // with WaveBlaster; Stage 4 (slot 0103+) with OPL3.
++// patch 0104 (Phase 10 Stage 5 auto-detect chain) adds `auto_select` —
++// transient state set by AudioBackend::selectBackendFromEnv when env
++// is "auto" / unset / empty (the new default per user's locked Tier-1
++// decision 2026-05-06). SoundManager::init resolves auto_select via
++// the chain WB → OPL3 → Organya before any counters fire, so this
++// value should never appear in [audio-block] emit's `backend=` field.
+ enum class AudioBackend : std::uint8_t
+ {
+-  organya   = 0,
+-  wb        = 1,
+-  opl3      = 2,
+-  tracker   = 3,
+-  none      = 4,
+-  midi_stub = 5,
++  organya     = 0,
++  wb          = 1,
++  opl3        = 2,
++  tracker     = 3,
++  none        = 4,
++  midi_stub   = 5,
++  auto_select = 6,
+ };
+ 
+ extern AudioBackend g_p10_audio_backend_active;
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 15af665..fa7e9e0 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -221,12 +221,13 @@ const char *backend_to_string(AudioBackend b)
+ {
+   switch (b)
+   {
+-    case AudioBackend::organya:   return "organya";
+-    case AudioBackend::wb:        return "wb";
+-    case AudioBackend::opl3:      return "opl3";
+-    case AudioBackend::tracker:   return "tracker";
+-    case AudioBackend::none:      return "none";
+-    case AudioBackend::midi_stub: return "midi-stub";
++    case AudioBackend::organya:     return "organya";
++    case AudioBackend::wb:          return "wb";
++    case AudioBackend::opl3:        return "opl3";
++    case AudioBackend::tracker:     return "tracker";
++    case AudioBackend::none:        return "none";
++    case AudioBackend::midi_stub:   return "midi-stub";
++    case AudioBackend::auto_select: return "auto";
+   }
+   return "unknown";
+ }
+diff --git a/src/sound/AudioBackend.cpp b/src/sound/AudioBackend.cpp
+index 63b483b..04f3bc5 100644
+--- a/src/sound/AudioBackend.cpp
++++ b/src/sound/AudioBackend.cpp
+@@ -27,18 +27,23 @@ void selectBackendFromEnv()
+   const char *value = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
+ 
+   // Default (env unset OR `auto`) → for slot 0100 resolves to
+-  // `organya` (Phase 10 baseline; only backend currently implemented).
+-  // The auto-detect chain (WB available → use WB; else OPL3 → use
+-  // OPL3; else Organya) lands in patches 0101+ once SDL-side detect
+-  // probes exist (per design § 7).
+-  NXE::Diag::AudioBackend selected = NXE::Diag::AudioBackend::organya;
++  // patch 0104 (Phase 10 Stage 5 auto-detect chain) — auto / unset /
++  // empty all resolve to `auto_select` so SoundManager::init runs the
++  // probe chain WB → OPL3 → Organya. Default (env unset) is auto per
++  // user's locked Tier-1 decision 2026-05-06: the engine will pick the
++  // best available music backend at startup without operator
++  // intervention. Explicit overrides (organya / wb / opl3 / midi-stub
++  // / tracker) skip the chain and instantiate directly.
++  NXE::Diag::AudioBackend selected = NXE::Diag::AudioBackend::auto_select;
+ 
+-  if (value == nullptr || std::strcmp(value, "auto") == 0)
++  if (value == nullptr || value[0] == '\0' || std::strcmp(value, "auto") == 0)
+   {
+-    selected = NXE::Diag::AudioBackend::organya;
+-    LOG_INFO("audio backend: auto → organya (Phase 10 slot-0100 baseline; "
+-             "auto-detect chain WB → OPL3 → Organya lands with backend "
+-             "implementations in patches 0101+)");
++    selected = NXE::Diag::AudioBackend::auto_select;
++    LOG_INFO("audio backend: auto (Phase 10 Stage 5 auto-detect chain; "
++             "SoundManager::init will probe WB → OPL3 → Organya in "
++             "sequence and select the first backend whose probe "
++             "succeeds). Pixtone SFX continues on SB16 DAC unchanged "
++             "regardless of which music backend is selected.");
+   }
+   else if (std::strcmp(value, "organya") == 0)
+   {
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 4ea452f..ef950b4 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -74,6 +74,90 @@ extern "C" {
+   extern int doskutsu_audio_ring_chunks_active;
+ }
+ 
++// DOS-PORT (patch 0104, Phase 10 Stage 5 auto-detect chain): file-
++// scope helpers for per-backend install. Called from SoundManager::
++// init(); split out here so the auto-detect chain can call them in
++// sequence without duplicating each backend's install logic.
++//
++// Each helper:
++//   - Probes / instantiates the concrete backend
++//   - On success: installs on MidiScheduler, sets the sticky enum to
++//     the resolved backend value, logs the install banner, returns true
++//   - On failure: returns false (caller decides whether to fall back
++//     in chain mode or roll the explicit-selection enum back to organya)
++//
++// Helpers are static (file-scope, internal linkage) — no class state
++// needed since MidiScheduler is a singleton and g_p10_audio_backend_-
++// active is a global. Keep them near the top of the TU so init() finds
++// them via in-TU lookup.
++
++static bool _try_install_wb_backend()
++{
++  auto wb = std::unique_ptr<MidiBackendWaveBlaster>(new MidiBackendWaveBlaster());
++  if (!wb->isReady())
++  {
++    // Probe failed; unique_ptr unwinds → MidiBackendWaveBlaster dtor
++    // calls SDL_DOSMpu401Shutdown which is idempotent (no-op when
++    // _ready was false). No state to clean.
++    return false;
++  }
++  MidiScheduler::getInstance()->set_backend(std::move(wb));
++  NXE::Diag::g_p10_audio_backend_active = NXE::Diag::AudioBackend::wb;
++  LOG_INFO("Sound system: MidiScheduler armed with MidiBackendWaveBlaster "
++           "(patch 0102 Phase 10 Stage 3). Music dispatch routes via "
++           "SMF parser + hardware-MIDI on the WaveBlaster header / "
++           "DreamBlaster S2; Pixtone SFX still active on SB16 DAC.");
++  return true;
++}
++
++static bool _try_install_opl3_backend()
++{
++  auto opl3 = std::unique_ptr<MidiBackendOpl3>(new MidiBackendOpl3());
++  if (!opl3->isReady())
++  {
++    // Probe failed; unique_ptr unwinds → MidiBackendOpl3 dtor calls
++    // SDL_DOSOpl3Shutdown which is idempotent when _ready was false.
++    return false;
++  }
++  MidiScheduler::getInstance()->set_backend(std::move(opl3));
++  NXE::Diag::g_p10_audio_backend_active = NXE::Diag::AudioBackend::opl3;
++  LOG_INFO("Sound system: MidiScheduler armed with MidiBackendOpl3 "
++           "(patch 0103 Phase 10 Stage 4). Music dispatch routes via "
++           "SMF parser + 18 x 2-op OPL3 voice allocator + small "
++           "inline patch bank (community-sourced from Apogee Sound "
++           "System / AdLib SBI public-domain refs). Pixtone SFX "
++           "still active on SB16 DAC.");
++  return true;
++}
++
++static void _install_midi_stub_backend()
++{
++  MidiScheduler::getInstance()->set_backend(
++      std::unique_ptr<MidiBackend>(new MidiBackendStub()));
++  // midi_stub is never the result of auto-detect (auto chain only
++  // tries wb / opl3); it's only set explicitly via env. Sticky enum
++  // already matches; no mutation needed.
++  LOG_INFO("Sound system: MidiScheduler armed with MidiBackendStub "
++           "(patch 0101 Phase 10 Stage 2). Music dispatch routes via "
++           "SMF parser + no-op concrete backend; Pixtone SFX still "
++           "active on SB16 DAC.");
++}
++
++static void _narrate_organya_fallback(const char *which)
++{
++  // Roll the sticky enum to organya so the engine's existing music
++  // dispatch path (settings->new_music = 0 → Organya) takes over.
++  // Pixtone SFX is unaffected (independent dispatch path on SB16
++  // DAC). The which arg distinguishes WB vs OPL3 vs auto-detect-
++  // exhausted in the log — operator can see at a glance which probe
++  // path failed.
++  NXE::Diag::g_p10_audio_backend_active = NXE::Diag::AudioBackend::organya;
++  LOG_INFO("Sound system: {} probe failed; falling back to organya. "
++           "Music dispatch reverts to the SDL3_mixer + Organya "
++           "synthesizer path. Phase 10 audio offload not engaged for "
++           "this run.", which);
++}
++
+ SoundManager::SoundManager() {}
+ SoundManager::~SoundManager() {}
+ 
+@@ -254,100 +338,71 @@ bool SoundManager::init()
+   // 2/3/4 (patches 0101+) plug the actual backend implementations.
+   selectBackendFromEnv();
+ 
+-  // DOS-PORT (patch 0101, Phase 10 Stage 2 MidiScheduler): when
+-  // backend is midi_stub, install MidiBackendStub on the singleton
+-  // MidiScheduler so subsequent music() calls route through the
+-  // SMF-parsing + tick-driven dispatch path. Done unconditionally
+-  // when backend matches; the per-frame tick driver in runFade()
+-  // gates on g_p10_audio_backend_active so unselected paths cost
+-  // nothing. Stage 3 (slot 0102) extends this with the concrete
+-  // WaveBlaster backend; Stage 4 (slot 0103+) with OPL3.
+-  if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub)
+-  {
+-    MidiScheduler::getInstance()->set_backend(
+-        std::unique_ptr<MidiBackend>(new MidiBackendStub()));
+-    LOG_INFO("Sound system: MidiScheduler armed with MidiBackendStub "
+-             "(patch 0101 Phase 10 Stage 2). Music dispatch routes via "
+-             "SMF parser + no-op concrete backend; Pixtone SFX still "
+-             "active on SB16 DAC.");
+-  }
+-  // DOS-PORT (patch 0102, Phase 10 Stage 3 WaveBlaster backend):
+-  // when backend is wb, instantiate MidiBackendWaveBlaster which
+-  // probes MPU-401 in its constructor via SDL_DOSMpu401Init at the
+-  // BLASTER-resolved port (default 0x330). On probe success, install
+-  // on MidiScheduler. On probe failure, log + roll the active
+-  // backend back to organya so the engine's existing music dispatch
+-  // path (settings->new_music = 0 → Organya) takes over. Pixtone
+-  // SFX is unaffected either way (independent dispatch path on the
+-  // SB16 DAC).
++  // DOS-PORT (patch 0104, Phase 10 Stage 5 auto-detect chain):
++  // refactored backend-install dispatch. Per-backend installation
++  // logic lives in file-scope helpers (_try_install_*) so the auto-
++  // detect chain can call them in sequence without code duplication.
+   //
+-  // The wb-fallback-to-organya transition IS a backend swap per
+-  // PHASE10-CONTRACT.md § 1.2's anticipated case ("only flipped by
+-  // backend swap (rare)"); the sticky enum mutation here is correct.
+-  // The runtime decision happens once at game-init and persists for
+-  // the run.
+-  else if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb)
+-  {
+-    auto wb = std::unique_ptr<MidiBackendWaveBlaster>(new MidiBackendWaveBlaster());
+-    if (wb->isReady())
+-    {
+-      MidiScheduler::getInstance()->set_backend(std::move(wb));
+-      LOG_INFO("Sound system: MidiScheduler armed with MidiBackendWaveBlaster "
+-               "(patch 0102 Phase 10 Stage 3). Music dispatch routes via "
+-               "SMF parser + hardware-MIDI on the WaveBlaster header / "
+-               "DreamBlaster S2; Pixtone SFX still active on SB16 DAC.");
+-    }
+-    else
+-    {
+-      // Probe failed — roll the sticky enum back to organya so the
+-      // engine's existing Organya-based music dispatch path takes
+-      // over. wb's destructor (already-firing as the unique_ptr
+-      // unwinds) is a graceful no-op since _ready is false.
+-      NXE::Diag::g_p10_audio_backend_active = NXE::Diag::AudioBackend::organya;
+-      LOG_INFO("Sound system: WB backend probe failed; falling back "
+-               "to organya. Music dispatch reverts to the SDL3_mixer + "
+-               "Organya synthesizer path. Phase 10 audio offload not "
+-               "engaged for this run; restart with a connected MPU-401 "
+-               "device + DreamBlaster S2 to retry.");
+-      // wb is freed here as the unique_ptr scope closes; its dtor
+-      // calls SDL_DOSMpu401Shutdown which is idempotent (no-op when
+-      // _ready was false).
+-    }
+-  }
+-  // DOS-PORT (patch 0103, Phase 10 Stage 4 OPL3 backend): when backend
+-  // is opl3, instantiate MidiBackendOpl3 which probes OPL3 in its
+-  // constructor via SDL_DOSOpl3Detect (Adlib timer-1 sequence). On
+-  // probe success, install on MidiScheduler. On probe failure, roll
+-  // active backend back to organya — same graceful-degradation
+-  // pattern as Stage 3's WB. DOSBox-X SB16 default config emulates
+-  // OPL3 so probe succeeds under emulation; g2k Vibra16S CT2490 has
+-  // BLASTER T6 = SB16 = OPL3, so probe succeeds on real HW.
+-  else if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3)
++  // Decision table:
++  //   midi_stub   → install MidiBackendStub (no probe; always ready)
++  //   wb          → try MidiBackendWaveBlaster; on probe-fail, roll
++  //                 enum back to organya (no chain attempt — explicit
++  //                 user override should not cascade)
++  //   opl3        → same pattern as wb but for MidiBackendOpl3
++  //   auto_select → run the chain: try wb → if fails, try opl3 → if
++  //                 fails, settle to organya. Sticky enum updated to
++  //                 the resolved backend at each step.
++  //   organya / tracker / none → no MidiScheduler involvement;
++  //                              fall through to existing Organya /
++  //                              OGG dispatch in music()/runFade().
++  //
++  // The wb/opl3-fallback-to-organya transition IS a backend swap
++  // per PHASE10-CONTRACT.md § 1.2's anticipated case; the sticky
++  // enum mutation here is correct. The runtime decision happens
++  // once at game-init and persists for the run.
++  switch (NXE::Diag::g_p10_audio_backend_active)
+   {
+-    auto opl3 = std::unique_ptr<MidiBackendOpl3>(new MidiBackendOpl3());
+-    if (opl3->isReady())
+-    {
+-      MidiScheduler::getInstance()->set_backend(std::move(opl3));
+-      LOG_INFO("Sound system: MidiScheduler armed with MidiBackendOpl3 "
+-               "(patch 0103 Phase 10 Stage 4). Music dispatch routes via "
+-               "SMF parser + 18 x 2-op OPL3 voice allocator + small "
+-               "inline patch bank (community-sourced from Apogee Sound "
+-               "System / AdLib SBI public-domain refs). Pixtone SFX "
+-               "still active on SB16 DAC.");
+-    }
+-    else
+-    {
+-      // Probe failed — roll back to organya. opl3 unique_ptr's dtor
+-      // calls SDL_DOSOpl3Shutdown which is idempotent when _ready
+-      // was false (no chip state to restore).
+-      NXE::Diag::g_p10_audio_backend_active = NXE::Diag::AudioBackend::organya;
+-      LOG_INFO("Sound system: OPL3 backend probe failed; falling back "
+-               "to organya. Music dispatch reverts to the SDL3_mixer + "
+-               "Organya synthesizer path. Phase 10 audio offload not "
+-               "engaged for this run; OPL3 chip absent or non-"
+-               "responsive (timer-1 sequence did not produce expected "
+-               "status).");
+-    }
++    case NXE::Diag::AudioBackend::midi_stub:
++      _install_midi_stub_backend();
++      break;
++
++    case NXE::Diag::AudioBackend::wb:
++      if (!_try_install_wb_backend())
++        _narrate_organya_fallback("WB");
++      break;
++
++    case NXE::Diag::AudioBackend::opl3:
++      if (!_try_install_opl3_backend())
++        _narrate_organya_fallback("OPL3");
++      break;
++
++    case NXE::Diag::AudioBackend::auto_select:
++      LOG_INFO("Sound system: auto-detect chain running (Phase 10 Stage 5; "
++               "trying WB → OPL3 → Organya in sequence; first probe "
++               "success wins).");
++      LOG_INFO("auto-detect: probing wb...");
++      if (_try_install_wb_backend())
++      {
++        LOG_INFO("auto-detect: wb selected.");
++        break;
++      }
++      LOG_INFO("auto-detect: wb probe failed, trying opl3...");
++      if (_try_install_opl3_backend())
++      {
++        LOG_INFO("auto-detect: opl3 selected.");
++        break;
++      }
++      LOG_INFO("auto-detect: opl3 probe failed, falling back to organya.");
++      _narrate_organya_fallback("auto-detect chain (WB + OPL3 both)");
++      break;
++
++    case NXE::Diag::AudioBackend::organya:
++    case NXE::Diag::AudioBackend::tracker:
++    case NXE::Diag::AudioBackend::none:
++    default:
++      // No MidiScheduler involvement. Existing Organya / OGG dispatch
++      // path in music() / runFade() handles these. No-op here.
++      break;
+   }
+ 
+   // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
+-- 
+2.47.3
+

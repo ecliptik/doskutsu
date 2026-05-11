@@ -1,0 +1,115 @@
+From b316ee3b424dc20fd0b52600eda51bb277852f0f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 8 May 2026 13:11:08 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=2012=20patch=200051=20=E2=80=94=20?=
+ =?UTF-8?q?SDL/0050=20shutdown=20bypass=20(fixes=20iter=20L=20L1=20freeze)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Iter L L1 (SDL/0050 default ON) delivered +8-13 fps in heavy gameplay
+(30 fps milestone hit), BUT introduced a shutdown freeze on Quit-to-DOS
+requiring operator reboot. L1.LOG ended after engine-side OPL3 close
+("opl3 backend shutdown ..."), never reached "Sound system shutdown"
+or "Renderer::Close()" lines that L2 (gate killswitched via
+SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0) emitted cleanly.
+
+Root cause: SDL/0050's GetDeviceBuf quiescence gate calls SDL_Delay(10)
+inside the audio-thread iter while holding device->lock. When SDL audio
+close path sets device->shutdown atomic + waits in SDL_WaitThread, the
+audio thread's 10 ms SDL_Delay holds device->lock; if main thread also
+needs the lock for SDL_CloseAudioDevice's internal cleanup, the
+cooperative scheduler deadlocks before the atomic shutdown signal can
+propagate through the gate's idle-cycle. Same class as the SDL/0046
+WaitDevice deadlock fix — cooperative scheduler + paused audio path =
+audio thread doesn't drain shutdown signal.
+
+Fix: read device->shutdown atomic at top of DOSSOUNDBLASTER_GetDeviceBuf
+BEFORE the quiescence walk + SDL_Delay throttle. If set, return the
+staging buffer with *buffer_size unchanged (default-path return; normal
+mix + PlayDevice). Audio thread does one final normal iteration;
+PlaybackAudioThreadIterate's top-of-function shutdown check at
+SDL_audio.c:1181 fires on the next iter; thread exits cleanly. Lock is
+held only for the µs-class quiescence-walk-skip window, not the 10 ms
+SDL_Delay window.
+
+SDL_GetAtomicInt is lock-free (mirrors WaitDevice's pattern at
+SDL_dosaudio_sb.c:437 added by SDL/0046). Safe to read here even with
+device->lock held by PlaybackAudioThreadIterate.
+
+Validation status:
+- Gameplay smoke (DOSBox-X --fast): GREEN. Game launches, hits title,
+  accepts input, no crash, 8 screenshots clean.
+- Real-HW iter M validation needed: must observe "Sound system shutdown"
+  + "Renderer::Close()" lines emit cleanly post-Quit (per L2's clean
+  shutdown reference).
+
+5-line meaningful change. No new env vars, no new public API. Coexists
+with SDL/0050's killswitch — when killswitch=0 the quiescence walk is
+skipped entirely (so the bypass never matters); when killswitch unset/
+default-on the bypass fires only during shutdown.
+
+Companion patches:
+  SDL/0037 — idle-pause API + auto-engage IRQ-counter
+  SDL/0038 — SB16 IRQ-5 instrumentation
+  SDL/0040 — force-DSP-pause hint (fps measurement)
+  SDL/0046 — WaitDevice shutdown bail (sibling deadlock fix)
+  SDL/0048 — ForcePause auto-resume race fix
+  SDL/0050 — DOS GetDeviceBuf quiescence gate (this patch fixes its
+             shutdown-time interaction with cooperative scheduler)
+
+Cross-reference: docs/PHASE12-PIXTONE-DECOUPLE-DESIGN.md Option A.
+
+Per `dosbox_not_behavioral_proxy_for_io.md`: DOSBox-X smoke is
+structural-only; gameplay smoke confirms structural correctness but
+does not exercise graceful Quit-to-DOS shutdown. Real-HW iter M is the
+data + behavioral gate.
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index e41b4d79a..296c43253 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -825,6 +825,37 @@ static Uint8 *DOSSOUNDBLASTER_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_
+ {
+     struct SDL_PrivateAudioData *hidden = device->hidden;
+ 
++    /* DOSKUTSU patch (Phase 12 patch 0051): shutdown bypass for the
++       SDL/0050 quiescence gate. When SDL audio close path has set
++       device->shutdown atomic, skip the gate's quiescence walk + the
++       SDL_Delay(10) throttle so the audio thread can promptly drain its
++       iter cycle and exit on the next iteration's top-of-function
++       shutdown check at SDL_audio.c:1181.
++
++       Same class as SDL/0046's WaitDevice shutdown bail. Iter L L1.LOG
++       showed shutdown freeze on Quit-to-DOS — log ended after engine-side
++       OPL3 close, never reached "Sound system shutdown" or "Renderer::Close()"
++       lines that L2 (gate killswitched) emitted cleanly. Operator required
++       reboot. Root cause: audio thread held device->lock during the gate's
++       SDL_Delay(10) throttle while main thread waited in SDL_WaitThread;
++       cooperative scheduler deadlocked on lock contention before the
++       atomic shutdown propagated through the gate's idle-cycle.
++
++       Fix: read device->shutdown atomic at top of GetDeviceBuf BEFORE the
++       quiescence walk + delay; if set, fall through to the default-path
++       return (staging_buffer with *buffer_size unchanged). Audio thread
++       does one final normal-mix iteration; PlaybackAudioThreadIterate's
++       top-of-function shutdown check at line 1181 fires on the NEXT
++       iteration; thread exits cleanly. Lock is held only for the µs-class
++       quiescence-walk-skip window, not the 10 ms SDL_Delay window.
++
++       SDL_GetAtomicInt is lock-free (mirrors WaitDevice's pattern at
++       line ~437); safe to read here even with device->lock held by
++       PlaybackAudioThreadIterate. */
++    if (SDL_GetAtomicInt(&device->shutdown)) {
++        return hidden->staging_buffer;
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0050, Phase 12 Option A): GetDeviceBuf
+        quiescence gate. Returns *buffer_size = 0 to signal "skip this audio-
+        thread iteration" when no logical-device bound streams have data.
+-- 
+2.47.3
+

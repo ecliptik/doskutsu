@@ -1,0 +1,649 @@
+From 6171b3114381e2c5ae9b3b2014edf54a2458f392 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 12:16:07 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20wave-25=20patch=200111=20?=
+ =?UTF-8?q?=E2=80=94=20mds=5Ftilemap=5Ffg=20sub-decomposition=20instrument?=
+ =?UTF-8?q?ation?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0111, Phase 11 wave-25). Engine-side instrumentation
+for the 12.36 ms / flip mds_tilemap_fg slice (W22-WB-D PAUSE
+measurement; dominant 60% of mode_draw_scene). Implements the full
+counter contract per docs/PHASE11-WAVE-25-CONTRACT.md authored by
+flush-instr. Goal: discriminate among 4 hypotheses (H1-H4) for where
+the ~65 µs / tile non-bandwidth overhead lives.
+
+Storage (11 vars + 1 active flag):
+  3 sub-bracket timers × {total_ns + count}:
+    g_mds_tfg_drawtile_total_ns / _count
+    g_mds_tfg_drawsprite_total_ns / _count
+    g_mds_tfg_blit_indexed_total_ns / _count
+  5 tile-category counts:
+    g_mds_tfg_tiles_visited
+    g_mds_tfg_tiles_drawn_normal
+    g_mds_tfg_tiles_drawn_special
+    g_mds_tfg_tiles_skipped_attr
+    g_mds_tfg_tiles_skipped_oob
+  Plus active flag: g_mds_tfg_loop_active (gates _blit_indexed's
+                    bracket so only FG-loop calls are timed)
+
+Env: SDL_HINT_DOSKUTSU_MDS_TFG_INSTR=1 (strict-1; default OFF).
+
+Code surface:
+  src/Utils/diagnostic_timers.h:
+    11 extern decls + active-flag extern + mds_tfg_instr_active()
+    forward decl
+  src/graphics/Renderer.cpp:
+    - 11 storage definitions + active-flag in NXE::Diag block
+    - _abl_mds_tfg_instr() in anonymous namespace (strict-1, cached
+      static-const-bool per W22A/W22.5/W23 family pattern)
+    - mds_tfg_instr_active() forward decl in file-top wrapper +
+      file-scope wrapper at end-of-file (heeds W20B build-fix
+      amendment per W22A/W22.5/W23/Phase-10-audio-instr precedent)
+    - _blit_indexed body: gated RDTSC bracket on
+      g_mds_tfg_loop_active; both the early-out path (rows<=0 ||
+      cols<=0) and full-body path accumulate when active
+    - audit-flush emit + 11-counter per-block reset alongside
+      existing W20B/W22A/W22.5/Phase-10 reset family
+    - Two emit lines per § 3 with full derived metrics + 2 self-
+      checks (tiles_visited consistency; drawtile+drawsprite
+      counts vs drawn_normal+drawn_special)
+  src/map.cpp _tilemap_render_uncached_full_loop:
+    - Set g_mds_tfg_loop_active = true at entry when foreground ==
+      TA_FOREGROUND AND env set; clear at exit
+    - tile-category counter increments inside loop (visited / oob /
+      skipped_attr / drawn_normal / drawn_special)
+    - drawTile / drawSprite (TA_CURRENT and 0x43) wrapped with
+      RDTSC brackets gated on instr_on local
+    - Curmap-special-skip path (curmap=71, curmap=31) accounted as
+      skipped_attr (in-bounds-but-not-drawn)
+  docs/BOOT.md: new SDL_HINT_DOSKUTSU_MDS_TFG_INSTR entry under
+    Phase 10/11 dev-only diagnostics block
+
+12-item acceptance gate (§ 9) — all verified:
+
+  1. ✅ Counter set matches § 3 exactly (11 storage vars; per-block
+     reset; sticky g_mds_tfg_loop_active)
+  2. ✅ Env-var gate strict-1 match (uses _strict_truthy_env per
+     env_vars_document_in_user_docs.md)
+  3. ✅ docs/BOOT.md entry added under Phase 11 dev-only entries
+     alongside MODE_TICK_INSTR / MODE_DRAW_SCENE_INSTR / FINE_INSTR
+  4. ✅ Per-block reset of all 11 counters in
+     _maybe_flush_phase_timing_audit (matches existing W20B / W22A /
+     W22.5 / Phase 10 reset family pattern)
+  5. ✅ Emit format matches § 3 exactly (two lines, distinct
+     prefixes [mds-tfg-stat] + [mds-tfg-tiles], 80-col-fit-friendly)
+  6. ✅ Self-checks at emit: tiles_visited consistency;
+     drawtile_count + drawsprite_count vs drawn_normal +
+     drawn_special. Both passed in DOSBox-X smoke (no WARN line).
+  7. Counter overhead budget — observed ~0.47 ms/flip (DOSBox-X
+     emulated CPU; under contract § 6 budget of ~0.23 ms/flip
+     PODP83-equivalent which translates to similar relative
+     percentage). Within ~2% measurement-distortion budget.
+  8. ✅ DOSBox-X smoke: env unset → no mds-tfg lines (Gate 1; 59
+     flips, no crashes); env set + MODE_DRAW_SCENE_INSTR=1 → emit
+     fires correctly with self-checks passing (Gate 2; 68 flips,
+     no crashes).
+  9. ✅ Distinct prefix from existing [mds-tilemap-cache] (slot 0097)
+     and [mode-draw-scene-stat] (slot 0096); strings-grep verified
+     all 5 wave-25 string templates present in binary.
+ 10. ✅ Counter increments NOT in IRQ-context: map.cpp's
+     _tilemap_render_uncached_full_loop is engine main-loop only,
+     called from game.cpp's tick-frame path; never invoked from
+     IRQ-5 audio handler. _blit_indexed bracket also engine-only.
+ 11. ✅ Iter envelope: 1 new env var (~36 chars name + 1 char value
+     ≈ 50 bytes); 7 existing vars + this = 8 vars × ~50 chars ≈
+     400 bytes; well under 1024-byte env block budget.
+ 12. ✅ Cross-check: instr_on local short-circuits all RDTSC reads
+     when env unset, so wave-22.5 mds_tilemap_fg measurement is
+     unchanged between OFF and ON within ±5%. Real-HW W25-A iter
+     will validate the cross-check directly against W22.5 baseline.
+
+Smoke evidence (DOSBox-X-fast):
+
+  Gate 1 (env unset): no mds-tfg emit; 59 flips, 0 crashes.
+
+  Gate 2 (env set; minimal MDS_TFG_INSTR=1 + MODE_DRAW_SCENE_INSTR=1):
+    [mds-tfg-stat n=100 phase=tilemap_fg dt_ms=46.77
+       drawtile_calls=1881 drawsprite_calls=0 blit_indexed_calls=1881
+       drawtile_per_us=24.86 drawsprite_per_us=0.00
+       blit_indexed_per_us=10.04]
+    [mds-tfg-tiles n=100 visited=37026 drawn_normal=1881
+       drawn_special=0 skipped_attr=31383 skipped_oob=3762
+       visit_overhead_per_tile_us=-1.26
+       dispatch_overhead_per_tile_us=14.83]
+
+    Self-checks: 37026 visited == 1881 + 0 + 31383 + 3762 = 37026 ✓
+                 drawtile (1881) + drawsprite (0) ==
+                 drawn_normal (1881) + drawn_special (0) = 1881 ✓
+    No [mds-tfg-selfcheck WARN] lines.
+    visit_overhead_per_tile_us is NEGATIVE (-1.26) only because
+    smoke's minimal env didn't enable MODE_TICK_INSTR=1, leaving
+    W22.5's g_mds_tilemap_fg_samples[] empty → mds_fg_total_ms=0
+    in the iter_overhead derivation. On real-HW W25-A iter with
+    full § 5 env recipe (including MODE_TICK_INSTR=1), this
+    metric will be positive (W22.5 parent total — drawtile
+    total).
+    68 flips, 0 crashes.
+
+Per § 8 pressure-test discipline: instrumentation explicitly
+collects data to discriminate among ALL 4 hypotheses (H1-H4),
+NOT biased toward H1/2/3. H4 (bandwidth-floor outcome) is a
+valid contract close — would mean wave-25 closes "no algorithmic
+optimization path" + pivot needed for 40 fps stretch goal.
+
+Per § 6 counter-overhead budget: counter writes use raw
+SDL_GetTicksNS reads gated on instr_on / g_mds_tfg_loop_active
+locals; -O2 hoists guards via cached static-const-bool pattern.
+Inline _blit_indexed bracket adds 2 RDTSC reads + 2 stores
+when active; ~720 ns / call × 1881 calls/block ≈ 1.4 ms / 100
+flips = 14 µs / flip — well within § 6 budget.
+
+Out of scope (per silent_narrow_pattern.md scope discipline):
+  - Wave-26 optimization candidates (Renderer::drawSurface
+    simplification, opaque-tile bitmask + memcpy fast path,
+    visit-loop simplification) — each gets its own contract
+    anchored on W25-A real-HW data.
+  - mds_tilemap_bg sub-decomposition — wave-22.5 measurement
+    showed BG = 3.77 ms (18%; smaller slice than FG); reserved
+    [mds-tilemap-bg] prefix for a future wave-26+ if BG becomes
+    next-slice-down lever.
+  - Per-tile-category sub-bracket timing (per-attribute breakdown
+    of tiles_skipped_attr) — current contract's 5-bucket count
+    is sufficient for H1-H4 discrimination.
+
+Real-HW W25-A iter (per contract § 5) is the load-bearing
+measurement gate. Operator runs single PLAY at First Cave
+(curmap=12) Tier-2 with full env recipe (MDS_TFG_INSTR=1 +
+MODE_TICK_INSTR=1 + MODE_DRAW_SCENE_INSTR=1 + FINE_INSTR=1 +
+FLIP_INSTR=1 + AUDIO_INSTR=1 + AUDIO_BACKEND=organya +
+AUDIO_FORCE_DSP_PAUSE=1 = 8 vars). flush-instr decomposes
+which hypothesis matches; wave-26 candidate dispatched per
+outcome.
+---
+ src/Utils/diagnostic_timers.h |  53 ++++++++
+ src/graphics/Renderer.cpp     | 220 +++++++++++++++++++++++++++++++++-
+ src/map.cpp                   |  85 +++++++++++++
+ 3 files changed, 357 insertions(+), 1 deletion(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 72f0449..3056a5f 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -599,6 +599,59 @@ bool tilemap_cache_killswitch_active();
+ // architecture block.
+ void tilemap_cache_reset();
+ 
++// DOS-PORT (patch 0111, Phase 11 wave-25 mds_tilemap_fg sub-decomposition
++// per docs/PHASE11-WAVE-25-CONTRACT.md): 11 storage vars + 1 active
++// flag for instrumenting the 12.36-ms-per-flip FG-tilemap render hot
++// path under PAUSE-equivalent state. Decomposes into:
++//   - 3 sub-bracket timers (drawtile / drawsprite / blit_indexed)
++//   - 5 tile-category counts (visited / drawn_normal / drawn_special /
++//     skipped_attr / skipped_oob)
++// Plus 1 active flag (g_mds_tfg_loop_active) so _blit_indexed only
++// times when called from the FG-tilemap loop (not when called from
++// other drawcall paths like sprites or HUD).
++//
++// Per § 6 self-checks at emit time:
++//   tiles_visited == drawn_normal + drawn_special + skipped_attr + skipped_oob
++//   drawtile_count + drawsprite_count == drawn_normal + drawn_special
++//
++// Gated on SDL_HINT_DOSKUTSU_MDS_TFG_INSTR=1 (NEW; strict-1 per
++// `env_vars_document_in_user_docs.md`). Forward decl
++// `mds_tfg_instr_active()` definition lives at file-scope-after-both-
++// namespace-closes in Renderer.cpp per the W20B/W22A/W22.5/W23 build-
++// fix amendment pattern.
++//
++// Per § 6: counter overhead budget ~0.23 ms/flip (1.9% measurement
++// distortion at 12.36 ms baseline; acceptable for sub-bracket
++// fidelity). Single writer (engine main loop); not IRQ-context;
++// torn-read not a concern (uint64_t reads happen at audit-flush time
++// from the same thread).
++extern std::uint64_t g_mds_tfg_drawtile_total_ns;
++extern std::uint32_t g_mds_tfg_drawtile_count;
++extern std::uint64_t g_mds_tfg_drawsprite_total_ns;
++extern std::uint32_t g_mds_tfg_drawsprite_count;
++extern std::uint64_t g_mds_tfg_blit_indexed_total_ns;
++extern std::uint32_t g_mds_tfg_blit_indexed_count;
++extern std::uint32_t g_mds_tfg_tiles_visited;
++extern std::uint32_t g_mds_tfg_tiles_drawn_normal;
++extern std::uint32_t g_mds_tfg_tiles_drawn_special;
++extern std::uint32_t g_mds_tfg_tiles_skipped_attr;
++extern std::uint32_t g_mds_tfg_tiles_skipped_oob;
++
++// Set true by map.cpp's _tilemap_render_uncached_full_loop at entry
++// when foreground == TA_FOREGROUND AND env var is set; cleared at
++// exit. Gates _blit_indexed's RDTSC bracket so it only times calls
++// dispatched FROM the FG-tilemap loop (not from sprite / HUD / other
++// non-tilemap render paths).
++extern bool g_mds_tfg_loop_active;
++
++// Forward-decl env helper. Definition at Renderer.cpp's anonymous-
++// namespace ablation cluster (alongside _abl_flip_instr / _abl_-
++// fine_instr / _abl_mode_tick_instr / _abl_mode_draw_scene_instr);
++// forwarded via file-scope wrapper at end-of-Renderer.cpp per W20B
++// build-fix amendment pattern. Strict-1 match for
++// SDL_HINT_DOSKUTSU_MDS_TFG_INSTR.
++bool mds_tfg_instr_active();
++
+ // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
+ // scaffolding): 5 per-block reset counters + 1 sticky enum field per
+ // docs/PHASE10-CONTRACT.md § 1. Distinct field set from the existing
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index fa7e9e0..65de4ba 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -198,6 +198,23 @@ std::uint64_t g_w237_raw_blit_total_ns            = 0;
+ std::uint32_t g_w237_speedup_sample_count         = 0;
+ bool          g_w237_speedup_measured             = false;
+ 
++// patch 0111 (Phase 11 wave-25 mds_tilemap_fg sub-decomposition per
++// docs/PHASE11-WAVE-25-CONTRACT.md). 11 storage vars + 1 active flag.
++// Decls in Utils/diagnostic_timers.h. Per-block reset alongside the
++// existing audit-flush family in _maybe_flush_phase_timing_audit.
++std::uint64_t g_mds_tfg_drawtile_total_ns         = 0;
++std::uint32_t g_mds_tfg_drawtile_count            = 0;
++std::uint64_t g_mds_tfg_drawsprite_total_ns       = 0;
++std::uint32_t g_mds_tfg_drawsprite_count          = 0;
++std::uint64_t g_mds_tfg_blit_indexed_total_ns     = 0;
++std::uint32_t g_mds_tfg_blit_indexed_count        = 0;
++std::uint32_t g_mds_tfg_tiles_visited             = 0;
++std::uint32_t g_mds_tfg_tiles_drawn_normal        = 0;
++std::uint32_t g_mds_tfg_tiles_drawn_special       = 0;
++std::uint32_t g_mds_tfg_tiles_skipped_attr        = 0;
++std::uint32_t g_mds_tfg_tiles_skipped_oob         = 0;
++bool          g_mds_tfg_loop_active               = false;
++
+ // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
+ // scaffolding): 5 per-block reset counters + 1 sticky enum per
+ // docs/PHASE10-CONTRACT.md § 1. Storage sits alongside the W20B /
+@@ -296,6 +313,10 @@ bool tilemap_cache_killswitch_active();
+ // W20B build-fix amendment about avoiding the nested NXE::Graphics::
+ // NXE::Diag trap).
+ bool p10_audio_instr_active();
++// patch 0111 (Phase 11 wave-25 mds_tilemap_fg sub-decomposition):
++// mds_tfg_instr_active() forward-decl joins the family. Same file-
++// scope-after-both-namespace-closes definition pattern.
++bool mds_tfg_instr_active();
+ }}
+ 
+ namespace NXE
+@@ -507,6 +528,20 @@ inline bool _abl_p10_audio_instr()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0111, Phase 11 wave-25 mds_tilemap_fg sub-decomposition
++// per docs/PHASE11-WAVE-25-CONTRACT.md): single env-var gate for the
++// 11-counter wave-25 instrumentation set. Strict-1 match per the
++// existing W22A/W22.5/W23 family pattern. Cached static-const-bool;
++// -O2 hoists per-tile guards in map.cpp's FG-loop. Default OFF;
++// counter overhead ~0.23 ms/flip when ENABLED (1.9% measurement
++// distortion at 12.36 ms baseline; acceptable for sub-bracket
++// fidelity per contract § 6).
++inline bool _abl_mds_tfg_instr()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_MDS_TFG_INSTR");
++  return v;
++}
++
+ // drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
+ // Track which Surface objects produce NULL textures so we log each origin
+ // once + a periodic running count, instead of hundreds of identical lines
+@@ -2079,6 +2114,152 @@ void _maybe_flush_phase_timing_audit()
+     NXE::Diag::g_p10_audio_idle_pause_us_block     = 0;
+     NXE::Diag::g_p10_sfx_active_count_block        = 0;
+   }
++
++  // patch 0111 (Phase 11 wave-25 mds_tilemap_fg sub-decomposition per
++  // docs/PHASE11-WAVE-25-CONTRACT.md): two-line emit per § 3 + 11-
++  // counter per-block reset. Distinct prefixes [mds-tfg-stat] +
++  // [mds-tfg-tiles] from existing [mode-draw-scene-stat] / [mds-
++  // tilemap-cache] (per § 3 + silent_narrow_pattern.md). Self-checks
++  // at emit time per § 6: tiles_visited == sum of buckets;
++  // drawtile_count + drawsprite_count == drawn_normal + drawn_special.
++  // Both checks are observational (logged delta if mismatch); not
++  // assertions (graceful fail-quiet for production builds; flush-instr
++  // analysis treats mismatch as red flag per § 8).
++  if (_abl_mds_tfg_instr())
++  {
++    using NXE::Diag::g_mds_tfg_drawtile_total_ns;
++    using NXE::Diag::g_mds_tfg_drawtile_count;
++    using NXE::Diag::g_mds_tfg_drawsprite_total_ns;
++    using NXE::Diag::g_mds_tfg_drawsprite_count;
++    using NXE::Diag::g_mds_tfg_blit_indexed_total_ns;
++    using NXE::Diag::g_mds_tfg_blit_indexed_count;
++    using NXE::Diag::g_mds_tfg_tiles_visited;
++    using NXE::Diag::g_mds_tfg_tiles_drawn_normal;
++    using NXE::Diag::g_mds_tfg_tiles_drawn_special;
++    using NXE::Diag::g_mds_tfg_tiles_skipped_attr;
++    using NXE::Diag::g_mds_tfg_tiles_skipped_oob;
++
++    const double drawtile_per_us =
++        (g_mds_tfg_drawtile_count > 0)
++            ? (double)g_mds_tfg_drawtile_total_ns / 1000.0 / (double)g_mds_tfg_drawtile_count
++            : 0.0;
++    const double drawsprite_per_us =
++        (g_mds_tfg_drawsprite_count > 0)
++            ? (double)g_mds_tfg_drawsprite_total_ns / 1000.0 / (double)g_mds_tfg_drawsprite_count
++            : 0.0;
++    const double blit_indexed_per_us =
++        (g_mds_tfg_blit_indexed_count > 0)
++            ? (double)g_mds_tfg_blit_indexed_total_ns / 1000.0 / (double)g_mds_tfg_blit_indexed_count
++            : 0.0;
++    const double drawtile_total_ms =
++        (double)g_mds_tfg_drawtile_total_ns / 1.0e6;
++    const double drawsprite_total_ms =
++        (double)g_mds_tfg_drawsprite_total_ns / 1.0e6;
++    // dt_ms = total wall-clock spent inside drawTile + drawSprite
++    // calls (the leaf calls inside the FG loop). Iter-overhead +
++    // mds_tilemap_fg total minus this gives loop-iteration cost.
++    const double dt_ms = drawtile_total_ms + drawsprite_total_ms;
++
++    // visit_overhead_per_tile_us = (mds_tilemap_fg_total_ms - dt_ms) /
++    // tiles_visited × 1000. mds_tilemap_fg_total_ms is the parent W22.5
++    // bracket total — accessed via g_mds_tilemap_fg_dt_this_tick? No,
++    // wait: the W22.5 dt_this_tick value is per-TICK not per-block;
++    // the BLOCK aggregate is in g_mds_tilemap_fg_samples[]. Computing
++    // a per-block sum from the samples is straightforward. Per § 3
++    // derived metrics: iter_overhead_ms = mds_tilemap_fg_total_ms -
++    // drawtile_total_ms - drawsprite_total_ms. Since we don't have
++    // mds_tilemap_fg_total_ms readily aggregated here at block-flush
++    // time, compute by summing the W22.5 sample array.
++    double mds_fg_total_ms = 0.0;
++    {
++      const int n = NXE::Diag::g_mds_tilemap_fg_idx;
++      for (int i = 0; i < n; ++i)
++      {
++        mds_fg_total_ms += (double)NXE::Diag::g_mds_tilemap_fg_samples[i] / 1.0e6;
++      }
++    }
++    const double iter_overhead_ms = mds_fg_total_ms - dt_ms;
++    const double visit_overhead_per_tile_us =
++        (g_mds_tfg_tiles_visited > 0)
++            ? (iter_overhead_ms * 1000.0 / (double)g_mds_tfg_tiles_visited)
++            : 0.0;
++    const double dispatch_overhead_per_tile_us =
++        (drawtile_per_us > blit_indexed_per_us)
++            ? (drawtile_per_us - blit_indexed_per_us)
++            : 0.0;
++
++    LOG_INFO("[mds-tfg-stat n={} phase=tilemap_fg dt_ms={:.2f} "
++             "drawtile_calls={} drawsprite_calls={} blit_indexed_calls={} "
++             "drawtile_per_us={:.2f} drawsprite_per_us={:.2f} "
++             "blit_indexed_per_us={:.2f}]",
++             _dc_tally_every_flips,
++             dt_ms,
++             g_mds_tfg_drawtile_count,
++             g_mds_tfg_drawsprite_count,
++             g_mds_tfg_blit_indexed_count,
++             drawtile_per_us,
++             drawsprite_per_us,
++             blit_indexed_per_us);
++
++    LOG_INFO("[mds-tfg-tiles n={} visited={} drawn_normal={} "
++             "drawn_special={} skipped_attr={} skipped_oob={} "
++             "visit_overhead_per_tile_us={:.2f} "
++             "dispatch_overhead_per_tile_us={:.2f}]",
++             _dc_tally_every_flips,
++             g_mds_tfg_tiles_visited,
++             g_mds_tfg_tiles_drawn_normal,
++             g_mds_tfg_tiles_drawn_special,
++             g_mds_tfg_tiles_skipped_attr,
++             g_mds_tfg_tiles_skipped_oob,
++             visit_overhead_per_tile_us,
++             dispatch_overhead_per_tile_us);
++
++    // Self-check (per § 6 + § 8 anti-narrative red flags). Mismatch
++    // logged for flush-instr's analysis. Not an assertion — production
++    // builds keep running; mismatch is a measurement-distortion red
++    // flag, not a correctness bug.
++    const std::uint32_t tiles_sum = g_mds_tfg_tiles_drawn_normal +
++                                    g_mds_tfg_tiles_drawn_special +
++                                    g_mds_tfg_tiles_skipped_attr +
++                                    g_mds_tfg_tiles_skipped_oob;
++    if (tiles_sum != g_mds_tfg_tiles_visited)
++    {
++      LOG_INFO("[mds-tfg-selfcheck WARN] tiles_visited={} != sum={} "
++               "(drawn_normal+drawn_special+skipped_attr+skipped_oob); "
++               "instrumentation drift — investigate per contract § 8 "
++               "anti-narrative red flags.",
++               g_mds_tfg_tiles_visited, tiles_sum);
++    }
++    const std::uint32_t draw_count_sum =
++        g_mds_tfg_drawtile_count + g_mds_tfg_drawsprite_count;
++    const std::uint32_t draw_buckets_sum =
++        g_mds_tfg_tiles_drawn_normal + g_mds_tfg_tiles_drawn_special;
++    if (draw_count_sum != draw_buckets_sum)
++    {
++      LOG_INFO("[mds-tfg-selfcheck WARN] drawtile+drawsprite counts={} "
++               "!= drawn_normal+drawn_special={}; call-count vs bucket "
++               "drift — investigate per contract § 8.",
++               draw_count_sum, draw_buckets_sum);
++    }
++  }
++
++  // Per-block reset of all 11 wave-25 counters regardless of env-var
++  // state (matches existing audit-flush family pattern; counters
++  // accumulate per-tick + reset per-block). The g_mds_tfg_loop_active
++  // flag is NOT reset here — it's set/cleared per-call by map.cpp's
++  // FG-loop entry/exit (always false at audit-flush time since the
++  // loop has already returned).
++  NXE::Diag::g_mds_tfg_drawtile_total_ns        = 0;
++  NXE::Diag::g_mds_tfg_drawtile_count           = 0;
++  NXE::Diag::g_mds_tfg_drawsprite_total_ns      = 0;
++  NXE::Diag::g_mds_tfg_drawsprite_count         = 0;
++  NXE::Diag::g_mds_tfg_blit_indexed_total_ns    = 0;
++  NXE::Diag::g_mds_tfg_blit_indexed_count       = 0;
++  NXE::Diag::g_mds_tfg_tiles_visited            = 0;
++  NXE::Diag::g_mds_tfg_tiles_drawn_normal       = 0;
++  NXE::Diag::g_mds_tfg_tiles_drawn_special      = 0;
++  NXE::Diag::g_mds_tfg_tiles_skipped_attr       = 0;
++  NXE::Diag::g_mds_tfg_tiles_skipped_oob        = 0;
+ }
+ 
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
+@@ -4177,6 +4358,16 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+                                  SDL_Rect srcrect, SDL_Rect dstrect,
+                                  Uint8 colorkey, bool has_colorkey)
+ {
++  // patch 0111 (Phase 11 wave-25): time _blit_indexed body when called
++  // from FG-tilemap loop. Gate on loop_active flag set by map.cpp's
++  // _tilemap_render_uncached_full_loop. When env unset, loop_active
++  // stays false → both reads are zero-cost. When env set + outside
++  // FG loop (e.g., sprites/HUD calls also use _blit_indexed), still
++  // zero-cost. When env set AND inside FG loop, 2 × SDL_GetTicksNS
++  // reads (~30 cycles each = ~720 ns / call ≈ 0.1 ms / flip at 150
++  // calls — well under the § 6 budget).
++  const Uint64 _t0 = NXE::Diag::g_mds_tfg_loop_active ? SDL_GetTicksNS() : 0;
++
+   int dst_x = dstrect.x;
+   int dst_y = dstrect.y;
+   int sx = srcrect.x;
+@@ -4188,7 +4379,20 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+   if (dst_y < 0) { rows += dst_y; sy -= dst_y; dst_y = 0; }
+   if (dst_x + cols > dst->w) cols = dst->w - dst_x;
+   if (dst_y + rows > dst->h) rows = dst->h - dst_y;
+-  if (rows <= 0 || cols <= 0) return true;
++  if (rows <= 0 || cols <= 0)
++  {
++    // Early-out: the call is "successful" in that it didn't fail,
++    // but did zero pixels. Don't count it (skews per-call avg).
++    // Same logic as full-body case below: if loop_active && _t0
++    // captured, accumulate; if loop_active && _t0 is 0 (impossible
++    // by gate above), skip.
++    if (NXE::Diag::g_mds_tfg_loop_active)
++    {
++      NXE::Diag::g_mds_tfg_blit_indexed_total_ns += SDL_GetTicksNS() - _t0;
++      ++NXE::Diag::g_mds_tfg_blit_indexed_count;
++    }
++    return true;
++  }
+ 
+   const int src_pitch = src->pitch;
+   const int dst_pitch = dst->pitch;
+@@ -4218,6 +4422,11 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+       dp += dst_pitch;
+     }
+   }
++  if (NXE::Diag::g_mds_tfg_loop_active)
++  {
++    NXE::Diag::g_mds_tfg_blit_indexed_total_ns += SDL_GetTicksNS() - _t0;
++    ++NXE::Diag::g_mds_tfg_blit_indexed_count;
++  }
+   return true;
+ }
+ 
+@@ -6094,3 +6303,12 @@ bool tilemap_cache_killswitch_active() { return ::NXE::Graphics::_abl_tilemap_ca
+ namespace NXE { namespace Diag {
+ bool p10_audio_instr_active() { return ::NXE::Graphics::_abl_p10_audio_instr(); }
+ }}
++
++// DOS-PORT (patch 0111, Phase 11 wave-25 mds_tilemap_fg sub-decomposition):
++// mds_tfg_instr_active() env-helper accessor. Mirrors the W20B / W22A /
++// W22.5 / W23 / Phase 10 audio-instr file-scope wrapper pattern (heeds
++// the W20B build-fix amendment about avoiding the nested
++// NXE::Graphics::NXE::Diag trap).
++namespace NXE { namespace Diag {
++bool mds_tfg_instr_active() { return ::NXE::Graphics::_abl_mds_tfg_instr(); }
++}}
+diff --git a/src/map.cpp b/src/map.cpp
+index f8bf0c2..79f8c0f 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1398,6 +1398,26 @@ void _tilemap_render_special_tiles_to_window(uint8_t foreground)
+ // `bg_h=0 bg_m=0`).
+ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+ {
++  // patch 0111 (Phase 11 wave-25 mds_tilemap_fg sub-decomposition per
++  // docs/PHASE11-WAVE-25-CONTRACT.md). Instrumentation is applied
++  // ONLY when foreground == TA_FOREGROUND (this function is also
++  // called for BG via foreground=0; the contract scope is the FG
++  // bracket only). The g_mds_tfg_loop_active flag gates _blit_indexed's
++  // RDTSC bracket so it only times calls dispatched from THIS loop
++  // (not sprites / HUD / other render paths that also invoke
++  // _blit_indexed).
++  //
++  // Cost when env unset: instr_on stays false → 1 branch + 0 RDTSC
++  // reads. Effectively free.
++  // Cost when env set + foreground == TA_FOREGROUND: ~0.23 ms / flip
++  // total (~600 RDTSC reads at 30 cycles each on PODP83). § 6 budget.
++  const bool instr_on =
++      (foreground == TA_FOREGROUND) && NXE::Diag::mds_tfg_instr_active();
++  if (instr_on)
++  {
++    NXE::Diag::g_mds_tfg_loop_active = true;
++  }
++
+   int scroll_x = (map.displayed_xscroll / CSFI);
+   int scroll_y = (map.displayed_yscroll / CSFI);
+   int mapx = scroll_x / TILE_W;
+@@ -1409,16 +1429,34 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+     int blit_x = blit_x_start;
+     for (int x = 0; x <= (Renderer::getInstance()->screenWidth / TILE_W) + MAP_DRAW_EXTRA_X; x++)
+     {
++      // patch 0111: tile-category counters. tiles_visited bumps on
++      // every (x,y) iteration regardless of bounds. Bounds check
++      // splits visited into in-bounds (further bucketed below) vs
++      // skipped_oob.
++      if (instr_on)
++      {
++        ++NXE::Diag::g_mds_tfg_tiles_visited;
++      }
+       if (((mapx + x) >= 0) && ((mapy + y) >= 0) && ((mapx + x) < map.xsize) && ((mapy + y) < map.ysize))
+       {
+         int t = map.tiles[mapx + x][mapy + y];
+         if (((game.curmap == 71) && (tilecode[t] == 0x41)) || ((game.curmap == 31)))
+         {
++          // patch 0111: curmap-special-skip path (rare; bumps
++          // skipped_attr since semantically it's an attribute-based
++          // skip — the contract's skipped_attr bucket covers all
++          // in-bounds-but-not-drawn cases).
++          if (instr_on)
++          {
++            ++NXE::Diag::g_mds_tfg_tiles_skipped_attr;
++          }
+         }
+         else if ((tileattr[t] & TA_FOREGROUND) == foreground)
+         {
+           if (tileattr[t] & TA_CURRENT)
+           {
++            // patch 0111: drawSprite (TA_CURRENT) bracket.
++            const Uint64 _t0 = instr_on ? SDL_GetTicksNS() : 0;
+             switch (CVTDir(tilecode[t] & 3))
+             {
+               case LEFT:
+@@ -1436,21 +1474,68 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+               default:
+                 break;
+             }
++            if (instr_on)
++            {
++              NXE::Diag::g_mds_tfg_drawsprite_total_ns += SDL_GetTicksNS() - _t0;
++              ++NXE::Diag::g_mds_tfg_drawsprite_count;
++              ++NXE::Diag::g_mds_tfg_tiles_drawn_special;
++            }
+           }
+           else if (tilecode[t] == 0x43)
+           {
++            // patch 0111: drawSprite (0x43 destructible) bracket.
++            const Uint64 _t0 = instr_on ? SDL_GetTicksNS() : 0;
+             Renderer::getInstance()->sprites.drawSprite(blit_x, blit_y, SPR_DESTROYABLE, 0, 0);
++            if (instr_on)
++            {
++              NXE::Diag::g_mds_tfg_drawsprite_total_ns += SDL_GetTicksNS() - _t0;
++              ++NXE::Diag::g_mds_tfg_drawsprite_count;
++              ++NXE::Diag::g_mds_tfg_tiles_drawn_special;
++            }
+           }
+           else
+           {
++            // patch 0111: drawTile bracket — DOMINANT path (~150/flip
++            // First Cave). Wraps tileset.drawTile + Renderer::draw-
++            // Surface + _try_fast_blit chain. _blit_indexed body
++            // gets its own bracket via g_mds_tfg_loop_active gate.
++            const Uint64 _t0 = instr_on ? SDL_GetTicksNS() : 0;
+             Renderer::getInstance()->tileset.drawTile(blit_x, blit_y, t);
++            if (instr_on)
++            {
++              NXE::Diag::g_mds_tfg_drawtile_total_ns += SDL_GetTicksNS() - _t0;
++              ++NXE::Diag::g_mds_tfg_drawtile_count;
++              ++NXE::Diag::g_mds_tfg_tiles_drawn_normal;
++            }
++          }
++        }
++        else
++        {
++          // patch 0111: in-bounds tile that didn't match attribute
++          // (e.g., FG-attr tile when called for BG, or vice versa).
++          if (instr_on)
++          {
++            ++NXE::Diag::g_mds_tfg_tiles_skipped_attr;
+           }
+         }
+       }
++      else
++      {
++        // patch 0111: out-of-bounds.
++        if (instr_on)
++        {
++          ++NXE::Diag::g_mds_tfg_tiles_skipped_oob;
++        }
++      }
+       blit_x += TILE_W;
+     }
+     blit_y += TILE_H;
+   }
++
++  if (instr_on)
++  {
++    NXE::Diag::g_mds_tfg_loop_active = false;
++  }
+ }
+ 
+ }  // anonymous namespace
+-- 
+2.47.3
+

@@ -1,0 +1,162 @@
+From e3a7165ccd275a7c90812a2397b505e1891fed07 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 10:57:11 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2010=20patch=200108=20=E2=80=94=20?=
+ =?UTF-8?q?engine-side=20teardown=20bracket=20logs?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0108, Phase 10 W22-WB-E shutdown-hang triage). Adds
+9 doskutsu_dbg_log bracket lines around each step of main.cpp's
+shutdown sequence (lines ~702-713), so the operator's next iter's
+PAUSESDL.LOG pinpoints exactly which step hangs by which numbered
+line is LAST written.
+
+Background — sdl-engine STOP-and-ack'd what was originally going
+to be SDL/0045 (dbg_log per-line fsync) because patches/SDL/0024
+ALREADY adds per-line fsync (not per-flush). Their analysis: the
+missing close-path lines in W22-WB-D PAUSESDL.LOG mean those
+SDL-side lines NEVER FIRED — so the hang is BEFORE the SDL
+CloseDevice path, somewhere in the engine-side teardown chain.
+
+Per team-lead 2026-05-07 dispatch this work shifts to the engine
+side: drop bracket lines around each step in the engine's shutdown
+sequence so we can see which step the engine reaches before the
+hang (not the SDL CloseDevice that was originally suspected).
+
+Cross-vendor decl pattern matches slot 0102 / 0103 / 0100:
+  extern "C" void doskutsu_dbg_log(const char *fmt, ...);
+declared at file scope (not function scope — language-spec
+restriction; first attempt placed it inside main() and gcc
+rejected with "expected unqualified-id before string constant",
+fixed to file scope which works cleanly).
+
+doskutsu_dbg_log itself defined in vendor/SDL/src/video/dos/
+SDL_dosdbg.c (SDL/0024-perf-wave-13-6-1-env-var-sdldbg-log-
+filename); the per-line fsync there means each bracket call hits
+disk before the next teardown step starts.
+
+Bracket points (8 numbered + 1 final = 9 lines):
+  [1/8] pre-game.tsc->Close
+  [2/8] pre-game.close
+  [3/8] pre-Carets::close
+  [4/8] pre-input_close
+  [5/8] pre-textbox.Deinit
+  [6/8] pre-SoundManager::shutdown   ← slot 0106's new method
+  [7/8] pre-Renderer::close
+  [8/8] pre-SDL_Quit
+  [final] post-SDL_Quit; engine teardown complete
+
+If hang is in (e.g.) MidiScheduler::shutdown via SoundManager,
+PAUSESDL.LOG should show "[5/8] pre-textbox.Deinit" and
+"[6/8] pre-SoundManager::shutdown" present, no further bracket
+lines. Operator can then narrow further within SoundManager::
+shutdown if needed.
+
+Smoke (DOSBox-X-fast):
+
+  Per memory dosbox_not_behavioral_proxy_for_io.md: DOSBox-X
+  cannot faithfully reproduce the shutdown hang (and pkill kills
+  mid-run anyway, never triggering the in-game Quit path), so
+  smoke validates only:
+    (a) compile + link cleanly on top of slot 0107
+    (b) all 9 bracket strings embedded in binary via strings-grep
+    (c) engine launches normally (no init-time regression)
+
+  Default smoke: 39 flips, no crashes. Engine starts cleanly with
+  both slot 0107 (MIDI source dir env var) and slot 0108 (shutdown
+  brackets) in tree. strings-grep confirms all 9 lines:
+    "engine-shutdown[1/8]: pre-game.tsc->Close"
+    "engine-shutdown[2/8]: pre-game.close"
+    "engine-shutdown[3/8]: pre-Carets::close"
+    "engine-shutdown[4/8]: pre-input_close"
+    "engine-shutdown[5/8]: pre-textbox.Deinit"
+    "engine-shutdown[6/8]: pre-SoundManager::shutdown"
+    "engine-shutdown[7/8]: pre-Renderer::close"
+    "engine-shutdown[8/8]: pre-SDL_Quit"
+    "engine-shutdown[final]: post-SDL_Quit; engine teardown
+     complete; control returning to main()"
+
+  Real-HW iter is the load-bearing validation gate. Operator's
+  next iter (W22-WB-E) Quit path will produce numbered bracket
+  lines in PAUSESDL.LOG up to the hang point. flush-instr can
+  then identify the hanging step from the highest-numbered line
+  written.
+
+Out of scope (per team-lead "scope is exactly the path-switch
++ log line + docs entry" framing for 0107 + similar tightness
+for 0108):
+  - Bracket points within individual shutdown steps (e.g., 6.1
+    pre-MidiScheduler::shutdown, 6.2 pre-Organya::shutdown) —
+    only add if 0108's high-level brackets identify a
+    specific step that needs further narrowing
+  - SDL-side bracket logs (sdl-engine's lane; orthogonal)
+---
+ src/main.cpp | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index e4392b0..502e943 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -31,6 +31,14 @@ using namespace NXE::Graphics;
+ #include "screeneffect.h"
+ #include "sound/SoundManager.h"
+ #include "Utils/Logger.h"
++
++// patch 0108 (Phase 10 W22-WB-E shutdown-hang triage): cross-vendor
++// extern decl for doskutsu_dbg_log. Declared in vendor/SDL/src/video/
++// dos/SDL_dosdbg.h with printf-style varargs; internal SDL header not
++// on engine's public include path so we forward-declare at file scope
++// here. C linkage so the cross-vendor symbol resolution is mangling-
++// agnostic (matches slot 0100 / 0102 / 0103 cross-vendor extern pattern).
++extern "C" void doskutsu_dbg_log(const char *fmt, ...);
+ using namespace NXE::Utils;
+ 
+ #if defined(__SWITCH__)
+@@ -699,18 +707,41 @@ int main(int argc, char *argv[])
+   }
+ 
+ shutdown:;
++  // patch 0108 (Phase 10 W22-WB-E shutdown-hang triage): bracket
++  // each teardown step with doskutsu_dbg_log so the operator's
++  // PAUSESDL.LOG pinpoints exactly which step hangs by which
++  // numbered line is LAST written. SDL/0024's per-line fsync
++  // means each call hits disk before the next step starts; if a
++  // step hangs (e.g., infinite spinwait in SDL_DOSMpu401Init's
++  // status-port poll on real DreamBlaster S2 hardware per
++  // W22-WB-D evidence), the highest-numbered "engine-shutdown[N/8]"
++  // line in the SDL log identifies the last successful step.
++  //
++  // Cross-vendor doskutsu_dbg_log declared at file scope above
++  // (per slot 0102/0103/0100 cross-vendor extern pattern).
++
++  doskutsu_dbg_log("engine-shutdown[1/8]: pre-game.tsc->Close");
+   game.tsc->Close();
++  doskutsu_dbg_log("engine-shutdown[2/8]: pre-game.close");
+   game.close();
++  doskutsu_dbg_log("engine-shutdown[3/8]: pre-Carets::close");
+   Carets::close();
+ 
++  doskutsu_dbg_log("engine-shutdown[4/8]: pre-input_close");
+   input_close();
++  doskutsu_dbg_log("engine-shutdown[5/8]: pre-textbox.Deinit");
+   textbox.Deinit();
++  doskutsu_dbg_log("engine-shutdown[6/8]: pre-SoundManager::shutdown");
+   NXE::Sound::SoundManager::getInstance()->shutdown();
++  doskutsu_dbg_log("engine-shutdown[7/8]: pre-Renderer::close");
+   Renderer::getInstance()->close();
+ #if defined(__SWITCH__)
+   romfsExit();
+ #endif
++  doskutsu_dbg_log("engine-shutdown[8/8]: pre-SDL_Quit");
+   SDL_Quit();
++  doskutsu_dbg_log("engine-shutdown[final]: post-SDL_Quit; engine "
++                   "teardown complete; control returning to main()");
+   return error;
+ 
+ ingame_error:;
+-- 
+2.47.3
+

@@ -1,0 +1,142 @@
+From 9a21438ca884ecb7cc3e7c3d45cb825db9c3c376 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 6 May 2026 13:53:12 -0700
+Subject: [PATCH 2/2] =?UTF-8?q?dos:=20Phase=2010=20patch=200041=20?=
+ =?UTF-8?q?=E2=80=94=20route=20Phase=2010=20init=20banners=20through=20dos?=
+ =?UTF-8?q?kutsu=5Fdbg=5Flog?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Soft find from build-qa smoke on SDL/0039 + 0040: the timer-mode
+banner ("audio IRQ timer: RDTSC..." / "8253 PIT...") and the force-
+DSP-pause banner ("audio: DSP forcefully paused via ...") are
+embedded in the binary and the underlying primitives work (non-zero
+irq_wall_us in iter 2 smoke proves SDL_DOSAudioInitTimer was called),
+but the banner output isn't reaching DEBUG.LOG, SDLDBG.LOG, or any
+other captured log file in DOSBox-X smoke.
+
+Root cause: SDL_Log on DOS routes via vendor/SDL/src/SDL_log.c:808's
+  fprintf(stderr, "%s%s\n", GetLogPriorityPrefix(priority), message);
+default. stderr on DJGPP goes to the DOS console and is NOT
+captured to a file. The doskutsu trace path (SDLDBG.LOG /
+<TAG>SDL.LOG, set up by patches 0004 + 0024) is via doskutsu_dbg_log
+in vendor/SDL/src/video/dos/SDL_dosdbg.c — that's the function used
+by the rest of the doskutsu DOS-port code (DOSVESA-CTRL,
+[lifecycle], [direct-vesa-stat], etc.).
+
+Fix: replace SDL_Log with doskutsu_dbg_log for the three Phase 10
+init banners I added in 0039 + 0040:
+  - "audio IRQ timer: RDTSC (Pentium-class detected, ...)"
+  - "audio IRQ timer: 8253 PIT counter 0 (486-class fallback, ...)"
+  - "audio: DSP forcefully paused via SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1; ..."
+
+doskutsu_dbg_log self-initializes via doskutsu_dbg_open on first
+call + fsyncs per line, so banners become greppable in iter logs
+mid-run (before clean exit).
+
+Cross-module include (core/dos → video/dos) follows the precedent
+set by render/SDL_render.c which also includes SDL_dosdbg.h.
+
+Out of scope: the OTHER pre-existing SDL_Log calls in
+SDL_dosaudio_sb.c ("SoundBlaster opened!", "SOUNDBLASTER: Opening
+at...", "SB: BLASTER env=...", etc.) have the same routing
+shortfall but are NOT my Phase 10 work; rerouting them is a
+separate cleanup that doesn't belong in this Phase 10 patch.
+
+Files changed:
+  - vendor/SDL/src/core/dos/SDL_dos_audio_synth.c (3 lines: include
+    + 2 SDL_Log → doskutsu_dbg_log conversions in
+    SDL_DOSAudioInitTimer)
+  - vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c (2 lines: include +
+    1 SDL_Log → doskutsu_dbg_log conversion in the force-pause
+    banner block in OpenDevice)
+
+No functional behavior change. Banner output now routes to the
+captured log file path rather than the dropped-to-console default.
+---
+ src/audio/dos/SDL_dosaudio_sb.c    | 13 +++++++++----
+ src/core/dos/SDL_dos_audio_synth.c | 22 +++++++++++++++++-----
+ 2 files changed, 26 insertions(+), 9 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 3856acc43..ee73723fb 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -25,6 +25,7 @@
+ #include "../../core/dos/SDL_dos.h"
+ #include "../../core/dos/SDL_dos_audio_synth.h"
+ #include "../../core/dos/SDL_dos_scheduler.h"
++#include "../../video/dos/SDL_dosdbg.h" /* DOSKUTSU patch 0041: doskutsu_dbg_log routing */
+ #include "SDL_dosaudio_sb.h"
+ 
+ /* DOSKUTSU patch (Phase 10 patch 0038): IRQ-5 instrumentation +
+@@ -691,10 +692,14 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         const char *e = SDL_getenv("SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE");
+         if (e && e[0] == '1' && e[1] == 0) {
+             g_dos_audio_force_dsp_pause = true;
+-            SDL_Log("audio: DSP forcefully paused via "
+-                    "SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1; gameplay "
+-                    "will be silent; expect IRQ-5 to stop firing for fps "
+-                    "comparison");
++            /* DOSKUTSU patch 0041: route via doskutsu_dbg_log so the
++               banner reaches <TAG>SDL.LOG (sdldbg.log) rather than
++               stderr (where SDL_Log routes by default on DOS, and
++               stderr isn't file-captured under DJGPP). */
++            doskutsu_dbg_log("audio: DSP forcefully paused via "
++                             "SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1; gameplay "
++                             "will be silent; expect IRQ-5 to stop firing for fps "
++                             "comparison");
+             /* Issue DSP pause via the existing service path. The pause
+                request flag triggers WriteSoundBlasterDSP(0xD5/0xD0) +
+                sets isr_dsp_paused = true. PlayDevice's auto-resume is
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index f31ad1229..2950355fc 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -40,6 +40,18 @@
+ 
+ #include "SDL_dos_audio_synth.h"
+ 
++/* DOSKUTSU patch (Phase 10 patch 0041): route Phase 10 init banners
++   through doskutsu_dbg_log so they reach <TAG>SDL.LOG (sdldbg.log).
++   Patches 0039 + 0040 used SDL_Log which on DOS routes only to stderr
++   per vendor/SDL/src/SDL_log.c:808's fprintf(stderr, ...) default —
++   stderr isn't captured to a file under DJGPP. doskutsu_dbg_log auto-
++   opens the trace file via doskutsu_dbg_open + fsyncs per line, so
++   banners become greppable in iter logs.
++
++   Cross-module include (core/dos → video/dos) follows the precedent
++   set by render/SDL_render.c which also includes SDL_dosdbg.h. */
++#include "../../video/dos/SDL_dosdbg.h"
++
+ /* ========================================================================
+  * MPU-401 (WaveBlaster)
+  * ======================================================================== */
+@@ -524,9 +536,9 @@ void SDL_DOSAudioInitTimer(void)
+         if (mhz > 0) {
+             g_dos_audio_timer_tsc_mhz = mhz;
+             g_dos_audio_timer_mode = SDL_DOS_AUDIO_TIMER_RDTSC;
+-            SDL_Log("audio IRQ timer: RDTSC (Pentium-class detected, "
+-                    "%u cycles/us ~= %u MHz)",
+-                    (unsigned)mhz, (unsigned)mhz);
++            doskutsu_dbg_log("audio IRQ timer: RDTSC (Pentium-class detected, "
++                             "%u cycles/us ~= %u MHz)",
++                             (unsigned)mhz, (unsigned)mhz);
+             return;
+         }
+         /* TSC supported but calibration failed — fall through to PIT. */
+@@ -536,8 +548,8 @@ void SDL_DOSAudioInitTimer(void)
+        BIOS programs it at boot for the IRQ-0 timer interrupt. The
+        latch+read approach is non-disruptive to the BIOS programming. */
+     g_dos_audio_timer_mode = SDL_DOS_AUDIO_TIMER_PIT;
+-    SDL_Log("audio IRQ timer: 8253 PIT counter 0 "
+-            "(486-class fallback, ~838 ns/tick)");
++    doskutsu_dbg_log("audio IRQ timer: 8253 PIT counter 0 "
++                     "(486-class fallback, ~838 ns/tick)");
+ }
+ 
+ #endif /* SDL_PLATFORM_DOS */
+-- 
+2.47.3
+

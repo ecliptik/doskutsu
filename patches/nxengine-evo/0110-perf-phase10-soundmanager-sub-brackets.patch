@@ -1,0 +1,180 @@
+From 117fed9de6865b47e032378514033319d158dbb5 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 11:59:53 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2010=20patch=200110=20=E2=80=94=20?=
+ =?UTF-8?q?SoundManager::shutdown=20sub-brackets?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0110, Phase 10 W22-WB-E #44 v3 hang triage). Adds 6
+doskutsu_dbg_log sub-bracket lines inside SoundManager::shutdown body
+to pinpoint which exact sub-step hangs.
+
+Background — slot 0108 narrowing 2026-05-07:
+
+W22-WB-E iter showed slot 0108's engine-shutdown brackets fired
+exactly as designed and pinned the hang to INSIDE SoundManager::
+shutdown:
+
+  engine-shutdown[1/8]: pre-game.tsc->Close   ✓
+  engine-shutdown[2/8]: pre-game.close        ✓
+  engine-shutdown[3/8]: pre-Carets::close     ✓
+  engine-shutdown[4/8]: pre-input_close       ✓
+  engine-shutdown[5/8]: pre-textbox.Deinit    ✓
+  engine-shutdown[6/8]: pre-SoundManager::shutdown  ✓
+  engine-shutdown[7/8]: pre-Renderer::close   ✗ NEVER FIRES
+  engine-shutdown[8/8]: pre-SDL_Quit          ✗ NEVER FIRES
+
+Slot 0110 drills into SoundManager::shutdown body. The function has
+5 sub-steps (MidiScheduler::shutdown, Organya::shutdown, Pixtone::
+shutdown, MIX_DestroyMixer if _mixer, MIX_Quit) plus a final post-
+marker = 6 numbered bracket points. Highest-numbered "snd-shutdown
+[N/6]" line in operator's next PAUSESDL.LOG identifies the last
+sub-step that completed before the #44 v3 hang.
+
+Bracket points:
+  [1/6] pre-MidiScheduler::shutdown
+        (slot-0106 method; if hang here → MidiBackend dtor or
+        SDL_DOSMpu401Shutdown / SDL_DOSOpl3Shutdown; further
+        sub-bracketing into MidiScheduler::shutdown for next iter)
+  [2/6] pre-Organya::shutdown
+        (Organya synth teardown; if hang here → singleton dtor or
+        SDL3_mixer track destruction)
+  [3/6] pre-Pixtone::shutdown
+        (Pixtone SFX teardown; if hang here → track-pool destroy or
+        sound-fx buffer free loop)
+  [4/6] pre-MIX_DestroyMixer (conditional on _mixer)
+        (SDL3_mixer device shutdown; if hang here → audio-device
+        close path; sdl-engine territory possibly — depends where
+        in MIX_DestroyMixer the hang is)
+  [5/6] pre-MIX_Quit
+        (SDL3_mixer global state unwind; if hang here → likely SDL
+        backend dispatch table teardown)
+  [6/6] post-MIX_Quit; SoundManager::shutdown body complete;
+        returning to engine-shutdown[7/8]
+        (if [6/6] fires but [7/8] doesn't → hang BETWEEN
+        SoundManager::shutdown return and Renderer::close call;
+        narrow further next iter at engine-level)
+
+Cross-vendor extern decl for doskutsu_dbg_log added to existing
+SoundManager.cpp file-scope extern "C" block (alongside slot 0100's
+SDL_DOSAudio* extern + slot 0110's new doskutsu_dbg_log).
+SoundManager.cpp's existing extern "C" cluster is the canonical
+home for cross-vendor decls per slot 0100 / 0102 / 0103 precedent.
+
+Smoke (DOSBox-X-fast):
+
+  Per dosbox_not_behavioral_proxy_for_io.md: DOSBox-X cannot
+  reproduce the #44 v3 hang (SB16 DSP-pause hardware-state
+  dependency). Smoke validates only:
+    (a) compile + link cleanly on top of slot 0109
+    (b) all 6 sub-bracket strings in binary via strings-grep
+    (c) no init-time regression (engine reaches title cleanly)
+
+  Default smoke: 39 flips, no crashes. Engine starts and reaches
+  title; pkill kills mid-run so no shutdown-path lines fire (as
+  expected per slot-0108 + slot-0110 testing pattern). All 6
+  sub-bracket strings confirmed present in binary via strings-grep.
+
+  Real-HW iter is the load-bearing validation gate — operator's
+  next iter (W22-WB-F or whatever the next iter shape is) Quit
+  path will produce numbered sub-bracket lines in PAUSESDL.LOG up
+  to the hang point; flush-instr / nx-engine identifies the
+  hanging sub-step from the highest line written.
+
+Quality gates per team-lead's dispatch:
+  1. ✓ DOSBox-X smoke regression (engine launches cleanly with
+     0110 in tree on top of 0109)
+  2. ✓ strings-grep verifies all 6 sub-bracket lines in binary
+  3. ✓ Other configs regression unchanged
+  4. ✓ Patch applies cleanly on top of slot 0109
+
+Iter shape note (per team-lead 2026-05-07): WB removed from next
+iter — operator's photo confirms SB16 PnP CTL0026 + DSP v4.13 (not
+the chip variant memory had); probe-engineer dispatching standalone
+MPU-401 hardware probe in parallel. WB stays out of operator iters
+until probe data informs new SDL approach. Iter shape going forward:
+3-PLAY (ORG / OPL3 / PAUSE).
+
+Out of scope (deferred to next iter findings):
+  - Sub-bracketing within MidiScheduler::shutdown if [1/6] is the
+    last-fired line (slot 0111+: pre-stop / pre-_backend.reset /
+    pre-_events.clear)
+  - Sub-bracketing within MIX_DestroyMixer / MIX_Quit if [4/6] or
+    [5/6] is last-fired (sdl-engine territory; would dispatch a
+    SDL/0046+ instrumentation patch)
+  - Restoring default-to-auto when sdl-engine WB probe approach
+    lands + validates real-HW (one-line revert in slot 0105's
+    selectBackendFromEnv)
+---
+ src/sound/SoundManager.cpp | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index a3373cc..5303442 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -36,6 +36,14 @@ extern "C" {
+   // storage definitions for g_p10_audio_idle_pause_count_block /
+   // g_p10_audio_idle_pause_us_block.
+   void p10_audio_idle_pause_callback(std::uint64_t paused_ns);
++
++  // patch 0110 (Phase 10 W22-WB-E #44 v3 hang triage): cross-vendor
++  // extern decl for doskutsu_dbg_log. Declared in vendor/SDL/src/video/
++  // dos/SDL_dosdbg.h with printf-style varargs (per slot 0108
++  // precedent). Used in SoundManager::shutdown for sub-bracket
++  // logging. C linkage matches slot 0108 / 0102 / 0103 / 0100
++  // cross-vendor extern pattern.
++  void doskutsu_dbg_log(const char *fmt, ...);
+ }
+ 
+ #define MUSIC_OFF 0
+@@ -552,6 +560,18 @@ bool SoundManager::init()
+ 
+ void SoundManager::shutdown()
+ {
++  // patch 0110 (Phase 10 W22-WB-E #44 v3 hang triage): sub-bracket
++  // logs for each step inside this body. Slot 0108 narrowed the
++  // hang to between [6/8] (pre-SoundManager::shutdown) and where
++  // [7/8] (pre-Renderer::close) would have fired — confirming the
++  // hang is INSIDE this function. Numbered sub-bracket lines via
++  // doskutsu_dbg_log (declared at file-scope in main.cpp per slot
++  // 0108) pinpoint the exact sub-step. SDL/0024's per-line fsync
++  // means each line hits disk before the next sub-step starts;
++  // the highest-numbered "snd-shutdown[N/6]" line in PAUSESDL.LOG
++  // identifies the last sub-step that completed before the hang.
++
++  doskutsu_dbg_log("snd-shutdown[1/6]: pre-MidiScheduler::shutdown");
+   // patch 0106 (Phase 10 OPL3 hanging-note fix): MidiScheduler shutdown
+   // FIRST. Released backend's dtor (MidiBackendOpl3 / WaveBlaster /
+   // Stub) fires here in deterministic teardown order, ensuring chip
+@@ -564,17 +584,25 @@ void SoundManager::shutdown()
+   // KEY-ON → audible hanging note that persists until reboot.
+   MidiScheduler::getInstance()->shutdown();
+ 
++  doskutsu_dbg_log("snd-shutdown[2/6]: pre-Organya::shutdown");
+   Organya::getInstance()->shutdown();
++  doskutsu_dbg_log("snd-shutdown[3/6]: pre-Pixtone::shutdown");
+   Pixtone::getInstance()->shutdown();
+ 
+   // DOS-PORT: SDL3_mixer's destroy is MIX_DestroyMixer(mixer); pairs with
+   // MIX_CreateMixerDevice. MIX_Quit() then unwinds the global state.
++  doskutsu_dbg_log("snd-shutdown[4/6]: pre-MIX_DestroyMixer "
++                   "(conditional on _mixer)");
+   if (_mixer)
+   {
+     MIX_DestroyMixer(_mixer);
+     _mixer = nullptr;
+   }
++  doskutsu_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
+   MIX_Quit();
++  doskutsu_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
++                   "SoundManager::shutdown body complete; "
++                   "returning to engine-shutdown[7/8]");
+   LOG_INFO("Sound system shutdown");
+ }
+ 
+-- 
+2.47.3
+

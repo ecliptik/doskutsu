@@ -1,0 +1,450 @@
+From 471184b74938916ac6c7decb9f5cd23fd11244ae Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 18:22:40 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200117=20=E2=80=94=20?=
+ =?UTF-8?q?drawTileFast=20inline=20(FG-tilemap=20fast-fast-path)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0117, Phase 11 iter K Cand #1 — drawTileFast inline).
+Bypass Renderer::drawSurface entry chain for FG-tilemap drawcalls.
+Wave-25 (slot 0111) measured dispatch_overhead_per_tile_us = 32.4 µs
+× 329 visible tiles ≈ 10.7 ms / flip of pure overhead BEFORE the
+inner `_blit_indexed` body fires — RAII `_DrawcallTimer` 2× ns reads,
+NULL check, 6× `*scale` (=1) multiplies, `_need_clip` branch,
+`_bump_alpha_count` function call, `_try_fast_blit` 12-arg call with
+5-condition validation, `_bump_drawcall` 2 increments,
+`_record_dirty_rect` bbox accumulator. Tilemap call sites GUARANTEE
+all the validation passes (tilesheet.alpha=255 always, INDEX8↔INDEX8
+post-Wave-16, 320×240 window locked at boot, scale=1, no clip). So
+the entire validation chain is wasted work on the dominant ~150
+calls / flip path.
+
+Mechanism (3 new entry points + 1 call-site change + 1 killswitch):
+
+  Renderer::drawTileFast(Surface*, x, y, srcx, srcy)
+    — drains _renderer_queue_dirty (correctness; preserves z-order
+      with prior slow-path commands)
+    — pre-computes 16x16 srcrect/dstrect inline (TILE_W/TILE_H from
+      Tileset.h)
+    — calls _blit_indexed directly with src->surfaceCpu(),
+      src->colorkey(), src->hasColorkey()
+    — skips _DrawcallTimer / _bump_alpha_count / _bump_drawcall /
+      _record_dirty_rect / _try_fast_blit's validation gate
+
+  Tileset::drawTileFast(x, y, t)
+    — same src-rect math as drawTile (tile-index → 16-tiles-per-row
+      sheet coordinates)
+    — adds NULL-tileset guard (drawSurface's NULL check is dropped
+      by drawTileFast; this single Tileset-level guard preserves
+      semantics cheaply — branch predicted-not-taken in steady state)
+    — delegates to Renderer::drawTileFast
+
+  map.cpp _tilemap_render_uncached_full_loop:
+    — reads `drawtile_fast_on` (cached static-const-bool from
+      env_var_helper) once per call entry — -O2 hoists the per-
+      tile loop guard
+    — dominant else-branch path (the ~150 tiles/flip drawTile case):
+      `if (drawtile_fast_on) tileset.drawTileFast(...) else
+       tileset.drawTile(...)` — preserves wave-25 RDTSC bracket
+      around the call (g_mds_tfg_drawtile_total_ns + count) so
+      iter-K-1 can A/B drawtile_per_us between killswitch=ON vs
+      killswitch=OFF
+
+  Killswitch: SDL_HINT_DOSKUTSU_DRAWTILE_FAST=0 strict-match (only
+  literal "0" disables; mirror of patch 0088 / 0093 / 0115's
+  inverse-killswitch convention). Default ON. Lambda in
+  _abl_drawtile_fast() per the patch-0088 pattern. Per
+  env_vars_document_in_user_docs.md: documented in docs/BOOT.md
+  alongside slot 0113 / 0115.
+
+Wave-25 instrumentation interaction (CRITICAL):
+  _blit_indexed bracket gates on g_mds_tfg_loop_active flag, set by
+  map.cpp's FG-loop entry/exit when foreground == TA_FOREGROUND AND
+  MDS_TFG_INSTR=1. drawTileFast still calls _blit_indexed → the
+  blit_indexed_per_us / count counters continue to fire correctly.
+  drawtile_per_us / count counters at the map.cpp call site also
+  still fire (they're outside drawTileFast, wrapping the call). So
+  the contract:
+    drawtile_per_us → expected to DROP from ~58.0 µs (iter J) toward
+                      blit_indexed_per_us (~25.7 µs iter J) when
+                      killswitch=ON
+    dispatch_overhead_per_tile_us = drawtile_per_us −
+                      blit_indexed_per_us → expected to DROP from
+                      ~32.4 µs toward 0 when killswitch=ON
+  iter-K-1 PLAY1 (drawTileFast=ON) vs PLAY2 (drawTileFast=OFF)
+  delta isolates the lever. Per dosbox_not_perf_proxy.md +
+  dosbox_scales_per_code_path.md: real-HW PODP-OD-83 is the load-
+  bearing gate; DOSBox-X scaling is 0.81×-286× per code path.
+
+Predicted savings (per perf_predictions_unreliable.md honesty
+discipline; predictions historically wrong 5-30×):
+  Range -3 to -5 ms / flip per FPS-DEEPDIVE § 2 row #1.
+  Iter K-1 real-HW measurement → confirm or pressure-test.
+  Outside that range = investigate per
+  measurements_above_prediction_are_red_flags.md.
+
+Trade-offs called out (per pressure_test_tidy_narratives.md):
+  - _bump_drawcall is skipped: tilemap drawcalls don't bump engine-
+    wide drawcall counters under killswitch=ON. The aggregate
+    `_drawcalls_total` field in [drawcall tally] log lines under-
+    counts by ~150/flip. Counter is informational, not load-bearing.
+  - _record_dirty_rect is skipped: tilemap drawcalls don't update
+    `_dirty_rects` bbox accumulator. Default-config full-refresh
+    fires every flip per slot 0085 (PREVFRAME_DIFF default OFF since
+    wave-17.6); partial-flush via prev-frame-diff path uses per-
+    scanline memcmp — independent of `_dirty_rects`. So default
+    config: no behavior change. Opt-in PREVFRAME_DIFF + drawTile-
+    Fast combo: tilemap regions become "dirty everywhere full-flush"
+    by virtue of memcmp-against-prev-frame finding them changed.
+    Acceptable.
+  - _bump_alpha_count is skipped: tilesheet alpha is always 255 so
+    the `nonopaque / total` ratio in the alpha audit log is
+    unaffected. Total drawcall count under-counts by ~150/flip but
+    the `_alpha_nonopaque_drawcalls / _alpha_total_drawcalls`
+    fraction is unchanged.
+  - drawSurface NULL-texture diagnostic skipped: the Tileset-level
+    NULL guard (`if (!_tileset) return;` at the top of drawTileFast)
+    catches the only realistic failure mode (missing tilesheet
+    file). drawSurface's full _log_null_tex pump for arbitrary
+    Surface NULLs is overkill for this path.
+
+Build (DOSBox-X smoke pre-iter-K-1):
+  build SHA: 9719eb74af5bc791105ef5c9bb86640d45bb7677b6a7a15063c11b9c0b0df48f
+  strings markers verified embedded:
+    - "SDL_HINT_DOSKUTSU_DRAWTILE_FAST" (env-var symbol)
+    - "_ZN3NXE8Graphics8Renderer12drawTileFastE..." (mangled symbol)
+    - "_ZN3NXE8Graphics7Tileset12drawTileFastE..." (mangled symbol)
+
+Out of scope (per silent_narrow_pattern.md):
+  - drawSurface fast-fast-path for non-tilemap paths (sprites, HUD).
+    Sprites need _bump_drawcall + dirty-rect + alpha audit because
+    those paths exercise alpha<255 + mirror + clip variability.
+    drawTileFast's invariant assumptions don't hold for sprites.
+  - Cached srcrect tuple optimization (the per-call srcx/srcy →
+    16x16 stamp recomputes 2 multiplies + 2 modulos per call).
+    Optimizing that would save ~5-10 cycles per tile = 1-2 µs / flip
+    — below noise floor. Defer until iter L if other levers exhaust.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h | 13 +++++
+ src/graphics/Renderer.cpp     | 98 +++++++++++++++++++++++++++++++++++
+ src/graphics/Renderer.h       | 35 +++++++++++++
+ src/graphics/Tileset.cpp      | 26 ++++++++++
+ src/graphics/Tileset.h        | 11 ++++
+ src/map.cpp                   | 33 +++++++++++-
+ 6 files changed, 215 insertions(+), 1 deletion(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 39ca150..704f9a3 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -665,6 +665,19 @@ bool mds_tfg_instr_active();
+ // Per-tile rendering correctness preserved (in-bounds path unchanged).
+ bool tile_bbox_skip_active();
+ 
++// patch 0117 (Phase 11 iter K Cand #1 — drawTileFast inline). Forward-
++// decl for the FG-tilemap drawcall fast-fast-path killswitch reader.
++// Default ON; literal "0" disables (mirror of patch 0088 / 0093 / 0115
++// inverse-killswitch convention). When ON (default), map.cpp's
++// `_tilemap_render_uncached_full_loop` calls `tileset.drawTileFast()`
++// instead of `tileset.drawTile()` for the dominant else-branch path —
++// skipping the Renderer::drawSurface entry chain (RAII timer, NULL
++// check, scale math, _try_fast_blit validation, counter pumps,
++// dirty-rect record). When OFF (env=0), the original drawTile path
++// is used (full counter / instrumentation pump). Used for an A/B
++// comparison iter to attribute the iter K-1 fps gain to this lever.
++bool drawtile_fast_active();
++
+ // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
+ // scaffolding): 5 per-block reset counters + 1 sticky enum field per
+ // docs/PHASE10-CONTRACT.md § 1. Distinct field set from the existing
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 3ab7f56..6a11746 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -320,6 +320,9 @@ bool mds_tfg_instr_active();
+ // patch 0113 (Phase 11 iter H opt #2: off-screen tile bbox skip):
+ // tile_bbox_skip_active() forward-decl. Same pattern.
+ bool tile_bbox_skip_active();
++// patch 0117 (Phase 11 iter K Cand #1: drawTileFast inline):
++// drawtile_fast_active() forward-decl. Same pattern.
++bool drawtile_fast_active();
+ }}
+ 
+ namespace NXE
+@@ -557,6 +560,31 @@ inline bool _abl_tile_bbox_skip()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0117, Phase 11 iter K Cand #1 — drawTileFast inline).
++// Killswitch for the FG-tilemap drawcall fast-fast-path. Default ON;
++// set =0 to revert to Renderer::drawSurface for tilemap calls (preserves
++// all counter / dirty-rect / instrumentation pumps as-of-slot-0115).
++//
++// Polarity: only literal "0" disables (mirror of patch 0088 / 0093 /
++// 0115's killswitch convention). Any other value (unset, empty, "1",
++// "yes", garbage) keeps drawTileFast engaged. Cached lambda + static
++// const bool so the per-tile hot-path guard is hoisted out of the
++// loop body at -O2.
++//
++// Predicted savings: ~3-5 ms / flip per FPS-DEEPDIVE Cand #1
++// (data-backed by wave-25 dispatch_overhead_per_tile_us = 32.4 µs ×
++// 329 tiles = 10.7 ms / flip pure overhead). Iter K-1 is the load-
++// bearing measurement gate (real-HW PODP-OD-83); per
++// perf_predictions_unreliable.md predictions historically wrong 5-30×.
++inline bool _abl_drawtile_fast()
++{
++  static const bool v = []() {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_DRAWTILE_FAST");
++    return !(e && e[0] == '0' && e[1] == 0);
++  }();
++  return v;
++}
++
+ // drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
+ // Track which Surface objects produce NULL textures so we log each origin
+ // once + a periodic running count, instead of hundreds of identical lines
+@@ -5340,6 +5368,67 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   _renderer_queue_dirty = true;
+ }
+ 
++// DOS-PORT (patch 0117, Phase 11 iter K Cand #1 — drawTileFast inline).
++// Fast-fast-path for the FG-tilemap drawcall hot path. See Renderer.h
++// for the full design comment + caller-precondition contract. Cost
++// reductions vs Renderer::drawSurface entry chain (per call):
++//   - 2× SDL_GetTicksNS reads (DrawcallTimer ctor + dtor) skipped
++//   - assert + NULL check skipped (caller responsibility)
++//   - 6× scale multiplies skipped (scale=1; coords passed through)
++//   - _need_clip / clipScaled skipped (tilemap loop never sets clip)
++//   - _bump_alpha_count skipped (alpha=255 invariant)
++//   - _try_fast_blit's 5-condition validation skipped (preconditions
++//     above guarantee they pass; we re-do only the queue-drain gate
++//     because that's correctness, not validation)
++//   - _bump_drawcall skipped (drawcall counters drift; tilemap-specific
++//     accounting lives in wave-25 instrumentation instead)
++//   - _record_dirty_rect skipped (default-config full-refresh fires
++//     every flip per slot 0085; partial-flush via prev-frame-diff
++//     uses per-scanline memcmp — independent of _dirty_rects)
++//   - _bump_alpha drift on the per-tile path: tilesheet alpha is
++//     constant 255 across the run (tilesheet.alpha is never assigned
++//     except at construction); _alpha_total counter under-counts
++//     tilemap calls, but those are 100% alpha=255 anyway so the
++//     ratio (nonopaque / total) stays accurate.
++//
++// Wave-25 instrumentation behavior:
++//   _blit_indexed brackets gate on g_mds_tfg_loop_active flag (set by
++//   map.cpp's _tilemap_render_uncached_full_loop entry/exit when
++//   foreground == TA_FOREGROUND AND env set). drawTileFast still
++//   calls _blit_indexed, so blit_indexed_per_us / count counters
++//   continue to fire correctly. drawtile_per_us / count counters at
++//   the map.cpp call site also still fire (they're outside this
++//   function, wrapping the call). dispatch_overhead_per_tile_us =
++//   drawtile - blit_indexed should DROP toward 0 when drawTileFast
++//   engages — that's the load-bearing iter-K-1 measurement.
++void Renderer::drawTileFast(Surface *src, int dstx, int dsty, int srcx, int srcy)
++{
++  // Drain pending slow-path commands so our overlay lands AFTER them.
++  // Same gate as _try_fast_blit; correctness is non-negotiable.
++  if (_renderer_queue_dirty)
++  {
++    SDL_FlushRenderer(_renderer);
++    _renderer_queue_dirty = false;
++  }
++
++  // Pre-compute rects (16x16 fixed at TILE_W/TILE_H constants from
++  // Tileset.h; scale=1 invariant). No clipping done here — the
++  // _blit_indexed primitive performs its own dst-bounds clamping
++  // (off-screen tiles produce zero-pixel early-return inside
++  // _blit_indexed; same correctness as drawSurface's clipScaled
++  // fall-through).
++  SDL_Rect srcrect = {srcx, srcy, TILE_W, TILE_H};
++  SDL_Rect dstrect = {dstx, dsty, TILE_W, TILE_H};
++
++  // Direct call to _blit_indexed (same primitive drawSurface's fast
++  // path eventually reaches via _try_fast_blit dispatch). Wave-25
++  // instrumentation continues to fire if g_mds_tfg_loop_active is
++  // set by the caller.
++  _blit_indexed(_cached_window_surface, src->surfaceCpu(),
++                srcrect, dstrect,
++                (Uint8)src->colorkey(), src->hasColorkey());
++}
++
+ // blit the specified portion of the surface to the screen
+ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
+@@ -6333,3 +6422,12 @@ bool mds_tfg_instr_active() { return ::NXE::Graphics::_abl_mds_tfg_instr(); }
+ namespace NXE { namespace Diag {
+ bool tile_bbox_skip_active() { return ::NXE::Graphics::_abl_tile_bbox_skip(); }
+ }}
++
++// DOS-PORT (patch 0117, Phase 11 iter K Cand #1 — drawTileFast inline):
++// drawtile_fast_active() env-helper accessor. Same file-scope wrapper
++// pattern as the W20B / W22A / W22.5 / W23 / Phase 10 / patch 0111 /
++// patch 0113 family (heeds the W20B build-fix amendment about avoiding
++// the nested NXE::Graphics::NXE::Diag trap).
++namespace NXE { namespace Diag {
++bool drawtile_fast_active() { return ::NXE::Graphics::_abl_drawtile_fast(); }
++}}
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index a791298..60c6861 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -79,6 +79,41 @@ class Renderer
+     void drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht);
+     void drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht);
+ 
++    // DOS-PORT (patch 0117, Phase 11 iter K): fast-fast-path for the
++    // FG-tilemap drawcall hot path. Wave-25 (slot 0111) measured
++    // dispatch_overhead_per_tile_us = 32.4 µs × 329 visible tiles =
++    // ~10.7 ms / flip pure overhead in `Renderer::drawSurface` entry
++    // chain (RAII `_DrawcallTimer` 2× SDL_GetTicksNS reads, NULL check,
++    // 6× scale multiplies, _need_clip branch, _bump_alpha_count function
++    // call, _try_fast_blit 12-arg call with 5-condition validation pass,
++    // _bump_drawcall, _record_dirty_rect bbox accumulator). drawTileFast
++    // skips ALL of that — the FG-tilemap loop's preconditions guarantee
++    // alpha=255 + INDEX8↔INDEX8 + 320×240 window + scale=1 + no clip,
++    // so the validation chain is wasted work. Inlines the queue-drain
++    // gate and calls _blit_indexed directly.
++    //
++    // Caller (Tileset::drawTileFast in map.cpp's FG-tilemap loop) MUST
++    // GUARANTEE preconditions:
++    //   - src != NULL && src->surfaceCpu() != NULL
++    //   - src->alpha == 255 (tilesheet alpha is constant; never mutated)
++    //   - src->surfaceCpu()->format == _cached_window_surface->format
++    //     (INDEX8 once Wave-16 indexed mode engaged)
++    //   - _cached_window_surface non-NULL, 320×240
++    //   - scale == 1 (DOS port locked at 320×240 fullscreen)
++    // Violation = silent miscompile (no validation; that's the point).
++    //
++    // Wave-25 instrumentation preserved: _blit_indexed brackets gate on
++    // g_mds_tfg_loop_active (set by map.cpp's FG-loop entry/exit), so
++    // sub-bracket data continues to flow through drawTileFast calls.
++    // Slot 0111 dispatch_overhead_per_tile_us metric should DROP by
++    // most of the 32.4 µs gap when this path engages.
++    //
++    // Killswitch: SDL_HINT_DOSKUTSU_DRAWTILE_FAST=0 strict-match → fall
++    // back to Renderer::drawSurface for tilemap calls (preserves all
++    // counter / dirty-rect / instrumentation pumps as-of-slot-0115).
++    // Default ON.
++    void drawTileFast(Surface *src, int dstx, int dsty, int srcx, int srcy);
++
+     // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): per-pixel color
+     // modulation blit. Used by Font::draw to render glyph shadow + glyph
+     // foreground without going through SDL_SetTextureColorMod. Three
+diff --git a/src/graphics/Tileset.cpp b/src/graphics/Tileset.cpp
+index 5102f2f..ccee838 100644
+--- a/src/graphics/Tileset.cpp
++++ b/src/graphics/Tileset.cpp
+@@ -62,6 +62,32 @@ void Tileset::drawTile(int x, int y, int t)
+   Renderer::getInstance()->drawSurface(_tileset, x, y, srcx, srcy, TILE_W, TILE_H);
+ }
+ 
++// DOS-PORT (patch 0117, Phase 11 iter K Cand #1 — drawTileFast inline).
++// Same src-rect math as drawTile; delegates to Renderer::drawTileFast
++// instead of drawSurface. Callers (map.cpp's
++// _tilemap_render_uncached_full_loop) gate selection between drawTile
++// and drawTileFast on SDL_HINT_DOSKUTSU_DRAWTILE_FAST killswitch.
++//
++// NULL-tileset guard: drawTile delegates the guard to
++// Renderer::drawSurface's null-check; drawTileFast skips that check
++// (caller responsibility). We add the guard here at the Tileset
++// level so a missing tilesheet (e.g., reload race) does not trip
++// undefined behavior in Renderer::drawTileFast → src->surfaceCpu()
++// dereferencing nullptr. This single guard at the Tileset entry is
++// cheap (one branch, predicted-not-taken in the steady state) and
++// preserves the drawSurface NULL-check semantics that drawTileFast
++// drops.
++void Tileset::drawTileFast(int x, int y, int t)
++{
++  if (!_tileset) return;
++
++  // 16 tiles per row on all tilesheet
++  int srcx = (t % 16) * TILE_W;
++  int srcy = (t / 16) * TILE_H;
++
++  Renderer::getInstance()->drawTileFast(_tileset, x, y, srcx, srcy);
++}
++
+ // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): raw blit a tile
+ // into a destination SDL_Surface, bypassing Renderer overhead. Used
+ // during tilemap cache miss-render in map.cpp. Same src-rect math as
+diff --git a/src/graphics/Tileset.h b/src/graphics/Tileset.h
+index 89f10fe..ac35f3f 100644
+--- a/src/graphics/Tileset.h
++++ b/src/graphics/Tileset.h
+@@ -24,6 +24,17 @@ class Tileset
+ 
+     void drawTile(int x, int y, int t);
+ 
++    // DOS-PORT (patch 0117, Phase 11 iter K Cand #1 — drawTileFast
++    // inline). Sibling to drawTile that delegates to
++    // Renderer::drawTileFast — bypasses Renderer::drawSurface entry
++    // chain (RAII timer, NULL check, scale math, _try_fast_blit
++    // validation, counter pumps, dirty-rect record). Caller (map.cpp's
++    // _tilemap_render_uncached_full_loop) selects between drawTile
++    // (slot 0117 killswitch=0) and drawTileFast (default ON) based on
++    // SDL_HINT_DOSKUTSU_DRAWTILE_FAST. Same src-rect math (16 tiles
++    // per row tilesheet); same per-tile result.
++    void drawTileFast(int x, int y, int t);
++
+     // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): raw blit of
+     // a tile from the loaded tileset into an arbitrary destination
+     // SDL_Surface (intended target: map.cpp's tilemap cache surface).
+diff --git a/src/map.cpp b/src/map.cpp
+index e37c2d4..f1db4ff 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1438,6 +1438,19 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+   // lever's actual fps gain on real HW.
+   const bool bbox_skip_on = NXE::Diag::tile_bbox_skip_active();
+ 
++  // patch 0117 (Phase 11 iter K Cand #1 — drawTileFast inline). When
++  // killswitch is ON (default), the dominant `tileset.drawTile` call
++  // in the else-branch below routes through `tileset.drawTileFast`
++  // instead, which bypasses Renderer::drawSurface's entry chain.
++  // Sample readout (cached static-const-bool; -O2 hoists this guard
++  // out of the per-tile loop body). Wave-25 dispatch_overhead_per_-
++  // tile_us = 32.4 µs × 329 tiles = 10.7 ms / flip pure overhead;
++  // drawTileFast targets recovering most of that. Special-tile paths
++  // (TA_CURRENT, 0x43 destructible) keep using drawSprite — they
++  // need full sprite-pipeline plumbing (mirror, frame-anim) so
++  // they're outside this lever's scope.
++  const bool drawtile_fast_on = NXE::Diag::drawtile_fast_active();
++
+   int scroll_x = (map.displayed_xscroll / CSFI);
+   int scroll_y = (map.displayed_yscroll / CSFI);
+   int mapx = scroll_x / TILE_W;
+@@ -1548,8 +1561,26 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+             // First Cave). Wraps tileset.drawTile + Renderer::draw-
+             // Surface + _try_fast_blit chain. _blit_indexed body
+             // gets its own bracket via g_mds_tfg_loop_active gate.
++            //
++            // patch 0117 (Phase 11 iter K Cand #1): when killswitch
++            // is ON (default), use drawTileFast which bypasses the
++            // drawSurface entry chain. _blit_indexed-side wave-25
++            // bracket still fires (g_mds_tfg_loop_active gate is
++            // unchanged); drawtile_per_us metric should drop toward
++            // blit_indexed_per_us (≈ closing the ~32 µs/tile
++            // dispatch overhead). When killswitch is OFF (env=0),
++            // original drawTile path runs unchanged — full counter /
++            // dirty-rect / instrumentation pumps preserved for the
++            // A/B baseline.
+             const Uint64 _t0 = instr_on ? SDL_GetTicksNS() : 0;
+-            Renderer::getInstance()->tileset.drawTile(blit_x, blit_y, t);
++            if (drawtile_fast_on)
++            {
++              Renderer::getInstance()->tileset.drawTileFast(blit_x, blit_y, t);
++            }
++            else
++            {
++              Renderer::getInstance()->tileset.drawTile(blit_x, blit_y, t);
++            }
+             if (instr_on)
+             {
+               NXE::Diag::g_mds_tfg_drawtile_total_ns += SDL_GetTicksNS() - _t0;
+-- 
+2.47.3
+

@@ -1,0 +1,140 @@
+From a537a43010e71b729acffa5006cecb639bf28523 Mon Sep 17 00:00:00 2001
+From: Claude Code <services.claude@accounts.ecliptik.com>
+Date: Thu, 7 May 2026 15:35:41 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200114=20=E2=80=94=20?=
+ =?UTF-8?q?fix=20slot=200112=20PRELOAD=5FMIDI=20per-track=20PPQ=20regressi?=
+ =?UTF-8?q?on?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (Phase 11 iter I correctness fix). Slot 0112 introduced an
+in-memory MIDI event cache so song changes wouldn't re-parse from CF;
+that path shipped a latent timing bug.
+
+Symptom (operator iter H PLAY1, 2026-05-07):
+  "title music is only playing a single note every 5 seconds, they
+  are different notes, so like playing the MIDI but extremely slow"
+
+Root cause: load_from_preload_cache copied events into _events but
+left _division_ppq at whatever the LAST preload call set. The WiiWare
+set is NON-uniform — white.mid is 24 PPQ while the other 40 tracks
+are 480 PPQ — so after the 41-track preload loop _division_ppq was
+24, and any cache hit for a 480-PPQ track got _us_per_tick =
+500000/24 = 20833 (~20x too slow) instead of the correct
+500000/480 = 1041.
+
+Engine log evidence (iter H OPL3.LOG):
+  parsed wanpaku.mid = 8241 events at 480 PPQ
+  parsed anzen.mid   = 1731 events at 480 PPQ
+  ... 38 more 480-PPQ tracks ...
+  parsed white.mid   = 7284 events at 24 PPQ
+  preload complete - 41 tracks cached, 0 failed
+  load_from_preload_cache: hit 'curly' = 5684 events  <- played at 24 PPQ rate
+
+Fix: store _division_ppq in the cache entry alongside events.
+load_from_preload_cache restores both before start() runs.
+
+Memory cost delta: +2 bytes per entry x 41 entries = +82 bytes total.
+
+Bonus: cache-hit log now reports per-entry PPQ for self-diagnosis.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ src/sound/MidiScheduler.cpp | 34 +++++++++++++++++++++-------------
+ src/sound/MidiScheduler.h   | 19 +++++++++++++------
+ 2 files changed, 34 insertions(+), 19 deletions(-)
+
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+index 8da53df..41512f8 100644
+--- a/src/sound/MidiScheduler.cpp
++++ b/src/sound/MidiScheduler.cpp
+@@ -138,9 +138,16 @@ bool MidiScheduler::add_to_preload_cache(const std::string &path,
+   // Capture the parsed event list (whether ok or not — empty events
+   // for parse failures still get cached so we know not to retry on
+   // the same key).
++  // patch 0114: also capture _division_ppq into the cache entry. The
++  // WiiWare set is non-uniform (white.mid = 24 PPQ; rest = 480 PPQ),
++  // so the global _division_ppq is unreliable at play-time after
++  // multi-track preload. Storing per-entry preserves correct timing.
+   if (ok)
+   {
+-    _preload_cache[cache_key] = std::move(_events);
++    PreloadCacheEntry entry;
++    entry.events       = std::move(_events);
++    entry.division_ppq = _division_ppq;
++    _preload_cache[cache_key] = std::move(entry);
+   }
+ 
+   // Restore prior _events (currently empty unless a track was somehow
+@@ -170,24 +177,25 @@ bool MidiScheduler::load_from_preload_cache(const std::string &cache_key)
+   // Copy from cache. ~5000 events × 12 bytes = ~60 KB; fast (sub-ms
+   // memcpy) vs 446 ms file-parse spike. The cache retains its own
+   // copy so subsequent loads of the same track don't re-parse.
+-  _events = it->second;
++  _events = it->second.events;
++
++  // patch 0114: restore the cached _division_ppq for THIS track.
++  // Without this, the global _division_ppq retained whatever the
++  // last-preloaded track set — for the WiiWare set, white.mid is
++  // 24 PPQ while the other 40 tracks are 480 PPQ, giving a 20× tempo
++  // skew on cache hits for any non-matching track (iter H operator-
++  // perceived "1/10 speed" symptom). start() will _recompute_us_per_-
++  // tick using this restored division + the SMF-default tempo it
++  // resets to.
++  _division_ppq = it->second.division_ppq;
+ 
+   // Reset playback position (same as load() does on parse success).
+   _next_event_idx = 0;
+   _current_tick = 0;
+   _position_us = 0;
+ 
+-  // _division_ppq is preserved across cache hits because it's set by
+-  // _parse_smf at preload time AND not reset by start(). For multiple
+-  // tracks with different divisions, the most-recently-cached track's
+-  // division wins — Cave Story tracks all use either 480 PPQ
+-  // (WiiWare) or 24 PPQ (ORGMID) within the same source dir; first
+-  // track preloaded establishes the active division for the run.
+-  // (Robust fix would cache division per-key; deferred to wave-N+1
+-  // if real-HW W26-A iter shows mistuned playback for some tracks.)
+-
+-  LOG_INFO("MidiScheduler::load_from_preload_cache: hit '{}' = {} events",
+-           cache_key, (unsigned)_events.size());
++  LOG_INFO("MidiScheduler::load_from_preload_cache: hit '{}' = {} events at {} PPQ",
++           cache_key, (unsigned)_events.size(), (unsigned)_division_ppq);
+   return true;
+ }
+ 
+diff --git a/src/sound/MidiScheduler.h b/src/sound/MidiScheduler.h
+index aac6479..558666d 100644
+--- a/src/sound/MidiScheduler.h
++++ b/src/sound/MidiScheduler.h
+@@ -240,12 +240,19 @@ private:
+   std::unique_ptr<MidiBackend> _backend;
+ 
+   // patch 0112 (Phase 11 iter H opt #1: front-load MIDI parsing).
+-  // In-memory cache of pre-parsed event lists, keyed by track name
+-  // (e.g., "curly", "white", "gravity"). Populated at init via
+-  // add_to_preload_cache; consulted at play-time via
+-  // load_from_preload_cache. Empty by default (env unset → no
+-  // preload). Resident size ~2 MB max (41 tracks × ~50 KB each).
+-  std::unordered_map<std::string, std::vector<MidiEvent>> _preload_cache;
++  // patch 0114 (Phase 11 iter I fix): cache stores _division_ppq per
++  // entry. The WiiWare set is non-uniform — `white.mid` is 24 PPQ
++  // while the other 40 tracks are 480 PPQ. Without per-entry storage,
++  // load_from_preload_cache leaves _division_ppq at whatever the
++  // last-preloaded track set, mistuning playback by 20× for any
++  // track that doesn't match. (iter H operator-perceived "1/10
++  // speed" symptom on title music after preload of all 41 tracks.)
++  struct PreloadCacheEntry
++  {
++    std::vector<MidiEvent> events;
++    std::uint16_t          division_ppq;
++  };
++  std::unordered_map<std::string, PreloadCacheEntry> _preload_cache;
+   std::uint16_t _division_ppq          = 480;  // SMF default if header had 0
+   std::uint32_t _tempo_us_per_quarter  = 500000;  // SMF default = 120 BPM
+   double        _us_per_tick           = 500000.0 / 480.0;
+-- 
+2.47.3
+

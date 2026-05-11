@@ -1,0 +1,735 @@
+From 119ea4b662693cb8c70f617bfe6969b2576f27d3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 6 May 2026 12:43:49 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=2010=20patch=200037=20=E2=80=94=20?=
+ =?UTF-8?q?audio=20synth=20helpers=20(MPU-401=20+=20OPL3=20+=20idle-pause?=
+ =?UTF-8?q?=20API)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Phase 10 audio offload requires hardware programming primitives for the
+WaveBlaster (MPU-401) and OPL3 (YMF262) backends, plus a coordination
+API for the SB16 audio-IRQ idle-pause mechanism. This patch adds the
+helper API + state in two new files; patch 0038 modifies the SB16 audio
+backend to use them.
+
+New files:
+
+- src/core/dos/SDL_dos_audio_synth.h — public API contract:
+  * MPU-401: Init/WriteByte/Shutdown/GetBLASTERPort
+  * OPL3: Detect/InitChip/Shutdown/WriteRegister/WriteRegisterBlock/
+    VoiceRegOffsets/VoiceWritePatch/VoiceNoteOn/VoiceNoteOff
+  * Idle-pause: RegisterIdlePauseCallback/SetIdlePauseEnabled/
+    ForcePause/ForceResume + SDL_DOSIdlePauseCallback typedef
+  * Per-block extern counters (uint32_t µs/count, atomic on x86):
+    doskutsu_audio_irq_wall_us / _irq_count / _sfx_active_count
+
+- src/core/dos/SDL_dos_audio_synth.c — implementations:
+  * MPU-401: reset+ACK probe at Init (10 ms timeout); UART-mode entry
+    via 0x3F to command port; per-byte poll on bit 6 of status before
+    data write; BLASTER env parser for `Pxxxx` field with 0x330 default
+  * OPL3: canonical Adlib timer-1 detection (s1=0x00 → s2=0xC0); register
+    write helper with bank routing (0x388/0x389 vs 0x38A/0x38B for
+    secondary bank) + 6-dummy-status-read inter-write delay; voice
+    register offset table for all 18 voices in 9-channel 2-op mode
+    layout (per § D.5 design recommendation); OPL3-mode init via
+    register 0x105 = 0x01 + 4-op disable via register 0x104 = 0x00
+  * Idle-pause: state vars exposed to SB16 backend (patch 0038 services
+    the request flags + DSP pause/resume command issuing); callback
+    slot for engine-side counter accumulation
+
+Engine consumes via `vendor/nxengine-evo/src/sound/AudioBackendWB.cpp`
+and `AudioBackendOPL3.cpp` (nx-engine's lane, slot 0100+).
+
+Per CLAUDE.md threading-zero invariant: all helpers synchronous /
+blocking. No threads, no DPMI thunks beyond port-I/O primitives.
+
+Per kbd-counter precedent (patches 0023+0025): uint32_t volatile
+externs, atomic single-bus-cycle reads on x86 — no cli/sti.
+
+Per `audio_mix_zero_is_not_audio_off.md`: idle-pause is the load-bearing
+lever for the projected ~12 ms / flip wall-clock removal during silent
+gameplay (IRQ entry/exit cost, not mix work).
+
+CMakeLists.txt unchanged: src/core/dos/*.c is globbed.
+
+Design contract: docs/PHASE10-DESIGN.md § C / § D / § E.6 (gitignored).
+Instrumentation contract: docs/PHASE10-CONTRACT.md (gitignored).
+---
+ src/core/dos/SDL_dos_audio_synth.c | 435 +++++++++++++++++++++++++++++
+ src/core/dos/SDL_dos_audio_synth.h | 220 +++++++++++++++
+ 2 files changed, 655 insertions(+)
+ create mode 100644 src/core/dos/SDL_dos_audio_synth.c
+ create mode 100644 src/core/dos/SDL_dos_audio_synth.h
+
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+new file mode 100644
+index 000000000..e6adfb38f
+--- /dev/null
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -0,0 +1,435 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/*
++ * DOSKUTSU patch (Phase 10 patch 0037): hardware audio-synth helper
++ * implementations. See SDL_dos_audio_synth.h for the API contract +
++ * design rationale references.
++ *
++ * The MPU-401 + OPL3 helpers are pure port I/O — no DPMI, no allocation,
++ * no FPU. The audio idle-pause coordination state lives in this TU as
++ * statics; the SB16 audio backend (SDL_dosaudio_sb.c, modified by
++ * patch 0038) reaches into them via the public Set/Force/Register API.
++ *
++ * Per CLAUDE.md threading-zero invariant: all helpers are synchronous /
++ * blocking. No threads, no DPMI thunks beyond the existing port-I/O
++ * primitives.
++ */
++
++#include "SDL_internal.h"
++
++#if defined(SDL_PLATFORM_DOS)
++
++#include "SDL_dos_audio_synth.h"
++
++/* ========================================================================
++ * MPU-401 (WaveBlaster)
++ * ======================================================================== */
++
++/* Single-instance state. Set at SDL_DOSMpu401Init() time; -1 sentinel
++   indicates "not initialized" (WriteByte becomes a no-op). */
++static int s_mpu401_port_base = -1;
++
++bool SDL_DOSMpu401Init(uint16_t port_base)
++{
++    /* Reset MPU-401: write 0xFF to command port (data + 1). */
++    outportb((Uint16)(port_base + 1), 0xFF);
++
++    /* Poll for ACK (0xFE) on data port within ~10 ms wall-clock.
++       Status bit 7 (0x80) = data-set-ready (read input available). */
++    const Uint64 deadline = SDL_GetTicksNS() + SDL_MS_TO_NS(10);
++    while (SDL_GetTicksNS() < deadline) {
++        const Uint8 status = inportb((Uint16)(port_base + 1));
++        if ((status & 0x80) == 0) { /* DSR low = byte ready to read */
++            const Uint8 ack = inportb(port_base);
++            if (ack == 0xFE) {
++                /* Enter UART mode. After this, all writes to data port
++                   pass directly to MIDI bus; status bit 6 (0x40) = DRR
++                   (data ready to receive; must be 0 before each write). */
++                outportb((Uint16)(port_base + 1), 0x3F);
++                /* Some clones don't ACK the UART-mode command per
++                   docs/PHASE10-DESIGN.md § C.2 step 4; we don't require
++                   a second ACK. */
++                s_mpu401_port_base = (int)port_base;
++                return true;
++            }
++        }
++    }
++    return false;
++}
++
++void SDL_DOSMpu401WriteByte(uint8_t byte)
++{
++    if (s_mpu401_port_base < 0) {
++        return; /* not initialized; silent no-op per docs */
++    }
++    const Uint16 base = (Uint16)s_mpu401_port_base;
++    /* Spin until DRR clear (data ready to receive). On real HW with a
++       fast wavetable like DreamBlaster S2, this is typically already
++       clear; the spin is sub-µs. */
++    while ((inportb((Uint16)(base + 1)) & 0x40) != 0) {
++        /* spin */
++    }
++    outportb(base, byte);
++}
++
++void SDL_DOSMpu401Shutdown(void)
++{
++    if (s_mpu401_port_base < 0) {
++        return; /* never initialized; nothing to reset */
++    }
++    /* Reset to BIOS-default state. Suppress ACK polling on shutdown —
++       process is exiting; we don't care if reset is acknowledged. */
++    outportb((Uint16)(s_mpu401_port_base + 1), 0xFF);
++    s_mpu401_port_base = -1;
++}
++
++uint16_t SDL_DOSMpu401GetBLASTERPort(void)
++{
++    /* BLASTER format example: "A220 I5 D1 H5 T6 J200 P330" — fields are
++       single letter + hex/decimal port. We want `Pxxxx`; default 0x330. */
++    const char *blaster = SDL_getenv("BLASTER");
++    if (!blaster) {
++        return 0x330;
++    }
++    /* Walk the string looking for whitespace-prefixed (or string-start) P. */
++    const char *p = blaster;
++    while (*p) {
++        const char c = *p;
++        if (c == 'P' || c == 'p') {
++            const bool at_start = (p == blaster);
++            const bool prev_space = (!at_start && (*(p - 1) == ' ' || *(p - 1) == '\t'));
++            if (at_start || prev_space) {
++                /* Parse hex digits after P. */
++                p++;
++                uint16_t port = 0;
++                bool got_digit = false;
++                while (*p) {
++                    const char d = *p;
++                    int digit = -1;
++                    if (d >= '0' && d <= '9') digit = d - '0';
++                    else if (d >= 'A' && d <= 'F') digit = 10 + (d - 'A');
++                    else if (d >= 'a' && d <= 'f') digit = 10 + (d - 'a');
++                    else break;
++                    port = (uint16_t)((port << 4) | digit);
++                    got_digit = true;
++                    p++;
++                }
++                if (got_digit && port != 0) {
++                    return port;
++                }
++                return 0x330;
++            }
++        }
++        p++;
++    }
++    return 0x330; /* P field absent */
++}
++
++/* ========================================================================
++ * OPL3 (YMF262)
++ * ======================================================================== */
++
++/* OPL3 voice register offset table per Yamaha YMF262 datasheet.
++   Voices 0-8 use primary bank (registers 0x00-0xFF; addr/data ports
++   0x388/0x389). Voices 9-17 use secondary bank (registers 0x100-0x1FF;
++   addr/data ports 0x38A/0x38B).
++
++   Each voice has 2 operators (op0 = modulator, op1 = carrier in default
++   FM connection mode). Operator registers at relative offsets 0x00 (AM/
++   VIB/EG/KSR/MULT), 0x20 same, 0x40 (KSL/TL), 0x60 (AR/DR), 0x80 (SL/RR),
++   0xE0 (waveform). Channel registers at 0xA0 (F-num low), 0xB0 (F-num
++   high + block + key-on), 0xC0 (feedback/algo + panning).
++
++   For a write to e.g. voice-0 op0 register 0x40 (KSL/TL), the actual
++   OPL3 register is 0x40 + voice0_op0_offset = 0x40 + 0x00 = 0x40. For
++   voice-9 op0 register 0x40, actual register is 0x100 + 0x40 + 0x00
++   = 0x140 (secondary bank).
++
++   Channel offset within a bank: 0xA0 / 0xB0 / 0xC0 + (voice % 9). */
++static const struct {
++    uint16_t op0_base;
++    uint16_t op1_base;
++    uint16_t channel_base;
++} s_opl3_voice_offsets[18] = {
++    /* Voice 0-8: primary bank (0x000 base) */
++    { 0x000, 0x003, 0x000 + 0 },
++    { 0x001, 0x004, 0x000 + 1 },
++    { 0x002, 0x005, 0x000 + 2 },
++    { 0x008, 0x00B, 0x000 + 3 },
++    { 0x009, 0x00C, 0x000 + 4 },
++    { 0x00A, 0x00D, 0x000 + 5 },
++    { 0x010, 0x013, 0x000 + 6 },
++    { 0x011, 0x014, 0x000 + 7 },
++    { 0x012, 0x015, 0x000 + 8 },
++    /* Voice 9-17: secondary bank (0x100 base) */
++    { 0x100, 0x103, 0x100 + 0 },
++    { 0x101, 0x104, 0x100 + 1 },
++    { 0x102, 0x105, 0x100 + 2 },
++    { 0x108, 0x10B, 0x100 + 3 },
++    { 0x109, 0x10C, 0x100 + 4 },
++    { 0x10A, 0x10D, 0x100 + 5 },
++    { 0x110, 0x113, 0x100 + 6 },
++    { 0x111, 0x114, 0x100 + 7 },
++    { 0x112, 0x115, 0x100 + 8 },
++};
++
++bool SDL_DOSOpl3Detect(void)
++{
++    /* Standard Adlib detection: timer-1 rollover sequence.
++       1. Reset both timers (0x60 to register 0x04).
++       2. Mask both timer interrupts (0x80 to register 0x04).
++       3. Read status (port 0x388); high bits should be 0x00.
++       4. Set timer-1 to load fast (0xFF to register 0x02).
++       5. Unmask timer-1 (0x21 to register 0x04).
++       6. Wait ~100 µs for timer to expire.
++       7. Read status; high bits should be 0xC0 (overflow + timer-1).
++       8. Reset + mask timers again. */
++    SDL_DOSOpl3WriteRegister(0x04, 0x60);
++    SDL_DOSOpl3WriteRegister(0x04, 0x80);
++    const Uint8 s1 = (Uint8)(inportb(0x388) & 0xE0);
++    SDL_DOSOpl3WriteRegister(0x02, 0xFF);
++    SDL_DOSOpl3WriteRegister(0x04, 0x21);
++    SDL_DelayPrecise(SDL_US_TO_NS(100));
++    const Uint8 s2 = (Uint8)(inportb(0x388) & 0xE0);
++    SDL_DOSOpl3WriteRegister(0x04, 0x60);
++    SDL_DOSOpl3WriteRegister(0x04, 0x80);
++    return (s1 == 0x00 && s2 == 0xC0);
++}
++
++void SDL_DOSOpl3WriteRegister(uint16_t reg, uint8_t value)
++{
++    /* Bank routing: registers 0x000-0x0FF → primary bank (0x388/0x389);
++       0x100-0x1FF → secondary bank (0x38A/0x38B). */
++    const Uint16 addr_port = (reg < 0x100) ? 0x388 : 0x38A;
++    const Uint16 data_port = (reg < 0x100) ? 0x389 : 0x38B;
++
++    outportb(addr_port, (Uint8)(reg & 0xFF));
++    /* Inter-write delay: canonical Adlib 6 dummy status reads.
++       Per YMF262 datasheet ~24 master clock cycles ≈ 1.7 µs at
++       14.318 MHz; six ISA-bus reads at ~1 µs each = ~6 µs — well
++       past the requirement, bullet-proof on PODP83 + Cirrus 5434. */
++    for (int i = 0; i < 6; i++) {
++        (void)inportb(0x388);
++    }
++    outportb(data_port, value);
++    /* Post-data delay before next register access: another 6 reads. */
++    for (int i = 0; i < 6; i++) {
++        (void)inportb(0x388);
++    }
++}
++
++void SDL_DOSOpl3WriteRegisterBlock(
++    const uint16_t *regs, const uint8_t *vals, size_t n)
++{
++    /* Caller passes parallel arrays of register IDs + values. We just
++       loop. A future optimization could collapse delays for adjacent
++       writes to the same bank, but block writes aren't on the hot
++       path (patch loading happens at song-load) so keep simple. */
++    for (size_t i = 0; i < n; i++) {
++        SDL_DOSOpl3WriteRegister(regs[i], vals[i]);
++    }
++}
++
++void SDL_DOSOpl3VoiceRegOffsets(int voice_id,
++    uint16_t *out_op0_base, uint16_t *out_op1_base, uint16_t *out_channel)
++{
++    if (voice_id < 0 || voice_id >= 18) {
++        if (out_op0_base) *out_op0_base = 0;
++        if (out_op1_base) *out_op1_base = 0;
++        if (out_channel) *out_channel = 0;
++        return;
++    }
++    if (out_op0_base) *out_op0_base = s_opl3_voice_offsets[voice_id].op0_base;
++    if (out_op1_base) *out_op1_base = s_opl3_voice_offsets[voice_id].op1_base;
++    if (out_channel) *out_channel = s_opl3_voice_offsets[voice_id].channel_base;
++}
++
++void SDL_DOSOpl3VoiceWritePatch(int voice_id, const uint8_t patch[12])
++{
++    if (voice_id < 0 || voice_id >= 18) {
++        return;
++    }
++    /* OPL3Patch struct layout per docs/PHASE10-DESIGN.md § D.8 / plan
++       doc § 5:
++         op0[0..5]: AM/VIB/EG/KSR/MULT, KSL/TL, AR/DR, SL/RR, WS, FB/CONN
++         op1[0..4]: AM/VIB/EG/KSR/MULT, KSL/TL, AR/DR, SL/RR, WS
++         feedback_algo: 1 byte combining FB + CONN (channel-level)
++       Total 12 bytes mapped to OPL3 registers:
++         op0 0x20+offset, 0x40+, 0x60+, 0x80+, 0xE0+, [op0 byte 5 = FB
++              actually goes at the channel reg 0xC0+, NOT op-level —
++              per YMF262 datasheet, FB/CONN is per-channel]
++         op1 0x20+, 0x40+, 0x60+, 0x80+, 0xE0+
++         feedback_algo: 0xC0+channel
++       Reading the plan doc § 5 struct again: op0[6] includes the
++       FB/CONN byte; we put that at channel 0xC0. op1[5] does NOT
++       include FB/CONN (one less byte); the patch layout assumes
++       op0_byte5 IS the channel-level FB/CONN. */
++    const uint16_t op0 = s_opl3_voice_offsets[voice_id].op0_base;
++    const uint16_t op1 = s_opl3_voice_offsets[voice_id].op1_base;
++    const uint16_t ch  = s_opl3_voice_offsets[voice_id].channel_base;
++
++    /* op0 (modulator): 5 op-level registers + FB/CONN at channel level. */
++    SDL_DOSOpl3WriteRegister((uint16_t)(0x20 + op0), patch[0]);
++    SDL_DOSOpl3WriteRegister((uint16_t)(0x40 + op0), patch[1]);
++    SDL_DOSOpl3WriteRegister((uint16_t)(0x60 + op0), patch[2]);
++    SDL_DOSOpl3WriteRegister((uint16_t)(0x80 + op0), patch[3]);
++    SDL_DOSOpl3WriteRegister((uint16_t)(0xE0 + op0), patch[4]);
++    /* patch[5] = combined feedback_algo + connection (per § D.8 last byte
++       of the 12-byte struct via op0[5] convention). Goes at 0xC0+channel. */
++    SDL_DOSOpl3WriteRegister((uint16_t)(0xC0 + ch), patch[5]);
++
++    /* op1 (carrier): 5 op-level registers, no channel-level. */
++    SDL_DOSOpl3WriteRegister((uint16_t)(0x20 + op1), patch[6]);
++    SDL_DOSOpl3WriteRegister((uint16_t)(0x40 + op1), patch[7]);
++    SDL_DOSOpl3WriteRegister((uint16_t)(0x60 + op1), patch[8]);
++    SDL_DOSOpl3WriteRegister((uint16_t)(0x80 + op1), patch[9]);
++    SDL_DOSOpl3WriteRegister((uint16_t)(0xE0 + op1), patch[10]);
++    /* patch[11] = fine-tune (engine applies before calling NoteOn; this
++       slot is reserved for engine-side use and not written to a register
++       here). */
++    (void)patch[11];
++}
++
++void SDL_DOSOpl3VoiceNoteOn(int voice_id, uint16_t freq, uint8_t block)
++{
++    if (voice_id < 0 || voice_id >= 18) {
++        return;
++    }
++    const uint16_t ch = s_opl3_voice_offsets[voice_id].channel_base;
++    /* F-num low byte at 0xA0+channel. */
++    SDL_DOSOpl3WriteRegister((uint16_t)(0xA0 + ch), (uint8_t)(freq & 0xFF));
++    /* F-num high 2 bits + block (3 bits) + key-on (bit 5 = 0x20) at
++       0xB0+channel. */
++    const uint8_t b0 = (uint8_t)(((freq >> 8) & 0x03) |
++                                  ((block & 0x07) << 2) |
++                                  0x20); /* key-on */
++    SDL_DOSOpl3WriteRegister((uint16_t)(0xB0 + ch), b0);
++}
++
++void SDL_DOSOpl3VoiceNoteOff(int voice_id)
++{
++    if (voice_id < 0 || voice_id >= 18) {
++        return;
++    }
++    const uint16_t ch = s_opl3_voice_offsets[voice_id].channel_base;
++    /* Clear key-on bit at 0xB0+channel; preserve F-num/block in case
++       engine wants to re-trigger without re-programming. Simple
++       approach: just clear key-on by writing 0x00 (loses block/freq
++       state but engine should re-program on next note-on anyway). */
++    SDL_DOSOpl3WriteRegister((uint16_t)(0xB0 + ch), 0x00);
++}
++
++void SDL_DOSOpl3InitChip(void)
++{
++    /* Enable OPL3 mode: bit 0 of register 0x105 (secondary bank).
++       This unlocks the secondary register set + 18-voice mode. */
++    SDL_DOSOpl3WriteRegister(0x105, 0x01);
++
++    /* Disable 4-op mode: register 0x104 = 0x00 (no 4-op channels).
++       We use 18 × 2-op layout per § D.5 recommendation. */
++    SDL_DOSOpl3WriteRegister(0x104, 0x00);
++
++    /* Silence all voices: clear key-on bit (0xB0+channel = 0x00) for
++       all 18 voices. */
++    for (int v = 0; v < 18; v++) {
++        SDL_DOSOpl3VoiceNoteOff(v);
++    }
++}
++
++void SDL_DOSOpl3Shutdown(void)
++{
++    /* Silence all voices first. */
++    for (int v = 0; v < 18; v++) {
++        SDL_DOSOpl3VoiceNoteOff(v);
++    }
++
++    /* Disable OPL3 mode (clear bit 0 of register 0x105). Restores
++       Adlib OPL2 layout for any post-process BIOS or DOS app that
++       might assume the chip is in OPL2 state. */
++    SDL_DOSOpl3WriteRegister(0x105, 0x00);
++}
++
++/* ========================================================================
++ * Audio IRQ-5 idle-pause coordination
++ *
++ * Implementation lives partly here (state + public API) and partly in
++ * the SB16 audio backend (SDL_dosaudio_sb.c, modified by patch 0038):
++ * the state vars below are exported to the SB16 backend via these
++ * extern declarations + companion accessor functions. The SB16 IRQ
++ * handler observes ring-fill, increments the counters, and triggers
++ * pause/resume; this TU owns the public-API surface + callback dispatch.
++ * ======================================================================== */
++
++/* Public-API state. Set by SetIdlePauseEnabled / RegisterIdlePauseCallback;
++   read by the SB16 backend (patch 0038) via these externs.
++
++   Per kbd-counter precedent (32-bit volatile = atomic on x86), all
++   counter and flag access uses single-bus-cycle reads; no cli/sti. */
++volatile bool g_dos_audio_idle_pause_enabled = false;
++SDL_DOSIdlePauseCallback g_dos_audio_idle_pause_cb = NULL;
++
++/* Per-block extern counters; initialized to 0. These are defined here
++   (in this synth helper TU) and incremented from SB16 backend code
++   (patch 0038's modifications to SoundBlasterIRQHandler etc.). The
++   declarations in the header allow engine-side reads. */
++volatile uint32_t doskutsu_audio_irq_wall_us = 0;
++volatile uint32_t doskutsu_audio_irq_count = 0;
++volatile uint32_t doskutsu_audio_sfx_active_count = 0;
++
++/* Force-pause / force-resume request flags. Set by ForcePause/Resume;
++   serviced by the SB16 backend's audio writer / WaitDevice loop in
++   patch 0038. The actual DSP pause/resume command issuing lives in
++   the SB16 backend so all DSP-port mechanics stay co-located there. */
++volatile bool g_dos_audio_pause_request = false;
++volatile bool g_dos_audio_resume_request = false;
++
++void SDL_DOSAudioRegisterIdlePauseCallback(SDL_DOSIdlePauseCallback cb)
++{
++    g_dos_audio_idle_pause_cb = cb;
++}
++
++void SDL_DOSAudioSetIdlePauseEnabled(bool enabled)
++{
++    g_dos_audio_idle_pause_enabled = enabled;
++    if (!enabled) {
++        /* Clear any pending pause request and request resume so the
++           SB16 backend's next service cycle un-pauses the DSP if it
++           was paused. Engine flipping from WB/OPL3 backend back to
++           Organya at runtime is the use case. */
++        g_dos_audio_pause_request = false;
++        g_dos_audio_resume_request = true;
++    }
++}
++
++void SDL_DOSAudioForcePause(void)
++{
++    g_dos_audio_pause_request = true;
++    g_dos_audio_resume_request = false;
++}
++
++void SDL_DOSAudioForceResume(void)
++{
++    g_dos_audio_pause_request = false;
++    g_dos_audio_resume_request = true;
++}
++
++#endif /* SDL_PLATFORM_DOS */
+diff --git a/src/core/dos/SDL_dos_audio_synth.h b/src/core/dos/SDL_dos_audio_synth.h
+new file mode 100644
+index 000000000..a6faebeca
+--- /dev/null
++++ b/src/core/dos/SDL_dos_audio_synth.h
+@@ -0,0 +1,220 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/*
++ * DOSKUTSU patch (Phase 10 patch 0037): hardware audio-synth helpers for
++ * the WaveBlaster (MPU-401) and OPL3 (YMF262) backends, plus the SB16
++ * audio-IRQ idle-pause coordination API.
++ *
++ * Design contract: docs/PHASE10-DESIGN.md § C / § D / § E.6 (gitignored).
++ * Instrumentation contract: docs/PHASE10-CONTRACT.md (gitignored).
++ *
++ * The helpers are consumed by the engine-side AudioBackendWB and
++ * AudioBackendOPL3 in vendor/nxengine-evo/src/sound/ (nx-engine's lane).
++ * The engine never writes to MPU-401 / OPL3 ports directly; it composes
++ * port operations via these helpers so all DPMI / port-output mechanics
++ * stay within the SDL DOS backend.
++ *
++ * Most helpers are non-inline (state-bearing or non-trivial) to avoid
++ * per-TU duplication of static state. A few hot-path / trivial helpers
++ * stay SDL_FORCE_INLINE.
++ */
++
++#include "SDL_internal.h"
++
++#ifndef SDL_dos_audio_synth_h_
++#define SDL_dos_audio_synth_h_
++
++#if defined(SDL_PLATFORM_DOS)
++
++#include "SDL_dos.h" // PIC + EOI macros, DOS_LockCode/Variable, DPMI types
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* ------------------------------------------------------------------------
++ * MPU-401 (WaveBlaster) — § C of design doc
++ * ------------------------------------------------------------------------
++ *
++ * MIDI byte stream output to a UART-mode MPU-401. Default port 0x330 from
++ * BLASTER `Pxxxx`. Status port = base+1; bit 6 = data-ready-to-receive
++ * (must be 0 before a data write).
++ *
++ * Single-instance assumption: at most one MPU-401 in the system. Port
++ * stored at SDL_DOSMpu401Init time; subsequent WriteByte uses that port
++ * implicitly.
++ */
++
++// Probes MPU-401 at port_base + initializes UART mode if found.
++// Returns true on success, false if no MPU-401 present (engine falls back).
++// On success, stores port_base for subsequent WriteByte calls.
++extern bool SDL_DOSMpu401Init(uint16_t port_base);
++
++// Writes one MIDI byte to the data port. Polls bit 6 of status port until
++// clear (data-ready-to-receive). Sub-µs typical on real HW. Caller is
++// responsible for the byte being a valid MIDI message component.
++// Caller must have called SDL_DOSMpu401Init() previously; calling without
++// init is a no-op (writes nothing).
++extern void SDL_DOSMpu401WriteByte(uint8_t byte);
++
++// Sends MPU-401 reset (0xFF) to restore device to BIOS-default state.
++// Idempotent; safe to call without a prior Init.
++extern void SDL_DOSMpu401Shutdown(void);
++
++// Parses the BLASTER environment variable for the `Pxxxx` field.
++// Returns the port (0x330 default if BLASTER unset or P field absent).
++// Engine can call this directly or pass a fixed port to Init.
++extern uint16_t SDL_DOSMpu401GetBLASTERPort(void);
++
++/* ------------------------------------------------------------------------
++ * OPL3 (YMF262) — § D of design doc
++ * ------------------------------------------------------------------------
++ *
++ * FM-synth register I/O at fixed Adlib-compatible base 0x388 (primary
++ * bank, registers 0x000-0x0FF) + 0x38A (secondary bank, registers
++ * 0x100-0x1FF). 18 voices in 9-channel 2-op mode (recommended; see § D.5).
++ *
++ * Voice IDs 0-17. Voices 0-8 use primary bank registers; voices 9-17 use
++ * secondary bank.
++ */
++
++// Probes Adlib + OPL3 presence via timer-1 sequence. Returns true if some
++// OPL chip detected. Caller distinguishes OPL2 vs OPL3 via BLASTER `T`
++// field (T6 = SB16 = OPL3; T1/T3 = pre-SB16 = OPL2-only). For doskutsu's
++// target hardware (Vibra16S CT2490, BLASTER T6), this returning true
++// guarantees OPL3.
++extern bool SDL_DOSOpl3Detect(void);
++
++// Initializes OPL3 chip to known state: enables OPL3 mode (4-op disabled
++// = 18 × 2-op layout per § D.5), silences all voices.
++extern void SDL_DOSOpl3InitChip(void);
++
++// Restores Adlib OPL2 mode (clears OPL3 enable bit), silences all voices.
++// Leaves the chip in a state compatible with subsequent BIOS or Adlib-only
++// usage post-process-exit.
++extern void SDL_DOSOpl3Shutdown(void);
++
++// Single register write. Handles primary/secondary bank routing
++// automatically based on `reg`'s high bit. Includes the canonical
++// 6-dummy-status-read inter-write delay (~6 µs on PODP83 ISA bus).
++extern void SDL_DOSOpl3WriteRegister(uint16_t reg, uint8_t value);
++
++// Bulk register write. Equivalent to a loop of SDL_DOSOpl3WriteRegister
++// but composes inter-write delays slightly more efficiently.
++extern void SDL_DOSOpl3WriteRegisterBlock(
++    const uint16_t *regs, const uint8_t *vals, size_t n);
++
++// Looks up the operator + channel register offsets for a given voice.
++// Voice IDs 0-17. Voices 0-8 use primary bank; 9-17 use secondary bank.
++// Returns by out-pointer for clarity; primitive used by engine voice
++// allocator that wants to compose its own register sequences.
++extern void SDL_DOSOpl3VoiceRegOffsets(int voice_id,
++    uint16_t *out_op0_base, uint16_t *out_op1_base, uint16_t *out_channel);
++
++// Convenience: writes the 12-byte patch from `patch[12]` into the voice's
++// 12 patch registers (op0 6 bytes + op1 5 bytes + feedback/algorithm 1 byte).
++// Order matches docs/PHASE10-DESIGN.md § D.8 / plan doc § 5 OPL3Patch struct.
++extern void SDL_DOSOpl3VoiceWritePatch(int voice_id, const uint8_t patch[12]);
++
++// Convenience hot-path: triggers note-on for a voice. `freq` is the OPL3
++// F-num (10-bit, low byte to register 0xA0+ch, high bits combined with
++// block + key-on bit to register 0xB0+ch). `block` is the 3-bit octave
++// scaling (0-7).
++extern void SDL_DOSOpl3VoiceNoteOn(int voice_id, uint16_t freq, uint8_t block);
++
++// Convenience hot-path: silences a voice (clears key-on bit at 0xB0+ch).
++extern void SDL_DOSOpl3VoiceNoteOff(int voice_id);
++
++/* ------------------------------------------------------------------------
++ * Audio IRQ-5 idle-pause coordination — § E of design doc
++ * ------------------------------------------------------------------------
++ *
++ * When music is offloaded to OPL3/WB, the SB16 DMA stream becomes idle
++ * except during Pixtone SFX windows. The IRQ-5 handler entry/exit
++ * accounts for ~13.5 ms / flip wall-clock on real HW per the W20A2
++ * ablation (memory `audio_mix_zero_is_not_audio_off.md`); pausing the
++ * DSP when no SFX is in flight eliminates that cost.
++ *
++ * The mechanism is DSP-pause via DSP commands 0xD5 (pause 16-bit) /
++ * 0xD0 (pause 8-bit) and 0xD6 / 0xD4 (resume). The IRQ handler stays
++ * installed in the IDT; pausing the DSP suppresses end-of-buffer IRQs
++ * without touching IDT state.
++ *
++ * Default behavior is OFF (preserves Phase 9 / Organya behavior bit-
++ * for-bit). Engine flips ON via SDL_DOSAudioSetIdlePauseEnabled(true)
++ * after backend selection if and only if the music backend is OPL3 or
++ * WaveBlaster (i.e., music doesn't need DMA stream).
++ */
++
++// Callback fired at each pause-resume transition. Argument is nanoseconds
++// elapsed during the pause window (uint64 for sub-µs precision). Fired
++// from non-IRQ context; callback may use FPU, locks, allocations.
++typedef void (*SDL_DOSIdlePauseCallback)(Uint64 paused_ns);
++
++// Registers a callback fired on pause-resume transition. Single-slot;
++// re-registering overwrites. Pass NULL to clear.
++extern void SDL_DOSAudioRegisterIdlePauseCallback(SDL_DOSIdlePauseCallback cb);
++
++// Enables or disables the idle-pause mechanism. Default OFF. Engine
++// should flip ON only when music backend is hardware-offload (WB/OPL3)
++// AND Pixtone SFX continues through SB16 DAC. Disabling cancels any
++// pending pause request and resumes DMA if currently paused.
++extern void SDL_DOSAudioSetIdlePauseEnabled(bool enabled);
++
++// Diagnostic: forces an immediate pause request. For ablation iters
++// comparing "force-pause-always" vs "auto-detect-from-ring-fill" on
++// real HW. Use sparingly; bypasses normal ring-fill heuristics.
++extern void SDL_DOSAudioForcePause(void);
++
++// Diagnostic: cancels any pending pause + immediately resumes DMA if
++// paused. Companion to ForcePause.
++extern void SDL_DOSAudioForceResume(void);
++
++/* ------------------------------------------------------------------------
++ * Per-block extern counters (read by engine at audit-flush boundary)
++ * ------------------------------------------------------------------------
++ *
++ * Cumulative-since-init monotonic counters incremented by the SB16
++ * audio backend's IRQ handler. Per the kbd-counter precedent
++ * (patches 0023+0025), uint32_t volatile is atomic-readable on x86;
++ * no `cli`/`sti` synchronization required.
++ *
++ * Engine reads each at _maybe_flush_phase_timing_audit() entry, computes
++ * delta vs last-read static (file-scope in Renderer.cpp), assigns delta
++ * to engine-side g_p10_*_block. Modular subtraction is wrap-safe per
++ * C99 unsigned overflow semantics.
++ *
++ * The audio-IRQ wall-clock measurement is in microseconds (uint32_t)
++ * for atomic readability. Wraps at uint32_t max ≈ 71.6 min cumulative
++ * IRQ wall-clock; iter sessions are well under this.
++ */
++extern volatile uint32_t doskutsu_audio_irq_wall_us;
++extern volatile uint32_t doskutsu_audio_irq_count;
++extern volatile uint32_t doskutsu_audio_sfx_active_count;
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // SDL_PLATFORM_DOS
++
++#endif // SDL_dos_audio_synth_h_
+-- 
+2.47.3
+

@@ -1,0 +1,109 @@
+From e5b4a273a8efbf07a70ef89329bc579fecdcc9fe Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 13:07:41 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=2010=20patch=200046=20=E2=80=94=20?=
+ =?UTF-8?q?WaitDevice=20shutdown-check=20unblocks=20MIX=5FDestroyMixer?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+W22-WB-D + W22-WB-F operator iters confirmed PAUSE-Quit hard locks
+the system on both real Vibra16S CT2490 AND DOSBox-X 2025.02. Engine
+reaches `Script engine shutdown` then `snd-shutdown[4/6]: pre-MIX_
+DestroyMixer` then never returns. Cross-platform reproduction means
+DOSBox-X smoke can be relied on for fix validation here.
+
+Root cause (localized via transient bracket logging through
+MIX_DestroyMixer → SDL_DestroyAudioStream → SDL_CloseAudioDevice →
+ClosePhysicalAudioDevice → SDL_WaitThread):
+
+The audio playback thread (PlaybackAudioThread, created in
+vendor/SDL/src/audio/SDL_audio.c:1887) is stuck inside
+DOSSOUNDBLASTER_WaitDevice's infinite for-loop waiting for ring
+buffer drain. With force-pause active (SDL/0040 issues DSP 0xD5
+at OpenDevice), the DSP is paused → DMA halted → IRQ-5 stops
+firing → ring buffer never drains → the thread spins forever
+yielding to main.
+
+Main thread (in ClosePhysicalAudioDevice) sets device->shutdown=1
+and calls SDL_WaitThread to join the audio thread. SDL_WaitThread
+on DOS calls DOS_JoinThread which BLOCKS the main thread waiting
+for the audio thread to finish. The cooperative scheduler keeps
+yielding back and forth: audio thread spins in WaitDevice (no
+shutdown check), main thread spins in DOS_JoinThread. Deadlock.
+
+Fix: add a single shutdown check at the top of DOSSOUNDBLASTER_
+WaitDevice's for-loop. When device->shutdown is set, return true
+unconditionally. The calling SDL_PlaybackAudioThreadIterate's
+next iteration observes device->shutdown and exits the loop
+cleanly (SDL_audio.c:1181), releasing the SDL_WaitThread join.
+
+Why return true (not false): SDL_audio.c:1322 treats !WaitDevice
+as a disconnect signal (SDL_AudioDeviceDisconnected fires). We
+don't want to fire that on a clean shutdown. Returning true lets
+the loop continue to the next SDL_PlaybackAudioThreadIterate call,
+which then sees shutdown=1 and exits via the normal path. The
+intervening "fill ring with audio data" work is skipped because
+that's gated on !shutdown inside Iterate.
+
+This bug was masked at run-time on the organya path because the
+DSP isn't paused — IRQ-5 fires, ring drains, WaitDevice returns
+naturally on its own success condition. Only the force-pause
+path (where IRQ-5 stops firing) hits the deadlock. Same on
+DOSBox-X (which faithfully emulates the SB16 0xD5 pause command
+and therefore reproduces the deadlock).
+
+Performance impact: zero. SDL_GetAtomicInt is a single x86 load
+of a volatile int — sub-µs on PODP83. Adds one cheap branch per
+WaitDevice loop iteration, dominated by the existing DOS_Yield
++ MaybeServiceIdlePauseRequests calls.
+
+Fixes:
+  - W22-WB-D PAUSE.LOG / PAUSESDL.LOG hang at snd-shutdown[4/6]
+  - W22-WB-F PAUSE.LOG / PAUSESDL.LOG same hang
+  - Future force-pause-style measurement iters (any pause-DSP
+    + clean-quit pattern)
+
+Validation: DOSBox-X smoke reproduces the bug + the fix. Smoke
+matrix: organya regression PASS (1s clean exit, full snd-shutdown
+[1/6 .. 6/6] trace). Force-pause PASS (1s clean exit, full
+snd-shutdown trace + SDL/0043 hard-reset path runs cleanly).
+Per memory dosbox_not_behavioral_proxy_for_io.md, this is the
+documented exception where DOSBox-X DOES faithfully reproduce
+the IO behavior — fix validation here transfers to real HW.
+
+Modifies vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c only; no new
+files; no new env vars; no doc changes required.
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 4d4eb510f..a9430c662 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -384,6 +384,21 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+     const int size = hidden->ring_size;
+ 
+     for (;;) {
++        /* DOSKUTSU patch (Phase 10 patch 0046): bail out early when the
++           audio device is shutting down. SDL3 audio core sets
++           device->shutdown=1 before calling SDL_WaitThread to join the
++           playback thread. If we're stuck spinning here (e.g., DSP is
++           force-paused via SDL/0040 → DMA halted → IRQ-5 stops firing
++           → ring buffer never drains), we'd deadlock with the main
++           thread — main waits for us to finish; we wait for ring to
++           drain that the IRQ that's not firing. Returning true on
++           shutdown lets the calling SDL_PlaybackAudioThreadIterate's
++           next iteration observe device->shutdown and exit cleanly,
++           releasing the SDL_WaitThread join. */
++        if (SDL_GetAtomicInt(&device->shutdown)) {
++            return true;
++        }
++
+         /* DOSKUTSU patch (Phase 10 patch 0038): service pause/resume
+            requests on each WaitDevice loop iteration. Pause requests
+            come from the IRQ handler (consecutive-silent-IRQ threshold
+-- 
+2.47.3
+

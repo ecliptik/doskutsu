@@ -1,0 +1,203 @@
+From b56640179ff4ead830a03b6b535261cb4dcaa08b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 10:41:38 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=2010=20patch=200044=20=E2=80=94=20?=
+ =?UTF-8?q?skip=20MPU-401=20probe=20by=20default=20(real-HW)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+W22-WB-D operator iter (2026-05-07) confirmed the 0042 defensive
+probe still hangs system on real Vibra16S+S2. WBSDL.LOG ended at
+exactly the line "mpu401: probe entry port_base=0x0330" — the 0042
+entry log line wrote successfully (per-line fsync committed it to
+disk) but the very next inportb (status register read at port_base
++1) hung the ISA bus. CPU never saw the read complete; the 0042
+iteration counter never advanced because the inportb itself blocks
+the bus.
+
+The probe approach is fundamentally incompatible with this chip.
+Defensive iteration caps don't help when the very first inb is
+the lockup point. Architectural change required: SKIP the probe
+entirely for the default code path.
+
+New default behavior in SDL_DOSMpu401Init: BLIND init.
+
+  - Write the UART mode entry command (0x3F) to port_base+1
+    without any read or ACK polling.
+  - Mark backend ready unconditionally.
+  - Return true.
+
+Failure modes:
+  - Chip present + responsive: subsequent MIDI byte writes produce
+    sound. WB backend works.
+  - Chip absent / not seated: MIDI byte writes go to a non-decoding
+    port. Music is silent. NO LOCK because there's no read on the
+    lockup-prone status register. Failing-to-silence beats failing-
+    to-lockup.
+
+This is the "trust the user" pattern matching the 1990s convention:
+when AUDIO_BACKEND=wb is explicitly declared (or the auto-detect
+chain selects WB), the user takes responsibility for hardware
+presence. The driver's job is to not crash the system when the
+hardware isn't there.
+
+Probe path retained behind SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1
+opt-in for diagnosis on hardware known-safe to probe (DOSBox-X
+emulated MPU-401, hypothetical future ISA chips that don't stall
+the bus on cold reads). Strict-1 env-var match per CLAUDE.md
+convention. Default OFF: even auto-detect chain gets blind init
+(fail-open semantics).
+
+Implementation: same SDL_DOSMpu401Init function signature as 0042;
+the probe-vs-blind branch is at function entry. Probe path code
+preserved verbatim from 0042 (open-bus early-exit + iteration
+cap) — readable diff as a single conditional block rather than
+new function. Engine-side calls don't change; the SDL hint
+controls behavior internally.
+
+doskutsu_dbg_log lines:
+  - blind init path: "mpu401: blind init at port_base=0x%04x ..."
+  - probe path: existing 4 lines from 0042 (entry/early-exit/
+    fail/ok) preserved.
+
+BOOT.md entry added per env_vars_document_in_user_docs.md:
+  SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1
+  Category: dev-only (LOCKUP RISK on real Vibra16S+S2; opt-in
+  for diagnosis on emulated or known-safe hardware only).
+
+Validation: DOSBox-X smoke gates "doesn't break organya" + "blind
+WB init produces MIDI dispatch under DOSBox-X's MPU-401 emulation".
+Real-HW iter on g2k Vibra16S+S2 is the actual gate per memory
+dosbox_not_behavioral_proxy_for_io.md. Don't claim fix works
+until operator runs it.
+---
+ src/core/dos/SDL_dos_audio_synth.c | 98 +++++++++++++++++++++---------
+ 1 file changed, 68 insertions(+), 30 deletions(-)
+
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index e1bb0555a..a5509d3cd 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -62,17 +62,72 @@ static int s_mpu401_port_base = -1;
+ 
+ bool SDL_DOSMpu401Init(uint16_t port_base)
+ {
+-    doskutsu_dbg_log("mpu401: probe entry port_base=0x%04x", (unsigned)port_base);
+-
+-    /* DOSKUTSU patch (Phase 10 patch 0042): open-bus early-exit. Read
+-       the status register BEFORE issuing the reset write. If it returns
+-       0xFF, that's the canonical "no chip is decoding this address" /
+-       open-bus pattern on ISA — bail with false immediately rather than
+-       writing reset to a non-responsive port. This avoids the W22-WB-C
+-       lockup failure mode where issuing reset to a non-responsive chip
+-       stalled the ISA bus indefinitely on real Vibra16S CT2490
+-       (the failure was distinct from the inb-poll loop spinning; the
+-       outportb write itself appears to have hung). */
++    /* DOSKUTSU patch (Phase 10 patch 0044): SKIP the probe by default.
++
++       W22-WB-D real-HW evidence: WBSDL.LOG ended at exactly the line
++       "mpu401: probe entry port_base=0x0330" (the 0042 entry log line
++       wrote successfully + fsync committed it) — but the very next
++       inportb (status register read at port_base+1) hung the ISA bus
++       on real Vibra16S+S2. CPU never saw the read complete; the iter
++       counter from 0042 never advanced because the inportb itself
++       blocks the bus. The probe approach is fundamentally incompatible
++       with this hardware.
++
++       New default: BLIND init. Write the UART mode entry command
++       (0x3F) without any read or ACK polling. Mark backend ready
++       unconditionally. Return true.
++
++       Failure modes:
++         - Chip present + responsive: subsequent MIDI byte writes
++           produce sound. WB backend works.
++         - Chip absent / not seated: MIDI byte writes go to a non-
++           decoding port. Music is silent. NO LOCK because there's
++           no read on the lockup-prone status register.
++
++       This is the "trust the user" pattern: when the user explicitly
++       declares AUDIO_BACKEND=wb (or the auto-detect chain selects
++       WB), they take responsibility for hardware presence. Failing-
++       to-silence beats failing-to-lockup.
++
++       Probe path retained behind SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1
++       for hardware known-safe to probe (e.g. DOSBox-X emulated
++       MPU-401, or hypothetical future ISA chips that don't stall
++       the bus on cold reads). Default OFF: even the auto-detect
++       chain gets blind init (fail-open semantics). Strict-1 env-var
++       match per CLAUDE.md convention. */
++    const char *probe_env = SDL_getenv("SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401");
++    const bool do_probe = (probe_env && probe_env[0] == '1' && probe_env[1] == 0);
++
++    if (!do_probe) {
++        doskutsu_dbg_log("mpu401: blind init at port_base=0x%04x "
++                         "(probe disabled — patch 0044 default; set "
++                         "SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1 to enable "
++                         "probe path with LOCKUP RISK on real Vibra16S+S2)",
++                         (unsigned)port_base);
++        /* UART mode entry. After this, all writes to data port pass
++           directly to MIDI bus; status bit 6 (0x40) = DRR (data ready
++           to receive; must be 0 before each write — but we never read
++           it on this path; chip clocks data out on its own). */
++        outportb((Uint16)(port_base + 1), 0x3F);
++        s_mpu401_port_base = (int)port_base;
++        return true;
++    }
++
++    /* === Probe path (opt-in via SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1) ===
++
++       LOCKUP RISK on real Vibra16S+S2 — see W22-WB-D postmortem.
++       Retained for diagnosis on emulated MPU-401 hardware (DOSBox-X)
++       or future chips known-safe to probe. Logic preserved from
++       patch 0042 (open-bus early-exit + iteration-cap). */
++    doskutsu_dbg_log("mpu401: probe entry port_base=0x%04x "
++                     "(SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1; LOCKUP RISK)",
++                     (unsigned)port_base);
++
++    /* Open-bus early-exit (from patch 0042): if the status register
++       returns 0xFF on the very first read, that's canonical ISA
++       open-bus and we bail without issuing reset. Doesn't help if
++       the inportb itself stalls (the W22-WB-D failure mode), but
++       handles the no-chip-decoding-port case cleanly. */
+     const Uint8 initial_status = inportb((Uint16)(port_base + 1));
+     if (initial_status == 0xFF) {
+         doskutsu_dbg_log("mpu401: probe early-exit (status=0xFF; no chip at 0x%04x)",
+@@ -83,20 +138,7 @@ bool SDL_DOSMpu401Init(uint16_t port_base)
+     /* Reset MPU-401: write 0xFF to command port (data + 1). */
+     outportb((Uint16)(port_base + 1), 0xFF);
+ 
+-    /* DOSKUTSU patch (Phase 10 patch 0042): poll for ACK (0xFE) with a
+-       hard ITERATION CAP rather than an SDL_GetTicksNS()-based wall-
+-       clock deadline. The original 10ms deadline approach hung
+-       indefinitely on real Vibra16S+S2 hardware in W22-WB-C iter (WB.LOG
+-       ended at the engine-side "probing port..." line with no further
+-       output, including no SDL-side log). Suspected: either ISA bus
+-       stall on the status-port read, or a pathological interaction with
+-       SDL3's timer source. The iteration cap is a known-bounded code
+-       path that terminates regardless of timer-source state.
+-
+-       Sizing: 20000 iterations × ~500ns per inportb on Pentium ≈ 10ms
+-       wall-clock — same upper bound as the original deadline, but
+-       without the timer dependency. Status bit 7 (0x80) = DSR (data-
+-       set-ready inverse: low = data available to read). */
++    /* Poll for ACK (0xFE) with hard iteration cap (from patch 0042). */
+     bool ack_ok = false;
+     int iter;
+     for (iter = 0; iter < 20000; iter++) {
+@@ -116,11 +158,7 @@ bool SDL_DOSMpu401Init(uint16_t port_base)
+         return false;
+     }
+ 
+-    /* Enter UART mode. After this, all writes to data port pass
+-       directly to MIDI bus; status bit 6 (0x40) = DRR (data ready
+-       to receive; must be 0 before each write). Some clones don't
+-       ACK the UART-mode command per docs/PHASE10-DESIGN.md § C.2
+-       step 4; we don't require a second ACK. */
++    /* Enter UART mode. */
+     outportb((Uint16)(port_base + 1), 0x3F);
+     s_mpu401_port_base = (int)port_base;
+     doskutsu_dbg_log("mpu401: probe ok (UART mode active at 0x%04x; "
+-- 
+2.47.3
+

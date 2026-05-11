@@ -1,0 +1,194 @@
+From fe311beba4ac891a282bcb1355ff2d952c6eea34 Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Tue, 5 May 2026 21:54:55 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2023=20W23B=20patch=200098=20?=
+ =?UTF-8?q?=E2=80=94=20default-disable=20tilemap=20cache=20(regression=20m?=
+ =?UTF-8?q?itigation)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0098, Phase 9 wave 23 W23B). Default-flips the
+SDL_HINT_DOSKUTSU_TILEMAP_CACHE killswitch from ON to OFF after
+W23A real-HW measurement found the wave-23 W23A Path B tilemap
+cache is a NET REGRESSION on real HW. Mimiga heavy-music gameplay
++11.23 ms vs wave-22 W22.5 baseline per docs/PHASE11-WAVE-23-
+FINDINGS.md § 11. Cache architecture + 13-counter instrumentation
++ kbd diagnostic + adaptive-α state machine all PRESERVED intact
+for wave-24 architectural redesign.
+
+Mechanism of the regression (per flush-instr's findings § 11):
+  - Cache miss path costs ~2× uncached render: render-INTO-cache
+    AND blit-cache-TO-window are BOTH bandwidth-bound on PODP83's
+    17 MB/s memcpy throughput.
+  - Break-even hit rate is 92% (cache must hit 92% of frames to
+    match uncached cost).
+  - Real-HW gameplay aggregate hit rate is 44.7% (well below
+    break-even).
+  - Adaptive-α has two blind spots that prevented the fail-safe
+    from triggering: (a) hit-cost not measured-derived, only
+    threshold-compared, so high-cost hits don't disable cache; and
+    (b) thrash detection requires 10 consecutive LOW-cost misses
+    but real-HW misses are HIGH-cost so adaptive-α never disabled
+    the cache despite the regression.
+
+Patch 0098 ONLY flips the default. ~5 LOC change in
+`_abl_tilemap_cache_killswitch()`:
+
+  Before (patch 0097):
+    static const bool v = _strict_falsy_env("SDL_HINT_DOSKUTSU_TILEMAP_CACHE");
+  After (patch 0098):
+    static const bool v = !_strict_truthy_env("SDL_HINT_DOSKUTSU_TILEMAP_CACHE");
+
+Semantics flip:
+  - Before: env unset → killswitch INACTIVE → cache ENABLED (default ON)
+  - After:  env unset → killswitch ACTIVE   → cache DISABLED (default OFF)
+  - env "1" enables cache (opt-in for ablation iters)
+  - env "0" / empty / anything else: cache stays DISABLED
+
+The `_strict_falsy_env` helper from patch 0097 stays in tree but is
+unused after this flip — kept for symmetry with `_strict_truthy_env`
+and for any future opt-OUT semantics. Future-cleanup task: remove
+`_strict_falsy_env` if it remains unused after wave-24 redesign.
+
+Why this restoration is safe:
+  - When killswitch is ACTIVE (default), `map_draw()` falls through
+    to `_tilemap_render_uncached_full_loop()` — byte-identical to
+    pre-patch-0097 map_draw body. Counter increments NOT made (per
+    W23A contract § 3.2). Mode_draw_scene cost matches W22.5
+    baseline.
+  - Counter emission (gated on MODE_DRAW_SCENE_INSTR=1, NOT the
+    killswitch) still fires when MODE_DRAW_SCENE_INSTR=1 is set.
+    The post-build-qa-smoke-C fix in patch 0097 § 9.b ensures
+    `bg_state=D fg_state=D` from block 1 under killswitch — so
+    flush-instr's analysis tooling correctly identifies "wave-23
+    cache disabled" runs vs adaptive-α-disabled runs.
+  - Cache architecture + adaptive-α + 13-counter storage remain
+    intact for wave-24 redesign. Re-enabling per-iter for cache-
+    on ablation is just `SET SDL_HINT_DOSKUTSU_TILEMAP_CACHE=1`.
+
+What stays preserved (NOT removed):
+  - `Renderer::drawCachedTilemap()` + `Tileset::drawTileToSurface()`
+  - Cache surfaces + cache key tuple + lazy-alloc + reset hook
+  - Adaptive-α state machine (8.6 ms BG / 15.4 ms FG thresholds)
+  - 13-field `[mds-tilemap-cache ...]` instrumentation line
+  - 5-field kbd diagnostic appendage to kbd/audio block log
+  - Tile mutation counter
+  - All NXE::Diag accessors + file-top + end-of-file wrappers
+  - `_strict_falsy_env()` helper (unused but retained)
+
+Documentation:
+  - docs/BOOT.md: TILEMAP_CACHE entry rewritten — reframed as opt-IN
+    via "1" (was opt-OUT via "0"). Default-OFF rationale + W23A
+    regression measurement cited. Wave-24 redesign noted.
+  - BOOT.md gitignored per pre-existing convention; on-disk only.
+
+Test plan (subsequent tasks per team-lead's W23B brief):
+  - DOSBox-X smoke gate (build-qa): cache-disabled-default produces
+    same fps as wave-22 W22.5 baseline.
+    - Smoke A: env-unset baseline. NO `[mds-tilemap-cache]` lines
+      emit (instrumentation off); cache also OFF; mds_tilemap_bg +
+      mds_tilemap_fg match W22.5 numbers.
+    - Smoke B: MODE_DRAW_SCENE_INSTR=1 only (other env unset).
+      `[mds-tilemap-cache]` lines emit with `bg_state=D fg_state=D`
+      from block 1 + `bg_h=0 bg_m=0 fg_h=0 fg_m=0` (confirms
+      default-disabled). mds_tilemap_bg + mds_tilemap_fg match
+      W22.5 baseline.
+    - Smoke C: MODE_DRAW_SCENE_INSTR=1 + TILEMAP_CACHE=1 (opt-in
+      cache enabled). `[mds-tilemap-cache]` lines emit with
+      `bg_state=E fg_state=E` from block 1 (cache active). Smoke
+      reproduces the wave-23 W23A behavior pre-default-flip.
+  - Real-HW iter (realhw): W23B short cycle. Cache disabled
+    default. Mimiga heavy-music mean flip-total returns to
+    ~31 ms (wave-22 W22.5 baseline) confirming the regression
+    is gone.
+  - Findings (flush-instr): brief findings § 13 confirming
+    baseline restoration. No new architecture authored in W23B;
+    that's wave-24 scope.
+
+Reviewer ack:
+  - team-lead: directly approved option 1 default-flip per
+    flush-instr's W23A § 12 verdict (2026-05-05 user direction).
+  - flush-instr: not re-reviewed for this micro-patch — the change
+    is a single-line semantic flip + BOOT.md update; no contract
+    deviation.
+  - sdl-engine: not re-reviewed — kbd diagnostic unchanged.
+  - build-qa: smoke gate per the test plan above is the next gate.
+
+Patch slot 0098 used for this regression mitigation per team-lead's
+W23B brief. Slot 0098 was originally reserved for hand-rolled
+`_blit_indexed` optimization (wave-23 design Q5); that work moves
+to slot 0099+ if wave-24 redesign retains the cache concept.
+
+References:
+  patches/nxengine-evo/0097-perf-wave-23-path-b-tilemap-cache.patch
+    (W23A architecture being default-disabled here)
+  docs/PHASE11-WAVE-23-FINDINGS.md § 11-13 (gitignored, on-disk
+    only) — W23A regression measurement + wave-24 redesign
+    rationale + W23B baseline-restoration verification gate
+  memory/perf_predictions_unreliable.md (wave-23 projection vs
+    measurement gap = canonical example)
+  memory/measurements_above_prediction_are_red_flags.md (wave-23
+    +11.23 ms regression IS the red flag this rule was written for)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 40 ++++++++++++++++++++++++++++++---------
+ 1 file changed, 31 insertions(+), 9 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index e88364d..ca51089 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -344,17 +344,39 @@ inline bool _abl_mode_draw_scene_instr()
+ }
+ 
+ // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): tilemap-cache
+-// killswitch. Strict-"0" match per contract § 3.2 — default-ON cache
+-// requires opt-OUT semantics. Setting SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0
+-// disables the cache (reverts to per-tile rendering for both BG and
+-// FG layers); any other value (unset, "1", empty) keeps cache ENABLED.
+-// Cache architecture in map.cpp short-circuits on this — when true,
+-// bypass cache check + render directly. Counter emission still gates
+-// on MODE_DRAW_SCENE_INSTR; killswitch only affects cache architecture.
+-// Cached static-const-bool — -O2 hoists per-frame guards.
++// killswitch. Originally strict-"0" match (default-ON cache, opt-OUT
++// via "0") per wave-23 contract § 3.2.
++//
++// DOS-PORT (patch 0098, Phase 9 wave 23 W23B regression mitigation):
++// **DEFAULT FLIPPED to OFF** (= killswitch active by default; opt-IN
++// via "1"). Wave-23 W23A real-HW measurement found the cache is a
++// NET REGRESSION on real HW (Mimiga heavy-music +11.23 ms vs wave-22
++// baseline) per docs/PHASE11-WAVE-23-FINDINGS.md § 11. Mechanism:
++// cache miss path costs ~2× uncached render (render-INTO-cache +
++// blit-cache-TO-window are BOTH bandwidth-bound on PODP83); break-
++// even hit rate is 92% but real-HW gameplay aggregate is 44.7%.
++// Adaptive-α has two blind spots that prevented detection.
++//
++// Patch 0098 preserves the cache architecture + adaptive-α state
++// machine + 13-counter instrumentation + kbd diagnostic intact. ONLY
++// the default flips. Opt-IN via SDL_HINT_DOSKUTSU_TILEMAP_CACHE=1
++// for cache-on ablation iters. Wave-24 architectural redesign will
++// either remove the cache entirely or restructure to fix the 92%
++// break-even threshold (most likely: cache the rendered RESULT not
++// the per-tile inputs, so miss path becomes 1× not 2× the bandwidth
++// cost).
++//
++// Returns true (= killswitch active = cache disabled) UNLESS env is
++// strict-set to "1". Inverts the previous strict-falsy semantics.
++// Cached static-const-bool — -O2 hoists per-frame guards. Counter
++// emission still gates on MODE_DRAW_SCENE_INSTR; killswitch only
++// affects cache architecture (counter-emission shows
++// `bg_state=D fg_state=D bg_h=0 bg_m=0 fg_h=0 fg_m=0` from block 1
++// per contract § 3.2's "killswitch-disabled (no transition history)"
++// distinguishability semantic — unchanged by this default-flip).
+ inline bool _abl_tilemap_cache_killswitch()
+ {
+-  static const bool v = _strict_falsy_env("SDL_HINT_DOSKUTSU_TILEMAP_CACHE");
++  static const bool v = !_strict_truthy_env("SDL_HINT_DOSKUTSU_TILEMAP_CACHE");
+   return v;
+ }
+ 
+-- 
+2.47.3
+

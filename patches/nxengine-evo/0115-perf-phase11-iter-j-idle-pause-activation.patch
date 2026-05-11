@@ -1,0 +1,218 @@
+From 34b6e341832759c6e73cefd3235f6837a1ef9af7 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 16:26:31 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200115=20=E2=80=94=20?=
+ =?UTF-8?q?engine-side=20idle-pause=20activation=20(OPL3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0115, Phase 11 iter J). Engine-side activation of the
+SDL-side idle-pause helper introduced by sdl-engine slots 0037 + 0038.
+The SDL helper defaults OFF; engine flips it ON via
+SDL_DOSAudioSetIdlePauseEnabled(true) ONLY when the resolved music
+backend is OPL3 — hardware-offload synth that does not need a
+continuous DMA stream, so the DSP can be paused between Pixtone SFX
+bursts to recover ~12 ms / flip of IRQ-5 wall-clock per Phase 10
+design (PHASE10-DESIGN.md § E).
+
+Why OPL3-only (not Organya, not WB-yet):
+  Organya is a continuous PCM stream — pausing the DSP would gap the
+  music. WaveBlaster idle-pause is a one-line follow-up if/when a WB
+  iter is run but iter J's brief is OPL3-only so this patch ships
+  literal-OPL3-only. Per silent_narrow_pattern.md the brief's exact
+  wording is honored; broadening to WB+OPL3 is queued as a separate
+  small patch when the WB iter happens.
+
+Activation point:
+  AFTER the existing backend-resolution switch in SoundManager::init
+  (lines ~421-464 — auto_select chain may have rolled the enum back
+  from wb to opl3 to organya, so the FINAL g_p10_audio_backend_active
+  is what we read here). AFTER SDL_DOSAudioRegisterIdlePauseCallback
+  so the callback is in place before the SDL-side mechanism activates.
+  BEFORE the music-dir + preload + reload scan that runs after.
+
+Killswitch:
+  SDL_HINT_DOSKUTSU_IDLE_PAUSE=0 strict-match (only literal "0"
+  disables). Default = enabled when backend == OPL3. Mirrors
+  patch 0093's killswitch convention. Per
+  env_vars_document_in_user_docs.md: documented in docs/BOOT.md under
+  the user-facing / fallback section alongside other Phase 11 iter-J
+  knobs.
+
+Three log lines (one fires per init based on state):
+  "Sound system: idle-pause-activated (patch 0115; backend=opl3; ...)"
+    — default ON path (backend qualifies + killswitch off)
+  "Sound system: idle-pause skipped (SDL_HINT_DOSKUTSU_IDLE_PAUSE=0
+   killswitch active; backend=opl3 would otherwise qualify). ..."
+    — killswitch on, backend qualified
+  "Sound system: idle-pause skipped (backend={} does not qualify; ...)"
+    — backend is organya/wb/tracker/none
+
+Cross-vendor coordination:
+  Forward-decl SDL_DOSAudioSetIdlePauseEnabled added to the existing
+  extern "C" block at SoundManager.cpp top (alongside the existing
+  SDL_DOSAudioRegisterIdlePauseCallback decl from patch 0100).
+  Linker resolves cross-vendor at combined-build time; standalone
+  build of this patch alone fails unless sdl-engine's 0037+ lands
+  alongside, which is the expected combined-review pattern per
+  W22A precedent.
+
+Slot 0116 SAMPLE_FRAMES knob — DEFERRED to iter K (W13.5 reconciliation):
+  The iter J task brief originally proposed bundling slot 0116 — set
+  SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES=2048 to halve the IRQ-5 rate;
+  predicted -6 to -11 ms / flip per FPS-DEEPDIVE § 10.C. STOPPED-and-
+  acked the team-lead before authoring (per silent_narrow_pattern.md +
+  force_options_on_deviations.md) because two pre-existing tree facts
+  contradict the brief's prediction:
+
+    1. Slot 0066's W13.5 experiment (real-HW PODP 5V83) measured
+       SAMPLE_FRAMES=512 vs 1024 vs 2048 as 86 ms vs ~99 ms vs ~99 ms
+       per flip — so 2048 was a +13 ms REGRESSION on this machine.
+       Per-chunk cost scales with chunk size; the comment block at
+       SoundManager.cpp:267 attributes this to L1 cache pressure
+       (P54C 8 KB D-cache thrashes against an 8 KB chunk memcpy).
+       Net: brief predicted -6 to -11 ms gain; existing measurement
+       said +13 ms regression — a -19 to -24 ms gap between
+       prediction and data, too large to ship without reconciliation
+       per measurements_above_prediction_are_red_flags.md.
+
+    2. Slot 0093's Tier-2 default-ON config already pins
+       SAMPLE_FRAMES=256 via SDL_HINT_OVERRIDE priority — the
+       wave-21 Lever G mechanism that halves IRQ rate to 43 Hz at
+       11025 mono. Slot 0116 with normal priority would lose to the
+       OVERRIDE; with OVERRIDE priority would directly fight Lever G.
+
+  Decision (team-lead, Option 4): defer slot 0116 to iter K pending
+  iter-J AUDBUF probe data. The AUDBUF probe (probe-engineer's lane)
+  maps the cost curve at multiple buffer sizes; iter K's slot becomes
+  data-driven — the sweet spot may not be 2048 (could be 384, 512,
+  etc.). Per probe_first_optimization.md.
+
+  Future-claude reading this patch series: if you're considering
+  bumping SAMPLE_FRAMES on this hardware, look at AUDBUF probe data
+  first AND reconcile against the W13.5 measurement embedded in
+  SoundManager.cpp:262-274. The "bigger buffer = always better"
+  intuition does not hold on PODP5V83 with INDEX8 mixer + small L1.
+
+DOSBox-X smoke (build-validated):
+  build SHA: 40719b95b1cbde673f9275401032f9be77649087a29eb2875373b8fbfaae1000
+  strings markers verified embedded in binary:
+    - "SDL_HINT_DOSKUTSU_IDLE_PAUSE"
+    - "Sound system: idle-pause-activated (patch 0115; ...)"
+    - "Sound system: idle-pause skipped (SDL_HINT_DOSKUTSU_IDLE_PAUSE=0
+       killswitch active; ...)"
+    - "Sound system: idle-pause skipped (backend={} does not qualify;
+       ...)"
+  Real-HW iter J PLAY1 (OPL3 backend) is the load-bearing measurement
+  gate per dosbox_not_perf_proxy.md.
+
+Out of scope (per silent_narrow_pattern.md scope discipline):
+  - WB-backend extension (would be a one-line addition to the
+    backend_qualifies disjunction; deferred until a WB iter is run)
+  - SDL_HINT_DOSKUTSU_IDLE_PAUSE_FORCE=1 to force-enable on
+    non-qualifying backends (would gap Organya music; not useful)
+  - Per-stage idle-pause threshold tuning (the sdl-engine 0037+
+    helpers handle this; engine just toggles the gate)
+  - SAMPLE_FRAMES knob (slot 0116; deferred to iter K — see W13.5
+    reconciliation above)
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 73 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index b9af0da..1e9fba0 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -32,6 +32,13 @@
+ extern "C" {
+   typedef void (*SDL_DOSIdlePauseCallback_t)(std::uint64_t paused_ns);
+   void SDL_DOSAudioRegisterIdlePauseCallback(SDL_DOSIdlePauseCallback_t cb);
++  // patch 0115 (Phase 11 iter J): engine-side activation of the SDL-side
++  // idle-pause helper. The SDL helper (sdl-engine slot 0037) defaults to
++  // OFF; engine flips it ON only when music backend is hardware-offload
++  // (OPL3 / WB) so the DSP can actually be paused without breaking
++  // continuous-stream Organya playback. C linkage matches the rest of
++  // the SDL_DOSAudio* helper API.
++  void SDL_DOSAudioSetIdlePauseEnabled(bool enabled);
+   // Defined in graphics/Renderer.cpp's NXE::Diag block alongside the
+   // storage definitions for g_p10_audio_idle_pause_count_block /
+   // g_p10_audio_idle_pause_us_block.
+@@ -492,6 +499,72 @@ bool SoundManager::init()
+   // per W22A precedent.
+   SDL_DOSAudioRegisterIdlePauseCallback(p10_audio_idle_pause_callback);
+ 
++  // DOS-PORT (patch 0115, Phase 11 iter J): activate the SDL-side idle-
++  // pause helper. The SDL helper (sdl-engine slot 0037 + 0038) defaults
++  // to OFF — engine-side flips it ON only when the resolved music
++  // backend is OPL3 (hardware-offload, no DMA stream). Idle-pause makes
++  // no sense for Organya, which is a continuous PCM stream — pausing
++  // the DSP would gap the music. With OPL3, music synthesis happens on
++  // the SB16/Vibra16S OPL3 chip independently of the SDL audio device,
++  // so we can pause the DAC stream entirely between Pixtone SFX bursts.
++  // Per SDL/0037's design comment: "Engine flips ON via
++  // SDL_DOSAudioSetIdlePauseEnabled(true) after backend selection if
++  // and only if the music backend is OPL3 or WaveBlaster (i.e., music
++  // doesn't need DMA stream)." This patch implements OPL3-only per the
++  // iter-J brief; WB extension is a one-line follow-up if/when a WB
++  // iter is run.
++  //
++  // Killswitch: SDL_HINT_DOSKUTSU_IDLE_PAUSE=0 strict-match → skip the
++  // enable call (DSP stays in continuous-stream mode; useful for an
++  // A/B comparison iter or a fallback if idle-pause introduces audio
++  // glitches on a particular SB16 variant). Per
++  // env_vars_document_in_user_docs.md: documented in docs/BOOT.md.
++  // Default = enabled when OPL3 backend is active.
++  //
++  // Order-of-operations note: this must run AFTER the backend-resolution
++  // switch (above; lines ~421-464) so g_p10_audio_backend_active
++  // reflects the FINAL resolved backend (e.g., auto-detect chain may
++  // have settled on OPL3 after WB probe failure; the WB-specific code
++  // path inside that branch already rolled the enum back if needed).
++  // Also after SDL_DOSAudioRegisterIdlePauseCallback so the callback
++  // is in place before the SDL-side mechanism activates.
++  {
++    const char *idle_env = SDL_GetHint("SDL_HINT_DOSKUTSU_IDLE_PAUSE");
++    // Strict-"0" match: only the literal "0" disables. Default ON when
++    // backend qualifies. Mirror of patch 0093's killswitch convention
++    // (`tier2_on = !(e && e[0] == '0' && e[1] == 0)`); see also
++    // env_vars_document_in_user_docs.md.
++    const bool idle_pause_killswitch_on =
++        idle_env && idle_env[0] == '0' && idle_env[1] == 0;
++    const bool backend_qualifies =
++        (NXE::Diag::g_p10_audio_backend_active ==
++         NXE::Diag::AudioBackend::opl3);
++    if (backend_qualifies && !idle_pause_killswitch_on)
++    {
++      SDL_DOSAudioSetIdlePauseEnabled(true);
++      LOG_INFO("Sound system: idle-pause-activated (patch 0115; backend=opl3; "
++               "SDL_DOSAudioSetIdlePauseEnabled(true) called). DSP will "
++               "auto-pause between Pixtone SFX bursts to recover ~12 ms / "
++               "flip IRQ-5 wall-clock per Phase 10 design. Set "
++               "SDL_HINT_DOSKUTSU_IDLE_PAUSE=0 to disable (continuous-stream "
++               "mode; pre-iter-J behavior).");
++    }
++    else if (backend_qualifies && idle_pause_killswitch_on)
++    {
++      LOG_INFO("Sound system: idle-pause skipped (SDL_HINT_DOSKUTSU_IDLE_"
++               "PAUSE=0 killswitch active; backend=opl3 would otherwise "
++               "qualify). DSP stays in continuous-stream mode.");
++    }
++    else
++    {
++      LOG_INFO("Sound system: idle-pause skipped (backend={} does not "
++               "qualify; only opl3 currently activates idle-pause per "
++               "patch 0115).",
++               NXE::Diag::backend_to_string(
++                   NXE::Diag::g_p10_audio_backend_active));
++    }
++  }
++
+   std::string path = ResourceManager::getInstance()->getPath("musicdir.jsn", false);
+ 
+   _music_dirs.clear();
+-- 
+2.47.3
+

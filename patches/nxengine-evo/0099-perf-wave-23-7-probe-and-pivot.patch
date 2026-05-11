@@ -1,0 +1,481 @@
+From 27c373dd920d396ffa948cb40d206be0c344ebec Mon Sep 17 00:00:00 2001
+From: "Claude (DOSKUTSU port)" <services.claude@accounts.ecliptik.com>
+Date: Wed, 6 May 2026 09:56:37 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20wave=2023.7=20W237A=20patch=200099=20?=
+ =?UTF-8?q?=E2=80=94=20probe-and-pivot=20(S=20+=20X=20measurement)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0099, Phase 9 wave 23.7 W237A). Probe-only
+instrumentation that measures two orthogonal hypotheses driving the
+wave-24 architecture-pick decision (Option A lazy-populate vs Option B
+rect-list replay).
+
+Authored against docs/PHASE11-WAVE-23-7-CONTRACT.md § 1-4 + § 9
+acceptance gate. Cache stays default-disabled per patch 0098;
+ZERO architecture changes. After wave-23.7 data lands, flush-instr's
+findings doc applies the § 7.3 decision tree (S, X) → Option A or B
+(or escalate-to-team-lead if neither viable).
+
+Two measurements in one patch:
+
+1. **Measurement A — stationary-fraction tracker (S)** (contract § 1):
+   Per-frame check at end of Game::tick body, AFTER W22A mode_tick
+   residual block. Compares post-tick (map.displayed_xscroll,
+   map.displayed_yscroll) against prev-frame values. If equal AND
+   prev != INT_MIN sentinel (skips first-frame + post-map-change),
+   increment stationary_frames_block.
+   - 4 storage vars in NXE::Diag: g_w237_prev_scroll_x/y (sticky;
+     INT_MIN sentinel), g_w237_stationary_frames_block (per-block
+     reset), g_w237_total_frames_block (per-block reset).
+   - Reset hook: tilemap_cache_reset() now also resets prev-scroll
+     sentinels to INT_MIN on map_flush_graphics.
+   - Output: appended `stationary_frac={:.2f}` field at end of
+     existing [mds-tilemap-cache] line. Defensive divide-by-zero
+     check (clamps to 0.00 if total_frames_block == 0).
+   - Cost: ~3 int comparisons + 2 increments per Game::tick; sub-µs.
+     Update sites NOT gated on MODE_DRAW_SCENE_INSTR (per design;
+     gating happens at emit-time in Renderer.cpp, not at counter
+     update).
+
+2. **Measurement B — per-tile speedup probe (X)** (contract § 2):
+   Picked Option β (one-shot benchmark) per flush-instr's
+   recommendation; cleaner hypothesis-testing for the 5-30× speedup
+   question. Fires ONCE per run after warmup, gated on
+   `_flip_total >= 300` (= ~6 sec at 50 Hz; ~3 audit-flush blocks
+   settled past transition pollution).
+   - 4 storage vars in NXE::Diag: g_w237_drawtile_total_ns,
+     g_w237_raw_blit_total_ns, g_w237_speedup_sample_count,
+     g_w237_speedup_measured (sticky one-shot guard).
+   - Sink scratch surface lazy-allocated in benchmark function:
+     16×16 INDEX8 (tile-sized; sufficient for raw-blit destination),
+     palette-attached via Renderer::masterPalette() per W23 0097
+     lazy-alloc pattern.
+   - 100-iteration micro-benchmark each path:
+     * drawtile path: tileset.drawTile(0, 0, 0) → window. Full
+       Renderer dispatch + per-call overhead (_DrawcallTimer, NULL
+       checks, rect math, _try_fast_blit gates, alpha-mod, dirty-
+       rect record, etc.).
+     * raw_blit path: tileset.drawTileToSurface(sink, 0, 0, 0).
+       Bypasses Renderer; single SDL_BlitSurface to sink.
+   - Output: one-shot `[tile-speedup-stat n=100 drawtile_us=X.XX
+     raw_blit_us=X.XX ratio=X.XX]` line. µs precision per contract
+     § 4.2 (per-tile costs in 1-10 µs range; ms.2f would lose
+     resolution).
+   - Test tile = 0 (always loaded); test position = (0, 0) for
+     determinism. drawTile path writes to window 100× — visible as
+     brief 1-frame artifact (tile 0 redrawn at (0,0) over itself);
+     next frame's normal render replaces it. Acceptable for probe-
+     only iter.
+
+Architectural deviation from contract § 2.2 wording (transparently
+flagged to flush-instr at review; ACCEPTED):
+
+Contract § 2.2 said "writing to the same scratch sink surface."
+Implementation: drawTile path writes to WINDOW; raw_blit path writes
+to SINK. They're NOT writing to the same destination. Why this is OK
+per flush-instr's review:
+
+  1. Both paths are sysmem→sysmem. SDL3-DOS in INDEX8 software-render
+     mode writes to the window's CPU-side INDEX8 SDL_Surface, NOT
+     VRAM-direct. Only SDL_RenderPresent flushes window→VRAM. So
+     drawTile→window is a sysmem-only blit at per-call time.
+  2. Both paths are INDEX8→INDEX8 (sink palette-attached via
+     masterPalette() matching window format). No format conversion.
+  3. The DELTA is exactly what we want to measure. drawTile's
+     overhead = Renderer dispatch + per-tile setup (src/dst-rect
+     math + alpha checks + format checks) + dirty-rect tracking
+     append. raw_blit bypasses ALL of that. Option B's rect-replay
+     architecture in wave-24 would replace ALL drawTile-overhead
+     with a single final dirty-rect add for the whole tilemap pass
+     — so the measured DELTA IS the projected savings.
+
+Warmup-gate fix (post-build-qa-W23.7-smoke STOP-and-ack):
+
+Initial draft used `_dc_block_idx >= 3` for the speedup-probe
+warmup gate. build-qa's W23.7 DOSBox-X smoke (config B with
+MODE_DRAW_SCENE_INSTR=1 + FLIP_INSTR=1) found the probe NEVER
+fired across 89 flip-stat blocks (= ~9000 flips). Root cause:
+`_dc_block_idx` only ticks via `_timed_render_texture()` at
+Renderer.cpp:487, which is the SDL_RenderTexture wrapper — and the
+wave-20 direct-VESA hot path (default-ON since W20 patch 0088)
+BYPASSES that wrapper entirely. So `_dc_count_block` stays at 0,
+`_maybe_flush_drawcall_tally()` returns early at line 530, and
+`_dc_block_idx` never increments past 0.
+
+This is structural, not cosmetic — the probe is the entire point of
+patch 0099 (per contract § 2.2 Option β: the 5-30× speedup hypothesis
+test). Without the fix, real-HW W237A iter would have returned logs
+with `stationary_frac` data but ZERO `[tile-speedup-stat]` lines,
+blocking the wave-24 architecture-pick decision tree (§ 7.3) on
+Measurement B.
+
+Fix: changed gate to `_flip_total >= 300` (Renderer.cpp:438).
+`_flip_total` increments per flip() call regardless of which render
+path is taken (direct-VESA OR SDL slow path). 300 flips ≈ 3 audit-
+flush emit blocks at existing 100-flip cadence ≈ 6 sec at 50 fps.
+Same effective warmup threshold as original intent; decoupled from
+drawcall-path-dependent state.
+
+build-qa's STOP-and-ack on W23.7 smoke caught this before real-HW
+W237A iter — same silent-narrow-rule symmetry that caught W23 0097's
+state-char-under-killswitch issue. Two for two on caught structural
+bugs at smoke gate.
+
+Hint reuse: existing SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR=1 (W22.5
+hint per contract § 3) gates both new emissions. NO new env var. NO
+BOOT.md edit required. Operator's W23.7A iter env-var set is
+identical to W23.5: 4 hints (FLIP_INSTR + FINE_INSTR + MODE_TICK_INSTR
++ MODE_DRAW_SCENE_INSTR).
+
+Source files touched (4 of 5 contract-listed; new helper file inlined
+into _maybe_flush_phase_timing_audit() per acceptance):
+
+1. vendor/nxengine-evo/src/Utils/diagnostic_timers.h (+33): 8 extern
+   storage decls + 1 added include comment.
+2. vendor/nxengine-evo/src/graphics/Renderer.cpp (+114 with warmup-
+   gate fix): 8 storage definitions in NXE::Diag block + stationary_-
+   frac field append in [mds-tilemap-cache] emit + 2-counter per-
+   block reset + Option β benchmark inline in _maybe_flush_phase_-
+   timing_audit() + one-shot [tile-speedup-stat] emit.
+3. vendor/nxengine-evo/src/game.cpp (+26): <climits> include for
+   INT_MIN; stationary-tracker hook at end of Game::tick body AFTER
+   W22A mode_tick residual block.
+4. vendor/nxengine-evo/src/map.cpp (+7): tilemap_cache_reset()
+   extension (2-line; resets prev-scroll sentinels on map change).
+
+W23.7A iter shape per contract § 6:
+- PLAY1 First Cave (curmap=12) — mixed-walking baseline; LOG_TAG
+  W237A1; ~60-90 sec. Load-bearing scene for wave-24 success-criterion
+  validation.
+- PLAY2 Hermit Gunsmith (curmap=90) — high-stationary dialog scene;
+  LOG_TAG W237A2; ~30-60 sec.
+- Both PLAYs single-boot. Tier-2 audio (default). 4 instr hints set;
+  TILEMAP_CACHE unset (cache stays default-disabled per 0098).
+
+Wave-24 success criterion (locked per team-lead 2026-05-06 user pick =
+Framing A): First Cave (curmap=12) Tier-2 mean flip-total ≤ 25 ms =
+40 fps mean. Need -7.15 ms savings vs current 32.15 ms baseline.
+Wave-24 architecture-pick decision tree (S, X) → A or B or escalate
+per contract § 7.3.
+
+Reviewer ack:
+- flush-instr § 9 acceptance gate review: PASSED (10/10 checkboxes
+  on first draft; one architectural deviation — drawTile-window-vs-
+  sink — accepted with sysmem-equivalence reasoning).
+- team-lead wave-23.7 probe approval: PASSED. 2-PLAY iter shape
+  approved (First Cave + Hermit Gunsmith).
+- build-qa W23.7 smoke gate: surfaced warmup-gate-under-direct-VESA
+  structural bug per silent-narrow STOP-and-ack rule; fix incorporated
+  pre-format-patch (warmup gate switched from `_dc_block_idx >= 3`
+  to `_flip_total >= 300`). Verifies on re-smoke.
+
+References:
+  patches/nxengine-evo/0095-perf-wave-22-mode-tick-decomposition.patch
+  patches/nxengine-evo/0096-perf-wave-22-5-mode-draw-scene-decomposition.patch
+  patches/nxengine-evo/0097-perf-wave-23-path-b-tilemap-cache.patch
+    (cache infrastructure preserved; default-disabled by 0098;
+     Tileset::drawTileToSurface raw-blit primitive reused for
+     Measurement B)
+  patches/nxengine-evo/0098-perf-wave-23-w23b-tilemap-cache-default-disable.patch
+    (cache default-disabled; preserved invariant for W23.7 probe)
+  patches/SDL/0035 (W20A flush instrumentation; produces _flip_total
+    increment used for the corrected warmup gate)
+  patches/nxengine-evo/0088-perf-wave-20-direct-vesa-default-on.patch
+    (the direct-VESA default that bypasses _dc_block_idx; structural
+     reason for the warmup-gate fix)
+  vendor/nxengine-evo/src/Utils/diagnostic_timers.h
+  docs/PHASE11-WAVE-22-FINDINGS.md § 11.3-11.6 (W22.5 baselines +
+    bandwidth probe data)
+  docs/PHASE11-WAVE-22-FINDINGS.md § 12-13 (W23 + W23.5 measurements)
+  docs/PHASE11-WAVE-24-DESIGN.md § 4.2 + § 12 (Option B per-tile
+    speedup hypothesis + wave-24 architecture options)
+  docs/PHASE11-WAVE-23-7-CONTRACT.md (gitignored; this commit
+    authored against it)
+  memory/perf_predictions_unreliable.md
+  memory/measurements_above_prediction_are_red_flags.md
+  memory/dosbox_scales_per_code_path.md
+  memory/silent_narrow_pattern.md (build-qa STOP-and-ack on W23.7
+    smoke caught the warmup-gate structural bug before real-HW)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h |  33 +++++++++
+ src/game.cpp                  |  26 +++++++
+ src/graphics/Renderer.cpp     | 131 +++++++++++++++++++++++++++++++++-
+ src/map.cpp                   |   7 ++
+ 4 files changed, 195 insertions(+), 2 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 238f102..a244341 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -554,6 +554,39 @@ extern std::uint64_t g_tilemap_fg_hit_total_ns_block;
+ extern std::uint64_t g_tilemap_fg_miss_total_ns_block;
+ extern std::uint32_t g_tilemap_cache_n_block;                // DrawScene-call count
+ 
++// DOS-PORT (patch 0099, Phase 9 wave 23.7 W237A probe-and-pivot):
++// 8 storage variables for two orthogonal measurements that drive the
++// wave-24 architecture-pick. Per docs/PHASE11-WAVE-23-7-CONTRACT.md
++// § 1 + § 2; sized at ~40 bytes total.
++//
++// Measurement A — stationary-fraction (S) tracker. Per-frame check
++// `(displayed_xscroll, displayed_yscroll) == prev`. If equal, frame
++// is "stationary." Aggregated per-block as fraction; appended to
++// existing [mds-tilemap-cache] line as `stationary_frac=N.NN` field.
++//
++// Measurement B — per-tile speedup probe (X). One-shot benchmark
++// (Option β per contract § 2.2) at first non-transition block emit:
++// 100 iterations of tileset.drawTile() vs raw SDL_BlitSurface; emits
++// one-shot [tile-speedup-stat ...] line with the ratio.
++//
++// All gated on existing SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR=1
++// (W22.5 hint per contract § 3); no new env var.
++//
++// Per-block reset: 2 of 8 (stationary-fraction counters). 6 sticky
++// (1 prev_scroll_x + 1 prev_scroll_y + 4 speedup-probe one-shot).
++
++// Stationary-fraction tracker (Measurement A) — 4 vars.
++extern std::int32_t  g_w237_prev_scroll_x;             // INT_MIN sentinel = first frame / post-reset
++extern std::int32_t  g_w237_prev_scroll_y;
++extern std::uint32_t g_w237_stationary_frames_block;   // count within current 100-tick block
++extern std::uint32_t g_w237_total_frames_block;        // total ticks in block (= n)
++
++// Per-tile speedup probe (Measurement B) — 4 vars.
++extern std::uint64_t g_w237_drawtile_total_ns;         // sum across N samples
++extern std::uint64_t g_w237_raw_blit_total_ns;         // sum across N samples
++extern std::uint32_t g_w237_speedup_sample_count;      // N (typically 100)
++extern bool          g_w237_speedup_measured;          // sticky one-shot guard
++
+ // Killswitch accessor — definition in Renderer.cpp's anonymous-
+ // namespace `_abl_tilemap_cache_killswitch()` forwarded via the file-
+ // scope wrapper at end-of-file. map.cpp reads this to short-circuit
+diff --git a/src/game.cpp b/src/game.cpp
+index 2490e68..7626fac 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -1,6 +1,8 @@
+ 
+ #include "game.h"
+ 
++#include <climits>  // patch 0099 (wave 23.7): INT_MIN sentinel for stationary tracker
++
+ #include "ObjManager.h"
+ #include "ai/ai.h"
+ #include "Utils/Logger.h"
+@@ -371,6 +373,30 @@ void Game::tick(void)
+     if (_mt_res < 0) _mt_res = 0;
+     NXE::Diag::g_mt_residual_samples[NXE::Diag::g_mt_residual_idx++] = (Uint64)_mt_res;
+   }
++
++  // patch 0099 (wave 23.7 W237A): stationary-fraction tracker per
++  // docs/PHASE11-WAVE-23-7-CONTRACT.md § 1.3. Compares post-tick
++  // scroll values to prior-tick. Placement at end-of-Game::tick AFTER
++  // all mode_sim/mode_draw work (ModeTickTimer scope closes upstream;
++  // mode_tick residual block above just ran). map.displayed_xscroll
++  // and map.displayed_yscroll have their final values for this tick.
++  //
++  // First-frame sentinel: g_w237_prev_scroll_x = INT_MIN (init + map
++  // change). Skip the equality check until prev is set.
++  //
++  // Update sites NOT gated on MODE_DRAW_SCENE_INSTR — counters update
++  // unconditionally so the value is ready when emit fires (gating
++  // happens at emit-time in Renderer.cpp, not at counter update).
++  // ~3 int comparisons + 2 increments per tick; sub-µs cost.
++  if (NXE::Diag::g_w237_prev_scroll_x != INT_MIN
++      && map.displayed_xscroll == NXE::Diag::g_w237_prev_scroll_x
++      && map.displayed_yscroll == NXE::Diag::g_w237_prev_scroll_y)
++  {
++    ++NXE::Diag::g_w237_stationary_frames_block;
++  }
++  NXE::Diag::g_w237_prev_scroll_x = map.displayed_xscroll;
++  NXE::Diag::g_w237_prev_scroll_y = map.displayed_yscroll;
++  ++NXE::Diag::g_w237_total_frames_block;
+ }
+ 
+ void Game::switchmap(int mapno, int scriptno, int px, int py)
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index ca51089..27a34e2 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -161,6 +161,20 @@ bool          g_tilemap_fg_cache_enabled                     = true;
+ std::uint64_t g_tilemap_fg_hit_total_ns_block                = 0;
+ std::uint64_t g_tilemap_fg_miss_total_ns_block               = 0;
+ std::uint32_t g_tilemap_cache_n_block                        = 0;
++
++// DOS-PORT (patch 0099, Phase 9 wave 23.7 W237A): probe-and-pivot
++// instrumentation per docs/PHASE11-WAVE-23-7-CONTRACT.md § 1.2 + § 2.3.
++// 8 storage vars (4 stationary-tracker + 4 speedup-probe). Per-block
++// reset for the 2 stationary counters; 6 sticky (prev-scroll +
++// speedup-one-shot).
++std::int32_t  g_w237_prev_scroll_x                = INT_MIN;  // sentinel
++std::int32_t  g_w237_prev_scroll_y                = INT_MIN;
++std::uint32_t g_w237_stationary_frames_block      = 0;
++std::uint32_t g_w237_total_frames_block           = 0;
++std::uint64_t g_w237_drawtile_total_ns            = 0;
++std::uint64_t g_w237_raw_blit_total_ns            = 0;
++std::uint32_t g_w237_speedup_sample_count         = 0;
++bool          g_w237_speedup_measured             = false;
+ }  // namespace Diag
+ }  // namespace NXE
+ 
+@@ -1722,7 +1736,15 @@ void _maybe_flush_phase_timing_audit()
+     const bool _killswitch_active = _abl_tilemap_cache_killswitch();
+     const char _bg_state_char = (_killswitch_active || !g_tilemap_bg_cache_enabled) ? 'D' : 'E';
+     const char _fg_state_char = (_killswitch_active || !g_tilemap_fg_cache_enabled) ? 'D' : 'E';
+-    LOG_INFO("[mds-tilemap-cache n={} bg_h={} bg_m={} bg_state={} bg_t={} fg_h={} fg_m={} fg_state={} fg_t={} bg_ms_h={:.2f} bg_ms_m={:.2f} fg_ms_h={:.2f} fg_ms_m={:.2f}]",
++    // patch 0099 (wave 23.7 W237A): append stationary_frac field per
++    // docs/PHASE11-WAVE-23-7-CONTRACT.md § 4.1. Within-block ratio
++    // S = stationary_frames / total_frames; clamped to 0.00 if total=0
++    // (defensive — block should never have zero ticks but check
++    // protects against divide-by-zero).
++    const double _stationary_frac = (NXE::Diag::g_w237_total_frames_block > 0)
++        ? (double)NXE::Diag::g_w237_stationary_frames_block / (double)NXE::Diag::g_w237_total_frames_block
++        : 0.0;
++    LOG_INFO("[mds-tilemap-cache n={} bg_h={} bg_m={} bg_state={} bg_t={} fg_h={} fg_m={} fg_state={} fg_t={} bg_ms_h={:.2f} bg_ms_m={:.2f} fg_ms_h={:.2f} fg_ms_m={:.2f} stationary_frac={:.2f}]",
+              g_tilemap_cache_n_block,
+              g_tilemap_bg_cache_hits_block,
+              g_tilemap_bg_cache_misses_block,
+@@ -1743,7 +1765,8 @@ void _maybe_flush_phase_timing_audit()
+                  : 0.0,
+              g_tilemap_fg_cache_misses_block > 0
+                  ? (double)g_tilemap_fg_miss_total_ns_block / 1e6 / (double)g_tilemap_fg_cache_misses_block
+-                 : 0.0);
++                 : 0.0,
++             _stationary_frac);
+   }
+   // Reset 12 per-block counters regardless of MODE_DRAW_SCENE_INSTR
+   // state. The 2 sticky `*_enabled` flags NOT reset here (per contract
+@@ -1760,6 +1783,110 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_tilemap_fg_cache_disable_transitions_block  = 0;
+   NXE::Diag::g_tilemap_fg_hit_total_ns_block               = 0;
+   NXE::Diag::g_tilemap_fg_miss_total_ns_block              = 0;
++
++  // patch 0099 (wave 23.7 W237A): per-block reset of stationary-fraction
++  // counters per docs/PHASE11-WAVE-23-7-CONTRACT.md § 4.1. The 2
++  // prev-scroll-x/y vars are NOT reset here (sticky across blocks; only
++  // reset on map_flush_graphics via tilemap_cache_reset()). The 4
++  // speedup-probe vars are NOT reset here (one-shot guard sticky across
++  // entire run).
++  NXE::Diag::g_w237_stationary_frames_block = 0;
++  NXE::Diag::g_w237_total_frames_block      = 0;
++
++  // patch 0099 (wave 23.7 W237A): per-tile speedup probe one-shot per
++  // docs/PHASE11-WAVE-23-7-CONTRACT.md § 2.2 Option β + § 4.2. Fires
++  // ONCE per run after warmup (~300 flips ≈ 6 sec at 50 Hz of
++  // transition pollution settled). Only when MODE_DRAW_SCENE_INSTR=1
++  // (this branch). 100-iteration micro-benchmark of tileset.drawTile()
++  // (full Renderer dispatch) vs tileset.drawTileToSurface() (raw
++  // SDL_BlitSurface to sink scratch surface). One-shot guarded by
++  // g_w237_speedup_measured.
++  //
++  // Warmup gate: `_flip_total >= 300`. Initial draft used
++  // `_dc_block_idx >= 3` (drawcall-tally block index) but build-qa's
++  // W23.7 smoke gate caught a structural bug: `_dc_block_idx` only
++  // ticks via the SDL_RenderTexture wrapper (`_timed_render_texture`
++  // at Renderer.cpp:487), which the wave-20 direct-VESA hot path
++  // (default-ON since W20 patch 0088) BYPASSES entirely. So
++  // `_dc_block_idx` stayed at 0 and the probe never fired in any
++  // production config on either DOSBox-X or real HW.
++  //
++  // Fix: gate on `_flip_total` instead — a flip-counter that ticks
++  // per flip() call regardless of which render path is taken
++  // (direct-VESA OR SDL slow path). `_flip_total >= 300` is the
++  // equivalent warmup threshold (~3 audit-flush blocks at the
++  // existing 100-flip cadence; matches the "first non-transition
++  // block" wording in contract § 2.2).
++  //
++  // Test tile = 0 (always loaded); test position = (0, 0) for
++  // determinism. drawTile path writes to window 100× — visible as a
++  // brief 1-frame artifact (tile 0 redrawn at 0,0 100× over itself);
++  // next frame's normal render replaces it. Acceptable for a probe iter.
++  //
++  // Sink scratch surface lazily allocated on first benchmark fire,
++  // 16x16 INDEX8 (tile-sized; sufficient for raw-blit destination).
++  // Dropped on next map_flush_graphics indirectly (window surface
++  // re-init) — small enough that we don't bother with explicit cleanup.
++  if (!NXE::Diag::g_w237_speedup_measured && _flip_total >= 300)
++  {
++    static SDL_Surface *_w237_sink_sfc = nullptr;
++    Renderer *r = Renderer::getInstance();
++    SDL_Surface *win = r->_cached_window_surface;
++    if (win)
++    {
++      if (!_w237_sink_sfc ||
++          _w237_sink_sfc->format != win->format)
++      {
++        if (_w237_sink_sfc) SDL_DestroySurface(_w237_sink_sfc);
++        _w237_sink_sfc = SDL_CreateSurface(16, 16, win->format);
++        if (_w237_sink_sfc && win->format == SDL_PIXELFORMAT_INDEX8 &&
++            r->masterPalette())
++        {
++          SDL_SetSurfacePalette(_w237_sink_sfc, r->masterPalette());
++        }
++      }
++      if (_w237_sink_sfc)
++      {
++        constexpr int kSpeedupBenchIters = 100;
++        // Path 1: full Renderer dispatch via tileset.drawTile() — writes
++        // to window. Brief visual artifact, self-correcting next frame.
++        const Uint64 _t0 = SDL_GetTicksNS();
++        for (int i = 0; i < kSpeedupBenchIters; i++)
++        {
++          r->tileset.drawTile(0, 0, 0);
++        }
++        const Uint64 _t1 = SDL_GetTicksNS();
++        // Path 2: raw SDL_BlitSurface via tileset.drawTileToSurface() —
++        // writes to sink scratch surface; bypasses Renderer.
++        const Uint64 _t2 = SDL_GetTicksNS();
++        for (int i = 0; i < kSpeedupBenchIters; i++)
++        {
++          r->tileset.drawTileToSurface(_w237_sink_sfc, 0, 0, 0);
++        }
++        const Uint64 _t3 = SDL_GetTicksNS();
++        NXE::Diag::g_w237_drawtile_total_ns    = _t1 - _t0;
++        NXE::Diag::g_w237_raw_blit_total_ns    = _t3 - _t2;
++        NXE::Diag::g_w237_speedup_sample_count = kSpeedupBenchIters;
++        NXE::Diag::g_w237_speedup_measured     = true;
++
++        // Emit one-shot per docs/PHASE11-WAVE-23-7-CONTRACT.md § 4.2.
++        // µs precision (per-tile costs ~1-10 µs range; ms with .2f
++        // would lose resolution).
++        const double _drawtile_us =
++            (double)NXE::Diag::g_w237_drawtile_total_ns / 1000.0 /
++            (double)kSpeedupBenchIters;
++        const double _raw_blit_us =
++            (double)NXE::Diag::g_w237_raw_blit_total_ns / 1000.0 /
++            (double)kSpeedupBenchIters;
++        const double _ratio = (_raw_blit_us > 0.0)
++            ? (_drawtile_us / _raw_blit_us)
++            : 0.0;
++        LOG_INFO("[tile-speedup-stat n={} drawtile_us={:.2f} raw_blit_us={:.2f} ratio={:.2f}]",
++                 (unsigned)kSpeedupBenchIters,
++                 _drawtile_us, _raw_blit_us, _ratio);
++      }
++    }
++  }
+ }
+ 
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
+diff --git a/src/map.cpp b/src/map.cpp
+index a50db37..f8bf0c2 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1484,6 +1484,13 @@ void tilemap_cache_reset()
+   g_tilemap_fg_cache_enabled = true;
+   g_tilemap_bg_consecutive_low_misses = 0;
+   g_tilemap_fg_consecutive_low_misses = 0;
++  // patch 0099 (wave 23.7 W237A): reset stationary-tracker prev-scroll
++  // sentinel so the first frame after map change isn't compared
++  // against stale prev values (would falsely register as stationary if
++  // displayed_xscroll/y happens to equal pre-map-change values).
++  // Per docs/PHASE11-WAVE-23-7-CONTRACT.md § 1.3.
++  g_w237_prev_scroll_x = INT_MIN;
++  g_w237_prev_scroll_y = INT_MIN;
+ }
+ }}  // namespace NXE::Diag
+ 
+-- 
+2.47.3
+

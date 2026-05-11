@@ -1,0 +1,244 @@
+From 3463222f7863cb7b004f8bccfb074e886a89dc7f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 5 May 2026 11:18:50 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=2011=20patch=200036=20=E2=80=94=20?=
+ =?UTF-8?q?replace-not-chain=20IRQ-1=20keyboard=20hook?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Bug: real-HW operator on Gateway 2000 Pentium-OD-83 + AMI/Award BIOS +
+Vibra16S reports keyboard input works for ~10 keystrokes, then PC
+speaker beeps and further keys are dropped. Held-key navigation still
+works; single-press timing is broken.
+
+Root cause: DOSVESA_InitKeyboard hooks IRQ-1 via DOS_HookInterrupt,
+which uses _go32_dpmi_chain_protected_mode_interrupt_vector. The chain
+wrapper runs our KeyboardIRQHandler first, then falls through to
+CWSDPMI's reflection-to-real-mode stub, which forwards the IRQ to the
+real-mode BIOS INT 9 handler. BIOS INT 9 writes the keystroke into the
+BIOS keyboard buffer at 0040:001E in parallel with our SDL ring. The
+application never calls INT 16h to drain that buffer, so it fills
+after ~10–16 keystrokes and BIOS beeps the PC speaker on overflow.
+AMI/Award BIOSes also commonly issue an 8042 "disable keyboard"
+controller command on buffer-full, which stops further IRQ-1 fires
+until BIOS re-enables on the (never-coming) INT 16h drain — that's the
+"input stops responding" portion of the symptom.
+
+Fix: add DOS_HookInterruptReplace, a variant of DOS_HookInterrupt that
+uses _go32_dpmi_set_protected_mode_interrupt_vector (replace) instead
+of _go32_dpmi_chain_protected_mode_interrupt_vector (chain). The
+replace variant allocates an explicit IRET wrapper via
+_go32_dpmi_allocate_iret_wrapper since the plain "set" function does
+not internally wrap raw C handlers with register-save / IRET glue
+(unlike the chain function which does).
+
+DOSVESA_InitKeyboard switches to DOS_HookInterruptReplace for IRQ-1.
+Audio (SB16, IRQ-5) and any other future hook keep using the chaining
+DOS_HookInterrupt — only IRQ-1 has a BIOS handler with stateful side
+effects in its chain.
+
+DOS_InterruptHook gains a `replaced` flag so DOS_UnhookInterrupt can
+distinguish the two paths and call _go32_dpmi_free_iret_wrapper safely
+on the replace path (the chain wrapper still cannot be freed; that
+leak is harmless and pre-existing).
+
+Risk audit: engine consumes raw scancodes via SDL's keymap, never
+reads BIOS keyboard state (shift flags at 0040:0017, scan-to-ASCII
+translation, the 0040:001E buffer). Ctrl+Alt+Del system reset becomes
+unreachable mid-session — acceptable for a port that owns the
+keyboard.
+
+No new env var. Default-behavior fix.
+
+See docs/PHASE11-KEYBOARD-FINDINGS.md for the full mechanism analysis,
+hypothesis triage (a refuted, b confirmed, c subsumed), and
+pressure-test against all five observed real-HW behaviors.
+---
+ src/core/dos/SDL_dos.c        | 84 +++++++++++++++++++++++++++++++++--
+ src/core/dos/SDL_dos.h        | 25 ++++++++++-
+ src/video/dos/SDL_dosevents.c | 17 ++++++-
+ 3 files changed, 120 insertions(+), 6 deletions(-)
+
+diff --git a/src/core/dos/SDL_dos.c b/src/core/dos/SDL_dos.c
+index 0ba077319..cf260a48a 100644
+--- a/src/core/dos/SDL_dos.c
++++ b/src/core/dos/SDL_dos.c
+@@ -95,6 +95,7 @@ void DOS_HookInterrupt(int irq, DOS_InterruptHookFn fn, DOS_InterruptHook *hook)
+     hook->fn = fn;
+     hook->irq = irq;
+     hook->interrupt_vector = DOS_IRQToVector(irq);
++    hook->replaced = false; // chain variant; see DOS_UnhookInterrupt for why this matters
+     hook->irq_handler_seginfo.pm_selector = _go32_my_cs();
+     hook->irq_handler_seginfo.pm_offset = (uint32_t)fn;
+     _go32_dpmi_get_protected_mode_interrupt_vector(hook->interrupt_vector, &hook->original_irq_handler_seginfo);
+@@ -109,6 +110,73 @@ void DOS_HookInterrupt(int irq, DOS_InterruptHookFn fn, DOS_InterruptHook *hook)
+     }
+ }
+ 
++/* DOSKUTSU patch (Phase 11): replace-not-chain variant. Used by
++   DOSVESA_InitKeyboard for IRQ-1 only. The chain variant
++   DOS_HookInterrupt runs our handler FIRST, then falls through to the
++   previous handler at the protected-mode IRQ-1 vector — which is
++   CWSDPMI's reflection-to-real-mode stub, which forwards to the
++   real-mode BIOS INT 9 handler. BIOS INT 9 then writes the keystroke
++   into the BIOS keyboard buffer at 0040:001E. Since the application
++   never calls INT 16h to drain that buffer, it fills after ~10–16
++   keystrokes and BIOS issues a PC speaker beep on overflow; AMI/Award
++   BIOSes commonly also issue an 8042 "disable keyboard" controller
++   command which stops further IRQ-1 fires until BIOS re-enables on
++   the (never-coming) INT 16h drain.
++
++   Replacing the vector means BIOS INT 9 never runs, so the BIOS
++   buffer stays empty and the overflow beep never fires. The engine
++   doesn't read any BIOS keyboard state (shift flags at 0040:0017,
++   scan-to-ASCII translation, the 0040:001E buffer itself) — it
++   consumes raw scan codes via SDL's scancode-to-keycode tables — so
++   removing BIOS from the path has no engine-visible side effects.
++   Ctrl+Alt+Del system reset becomes unreachable mid-session, which is
++   acceptable for a port that owns the keyboard.
++
++   Implementation note: unlike the chain variant which internally
++   wraps the handler with IRET + register-save glue,
++   _go32_dpmi_set_protected_mode_interrupt_vector expects a
++   pre-wrapped handler. We allocate the IRET wrapper explicitly via
++   _go32_dpmi_allocate_iret_wrapper, which is the matching
++   pre-allocated wrapper that CAN be freed with
++   _go32_dpmi_free_iret_wrapper on unhook (the chain wrapper cannot —
++   see the comment in DOS_UnhookInterrupt). The hook->replaced flag
++   tells DOS_UnhookInterrupt which path was used and whether the free
++   call is safe.
++
++   See docs/PHASE11-KEYBOARD-FINDINGS.md for the full mechanism
++   analysis and the pressure-test against all five observed real-HW
++   behaviors. */
++void DOS_HookInterruptReplace(int irq, DOS_InterruptHookFn fn, DOS_InterruptHook *hook)
++{
++    SDL_assert(irq >= 0 && irq <= 15);
++    SDL_assert(fn != NULL);
++    SDL_assert(hook != NULL);
++    hook->fn = fn;
++    hook->irq = irq;
++    hook->interrupt_vector = DOS_IRQToVector(irq);
++    hook->replaced = true;
++    hook->irq_handler_seginfo.pm_selector = _go32_my_cs();
++    hook->irq_handler_seginfo.pm_offset = (uint32_t)fn;
++    _go32_dpmi_get_protected_mode_interrupt_vector(hook->interrupt_vector, &hook->original_irq_handler_seginfo);
++
++    // Wrap our raw C function with an IRET + register-save trampoline.
++    // The trampoline writes its DPMI-allocated entry-point selector +
++    // offset back into hook->irq_handler_seginfo (overwriting the
++    // pm_selector / pm_offset we just set, which only fed the wrapper
++    // allocator with the target function); we then install the
++    // trampoline at the IRQ-1 vector.
++    _go32_dpmi_allocate_iret_wrapper(&hook->irq_handler_seginfo);
++    _go32_dpmi_set_protected_mode_interrupt_vector(hook->interrupt_vector, &hook->irq_handler_seginfo);
++
++    // enable interrupt on the correct PIC (same as chaining variant)
++    if (irq > 7) {
++        outportb(PIC2_DATA, inportb(PIC2_DATA) & ~(1 << (irq - 8))); // unmask on slave PIC
++        outportb(PIC1_DATA, inportb(PIC1_DATA) & ~(1 << 2));         // ensure cascade (IRQ2) is unmasked
++    } else {
++        outportb(PIC1_DATA, inportb(PIC1_DATA) & ~(1 << irq)); // unmask on master PIC
++    }
++}
++
+ void DOS_UnhookInterrupt(DOS_InterruptHook *hook, bool disable_interrupt)
+ {
+     if (!hook || !hook->fn) {
+@@ -128,13 +196,21 @@ void DOS_UnhookInterrupt(DOS_InterruptHook *hook, bool disable_interrupt)
+ 
+     _go32_dpmi_set_protected_mode_interrupt_vector(hook->interrupt_vector, &hook->original_irq_handler_seginfo);
+ 
+-    // Note: _go32_dpmi_chain_protected_mode_interrupt_vector internally
++    // _go32_dpmi_chain_protected_mode_interrupt_vector internally
+     // allocates a wrapper, but it is NOT safe to free it with
+     // _go32_dpmi_free_iret_wrapper — that function expects a wrapper
+     // allocated by _go32_dpmi_allocate_iret_wrapper, and calling it on
+-    // a chain-allocated wrapper causes a page fault on exit.  The wrapper
+-    // is a few bytes of conventional memory that the OS reclaims when the
+-    // process terminates, so the leak is harmless.
++    // a chain-allocated wrapper causes a page fault on exit. The wrapper
++    // is a few bytes of conventional memory that the OS reclaims when
++    // the process terminates, so the leak is harmless.
++    //
++    // DOSKUTSU patch (Phase 11): for hooks installed via
++    // DOS_HookInterruptReplace, the wrapper IS one returned by
++    // _go32_dpmi_allocate_iret_wrapper, so freeing it is safe and
++    // matched. The hook->replaced flag distinguishes the two paths.
++    if (hook->replaced) {
++        _go32_dpmi_free_iret_wrapper(&hook->irq_handler_seginfo);
++    }
+ 
+     SDL_zerop(hook);
+ }
+diff --git a/src/core/dos/SDL_dos.h b/src/core/dos/SDL_dos.h
+index 11dc58d5e..5b7ff09da 100644
+--- a/src/core/dos/SDL_dos.h
++++ b/src/core/dos/SDL_dos.h
+@@ -142,10 +142,33 @@ typedef struct DOS_InterruptHook
+     int interrupt_vector; // this is the _vector_ number, not the IRQ number!
+     _go32_dpmi_seginfo irq_handler_seginfo;
+     _go32_dpmi_seginfo original_irq_handler_seginfo;
+-
++    /* DOSKUTSU patch (Phase 11): true if hook was installed via
++       DOS_HookInterruptReplace (which uses _go32_dpmi_allocate_iret_wrapper
++       and _go32_dpmi_set_protected_mode_interrupt_vector); false if it was
++       installed via DOS_HookInterrupt (which uses
++       _go32_dpmi_chain_protected_mode_interrupt_vector — that function
++       allocates its own wrapper internally that is NOT safe to free with
++       _go32_dpmi_free_iret_wrapper).
++       DOS_UnhookInterrupt branches on this to free the wrapper safely
++       when applicable. */
++    bool replaced;
+ } DOS_InterruptHook;
+ 
+ void DOS_HookInterrupt(int irq, DOS_InterruptHookFn fn, DOS_InterruptHook *hook); // `irq` is the IRQ number, not the interrupt vector number!
++
++/* DOSKUTSU patch (Phase 11): variant of DOS_HookInterrupt that REPLACES
++   the previous handler instead of chaining to it. Use this for IRQ-1
++   (keyboard) only, where chaining causes the BIOS INT 9 handler to fill
++   the BIOS keyboard buffer at 0040:001E in parallel with our SDL ring.
++   Once that 16-entry BIOS buffer fills (~10–16 keystrokes), the BIOS PC
++   speaker beeps on overflow and (on AMI/Award BIOSes) issues an 8042
++   "disable keyboard" command which stops further IRQ-1 fires entirely.
++   Replacing rather than chaining keeps BIOS out of the loop entirely.
++   See docs/PHASE11-KEYBOARD-FINDINGS.md for the full mechanism + risk
++   audit. Audio (IRQ-5) and any other hook should keep using the chaining
++   variant — only IRQ-1 has a BIOS handler with stateful side effects. */
++void DOS_HookInterruptReplace(int irq, DOS_InterruptHookFn fn, DOS_InterruptHook *hook);
++
+ void DOS_UnhookInterrupt(DOS_InterruptHook *hook, bool disable_interrupt);
+ 
+ // Ends C function definitions when using C++
+diff --git a/src/video/dos/SDL_dosevents.c b/src/video/dos/SDL_dosevents.c
+index b29e07c6d..1a6e3261b 100644
+--- a/src/video/dos/SDL_dosevents.c
++++ b/src/video/dos/SDL_dosevents.c
+@@ -476,7 +476,22 @@ void DOSVESA_InitKeyboard(SDL_VideoDevice *device)
+     DOS_LockVariable(doskutsu_kbd_irq_vector_at_install);
+     DOS_LockVariable(doskutsu_kbd_pic1_mask_at_install);
+ 
+-    DOS_HookInterrupt(1, KeyboardIRQHandler, &data->keyboard_interrupt_hook);
++    /* DOSKUTSU patch (Phase 11): use DOS_HookInterruptReplace, not
++       DOS_HookInterrupt. Chaining the IRQ-1 hook would let CWSDPMI's
++       reflection-to-real-mode stub forward the IRQ to the real-mode
++       BIOS INT 9 handler in parallel with our handler, which fills the
++       BIOS keyboard buffer at 0040:001E. After ~10–16 keystrokes the
++       buffer overflows, BIOS issues a PC speaker beep, and AMI/Award
++       BIOSes also issue an 8042 "disable keyboard" command that stops
++       further IRQ-1 fires entirely. Replacing the vector keeps BIOS
++       INT 9 out of the loop. The engine consumes raw scancodes via
++       SDL's keymap and never reads BIOS keyboard state, so removing
++       BIOS from the path has no engine-visible side effects. See
++       docs/PHASE11-KEYBOARD-FINDINGS.md for the full mechanism
++       analysis. Audio and any other future hook should keep using the
++       chaining DOS_HookInterrupt; only IRQ-1 has a BIOS handler with
++       stateful side effects. */
++    DOS_HookInterruptReplace(1, KeyboardIRQHandler, &data->keyboard_interrupt_hook);
+ 
+     /* DOSKUTSU patch (Phase 9 wave 13.6.2): post-hook install-time
+        snapshots for the IRQ-mask discrimination iter. Ordering of the
+-- 
+2.47.3
+

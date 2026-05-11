@@ -1,0 +1,236 @@
+From 0361246bfe3680d8c94449167ac134968ea455ea Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 6 May 2026 19:28:59 -0700
+Subject: [PATCH 2/2] =?UTF-8?q?dos:=20Phase=2010=20patch=200043=20?=
+ =?UTF-8?q?=E2=80=94=20CloseDevice=20DSP=20hard-reset=20for=20force-pause?=
+ =?UTF-8?q?=20path?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+W22-WB-C operator iter (2026-05-06) confirmed task #44 force-DSP-
+pause quit lockup STILL OCCURS on real Vibra16S CT2490 despite the
+patch 0040 amend that "fixed" it under DOSBox-X. PAUSESDL.LOG ended
+at @flush=8500 with no SDL-side teardown trace; engine reached
+"Script engine shutdown." then hung before MIX_DestroyMixer could
+finish.
+
+The 0040 amend's approach was: detect force-pause-active in CloseDevice,
+issue 0xD6 (resume DMA) via MaybeServiceIdlePauseRequests(), then
+continue with the standard 0xDA (exit auto-init DMA) + 0xD3 (speaker
+off) sequence. DOSBox-X passed cleanly because emulated SB16 DMA
+state machine is permissive about command sequencing. Real Vibra16S
+isn't.
+
+Hypothesis-of-failure for 0040 amend on real HW: when force-pause
+is engaged immediately after OpenDevice (before any DMA bytes have
+actually transferred), the DSP enters an unstable state. The 0xD6
+resume command doesn't fully restart the DMA state machine, and
+the subsequent 0xDA "exit auto-init DMA" then waits for in-flight
+DMA that never completes — same deadlock the original patch
+targeted, just shifted one DSP-state-transition later.
+
+Fix: in the force-pause branch only, hard-reset the DSP via the
+reset port (port_base + 0x6 with 1 -> 100µs hold -> 0 pulse via
+existing ResetSoundBlasterDSP() helper). This returns the DSP to
+known idle state regardless of prior pause/run/auto-init state.
+Then SKIP the standard 0xDA/0xD3 disable-PCM sequence entirely
+(DSP is already silent post-reset; those commands are no-ops or
+worse). Continue with IRQ unhook + DMA mask + buffer free — those
+steps are state-independent.
+
+The force-pause branch is gated on g_dos_audio_force_dsp_pause:
+zero risk of affecting the regular organya-path shutdown which
+works fine on real HW (W22-WB-C ORG.LOG ended cleanly through
+Renderer::Close()). Per team-lead's explicit ack constraint.
+
+Tradeoff: hard reset is more disruptive than graceful exit, but
+force-pause is a dev-only measurement path
+(SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1; not user-facing).
+Robustness > graceful for this edge.
+
+Defensive flag-clear post-reset: g_dos_audio_resume_request,
+g_dos_audio_pause_request, isr_dsp_paused all forced to false
+after the reset. Avoids the post-reset MaybeServiceIdlePauseRequests
+service path from observing stale paused-state signals if any
+subsequent code reaches it (it shouldn't, but defensive).
+
+Per-step diagnostic bracketing via doskutsu_dbg_log:
+  - "audio close: force-pause active, issuing DSP hard reset" /
+    "audio close: DSP hard reset complete" (force-pause branch only)
+  - "audio close: pre-disable-pcm (was_force_paused=N)" / "post-disable-pcm"
+  - "audio close: pre-irq-unhook" / "post-irq-unhook"
+  - "audio close: pre-dma-mask" / "post-dma-mask"
+
+Logs run on EVERY close (not just force-pause) so the regular path
+is also instrumented, giving us a known-good trace to A/B against
+in PAUSESDL.LOG / SDLDBG.LOG. If hard-reset hypothesis is wrong and
+the lockup recurs at a later step in the next iter, the log will
+show exactly which step hung.
+
+Validation: DOSBox-X smoke is explicitly insufficient per memory
+dosbox_not_behavioral_proxy_for_io.md (DOSBox-X already passed the
+0040 amend that didn't actually fix real HW). This patch needs an
+operator-iter cycle on real Vibra16S CT2490 to confirm. SDL-side
+smoke gate is "doesn't break organya-path shutdown" only — checked
+via DOSBox-X organya regression smoke before handoff.
+
+Companion: SDL/0042 (MPU-401 probe defensive bailout for the
+related W22-WB-C WB lockup at port 0x330) ships in the same iter.
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 124 +++++++++++++++++++++++---------
+ 1 file changed, 89 insertions(+), 35 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index ee73723fb..4d4eb510f 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -766,49 +766,102 @@ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
+ {
+     struct SDL_PrivateAudioData *hidden = device->hidden;
+     if (hidden) {
+-        /* DOSKUTSU patch (Phase 10 patch 0040): release force-DSP-pause
+-           before the standard teardown sequence runs. Background:
+-           OpenDevice issues DSP 0xD5 (16-bit) or 0xD0 (8-bit) when
+-           SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1, leaving the DSP
+-           in paused state for the entire run. The standard teardown
+-           below issues 0xDA (exit auto-init DMA) which expects the
+-           DMA to be active — when the DSP is paused, 0xDA spins
+-           waiting for an in-flight DMA that never completes, hanging
+-           the quit path. Operator W22-WB-A-r2 PLAY4 confirmed: ESC →
+-           Quit → system lockup, only force-pause path affected.
+-
+-           Fix: clear the force-pause flag + request resume + service
+-           it from non-IRQ context. After this block, the DSP is back
+-           in the normal "running auto-init DMA" state and the standard
+-           0xDA / 0xD3 sequence completes cleanly. Idempotent — when
+-           force-pause was never engaged, isr_dsp_paused is false and
+-           MaybeServiceIdlePauseRequests is a no-op. */
+-        if (g_dos_audio_force_dsp_pause) {
++        /* DOSKUTSU patch (Phase 10 patch 0043): force-DSP-pause hard-
++           reset teardown path. Supersedes the patch 0040 amend's
++           "graceful resume + standard 0xDA/0xD3" approach.
++
++           Background: patch 0040's OpenDevice issues DSP 0xD5 (16-bit)
++           or 0xD0 (8-bit) when SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE
++           =1, leaving DSP in paused state for the entire run. Patch
++           0040's amend tried to fix the resulting quit lockup by
++           issuing 0xD6 (resume) before the standard 0xDA + 0xD3 exit
++           sequence — DOSBox-X smoke passed cleanly. W22-WB-C operator
++           iter (2026-05-06) however showed the lockup STILL occurred
++           on real Vibra16S CT2490: PAUSESDL.LOG ended mid-render at
++           @flush=8500 with no SDL-side teardown log, engine reached
++           "Script engine shutdown." then hung before MIX_DestroyMixer
++           could finish.
++
++           Hypothesis-of-failure for the 0040 amend approach: when
++           force-pause is engaged immediately after OpenDevice (before
++           any DMA bytes have actually transferred), the DSP enters an
++           unstable state. The 0xD6 resume command doesn't fully
++           restart the DMA state machine, and the subsequent 0xDA
++           "exit auto-init DMA" then waits for in-flight DMA that
++           never completes — same deadlock the original patch
++           targeted, just shifted one DSP-state-transition later.
++
++           Fix: in the force-pause branch only, hard-reset the DSP via
++           the reset port. ResetSoundBlasterDSP() drives port_base+0x6
++           with a 1->100µs->0 pulse, returning the chip to known idle
++           state regardless of prior pause/run/auto-init state. Then
++           SKIP the standard 0xDA/0xD3 disable-PCM sequence entirely
++           (DSP is already silent post-reset; those commands are no-
++           ops or worse). Continue with IRQ unhook + DMA mask + buffer
++           free — those steps are state-independent.
++
++           Tradeoff: hard reset is more disruptive than graceful exit,
++           but force-pause is a dev-only measurement path
++           (SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1; not user-facing).
++           Robustness > graceful for this edge.
++
++           Force-pause branch is gated on g_dos_audio_force_dsp_pause
++           — zero risk of affecting the regular organya-path shutdown
++           which works fine on real HW (W22-WB-C ORG.LOG ended cleanly
++           through Renderer::Close()).
++
++           DOSBox-X smoke is explicitly insufficient validation for
++           this fix per memory dosbox_not_behavioral_proxy_for_io.md.
++           Real-HW operator iter required for confirmation. */
++        const bool was_force_paused = g_dos_audio_force_dsp_pause;
++        if (was_force_paused) {
++            doskutsu_dbg_log("audio close: force-pause active, issuing DSP "
++                             "hard reset (skips 0xDA/0xD3 graceful exit)");
+             g_dos_audio_force_dsp_pause = false;
+-            g_dos_audio_resume_request = true;
+-            MaybeServiceIdlePauseRequests();
++            g_dos_audio_resume_request = false;
++            g_dos_audio_pause_request = false;
++            isr_dsp_paused = false; /* DSP is now reset; not in pause state */
++            ResetSoundBlasterDSP();
++            doskutsu_dbg_log("audio close: DSP hard reset complete");
+         }
+ 
+-        // Disable PCM.
+-        if (hidden->is_16bit) {
+-            WriteSoundBlasterDSP(0xDA); // exit 16-bit auto-init DMA
+-            WriteSoundBlasterDSP(0xD3); // turn off the speaker
+-        } else {
+-            WriteSoundBlasterDSP(0xD0); // halt 8-bit DMA
+-            WriteSoundBlasterDSP(0xDA); // exit auto-init DMA
+-            WriteSoundBlasterDSP(0xD3); // turn off the speaker
+-
+-            // SB Pro: reset stereo bit in mixer register 0x0E
+-            if (soundblaster_version >= 3) {
+-                const int mixer_addr = soundblaster_base_port + 0x04;
+-                const int mixer_data = soundblaster_base_port + 0x05;
+-                outportb(mixer_addr, 0x0E);
+-                outportb(mixer_data, inportb(mixer_data) & ~0x02); // clear stereo bit
++        /* DOSKUTSU patch (Phase 10 patch 0043): per-step diagnostic
++           bracketing. If real-HW lockup reproduces in a future iter,
++           PAUSESDL.LOG / SDLDBG.LOG will show which specific teardown
++           step hung — not just "engine reached shutdown but didn't
++           complete". Logs run on EVERY close (not just force-pause)
++           so the regular path is also instrumented, giving us a
++           known-good trace to A/B against. */
++        doskutsu_dbg_log("audio close: pre-disable-pcm "
++                         "(was_force_paused=%d)", was_force_paused ? 1 : 0);
++
++        if (!was_force_paused) {
++            // Disable PCM (normal path; force-pause branch already hard-
++            // reset the DSP and skips this).
++            if (hidden->is_16bit) {
++                WriteSoundBlasterDSP(0xDA); // exit 16-bit auto-init DMA
++                WriteSoundBlasterDSP(0xD3); // turn off the speaker
++            } else {
++                WriteSoundBlasterDSP(0xD0); // halt 8-bit DMA
++                WriteSoundBlasterDSP(0xDA); // exit auto-init DMA
++                WriteSoundBlasterDSP(0xD3); // turn off the speaker
++
++                // SB Pro: reset stereo bit in mixer register 0x0E
++                if (soundblaster_version >= 3) {
++                    const int mixer_addr = soundblaster_base_port + 0x04;
++                    const int mixer_data = soundblaster_base_port + 0x05;
++                    outportb(mixer_addr, 0x0E);
++                    outportb(mixer_data, inportb(mixer_data) & ~0x02); // clear stereo bit
++                }
+             }
+         }
+ 
++        doskutsu_dbg_log("audio close: post-disable-pcm");
++        doskutsu_dbg_log("audio close: pre-irq-unhook");
+         DOS_UnhookInterrupt(&hidden->interrupt_hook, true);
++        doskutsu_dbg_log("audio close: post-irq-unhook");
+ 
++        doskutsu_dbg_log("audio close: pre-dma-mask");
+         // disable DMA — mask the appropriate DMA channel.
+         if (hidden->dma_buffer) {
+             if (hidden->is_16bit) {
+@@ -818,6 +871,7 @@ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
+             }
+             DOS_FreeConventionalMemory(&hidden->dma_seginfo);
+         }
++        doskutsu_dbg_log("audio close: post-dma-mask");
+ 
+         // Free ring buffer resources.
+         if (hidden->ring_buffer) {
+-- 
+2.47.3
+

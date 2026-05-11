@@ -1,0 +1,178 @@
+From c10f342c0f4820f68164fb7fde7c5f4cd1c73699 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 10:53:39 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2010=20patch=200107=20=E2=80=94=20?=
+ =?UTF-8?q?MIDI=20source=20dir=20env=20var=20(W22-WB-E=20A/B)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0107, Phase 10 W22-WB-E A/B comparison). Adds
+SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE env var to switch between two
+MIDI directories at SoundManager::init: 'wiimidi' (default) → data/
+midi/ (WiiWare arrangements per scripts/fetch-cs-midi.py); 'orgmid'
+→ data/midi-orgmid/ (literal ORGMID transcription per scripts/
+build-cs-midi-orgmid.py; transposed +12 to fix octave-down quirk).
+
+Operator-controllable for next-iter A/B real-HW listening between
+the WiiWare arrangement aesthetic vs literal-ORGMID transcription
+on g2k Vibra16S OPL3 + DreamBlaster S2. Decide canonical set based
+on listening, not theory.
+
+Scope (per team-lead 2026-05-07 dispatch):
+- 1 new private member: SoundManager::_midi_source_dir (default "midi")
+- env-var resolution at SoundManager::init (~30 LOC including narration)
+- _start_mid_track() uses _midi_source_dir + "/" + name + ".mid"
+- LOG_WARN message updated to include the resolved dir name
+- docs/BOOT.md entry under user-facing options
+
+Recognized values:
+  unset / "wiimidi" / empty → "midi"        (data/midi/<n>.mid; default)
+  "orgmid"                  → "midi-orgmid" (data/midi-orgmid/<n>.mid)
+  any other value           → "midi" (fallback + LOG_INFO unrecognized)
+
+Resolved ONCE at SoundManager::init (not per-track-load); cached in
+_midi_source_dir. Banner log fires at startup so flush-instr +
+debugging can see which set is in use without diffing audio output.
+
+Has no effect when AUDIO_BACKEND=organya (Organya path doesn't use
+.mid files). Affects only MidiScheduler-routed backends (midi-stub
+/ wb / opl3).
+
+Smoke (DOSBox-X-fast, 5 gates):
+  Gate 1 — env unset (organya default + wiimidi banner): both
+    log lines present; "MidiScheduler: MIDI source = 'wiimidi'
+    (default;...)" appears even though Organya path is selected
+    (init logs the resolved dir regardless of backend so operator
+    can see what would be used if a MIDI backend were active).
+    37 flips, no crashes.
+  Gate 2 — AUDIO_BACKEND=wb + MIDI_SOURCE unset: "MidiScheduler:
+    MIDI source = 'wiimidi'" + MidiBackendWaveBlaster armed; music
+    dispatch routes through data/midi/<name>.mid. 38 flips.
+  Gate 3 — AUDIO_BACKEND=wb + AUDIO_MIDI_SOURCE=orgmid: banner
+    shows "MIDI source = 'orgmid' (resolves to data/midi-orgmid/...)";
+    MidiBackendWaveBlaster armed; path resolution would use data/
+    midi-orgmid/. 40 flips. (Real-HW iter populates the dir via
+    scripts/build-cs-midi-orgmid.py before launching.)
+  Gate 4 — explicit MIDI_SOURCE=wiimidi: same as Gate 1 banner.
+    36 flips.
+  Gate 5 — invalid value 'garbage': "MidiScheduler: unrecognized
+    SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE value 'garbage'; falling
+    back to 'wiimidi' (data/midi/)." 37 flips.
+
+  All 5 gates PASS.
+
+strings-grep verifies banner text + value labels + fallback message
+all present in binary.
+
+Out of scope (per team-lead's "scope is exactly the path-switch +
+log line + docs entry"):
+  - data/midi-orgmid/ population — handled by separate script
+    scripts/build-cs-midi-orgmid.py (just landed per team-lead)
+  - MidiScheduler-internal changes (path-resolution stays in
+    SoundManager::_start_mid_track per slot 0101 architecture)
+  - Per-track override (orgmid for some tracks, wiimidi for others)
+    — not needed; A/B comparison is whole-set basis
+---
+ src/sound/SoundManager.cpp | 49 +++++++++++++++++++++++++++++++++++---
+ src/sound/SoundManager.h   |  9 +++++++
+ 2 files changed, 55 insertions(+), 3 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 8c9a147..5330fb9 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -338,6 +338,46 @@ bool SoundManager::init()
+   // 2/3/4 (patches 0101+) plug the actual backend implementations.
+   selectBackendFromEnv();
+ 
++  // DOS-PORT (patch 0107, Phase 10 W22-WB-E A/B): resolve MIDI source
++  // directory once per process. Default = "midi" (data/midi/, the
++  // wiimidi-arrangement set from scripts/fetch-cs-midi.py per
++  // docs/ASSETS.md Step 4.5). Operator-controllable via
++  // SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE for W22-WB-E A/B comparison
++  // between WiiWare arrangements and literal-ORGMID transcriptions.
++  // Resolved here once at init so _start_mid_track() does not re-
++  // read the env var on every song change (cleaner than per-call
++  // SDL_GetHint + cheaper than SDL_GetHint anyway). The cached
++  // dir name is logged at startup so flush-instr / debugging can
++  // see which set was in use without diffing audio output.
++  {
++    const char *src = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE");
++    if (src == nullptr || src[0] == '\0' || std::strcmp(src, "wiimidi") == 0)
++    {
++      _midi_source_dir = "midi";
++      LOG_INFO("MidiScheduler: MIDI source = 'wiimidi' "
++               "(default; resolves to data/midi/<name>.mid; the WiiWare "
++               "arrangement set fetched by scripts/fetch-cs-midi.py per "
++               "docs/ASSETS.md Step 4.5).");
++    }
++    else if (std::strcmp(src, "orgmid") == 0)
++    {
++      _midi_source_dir = "midi-orgmid";
++      LOG_INFO("MidiScheduler: MIDI source = 'orgmid' "
++               "(resolves to data/midi-orgmid/<name>.mid; literal ORGMID "
++               "transcription set generated by scripts/build-cs-midi-"
++               "orgmid.py — alternative to the WiiWare arrangements for "
++               "W22-WB-E A/B comparison; transposed +12 to match Cave "
++               "Story canonical pitch).");
++    }
++    else
++    {
++      _midi_source_dir = "midi";
++      LOG_INFO("MidiScheduler: unrecognized SDL_HINT_DOSKUTSU_AUDIO_MIDI_"
++               "SOURCE value '{}'; falling back to 'wiimidi' (data/midi/). "
++               "Recognized values: wiimidi (default) | orgmid.", src);
++    }
++  }
++
+   // DOS-PORT (patch 0104, Phase 10 Stage 5 auto-detect chain):
+   // refactored backend-install dispatch. Per-backend installation
+   // logic lives in file-scope helpers (_try_install_*) so the auto-
+@@ -802,8 +842,11 @@ void SoundManager::_start_mid_track(int songno, bool resume)
+     return;
+   }
+ 
++  // patch 0107: use _midi_source_dir resolved at init from SDL_HINT_-
++  // DOSKUTSU_AUDIO_MIDI_SOURCE. Default = "midi" (data/midi/);
++  // "orgmid" → "midi-orgmid" (data/midi-orgmid/).
+   const std::string path = ResourceManager::getInstance()->getPath(
+-      "midi/" + _music_names[songno] + ".mid", false);
++      _midi_source_dir + "/" + _music_names[songno] + ".mid", false);
+   if (MidiScheduler::getInstance()->load(path))
+   {
+     MidiScheduler::getInstance()->start();
+@@ -812,8 +855,8 @@ void SoundManager::_start_mid_track(int songno, bool resume)
+   {
+     LOG_WARN("SoundManager::_start_mid_track: could not load '{}' "
+              "(songno={}); music slot stays silent. Verify "
+-             "scripts/fetch-cs-midi.py was run + data/midi/ contains "
+-             "the file.", path, songno);
++             "scripts/fetch-cs-midi.py was run + data/{}/ contains "
++             "the file.", path, songno, _midi_source_dir);
+   }
+ }
+ 
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index f785ea7..d2cd0f0 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -228,6 +228,15 @@ private:
+   std::vector<std::string> _music_dir_names;
+   std::vector<std::string> _music_playlists;
+ 
++  // patch 0107 (Phase 10 W22-WB-E A/B): per-process MIDI source-dir
++  // selection via SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE. Resolved once
++  // at SoundManager::init() and stored here; _start_mid_track() uses
++  // this dir name (no trailing slash) when constructing the .mid
++  // file path. Default empty string sentinel = "midi" (the existing
++  // wiimidi-arrangement set fetched by scripts/fetch-cs-midi.py per
++  // docs/ASSETS.md Step 4.5). Documented in docs/BOOT.md.
++  std::string _midi_source_dir = "midi";
++
+   const char _bossmusic[14] = {4, 7, 10, 11, 15, 16, 17, 18, 21, 22, 31, 33, 35, 0};
+ };
+ 
+-- 
+2.47.3
+

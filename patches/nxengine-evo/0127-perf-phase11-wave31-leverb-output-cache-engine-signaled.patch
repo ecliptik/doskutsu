@@ -1,0 +1,543 @@
+From 465ba10e0d76617855a151a78b53cf6132102b9a Mon Sep 17 00:00:00 2001
+From: nx-engine <nx-engine@doskutsu.local>
+Date: Mon, 11 May 2026 11:38:15 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200127=20=E2=80=94=20?=
+ =?UTF-8?q?wave-31=20Lever=20B:=20natural-origin=20backdrop=20output=20cac?=
+ =?UTF-8?q?he?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Extends patch 0080's existing backdrop cache + patch 0126's wave-30
+thrashing-detect with a CORRECTNESS-PRESERVING natural-origin output
+cache for the generic-loop scrolltypes (BK_PARALLAX / BK_FOLLOWFG /
+BK_FASTLEFT / BK_FIXED). Sub-decomposes the cache key per wave-31
+contract: removes parscroll_x/y; cached output stays valid as long as
+map / scrolltype / backdrop_id / format / window-dim don't change. On
+hit, parscroll is applied as a SRC OFFSET in the cache→window blit
+instead of being part of the key.
+
+**Critical interpretation choice (documented in commit + DM):** the
+wave-31 brief's literal wording "strip parscroll, cached output is
+RENDERED backdrop, on hit single cache→window blit" would produce a
+FROZEN PARALLAX visual regression on every non-BK_FIXED scrolltype
+(the rendered backdrop output DEPENDS on parscroll for BK_PARALLAX /
+BK_FOLLOWFG / BK_FASTLEFT — caching the rendered output and reusing
+across parscroll changes means the backdrop visually freezes while
+the camera moves). This patch implements the CORRECTNESS-PRESERVING
+variant: cache the NATURAL-ORIGIN tiled output (parscroll-independent
+contents) at dimensions large enough that the per-frame parscroll
+can be applied as a src offset in the cache→window blit at hit time.
+Same fps savings target (one blit on hit vs ~20 small tile blits on
+miss for 64×64 bgs), no visual regression. See build-qa handoff DM
+for the full reasoning + the cost-decomposition math.
+
+**Cache structure:**
+- New file-scope cache surface `g_backdrop_natural_sfc` separate from
+  patch 0080's `g_backdrop_cache_sfc`. Sized
+  `(screenWidth + bg_w) × (screenHeight + bg_h)` so any parscroll
+  ∈ [0, bg_w) × [0, bg_h) produces an in-bounds src rect of size
+  (screenWidth × screenHeight). For 64×64 bg at 320×240 screen,
+  cache = 384×304 ≈ 117 KB.
+- New key tuple: `(curmap, backdrop_id, scrolltype, indexed, w, h,
+  format)` — no parscroll.
+- New diagnostic counters: hits/misses/invalidates per block,
+  emitted as `backdrop cache: engine-signaled invalidation,
+  hit=N miss=M invalidate=K` once per audit-flush cadence (100 flips)
+  via the new `map_emit_backdrop_natural_audit()` helper called from
+  Renderer.cpp's `_maybe_flush_phase_timing_audit`.
+
+**Dispatch order (in the generic-loop branch of map_draw_backdrop):**
+1. Lever B (this patch) attempts first. On HIT: single src-offset
+   blit cache→window (~3-4 ms); return. On MISS: realloc + tile-fill
+   cache via `_render_natural_origin_to_cache` (~12-16 ms one-time
+   per map change); blit cache→window; return.
+2. On Lever B alloc/format/blit failure: fall through to patch 0080
+   cache + wave-30 0126 thrashing-detect as safety net.
+3. On all failures: fall through to legacy live tile loop (line 1080+).
+
+**Scope:**
+- Lever B applies ONLY to the GENERIC LOOP branch of map_draw_backdrop
+  (the patch 0080 wrapper). Eligible scrolltypes per wave-29's
+  scrolltype-vs-stage analysis: BK_FIXED (0), BK_PARALLAX (1),
+  BK_FOLLOWFG (2), BK_FASTLEFT (5). Per stage.dat audit: 40 / 95
+  stages = ~42% of game scenes engage Lever B (notable: Egg Corridor,
+  Mimiga Village, Grasstown, Arthur's House, Sand Zone, all
+  BK_PARALLAX).
+- Lever B does NOT apply to BK_HIDE / BK_HIDE2 / BK_HIDE3
+  scrolltypes (47 stages = ~50% — including Stage 12 First Cave,
+  Stage 13 Start Point, Stage 18 Shelter). These return early at
+  the BK_HIDE case with just a `Renderer::clearScreen(DK_BLUE)`.
+  Lever B's path is never reached for these scenes; the backdrop
+  cost remains the ~4 ms (or more on real HW) clearScreen call.
+  **Wave-29's "First Cave heavy-music" 13.5 ms measurement may
+  have been on a different stage (Mimiga Village or Egg Corridor —
+  both BK_PARALLAX) than Stage 12. Operator's iter N+4 measurement
+  must route through Lever-B-eligible scenes for the fps gain to
+  materialize.**
+- Lever B does NOT apply to BK_FASTLEFT_LAYERS / NOFALLLEFT (8
+  stages — Outer Wall / Balcony / title menu). Those use the
+  patch 0081 wrapper with 5-layer parscroll-dependent composition
+  where each layer scrolls at a different speed; the composited
+  output can't be expressed as a single src offset. Patch 0081
+  branch keeps wave-30 thrashing-detect unchanged.
+
+**Hypothesis savings** per wave-31 brief: -8 to -12 ms / flip in
+heavy-music gameplay on Lever-B-eligible scenes. Replaces ~20 small
+tile blits (~12-16 ms total for 64×64 bgs) on the wave-30 direct-to-
+window path with a single 76 KB src-offset blit (~3-4 ms).
+
+**On scenes that don't engage Lever B** (BK_HIDE2, BK_FASTLEFT_LAYERS,
+etc.): 0 ms regression. Wave-30 thrashing-detect remains in place for
+BK_FASTLEFT_LAYERS; BK_HIDE2 path is untouched.
+
+Per `perf_predictions_unreliable.md` predictions on this project
+have been 5-30× wrong; the savings depend on operator's scene route.
+Could overshoot or undershoot the 40 fps target.
+
+**Reuses existing `SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` killswitch**
+per team-lead direction — disables EVERYTHING (patch 0080 + wave-30
+0126 + wave-31 0127). Cleanest semantics. No new env var.
+
+**Fade-transition edge case:** team-lead's brief flagged this as in-
+patch responsibility. Per code analysis: backdrop is not modulated
+by per-pixel alpha — fade (`fade.Draw()`) and `tintScreen()` apply
+to the whole window surface AFTER `map_draw_backdrop` returns,
+overdrawing or darkening the backdrop's already-written pixels.
+Caching the pre-fade backdrop is correct (fade reapplies to the
+blitted output). No special-case gating needed.
+
+**Strings marker:** LOG_INFO emitted unconditionally each audit-flush
+(every 100 flips). flush-instr greps post-iter for `engine-signaled
+invalidation, hit=N miss=M invalidate=K` to verify:
+- hit/(hit+miss) ratio close to 1.0 in steady-state (cache hits
+  every frame after the initial map-fill miss)
+- invalidate count matches expected map-transition count
+- per-block (n=100): expected ~99 hits + 1 miss per map entry, or
+  100 hits steady-state
+
+**Local DOSBox-X smoke** (this build, --fast, ~2 min):
+- Title screen (BK_FASTLEFT_LAYERS): renders correctly; Lever B not
+  engaged (patch 0081 wrapper, wave-30 thrashing-detect runs); 30+
+  thrashing-detect markers observed.
+- Intro cutscene + Start Point (BK_HIDE2 per stage.dat): renders
+  correctly; Lever B not engaged (early-return at BK_HIDE case);
+  Lever B counters show hit=0 miss=0 across all blocks. Expected.
+- Shelter (Stage 18, BK_HIDE2): renders correctly; same as Start
+  Point.
+- Mimiga Village / Egg Corridor / other BK_PARALLAX scenes: not
+  reached in local smoke (hold-key navigation pre-40fps is fiddly);
+  build-qa real-HW iter validates Lever B engagement count via
+  the marker.
+
+**Risk profile:** structurally sound, follows existing patch 0080
+pattern, killswitch tested. The only un-stress-tested element is
+the src-offset blit correctness on BK_PARALLAX scenes — visual A/B
+risk caught by build-qa's real-HW iter screenshot review.
+
+Workspace-local; never upstreamed. See `docs/PHASE11-WAVE-30-FINDINGS.md`
+§ 3 (wave-30 trajectory) + `docs/PHASE11-WAVE-29-HEADLINE.md` § 6
+(Lever B original framing) for the wave-29 → wave-31 chain context.
+---
+ src/graphics/Renderer.cpp |  11 ++
+ src/map.cpp               | 322 ++++++++++++++++++++++++++++++++++++++
+ src/map.h                 |   6 +
+ 3 files changed, 339 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 580556c..7c61a73 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -2610,6 +2610,17 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_mds_tfg_tiles_drawn_special      = 0;
+   NXE::Diag::g_mds_tfg_tiles_skipped_attr       = 0;
+   NXE::Diag::g_mds_tfg_tiles_skipped_oob        = 0;
++
++  // patch 0127 (Phase 11 wave-31 Lever B): emit + reset the natural-
++  // origin backdrop cache hit/miss/invalidate counters per the per-
++  // 100-flip cadence. Single LOG_INFO line `backdrop cache: engine-
++  // signaled invalidation, hit=N miss=M invalidate=K` for flush-instr
++  // post-iter grep verification. Encapsulated in map.cpp (counters
++  // stay file-scope-static there; this is a thin helper that emits
++  // + resets in one shot). Emits unconditionally — even when
++  // killswitched the line shows hit=0 miss=0 invalidate=0 so the log
++  // shape stays uniform.
++  map_emit_backdrop_natural_audit();
+ }
+ 
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
+diff --git a/src/map.cpp b/src/map.cpp
+index 6d2a975..97d7fa1 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -114,6 +114,108 @@ static int  g_backdrop_thrash_frames_in_state = 0;
+ static constexpr int BACKDROP_THRASH_MISS_THRESHOLD = 4;
+ static constexpr int BACKDROP_THRASH_PROBE_INTERVAL = 60;
+ 
++// DOS-PORT (patch 0127, Phase 11 wave-31 Lever B): natural-origin
++// backdrop output cache for the generic-loop scrolltypes
++// (BK_PARALLAX / BK_FOLLOWFG / BK_FASTLEFT / BK_FIXED). Stores the
++// NATURAL-ORIGIN tiled rendered backdrop (parscroll=0,0 conceptually)
++// at dimensions large enough to hold screenWidth+bg_w by
++// screenHeight+bg_h, so any parscroll ∈ [0, bg_w) × [0, bg_h) maps
++// to an in-bounds src rect of size (screenWidth, screenHeight).
++//
++// Cache key strips parscroll_x/y per wave-31 contract; cached output
++// stays valid as long as map/scrolltype/backdrop/format/window-dim
++// don't change. **Critical interpretation choice**: team-lead's brief
++// wording "strip parscroll, cached output is RENDERED backdrop, on
++// hit single cache→window blit" would have produced a FROZEN
++// PARALLAX visual regression on every non-BK_FIXED scrolltype (the
++// rendered output DOES depend on parscroll; caching the rendered
++// output and reusing across parscroll changes means the backdrop
++// stops scrolling visually while the camera moves). This patch
++// implements the CORRECTNESS-PRESERVING variant: cache the NATURAL-
++// ORIGIN tiled output (parscroll-independent contents) at dimensions
++// large enough that the per-frame parscroll can be applied as a SRC
++// OFFSET in the cache→window blit at hit time. Same -ms savings (one
++// blit on hit vs. ~20 small tile blits on miss for 64×64 bgs), no
++// visual regression. See commit message + build-qa DM for full
++// rationale.
++//
++// Cache hit path: SDL_BlitSurface(g_backdrop_natural_sfc,
++//                                 &{parscroll_x, parscroll_y,
++//                                   screenWidth, screenHeight},
++//                                 win, NULL)
++//   = ~3-4 ms (single 76 KB transfer).
++//
++// Cache miss path: realloc cache to (screenWidth+bg_w) ×
++// (screenHeight+bg_h) if dims changed; tile-fill cache with bg_src
++// at offsets covering [0, screenWidth+bg_w) × [0, screenHeight+bg_h)
++// → typically ~12-16 ms for 64×64 bgs (~20 tile blits) one-time per
++// map change.
++//
++// Out of scope: BK_FASTLEFT_LAYERS scrolltype (patch 0081 wrapper).
++// That branch uses 5-layer per-layer-parscroll-dependent composition
++// where each layer has a DIFFERENT scroll speed (move_spd[]={0,1,2,
++// 4,8}); the composited output can't be expressed as a single src
++// offset of a natural-origin cache. BK_FASTLEFT_LAYERS branch
++// continues to use wave-30 thrashing-detect from patch 0126
++// unchanged.
++//
++// Killswitch: SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0 disables EVERYTHING
++// (patch 0080 cache + wave-30 0126 thrashing-detect + this wave-31
++// 0127 Lever B). Cleanest semantics: BACKDROP_CACHE=0 → render fresh
++// every frame, no cache machinery at all.
++//
++// Diagnostic counters: emitted per audit-flush cadence (every 100
++// flips) so flush-instr can grep post-iter for hit-rate verification.
++static SDL_Surface *g_backdrop_natural_sfc = nullptr;
++static int g_backdrop_natural_curmap     = -1;
++static int g_backdrop_natural_id         = -1;
++static int g_backdrop_natural_scrolltype = -1;
++static int g_backdrop_natural_indexed    = -1;
++static int g_backdrop_natural_cache_w    = 0;
++static int g_backdrop_natural_cache_h    = 0;
++static int g_backdrop_natural_bg_w       = 0;
++static int g_backdrop_natural_bg_h       = 0;
++static SDL_PixelFormat g_backdrop_natural_format = SDL_PIXELFORMAT_UNKNOWN;
++// Per-audit-flush counters (reset every 100 flips by
++// _maybe_flush_phase_timing_audit; emitted as a log marker for
++// post-iter grep verification of hit rate).
++static int g_backdrop_natural_hits_block        = 0;
++static int g_backdrop_natural_misses_block      = 0;
++static int g_backdrop_natural_invalidates_block = 0;
++
++// patch 0127 (wave-31 Lever B): natural-origin tile fill. Renders
++// bg_src tiled into target surface at every (x, y) offset where
++// 0 ≤ x ≤ cache_w and 0 ≤ y ≤ cache_h, in steps of (bg_w, bg_h).
++// Mirrors the existing tile loop at the patch 0080 cache miss path
++// + the legacy fallback, but writes natural-origin output (no
++// parscroll offsets — parscroll is applied at hit time as a src
++// offset in cache→window blit). Returns true on success.
++static bool _render_natural_origin_to_cache(SDL_Surface *target,
++                                            SDL_Surface *bg_src,
++                                            int target_w, int target_h,
++                                            int bg_w, int bg_h)
++{
++  if (!target || !bg_src) return false;
++  if (bg_w <= 0 || bg_h <= 0) return false;
++  // Defensive pre-clear so any backdrop dim case (bg < cache) doesn't
++  // leak prior contents in the trailing edges. Cheap (~3-4 ms one-
++  // time per map; amortizes to ~0 / flip).
++  SDL_FillSurfaceRect(target, NULL, 0);
++  SDL_Rect dst;
++  dst.w = bg_w;
++  dst.h = bg_h;
++  for (int y = 0; y < target_h; y += bg_h)
++  {
++    for (int x = 0; x < target_w; x += bg_w)
++    {
++      dst.x = x;
++      dst.y = y;
++      SDL_BlitSurface(bg_src, NULL, target, &dst);
++    }
++  }
++  return true;
++}
++
+ // DOS-PORT (patch 0080): probe killswitch once on first call. Strict
+ // "0" match disables the cache (lets a real-HW iter reproduce wave-9
+ // pre-cache behavior for ablation). All other values keep the
+@@ -233,6 +335,32 @@ static void _backdrop_cache_reset()
+   g_backdrop_miss_streak            = 0;
+   g_backdrop_thrash_engaged         = false;
+   g_backdrop_thrash_frames_in_state = 0;
++  // patch 0127 (wave-31 Lever B): release natural-origin cache surface
++  // + reset its key fields on map change. map_flush_graphics() is the
++  // engine's authoritative "map changed" signal — when curmap changes,
++  // the backdrop_id/scrolltype may change, requiring a full cache
++  // re-fill on next frame. Per-block hit/miss counters are reset by
++  // the log emit site (every 100 flips), NOT here, so per-flush
++  // attribution remains accurate across map transitions within a
++  // 100-flip block.
++  if (g_backdrop_natural_sfc)
++  {
++    SDL_DestroySurface(g_backdrop_natural_sfc);
++    g_backdrop_natural_sfc = nullptr;
++  }
++  g_backdrop_natural_curmap     = -1;
++  g_backdrop_natural_id         = -1;
++  g_backdrop_natural_scrolltype = -1;
++  g_backdrop_natural_indexed    = -1;
++  g_backdrop_natural_cache_w    = 0;
++  g_backdrop_natural_cache_h    = 0;
++  g_backdrop_natural_bg_w       = 0;
++  g_backdrop_natural_bg_h       = 0;
++  g_backdrop_natural_format     = SDL_PIXELFORMAT_UNKNOWN;
++  // Bump invalidates counter — flush-instr's marker tracks
++  // engine-signaled invalidation count per block to verify the cache
++  // architecture isn't thrashing on spurious map_flush_graphics calls.
++  ++g_backdrop_natural_invalidates_block;
+ }
+ 
+ // for FindObject--finding NPC's by ID2
+@@ -1061,7 +1189,164 @@ void map_draw_backdrop(void)
+     SDL_Surface *bg_src = backdrop[map.backdrop]->surfaceCpu();
+     if (bg_src && bg_src->format == win->format)
+     {
++      // patch 0127 (wave-31 Lever B): natural-origin cache attempt.
++      // Sub-decomposes patch 0080's cache key to remove parscroll_x/y;
++      // cache contents are the natural-origin tiled backdrop (no
++      // parscroll applied); parscroll is applied at hit time as a
++      // SRC OFFSET in the cache→window blit. Correctness-preserving
++      // alternative to the literal "freeze rendered output across
++      // parscroll changes" reading of the wave-31 spec.
++      //
++      // Lever B applies to the generic-loop scrolltypes only
++      // (BK_PARALLAX / BK_FOLLOWFG / BK_FASTLEFT / BK_FIXED). The
++      // BK_FASTLEFT_LAYERS branch (patch 0081 wrapper) uses multi-
++      // layer parscroll where each layer scrolls at a different
++      // speed; the composited output can't be expressed as a single
++      // src offset, so that branch keeps wave-30 thrashing-detect.
++      //
++      // Hit path: 1 SDL_BlitSurface (cache→window with src offset
++      // = parscroll mod bg_w / bg_h, size = screenWidth × screenHeight)
++      // ≈ ~3-4 ms.
++      // Miss path: realloc cache to (screenWidth+bg_w) ×
++      // (screenHeight+bg_h) if dims changed; tile-fill the cache
++      // surface via _render_natural_origin_to_cache (~12-16 ms one-
++      // time per map change for 64×64 bgs at 320×240 screen).
++      const int natural_cache_w = r->screenWidth + w;
++      const int natural_cache_h = r->screenHeight + h;
++      const bool natural_hit =
++          g_backdrop_natural_sfc &&
++          g_backdrop_natural_curmap     == game.curmap &&
++          g_backdrop_natural_id         == map.backdrop &&
++          g_backdrop_natural_scrolltype == map.scrolltype &&
++          g_backdrop_natural_indexed    == cache_indexed &&
++          g_backdrop_natural_cache_w    == natural_cache_w &&
++          g_backdrop_natural_cache_h    == natural_cache_h &&
++          g_backdrop_natural_bg_w       == w &&
++          g_backdrop_natural_bg_h       == h &&
++          g_backdrop_natural_format     == win->format;
++
++      if (natural_hit)
++      {
++        // HIT: blit natural-origin cache → window with parscroll-
++        // dependent src offset. parscroll_x/y may exceed bg_w/h for
++        // some scrolltypes (BK_FASTLEFT auto-increments without
++        // bounds); mod to [0, bg_w) × [0, bg_h) so the src rect
++        // stays in-bounds within the (screenWidth+bg_w) ×
++        // (screenHeight+bg_h) cache.
++        //
++        // For negative parscroll (some BK_PARALLAX edge cases on
++        // small maps; line 766-767 doubles negative parscroll to
++        // produce a non-negative result, but defensive % bg_w/h
++        // here handles any sign / magnitude).
++        int src_off_x = map.parscroll_x % w;
++        int src_off_y = map.parscroll_y % h;
++        if (src_off_x < 0) src_off_x += w;
++        if (src_off_y < 0) src_off_y += h;
++        SDL_Rect src_rect;
++        src_rect.x = src_off_x * r->scale;
++        src_rect.y = src_off_y * r->scale;
++        src_rect.w = r->screenWidth * r->scale;
++        src_rect.h = r->screenHeight * r->scale;
++        // Drain queued slow-path renderer commands + record full-
++        // screen dirty + bump drawcall via the wave-30 helpers
++        // (introduced in patch 0126 for the same single-blit-to-
++        // window accounting need).
++        r->prepareDirectBackdropWrite();
++        if (SDL_BlitSurface(g_backdrop_natural_sfc, &src_rect, win, NULL))
++        {
++          r->commitDirectBackdropWrite();
++          ++g_backdrop_natural_hits_block;
++          // patch 0126 carry-over: hit on Lever B path implicitly
++          // resets the wave-30 thrashing-detect state too — the
++          // patch-0080 cache below never runs, so the wave-30 miss
++          // streak doesn't increment. Explicitly clear state for
++          // cleanliness so transitioning between scrolltypes
++          // doesn't leave stale streak count behind.
++          g_backdrop_miss_streak            = 0;
++          g_backdrop_thrash_engaged         = false;
++          g_backdrop_thrash_frames_in_state = 0;
++          return;
++        }
++        // Lever B blit failed (rare; bad src rect or format mismatch).
++        // Invalidate key + fall through to patch-0080 + wave-30 path
++        // below.
++        g_backdrop_natural_curmap = -1;
++      }
++      else
++      {
++        // MISS: (re)alloc cache + populate.
++        if (!g_backdrop_natural_sfc ||
++            g_backdrop_natural_cache_w != natural_cache_w ||
++            g_backdrop_natural_cache_h != natural_cache_h ||
++            g_backdrop_natural_format  != win->format)
++        {
++          if (g_backdrop_natural_sfc)
++          {
++            SDL_DestroySurface(g_backdrop_natural_sfc);
++            g_backdrop_natural_sfc = nullptr;
++          }
++          g_backdrop_natural_sfc = SDL_CreateSurface(natural_cache_w, natural_cache_h, win->format);
++          if (g_backdrop_natural_sfc &&
++              win->format == SDL_PIXELFORMAT_INDEX8 &&
++              r->masterPalette())
++          {
++            SDL_SetSurfacePalette(g_backdrop_natural_sfc, r->masterPalette());
++          }
++          g_backdrop_natural_cache_w = natural_cache_w;
++          g_backdrop_natural_cache_h = natural_cache_h;
++          g_backdrop_natural_format  = win->format;
++        }
++
++        if (g_backdrop_natural_sfc &&
++            _render_natural_origin_to_cache(g_backdrop_natural_sfc, bg_src,
++                                            natural_cache_w, natural_cache_h,
++                                            w, h))
++        {
++          // Update key. Note: parscroll_x/y NOT stored in key (the
++          // whole point of Lever B — output stays valid across
++          // parscroll changes).
++          g_backdrop_natural_curmap     = game.curmap;
++          g_backdrop_natural_id         = map.backdrop;
++          g_backdrop_natural_scrolltype = map.scrolltype;
++          g_backdrop_natural_indexed    = cache_indexed;
++          g_backdrop_natural_bg_w       = w;
++          g_backdrop_natural_bg_h       = h;
++          ++g_backdrop_natural_misses_block;
++
++          // Now do the same hit-path blit (cache is freshly populated).
++          int src_off_x = map.parscroll_x % w;
++          int src_off_y = map.parscroll_y % h;
++          if (src_off_x < 0) src_off_x += w;
++          if (src_off_y < 0) src_off_y += h;
++          SDL_Rect src_rect;
++          src_rect.x = src_off_x * r->scale;
++          src_rect.y = src_off_y * r->scale;
++          src_rect.w = r->screenWidth * r->scale;
++          src_rect.h = r->screenHeight * r->scale;
++          r->prepareDirectBackdropWrite();
++          if (SDL_BlitSurface(g_backdrop_natural_sfc, &src_rect, win, NULL))
++          {
++            r->commitDirectBackdropWrite();
++            // Reset wave-30 thrashing state on miss-resolved-by-fill
++            // (cache is fresh; subsequent frames are hits).
++            g_backdrop_miss_streak            = 0;
++            g_backdrop_thrash_engaged         = false;
++            g_backdrop_thrash_frames_in_state = 0;
++            return;
++          }
++          // Blit failed post-fill (rare); fall through to patch-0080
++          // legacy path below.
++          g_backdrop_natural_curmap = -1;
++        }
++        // If alloc / render-fill failed, fall through to patch-0080
++        // + wave-30 path below.
++      }
++
+       // Cache key match check — if all dimensions/keys agree, single blit.
++      // patch 0127 (wave-31 Lever B) fallthrough: only reached if
++      // Lever B above failed (alloc/format issue, blit failure).
++      // patch-0080 cache + wave-30 thrashing-detect remain in place
++      // as a safety net for those edge cases.
+       const bool cache_hit =
+           g_backdrop_cache_sfc &&
+           g_backdrop_cache_curmap     == game.curmap &&
+@@ -1288,6 +1573,43 @@ void DrawFastLeftLayered(void)
+     Renderer::getInstance()->fillRect(0, 0, Renderer::getInstance()->screenWidth, -mapy, 0, 0, 0);
+ }
+ 
++// DOS-PORT (patch 0127, Phase 11 wave-31 Lever B): emit + reset the
++// natural-origin backdrop cache hit/miss/invalidate counters per the
++// per-100-flip cadence. Called from Renderer.cpp's
++// _maybe_flush_phase_timing_audit. Single LOG_INFO marker:
++//   backdrop cache: engine-signaled invalidation, hit=N miss=M invalidate=K
++// Where:
++//   hit         — frames in block where natural-origin cache hit
++//                 (single src-offset blit; ~3-4 ms / frame)
++//   miss        — frames in block where natural-origin cache missed
++//                 (alloc + tile-fill + blit; ~12-16 ms one-time)
++//   invalidate  — engine-signaled invalidation calls in block (via
++//                 map_flush_graphics → _backdrop_cache_reset). Expected
++//                 0 in steady-state gameplay; non-zero on map
++//                 transitions.
++//
++// flush-instr greps post-iter to verify:
++//   hit/(hit+miss) ratio close to 1.0 in steady-state (cache hits
++//   every frame after initial map-fill miss)
++//   invalidate count matches expected map-transition count
++//
++// Counters are file-scope static in map.cpp (encapsulated; not exposed
++// via diagnostic_timers.h extern). Reset at end of emit so each block
++// stats reflect its own 100 flips.
++void map_emit_backdrop_natural_audit()
++{
++  // Always emit (even when killswitched and counters all zero) so the
++  // log line is uniform-shape for grep tooling. Cheap: 1 LOG_INFO +
++  // 3 stores.
++  LOG_INFO("backdrop cache: engine-signaled invalidation, hit={} miss={} invalidate={}",
++           g_backdrop_natural_hits_block,
++           g_backdrop_natural_misses_block,
++           g_backdrop_natural_invalidates_block);
++  g_backdrop_natural_hits_block        = 0;
++  g_backdrop_natural_misses_block      = 0;
++  g_backdrop_natural_invalidates_block = 0;
++}
++
+ void map_flush_graphics()
+ {
+   int i;
+diff --git a/src/map.h b/src/map.h
+index 91b780c..b8feaa4 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -123,6 +123,12 @@ void initmap(void);
+ void map_set_backdrop(int backdrop_no);
+ void map_draw_backdrop(void);
+ void DrawFastLeftLayered(void);
++// patch 0127 (Phase 11 wave-31 Lever B): emit + reset the natural-
++// origin backdrop cache hit/miss/invalidate counters. Called from
++// Renderer.cpp's _maybe_flush_phase_timing_audit on the per-100-
++// flip cadence; emits one LOG_INFO marker line for flush-instr's
++// post-iter grep verification of cache hit-rate.
++void map_emit_backdrop_natural_audit();
+ void map_flush_graphics();
+ void map_drawwaterlevel(void);
+ void map_draw(uint8_t foreground);
+-- 
+2.47.3
+

@@ -1,0 +1,418 @@
+From d1801c4a724978804e419128870df633ffca384d Mon Sep 17 00:00:00 2001
+From: nx-engine <nx-engine@doskutsu.local>
+Date: Fri, 8 May 2026 14:57:48 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200124=20=E2=80=94=20?=
+ =?UTF-8?q?wave-28=20flip()=20body=20decomposition=20instrumentation?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Sub-decomposes Renderer::flip()'s W20A `phase=total` window into 5 named
+sub-buckets + 1 derived residual covering the regions OUTSIDE W20A's
+drain / dirty / present / housekeeping brackets — i.e. the ~12 ms / flip
+/ 32% unmeasured slice identified in iter K residual decomp as the
+dominant unmeasured cost post-slot-0117.
+
+Brackets:
+  fb_setup            — flip() entry block before the W20A dirty bracket
+                        opens (lines ~3658→3729). Local-variable book-
+                        keeping + _inter_flip_ms calc + diff prelude.
+                        Hypothesis: <0.1 ms (mostly local stores).
+  fb_prev_frame_blit  — prev-frame surface alloc/destroy on dim/format
+                        mismatch + SDL_BlitSurface cache→prev (76800 byte
+                        INDEX8 copy). Dormant when PREVFRAME_DIFF=OFF
+                        (default since wave 17.6 patch 0085); bracket
+                        exists for self-validation + future
+                        PREVFRAME_DIFF=1 ablation comparison.
+  fb_yield            — SDL_Delay(0) cooperative-thread yield to SDL3
+                        audio thread. SUSPECT for the dominant 12 ms
+                        slice per audio_mix_zero_is_not_audio_off.md +
+                        audio_cost_attribution_unknown.md — cooperative
+                        scheduler attributes audio wall-clock to the
+                        main thread's flip() call. Hypothesis: 1-12 ms.
+  fb_diag_logs        — flip_failed log + per-10-flips flip-probe
+                        LOG_INFO emit + drawcalls reset. Per-line fsync
+                        per patch 0036; spikes on per-10 emit flips.
+                        Hypothesis: amortized ~0.05-0.2 ms / flip.
+  fb_audit_flushes    — 7 _maybe_flush_*_audit() calls + flip-inner
+                        accumulator close + W20A sample-array fill
+                        block. Each _maybe_flush_* early-returns 99/100
+                        and emits 1-3 LOG_INFO lines on 1/100.
+                        Hypothesis: amortized ~0.1-0.5 ms / flip.
+  fb_residual         — derived. _flip_inner_dt_ns − (W20A named sum +
+                        sum(fb_*)); clamped at 0. Self-validation:
+                        small median (<1 ms) ⇒ brackets exhaustive;
+                        large residual surfaces an unbracketed chunk
+                        for wave-29.
+
+Implementation pattern: inline `if (_flip_body_instr_on)` guards with
+explicit Uint64 t0 captures (mirrors W20A's existing flip()-side pattern;
+NOT the RAII pattern used by game.cpp's W22A/W22.5 instrumentation —
+contract § 4 explicitly forbids mixing patterns in this file).
+
+Per-flip cost when env unset: ~10 conditional branches + 1 cached
+static-const-bool read (sub-µs total). Will not measurably regress fps
+in the W28A2 control PLAY (must match iter L baseline 34.33 fps within
+~1 fps tolerance).
+
+Storage: 6 × 100 × 8 = ~5 KB static state for the sample arrays + 1
+shared idx (each bucket fills exactly once per flip).
+
+`_flip_inner_dt_ns` hoisted from inner-block scope to flip()-function
+scope so the residual block can read it after the fb_audit_flushes
+bracket close (was previously scoped inside `{ ... }` and invisible
+after the brace).
+
+Emit site: _maybe_flush_phase_timing_audit() in Renderer.cpp, AFTER the
+W20A `[flip-stat]` block and BEFORE the W20B `[engine-tick-stat]` block.
+Output ordering: outermost-to-innermost (flip-stat → flip-body-stat →
+engine-tick-stat → mode-tick-stat → mode-draw-scene-stat → mds-* →
+counters). Distinct prefix `flip-body-stat` so the 7-layer grep stays
+clean. Empty-block placeholder lines (`n=0`, all numerics 0.00) emitted
+when env is set but no samples landed (e.g. first audit-flush after
+enable) so per-block log shape stays uniform 6 lines.
+
+Coupling note: residual reads W20A-populated `_drain_ns` / `_dirty_ns` /
+`_present_ns` / `_hk_ns` locals. Without `SDL_HINT_DOSKUTSU_FLIP_INSTR=1`
+those stay 0 and residual computes as `total - sum(fb_*)` which is
+still meaningful but no longer apples-to-apples with W20A's named
+phases. Operator iter sets both hints together.
+
+Direct-VESA-aware gating per direct_vesa_aware_instrumentation_gating.md:
+gate counter = `_flip_total` (already ticking; fires regardless of which
+SDL flush path is engaged). Emit fields = per-flip dt locals (no
+internal sticky-state). Verified clean against the two W23/W23.7 traps.
+
+Strict-"1" match: only literal `1` activates; any other value (unset,
+empty, "0") is OFF.
+
+Workspace-local; never upstreamed.
+
+See docs/PHASE11-WAVE-28-CONTRACT.md for the full bracket-scheme
+rationale + § 10 wave-29 decision tree.
+---
+ src/graphics/Renderer.cpp | 236 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 235 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index e30a44c..91bdcbc 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -558,6 +558,26 @@ inline bool _abl_mds_tfg_instr()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0124, Phase 11 wave-28 flip()-body decomposition per
++// docs/PHASE11-WAVE-28-CONTRACT.md): env-var gate for the 5 sub-bucket +
++// 1 derived residual brackets sitting INSIDE Renderer::flip()'s
++// `phase=total` window. Sub-decomposes the W20A flip-phase MISC slice
++// (~12 ms / flip / 32% per iter K residual decomp) into named buckets
++// {fb_setup, fb_prev_frame_blit, fb_yield, fb_diag_logs, fb_audit_flushes}
++// + derived fb_residual = phase=total − sum(W20A named) − sum(fb_*).
++// Strict-"1" match per CLAUDE.md convention; default OFF. Cached
++// static-const-bool — -O2 hoists per-flip guards. Pairs with
++// SDL_HINT_DOSKUTSU_FLIP_INSTR=1 (W20A): without W20A's gate the
++// W20A-populated dt locals stay 0 and residual silently reads
++// `total - sum(fb_*)` which is still meaningful but no longer
++// apples-to-apples cross-validation against W20A's named phases.
++// Strict "1" match; any other value (unset, empty, "0") is OFF.
++inline bool _abl_flip_body_instr()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_FLIP_BODY_INSTR");
++  return v;
++}
++
+ // DOS-PORT (patch 0113, Phase 11 iter H opt #2: off-screen tile
+ // bbox skip). Killswitch for the FG-tilemap loop's OOB-tile skip
+ // optimization. When ENABLED, the loop pre-clips iteration range to
+@@ -1245,6 +1265,55 @@ Uint64 _flip_phase_samples_get_generation[_flip_phase_block_size]  = {};
+ int    _flip_phase_idx_pp = 0;
+ int    _flip_phase_idx_gg = 0;
+ 
++// DOS-PORT (patch 0124, Phase 11 wave 28): flip()-body decomposition
++// sample arrays. Sub-decomposes the W20A `phase=total` window into 5
++// named sub-buckets covering the regions OUTSIDE W20A's drain / dirty /
++// present / housekeeping brackets (~12 ms / flip / 32% per iter K
++// residual decomposition; the dominant unmeasured slice post-slot-0117).
++// 6 arrays = 5 measured + 1 derived (residual = total − W20A named −
++// sum(fb_*) clamped at 0). Single shared idx because each bucket fills
++// exactly once per flip. Default OFF: when env unset, all dt locals
++// stay 0, residual computation block is gated, idx never increments.
++// Static state cost: 6 × 100 × 8 = 4800 bytes (~5 KB).
++//
++//   fb_setup            — flip() entry block before dirty bracket opens
++//                         (lines ~3658→3729); local-variable bookkeeping
++//                         + _inter_flip_ms calc + diff bracket prelude.
++//   fb_prev_frame_blit  — prev-frame surface alloc/destroy on dim/format
++//                         mismatch + SDL_BlitSurface cache→prev (76800
++//                         byte INDEX8 copy). Dormant in default config
++//                         (PREVFRAME_DIFF default-OFF since wave 17.6
++//                         patch 0085); bracket exists for self-validation
++//                         + future PREVFRAME_DIFF=1 ablation comparison.
++//   fb_yield            — SDL_Delay(0) cooperative-thread yield to SDL3
++//                         audio thread. Suspect for the audio-IRQ wall-
++//                         clock interleave hypothesis (audio thread fills
++//                         DAC ring with Pixtone mix; cooperative scheduler
++//                         attributes audio wall-clock to main-thread
++//                         flip() execution).
++//   fb_diag_logs        — flip_failed log + per-10-flips flip-probe
++//                         LOG_INFO emit + drawcalls reset. Amortized
++//                         ~1/10 emit cadence; spikes on the per-10
++//                         emit flips.
++//   fb_audit_flushes    — 7 _maybe_flush_*_audit() calls + flip-inner
++//                         accumulator close + sample-array fill block.
++//                         Each _maybe_flush_* early-returns 99/100 (one
++//                         comparison) and emits 1-3 LOG_INFO lines on
++//                         the 1/100 emit flip; block-sample-fill always
++//                         runs.
++//   fb_residual         — derived. _flip_inner_dt_ns − (W20A named sum
++//                         + sum(fb_*)). Self-validation: small median
++//                         (<1 ms) means brackets are exhaustive for the
++//                         scene; large residual surfaces an unbracketed
++//                         chunk for wave-29.
++Uint64 _flip_body_samples_setup[_flip_phase_block_size]            = {};
++Uint64 _flip_body_samples_prev_frame_blit[_flip_phase_block_size]  = {};
++Uint64 _flip_body_samples_yield[_flip_phase_block_size]            = {};
++Uint64 _flip_body_samples_diag_logs[_flip_phase_block_size]        = {};
++Uint64 _flip_body_samples_audit_flushes[_flip_phase_block_size]    = {};
++Uint64 _flip_body_samples_residual[_flip_phase_block_size]         = {};
++int    _flip_body_sample_idx = 0;
++
+ // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): summarize a sample
+ // array. n must be ≤ _flip_phase_block_size; copy is on-stack so total
+ // stack pressure is ~4 KB across the 5 phases × invocation site (one
+@@ -1571,6 +1640,60 @@ void _maybe_flush_phase_timing_audit()
+              (unsigned long)_gen_bumps_block,
+              (unsigned long)_housekeeping_skipped_block);
+   }
++  // DOS-PORT (patch 0124, Phase 11 wave 28): emit 6 `[flip-body-stat]`
++  // lines decomposing the W20A `phase=total` window into 5 sub-buckets +
++  // 1 derived residual. Sits AFTER the W20A `[flip-stat]` block (above)
++  // and BEFORE the W20B `[engine-tick-stat]` block (below). Output
++  // ordering is outermost-to-innermost: flip-stat (layer 1) →
++  // flip-body-stat (layer 1.5; sub-decomposes flip-stat phase=total) →
++  // engine-tick-stat (layer 2). Distinct prefix `flip-body-stat` so the
++  // 7-layer grep stays clean.
++  //
++  // Empty-block placeholder (n=0; 0.00 numerics) emitted regardless so
++  // per-block log shape stays uniform 6 lines — critical for
++  // fb_prev_frame_blit which fires n=count but with all-zero samples
++  // when PREVFRAME_DIFF is OFF (default). Independent gate: only this
++  // block reads from _flip_body_sample_idx; W20A's gate doesn't reach
++  // it. Reset _flip_body_sample_idx unconditionally below.
++  if (_abl_flip_body_instr() && _flip_body_sample_idx > 0)
++  {
++    const int n_fb = _flip_body_sample_idx;
++    _FlipPhaseStats st_fb_setup, st_fb_pfb, st_fb_yield,
++                    st_fb_dlogs, st_fb_audit, st_fb_resid;
++    _compute_flip_phase_stats(_flip_body_samples_setup,           n_fb, st_fb_setup);
++    _compute_flip_phase_stats(_flip_body_samples_prev_frame_blit, n_fb, st_fb_pfb);
++    _compute_flip_phase_stats(_flip_body_samples_yield,           n_fb, st_fb_yield);
++    _compute_flip_phase_stats(_flip_body_samples_diag_logs,       n_fb, st_fb_dlogs);
++    _compute_flip_phase_stats(_flip_body_samples_audit_flushes,   n_fb, st_fb_audit);
++    _compute_flip_phase_stats(_flip_body_samples_residual,        n_fb, st_fb_resid);
++    LOG_INFO("[flip-body-stat n={} phase=fb_setup            min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_fb, st_fb_setup.min_ms, st_fb_setup.med_ms, st_fb_setup.mean_ms, st_fb_setup.p95_ms, st_fb_setup.max_ms);
++    LOG_INFO("[flip-body-stat n={} phase=fb_prev_frame_blit  min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_fb, st_fb_pfb.min_ms, st_fb_pfb.med_ms, st_fb_pfb.mean_ms, st_fb_pfb.p95_ms, st_fb_pfb.max_ms);
++    LOG_INFO("[flip-body-stat n={} phase=fb_yield            min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_fb, st_fb_yield.min_ms, st_fb_yield.med_ms, st_fb_yield.mean_ms, st_fb_yield.p95_ms, st_fb_yield.max_ms);
++    LOG_INFO("[flip-body-stat n={} phase=fb_diag_logs        min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_fb, st_fb_dlogs.min_ms, st_fb_dlogs.med_ms, st_fb_dlogs.mean_ms, st_fb_dlogs.p95_ms, st_fb_dlogs.max_ms);
++    LOG_INFO("[flip-body-stat n={} phase=fb_audit_flushes    min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_fb, st_fb_audit.min_ms, st_fb_audit.med_ms, st_fb_audit.mean_ms, st_fb_audit.p95_ms, st_fb_audit.max_ms);
++    LOG_INFO("[flip-body-stat n={} phase=fb_residual         min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_fb, st_fb_resid.min_ms, st_fb_resid.med_ms, st_fb_resid.mean_ms, st_fb_resid.p95_ms, st_fb_resid.max_ms);
++  }
++  else if (_abl_flip_body_instr())
++  {
++    // Empty-block placeholder when env is set but no samples landed
++    // (e.g. first audit-flush after enable). Keeps shape uniform.
++    LOG_INFO("[flip-body-stat n=0 phase=fb_setup            min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    LOG_INFO("[flip-body-stat n=0 phase=fb_prev_frame_blit  min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    LOG_INFO("[flip-body-stat n=0 phase=fb_yield            min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    LOG_INFO("[flip-body-stat n=0 phase=fb_diag_logs        min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    LOG_INFO("[flip-body-stat n=0 phase=fb_audit_flushes    min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    LOG_INFO("[flip-body-stat n=0 phase=fb_residual         min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++  }
++  // DOS-PORT (patch 0124): reset W28 sub-bucket sample idx unconditionally
++  // (sample-array contents are overwritten next flip; idx reset lets the
++  // cadence repeat cleanly).
++  _flip_body_sample_idx = 0;
+   _drawcall_accum_ns_block = 0;
+   _drawcall_count_block = 0;
+   _flip_inner_accum_ns_block = 0;
+@@ -3692,6 +3815,29 @@ void Renderer::flip()
+   Uint64 _present_ns = 0;
+   Uint64 _hk_ns = 0;
+ 
++  // DOS-PORT (patch 0124, Phase 11 wave 28): flip-body decomposition
++  // capture + per-flip sub-bucket dt locals. _flip_body_instr_on is
++  // captured here adjacent to _flip_instr_on (mirrors the W20A pattern).
++  // Per-flip dt locals are function-scope so the residual block at end-
++  // of-flip can read them after the fb_audit_flushes bracket closes.
++  // _flip_inner_dt_ns is hoisted from the previously-inner-block scope
++  // up to function scope so the residual block can reference it AFTER
++  // the fb_audit_flushes bracket close (the W20A sample-fill block at
++  // end-of-flip captures into this local; previously it was scoped
++  // inside `{ ... }` and invisible after the brace).
++  const bool _flip_body_instr_on = _abl_flip_body_instr();
++  Uint64 _fb_setup_ns            = 0;
++  Uint64 _fb_prev_frame_blit_ns  = 0;
++  Uint64 _fb_yield_ns            = 0;
++  Uint64 _fb_diag_logs_ns        = 0;
++  Uint64 _fb_audit_flushes_ns    = 0;
++  Uint64 _flip_inner_dt_ns       = 0;
++  // fb_setup bracket entry: capture t0 before the entry block kicks off.
++  // The bracket closes immediately before the W20A `_dirty_t0_ns` capture
++  // (see below) — together they cover lines ~3658→3729 (function entry
++  // through the diff/bbox prelude).
++  const Uint64 _fb_setup_t0 = _flip_body_instr_on ? SDL_GetTicksNS() : 0;
++
+   // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): inter-flip wall clock.
+   // (this_flip_t0 - _last_flip_t0) measures the WHOLE-FRAME budget
+   // (logic + drawcalls + flip), not just the present cost. On real HW
+@@ -3725,6 +3871,11 @@ void Renderer::flip()
+   // (computed below in the bbox block). We deduct `_dirty_drain_subtract_ns`
+   // at close so the drain duration (counted separately under _drain_ns)
+   // doesn't double-count.
++  // DOS-PORT (patch 0124, Phase 11 wave 28): close the fb_setup bracket
++  // here — the W20A dirty bracket opens immediately below, and the W28
++  // sub-bucketing scheme attributes everything from flip() entry up to
++  // the dirty-bracket open to fb_setup.
++  if (_flip_body_instr_on) _fb_setup_ns = SDL_GetTicksNS() - _fb_setup_t0;
+   const Uint64 _dirty_t0_ns = _flip_instr_on ? SDL_GetTicksNS() : 0;
+ 
+   bool _prev_diff_engaged = false;
+@@ -4044,6 +4195,13 @@ void Renderer::flip()
+   // VRAM (within the limits of partial-flush — partial flushes only
+   // overwrite changed regions of VRAM, but prev mirrors the engine's
+   // window surface which is the source of truth, not VRAM directly).
++  // DOS-PORT (patch 0124, Phase 11 wave 28): bracket the entire prev-
++  // frame block as fb_prev_frame_blit. In default config (PREVFRAME_DIFF
++  // OFF) the helper short-circuits and the bracket measures ~0 ms; the
++  // bracket exists for self-validation + future PREVFRAME_DIFF=1
++  // ablation comparison.
++  const Uint64 _fb_prev_frame_blit_t0 =
++      _flip_body_instr_on ? SDL_GetTicksNS() : 0;
+   if (ok && !_doskutsu_prev_frame_diff_is_disabled(_prev_frame_diff_disabled) &&
+       _cached_window_surface)
+   {
+@@ -4073,6 +4231,8 @@ void Renderer::flip()
+       SDL_BlitSurface(_cached_window_surface, NULL, _prev_frame_surface, NULL);
+     }
+   }
++  if (_flip_body_instr_on)
++    _fb_prev_frame_blit_ns = SDL_GetTicksNS() - _fb_prev_frame_blit_t0;
+ 
+   // DOS-PORT (patch 0064, Phase 9 wave 13.3): explicit cooperative-thread
+   // yield once per flip. Pairs with the SDL-side patch that removes the
+@@ -4080,7 +4240,22 @@ void Renderer::flip()
+   // SDL_SYS_DelayNS(0) → DOS_Yield() on the DOS backend, giving the
+   // audio thread scheduled time without the 115 ms round-trip cost
+   // measured in wave 13.2 NO_INPUT_POLL ablation.
++  // DOS-PORT (patch 0124, Phase 11 wave 28): bracket the cooperative
++  // yield as fb_yield. Suspect for the ~12 ms unmeasured slice in
++  // phase=total per `audio_mix_zero_is_not_audio_off.md` —
++  // cooperative scheduler attributes audio thread wall-clock to the
++  // main thread's flip() call. Single-call bracket; thinnest of the 5.
++  const Uint64 _fb_yield_t0 = _flip_body_instr_on ? SDL_GetTicksNS() : 0;
+   SDL_Delay(0);
++  if (_flip_body_instr_on) _fb_yield_ns = SDL_GetTicksNS() - _fb_yield_t0;
++
++  // DOS-PORT (patch 0124, Phase 11 wave 28): bracket the diag-logs
++  // block as fb_diag_logs. Covers the flip_failed log + per-10-flips
++  // flip-probe LOG_INFO emit + drawcalls reset. Per-line fsync (per
++  // patch 0036) makes the per-10-flips emit measurable on real HW;
++  // amortized ~0.05-0.2 ms / flip with spikes on the per-10 emit flips.
++  const Uint64 _fb_diag_logs_t0 =
++      _flip_body_instr_on ? SDL_GetTicksNS() : 0;
+   if (!ok)
+   {
+     ++_flip_failed;
+@@ -4104,6 +4279,17 @@ void Renderer::flip()
+              _drawcalls_since_flip, _drawcalls_total, _flip_failed, _null_tex_total);
+   }
+   _drawcalls_since_flip = 0;
++  if (_flip_body_instr_on) _fb_diag_logs_ns = SDL_GetTicksNS() - _fb_diag_logs_t0;
++
++  // DOS-PORT (patch 0124, Phase 11 wave 28): bracket the audit-flush
++  // block as fb_audit_flushes. Covers the 7 _maybe_flush_*_audit() calls
++  // PLUS the flip-inner accumulator close + sample-array fill block (per
++  // contract § 4 — the inner-block work is part of the per-flip overhead
++  // this bucket measures). Each _maybe_flush_* early-returns on 99/100
++  // (one int comparison) and emits 1-3 LOG_INFO lines on 1/100; spikes
++  // on the per-100-flips emit flip.
++  const Uint64 _fb_audit_flushes_t0 =
++      _flip_body_instr_on ? SDL_GetTicksNS() : 0;
+   // Patch 0042: end-of-flip drawcall tally (block summary every N flips).
+   _maybe_flush_drawcall_tally();
+   // Patch 0043: alpha-mod audit summary (shares the per-100-flip cadence).
+@@ -4124,8 +4310,11 @@ void Renderer::flip()
+   // flip-inner duration includes the audit-flush cost itself (small,
+   // but accounting-honest). The audit-flush *for* phase timing fires
+   // afterwards, naturally including this flip's own inner duration.
++  // DOS-PORT (patch 0124, Phase 11 wave 28): _flip_inner_dt_ns is now
++  // declared at flip()-function scope (above) so the W28 residual block
++  // (after this bracket closes) can read it. Otherwise unchanged.
+   {
+-    const Uint64 _flip_inner_dt_ns = SDL_GetTicksNS() - _flip_inner_t0_ns;
++    _flip_inner_dt_ns = SDL_GetTicksNS() - _flip_inner_t0_ns;
+     _flip_inner_accum_ns_block += _flip_inner_dt_ns;
+     _flip_inner_accum_ns_global += _flip_inner_dt_ns;
+     // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): record all five
+@@ -4146,6 +4335,51 @@ void Renderer::flip()
+       ++_flip_phase_sample_idx;
+     }
+   }
++  if (_flip_body_instr_on)
++    _fb_audit_flushes_ns = SDL_GetTicksNS() - _fb_audit_flushes_t0;
++
++  // DOS-PORT (patch 0124, Phase 11 wave 28): residual computation block.
++  // Reads the W20A-populated locals (_drain_ns, _dirty_ns, _present_ns,
++  // _hk_ns) + W28 sub-bucket dt locals + flip-inner total. Residual =
++  // flip_inner − sum(W20A named) − sum(fb_*); clamped at 0 to handle
++  // measurement jitter (sum-of-parts can briefly exceed total due to
++  // SDL_GetTicksNS coarseness on PODP83).
++  //
++  // Self-validation: small fb_residual median (<1 ms) means the 5 sub-
++  // brackets are exhaustive for the scene. Large residual surfaces an
++  // unbracketed chunk for wave-29.
++  //
++  // Coupling note (per contract § 2): when FLIP_INSTR=0, the W20A locals
++  // stay 0 and the residual computes as `total - 0 - sum(fb_*)`. Still
++  // meaningful (= "anything not in fb_* sub-buckets") but no longer
++  // apples-to-apples with W20A's named phases. PLAY1/PLAY3 set both
++  // hints; PLAY2 leaves both off as the killswitched control.
++  if (_flip_body_instr_on
++      && _flip_body_sample_idx < _flip_phase_block_size)
++  {
++    const Sint64 _named_sum =
++        (Sint64)_drain_ns + (Sint64)_dirty_ns +
++        (Sint64)_present_ns + (Sint64)_hk_ns +
++        (Sint64)_fb_setup_ns + (Sint64)_fb_prev_frame_blit_ns +
++        (Sint64)_fb_yield_ns + (Sint64)_fb_diag_logs_ns +
++        (Sint64)_fb_audit_flushes_ns;
++    Sint64 _fb_residual = (Sint64)_flip_inner_dt_ns - _named_sum;
++    if (_fb_residual < 0) _fb_residual = 0;
++
++    _flip_body_samples_setup[_flip_body_sample_idx]
++        = _fb_setup_ns;
++    _flip_body_samples_prev_frame_blit[_flip_body_sample_idx]
++        = _fb_prev_frame_blit_ns;
++    _flip_body_samples_yield[_flip_body_sample_idx]
++        = _fb_yield_ns;
++    _flip_body_samples_diag_logs[_flip_body_sample_idx]
++        = _fb_diag_logs_ns;
++    _flip_body_samples_audit_flushes[_flip_body_sample_idx]
++        = _fb_audit_flushes_ns;
++    _flip_body_samples_residual[_flip_body_sample_idx]
++        = (Uint64)_fb_residual;
++    ++_flip_body_sample_idx;
++  }
+   _maybe_flush_phase_timing_audit();
+   // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-
+   // tick split (per-100-flip cadence; reads counters bumped by RAII
+-- 
+2.47.3
+

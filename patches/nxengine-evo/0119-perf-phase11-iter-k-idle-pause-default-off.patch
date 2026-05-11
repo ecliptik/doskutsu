@@ -1,0 +1,240 @@
+From 645d480eec04b0d081daab2b3ec030719a16223e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 18:27:31 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200119=20=E2=80=94=20?=
+ =?UTF-8?q?slot=200115=20default=20OFF=20(iter=20J=20IDLEPROB=20ABORT)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0119, Phase 11 iter K). Flip slot 0115 idle-pause
+default polarity from ON-when-OPL3 to OPT-IN-only. Iter J IDLEPROB
+real-HW measurement on operator's SB16-PnP CTL0026 + DSP v4.13
+hardware confirmed that the SDL/0037 ForcePause helper does NOT
+engage — banner said "idle-pause-activated" but the underlying
+mechanism was a no-op. Patch 0115 was misleading on this hardware.
+
+Until task #17 (SDL/0037 ForcePause non-engagement diagnostic) roots
+out the cause and a hardware-verified version lands, default OFF is
+the honest position. Re-promote to default-ON only after a successful
+real-HW iter measures actual DSP-pause engagement on this specific
+SB16 variant.
+
+Polarity flip:
+  patch 0115: SDL_HINT_DOSKUTSU_IDLE_PAUSE=0  (killswitch; default ON)
+  patch 0119: SDL_HINT_DOSKUTSU_IDLE_PAUSE=1  (opt-in;     default OFF)
+
+Strict-match convention reverses with the polarity (mirrors the
+patch 0088 → 0093 polarity-flip convention; an opt-in flag uses
+strict-"1" match per the wave-16+ family pattern).
+
+Activation gate (revised):
+  if (backend_qualifies && idle_pause_optin) → call
+     SDL_DOSAudioSetIdlePauseEnabled(true) + emit "armed but
+     unverified" banner
+  if (backend_qualifies && !idle_pause_optin) → emit "skipped
+     (default OFF since patch 0119)" banner
+  if (!backend_qualifies) → emit "skipped (backend X does not
+     qualify; default OFF since patch 0119 regardless)" banner
+
+Banner text rewrite:
+  Old (patch 0115 default-ON): "Sound system: idle-pause-activated
+    (patch 0115; backend=opl3; SDL_DOSAudioSetIdlePauseEnabled(true)
+    called)."
+  New (patch 0119 opt-in path): "Sound system: idle-pause armed but
+    unverified on this hardware (iter J IDLEPROB ABORT'd; see iter
+    K-2/iter L); SDL_DOSAudioSetIdlePauseEnabled(true) called per
+    opt-in SDL_HINT_DOSKUTSU_IDLE_PAUSE=1. Default OFF since patch
+    0119 (iter K) — actual DSP idle-pause engagement needs real-HW
+    verification on operator's SB16-PnP CTL0026 + DSP v4.13 (task
+    #17 SDL/0037 ForcePause non-engagement diagnostic). Banner says
+    'armed' to reflect that the engine-side toggle is set; whether
+    the SDL-side helper actually pauses the DSP is what task #17 /
+    iter L measures."
+  New (default OFF): "Sound system: idle-pause skipped (default OFF
+    since patch 0119; backend=opl3 would qualify but operator did
+    not opt-in via SDL_HINT_DOSKUTSU_IDLE_PAUSE=1). DSP stays in
+    continuous-stream mode. Re-enable for an A/B iter once SDL/0037
+    ForcePause non-engagement is rooted out (task #17)."
+  New (non-OPL3 backend): "Sound system: idle-pause skipped (backend=
+    {} does not qualify; only opl3 supports idle-pause per patch
+    0115; default OFF since patch 0119 regardless of backend)."
+
+Code surface (~10-line change in SoundManager.cpp):
+  - Comment block at the activation site rewritten to call out the
+    iter J IDLEPROB ABORT finding + the polarity flip rationale
+  - `idle_pause_killswitch_on` local renamed → `idle_pause_optin`
+    with inverted match condition (`==1` not `==0`)
+  - `if (!killswitch_on)` → `if (optin)` in activation gate
+  - Three banner LOG_INFOs rewritten per above
+
+docs/BOOT.md: env-var entry rewritten — header changed from
+  `SDL_HINT_DOSKUTSU_IDLE_PAUSE=0` (killswitch) to
+  `SDL_HINT_DOSKUTSU_IDLE_PAUSE=1` (opt-in); polarity-flip rationale
+  + iter J IDLEPROB ABORT finding documented; banner-text triple
+  reproduced for future-claude grep-for-symptom.
+
+Build (DOSBox-X smoke pre-iter-K-1):
+  build SHA: 72388b042cc3302d926ea67740e319e14005125a3e08cc65868d06d6e29d8bef
+  strings markers verified embedded (6 hits across these regexes):
+    - "SDL_HINT_DOSKUTSU_DRAWTILE_FAST" (slot 0117 carry-over)
+    - "SDL_HINT_DOSKUTSU_IDLE_PAUSE" (env-var symbol)
+    - "idle-pause armed but unverified" (slot 0119 opt-in banner)
+    - "idle-pause skipped (default OFF since patch 0119" (slot 0119
+      default banner)
+    - "drawTileFast" (slot 0117 mangled symbols)
+
+Per pressure_test_tidy_narratives.md: this is a measurement-truth
+patch, not a perf lever. Iter K's fps gain comes from slot 0117
+drawTileFast; slot 0119 just stops the engine from pretending
+idle-pause is engaged when iter J data shows it isn't. Future-claude
+re-promoting to default-ON should require:
+  (1) task #17 root cause for SDL/0037 ForcePause non-engagement
+      identified + fixed
+  (2) Real-HW iter measures non-zero g_p10_audio_idle_pause_us_block
+      delta when AUDIO_INSTR=1 + IDLE_PAUSE=1 + backend=opl3
+  (3) Re-flip polarity in a slot 0119+N patch with the iter
+      reference cited
+
+Out of scope (per silent_narrow_pattern.md):
+  - SDL/0037 ForcePause root-cause investigation (task #17 sdl-engine
+    lane; this patch only flips engine-side default)
+  - Idle-pause for WB backend (slot 0115 already says "OPL3 only";
+    WB extension defers to a future iter once OPL3 is verified)
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 100 +++++++++++++++++++++----------------
+ 1 file changed, 56 insertions(+), 44 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 1e9fba0..fcf610d 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -499,67 +499,79 @@ bool SoundManager::init()
+   // per W22A precedent.
+   SDL_DOSAudioRegisterIdlePauseCallback(p10_audio_idle_pause_callback);
+ 
+-  // DOS-PORT (patch 0115, Phase 11 iter J): activate the SDL-side idle-
+-  // pause helper. The SDL helper (sdl-engine slot 0037 + 0038) defaults
+-  // to OFF — engine-side flips it ON only when the resolved music
+-  // backend is OPL3 (hardware-offload, no DMA stream). Idle-pause makes
+-  // no sense for Organya, which is a continuous PCM stream — pausing
+-  // the DSP would gap the music. With OPL3, music synthesis happens on
+-  // the SB16/Vibra16S OPL3 chip independently of the SDL audio device,
+-  // so we can pause the DAC stream entirely between Pixtone SFX bursts.
+-  // Per SDL/0037's design comment: "Engine flips ON via
+-  // SDL_DOSAudioSetIdlePauseEnabled(true) after backend selection if
+-  // and only if the music backend is OPL3 or WaveBlaster (i.e., music
+-  // doesn't need DMA stream)." This patch implements OPL3-only per the
+-  // iter-J brief; WB extension is a one-line follow-up if/when a WB
+-  // iter is run.
++  // DOS-PORT (patch 0115, Phase 11 iter J — modified by patch 0119,
++  // iter K): activate the SDL-side idle-pause helper. Patch 0115's
++  // original default was ON when backend == OPL3. Iter J IDLEPROB
++  // result confirmed that SDL/0037's ForcePause helper does NOT
++  // engage on the operator's SB16-PnP CTL0026 + DSP v4.13 hardware —
++  // banner said "idle-pause-activated" but the underlying mechanism
++  // was a no-op (operator-confirmed via IDLEPROB ABORT). Patch 0119
++  // (this change) flips the default polarity: OPT-IN now via
++  // SDL_HINT_DOSKUTSU_IDLE_PAUSE=1 (strict-1 match, was strict-"0"
++  // killswitch). Default OFF until SDL/0037's ForcePause non-
++  // engagement is rooted out (task #17 SDL/0037 diagnostic) and a
++  // hardware-verified version lands. Banner text updated to reflect
++  // the "armed but unverified" semantics.
+   //
+-  // Killswitch: SDL_HINT_DOSKUTSU_IDLE_PAUSE=0 strict-match → skip the
+-  // enable call (DSP stays in continuous-stream mode; useful for an
+-  // A/B comparison iter or a fallback if idle-pause introduces audio
+-  // glitches on a particular SB16 variant). Per
+-  // env_vars_document_in_user_docs.md: documented in docs/BOOT.md.
+-  // Default = enabled when OPL3 backend is active.
++  // The SDL helper (sdl-engine slot 0037 + 0038) defaults to OFF —
++  // engine-side flips it ON only when the resolved music backend is
++  // OPL3 (hardware-offload, no DMA stream) AND the operator has
++  // explicitly opted in via SDL_HINT_DOSKUTSU_IDLE_PAUSE=1. Idle-
++  // pause makes no sense for Organya, which is a continuous PCM
++  // stream — pausing the DSP would gap the music. With OPL3, music
++  // synthesis happens on the SB16/Vibra16S OPL3 chip independently
++  // of the SDL audio device, so the DAC stream CAN be paused
++  // between Pixtone SFX bursts in principle — but real-HW
++  // verification on the operator's specific SB16 variant must
++  // confirm engagement before re-promoting to default-ON.
+   //
+-  // Order-of-operations note: this must run AFTER the backend-resolution
+-  // switch (above; lines ~421-464) so g_p10_audio_backend_active
+-  // reflects the FINAL resolved backend (e.g., auto-detect chain may
+-  // have settled on OPL3 after WB probe failure; the WB-specific code
+-  // path inside that branch already rolled the enum back if needed).
++  // Order-of-operations note: this must run AFTER the backend-
++  // resolution switch (above; lines ~421-464) so g_p10_audio_-
++  // backend_active reflects the FINAL resolved backend (e.g., auto-
++  // detect chain may have settled on OPL3 after WB probe failure).
+   // Also after SDL_DOSAudioRegisterIdlePauseCallback so the callback
+   // is in place before the SDL-side mechanism activates.
+   {
+     const char *idle_env = SDL_GetHint("SDL_HINT_DOSKUTSU_IDLE_PAUSE");
+-    // Strict-"0" match: only the literal "0" disables. Default ON when
+-    // backend qualifies. Mirror of patch 0093's killswitch convention
+-    // (`tier2_on = !(e && e[0] == '0' && e[1] == 0)`); see also
+-    // env_vars_document_in_user_docs.md.
+-    const bool idle_pause_killswitch_on =
+-        idle_env && idle_env[0] == '0' && idle_env[1] == 0;
++    // patch 0119 (Phase 11 iter K): strict-"1" opt-in match (default
++    // OFF; was patch 0115's strict-"0" killswitch convention). Only
++    // the literal "1" enables idle-pause. Any other value (unset,
++    // empty, "0", garbage) leaves the DSP in continuous-stream mode.
++    // See SoundManager.cpp comment block above for rationale.
++    const bool idle_pause_optin =
++        idle_env && idle_env[0] == '1' && idle_env[1] == 0;
+     const bool backend_qualifies =
+         (NXE::Diag::g_p10_audio_backend_active ==
+          NXE::Diag::AudioBackend::opl3);
+-    if (backend_qualifies && !idle_pause_killswitch_on)
++    if (backend_qualifies && idle_pause_optin)
+     {
+       SDL_DOSAudioSetIdlePauseEnabled(true);
+-      LOG_INFO("Sound system: idle-pause-activated (patch 0115; backend=opl3; "
+-               "SDL_DOSAudioSetIdlePauseEnabled(true) called). DSP will "
+-               "auto-pause between Pixtone SFX bursts to recover ~12 ms / "
+-               "flip IRQ-5 wall-clock per Phase 10 design. Set "
+-               "SDL_HINT_DOSKUTSU_IDLE_PAUSE=0 to disable (continuous-stream "
+-               "mode; pre-iter-J behavior).");
++      LOG_INFO("Sound system: idle-pause armed but unverified on this "
++               "hardware (iter J IDLEPROB ABORT'd; see iter K-2/iter L); "
++               "SDL_DOSAudioSetIdlePauseEnabled(true) called per opt-in "
++               "SDL_HINT_DOSKUTSU_IDLE_PAUSE=1. Default OFF since patch "
++               "0119 (iter K) — actual DSP idle-pause engagement needs "
++               "real-HW verification on operator's SB16-PnP CTL0026 + "
++               "DSP v4.13 (task #17 SDL/0037 ForcePause non-engagement "
++               "diagnostic). Banner says 'armed' to reflect that the "
++               "engine-side toggle is set; whether the SDL-side helper "
++               "actually pauses the DSP is what task #17 / iter L "
++               "measures.");
+     }
+-    else if (backend_qualifies && idle_pause_killswitch_on)
++    else if (backend_qualifies && !idle_pause_optin)
+     {
+-      LOG_INFO("Sound system: idle-pause skipped (SDL_HINT_DOSKUTSU_IDLE_"
+-               "PAUSE=0 killswitch active; backend=opl3 would otherwise "
+-               "qualify). DSP stays in continuous-stream mode.");
++      LOG_INFO("Sound system: idle-pause skipped (default OFF since "
++               "patch 0119; backend=opl3 would qualify but operator did "
++               "not opt-in via SDL_HINT_DOSKUTSU_IDLE_PAUSE=1). DSP "
++               "stays in continuous-stream mode. Re-enable for an A/B "
++               "iter once SDL/0037 ForcePause non-engagement is "
++               "rooted out (task #17).");
+     }
+     else
+     {
+       LOG_INFO("Sound system: idle-pause skipped (backend={} does not "
+-               "qualify; only opl3 currently activates idle-pause per "
+-               "patch 0115).",
++               "qualify; only opl3 supports idle-pause per patch 0115; "
++               "default OFF since patch 0119 regardless of backend).",
+                NXE::Diag::backend_to_string(
+                    NXE::Diag::g_p10_audio_backend_active));
+     }
+-- 
+2.47.3
+

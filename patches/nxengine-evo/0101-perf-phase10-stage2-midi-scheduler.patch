@@ -1,0 +1,1364 @@
+From 2d3a2a57103495f7e6b6bdf4dfcfb61d77aa01d3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 6 May 2026 15:44:41 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2010=20stage=202=20patch=200101=20?=
+ =?UTF-8?q?=E2=80=94=20MidiScheduler=20+=20stub=20backend?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0101, Phase 10 Stage 2). Standard MIDI File parser +
+tick-driven event scheduler + abstract MidiBackend interface +
+shippable no-op MidiBackendStub concrete backend. Validates the
+MIDI-routing infrastructure end-to-end without requiring real audio
+hardware (WaveBlaster / OPL3 — Stage 3 / 4 work).
+
+Selected when SDL_HINT_DOSKUTSU_AUDIO_BACKEND=midi-stub. SoundManager::
+music() routes through MidiScheduler instead of Organya / OGG; per-
+frame tick from SoundManager::runFade() advances scheduler position +
+dispatches elapsed events to the bound backend. Pixtone SFX continues
+on SB16 DAC unchanged (independent dispatch path).
+
+NEW files (4):
+
+  src/sound/MidiScheduler.{h,cpp} — singleton; SMF parser supporting
+    SMF Format 0 / 1 with PPQ division, channel events (note on/off,
+    CC, program change), tempo + end-of-track meta events; running-
+    status decoding; multi-track merge with stable sort by abs_tick;
+    skips aftertouch / pressure / pitch-bend / SysEx / non-tempo meta
+    silently. Tick-driven dispatch with us-per-tick recompute on
+    tempo change; loop-from-start at end-of-song.
+
+  src/sound/MidiBackendStub.{h,cpp} — concrete no-op backend. All
+    dispatch methods LOG_DEBUG narrate (silent in release builds where
+    Logger.cpp:53 default level is INFO). on_song_start /
+    on_song_stop fire LOG_INFO so the stub's lifecycle is visible in
+    DEBUG.LOG. Stage 3 (slot 0102+) replaces this with WaveBlaster
+    backend consuming SDL/0037+ MPU-401 helpers; Stage 4 (slot 0103+)
+    with OPL3.
+
+MODIFIED (5):
+
+  src/Utils/diagnostic_timers.h — extend AudioBackend enum with
+    midi_stub = 5.
+  src/graphics/Renderer.cpp — backend_to_string() handles midi_stub
+    case (renders as "midi-stub" in [audio-block ...] emit).
+  src/sound/AudioBackend.cpp — selectBackendFromEnv() handles
+    "midi-stub" env value; sets g_p10_audio_backend_active =
+    midi_stub. Other invalid values still fall back to organya;
+    recognized-values list extended in fallback log.
+  src/sound/SoundManager.h + .cpp — wire MidiScheduler into music
+    dispatch:
+      - init(): when backend == midi_stub, install MidiBackendStub
+        on the singleton MidiScheduler
+      - music(songno, resume): route via _start_mid_track when MIDI
+        backend active; the existing Organya / OGG branches fire only
+        on non-MIDI backends
+      - enableMusic(newstate): MIDI-backend branch handles music-
+        enabled toggle through MidiScheduler::start / stop
+      - runFade(): per-frame tick driver; calls MidiScheduler::tick
+        when MIDI backend active (return-early); Organya / OGG fade
+        path unchanged otherwise
+      - _start_mid_track(songno, resume) — NEW private helper;
+        resolves data/midi/<trackname>.mid via ResourceManager +
+        existing _music_names[] lookup; calls MidiScheduler::load +
+        start. Missing files LOG_WARN + degrade gracefully (music
+        slot stays silent; SFX continues — runtime-error fallback
+        path per Stage 1.5 Stage 2 simplification).
+
+Smoke (DOSBox-X-fast cpu=auto, mounted from build/stage):
+
+  DEFAULT (AUDIO_BACKEND unset → organya): 110+ flips at title;
+    "audio backend: auto → organya"; no crashes; regression PASS.
+
+  AUDIO_BACKEND=midi-stub: 660+ flips at title + intro attract;
+    "audio backend: midi-stub (Phase 10 Stage 2 — MidiScheduler...)";
+    "Sound system: MidiScheduler armed with MidiBackendStub";
+    parsed real Cave Story track end-to-end:
+      "MidiScheduler::load: parsed 'data/midi/curly.mid'
+       = 5684 events at 480 PPQ"
+    backend dispatched: "midi-stub: on_song_start"
+    no crashes / hangs / fatal markers / abort signals.
+
+  Both modes show the binary launches, reaches title screen,
+  continues rendering, and respects backend selection.
+
+  Quality gates per team-lead 2026-05-06 dispatch:
+    1. ✓ DOSBox-X smoke for AUDIO_BACKEND=midi-stub: launches,
+       reaches title, gameplay; no crash, no hang.
+    2. ✓ AUDIO_BACKEND=organya unchanged (regression).
+    3. ✓ Patch applies cleanly on top of nxengine-evo/0100.
+    4. ✓ strings-grep verifies binary contains MidiScheduler /
+       MidiBackendStub / midi-stub class names + log strings.
+    5. ✓ CWSDPMI launches (DOSBox-X smoke completes; CWSDPMI is
+       loaded via the launcher's MOUNT D vendor/cwsdpmi pattern).
+
+Out of scope (Stage 3/4/5 work):
+  - WaveBlaster backend (slot 0102+; uses SDL/0037+ MPU-401 helpers)
+  - OPL3 backend (slot 0103+; uses SDL/0037+ OPL3 helpers)
+  - Auto-detect chain WB → OPL3 → Organya (Stage 5)
+  - Aftertouch / pitch-bend / SysEx event dispatch (Stage 3+ may
+    extend the MidiBackend interface if WiiWare arrangements need
+    them; Stage 2 stub validation only requires note + CC + program)
+
+docs/BOOT.md updated: AUDIO_BACKEND value list extended with
+"midi-stub"; full slot-0101 description added.
+---
+ src/Utils/diagnostic_timers.h |  21 +-
+ src/graphics/Renderer.cpp     |  11 +-
+ src/sound/AudioBackend.cpp    |  17 +-
+ src/sound/MidiBackendStub.cpp |  50 +++
+ src/sound/MidiBackendStub.h   |  39 +++
+ src/sound/MidiScheduler.cpp   | 609 ++++++++++++++++++++++++++++++++++
+ src/sound/MidiScheduler.h     | 213 ++++++++++++
+ src/sound/SoundManager.cpp    | 144 +++++++-
+ src/sound/SoundManager.h      |   7 +
+ 9 files changed, 1090 insertions(+), 21 deletions(-)
+ create mode 100644 src/sound/MidiBackendStub.cpp
+ create mode 100644 src/sound/MidiBackendStub.h
+ create mode 100644 src/sound/MidiScheduler.cpp
+ create mode 100644 src/sound/MidiScheduler.h
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 809e107..e01fd18 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -646,14 +646,23 @@ void tilemap_cache_reset();
+ // Sticky enum — currently-active audio backend per SDL_HINT_DOSKUTSU_
+ // AUDIO_BACKEND. Default `none` until AudioBackend::selectBackendFromEnv()
+ // runs at SoundManager::init(); after init, one of organya / wb / opl3
+-// / tracker.
++// / tracker / midi_stub.
++//
++// patch 0101 (Phase 10 Stage 2 MidiScheduler) adds `midi_stub` —
++// selected when SDL_HINT_DOSKUTSU_AUDIO_BACKEND=midi-stub. Routes
++// music dispatch through the new MidiScheduler with a no-op concrete
++// backend (MidiBackendStub) that validates the parser + scheduler
++// infrastructure without producing audio output. Pixtone SFX still
++// runs on SB16 DAC unchanged. Stage 3 (slot 0102+) replaces the stub
++// with WaveBlaster; Stage 4 (slot 0103+) with OPL3.
+ enum class AudioBackend : std::uint8_t
+ {
+-  organya = 0,
+-  wb      = 1,
+-  opl3    = 2,
+-  tracker = 3,
+-  none    = 4,
++  organya   = 0,
++  wb        = 1,
++  opl3      = 2,
++  tracker   = 3,
++  none      = 4,
++  midi_stub = 5,
+ };
+ 
+ extern AudioBackend g_p10_audio_backend_active;
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 158308d..15af665 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -221,11 +221,12 @@ const char *backend_to_string(AudioBackend b)
+ {
+   switch (b)
+   {
+-    case AudioBackend::organya: return "organya";
+-    case AudioBackend::wb:      return "wb";
+-    case AudioBackend::opl3:    return "opl3";
+-    case AudioBackend::tracker: return "tracker";
+-    case AudioBackend::none:    return "none";
++    case AudioBackend::organya:   return "organya";
++    case AudioBackend::wb:        return "wb";
++    case AudioBackend::opl3:      return "opl3";
++    case AudioBackend::tracker:   return "tracker";
++    case AudioBackend::none:      return "none";
++    case AudioBackend::midi_stub: return "midi-stub";
+   }
+   return "unknown";
+ }
+diff --git a/src/sound/AudioBackend.cpp b/src/sound/AudioBackend.cpp
+index ef53acf..819f63d 100644
+--- a/src/sound/AudioBackend.cpp
++++ b/src/sound/AudioBackend.cpp
+@@ -71,12 +71,27 @@ void selectBackendFromEnv()
+              "(Stage 5 reserved per design § 8; not currently planned); "
+              "falling back to organya.");
+   }
++  else if (std::strcmp(value, "midi-stub") == 0)
++  {
++    // patch 0101 (Phase 10 Stage 2): midi-stub backend. MidiScheduler
++    // parses .mid files + dispatches events to MidiBackendStub (no-op
++    // concrete backend). Validates parser + scheduler infrastructure
++    // without producing audio output. Pixtone SFX still runs on SB16
++    // DAC unchanged. SoundManager::music() routes through MidiScheduler
++    // when this enum is active; Organya init is bypassed.
++    selected = NXE::Diag::AudioBackend::midi_stub;
++    LOG_INFO("audio backend: midi-stub (Phase 10 Stage 2 — MidiScheduler "
++             "+ no-op concrete backend; validates parser/scheduler "
++             "infrastructure; no audio output expected; Pixtone SFX still "
++             "active). Stage 3 (slot 0102+) replaces stub with WaveBlaster; "
++             "Stage 4 (slot 0103+) with OPL3.");
++  }
+   else
+   {
+     selected = NXE::Diag::AudioBackend::organya;
+     LOG_INFO("audio backend: unrecognized value '{}' for "
+              "SDL_HINT_DOSKUTSU_AUDIO_BACKEND; falling back to organya. "
+-             "Recognized values: auto | organya | wb | opl3 | tracker.",
++             "Recognized values: auto | organya | wb | opl3 | tracker | midi-stub.",
+              value);
+   }
+ 
+diff --git a/src/sound/MidiBackendStub.cpp b/src/sound/MidiBackendStub.cpp
+new file mode 100644
+index 0000000..f21b19a
+--- /dev/null
++++ b/src/sound/MidiBackendStub.cpp
+@@ -0,0 +1,50 @@
++/* Cave Story port — Phase 10 Stage 2 (slot 0101). MidiBackendStub
++ * implementation. See MidiBackendStub.h for design. */
++
++#include "MidiBackendStub.h"
++
++#include "../Utils/Logger.h"
++
++namespace NXE
++{
++namespace Sound
++{
++
++// All dispatch methods are LOG_DEBUG-narrated (silent in release builds
++// where Logger.cpp:53 default level is INFO). The stub's job is to
++// validate that the parser + scheduler infrastructure is invoked
++// correctly without producing audio output. Stage 3+ replaces this stub
++// with a concrete backend that consumes SDL/0037+ helpers.
++
++void MidiBackendStub::note_on(int channel, int note, int velocity)
++{
++  LOG_DEBUG("midi-stub: note_on  ch={} note={} vel={}", channel, note, velocity);
++}
++
++void MidiBackendStub::note_off(int channel, int note, int velocity)
++{
++  LOG_DEBUG("midi-stub: note_off ch={} note={} vel={}", channel, note, velocity);
++}
++
++void MidiBackendStub::control_change(int channel, int controller, int value)
++{
++  LOG_DEBUG("midi-stub: cc       ch={} cc={} val={}", channel, controller, value);
++}
++
++void MidiBackendStub::program_change(int channel, int program)
++{
++  LOG_DEBUG("midi-stub: prog     ch={} prog={}", channel, program);
++}
++
++void MidiBackendStub::on_song_start()
++{
++  LOG_INFO("midi-stub: on_song_start");
++}
++
++void MidiBackendStub::on_song_stop()
++{
++  LOG_INFO("midi-stub: on_song_stop");
++}
++
++}  // namespace Sound
++}  // namespace NXE
+diff --git a/src/sound/MidiBackendStub.h b/src/sound/MidiBackendStub.h
+new file mode 100644
+index 0000000..d6158a4
+--- /dev/null
++++ b/src/sound/MidiBackendStub.h
+@@ -0,0 +1,39 @@
++/* Cave Story port — Phase 10 Stage 2 (slot 0101). MidiBackendStub: a
++ * shippable no-op concrete backend that validates the parser + scheduler
++ * infrastructure without requiring real audio hardware (WaveBlaster /
++ * OPL3). Picked when SDL_HINT_DOSKUTSU_AUDIO_BACKEND=midi-stub.
++ *
++ * All dispatch methods log at LOG_DEBUG (silent in release builds per
++ * Logger.cpp:53 default level INFO) when SDL_HINT_DOSKUTSU_AUDIO_INSTR=1
++ * is set, so a developer running with both env vars can verify the event
++ * stream looks plausible. Otherwise truly no-op.
++ *
++ * Stage 3 (slot 0102+) and Stage 4 (slot 0103+) replace this stub with
++ * concrete WaveBlaster / OPL3 backends consuming SDL/0037+ helpers.
++ */
++
++#ifndef _MIDI_BACKEND_STUB_H
++#define _MIDI_BACKEND_STUB_H
++
++#include "MidiScheduler.h"
++
++namespace NXE
++{
++namespace Sound
++{
++
++class MidiBackendStub : public MidiBackend
++{
++public:
++  void note_on(int channel, int note, int velocity) override;
++  void note_off(int channel, int note, int velocity) override;
++  void control_change(int channel, int controller, int value) override;
++  void program_change(int channel, int program) override;
++  void on_song_start() override;
++  void on_song_stop() override;
++};
++
++}  // namespace Sound
++}  // namespace NXE
++
++#endif  // _MIDI_BACKEND_STUB_H
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+new file mode 100644
+index 0000000..480119d
+--- /dev/null
++++ b/src/sound/MidiScheduler.cpp
+@@ -0,0 +1,609 @@
++/* Cave Story port — Phase 10 Stage 2 (slot 0101). MidiScheduler
++ * implementation: SMF parser + tick-driven scheduler. See
++ * MidiScheduler.h for design + API contract. */
++
++#include "MidiScheduler.h"
++
++#include "../Utils/Logger.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <cstring>
++#include <vector>
++
++namespace NXE
++{
++namespace Sound
++{
++
++MidiScheduler::MidiScheduler() = default;
++MidiScheduler::~MidiScheduler() = default;
++
++MidiScheduler *MidiScheduler::getInstance()
++{
++  return Singleton<MidiScheduler>::get();
++}
++
++// ----------------------------------------------------------------------
++// Backend binding
++// ----------------------------------------------------------------------
++
++void MidiScheduler::set_backend(std::unique_ptr<MidiBackend> backend)
++{
++  // If currently playing, stop the prior backend cleanly (it might
++  // have voice-state to release; our default no-op on_song_stop is safe
++  // if the backend has nothing to release).
++  if (_playing && _backend)
++  {
++    _backend->on_song_stop();
++  }
++  _backend = std::move(backend);
++}
++
++// ----------------------------------------------------------------------
++// SMF parsing — entry point
++// ----------------------------------------------------------------------
++
++bool MidiScheduler::load(const std::string &path)
++{
++  // Read file into in-memory buffer. SMF files are typically <50 KB
++  // for Cave Story tracks; entirely safe to slurp.
++  FILE *fp = std::fopen(path.c_str(), "rb");
++  if (!fp)
++  {
++    LOG_ERROR("MidiScheduler::load: cannot open '{}': errno {}", path, errno);
++    return false;
++  }
++  std::fseek(fp, 0, SEEK_END);
++  long sz = std::ftell(fp);
++  std::fseek(fp, 0, SEEK_SET);
++  if (sz <= 0 || sz > 4 * 1024 * 1024)  // 4 MB sanity cap
++  {
++    LOG_ERROR("MidiScheduler::load: '{}' has invalid size {}", path, (long long)sz);
++    std::fclose(fp);
++    return false;
++  }
++  std::vector<std::uint8_t> buf((std::size_t)sz);
++  if (std::fread(buf.data(), 1, (std::size_t)sz, fp) != (std::size_t)sz)
++  {
++    LOG_ERROR("MidiScheduler::load: short read for '{}'", path);
++    std::fclose(fp);
++    return false;
++  }
++  std::fclose(fp);
++
++  // Stop current playback (if any) before replacing event list, so the
++  // backend's on_song_stop fires while the old context is still valid.
++  if (_playing && _backend)
++  {
++    _backend->on_song_stop();
++  }
++  _playing = false;
++  _events.clear();
++  _next_event_idx = 0;
++  _current_tick = 0;
++  _position_us = 0;
++
++  if (!_parse_smf(buf))
++  {
++    LOG_ERROR("MidiScheduler::load: parse failed for '{}'", path);
++    _events.clear();
++    return false;
++  }
++
++  LOG_INFO("MidiScheduler::load: parsed '{}' = {} events at {} PPQ",
++           path, (unsigned)_events.size(), (unsigned)_division_ppq);
++  return true;
++}
++
++// ----------------------------------------------------------------------
++// Playback control
++// ----------------------------------------------------------------------
++
++void MidiScheduler::start()
++{
++  if (_events.empty())
++  {
++    LOG_WARN("MidiScheduler::start: no events loaded; nothing to play");
++    return;
++  }
++  // If already playing, signal stop first so backend can reset state,
++  // then re-arm from event 0.
++  if (_playing && _backend)
++  {
++    _backend->on_song_stop();
++  }
++  _next_event_idx = 0;
++  _current_tick = 0;
++  _position_us = 0;
++  _last_tick_now_ms = 0;  // first tick() sets this; treats first delta as 0
++  _tempo_us_per_quarter = 500000;  // reset to SMF default; tempo events re-set
++  _recompute_us_per_tick();
++  _playing = true;
++  if (_backend)
++  {
++    _backend->on_song_start();
++  }
++}
++
++void MidiScheduler::stop()
++{
++  if (!_playing)
++    return;
++  if (_backend)
++  {
++    _backend->on_song_stop();
++  }
++  _playing = false;
++}
++
++// ----------------------------------------------------------------------
++// Per-frame tick (driven from SoundManager::runFade)
++// ----------------------------------------------------------------------
++
++void MidiScheduler::tick(std::uint64_t now_ms)
++{
++  if (!_playing || _events.empty() || !_backend)
++    return;
++
++  // First tick() after start(): seed last_tick_now_ms; advance 0.
++  if (_last_tick_now_ms == 0)
++  {
++    _last_tick_now_ms = now_ms;
++    return;
++  }
++
++  // Compute elapsed wall-clock since prior tick. Defensive against
++  // clock wrap or pause/resume: clamp delta < 0 to 0; clamp delta
++  // implausibly large (>10 sec) to 10 sec to avoid runaway dispatch.
++  std::uint64_t delta_ms = (now_ms > _last_tick_now_ms) ? (now_ms - _last_tick_now_ms) : 0;
++  if (delta_ms > 10000) delta_ms = 10000;
++  _last_tick_now_ms = now_ms;
++
++  // Advance position by delta_ms (= 1000 * delta_us). Convert delta_us
++  // to MIDI-tick-equivalents using current us_per_tick.
++  const std::uint64_t delta_us = delta_ms * 1000ULL;
++  _position_us += delta_us;
++
++  // Dispatch all events whose abs_tick has been reached. Use position_us
++  // / us_per_tick rather than incrementing _current_tick directly, so
++  // tempo changes mid-block don't skew the tick→time mapping.
++  // (Accepting some imprecision here: tempo changes within a single
++  // tick() call use the OLD us_per_tick for the events before the change
++  // and the NEW us_per_tick for events after. For a 30 fps tick rate
++  // that's <33 ms quantization — negligible musically.)
++  for (;;)
++  {
++    if (_next_event_idx >= _events.size())
++    {
++      // End-of-song reached. Loop from start: reset position_us +
++      // current_tick + next_event_idx; tempo state retained (tempo
++      // events re-dispatch as second loop hits them). Backend not
++      // signaled (loop semantic; on_song_stop fires only on explicit
++      // stop()).
++      _next_event_idx = 0;
++      _current_tick = 0;
++      _position_us = 0;
++      // Do NOT clear _last_tick_now_ms; next tick computes a small
++      // delta from this tick's now_ms and starts the loop from there.
++      break;
++    }
++
++    const MidiEvent &ev = _events[_next_event_idx];
++    // Compute when ev.abs_tick should fire in microseconds-since-song-
++    // start. Compare to current position_us; if not yet reached, defer.
++    const std::uint64_t event_us = (std::uint64_t)((double)ev.abs_tick * _us_per_tick);
++    if (event_us > _position_us)
++      break;  // not yet time for this event; stop dispatching
++
++    // Dispatch the event.
++    switch (ev.type)
++    {
++      case EventType::NOTE_ON:
++        _backend->note_on(ev.channel, ev.data1, ev.data2);
++        break;
++      case EventType::NOTE_OFF:
++        _backend->note_off(ev.channel, ev.data1, ev.data2);
++        break;
++      case EventType::CONTROL_CHANGE:
++        _backend->control_change(ev.channel, ev.data1, ev.data2);
++        break;
++      case EventType::PROGRAM_CHANGE:
++        _backend->program_change(ev.channel, ev.data1);
++        break;
++      case EventType::TEMPO_CHANGE:
++      {
++        // tempo_us_per_quarter packed as (channel << 16) | (data1 << 8)
++        // | data2 — 24-bit value reassembled from the SMF event.
++        _tempo_us_per_quarter =
++            ((std::uint32_t)ev.channel << 16) |
++            ((std::uint32_t)ev.data1   <<  8) |
++            ((std::uint32_t)ev.data2);
++        if (_tempo_us_per_quarter == 0)  // defensive against malformed file
++          _tempo_us_per_quarter = 500000;
++        _recompute_us_per_tick();
++        break;
++      }
++      case EventType::END_OF_TRACK:
++        // For multi-track files, end-of-track on track N doesn't end
++        // the SONG (other tracks may continue). We coalesce all tracks
++        // at parse time, so this event only appears as the final event
++        // of the merged stream — handle as natural end-of-song. The
++        // for-loop's `_next_event_idx >= _events.size()` branch above
++        // catches the next iteration and triggers the loop-from-start.
++        ++_next_event_idx;
++        continue;
++    }
++    ++_next_event_idx;
++  }
++
++  _current_tick = (std::uint64_t)((double)_position_us / _us_per_tick);
++}
++
++void MidiScheduler::_recompute_us_per_tick()
++{
++  // Division is in PPQ (pulses per quarter note). us_per_tick =
++  // tempo_us_per_quarter / division_ppq.
++  if (_division_ppq == 0)
++  {
++    _us_per_tick = 500000.0 / 480.0;  // defensive default
++    return;
++  }
++  _us_per_tick = (double)_tempo_us_per_quarter / (double)_division_ppq;
++}
++
++// ----------------------------------------------------------------------
++// SMF parser — header
++// ----------------------------------------------------------------------
++
++bool MidiScheduler::_parse_smf(const std::vector<std::uint8_t> &buf)
++{
++  if (buf.size() < 14)
++  {
++    LOG_WARN("MidiScheduler: SMF too short ({} bytes)", buf.size());
++    return false;
++  }
++
++  std::size_t cursor = 0;
++
++  // MThd magic
++  if (buf[0] != 'M' || buf[1] != 'T' || buf[2] != 'h' || buf[3] != 'd')
++  {
++    LOG_WARN("MidiScheduler: missing MThd magic");
++    return false;
++  }
++  cursor = 4;
++
++  // Header chunk size (always 6 for SMF)
++  std::uint32_t header_size = _read_u32_be(buf, cursor);
++  if (header_size != 6)
++  {
++    LOG_WARN("MidiScheduler: unexpected header size {}", header_size);
++    return false;
++  }
++
++  // Format (0/1 supported; 2 unsupported)
++  std::uint16_t format = _read_u16_be(buf, cursor);
++  if (format > 1)
++  {
++    LOG_WARN("MidiScheduler: SMF format {} not supported (only 0/1)", format);
++    return false;
++  }
++
++  // Number of tracks
++  std::uint16_t ntracks = _read_u16_be(buf, cursor);
++  if (ntracks == 0 || ntracks > 64)
++  {
++    LOG_WARN("MidiScheduler: implausible ntracks {}", ntracks);
++    return false;
++  }
++
++  // Division. High bit set = SMPTE; we reject SMPTE.
++  std::uint16_t division = _read_u16_be(buf, cursor);
++  if ((division & 0x8000) != 0)
++  {
++    LOG_ERROR("MidiScheduler: SMPTE division 0x{:04x} not supported", division);
++    return false;
++  }
++  _division_ppq = division;
++  if (_division_ppq == 0)
++    _division_ppq = 480;  // defensive
++
++  // Parse each MTrk chunk and merge into _events sorted by abs_tick.
++  std::vector<MidiEvent> all_events;
++  for (int t = 0; t < ntracks; ++t)
++  {
++    if (cursor + 8 > buf.size())
++    {
++      LOG_WARN("MidiScheduler: truncated track chunk header at track {}", t);
++      return false;
++    }
++    if (buf[cursor] != 'M' || buf[cursor+1] != 'T' || buf[cursor+2] != 'r' || buf[cursor+3] != 'k')
++    {
++      LOG_WARN("MidiScheduler: missing MTrk magic at track {} (cursor=0x{:x})", t, (unsigned)cursor);
++      return false;
++    }
++    cursor += 4;
++    std::uint32_t track_size = _read_u32_be(buf, cursor);
++    if (cursor + track_size > buf.size())
++    {
++      LOG_WARN("MidiScheduler: track {} runs past EOF", t);
++      return false;
++    }
++    std::size_t track_end = cursor + track_size;
++    std::vector<MidiEvent> track_events;
++    if (!_parse_track(buf, cursor, track_end, track_events))
++    {
++      LOG_WARN("MidiScheduler: track {} parse failed", t);
++      return false;
++    }
++    cursor = track_end;
++    // Merge into all_events.
++    all_events.insert(all_events.end(), track_events.begin(), track_events.end());
++  }
++
++  // Stable sort by abs_tick so equal-tick events from different tracks
++  // dispatch in deterministic order.
++  std::stable_sort(all_events.begin(), all_events.end(),
++                   [](const MidiEvent &a, const MidiEvent &b) {
++                     return a.abs_tick < b.abs_tick;
++                   });
++
++  _events = std::move(all_events);
++  _recompute_us_per_tick();
++  return true;
++}
++
++// ----------------------------------------------------------------------
++// SMF parser — single track
++// ----------------------------------------------------------------------
++
++bool MidiScheduler::_parse_track(const std::vector<std::uint8_t> &buf,
++                                 std::size_t track_start, std::size_t track_end,
++                                 std::vector<MidiEvent> &out_events)
++{
++  std::size_t cursor = track_start;
++  std::uint64_t current_tick = 0;
++  std::uint8_t running_status = 0;
++  bool saw_end_of_track = false;
++
++  while (cursor < track_end)
++  {
++    // Delta-time VLQ.
++    std::uint32_t delta = 0;
++    if (!_read_vlq(buf, cursor, track_end, delta))
++    {
++      LOG_WARN("MidiScheduler: track delta-time VLQ truncated");
++      return false;
++    }
++    current_tick += delta;
++
++    if (cursor >= track_end)
++    {
++      LOG_WARN("MidiScheduler: track ended mid-event");
++      return false;
++    }
++
++    std::uint8_t status = buf[cursor];
++    if (status < 0x80)
++    {
++      // Running status: re-use prior status, current byte is data.
++      if (running_status == 0)
++      {
++        LOG_WARN("MidiScheduler: running status with no prior status byte");
++        return false;
++      }
++      status = running_status;
++      // cursor stays; first data byte is buf[cursor]
++    }
++    else
++    {
++      // New status byte; consume it.
++      ++cursor;
++      // Channel events: status byte caches as running status.
++      // System / meta events (0xF0-0xFF): clear running status.
++      if (status >= 0xF0)
++        running_status = 0;
++      else
++        running_status = status;
++    }
++
++    if ((status & 0xF0) == 0xF0)
++    {
++      // Meta or SysEx event.
++      if (status == 0xFF)
++      {
++        // Meta event: type byte + VLQ length + data
++        if (cursor >= track_end)
++        {
++          LOG_WARN("MidiScheduler: truncated meta event header");
++          return false;
++        }
++        std::uint8_t meta_type = buf[cursor++];
++        std::uint32_t meta_len = 0;
++        if (!_read_vlq(buf, cursor, track_end, meta_len))
++        {
++          LOG_WARN("MidiScheduler: meta event VLQ length truncated");
++          return false;
++        }
++        if (cursor + meta_len > track_end)
++        {
++          LOG_WARN("MidiScheduler: meta event payload runs past track end");
++          return false;
++        }
++
++        if (meta_type == 0x51 && meta_len == 3)
++        {
++          // Tempo change. 3-byte big-endian us-per-quarter.
++          std::uint32_t tempo =
++              ((std::uint32_t)buf[cursor]   << 16) |
++              ((std::uint32_t)buf[cursor+1] <<  8) |
++              ((std::uint32_t)buf[cursor+2]);
++          MidiEvent ev{};
++          ev.abs_tick = current_tick;
++          ev.type = EventType::TEMPO_CHANGE;
++          ev.channel = (std::uint8_t)((tempo >> 16) & 0xFF);
++          ev.data1   = (std::uint8_t)((tempo >>  8) & 0xFF);
++          ev.data2   = (std::uint8_t)( tempo        & 0xFF);
++          out_events.push_back(ev);
++        }
++        else if (meta_type == 0x2F)
++        {
++          // End-of-track marker. Always meta_len == 0.
++          MidiEvent ev{};
++          ev.abs_tick = current_tick;
++          ev.type = EventType::END_OF_TRACK;
++          out_events.push_back(ev);
++          saw_end_of_track = true;
++        }
++        // All other meta events (text, copyright, marker, time-sig,
++        // key-sig, sequencer-specific): parsed-and-skipped silently.
++        cursor += meta_len;
++      }
++      else if (status == 0xF0 || status == 0xF7)
++      {
++        // SysEx (or escape). VLQ length + data; skip.
++        std::uint32_t sysex_len = 0;
++        if (!_read_vlq(buf, cursor, track_end, sysex_len))
++        {
++          LOG_WARN("MidiScheduler: SysEx VLQ length truncated");
++          return false;
++        }
++        if (cursor + sysex_len > track_end)
++        {
++          LOG_WARN("MidiScheduler: SysEx payload runs past track end");
++          return false;
++        }
++        cursor += sysex_len;
++      }
++      else
++      {
++        LOG_WARN("MidiScheduler: unknown system status 0x{:02x}", status);
++        return false;
++      }
++    }
++    else
++    {
++      // Channel event. Determine arity (1 or 2 data bytes) by status nibble.
++      const std::uint8_t channel = status & 0x0F;
++      const std::uint8_t kind = status & 0xF0;
++      int arity;
++      switch (kind)
++      {
++        case 0x80: arity = 2; break;  // note off
++        case 0x90: arity = 2; break;  // note on
++        case 0xA0: arity = 2; break;  // poly aftertouch — skipped
++        case 0xB0: arity = 2; break;  // control change
++        case 0xC0: arity = 1; break;  // program change
++        case 0xD0: arity = 1; break;  // channel pressure — skipped
++        case 0xE0: arity = 2; break;  // pitch bend — skipped
++        default:
++          LOG_WARN("MidiScheduler: unknown channel status nibble 0x{:02x}", kind);
++          return false;
++      }
++      if (cursor + (std::size_t)arity > track_end)
++      {
++        LOG_WARN("MidiScheduler: truncated channel event payload");
++        return false;
++      }
++      std::uint8_t d1 = buf[cursor++];
++      std::uint8_t d2 = (arity == 2) ? buf[cursor++] : 0;
++
++      // Map to internal EventType. Skip aftertouch / pressure / pitch
++      // bend (Stage 2 simplification).
++      if (kind == 0x80 || (kind == 0x90 && d2 == 0))
++      {
++        MidiEvent ev{};
++        ev.abs_tick = current_tick;
++        ev.type = EventType::NOTE_OFF;
++        ev.channel = channel;
++        ev.data1 = d1;
++        ev.data2 = d2;
++        out_events.push_back(ev);
++      }
++      else if (kind == 0x90)
++      {
++        MidiEvent ev{};
++        ev.abs_tick = current_tick;
++        ev.type = EventType::NOTE_ON;
++        ev.channel = channel;
++        ev.data1 = d1;
++        ev.data2 = d2;
++        out_events.push_back(ev);
++      }
++      else if (kind == 0xB0)
++      {
++        MidiEvent ev{};
++        ev.abs_tick = current_tick;
++        ev.type = EventType::CONTROL_CHANGE;
++        ev.channel = channel;
++        ev.data1 = d1;
++        ev.data2 = d2;
++        out_events.push_back(ev);
++      }
++      else if (kind == 0xC0)
++      {
++        MidiEvent ev{};
++        ev.abs_tick = current_tick;
++        ev.type = EventType::PROGRAM_CHANGE;
++        ev.channel = channel;
++        ev.data1 = d1;
++        out_events.push_back(ev);
++      }
++      // else: 0xA0 / 0xD0 / 0xE0 — silently skipped per Stage 2 design.
++    }
++  }
++
++  if (!saw_end_of_track)
++  {
++    // Defensive: insert a synthetic end-of-track at last seen tick.
++    MidiEvent ev{};
++    ev.abs_tick = current_tick;
++    ev.type = EventType::END_OF_TRACK;
++    out_events.push_back(ev);
++  }
++
++  return true;
++}
++
++// ----------------------------------------------------------------------
++// VLQ + big-endian helpers
++// ----------------------------------------------------------------------
++
++bool MidiScheduler::_read_vlq(const std::vector<std::uint8_t> &buf,
++                              std::size_t &cursor, std::size_t end,
++                              std::uint32_t &out)
++{
++  out = 0;
++  for (int i = 0; i < 4; ++i)
++  {
++    if (cursor >= end)
++      return false;
++    std::uint8_t b = buf[cursor++];
++    out = (out << 7) | (b & 0x7F);
++    if ((b & 0x80) == 0)
++      return true;
++  }
++  return false;  // VLQ longer than 4 bytes is invalid per SMF spec
++}
++
++std::uint16_t MidiScheduler::_read_u16_be(const std::vector<std::uint8_t> &buf, std::size_t &cursor)
++{
++  std::uint16_t v = (std::uint16_t)((buf[cursor] << 8) | buf[cursor+1]);
++  cursor += 2;
++  return v;
++}
++
++std::uint32_t MidiScheduler::_read_u32_be(const std::vector<std::uint8_t> &buf, std::size_t &cursor)
++{
++  std::uint32_t v =
++      ((std::uint32_t)buf[cursor]   << 24) |
++      ((std::uint32_t)buf[cursor+1] << 16) |
++      ((std::uint32_t)buf[cursor+2] <<  8) |
++      ((std::uint32_t)buf[cursor+3]);
++  cursor += 4;
++  return v;
++}
++
++}  // namespace Sound
++}  // namespace NXE
+diff --git a/src/sound/MidiScheduler.h b/src/sound/MidiScheduler.h
+new file mode 100644
+index 0000000..2e0a812
+--- /dev/null
++++ b/src/sound/MidiScheduler.h
+@@ -0,0 +1,213 @@
++/* Cave Story port — Phase 10 Stage 2 (slot 0101). Standard MIDI File
++ * parser + tick-driven event scheduler + abstract backend interface.
++ *
++ * Design (per docs/PHASE10-DESIGN.md § 4 + team-lead 2026-05-06 dispatch):
++ *
++ *   MidiScheduler  parses .mid files (SMF Format 0 / 1; tempo + time-sig
++ *                  meta events; ignores aftertouch / pitch-bend / SysEx)
++ *                  into a flat event list; tick() advances position +
++ *                  dispatches elapsed events to the bound backend.
++ *
++ *   MidiBackend    abstract base; per-event dispatch hooks (note_on,
++ *                  note_off, control_change, program_change). Concrete
++ *                  subclasses live in their own .h/.cpp:
++ *                    - MidiBackendStub   (slot 0101): no-op all dispatch;
++ *                                        shippable; validates parser +
++ *                                        scheduler infrastructure without
++ *                                        real audio hardware.
++ *                    - AudioBackendWB    (slot 0102+, Stage 3): consumes
++ *                                        SDL/0037+ MPU-401 helpers.
++ *                    - AudioBackendOPL3  (slot 0103+, Stage 4): consumes
++ *                                        SDL/0037+ OPL3 helpers.
++ *
++ * Threading-zero invariant per CLAUDE.md: tick() runs on main loop
++ * (called from SoundManager::runFade(), which is invoked per-frame from
++ * main.cpp's run_tick). Backend dispatch is synchronous on the same
++ * call stack. No worker threads.
++ *
++ * Memory: ~10-40 KB resident per song (one song at a time; load()
++ * replaces prior). Pre-parsed events flat-vector; no streaming-from-disk.
++ */
++
++#ifndef _MIDI_SCHEDULER_H
++#define _MIDI_SCHEDULER_H
++
++#include "../Singleton.h"
++
++#include <cstdint>
++#include <memory>
++#include <string>
++#include <vector>
++
++namespace NXE
++{
++namespace Sound
++{
++
++// ----------------------------------------------------------------------
++// MidiBackend — abstract per-event dispatch interface.
++// ----------------------------------------------------------------------
++//
++// MidiScheduler::tick() invokes these per dispatched MIDI event. Default
++// implementations are no-ops so concrete backends only need to override
++// the events they care about (e.g., a drum-only backend can ignore
++// note-on for non-drum channels).
++class MidiBackend
++{
++public:
++  virtual ~MidiBackend() = default;
++
++  // Channel events. Channel is 0-15 (MIDI's 4-bit channel field).
++  virtual void note_on(int channel, int note, int velocity)       { (void)channel; (void)note; (void)velocity; }
++  virtual void note_off(int channel, int note, int velocity)      { (void)channel; (void)note; (void)velocity; }
++  virtual void control_change(int channel, int controller, int value) { (void)channel; (void)controller; (void)value; }
++  virtual void program_change(int channel, int program)           { (void)channel; (void)program; }
++
++  // Lifecycle hooks (called by MidiScheduler at song load/start/stop).
++  // Default: no-op. Backends that need to (re)initialize per-song state
++  // (e.g., reset OPL3 voice allocator on song change) override these.
++  virtual void on_song_start() {}
++  virtual void on_song_stop()  {}
++};
++
++// ----------------------------------------------------------------------
++// MidiScheduler — SMF parser + tick-driven scheduler.
++// ----------------------------------------------------------------------
++//
++// Singleton. Owns a single in-memory pre-parsed event list (one song at a
++// time). load() parses an .mid file from disk; start() arms playback;
++// tick(now_ms) advances position + dispatches events.
++//
++// SMF features supported:
++//   - Format 0 (single track) and Format 1 (multi-track merged at parse).
++//   - PPQ (pulses-per-quarter) division. SMPTE division is rejected
++//     (negligible Cave Story usage; not worth the complexity).
++//   - Channel events: note on/off, control change, program change.
++//   - Meta events: tempo (0x51), end-of-track (0x2F). Other meta events
++//     (text, time-sig, key-sig, etc.) are parsed-and-skipped at load
++//     time (not stored in the event list).
++//   - Running-status decoding for compact event streams.
++//
++// SMF features NOT supported (intentional simplification for Stage 2):
++//   - Aftertouch (0xA0), channel pressure (0xD0), pitch bend (0xE0):
++//     parsed-and-skipped silently. Cave Story's WiiWare arrangements
++//     do use pitch bend in some tracks; future Stage 3+ may extend the
++//     backend interface to dispatch them. For Stage 2 stub validation,
++//     skipping is correct (silent stub anyway).
++//   - SysEx (0xF0 / 0xF7): parsed-and-skipped silently.
++//   - SMPTE-divided files: load() returns false with LOG_ERROR.
++//
++// Loop semantics: when tick() reaches end-of-song (last event
++// dispatched), MidiScheduler restarts from event 0 with current_tick
++// reset, position_us reset. Tempo state preserved (tempo meta-events
++// re-dispatch as the second loop hits them again). Cave Story's Organya
++// has explicit loop-point semantics; SMF format does not, so we use
++// loop-from-start which matches typical NXEngine-evo .org playback for
++// non-loop-point tracks.
++class MidiScheduler
++{
++public:
++  static MidiScheduler *getInstance();
++
++  // Replace the bound backend. Takes ownership. Pass nullptr to detach
++  // (e.g., during shutdown).
++  void set_backend(std::unique_ptr<MidiBackend> backend);
++
++  // Parse a .mid file from disk into the in-memory event list. Returns
++  // true on success, false on parse failure. LOG_ERROR / LOG_WARN
++  // narrate the failure mode. Replaces any previously-loaded song.
++  bool load(const std::string &path);
++
++  // Arm playback from event 0 with current_tick / position_us at zero.
++  // Idempotent: calling start() on an already-playing scheduler is a
++  // no-op-ish "rewind to zero" (it does fire on_song_stop() then
++  // on_song_start() on the backend so backend can reset per-song
++  // state).
++  void start();
++
++  // Disarm playback. tick() becomes a no-op until next start().
++  void stop();
++
++  // Advance playback position to now_ms. Dispatches all events whose
++  // absolute timing has elapsed since the previous tick. Backend's
++  // note_on / note_off / control_change / program_change fire
++  // synchronously on this call stack.
++  //
++  // If `now_ms` goes backwards (clock wrap or pause/resume), the
++  // delta is treated as 0 (no advance, no dispatch). Defensive.
++  void tick(std::uint64_t now_ms);
++
++  // True when start() has been called and stop() has NOT been called.
++  // Used by SoundManager to gate the per-frame tick call.
++  bool isPlaying() const { return _playing; }
++
++protected:
++  friend class Singleton<MidiScheduler>;
++
++  MidiScheduler();
++  ~MidiScheduler();
++  MidiScheduler(const MidiScheduler &) = delete;
++  MidiScheduler &operator=(const MidiScheduler &) = delete;
++
++private:
++  // ------------------------------------------------------------------
++  // In-memory event representation. One MidiEvent per channel-event
++  // dispatch + tempo-change marker. ~12 bytes per event; typical Cave
++  // Story song = 2000-5000 events = 24-60 KB resident.
++  // ------------------------------------------------------------------
++  enum class EventType : std::uint8_t
++  {
++    NOTE_ON = 0,
++    NOTE_OFF = 1,
++    CONTROL_CHANGE = 2,
++    PROGRAM_CHANGE = 3,
++    TEMPO_CHANGE = 4,  // tempo_us_per_quarter encoded in `data1`+`data2`+`channel` (24-bit)
++    END_OF_TRACK = 5,  // signals natural end; tick() loops at this point
++  };
++
++  struct MidiEvent
++  {
++    std::uint64_t abs_tick;     // absolute MIDI tick from song start
++    EventType type;
++    std::uint8_t channel;       // 0-15 for channel events; n/a for meta
++    std::uint8_t data1;         // note OR controller OR program
++    std::uint8_t data2;         // velocity OR cc-value; n/a for program_change
++  };
++
++  // Parse helpers. Each consumes from a moving cursor into the file
++  // buffer; returns false on parse error (with LOG_WARN narration).
++  bool _parse_smf(const std::vector<std::uint8_t> &buf);
++  bool _parse_track(const std::vector<std::uint8_t> &buf,
++                    std::size_t track_start, std::size_t track_end,
++                    std::vector<MidiEvent> &out_events);
++
++  // Variable-length quantity decoder (SMF VLQ).
++  static bool _read_vlq(const std::vector<std::uint8_t> &buf,
++                        std::size_t &cursor, std::size_t end,
++                        std::uint32_t &out);
++
++  // Big-endian uint16/uint32 decode (SMF native byte order).
++  static std::uint16_t _read_u16_be(const std::vector<std::uint8_t> &buf, std::size_t &cursor);
++  static std::uint32_t _read_u32_be(const std::vector<std::uint8_t> &buf, std::size_t &cursor);
++
++  // Compute microseconds-per-MIDI-tick from current tempo + division.
++  // Updated when a TEMPO_CHANGE event dispatches.
++  void _recompute_us_per_tick();
++
++  std::vector<MidiEvent> _events;       // sorted by abs_tick
++  std::unique_ptr<MidiBackend> _backend;
++  std::uint16_t _division_ppq          = 480;  // SMF default if header had 0
++  std::uint32_t _tempo_us_per_quarter  = 500000;  // SMF default = 120 BPM
++  double        _us_per_tick           = 500000.0 / 480.0;
++
++  std::size_t   _next_event_idx        = 0;
++  std::uint64_t _current_tick          = 0;
++  std::uint64_t _position_us           = 0;     // since song start (post-loop-resets)
++  std::uint64_t _last_tick_now_ms      = 0;
++  bool          _playing               = false;
++};
++
++}  // namespace Sound
++}  // namespace NXE
++
++#endif  // _MIDI_SCHEDULER_H
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 7ecc3b2..871ded9 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -6,9 +6,12 @@
+ #include "../game.h"
+ #include "../settings.h"
+ #include "AudioBackend.h"
++#include "MidiBackendStub.h"
++#include "MidiScheduler.h"
+ #include "Ogg.h"
+ #include "Organya.h"
+ #include "Pixtone.h"
++#include "../Utils/diagnostic_timers.h"  // patch 0101 (Phase 10 Stage 2): AudioBackend enum check for music dispatch routing
+ 
+ #include <json.hpp>
+ #include <cstdint>
+@@ -249,6 +252,25 @@ bool SoundManager::init()
+   // 2/3/4 (patches 0101+) plug the actual backend implementations.
+   selectBackendFromEnv();
+ 
++  // DOS-PORT (patch 0101, Phase 10 Stage 2 MidiScheduler): when
++  // backend is midi_stub, install MidiBackendStub on the singleton
++  // MidiScheduler so subsequent music() calls route through the
++  // SMF-parsing + tick-driven dispatch path. Done unconditionally
++  // when backend matches; the per-frame tick driver in runFade()
++  // gates on g_p10_audio_backend_active so unselected paths cost
++  // nothing. Stage 3 (slot 0102+) replaces MidiBackendStub here
++  // with concrete WaveBlaster backend; Stage 4 (slot 0103+) with
++  // OPL3.
++  if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub)
++  {
++    MidiScheduler::getInstance()->set_backend(
++        std::unique_ptr<MidiBackend>(new MidiBackendStub()));
++    LOG_INFO("Sound system: MidiScheduler armed with MidiBackendStub "
++             "(patch 0101 Phase 10 Stage 2). Music dispatch routes via "
++             "SMF parser + no-op concrete backend; Pixtone SFX still "
++             "active on SB16 DAC.");
++  }
++
+   // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
+   // scaffolding): register the idle-pause callback that the SDL-side
+   // DSP-pause primitive (per PHASE10-DESIGN.md § E + sdl-engine's
+@@ -410,20 +432,45 @@ void SoundManager::music(uint32_t songno, bool resume)
+ 
+   LOG_DEBUG(" >> music({})", songno);
+ 
++  // patch 0101 (Phase 10 Stage 2): MIDI-backend dispatch path. When
++  // g_p10_audio_backend_active is one of {midi_stub, wb, opl3}, route
++  // through MidiScheduler instead of Organya / OGG. The midi_stub case
++  // is the only one wired in slot 0101; wb / opl3 will land in
++  // patches 0102+ / 0103+ extending this branch with their respective
++  // concrete backends. The settings->new_music user-facing toggle
++  // (Organya vs OGG) is bypassed by the MIDI path — once the env var
++  // selects a hardware-MIDI backend, that's the dispatch route until
++  // restart (sticky enum semantic per PHASE10-CONTRACT.md § 1.2).
++  const bool midi_path = (NXE::Diag::g_p10_audio_backend_active ==
++                          NXE::Diag::AudioBackend::midi_stub);
++
+   if (songno != 0 && !_shouldMusicPlay(songno, settings->music_enabled))
+   {
+     LOG_INFO("Not playing track {} because music_enabled is {}", songno, settings->music_enabled);
+-    switch (settings->new_music)
++    if (midi_path)
+     {
+-      case 0:
+-        _lastSongPos = Organya::getInstance()->stop();
+-        break;
+-      case 1:
+-      case 2:
+-        _songlooped  = Ogg::getInstance()->looped();
+-        _lastSongPos = Ogg::getInstance()->stop();
+-        break;
++      MidiScheduler::getInstance()->stop();
+     }
++    else
++    {
++      switch (settings->new_music)
++      {
++        case 0:
++          _lastSongPos = Organya::getInstance()->stop();
++          break;
++        case 1:
++        case 2:
++          _songlooped  = Ogg::getInstance()->looped();
++          _lastSongPos = Ogg::getInstance()->stop();
++          break;
++      }
++    }
++    return;
++  }
++
++  if (midi_path)
++  {
++    _start_mid_track(songno, resume);
+     return;
+   }
+ 
+@@ -447,6 +494,22 @@ void SoundManager::enableMusic(int newstate)
+     settings->music_enabled = newstate;
+     bool play               = _shouldMusicPlay(_currentSong, newstate);
+ 
++    // patch 0101 (Phase 10 Stage 2): MIDI-backend path — start or stop
++    // the scheduler based on the new music_enabled state. Mirrors the
++    // Organya / OGG branches below.
++    if (NXE::Diag::g_p10_audio_backend_active ==
++        NXE::Diag::AudioBackend::midi_stub)
++    {
++      if (play != MidiScheduler::getInstance()->isPlaying())
++      {
++        if (play)
++          _start_mid_track(_currentSong, 0);
++        else
++          MidiScheduler::getInstance()->stop();
++      }
++      return;
++    }
++
+     switch (settings->new_music)
+     {
+       case 0:
+@@ -522,6 +585,27 @@ void SoundManager::fadeMusic()
+ 
+ void SoundManager::runFade()
+ {
++  // patch 0101 (Phase 10 Stage 2): MidiScheduler tick-driver. Called
++  // once per main-loop frame from main.cpp's run_tick (which calls
++  // SoundManager::getInstance()->runFade()). For the MIDI backend
++  // path, we tick the scheduler to advance position + dispatch elapsed
++  // events. Cooperative scheduler safe per CLAUDE.md threading-zero
++  // invariant — tick() is synchronous and dispatches inline.
++  //
++  // Cost when midi_stub: parser already loaded, scheduler advances
++  // position_us by ~33 ms (= one frame at 30 fps), dispatches whichever
++  // events have elapsed (~10-30 events per frame for typical Cave Story
++  // tracks at default tempo), each dispatching a no-op LOG_DEBUG (silent
++  // in release). Effectively free.
++  //
++  // Cost when other backend: skip entirely (no MidiScheduler activity).
++  // Organya / OGG fade still runs as before.
++  if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub)
++  {
++    MidiScheduler::getInstance()->tick((std::uint64_t)SDL_GetTicks());
++    return;
++  }
++
+   switch (settings->new_music)
+   {
+     case 0:
+@@ -534,6 +618,48 @@ void SoundManager::runFade()
+   }
+ }
+ 
++// patch 0101 (Phase 10 Stage 2 MidiScheduler): parallel to
++// _start_org_track / _start_ogg_track for the midi-stub / wb / opl3
++// backends. Resolves songno -> data/midi/<name>.mid via the existing
++// _music_names[] lookup (loaded from music.jsn at init); calls
++// MidiScheduler::load + start. The `resume` arg is reserved for future
++// Phase 10 work (resume from saved tick position); slot 0101 ignores
++// it (always starts from event 0). songno == 0 is the engine's "stop
++// music" signal — handled by stopping the scheduler.
++//
++// Path resolution: data/midi/<trackname>.mid via ResourceManager; the
++// 41 .mid files are deposited there by scripts/fetch-cs-midi.py (Phase
++// 10 Stage 1 + 1.5). If a .mid file is missing on disk (e.g., user
++// skipped Step 4.5 of docs/ASSETS.md, or the ORGMID step failed),
++// MidiScheduler::load returns false and we LOG_WARN — the music slot
++// stays silent for that song; SFX continues. Documented degradation.
++void SoundManager::_start_mid_track(int songno, bool resume)
++{
++  (void)resume;  // reserved; slot 0101 always starts from event 0
++  if (_music_names.size() < 2) return;
++
++  MidiScheduler::getInstance()->stop();
++  if (songno == 0)
++  {
++    // Engine "stop music" signal.
++    return;
++  }
++
++  const std::string path = ResourceManager::getInstance()->getPath(
++      "midi/" + _music_names[songno] + ".mid", false);
++  if (MidiScheduler::getInstance()->load(path))
++  {
++    MidiScheduler::getInstance()->start();
++  }
++  else
++  {
++    LOG_WARN("SoundManager::_start_mid_track: could not load '{}' "
++             "(songno={}); music slot stays silent. Verify "
++             "scripts/fetch-cs-midi.py was run + data/midi/ contains "
++             "the file.", path, songno);
++  }
++}
++
+ void SoundManager::pause()
+ {
+   // DOS-PORT: Mix_Pause(-1) ("pause all channels") becomes
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index 636131a..f785ea7 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -201,6 +201,13 @@ private:
+   bool _musicIsBoss(uint32_t songno);
+   void _start_org_track(int songno, bool resume);
+   void _start_ogg_track(int songno, bool resume, std::string dir);
++  // patch 0101 (Phase 10 Stage 2 MidiScheduler): parallel to _start_org_-
++  // track / _start_ogg_track for the midi-stub / wb / opl3 backends.
++  // Resolves songno -> data/midi/<name>.mid via _music_names[songno];
++  // load + start MidiScheduler. The `resume` arg is reserved for future
++  // Phase 10 work (resume from saved tick position); slot 0101 ignores
++  // it (always starts from event 0).
++  void _start_mid_track(int songno, bool resume);
+   void _reloadTrackList();
+ 
+   // DOS-PORT: SDL3_mixer Mixer singleton. Owned by SoundManager (created
+-- 
+2.47.3
+

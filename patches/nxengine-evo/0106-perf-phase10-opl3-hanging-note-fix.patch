@@ -1,0 +1,272 @@
+From f05a4387a7fb44aeb8960b06f49cf1dbcc564594 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 7 May 2026 10:44:55 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2010=20patch=200106=20=E2=80=94=20?=
+ =?UTF-8?q?OPL3=20hanging-note=20fix=20(deterministic=20shutdown)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DOS-PORT (patch 0106, Phase 10 OPL3 hanging-MIDI-note fix). Real-HW
+W22-WB-D iter 2026-05-07 PLAY3 confirmed OPL3 played music
+successfully (5684 events from curly.mid dispatched, audio-block
+backend=opl3 sfx=733) BUT a single MIDI note hangs after Quit; reboot
+required to clear.
+
+Root cause analysis (deeper than initially scoped — per team-lead
+dispatch's "or equivalent shutdown method" anticipation):
+
+  SoundManager::shutdown() called Organya::shutdown() and Pixtone::
+  shutdown() but NEVER touched MidiScheduler. MidiBackendOpl3::~Mid-
+  iBackendOpl3 only fired via Singleton<MidiScheduler>::~Singleton at
+  process exit, which has undefined order across compilation units
+  on DJGPP CRT teardown. On real DOS HW the singleton dtor sometimes
+  did not fire before process termination, leaving the OPL3 chip
+  with held KEY-ON bit on the last-played voice → audible hanging
+  note that persists across the next program's run until power-cycle.
+
+  W22-WB-D OPL3.LOG evidence: clean engine teardown (Script engine
+  shutdown → Sound system shutdown → Renderer::Close()), but NO
+  "opl3 backend shutdown" line — confirming MidiBackendOpl3's dtor
+  did NOT fire. The chip retained the last note's KEY-ON bit; the
+  game returned to DOS prompt with the OPL3 chip still actively
+  generating tones.
+
+Fix (3 components):
+
+1. NEW MidiScheduler::shutdown() method (src/sound/MidiScheduler.h
+   + .cpp). Calls stop() (fires on_song_stop on backend, which for
+   MidiBackendOpl3 silences all 18 voices via SDL_DOSOpl3VoiceNoteOff
+   loop) then _backend.reset() (unique_ptr unwind triggers backend
+   dtor → SDL_DOSOpl3Shutdown which silences again + clears OPL3
+   enable bit, restoring Adlib OPL2 mode for any subsequent app).
+   Idempotent on repeat-call. Documented in header comment with
+   the W22-WB-D motivation + why-not-rely-on-singleton-dtor reasoning.
+
+2. SoundManager::shutdown() calls MidiScheduler::getInstance()->
+   shutdown() FIRST, before Organya::shutdown() / Pixtone::shutdown()
+   / MIX_DestroyMixer / MIX_Quit. Ensures backend dtor fires in
+   deterministic teardown order with all engine state still valid
+   (mixer present, log subsystem alive). The "Sound system shutdown"
+   LOG_INFO that appeared in W22-WB-D OPL3.LOG now arrives AFTER
+   MidiScheduler/backend teardown completes — the new "opl3 backend
+   shutdown (all 18 voices KEY-OFF unconditionally; OPL2 mode
+   restored; chip state safe for next process)" line will appear
+   between the new MidiScheduler entry and the existing
+   "Sound system shutdown" line in next-iter DEBUG.LOG.
+
+3. MidiBackendOpl3::~MidiBackendOpl3 silence loop made UNCONDITIONAL.
+   Previously: `if (_voices[v].active) SDL_DOSOpl3VoiceNoteOff(v);` —
+   the active-flag guard SKIPPED voices whose engine-side bookkeeping
+   was stale (e.g., LRU-stolen voices, redundant note-offs from SMF
+   arrangements, loop-from-start re-dispatch on top of still-
+   sustaining notes). The chip's KEY-ON state is the load-bearing
+   ground-truth for whether a note is sounding; engine bookkeeping
+   can drift out of sync. Belt-and-braces: SDL_DOSOpl3Shutdown
+   AFTER the loop ALSO silences all 18 voices unconditionally per
+   its impl in vendor/SDL/src/core/dos/SDL_dos_audio_synth.c, but
+   the engine-side loop matches team-lead's literal dispatch
+   instruction + provides defense-in-depth.
+
+Out of scope (per team-lead "skip studder fix unless quick"):
+  - Studder fix in MidiScheduler::tick (cap notes-per-flip to avoid
+    audible burst on long flips) — defer to slot 0107+ if operator
+    confirms studder persists after KEY-OFF fix lands.
+
+Smoke (DOSBox-X-fast, 4 gates per dispatch):
+
+  Per memory dosbox_not_behavioral_proxy_for_io.md: DOSBox-X cannot
+  faithfully reproduce the OPL3-chip-state-retention-across-process-
+  exit bug — the emulated chip resets when DOSBox-X closes. So
+  DOSBox-X smoke validates that:
+    (a) the new MidiScheduler::shutdown plumbing compiles + links
+        cleanly on top of slot 0105
+    (b) the new shutdown narration strings are embedded in the binary
+    (c) per-backend init paths still work (regression check across
+        organya / wb / opl3 / midi-stub)
+    (d) no crashes / hangs in normal startup
+  Real-HW iter is the load-bearing validation: operator's next iter
+  on g2k should see the new "opl3 backend shutdown" log line in
+  OPL3.LOG between "Sound system shutdown" and process exit, AND
+  the audible hanging note should be gone (clean silence after
+  in-game Quit).
+
+  Gate 1 — AUDIO_BACKEND=opl3: engine starts cleanly; 45 flips, no
+    crashes. Shutdown narration verified in binary via strings-grep
+    (cannot exercise via DOSBox-X pkill — clean Quit requires
+    in-game menu navigation).
+  Gate 2 — env unset: organya default, slot 0105 behavior preserved.
+    16 flips, no crashes.
+  Gate 3 — AUDIO_BACKEND=wb: MidiScheduler armed with
+    MidiBackendWaveBlaster; regression unchanged. 50 flips, no
+    crashes.
+  Gate 4 — AUDIO_BACKEND=midi-stub: MidiScheduler armed with
+    MidiBackendStub; regression unchanged. 49 flips, no crashes.
+
+  All 4 gates PASS. Real-HW Quit-path validation is operator iter.
+
+strings-grep confirms presence in binary:
+  "opl3 backend shutdown (all 18 voices KEY-OFF unconditionally;
+   OPL2 mode restored; chip state safe for next process)"
+
+Phase 10.5 follow-ups (deferred):
+  - OPL3 silent music triage IS NOT addressed here (per team-lead
+    "OPL3 played music successfully" in PLAY3 — the silent-music
+    issue from earlier W22-WB-C iter was actually the patch-bank
+    / register-write issue, distinct from the hanging-note issue;
+    if music plays AND hanging note persists, the patch-bank-
+    register-write was working all along)
+  - Studder fix (operator-reported "occasional studder" in OPL3
+    PLAY) — slot 0107+ if confirmed after this fix
+  - WB probe hang (sdl-engine SDL/0042+) — orthogonal; nx-engine
+    side cannot fix
+  - Restore default-to-auto when WB probe fix validates real-HW —
+    one-line revert in selectBackendFromEnv (trivial when ready)
+---
+ src/sound/MidiBackendOpl3.cpp | 26 ++++++++++++++++++++------
+ src/sound/MidiScheduler.cpp   | 34 ++++++++++++++++++++++++++++++++++
+ src/sound/MidiScheduler.h     | 18 ++++++++++++++++++
+ src/sound/SoundManager.cpp    | 12 ++++++++++++
+ 4 files changed, 84 insertions(+), 6 deletions(-)
+
+diff --git a/src/sound/MidiBackendOpl3.cpp b/src/sound/MidiBackendOpl3.cpp
+index 98e2c7e..064b19f 100644
+--- a/src/sound/MidiBackendOpl3.cpp
++++ b/src/sound/MidiBackendOpl3.cpp
+@@ -330,16 +330,30 @@ MidiBackendOpl3::~MidiBackendOpl3()
+ {
+   if (_ready)
+   {
+-    // Silence all voices + restore Adlib OPL2 mode for any subsequent
+-    // process that might use the chip. Idempotent.
++    // patch 0106 (Phase 10 OPL3 hanging-note fix): UNCONDITIONALLY
++    // KEY-OFF all 18 voices, ignoring engine-side `_voices[v].active`
++    // bookkeeping. The chip's KEY-ON state is the load-bearing
++    // ground-truth for whether a note is sounding; engine bookkeeping
++    // can drift out of sync (e.g., LRU-stolen voices, redundant
++    // note-offs from SMF arrangements, or the loop-from-start in
++    // MidiScheduler::tick re-dispatching on top of a still-sustaining
++    // note). Belt-and-braces: SDL_DOSOpl3Shutdown below ALSO silences
++    // all 18 voices unconditionally (per its impl in
++    // vendor/SDL/src/core/dos/SDL_dos_audio_synth.c), but doing it
++    // here too ensures audible silence even if SDL_DOSOpl3Shutdown
++    // call is somehow skipped (defensive).
++    //
++    // Per W22-WB-D real-HW iter 2026-05-07 evidence: prior version
++    // had `if (_voices[v].active)` guard which skipped voices whose
++    // engine-side active=false but had chip KEY-ON=1 (drift). The
++    // guard is now removed; all 18 voices KEY-OFF unconditionally.
+     for (int v = 0; v < VOICES; ++v)
+     {
+-      if (_voices[v].active)
+-        SDL_DOSOpl3VoiceNoteOff(v);
++      SDL_DOSOpl3VoiceNoteOff(v);
+     }
+     SDL_DOSOpl3Shutdown();
+-    LOG_INFO("opl3 backend shutdown (all voices silenced; OPL2 mode "
+-             "restored)");
++    LOG_INFO("opl3 backend shutdown (all 18 voices KEY-OFF unconditionally; "
++             "OPL2 mode restored; chip state safe for next process)");
+   }
+ }
+ 
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+index 480119d..49ee670 100644
+--- a/src/sound/MidiScheduler.cpp
++++ b/src/sound/MidiScheduler.cpp
+@@ -137,6 +137,40 @@ void MidiScheduler::stop()
+   _playing = false;
+ }
+ 
++void MidiScheduler::shutdown()
++{
++  // patch 0106 (Phase 10 OPL3 hanging-note fix): explicit teardown
++  // path called from SoundManager::shutdown() to guarantee the
++  // backend's destructor fires in deterministic order BEFORE the
++  // engine fully exits. See header comment for the W22-WB-D real-HW
++  // motivation (OPL3 chip retains KEY-ON across process exit when
++  // singleton dtor never fires).
++  //
++  // Order:
++  //   1. stop() — fires on_song_stop on the backend (e.g.,
++  //      MidiBackendOpl3 silences all 18 voices via VoiceNoteOff).
++  //   2. _backend.reset() — unique_ptr unwind triggers backend dtor
++  //      (e.g., MidiBackendOpl3::~MidiBackendOpl3 → unconditional
++  //      18-voice KEY-OFF + SDL_DOSOpl3Shutdown which silences again
++  //      AND clears the OPL3 enable bit, restoring Adlib OPL2 mode).
++  //   3. _events.clear() — release the parsed SMF event list.
++  //
++  // Idempotent: re-calling shutdown() after the first call is a
++  // no-op (stop() bails on !_playing; _backend is already null).
++  if (_playing)
++  {
++    stop();
++  }
++  if (_backend)
++  {
++    _backend.reset();  // → backend dtor fires → chip state restored
++  }
++  _events.clear();
++  _next_event_idx = 0;
++  _current_tick = 0;
++  _position_us = 0;
++}
++
+ // ----------------------------------------------------------------------
+ // Per-frame tick (driven from SoundManager::runFade)
+ // ----------------------------------------------------------------------
+diff --git a/src/sound/MidiScheduler.h b/src/sound/MidiScheduler.h
+index 2e0a812..de655d2 100644
+--- a/src/sound/MidiScheduler.h
++++ b/src/sound/MidiScheduler.h
+@@ -128,6 +128,24 @@ public:
+   // Disarm playback. tick() becomes a no-op until next start().
+   void stop();
+ 
++  // Tear down the scheduler: stop any active playback (which fires
++  // on_song_stop on the backend, propagating per-backend cleanup
++  // like MidiBackendWaveBlaster's All-Notes-Off + MidiBackendOpl3's
++  // 18-voice KEY-OFF), then release the backend (unique_ptr unwind
++  // → backend dtor fires → SDL_DOSMpu401Shutdown / SDL_DOSOpl3Shutdown
++  // restores chip state). Called from SoundManager::shutdown().
++  //
++  // Why not rely on Singleton<MidiScheduler>::~Singleton at process
++  // exit: undefined order across compilation units. On real DOS HW
++  // (per W22-WB-D iter 2026-05-07 evidence) the singleton's dtor
++  // does not fire before process termination, leaving the OPL3 chip
++  // with a held KEY-ON bit → audible hanging note that persists
++  // across the next program's run until reboot. Explicit shutdown
++  // plumbing from SoundManager guarantees deterministic teardown
++  // order: this method runs in the engine's normal exit path BEFORE
++  // MIX_DestroyMixer, with all engine state still valid.
++  void shutdown();
++
+   // Advance playback position to now_ms. Dispatches all events whose
+   // absolute timing has elapsed since the previous tick. Backend's
+   // note_on / note_off / control_change / program_change fire
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index ef950b4..8c9a147 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -502,6 +502,18 @@ bool SoundManager::init()
+ 
+ void SoundManager::shutdown()
+ {
++  // patch 0106 (Phase 10 OPL3 hanging-note fix): MidiScheduler shutdown
++  // FIRST. Released backend's dtor (MidiBackendOpl3 / WaveBlaster /
++  // Stub) fires here in deterministic teardown order, ensuring chip
++  // state is restored (OPL3 KEY-OFF all voices + OPL2-mode disable;
++  // MPU-401 reset) BEFORE process exit. Without this explicit call,
++  // Singleton<MidiScheduler>::~Singleton fires at undefined order
++  // during CRT cleanup; on real DOS HW (per W22-WB-D iter 2026-05-07
++  // evidence) the singleton dtor sometimes does not fire at all
++  // before process termination, leaving the OPL3 chip with held
++  // KEY-ON → audible hanging note that persists until reboot.
++  MidiScheduler::getInstance()->shutdown();
++
+   Organya::getInstance()->shutdown();
+   Pixtone::getInstance()->shutdown();
+ 
+-- 
+2.47.3
+

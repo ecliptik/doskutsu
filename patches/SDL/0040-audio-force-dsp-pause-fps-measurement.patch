@@ -1,0 +1,199 @@
+From 7f08964dfdf04a70a12b4a749a6ee8fb21281ee3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 6 May 2026 13:41:06 -0700
+Subject: [PATCH 1/2] =?UTF-8?q?dos:=20Phase=2010=20patch=200040=20?=
+ =?UTF-8?q?=E2=80=94=20force-DSP-pause=20for=20fps=20upper-bound=20measure?=
+ =?UTF-8?q?ment?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1 env var. Strict-1 match
+per CLAUDE.md convention. When set, SoundBlaster OpenDevice issues a
+DSP pause command at init (immediately after auto-init DMA starts +
+IRQ hook installs) and PlayDevice's auto-resume on subsequent ring
+writes is gated off. Result: DSP stays paused for the entire run;
+IRQ-5 stops firing; gameplay is silent (no music synthesis, no
+Pixtone SFX through the DAC).
+
+Purpose: fps-upper-bound data point for the W22-WB-A-r2 PLAY4 iter.
+Measures the absolute fps headroom the future Stage 3 (WB) + Stage 4
+(OPL3) hardware-offload backends can approach when music is genuinely
+off-DMA — by removing the ~13.5 ms / flip IRQ-5 wall-clock cost (per
+W20A2 ablation, memory audio_mix_zero_is_not_audio_off.md) without
+waiting for those backends' Stage 2/3 implementation work to land.
+
+Trade-off: gameplay is silent. Dev-only; not user-facing.
+
+Implementation reuses existing patch 0037+0038 idle-pause primitives:
+  - g_dos_audio_pause_request flag set + MaybeServiceIdlePauseRequests
+    called at OpenDevice → issues DSP 0xD5 (16-bit) or 0xD0 (8-bit)
+    per soundblaster_is_sb16, sets isr_dsp_paused = true.
+  - PlayDevice auto-resume gated on !g_dos_audio_force_dsp_pause →
+    when force-pause active, ring writes don't trigger DSP 0xD6/0xD4.
+  - Idle-pause auto-engagement irrelevant (DSP already paused; the
+    silent-IRQ counter never reaches threshold because IRQs aren't
+    firing once paused).
+
+Init banner logged at SDL_Log INFO so DEBUG.LOG / SDLDBG.LOG document
+the active mode per run:
+  "audio: DSP forcefully paused via SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1;
+   gameplay will be silent; expect IRQ-5 to stop firing for fps comparison"
+
+g_dos_audio_force_dsp_pause flag locked in OpenDevice's lock-block
+alongside other Phase 10 state vars.
+
+Future Stage 2/3 (WB / OPL3) backends ignore this hint cleanly: their
+music is hardware-routed; the SB16 ring stays empty regardless of
+this flag; idle-pause auto-engages anyway. Force-pause is just a
+more aggressive form of idle-pause that doesn't wait for the
+silent-IRQ-threshold (4 IRQs ~92 ms).
+
+BOOT.md entry added per env_vars_document_in_user_docs.md (dev-only
+category; documents trade-off + intended use; references patch
+0040 + PHASE10-DESIGN.md § E.2).
+
+Defaults OFF preserves Phase 9 / current-build behavior bit-identical.
+
+Modifies vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c only; no new files.
+docs/BOOT.md edit lives in the parent doskutsu repo (not in this
+vendor commit).
+
+CloseDevice quit-hang fix (post-W22-WB-A-r2 operator report):
+PLAY4 with force-DSP-pause active hangs on quit. Root cause: standard
+CloseDevice teardown issues 0xDA (exit auto-init DMA) + 0xD3 (turn
+off speaker) while the DSP is in 0xD5-paused state from OpenDevice's
+force-pause. The 0xDA "exit auto-init DMA" command waits for in-flight
+DMA to complete; with DMA paused, that never happens → spin → lockup.
+Negative control: PLAYs 1/2/3 (Organya, no force-pause) all quit
+cleanly to DOS, confirming the issue is force-pause-path-only.
+
+Fix: at CloseDevice entry, if g_dos_audio_force_dsp_pause is set,
+clear it + request resume + service via MaybeServiceIdlePauseRequests.
+After this block, DSP is back in normal "running auto-init DMA" state
+and the standard 0xDA / 0xD3 sequence completes cleanly. Idempotent
+when force-pause was never engaged (isr_dsp_paused is false; service
+is a no-op). ~10 LOC + comment block; no new env vars; no new state.
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 77 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 75 insertions(+), 2 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index dabeddb34..3856acc43 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -172,6 +172,21 @@ static volatile uint32_t isr_consecutive_silent_irqs = 0;
+ static volatile bool isr_dsp_paused = false; /* set/cleared by non-IRQ service path */
+ static Uint64 s_dsp_pause_start_ns = 0;      /* set when pause issued; read at resume to compute paused_ns */
+ 
++/* DOSKUTSU patch (Phase 10 patch 0040): force-DSP-pause for fps-upper-
++   bound measurement. When SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1,
++   the audio backend issues DSP pause at init and PlayDevice's auto-
++   resume is disabled — the DSP stays paused regardless of ring fills.
++   Gameplay becomes silent; IRQ-5 stops firing; the resulting fps is
++   the upper bound that future Stage 2/3 backends (WB / OPL3) can
++   approach when music is genuinely offloaded.
++
++   Trade-off: gameplay is silent. This is dev-only; not user-facing.
++   Defaults OFF; env var unset = current behavior bit-identical.
++
++   Per env_vars_document_in_user_docs.md: documented in docs/BOOT.md
++   as dev-only category. Strict-1 env-var match per CLAUDE.md. */
++static volatile bool g_dos_audio_force_dsp_pause = false;
++
+ // ISR-visible ring buffer state (all memory-locked).
+ static volatile int isr_ring_read = 0;
+ static volatile int isr_ring_write = 0;
+@@ -589,6 +604,10 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+        context only reads. */
+     DOS_LockVariable(g_dos_audio_timer_mode);
+     DOS_LockVariable(g_dos_audio_timer_tsc_mhz);
++    /* DOSKUTSU patch (Phase 10 patch 0040): force-DSP-pause flag.
++       Read by PlayDevice (non-IRQ context) but defensively locked
++       in case any future path reads it from IRQ context. */
++    DOS_LockVariable(g_dos_audio_force_dsp_pause);
+ 
+     /* DOSKUTSU patch (Phase 10 patch 0039): initialize the IRQ-safe
+        timer for audio_irq_wall_us measurement. Detects RDTSC (Pentium+)
+@@ -659,6 +678,32 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+     }
+ 
+     SDL_Log("SoundBlaster opened!");
++
++    /* DOSKUTSU patch (Phase 10 patch 0040): force-DSP-pause for fps-
++       upper-bound measurement. When SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1,
++       request DSP pause immediately + suppress PlayDevice auto-resume.
++       Resulting fps is the absolute upper bound the future Stage 2/3
++       hardware-offload backends can approach.
++
++       Strict-1 env-var match per CLAUDE.md "Strict env-var matching
++       convention". Default OFF preserves current behavior bit-identical. */
++    {
++        const char *e = SDL_getenv("SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE");
++        if (e && e[0] == '1' && e[1] == 0) {
++            g_dos_audio_force_dsp_pause = true;
++            SDL_Log("audio: DSP forcefully paused via "
++                    "SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1; gameplay "
++                    "will be silent; expect IRQ-5 to stop firing for fps "
++                    "comparison");
++            /* Issue DSP pause via the existing service path. The pause
++               request flag triggers WriteSoundBlasterDSP(0xD5/0xD0) +
++               sets isr_dsp_paused = true. PlayDevice's auto-resume is
++               gated on !g_dos_audio_force_dsp_pause so the DSP stays
++               paused regardless of subsequent ring writes. */
++            g_dos_audio_pause_request = true;
++            MaybeServiceIdlePauseRequests();
++        }
++    }
+     return true;
+ }
+ 
+@@ -698,8 +743,13 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+        means the audio writer has fresh data to play — almost certainly
+        a Pixtone SFX trigger. Request resume; service it now so the new
+        data starts playing immediately rather than after the next
+-       WaitDevice cycle. */
+-    if (isr_dsp_paused) {
++       WaitDevice cycle.
++
++       DOSKUTSU patch (Phase 10 patch 0040): suppress auto-resume when
++       force-DSP-pause is active. Force-pause is the fps-upper-bound
++       measurement mode; gameplay is silent; ring writes from any
++       source (including Pixtone) are dropped on the floor. */
++    if (isr_dsp_paused && !g_dos_audio_force_dsp_pause) {
+         g_dos_audio_resume_request = true;
+         MaybeServiceIdlePauseRequests();
+     }
+@@ -711,6 +761,29 @@ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
+ {
+     struct SDL_PrivateAudioData *hidden = device->hidden;
+     if (hidden) {
++        /* DOSKUTSU patch (Phase 10 patch 0040): release force-DSP-pause
++           before the standard teardown sequence runs. Background:
++           OpenDevice issues DSP 0xD5 (16-bit) or 0xD0 (8-bit) when
++           SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1, leaving the DSP
++           in paused state for the entire run. The standard teardown
++           below issues 0xDA (exit auto-init DMA) which expects the
++           DMA to be active — when the DSP is paused, 0xDA spins
++           waiting for an in-flight DMA that never completes, hanging
++           the quit path. Operator W22-WB-A-r2 PLAY4 confirmed: ESC →
++           Quit → system lockup, only force-pause path affected.
++
++           Fix: clear the force-pause flag + request resume + service
++           it from non-IRQ context. After this block, the DSP is back
++           in the normal "running auto-init DMA" state and the standard
++           0xDA / 0xD3 sequence completes cleanly. Idempotent — when
++           force-pause was never engaged, isr_dsp_paused is false and
++           MaybeServiceIdlePauseRequests is a no-op. */
++        if (g_dos_audio_force_dsp_pause) {
++            g_dos_audio_force_dsp_pause = false;
++            g_dos_audio_resume_request = true;
++            MaybeServiceIdlePauseRequests();
++        }
++
+         // Disable PCM.
+         if (hidden->is_16bit) {
+             WriteSoundBlasterDSP(0xDA); // exit 16-bit auto-init DMA
+-- 
+2.47.3
+
