@@ -1,0 +1,397 @@
+From bcb241029293184810d5bf0ad1bbfd5cab723749 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 12 May 2026 10:09:52 -0700
+Subject: [PATCH] dos: Phase 11 patch 0057 -- Shape D mixer-flag silence-detect
+ (SDL reader)
+
+SDL3-DOS side of the Shape D mixer-flag silence-detect fps lever for
+wave-36 PLAY6. Pairs with patches/SDL_mixer/0001 (the writer) to
+replace SDL/0054 Shape A's bytewise post-mix scan with an O(1)
+volatile-int load.
+
+User direction 2026-05-12 (no_playing_it_safe.md): "We don't make
+Cave Story great on DOS by playing it safe." Wave-36 picks Shape D
+(architectural change; aggressive ceiling) over Shape E (cheaper-
+scan-loop; safe ceiling) per team-lead pivot. Risk-honest framing:
+mechanism IS architecturally correct (SDL_mixer's
+`mixer->actual_mixed_bytes` is the source-of-truth for "did the mix
+produce non-silence"; the bytewise scan was redundant); killswitch
+hygiene per correctness_vs_perf_trade_machinery_at_authoring.md;
+PLAY6 measures real-HW trade; wave-37+ flips ship-default if data
+clears.
+
+Mechanism:
+
+  - New static `g_dos_silence_shape_d_active` resolved at OpenDevice
+    from `SDL_HINT_DOSKUTSU_SILENCE_SHAPE=D` (strict-"D" match per
+    CLAUDE.md env-var convention). Default false (Shape A path active;
+    identical to wave-35 SDL/0054 ship behavior). Any value other than
+    literal single-char "D" (unset, "A", "E", lowercase "d", anything)
+    falls through to Shape A.
+
+  - PlayDevice silence-detect block dispatches on the active shape:
+        if (g_dos_silence_shape_d_active) {
+            all_silence = (doskutsu_mixer_actual_mixed_bytes == 0);
+        } else {
+            /* Shape A bytewise scan; unchanged from SDL/0054 */
+        }
+    The remaining silence-skip + ring-write + audio_thread bracket
+    paths are unchanged: only the silence detection itself swaps
+    mechanism.
+
+  - Weak-fallback definition of `doskutsu_mixer_actual_mixed_bytes`
+    in this TU (default 0; SDL_mixer's strong definition from
+    patches/SDL_mixer/0001 overrides at final link). Lets SDL3's own
+    test/utility binaries (which link libSDL3.a only without
+    libSDL3_mixer.a) link cleanly even though they never engage
+    Shape D at runtime -- the weak default reads as 0 (silent), and
+    no SDL3 test binary exercises the DOS audio backend.
+
+  - Boot banner emits one of FOUR variants per flush-instr's wave-36
+    contract section 3.4 (engagement-verify gate via doskutsu_dbg_log):
+
+      Variant 1 (Shape A default):
+        "audio: SDL/0054 silence-detect Shape A active
+         (default; bytewise scan; SFX-correct)"
+      Variant 2 (Shape D engaged):
+        "audio: SDL/0054 silence-detect Shape D active
+         (SHAPE=D; mixer-flag fast-path via
+         doskutsu_mixer_actual_mixed_bytes; replaces Shape A
+         bytewise scan with O(1) volatile load)"
+      Variant 3 (Shape A killswitched via SDL/0056):
+        "audio: SDL/0054 silence-detect DISABLED
+         (env-var; perf-experiment)"
+      Variant 4 (conflict: SILENCE_DETECT=0 + SHAPE=D both set):
+        "audio: SDL/0054 silence-detect DISABLED
+         (SILENCE_DETECT=0 overrides SILENCE_SHAPE=D)"
+
+    Operator BAT cell that sets SHAPE=D MUST produce variant 2 in
+    SDLDBG.LOG; absence of variant 2 means the gate chain didn't
+    engage and the fps measurement is invalid (per
+    contract_grep_targets_require_enabling_env_vars.md the
+    wave-35 PLAY5 trap that bit nx 0131 / SDL/0055 instrumentation).
+
+Conflict resolution (variant 4): SILENCE_DETECT=0 (entire silence-
+detect path disabled) WINS over SHAPE=D (mechanism pick within the
+silence-detect path). When both env vars are set, the silence-detect
+dispatch block is entirely skipped, so the Shape pick is moot. Banner
+variant 4 makes the conflict visible to log capture.
+
+Cost trade (predicted; framed as hypothesis per
+perf_predictions_unreliable.md):
+  Shape A: bytewise scan of 256-4096 buffer bytes per audio-thread
+           iter; cost dominated by cooperative-scheduler interaction
+           during the wall-clock window the scan runs (per
+           PHASE11-WAVE-35-FINDINGS section 2.1; +3.34 ms fi_ms slice
+           regression wave-35 vs wave-34).
+  Shape D: single volatile-int load (~0 ns at -O3). The scheduling-
+           window the load occupies is sub-microsecond; no
+           cooperative-yield opportunity.
+
+PLAY6 prediction band: +3 to +5 fps recovery from 35.71 baseline (full
+~3.34 ms fi_ms recovery to ~39-40 fps target). Real-HW measurement
+settles cost; if PLAY6 == PLAY1 (no fps gain), the wave-35 cost
+attribution hypothesis was wrong (scan-loop wall-clock wasn't the
+driver) and the real cost lives elsewhere; SDL/0058's mechanism
+histogram backstop reveals where for wave-37 picks.
+
+SFX-correctness gate: the mixer's actual_mixed_bytes captures track-
+output-stream byte counts; when a Pixtone SFX fires via MIX_PlayTrack,
+the track's TrackGetCallback puts non-zero data into the per-track
+output_stream during MixerCallback, mixer->actual_mixed_bytes
+increments, Shape D PlayDevice takes the audible-write path, ring
+write happens, SFX plays. Same correctness profile as Shape A; the
+difference is HOW we detected non-silence (mixer bookkeeping vs scan),
+not WHETHER we wrote the audible buffer.
+
+If operator reports SFX silent in PLAY6 but audible in PLAY1 (Shape
+A baseline), that's an attribution bug in actual_mixed_bytes tracking
+(very unlikely; SDL3_mixer's own tests rely on this counter being
+correct) and we revert Shape D as a ship-default candidate; the
+SHAPE=A default path remains the wave-36 ship binary's default
+regardless.
+
+Concurrency / atomicity:
+
+  - Writer (SDL_mixer/0001): MixerCallback writes the value at the
+    end of its body, just before SDL_PutAudioStreamData.
+    MixerCallback runs on the audio thread under device->lock per
+    SDL3 audio core's SDL_PlaybackAudioThreadIterate at
+    SDL_audio.c:1179-1289.
+  - Reader (this patch): PlayDevice reads the value in the silence-
+    detect dispatch block. PlayDevice runs on the SAME audio thread
+    under the SAME device->lock as MixerCallback (SDL3 calls
+    GetDeviceBuf -> mix loop -> PlayDevice in one critical
+    section).
+  - Therefore: same-thread reader; no cross-thread atomicity
+    question. `volatile` for compiler-fence semantics only. Same
+    pattern as the existing `doskutsu_audio_irq_count` /
+    `doskutsu_audio_irq_wall_us` volatile exports from SDL3-DOS.
+
+Workspace-local DOS-port patch per memory/sdl_ai_policy.md; never
+upstreamed.
+
+Validation:
+  - Compile clean at i486 -O3.
+  - Symbol `_doskutsu_mixer_actual_mixed_bytes` weak in libSDL3.a;
+    strong in libSDL3_mixer.a; final-link resolution verified.
+  - All 4 banner variants verified in libSDL3.a via
+    `strings | grep "Shape [AD]\\|SILENCE_DETECT=0 overrides"`.
+  - SDL3 test binaries link clean (weak fallback resolves).
+
+Coexistence with the patch family:
+  - SDL/0050 -- DOS GetDeviceBuf quiescence gate (superseded by
+                SDL/0054 mechanism; killswitch hint name retained;
+                orthogonal to SHAPE=D)
+  - SDL/0053 -- engine-signaled pre-shutdown gate disable (still
+                gates the silence-detect block via
+                g_dos_audio_quiescence_gate_disabled; same code path
+                under Shape D as Shape A)
+  - SDL/0054 -- Shape A silent-Pixtone-SFX fix (this patch's
+                fallback; remains default-ON; PlayDevice's silence-
+                detect dispatch lands here when SHAPE != "D")
+  - SDL/0055 -- P12 SDL-side audio brackets (independent
+                instrumentation; gates separately; coexists trivially)
+  - SDL/0056 -- silence-detect runtime killswitch (entirely disables
+                the silence-detect block when SILENCE_DETECT=0;
+                takes precedence over SHAPE=D per variant 4 banner)
+  - SDL_mixer/0001 -- Shape D mixer-flag writer (paired patch; this
+                       patch is its reader)
+  - SDL/0058 -- Shape A mechanism histogram (planned ride-along;
+                pure SDL-side; gates separately on
+                SDL_HINT_DOSKUTSU_SILENCE_HISTO=1)
+
+Cross-reference:
+  - docs/PHASE11-WAVE-36-CONTRACT.md section 4 + 5.7 (PLAY6 Shape D
+    fps lever; predicted +3 to +5 fps; refutation discriminator
+    boot-banner variant 2 in SDLDBG.LOG)
+  - docs/PHASE11-WAVE-35-FINDINGS.md section 2 (the +3.34 ms fi_ms
+    slice regression Shape D aims to recover)
+  - patches/SDL_mixer/0001-shape-d-mixer-flag-silence-detect-setter.patch
+    (the writer; defines `doskutsu_mixer_actual_mixed_bytes` strong)
+  - memory/no_playing_it_safe.md (user directive 2026-05-12: prefer
+    biggest correctness-retaining ceiling over smallest LOC)
+  - memory/correctness_vs_perf_trade_machinery_at_authoring.md
+    (killswitch hygiene; ship default-OFF; PLAY6 confirms; wave-37
+    flips default if data clears)
+  - memory/contract_grep_targets_require_enabling_env_vars.md
+    (banner-variant-2 grep target is load-bearing for PLAY6
+    engagement-verify)
+  - memory/perf_predictions_unreliable.md (PLAY6 prediction band
+    framed as hypothesis; measurement settles)
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 178 +++++++++++++++++++++++++++++---
+ 1 file changed, 161 insertions(+), 17 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 3d9b511fe..6c040d7a1 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -101,6 +101,91 @@ static bool g_dos_audio_quiescence_gate_disabled = false;
+    stretch framing. */
+ static bool g_dos_silence_detect_enabled = true;
+ 
++/* DOSKUTSU patch (Phase 11 patch 0057): Shape D mixer-flag silence-
++   detect engagement state. Default false (Shape A bytewise-scan path
++   runs; identical to wave-35 SDL/0054 ship behavior). Set
++   SDL_HINT_DOSKUTSU_SILENCE_SHAPE=D at SDL_Init time to engage Shape
++   D: PlayDevice reads the `doskutsu_mixer_actual_mixed_bytes`
++   volatile (defined in SDL3_mixer's MixerCallback per
++   patches/SDL_mixer/0001) instead of bytewise-scanning the staging
++   buffer. Strict-"D" match (single char + null terminator); any
++   other value (unset, "A", "E", lowercase "d", anything) falls
++   through to Shape A.
++
++   Architectural argument: SDL3_mixer's `mixer->actual_mixed_bytes`
++   is the source-of-truth for "did this iter produce non-silence"
++   (it's the max group_bytes across all groups' track output
++   streams, set at SDL_mixer.c line 619-621). The post-mix bytewise
++   scan that Shape A performs is a redundant re-verification of
++   what the mixer already knew. Shape D eliminates the redundancy:
++   one volatile-int load replaces N bytes of compare loop.
++
++   Hot-path cost trade:
++     Shape A: bytewise scan of 256-4096 staging buffer bytes,
++              early-exit on first non-silence byte. Cost dominated
++              by cooperative-scheduler interaction during the
++              wall-clock window the scan runs (per
++              docs/PHASE11-WAVE-35-FINDINGS.md section 2.1; +3.34 ms
++              fi_ms slice regression measured wave-35 vs wave-34).
++     Shape D: single volatile-int load (`*p` where p points at the
++              SDL_mixer-side global). Cost ~0 ns. The scheduling-
++              window the load occupies is sub-microsecond; no
++              cooperative-yield opportunity.
++
++   Per memory/no_playing_it_safe.md (user directive 2026-05-12):
++   "we don't make Cave Story great on DOS by playing it safe."
++   Shape D is the aggressive-but-architecturally-correct shape;
++   Shape E (smaller-scan-window variant in nx 0058's histogram
++   backstop framing) is the safe fallback if Shape D surfaces
++   correctness issues in real-HW PLAY6.
++
++   Conflict with g_dos_silence_detect_enabled (SDL/0056): if
++   SILENCE_DETECT=0 (silence-detect entirely disabled) AND SHAPE=D
++   are both set, SILENCE_DETECT=0 WINS (no silence-detect path runs;
++   Shape pick is moot because the silence-detect dispatch block
++   doesn't execute). Boot banner emits variant 4 to make the
++   conflict visible to log capture.
++
++   Wave-36 PLAY6 engagement matrix:
++     PLAY1/2/3/4/5/8/9: SHAPE unset -> Shape A active (default;
++                       baseline + audio decomp variations)
++     PLAY6:            SHAPE=D set -> Shape D active (this patch's
++                       fps lever; predicted +3 to +5 fps vs PLAY1) */
++static bool g_dos_silence_shape_d_active = false;
++
++/* DOSKUTSU patch (Phase 11 patch 0057): weak-fallback definition for
++   the SDL_mixer-defined volatile. The strong definition lives in
++   SDL3_mixer's MixerCallback TU
++   (vendor/SDL_mixer/src/SDL_mixer.c, file-scope after MixerCallback)
++   per patches/SDL_mixer/0001 -- when SDL3-DOS is linked into a binary
++   that ALSO links libSDL3_mixer.a (the doskutsu.exe link order), the
++   strong def from SDL_mixer wins at link time and MixerCallback's
++   writes are observable here.
++
++   The `__attribute__((weak))` default-zero definition exists to keep
++   SDL3's own test/utility binaries (which link libSDL3.a only without
++   libSDL3_mixer.a) link-clean: those binaries never engage Shape D
++   (no MixerCallback to set the value; SDL_HINT_DOSKUTSU_SILENCE_SHAPE
++   is never set in them), but the SDL_dosaudio_sb.c TU still contains
++   the read instruction in the Shape D code path that's compiled in.
++   Weak default-zero means: read returns 0 (silent) ALWAYS in those
++   builds; the Shape D path becomes equivalent to "always treat as
++   silent" -- which is HARMLESS because none of SDL3's test binaries
++   exercise the DOS audio backend at runtime.
++
++   Concurrency: same-thread reader (audio thread under device->lock
++   during PlaybackAudioThreadIterate); same thread is also the writer
++   (MixerCallback runs inside the same PlaybackAudioThreadIterate
++   critical section). No cross-thread sync required; `volatile` for
++   compiler-fence semantics only.
++
++   Per memory/no_playing_it_safe.md aggressive-but-not-reckless
++   framing: the weak fallback is the "not reckless" half -- it
++   ensures the architectural change doesn't break unrelated SDL3
++   test infrastructure on the way to delivering the Shape D fps
++   lever for doskutsu.exe. */
++volatile int doskutsu_mixer_actual_mixed_bytes __attribute__((weak)) = 0;
++
+ /* DOSKUTSU patch (Phase 11 patch 0055): Phase 12 SDL-side audio
+    instrumentation state. Pairs with engine-side nx 0131 brackets for
+    wave-36 PLAY5 audio cost attribution per
+@@ -636,23 +721,55 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
+-    /* DOSKUTSU patch (Phase 11 patch 0056): resolve silence-detect
+-       runtime killswitch once at OpenDevice time. Strict-"0" match per
+-       CLAUDE.md env-var convention. Cached at module scope; read by
+-       DOSSOUNDBLASTER_PlayDevice in the hot path. Boot banner emit is
+-       load-bearing for wave-36 decomp engagement-verify (operator BAT
+-       cell that sets =0 must produce the DISABLED variant in the log
+-       so we can confirm the killswitch path actually engaged before
+-       attributing the fps delta to silence-detect cost). */
++    /* DOSKUTSU patch (Phase 11 patch 0056 + 0057): resolve silence-
++       detect runtime killswitch + Shape D engagement once at
++       OpenDevice time. Strict-"0" / strict-"D" match per CLAUDE.md
++       env-var convention. Cached at module scope; read by
++       DOSSOUNDBLASTER_PlayDevice in the hot path. Boot banner emit
++       is load-bearing for wave-36 decomp engagement-verify (operator
++       BAT cell that sets either env-var must produce the matching
++       banner variant in the log so we can confirm the path actually
++       engaged before attributing the fps delta).
++
++       Four banner variants per flush-instr's wave-36 contract section
++       3.4:
++         1. Shape A active (default; bytewise scan)
++            -- SHAPE != "D" AND SILENCE_DETECT != "0"
++         2. Shape D active (SHAPE=D; mixer-flag fast-path)
++            -- SHAPE == "D" AND SILENCE_DETECT != "0"
++         3. silence-detect DISABLED (env-var; perf-experiment)
++            -- SILENCE_DETECT == "0" AND SHAPE != "D"
++         4. silence-detect DISABLED (SILENCE_DETECT=0 overrides
++            SILENCE_SHAPE=D)
++            -- SILENCE_DETECT == "0" AND SHAPE == "D" (conflict;
++               DETECT=0 wins -- silence-detect dispatch entirely
++               skipped, so Shape pick is moot) */
+     {
+         const char *sd_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_SILENCE_DETECT");
++        const char *shape_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_SILENCE_SHAPE");
+         const bool sd_disabled =
+             (sd_hint && sd_hint[0] == '0' && sd_hint[1] == 0);
++        const bool shape_d =
++            (shape_hint && shape_hint[0] == 'D' && shape_hint[1] == 0);
+         g_dos_silence_detect_enabled = !sd_disabled;
+-        if (g_dos_silence_detect_enabled) {
+-            doskutsu_dbg_log("audio: SDL/0054 silence-detect ACTIVE (default; SFX-correct)");
+-        } else {
++        g_dos_silence_shape_d_active = shape_d;
++        if (sd_disabled && shape_d) {
++            /* Variant 4: conflict; DETECT=0 wins. */
++            doskutsu_dbg_log("audio: SDL/0054 silence-detect DISABLED "
++                             "(SILENCE_DETECT=0 overrides SILENCE_SHAPE=D)");
++        } else if (sd_disabled) {
++            /* Variant 3: SILENCE_DETECT=0 (Shape A killswitched). */
+             doskutsu_dbg_log("audio: SDL/0054 silence-detect DISABLED (env-var; perf-experiment)");
++        } else if (shape_d) {
++            /* Variant 2: Shape D engaged (SDL/0057 mixer-flag fast-path). */
++            doskutsu_dbg_log("audio: SDL/0054 silence-detect Shape D active "
++                             "(SHAPE=D; mixer-flag fast-path via "
++                             "doskutsu_mixer_actual_mixed_bytes; replaces "
++                             "Shape A bytewise scan with O(1) volatile load)");
++        } else {
++            /* Variant 1: Shape A active (default; SDL/0054 wave-35 path). */
++            doskutsu_dbg_log("audio: SDL/0054 silence-detect Shape A active "
++                             "(default; bytewise scan; SFX-correct)");
+         }
+     }
+ 
+@@ -1251,12 +1368,39 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+        rationale on keeping the perf switch separate from the
+        legacy-compat / shutdown flag. */
+     if (g_dos_silence_detect_enabled && !g_dos_audio_quiescence_gate_disabled) {
+-        const Uint8 silence = soundblaster_silence_value;
+-        const Uint8 *p = buffer;
+-        const Uint8 *end = buffer + buffer_size;
+-        bool all_silence = true;
+-        while (p < end) {
+-            if (*p++ != silence) { all_silence = false; break; }
++        bool all_silence;
++        /* DOSKUTSU patch (Phase 11 patch 0057): Shape D mixer-flag
++           fast-path. When SHAPE=D is engaged, replace the Shape A
++           bytewise scan with an O(1) volatile load of the SDL_mixer-
++           defined `doskutsu_mixer_actual_mixed_bytes` global (set
++           in MixerCallback per patches/SDL_mixer/0001). The mixer's
++           own bookkeeping is the source-of-truth for "did this iter
++           produce non-silence"; the bytewise scan is a redundant
++           re-verification of what the mixer already knew.
++
++           When SHAPE != "D" (the default), the original Shape A path
++           runs unchanged -- identical to wave-35 SDL/0054 ship
++           behavior. The dispatch is a single cached-bool branch; -O3
++           hoists it to a predictable not-taken (default) or taken
++           (SHAPE=D engaged) at the static-bool-resolved-at-open
++           moment.
++
++           Concurrency: doskutsu_mixer_actual_mixed_bytes is written
++           by MixerCallback on the audio thread during SDL3's mix loop
++           (which runs between GetDeviceBuf and PlayDevice within one
++           SDL_PlaybackAudioThreadIterate critical section); read here
++           on the same thread. Same-thread reader; no cross-thread
++           atomicity question. `volatile` for compiler-fence semantics. */
++        if (g_dos_silence_shape_d_active) {
++            all_silence = (doskutsu_mixer_actual_mixed_bytes == 0);
++        } else {
++            const Uint8 silence = soundblaster_silence_value;
++            const Uint8 *p = buffer;
++            const Uint8 *end = buffer + buffer_size;
++            all_silence = true;
++            while (p < end) {
++                if (*p++ != silence) { all_silence = false; break; }
++            }
+         }
+         if (all_silence) {
+             /* Skip the ring write — ring continues to drain via IRQ →
+-- 
+2.47.3
+

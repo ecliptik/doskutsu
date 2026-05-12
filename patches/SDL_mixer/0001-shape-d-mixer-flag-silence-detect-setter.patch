@@ -1,0 +1,198 @@
+From ed402e50abe99604d5a05663cbec31af87f24e18 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 12 May 2026 10:08:33 -0700
+Subject: [PATCH] mixer: Phase 11 patch 0001 -- Shape D mixer-flag
+ silence-detect setter
+
+(First patch in patches/SDL_mixer/. Per patch_numbering.md pure-numeric
+convention + team-lead 2026-05-12 ACK: slot 0001 is the correct
+first-in-series, since patches/SDL_mixer/ was previously empty.)
+
+Surfaces `mixer->actual_mixed_bytes` as a cross-module volatile global
+`doskutsu_mixer_actual_mixed_bytes` so the SDL3-DOS audio backend can
+read it in PlayDevice instead of bytewise-scanning the final_mixbuf.
+Pairs with patches/SDL/0057 (Shape D reader) and SDL/0058 (Shape A
+mechanism histogram). Wave-36 Phase 11 fps lever per
+docs/PHASE11-WAVE-36-CONTRACT.md section 4 + team-lead 2026-05-12
+no_playing_it_safe.md priority pivot from Shape E -> Shape D
+(biggest correctness-retaining ceiling).
+
+Mechanism:
+
+  - MixerCallback (SDL_mixer.c:533+) already tracks
+    `mixer->actual_mixed_bytes` internally: line 619-621 sets it to
+    the max group_bytes across all groups' tracks for the current mix
+    iter. Zero means no track produced any data; non-zero means real
+    audio was mixed into final_mixbuf.
+
+  - This patch adds a volatile-int store at the end of MixerCallback,
+    just before SDL_PutAudioStreamData, that mirrors the value into
+    a cross-TU global. SDL3-DOS PlayDevice can read this in O(1) and
+    skip the ring write + SDL_Delay(10) silence-throttle when zero,
+    avoiding the per-iter bytewise scan of the staging buffer that
+    SDL/0054 Shape A performs.
+
+  - The mixer-bookkeeping value IS the architectural source-of-truth
+    for "did this iter produce non-silence" -- the post-mix bytewise
+    scan is a redundant re-verification of what the mixer already
+    knew. Shape D eliminates the redundancy.
+
+Static-link ordering rationale (DEFINITION lives in SDL_mixer.c, NOT
+in SDL3-DOS):
+
+  Doskutsu's nxengine link order is `SDL3::SDL3 SDL3_mixer::SDL3_mixer
+  SDL3_image::SDL3_image` per
+  vendor/nxengine-evo/CMakeLists.txt:231. With static archives in
+  single-pass linker mode, libSDL3.a is processed FIRST; if
+  SDL_mixer's reference to the volatile were extern-only and the
+  definition lived in SDL3-DOS (SDL_dos_audio_synth.c alongside
+  doskutsu_audio_irq_count), the linker would not yet know SDL_mixer
+  needs the symbol when processing libSDL3.a, so SDL_dos_audio_synth.o
+  might not be pulled in (no other live reference), and SDL_mixer's
+  reference would fail to resolve.
+
+  nxengine's existing `doskutsu_audio_irq_count` pattern works because
+  nxengine is LAST in the link order -- ld scans prior libs to
+  resolve nxengine's externs. Cross-vendor-archive references
+  (SDL_mixer -> SDL3-DOS) don't have that luxury without `--start-
+  group ... --end-group` flags, which we don't want to require.
+
+  Placing the DEFINITION in SDL_mixer.c (the writer; this patch) and
+  the extern decl in SDL3-DOS (the reader; SDL/0057) keeps the link
+  single-pass clean: SDL_mixer's TU defines the symbol; SDL3-DOS's
+  extern resolves against it.
+
+Workspace-local DOS-port patch per memory/sdl_ai_policy.md; never
+upstreamed. Default behavior unchanged on all non-doskutsu builds:
+the extra volatile store is observably a no-op when the SDL3-DOS
+reader is not linked in. Cost: 1 volatile-int store per
+MixerCallback invocation (~22 Hz at Tier-2 config; ~22 stores/sec).
+Negligible.
+
+Strict-"D" engagement: the volatile is READ by SDL3-DOS only when
+SDL_HINT_DOSKUTSU_SILENCE_SHAPE=D (env-var-gated; default-OFF;
+Shape A bytewise-scan path remains the default). PLAY6 in wave-36
+sets SHAPE=D; all other PLAYs run Shape A and ignore this value.
+
+Concurrency / atomicity:
+
+  - Writer: MixerCallback runs on the audio thread under
+    device->lock (per SDL3 audio core's SDL_PlaybackAudioThreadIterate
+    pattern at SDL_audio.c:1179-1289).
+  - Reader: SDL3-DOS PlayDevice runs on the same audio thread under
+    the same lock (SDL3 calls GetDeviceBuf -> mix loop ->
+    PlayDevice in one critical section).
+  - Therefore: same-thread reader; no cross-thread atomicity question.
+    `volatile int` for compiler-fence semantics; aligned-int x86
+    loads/stores are atomic by ISA anyway. Same pattern as the
+    existing `doskutsu_audio_irq_count` / `doskutsu_audio_irq_wall_us`
+    volatile exports from SDL3-DOS.
+
+Coordination with SDL3-DOS readers:
+  - SDL/0057 (Shape D reader): the active consumer. Engaged when
+    SHAPE=D.
+  - SDL/0058 (Shape A mechanism histogram): does NOT use this
+    value; it counts Shape A scan results independently. Both can
+    be enabled simultaneously in the same binary; SDL/0057 takes
+    precedence in PlayDevice's silence-detect dispatch (Shape D
+    path) and SDL/0058 instrumentation rides along the Shape A
+    path when SHAPE != D.
+
+Validation:
+  - Compile clean at i486 -O3 (visibility-attribute warnings on
+    lines 3311+ pre-exist this patch; unrelated to the new code).
+  - Symbol `_doskutsu_mixer_actual_mixed_bytes` verified in
+    libSDL3_mixer.a via `strings | grep` after rebuild.
+
+Cross-reference:
+  - docs/PHASE11-WAVE-36-CONTRACT.md section 4 + 5.7 (PLAY6 Shape D
+    fps lever predicted +3 to +5 fps from 35.71 baseline)
+  - docs/PHASE11-WAVE-35-FINDINGS.md (the +3.34 ms fi_ms slice
+    regression this patch aims to recover)
+  - patches/SDL/0057-shape-d-mixer-flag-silence-detect.patch (the
+    consumer; SDL3-DOS PlayDevice reads this volatile when SHAPE=D)
+  - patches/SDL/0058-shape-a-mechanism-histogram.patch (parallel
+    diagnostic backstop; ride-along)
+  - memory/no_playing_it_safe.md (2026-05-12 user directive: prefer
+    biggest correctness-retaining ceiling over smallest LOC)
+  - memory/sdl_pause_api_must_audit_auto_resume_gates.md (rationale
+    for the cross-vendor-archive symbol definition placement)
+---
+ src/SDL_mixer.c | 58 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 58 insertions(+)
+
+diff --git a/src/SDL_mixer.c b/src/SDL_mixer.c
+index 242d6412..21b10e78 100644
+--- a/src/SDL_mixer.c
++++ b/src/SDL_mixer.c
+@@ -633,9 +633,67 @@ static void SDLCALL MixerCallback(void *userdata, SDL_AudioStream *stream, int a
+         mixer->postmix_callback(mixer->postmix_callback_userdata, mixer, &mixer->spec, final_mixbuf, additional_amount / sizeof (float));
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0001): surface mixer->actual_mixed_bytes
++       as a cross-module volatile global so the SDL3-DOS audio backend
++       (vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c) can read it without
++       a bytewise scan of the final_mixbuf. Pairs with patches/SDL/0057
++       Shape D mixer-flag silence-detect.
++
++       Mechanism: mixer->actual_mixed_bytes is already tracked above
++       (line ~619-621 in vendor source: max group_bytes across all
++       groups). Zero == no track produced any data this iter == mix
++       result is silence. Non-zero == at least one track had data ==
++       PlayDevice should write the mixed buffer to the ring as normal.
++
++       Definition lives HERE (SDL_mixer.c) rather than in SDL3-DOS
++       because of static-link ordering: with the doskutsu link order
++       `SDL3::SDL3 SDL3_mixer::SDL3_mixer ...` (per
++       vendor/nxengine-evo/CMakeLists.txt:231), libSDL3.a is processed
++       FIRST; an extern reference from SDL_mixer to a symbol defined
++       in SDL3-DOS would not be resolved without --start-group
++       linker flags. Placing the definition in SDL_mixer.c (the writer)
++       and the extern decl in SDL3-DOS (the reader) keeps the link
++       single-pass clean. nxengine's existing
++       `doskutsu_audio_irq_count` pattern works because nxengine is
++       LAST in the link order, so ld searches prior libs to resolve
++       it; cross-vendor-archive references don't have that luxury.
++
++       Workspace-local DOS-port patch per memory/sdl_ai_policy.md;
++       never upstreamed. Default behavior unchanged: SDL_mixer
++       continues to operate identically on all non-doskutsu builds;
++       the extra volatile store is observably a no-op when the SDL3-
++       DOS reader is not linked in.
++
++       Cost: 1 volatile store per MixerCallback invocation (~22 Hz at
++       Tier-2 config; ~22 stores/sec). Negligible.
++
++       Strict-"D" engagement: the volatile is READ by SDL3-DOS only
++       when SDL_HINT_DOSKUTSU_SILENCE_SHAPE=D (see SDL/0057);
++       otherwise Shape A bytewise-scan path runs as before, ignoring
++       this value. */
++    extern volatile int doskutsu_mixer_actual_mixed_bytes;
++    doskutsu_mixer_actual_mixed_bytes = mixer->actual_mixed_bytes;
++
+     SDL_PutAudioStreamData(stream, final_mixbuf, additional_amount);
+ }
+ 
++/* DOSKUTSU patch (Phase 11 patch 0001): definition of the cross-module
++   volatile that MixerCallback writes above. SDL3-DOS audio backend
++   declares this as extern and reads it in PlayDevice when
++   SDL_HINT_DOSKUTSU_SILENCE_SHAPE=D engages Shape D (per
++   patches/SDL/0057). Initial value 0 means "silent" -- safe default
++   that won't false-trigger ring writes before the first MixerCallback
++   fires.
++
++   Volatile int chosen (not _Atomic) for DOS DJGPP compatibility +
++   single-writer (audio thread) single-reader (audio thread) cross-TU
++   pattern; semantics match the existing
++   `doskutsu_audio_irq_count`/`doskutsu_audio_irq_wall_us` exports
++   from SDL3-DOS (volatile uint32_t with no atomic semantics; x86
++   aligned-int loads/stores are atomic by ISA). */
++volatile int doskutsu_mixer_actual_mixed_bytes = 0;
++
++
+ int MIX_Generate(MIX_Mixer *mixer, void *buffer, int buflen)
+ {
+     SDL_AudioSpec output_spec;
+-- 
+2.47.3
+

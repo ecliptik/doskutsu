@@ -1,0 +1,203 @@
+From 729b7d6b9f9b89bbd6a13a16e0717eb4cbb5cbb4 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 12 May 2026 09:50:47 -0700
+Subject: [PATCH] dos: Phase 11 patch 0056 -- silence-detect runtime killswitch
+ (default-ON)
+
+Adds SDL_HINT_DOSKUTSU_SILENCE_DETECT runtime killswitch for SDL/0054
+Shape A post-mix silence-detect. Default-ON (silence-detect enabled;
+SFX-correct path; pays the wave-35 +3.34 ms fi_ms slice cost). Set
+SDL_HINT_DOSKUTSU_SILENCE_DETECT=0 to disable (skip silence-scan +
+skip-ring-write branch in PlayDevice; reverts to wave-34 always-fill-ring
+behavior; SFX silent under AUDIO_BACKEND=opl3 because Pixtone never
+propagates -- the wave-34 known-broken-but-fast path, exposed here for
+perf-experiment A/B isolation only).
+
+Implementation:
+
+  - New module-scope static bool g_dos_silence_detect_enabled, default
+    true. Distinct from g_dos_audio_quiescence_gate_disabled (which
+    carries the older SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE
+    semantic AND doubles as SDL/0053's engine-signaled shutdown gate
+    via SDL_DOSAudioBeginShutdown). Per
+    sdl_pause_api_must_audit_auto_resume_gates.md, adding a separate
+    flag avoids the state-flag-fragmentation footgun -- the new
+    user-facing perf killswitch does not entangle with the shutdown
+    coordination contract.
+
+  - OpenDevice reads SDL_HINT_DOSKUTSU_SILENCE_DETECT once via
+    SDL_GetHint (strict-"0" match per CLAUDE.md env-var convention:
+    only literal "0" disables; unset/empty/"1"/anything else enabled).
+    Cached at module scope; read by PlayDevice in the hot path.
+
+  - PlayDevice silence-scan block now runs iff BOTH:
+        g_dos_silence_detect_enabled               (this patch)
+      && !g_dos_audio_quiescence_gate_disabled    (SDL/0050/0053/0054)
+
+  - Boot banner emits one of two load-bearing variants for decomp
+    engagement-verify (so the operator BAT cell that sets =0 can be
+    confirmed to actually engage the disabled path before attributing
+    fps delta to silence-detect cost):
+
+      default-ON:  "audio: SDL/0054 silence-detect ACTIVE
+                    (default; SFX-correct)"
+      SET=0:       "audio: SDL/0054 silence-detect DISABLED
+                    (env-var; perf-experiment)"
+
+Why this ships now (wave-36, not WITH SDL/0054 at wave-35):
+
+  Per correctness_vs_perf_trade_machinery_at_authoring.md, this is the
+  canonical example of a correctness-vs-perf-trade killswitch that
+  should have shipped with the correctness patch. SDL/0054 (silent-SFX
+  fix; Shape A post-mix silence-scan) landed wave-35 default-ON without
+  a runtime A/B mechanism. Wave-35 then measured an unexpected -5.96 fps
+  regression (W34A1 41.67 -> W35A1 35.71) attributable to +3.34 ms fi_ms
+  per-flip slice, and the cost was not A/B-able in the same iter. This
+  patch provides the missing A/B switch so wave-36 can isolate the
+  silence-detect contribution from the rest of the post-W34 deltas.
+
+  Future-proofing: SDL/0057+ may ship a cheaper silence-detect shape
+  (Shape B/C/D investigation underway; see wave-36 plan). If a cheaper
+  shape lands default-ON, the same killswitch still applies (the
+  bracket condition gates whatever silence-detect mechanism is wired up
+  at the time).
+
+User docs: docs/BOOT.md edit lands alongside this patch, categorized as
+perf-experiment opt-out (NOT daily-use); operator should NEVER set
+=0 in production sessions because SFX will be silent under the
+default OPL3 music backend.
+
+Validation:
+  - Boot-banner strings verified in libSDL3.a via
+    `strings build/sysroot/lib/libSDL3.a | grep silence-detect`
+  - PlayDevice condition change is 1 line (single AND clause added);
+    behavioral semantics unchanged at default
+    (g_dos_silence_detect_enabled=true), so wave-35 SFX-audibility +
+    +3.34 ms cost retained as the default-ship behavior.
+
+Per memory/sdl_ai_policy.md the patch stays workspace-local; not for
+upstream.
+
+Companion patches:
+  SDL/0054 -- Shape A silent-Pixtone-SFX fix (the patch this gates;
+              the silence-scan code path itself is unchanged here)
+  SDL/0055 -- P12 SDL-side audio brackets (sits above this patch
+              numerically; coexists trivially -- different state flags,
+              different code paths)
+  SDL/0053 -- SDL_DOSAudioBeginShutdown engine-signal (uses the OLDER
+              g_dos_audio_quiescence_gate_disabled flag, untouched
+              here; both flags must allow PlayDevice silence-scan)
+  SDL/0050 -- DOS GetDeviceBuf quiescence gate (superseded mechanism;
+              hint name SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE
+              retained for user-facing compat; orthogonal to the
+              new SDL_HINT_DOSKUTSU_SILENCE_DETECT)
+
+Cross-reference:
+  - docs/PHASE11-WAVE-35-FINDINGS.md (the -5.96 fps regression +
+    +3.34 ms fi_ms slice attribution that this killswitch enables
+    wave-36 to A/B-isolate)
+  - docs/PHASE11-WAVE-36-CONTRACT.md (wave-36 PLAY cell matrix uses
+    SDL_HINT_DOSKUTSU_SILENCE_DETECT=0 as one of the isolation arms)
+  - memory/correctness_vs_perf_trade_machinery_at_authoring.md
+  - memory/env_vars_document_in_user_docs.md (BOOT.md edit required)
+  - memory/sdl_pause_api_must_audit_auto_resume_gates.md (rationale
+    for the separate-flag-not-overloaded-flag decision)
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 67 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 65 insertions(+), 2 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 22a5f5864..3d9b511fe 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -66,6 +66,41 @@ static Uint8 soundblaster_silence_value = 0;
+    PLAY2 control measurement to isolate SDL/0050 effect within iter. */
+ static bool g_dos_audio_quiescence_gate_disabled = false;
+ 
++/* DOSKUTSU patch (Phase 11 patch 0056): runtime killswitch for SDL/0054
++   Shape A post-mix silence-detect. Default true (silence-detect enabled
++   -- SFX-correct path, paying the wave-35 +3.34 ms fi_ms slice cost).
++   Set SDL_HINT_DOSKUTSU_SILENCE_DETECT=0 to disable silence-detect for
++   perf-experiment runs (skips the bytewise scan + skip-ring-write
++   branch in PlayDevice; reverts to wave-34 always-fill-ring behavior;
++   SFX will be silent under AUDIO_BACKEND=opl3 because Pixtone never
++   propagates -- this is the wave-34 known-broken-but-fast path,
++   provided here for fps-cost isolation only).
++
++   Per CLAUDE.md strict-"0" env-var convention: only literal "0"
++   disables; unset/empty/"1"/anything else leaves silence-detect
++   enabled. Resolved once at OpenDevice time; cached at module scope;
++   read by DOSSOUNDBLASTER_PlayDevice in the hot path.
++
++   Distinct from g_dos_audio_quiescence_gate_disabled (above): that
++   flag carries the older SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE
++   semantic AND doubles as SDL/0053's engine-signaled shutdown gate
++   (SDL_DOSAudioBeginShutdown flips it true). Adding a separate flag
++   keeps the new user-facing perf-experiment switch from entangling
++   with the shutdown coordination contract, per
++   memory/sdl_pause_api_must_audit_auto_resume_gates.md
++   (state-flag-fragmentation footgun: avoid overloading a single flag
++   across user-facing perf, shutdown, and legacy-compat semantics).
++
++   PlayDevice silence-detect block runs iff BOTH flags allow it:
++     g_dos_silence_detect_enabled       (this flag; perf killswitch)
++     && !g_dos_audio_quiescence_gate_disabled  (shutdown + legacy)
++
++   correctness_vs_perf_trade_machinery_at_authoring.md: this killswitch
++   is the trade-machinery that should have shipped WITH SDL/0054; it
++   lands now as part of wave-36 perf decomp + 50-fps-with-SFX
++   stretch framing. */
++static bool g_dos_silence_detect_enabled = true;
++
+ /* DOSKUTSU patch (Phase 11 patch 0055): Phase 12 SDL-side audio
+    instrumentation state. Pairs with engine-side nx 0131 brackets for
+    wave-36 PLAY5 audio cost attribution per
+@@ -601,6 +636,26 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0056): resolve silence-detect
++       runtime killswitch once at OpenDevice time. Strict-"0" match per
++       CLAUDE.md env-var convention. Cached at module scope; read by
++       DOSSOUNDBLASTER_PlayDevice in the hot path. Boot banner emit is
++       load-bearing for wave-36 decomp engagement-verify (operator BAT
++       cell that sets =0 must produce the DISABLED variant in the log
++       so we can confirm the killswitch path actually engaged before
++       attributing the fps delta to silence-detect cost). */
++    {
++        const char *sd_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_SILENCE_DETECT");
++        const bool sd_disabled =
++            (sd_hint && sd_hint[0] == '0' && sd_hint[1] == 0);
++        g_dos_silence_detect_enabled = !sd_disabled;
++        if (g_dos_silence_detect_enabled) {
++            doskutsu_dbg_log("audio: SDL/0054 silence-detect ACTIVE (default; SFX-correct)");
++        } else {
++            doskutsu_dbg_log("audio: SDL/0054 silence-detect DISABLED (env-var; perf-experiment)");
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0055): resolve P12 SDL-side audio
+        instrumentation gates once at OpenDevice time. BOTH FLIP_INSTR
+        AND P12_AUDIO_INSTR must be set to "1" (strict-"1" match) for
+@@ -1186,8 +1241,16 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+ 
+        Latency: SFX-trigger-to-first-sample-on-ring ≤ one audio-thread-
+        iter cycle (~10-12 ms). Same as the pre-SDL/0050 working SFX
+-       path; no perceptible regression for game SFX. */
+-    if (!g_dos_audio_quiescence_gate_disabled) {
++       path; no perceptible regression for game SFX.
++
++       SDL/0056 adds g_dos_silence_detect_enabled as a separate
++       user-facing perf killswitch (SDL_HINT_DOSKUTSU_SILENCE_DETECT=0).
++       Block runs iff BOTH flags allow it; either flag suppresses the
++       silence-scan + skip-ring-write path. See module-level comment on
++       g_dos_silence_detect_enabled (above the static decl) for the
++       rationale on keeping the perf switch separate from the
++       legacy-compat / shutdown flag. */
++    if (g_dos_silence_detect_enabled && !g_dos_audio_quiescence_gate_disabled) {
+         const Uint8 silence = soundblaster_silence_value;
+         const Uint8 *p = buffer;
+         const Uint8 *end = buffer + buffer_size;
+-- 
+2.47.3
+

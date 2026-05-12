@@ -666,6 +666,44 @@ PROBE_BLTFILL_EXE := $(PROBES_DIR)/bltfill.exe
 PROBE_CHIPID_SRC  := tests/probes/chipid.c
 PROBE_CHIPID_EXE  := $(PROBES_DIR)/chipid.exe
 
+# P12 — Phase 11 wave-36 task #10 Cirrus BLT async-parallelism probe.
+#   Gates hail-mary slot 0133 (BLT async backdrop flush): does the chip
+#   actually let the CPU do useful parallel work while the BLT runs? Source
+#   basename `cirrus-blt-async-probe` (host-side, 21 chars, descriptive) →
+#   binary basename `bltasync` (8.3-fit) via explicit Makefile rule below.
+#   Pure DJGPP. RDTSC-timed (calibrated against uclock at probe init).
+PROBE_BLTASYNC_SRC := tests/probes/cirrus-blt-async-probe.c
+PROBE_BLTASYNC_EXE := $(PROBES_DIR)/bltasync.exe
+
+# P13 — Phase 11 wave-36 Task A Cirrus BLT BULK_COPY variant-matrix probe.
+#   Root-cause investigation of BLTASYNC v2 REFUTE_VERIFY_FAIL: 8 variants
+#   systematically explore BULK_COPY register sequence + alternates (different
+#   src offsets, BLT_RESET ordering, color-reg state, PATTERN_COPY,
+#   COLOR_EXPAND reference anchor, offscreen-dst). Per-variant: raw dst
+#   first-16 + last-16 hex bytes + auto-classified status. Source basename
+#   `cirrus-blt-variant-probe` (host-side, 23 chars) → binary basename
+#   `bltvar` (8.3-fit) via explicit Makefile rule below.
+PROBE_BLTVAR_SRC := tests/probes/cirrus-blt-variant-probe.c
+PROBE_BLTVAR_EXE := $(PROBES_DIR)/bltvar.exe
+
+# P14 — Phase 11 wave-36 ceiling-bust probe A: LFB nearptr VRAM-write
+#   throughput vs banked dosmemput. Tests whether the 19 MB/s dosmemput
+#   ceiling is a banked-mode CPU-PIO artifact (not a chip bandwidth limit)
+#   by directly mapping the Cirrus 5434 LFB via DPMI int 0x31 / fn 0x0800 +
+#   __djgpp_nearptr_enable() + base-address subtraction for a dereferenceable
+#   C pointer. Source basename `lfbnear-probe` (host-side, 13 chars) →
+#   binary basename `lfbnear` (8.3-fit) via explicit Makefile rule below.
+PROBE_LFBNEAR_SRC := tests/probes/lfbnear-probe.c
+PROBE_LFBNEAR_EXE := $(PROBES_DIR)/lfbnear.exe
+
+# P15 — Phase 11 wave-36 ceiling-bust probe B: Mode 13h packed-pixel bandwidth.
+#   Tests whether bank-switch overhead OR per-byte CPU PIO is the dominant
+#   dosmemput-bandwidth ceiling, by running same-shape transfers into a
+#   single-bank 64000-byte FB at 0xA000:0. Cross-anchor against LFBNEAR
+#   to triangulate: bank-switch vs DPMI thunk vs sysmem-to-VRAM CPU bandwidth.
+PROBE_MODE13H_SRC := tests/probes/mode13h-probe.c
+PROBE_MODE13H_EXE := $(PROBES_DIR)/mode13h.exe
+
 # SDLPROB1 + SDLPROB2 — SDL3-DOS cost decomposition split into two binaries
 #   per docs/PHASE11-SDLPROBE-CONTRACT.md (sdl-engine task #23 designs the
 #   contract + authors sdlprob1; probe-engineer task #24 authors sdlprob2 +
@@ -767,7 +805,33 @@ $(PROBE_SDLPROB1_EXE): $(PROBE_SDLPROB1_SRC) $(PROBE_SDLPROB1_HDR) $(SYSROOT)/li
 # OPAQUE + BLTFILL are pure DJGPP (use the generic %.exe pattern rule above).
 # No explicit rules needed; the pattern handles them.
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11
+# Explicit rule for Cirrus BLT async probe — same source-vs-binary basename
+# divergence as PROBE_MPUWB / PROBE_TILE (host-side descriptive source name
+# maps to 8.3-clean DOS binary basename). Pure DJGPP, no SDL deps.
+$(PROBE_BLTASYNC_EXE): $(PROBE_BLTASYNC_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# Explicit rule for Cirrus BLT variant-matrix probe (wave-36 Task A).
+$(PROBE_BLTVAR_EXE): $(PROBE_BLTVAR_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# Explicit rule for LFB nearptr probe (wave-36 ceiling-bust A).
+$(PROBE_LFBNEAR_EXE): $(PROBE_LFBNEAR_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# Explicit rule for Mode 13h bandwidth probe (wave-36 ceiling-bust B).
+$(PROBE_MODE13H_EXE): $(PROBE_MODE13H_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) — ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -923,7 +987,60 @@ probes-p11: $(PROBE_SDLPROB2_EXE)
 	@echo "Built P11 probe set (partial): sdlprob2.exe (iter L — composites § 2)"
 	@echo "  sdlprob1.exe (sdl-engine task #23) lands separately."
 
-probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11
+bltasync: $(PROBE_BLTASYNC_EXE)
+	@echo "Built $(PROBE_BLTASYNC_EXE) — phase11 wave-36 task #10."
+	@echo "  Gates hail-mary slot 0133 (Cirrus BLT async backdrop flush)."
+	@echo "  Pure DJGPP; RDTSC-timed. Real-HW iter: bundle alongside CWSDPMI.EXE"
+	@echo "  + tests/probes/bltasync.bat. Output -> BLTASYNC.LOG."
+	@echo "  Decision gate in log: VERDICT=SHIP|DEFER|CANCEL|REFUTE_*."
+	@echo "  HAZARD: enters VBE 8bpp mode; screen corrupted during BLT scenarios;"
+	@echo "  restores text mode before exit. Runtime ~30-60 sec on PODP83."
+
+bltvar: $(PROBE_BLTVAR_EXE)
+	@echo "Built $(PROBE_BLTVAR_EXE) — phase11 wave-36 Task A."
+	@echo "  Root-cause investigation of BLTASYNC v2 REFUTE_VERIFY_FAIL: 8 variants"
+	@echo "  systematically explore BULK_COPY register sequence + alternates."
+	@echo "  Pure DJGPP. Per-variant: raw dst first-16 + last-16 hex bytes +"
+	@echo "  auto-classified status. Real-HW iter: bundle alongside CWSDPMI.EXE"
+	@echo "  + tests/probes/bltvar.bat. Output -> BLTVAR.LOG."
+	@echo "  HAZARD: enters VBE 8bpp mode; restores text mode. Runtime ~5 sec."
+
+lfbnear: $(PROBE_LFBNEAR_EXE)
+	@echo "Built $(PROBE_LFBNEAR_EXE) — phase11 wave-36 ceiling-bust A."
+	@echo "  Tests whether 19 MB/s dosmemput ceiling is banked-mode-CPU-PIO artifact"
+	@echo "  by mapping Cirrus 5434 LFB via DPMI + nearptr. Pure DJGPP."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/lfbnear.bat."
+	@echo "  Output -> LFBNEAR.LOG. Verdict: SHIP/DEFER/DROP/FAIL_NO_LFB/FAIL_LFB_APERTURE_BUG."
+	@echo "  HAZARD: enters VBE mode 0x4101; restores text. Runtime ~10 sec."
+
+mode13h: $(PROBE_MODE13H_EXE)
+	@echo "Built $(PROBE_MODE13H_EXE) — phase11 wave-36 ceiling-bust B."
+	@echo "  Tests Mode 13h (single-bank 320x200x8) vs banked-mode bandwidth."
+	@echo "  Cross-anchor against LFBNEAR to triangulate bank-switch vs DPMI thunk"
+	@echo "  vs sysmem-to-VRAM CPU bandwidth ceiling. Pure DJGPP."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/mode13h.bat."
+	@echo "  Output -> MODE13H.LOG. Verdict: SHIP_MODE13H/SHIP_NEARPTR/DROP/HARNESS_SUSPECT."
+	@echo "  HAZARD: enters Mode 13h; restores text. Runtime ~5 sec."
+
+# P12 — Phase 11 wave-36 task #10 Cirrus BLT async-parallelism probe.
+# Standalone gate for slot 0133 hail-mary; bundled into wave-36 iter or its
+# own quick-probe iter per team-lead direction.
+probes-p12: $(PROBE_BLTASYNC_EXE)
+	@echo "Built P12 probe set: bltasync.exe (wave-36 task #10 — BLT async gate)"
+
+# P13 — Phase 11 wave-36 Task A BLT BULK_COPY variant matrix.
+probes-p13: $(PROBE_BLTVAR_EXE)
+	@echo "Built P13 probe set: bltvar.exe (wave-36 Task A — BULK_COPY root-cause)"
+
+# P14 — Phase 11 wave-36 ceiling-bust A: LFB nearptr throughput probe.
+probes-p14: $(PROBE_LFBNEAR_EXE)
+	@echo "Built P14 probe set: lfbnear.exe (wave-36 ceiling-bust A — LFB nearptr vs banked)"
+
+# P15 — Phase 11 wave-36 ceiling-bust B: Mode 13h packed-pixel bandwidth probe.
+probes-p15: $(PROBE_MODE13H_EXE)
+	@echo "Built P15 probe set: mode13h.exe (wave-36 ceiling-bust B — Mode 13h vs banked)"
+
+probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
 	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (BAT redirect)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"

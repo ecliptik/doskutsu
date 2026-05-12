@@ -1,0 +1,459 @@
+From ad76998e91189d0304986eb69b89d667efa3d4ec Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 12 May 2026 09:48:36 -0700
+Subject: [PATCH] dos: Phase 11 patch 0055 -- wave-35 Phase 12 SDL-side audio
+ brackets
+
+SDL-side companion to engine-side nx 0131 P12 audio instrumentation for
+the wave-36 PLAY5 audio cost decomposition contract
+(docs/PHASE11-WAVE-36-CONTRACT.md section 8). Provides the
+[p12-audio sdl n=100 ...] emit line that pairs with nx 0131's
+[p12-audio n=100 midi_tick_us=...] engine-side emit, giving the wave-36
+operator full cross-thread (engine main + SDL audio-thread + IRQ-5
+ISR) attribution for the ~31 ms unattributed audio cost surfaced by
+audio_cost_attribution_unknown.md.
+
+The wave-35 lever-pick anchor said "rank #1: Phase 12 Pixtone-decouple"
+but tree-grep confirmed Pixtone is already pre-rendered (per nx 0131
+commit message section "Context"). Instrumentation-first per
+reconcile_deepdive_against_tree_facts.md: measure where the audio
+slice actually lives before attacking it in wave-36+.
+
+Context. Wave-35 PLAY5 was the FIRST attempt at this instrumentation
+and produced zero emit data. Per
+contract_grep_targets_require_enabling_env_vars.md, the wave-35
+contract specified P12_AUDIO_INSTR=1 in the BAT cell but missed
+FLIP_INSTR=1 (the parent gate inherited from the engine-side audit-
+flush family). Both gates are load-bearing; wave-36 PLAY5 re-runs
+with the corrected gate chain (BOTH env vars in one BAT cell).
+
+Mechanism. 4 sub-buckets emitted per 100 PlayDevice calls (one
+PlayDevice call corresponds to one SDL3-DOS audio-thread iter, i.e.
+one audio chunk processed):
+
+  audio_thread:  total wall-clock spent inside DOSSOUNDBLASTER_WaitDevice
+                 + DOSSOUNDBLASTER_GetDeviceBuf + DOSSOUNDBLASTER_PlayDevice.
+                 This is the SDL3-DOS audio backend's impl-function
+                 cost; complements the wall-clock-by-bracket attribution
+                 inside the chunk-processing cycle.
+
+  ring_refill:   PlayDevice's ring-write portion alone (SDL_memcpy +
+                 cursor advance + auto-resume signal). EXCLUDES the
+                 silence-detect scan + SDL_Delay(10) silence-throttle
+                 -- those land in audio_thread on the silence-skip
+                 path.
+
+  mix_mixer:     wall-clock between GetDeviceBuf return and PlayDevice
+                 entry. This is the period during which SDL3 core's
+                 SDL_PlaybackAudioThreadIterate (SDL_audio.c:1189-1295)
+                 runs its mix loop, calling SDL_GetAudioStreamData on
+                 each bound stream, which fires SDL3_mixer's
+                 MixerCallback -> per-track TrackGetCallback ->
+                 Pixtone-chunk-pull chain. Reflects the SDL3 +
+                 SDL3_mixer downmix cost that nx 0131 explicitly leaves
+                 to this patch's lane.
+
+  irq_isr:       delta of patch 0100's existing doskutsu_audio_irq_wall_us
+                 export across the 100-call block. Re-emitted under the
+                 p12-audio sdl namespace for one-stop attribution; the
+                 underlying counter is identical to what nx 0131 reports
+                 via the engine-side [p10-audio ...] line.
+
+Gating. BOTH SDL_HINT_DOSKUTSU_FLIP_INSTR=1 AND
+SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 must be set (strict-"1" per
+CLAUDE.md). Default OFF; opt-in only. Per
+contract_grep_targets_require_enabling_env_vars.md the BAT cell that
+engages the [p12-audio sdl ...] emit MUST set both env vars; wave-35
+PLAY5 W35A2 emitted zero data because only the leaf var was set.
+Both gates resolved at OpenDevice time; cached in
+g_p12_sdl_audio_instr_active (single bool); hot-path guard is a
+short-circuiting ternary that avoids any SDL_GetTicksNS reads when
+the gate is off.
+
+Cycle-counter primitive. SDL_GetTicksNS via SDL3-DOS's RDTSC/PIT timer
+dispatch (already used by SDL/0040 + SDL/0046 + SDL/0048 in this TU).
+Off-path cost: 0 ns (no reads). On-path cost: ~6 SDL_GetTicksNS reads
+per chunk = ~30 cycles RDTSC on PODP83 * 6 + accumulator adds = ~5 us
+per chunk = ~0.0001 % measurement distortion against the ~31 ms
+audio_cost_attribution_unknown.md baseline. Negligible.
+
+Cadence math. Each PlayDevice call processes one chunk. At Tier-2
+config (1024 frames / 22050 Hz mono), one chunk is ~46 ms wall-clock,
+so 100 PlayDevice calls is ~4.6 sec wall-clock per emit. Engine-side
+nx 0131 emits per 100 flips (~2.0 sec at 50 fps), so the wave-36 log
+will interleave ~2 SDL emits per engine emit -- comfortable cadence
+for decomp.
+
+Bracket call sites:
+
+  WaitDevice entry:    record _p12_wait_t0 = SDL_GetTicksNS().
+  WaitDevice exit:     audio_thread += now - _p12_wait_t0. (Two return
+                       paths -- shutdown bail, normal room-available;
+                       both accumulate.)
+  GetDeviceBuf exit:   record g_p12_sdl_t_gdb_exit_ns. (Function body
+                       is trivial under SDL/0054 Shape A; we
+                       approximate its wall-clock as 0 ns.)
+  PlayDevice entry:    record _p12_play_t0. If g_p12_sdl_t_gdb_exit_ns
+                       was set, mix_mixer += _p12_play_t0 - it;
+                       clear so a missing pair (e.g., shutdown race)
+                       does not accumulate stale span.
+  PlayDevice silence-skip path:  audio_thread += now - _p12_play_t0;
+                       counter tick + per-100 emit.
+  PlayDevice ring-write entry:   record _p12_ring_t0.
+  PlayDevice normal exit:       ring_refill += now - _p12_ring_t0;
+                       audio_thread += now - _p12_play_t0;
+                       counter tick + per-100 emit.
+
+Per memory/sdl_pause_api_must_audit_auto_resume_gates.md the gate
+state lives in a separate static bool (g_p12_sdl_audio_instr_active),
+not overloaded onto g_dos_audio_quiescence_gate_disabled or the new
+SDL/0056 g_dos_silence_detect_enabled. Three flag families across the
+audio path -- shutdown coordination, perf killswitch, instrumentation
+-- stay independent, avoiding the state-flag-fragmentation footgun.
+
+OpenDevice banner emit names BOTH env vars explicitly so log captures
+let the operator grep-verify the gate chain:
+
+  ACTIVE:  "audio: SDL/0055 P12 SDL-side audio brackets ACTIVE
+            (FLIP_INSTR=1 + P12_AUDIO_INSTR=1; emits [p12-audio sdl
+            n=100 ...] per 100 PlayDevice calls)"
+
+  OFF:     "audio: SDL/0055 P12 SDL-side audio brackets OFF (set BOTH
+            SDL_HINT_DOSKUTSU_FLIP_INSTR=1 and
+            SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 to engage)"
+
+Validation:
+  - Strings verified in libSDL3.a: SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR
+    + SDL_HINT_DOSKUTSU_FLIP_INSTR + emit template + both banner
+    variants present.
+  - Compile clean at i486 -O3.
+  - Off-path semantics unchanged (default OFF): every bracket guarded
+    by g_p12_sdl_audio_instr_active short-circuit; no behavioral
+    change when env vars unset.
+  - Real-HW smoke gate: wave-36 PLAY5 BAT cell sets both env vars +
+    grep [p12-audio sdl ...] emits in SDLDBG.LOG (>= 10 per block per
+    contract section 7 quota).
+
+Cross-reference:
+  - docs/PHASE11-WAVE-36-CONTRACT.md section 8 (emit format + gate
+    chain)
+  - docs/PHASE11-WAVE-35-FINDINGS.md (the W35A2 zero-emit failure
+    this patch corrects via the gate chain documented in OpenDevice
+    banner)
+  - patches/nxengine-evo/0131-perf-phase11-wave35-p12-audio-instrumentation.patch
+    (engine-side sibling; SAME env-var SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR
+    enables both halves)
+  - memory/audio_cost_attribution_unknown.md (the ~31 ms unattributed
+    audio cost this patch helps decompose)
+  - memory/contract_grep_targets_require_enabling_env_vars.md (the
+    rule that bit wave-35 PLAY5 + drives the BOTH-gate banner here)
+  - memory/sdl_pause_api_must_audit_auto_resume_gates.md (rationale
+    for the separate-flag-not-overloaded-flag decision)
+
+Per memory/sdl_ai_policy.md the patch stays workspace-local; not for
+upstream.
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 223 +++++++++++++++++++++++++++++++-
+ 1 file changed, 222 insertions(+), 1 deletion(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 44eedd70d..22a5f5864 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -66,6 +66,71 @@ static Uint8 soundblaster_silence_value = 0;
+    PLAY2 control measurement to isolate SDL/0050 effect within iter. */
+ static bool g_dos_audio_quiescence_gate_disabled = false;
+ 
++/* DOSKUTSU patch (Phase 11 patch 0055): Phase 12 SDL-side audio
++   instrumentation state. Pairs with engine-side nx 0131 brackets for
++   wave-36 PLAY5 audio cost attribution per
++   docs/PHASE11-WAVE-36-CONTRACT.md section 8.
++
++   Gates: BOTH SDL_HINT_DOSKUTSU_FLIP_INSTR=1 AND
++   SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 must be set (strict-"1" match
++   per CLAUDE.md env-var convention). FLIP_INSTR is the parent gate
++   (shared with engine-side instrumentation); P12_AUDIO_INSTR is the
++   sub-gate (so a single SET on the engine side enables both halves).
++   Default OFF: zero hot-path cost when either env-var is unset/0/empty.
++
++   Per contract_grep_targets_require_enabling_env_vars.md: the BAT cell
++   that engages the [p12-audio sdl ...] emit must set BOTH env vars;
++   wave-35 PLAY5 W35A2 hit this exact trap by setting only the leaf var
++   and producing zero emit data. Both gates resolved at OpenDevice.
++
++   Cadence: 100 PlayDevice calls per emit block. Each PlayDevice call
++   corresponds to one SDL3-DOS audio-thread iter (one chunk processed),
++   so n=100 means "~100 audio-thread iters of accumulator wall-clock."
++   At 1024 frames / 22050 Hz mono in Tier-2 config, one chunk is
++   ~46 ms, so 100 chunks is ~4.6 sec wall-clock -- a few emits per
++   100-flip engine-side block.
++
++   Counters cover 4 sub-buckets per task #2 contract:
++     audio_thread: total wall-clock spent inside WaitDevice +
++                   GetDeviceBuf + PlayDevice per chunk (SDL3-DOS audio
++                   backend impl-funcs total cost).
++     ring_refill:  PlayDevice's ring-write portion alone (memcpy +
++                   cursor advance + auto-resume trigger; excludes the
++                   silence-detect scan).
++     mix_mixer:    wall-clock between GetDeviceBuf exit and PlayDevice
++                   entry (proxy for SDL3 core's mix loop +
++                   SDL3_mixer MixerCallback chain wall-clock; the
++                   period when SDL3 calls SDL_GetAudioStreamData on
++                   each bound stream + per-track downmix).
++     irq_isr:      delta of doskutsu_audio_irq_wall_us across the
++                   block (existing patch 0100 export; re-emitted under
++                   p12-audio sdl namespace for one-stop attribution).
++
++   Cycle-counter primitive: SDL_GetTicksNS via SDL3-DOS's RDTSC/PIT
++   timer dispatch (same as the existing SDL/0040 + SDL/0046 + SDL/0048
++   timing usage in this TU). Off-path cost: 0 (cached static-bool guard
++   short-circuits at every call site). On-path cost: ~6 SDL_GetTicksNS
++   reads per audio chunk = ~30 cycles RDTSC on PODP83 + a few accumulator
++   adds = ~5 us per chunk = ~0.0001 % measurement distortion at the
++   ~31 ms audio_cost_attribution_unknown.md baseline. Negligible.
++
++   Per memory/sdl_pause_api_must_audit_auto_resume_gates.md the gate is
++   a SEPARATE flag from the silence-detect / quiescence flags above
++   (avoids state-flag fragmentation across the audio path). */
++static bool g_p12_sdl_audio_instr_active = false;
++static Uint64 g_p12_sdl_audio_thread_ns = 0;
++static Uint64 g_p12_sdl_ring_refill_ns = 0;
++static Uint64 g_p12_sdl_mix_mixer_ns = 0;
++static Uint32 g_p12_sdl_playdev_calls = 0;
++/* Last GetDeviceBuf exit timestamp; consumed at next PlayDevice entry
++   to compute mix_mixer span. Reset to 0 after consumption so a missing
++   GetDeviceBuf -> PlayDevice pairing (e.g., shutdown path) does not
++   accumulate a stale span. */
++static Uint64 g_p12_sdl_t_gdb_exit_ns = 0;
++/* IRQ-5 wall-us baseline at last emit; per-block delta computed at
++   each emit via doskutsu_audio_irq_wall_us - baseline. */
++static Uint32 g_p12_sdl_irq_wall_us_baseline = 0;
++
+ static void ResetSoundBlasterDSP(void)
+ {
+     // reset the DSP.
+@@ -457,6 +522,14 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+     struct SDL_PrivateAudioData *hidden = device->hidden;
+     const int size = hidden->ring_size;
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0055): P12 SDL-side audio bracket
++       entry. Records timer at WaitDevice entry; the matching accumulator
++       update fires just before each return path below. Off-path cost:
++       1 cached-bool branch + 0 SDL_GetTicksNS reads when the gate is
++       inactive (ternary short-circuits the read). */
++    const Uint64 _p12_wait_t0 =
++        g_p12_sdl_audio_instr_active ? SDL_GetTicksNS() : 0;
++
+     for (;;) {
+         /* DOSKUTSU patch (Phase 10 patch 0046): bail out early when the
+            audio device is shutting down. SDL3 audio core sets
+@@ -470,6 +543,10 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+            next iteration observe device->shutdown and exit cleanly,
+            releasing the SDL_WaitThread join. */
+         if (SDL_GetAtomicInt(&device->shutdown)) {
++            /* patch 0055: P12 bracket exit (shutdown path). */
++            if (g_p12_sdl_audio_instr_active) {
++                g_p12_sdl_audio_thread_ns += SDL_GetTicksNS() - _p12_wait_t0;
++            }
+             return true;
+         }
+ 
+@@ -486,6 +563,11 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+         // the ISR. Read the ISR's copy so we see the latest drain position.
+         const int used = hidden->ring_write - isr_ring_read;
+         if ((size - used) >= hidden->chunk_size) {
++            /* patch 0055: P12 bracket exit (room-available path; the
++               common case in steady-state playback). */
++            if (g_p12_sdl_audio_instr_active) {
++                g_p12_sdl_audio_thread_ns += SDL_GetTicksNS() - _p12_wait_t0;
++            }
+             return true; // room for at least one chunk
+         }
+         DOS_Yield();
+@@ -519,6 +601,43 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0055): resolve P12 SDL-side audio
++       instrumentation gates once at OpenDevice time. BOTH FLIP_INSTR
++       AND P12_AUDIO_INSTR must be set to "1" (strict-"1" match) for
++       the hot-path brackets to engage. Default OFF; opt-in via env.
++       Cached at module scope; the hot-path guard is a single bool read.
++
++       Per contract_grep_targets_require_enabling_env_vars.md: BAT cells
++       MUST set both env vars; wave-35 PLAY5 emitted zero data because
++       only the leaf var was set. Boot banner emit names both vars
++       explicitly so the operator can grep-verify the gate chain. */
++    {
++        const char *flip_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_FLIP_INSTR");
++        const char *p12_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR");
++        const bool flip_on =
++            (flip_hint && flip_hint[0] == '1' && flip_hint[1] == 0);
++        const bool p12_on =
++            (p12_hint && p12_hint[0] == '1' && p12_hint[1] == 0);
++        g_p12_sdl_audio_instr_active = flip_on && p12_on;
++        if (g_p12_sdl_audio_instr_active) {
++            doskutsu_dbg_log("audio: SDL/0055 P12 SDL-side audio brackets ACTIVE "
++                             "(FLIP_INSTR=1 + P12_AUDIO_INSTR=1; emits "
++                             "[p12-audio sdl n=100 ...] per 100 PlayDevice calls)");
++            /* Reset accumulators + baseline so the first emit measures
++               from this point forward, not from process start. */
++            g_p12_sdl_audio_thread_ns = 0;
++            g_p12_sdl_ring_refill_ns = 0;
++            g_p12_sdl_mix_mixer_ns = 0;
++            g_p12_sdl_playdev_calls = 0;
++            g_p12_sdl_t_gdb_exit_ns = 0;
++            g_p12_sdl_irq_wall_us_baseline = doskutsu_audio_irq_wall_us;
++        } else {
++            doskutsu_dbg_log("audio: SDL/0055 P12 SDL-side audio brackets OFF "
++                             "(set BOTH SDL_HINT_DOSKUTSU_FLIP_INSTR=1 and "
++                             "SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 to engage)");
++        }
++    }
++
+     if (is_sb16) {
+         // SB16 (DSP >= 4): 16-bit stereo signed
+         device->spec.format = SDL_AUDIO_S16LE;
+@@ -967,8 +1086,23 @@ static Uint8 *DOSSOUNDBLASTER_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_
+        in tree for documentation per `pressure_test_tidy_narratives.md`
+        — fixing-the-wrong-layer is a useful negative-result reference),
+        SDL/0053 (BeginShutdown semantic preserved). */
+-    (void)device;
+     (void)buffer_size; /* unchanged; ring writes happen in PlayDevice */
++
++    /* DOSKUTSU patch (Phase 11 patch 0055): P12 SDL-side audio bracket
++       for GetDeviceBuf. Records t_gdb_exit just before returning so the
++       next PlayDevice entry can compute the mix_mixer span across the
++       SDL3 audio core's mix loop (the period during which SDL3 calls
++       SDL_GetAudioStreamData on each bound stream, firing SDL3_mixer's
++       MixerCallback chain). Also folds the trivial GetDeviceBuf
++       wall-clock into the audio_thread accumulator. */
++    if (g_p12_sdl_audio_instr_active) {
++        const Uint64 _p12_now = SDL_GetTicksNS();
++        g_p12_sdl_t_gdb_exit_ns = _p12_now;
++        /* GetDeviceBuf wall-clock is trivial under Shape A (just two
++           assignments + return), so we approximate it as 0 ns and let
++           the audio_thread bucket capture WaitDevice + PlayDevice only.
++           Future shapes that grow GetDeviceBuf can add a t0 here. */
++    }
+     return device->hidden->staging_buffer;
+ }
+ 
+@@ -978,6 +1112,23 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+ {
+     struct SDL_PrivateAudioData *hidden = device->hidden;
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0055): P12 SDL-side audio bracket
++       for PlayDevice. Records PlayDevice entry; closes the mix_mixer
++       span (GetDeviceBuf exit -> PlayDevice entry == SDL3 core's mix
++       loop wall-clock); the matching audio_thread accumulator update
++       + per-block-emit logic fire before each return path below. */
++    const Uint64 _p12_play_t0 =
++        g_p12_sdl_audio_instr_active ? SDL_GetTicksNS() : 0;
++    if (g_p12_sdl_audio_instr_active && g_p12_sdl_t_gdb_exit_ns != 0) {
++        /* Close the SDL3 mix-loop span -- wall-clock from GetDeviceBuf
++           exit to PlayDevice entry. This is the period during which
++           SDL3 calls SDL_GetAudioStreamData on each bound stream,
++           which fires SDL3_mixer's MixerCallback -> per-track
++           TrackGetCallback -> Pixtone-chunk-pull chain. */
++        g_p12_sdl_mix_mixer_ns += _p12_play_t0 - g_p12_sdl_t_gdb_exit_ns;
++        g_p12_sdl_t_gdb_exit_ns = 0;
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0054, Shape A): post-mix silence
+        detection + skip-ring-write throttle. Replaces the SDL/0050
+        pre-mix quiescence gate that GetDeviceBuf used to implement
+@@ -1061,6 +1212,34 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+                                g_dos_audio_quiescence_gate_disabled true
+                                so this entire block is skipped during
+                                teardown). */
++            /* patch 0055: P12 bracket exit (silence-skip path). On this
++               path the silence-detect scan + SDL_Delay(10) is the
++               PlayDevice cost; no ring-refill happens. audio_thread
++               captures both the scan + the SDL_Delay throttle window
++               (which is the bulk of the wall-clock here). */
++            if (g_p12_sdl_audio_instr_active) {
++                g_p12_sdl_audio_thread_ns += SDL_GetTicksNS() - _p12_play_t0;
++                /* Counter tick + per-100 emit handled at end-of-function;
++                   inline equivalent here so the silence-skip path
++                   participates in cadence too. */
++                if (++g_p12_sdl_playdev_calls >= 100) {
++                    const Uint32 _p12_irq_now = doskutsu_audio_irq_wall_us;
++                    const Uint32 _p12_irq_delta =
++                        _p12_irq_now - g_p12_sdl_irq_wall_us_baseline;
++                    g_p12_sdl_irq_wall_us_baseline = _p12_irq_now;
++                    doskutsu_dbg_log(
++                        "[p12-audio sdl n=100 audio_thread=%lu ring_refill=%lu "
++                        "mix_mixer=%lu irq_isr=%lu]",
++                        (unsigned long)(g_p12_sdl_audio_thread_ns / 1000ULL),
++                        (unsigned long)(g_p12_sdl_ring_refill_ns / 1000ULL),
++                        (unsigned long)(g_p12_sdl_mix_mixer_ns / 1000ULL),
++                        (unsigned long)_p12_irq_delta);
++                    g_p12_sdl_audio_thread_ns = 0;
++                    g_p12_sdl_ring_refill_ns = 0;
++                    g_p12_sdl_mix_mixer_ns = 0;
++                    g_p12_sdl_playdev_calls = 0;
++                }
++            }
+             return true;
+         }
+     }
+@@ -1069,6 +1248,15 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+        sample, direct-stream OGG, etc.) OR gate disabled (killswitch
+        or shutdown coordination). Write the mixed staging buffer into
+        the ring. */
++
++    /* DOSKUTSU patch (Phase 11 patch 0055): P12 ring_refill bracket
++       entry. Records timer at the start of the ring-write portion;
++       matching accumulator update fires after the auto-resume signal
++       block below. ring_refill captures memcpy + cursor advance +
++       auto-resume signal cost. Off-path cost: cached-bool ternary. */
++    const Uint64 _p12_ring_t0 =
++        g_p12_sdl_audio_instr_active ? SDL_GetTicksNS() : 0;
++
+     const int mask = hidden->ring_size - 1;
+     const int pos = hidden->ring_write & mask;
+     const int first = (pos + buffer_size <= hidden->ring_size) ? buffer_size : (hidden->ring_size - pos);
+@@ -1102,6 +1290,39 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+         MaybeServiceIdlePauseRequests();
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0055): P12 bracket exit (normal
++       ring-write path). Closes ring_refill + audio_thread spans and
++       emits the [p12-audio sdl n=100 ...] line every 100 PlayDevice
++       calls. Counter-based cadence (NOT per-flip) -- one PlayDevice
++       call == one audio-thread iter == one chunk processed; at
++       1024 frames / 22050 Hz mono this is ~46 ms wall-clock per
++       call -> emit cadence ~4.6 sec under Tier-2 config. Field units:
++       audio_thread/ring_refill/mix_mixer reported in µs (ns/1000);
++       irq_isr re-emits the doskutsu_audio_irq_wall_us delta which is
++       already in µs from patch 0100. */
++    if (g_p12_sdl_audio_instr_active) {
++        const Uint64 _p12_now = SDL_GetTicksNS();
++        g_p12_sdl_ring_refill_ns += _p12_now - _p12_ring_t0;
++        g_p12_sdl_audio_thread_ns += _p12_now - _p12_play_t0;
++        if (++g_p12_sdl_playdev_calls >= 100) {
++            const Uint32 _p12_irq_now = doskutsu_audio_irq_wall_us;
++            const Uint32 _p12_irq_delta =
++                _p12_irq_now - g_p12_sdl_irq_wall_us_baseline;
++            g_p12_sdl_irq_wall_us_baseline = _p12_irq_now;
++            doskutsu_dbg_log(
++                "[p12-audio sdl n=100 audio_thread=%lu ring_refill=%lu "
++                "mix_mixer=%lu irq_isr=%lu]",
++                (unsigned long)(g_p12_sdl_audio_thread_ns / 1000ULL),
++                (unsigned long)(g_p12_sdl_ring_refill_ns / 1000ULL),
++                (unsigned long)(g_p12_sdl_mix_mixer_ns / 1000ULL),
++                (unsigned long)_p12_irq_delta);
++            g_p12_sdl_audio_thread_ns = 0;
++            g_p12_sdl_ring_refill_ns = 0;
++            g_p12_sdl_mix_mixer_ns = 0;
++            g_p12_sdl_playdev_calls = 0;
++        }
++    }
++
+     return true;
+ }
+ 
+-- 
+2.47.3
+

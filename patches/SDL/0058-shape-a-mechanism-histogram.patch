@@ -1,0 +1,365 @@
+From 821921216b7425db7fb9da548e4929313c92b3c4 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 12 May 2026 10:23:14 -0700
+Subject: [PATCH] dos: Phase 11 patch 0058 -- Shape A mechanism histogram
+ (diagnostic backstop)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pure-diagnostic backstop for wave-36 PLAY6 Shape D fps lever per
+docs/PHASE11-WAVE-36-CONTRACT.md section 4 + section 6.4. Per-100-
+PlayDevice-call histogram of Shape A scan outcomes (silent vs noisy)
+and per-outcome scan wall-clock. Gated on
+SDL_HINT_DOSKUTSU_SILENCE_HISTO=1 (strict-"1"; default OFF).
+
+Mechanism:
+
+  - Module-scope counters: g_p58_silent_count (scans returning all-
+    silence), g_p58_noisy_count (scans returning non-silence),
+    g_p58_silent_us_total + g_p58_noisy_us_total (wall-clock per
+    bucket), g_p58_pd_call_count (cadence counter; ticks under BOTH
+    Shape A and Shape D when HISTO=1 -- see below).
+
+  - OpenDevice reads SDL_HINT_DOSKUTSU_SILENCE_HISTO; sets
+    g_p58_silence_histo_active; emits banner.
+
+  - PlayDevice silence-detect dispatch: per-bucket scan-wall-clock
+    accumulation runs ONLY inside the Shape A scan branch (Shape D
+    doesn't perform a scan to attribute). Under SHAPE=D the silent
+    and noisy counts stay 0 + the per-bucket wall-clock totals stay 0.
+
+  - PlayDevice silence-detect dispatch EXIT: cadence counter +
+    emit-at-100 placed OUTSIDE the SHAPE dispatch, so the cadence
+    ticks per PlayDevice call regardless of which silence-detect
+    branch ran. Every 100 PlayDevice calls emit:
+
+      [silence-histo n=100 silent_n=N silent_us_total=N
+       noisy_n=N noisy_us_total=N]
+
+    + reset counters.
+
+  - Under SHAPE=D + HISTO=1: cadence ticks normally; per-bucket
+    counts stay 0; emit fires with all-zero values:
+
+      [silence-histo n=100 silent_n=0 silent_us_total=0
+       noisy_n=0 noisy_us_total=0]
+
+    This is the load-bearing engagement-verify signal for PLAY6
+    Shape D engagement per
+    docs/PHASE11-WAVE-36-CONTRACT.md v3.3+ section 4 grep target
+    spec: >= 1 emit with all zeros = Shape D dispatched correctly
+    AND HISTO engaged correctly. Refutation grep target: any emit
+    with silent_n > 0 OR noisy_n > 0 under SHAPE=D = Shape D
+    engagement failure (Shape A scan branch ran despite SHAPE=D
+    env-var).
+
+  - Under SHAPE=A (default) + HISTO=1: cadence ticks normally; per-
+    bucket counts accumulate per Shape A scan outcome; emit fires
+    with real bucket data for mechanism attribution per
+    pressure_test_tidy_narratives.md.
+
+Why the cadence counter is OUTSIDE the SHAPE dispatch:
+
+  Original draft placed `g_p58_pd_call_count++` inside the per-bucket
+  accumulation block (which lives inside the Shape A scan branch).
+  That gave an absence-signal engagement-verify pattern: under
+  SHAPE=D + HISTO=1, zero emits in SDLDBG.LOG (counter never ticked).
+  flush-instr's contract v3.3+ § 4 grep target spec'd
+  presence-with-zeros (`>= 1 emit with all zero values`) as the
+  engagement-verify signal -- which is more discriminating than
+  absence: an absent emit could mean Shape D engaged OR HISTO env-var
+  not set OR binary crashed; a present-zero-valued emit unambiguously
+  means HISTO engaged + Shape A scan path didn't fire.
+
+  Per contract_grep_targets_require_enabling_env_vars.md the contract
+  grep target IS the authoritative signal; the implementation must
+  match. Moving the cadence counter outside the SHAPE dispatch is a
+  one-block change that aligns SDL/0058 emit cadence with the v3.3
+  contract grep target. Per-bucket accumulation stays inside the
+  Shape A branch (Shape D has no scan to attribute) so the data
+  semantic is unchanged.
+
+Why this matters for wave-36:
+
+  Per docs/PHASE11-WAVE-35-FINDINGS.md section 2.5 the cost mechanism
+  for SDL/0054's +3.34 ms fi_ms regression is still hypothesis: most
+  likely scan-loop wall-clock interacting with cooperative scheduler
+  during dosmemput, but pressure-test alternatives exist (mixer-tick
+  CPU, cooperative-scheduler yield overhead, audio-thread lock
+  contention).
+
+  If PLAY6 Shape D lands the predicted +3 to +5 fps recovery, the
+  scan-loop-wall-clock hypothesis is confirmed and wave-37 picks
+  stacked levers from there. If PLAY6 == PLAY1 (Shape D doesn't move
+  the fps needle), the histogram tells wave-37 which alternative
+  cost mechanism to attack:
+
+    silent_us_total / silent_n ~ per-scan wall-cost. If this matches
+       expected ~1-2 us-per-scan (per SDL/0054 commit comment) but
+       fps still regressed +3.34 ms, the cost is NOT in scan-loop
+       wall-clock -- it's somewhere else (scheduler interaction
+       outside the scan body, mixer-tick CPU, etc.).
+    silent_us_total / silent_n >> 1-2 us -- the cost IS scan-loop
+       wall-clock but it's inflated by scheduler interactions during
+       the scan; Shape D was the right lever (and should have worked);
+       investigate why it didn't.
+    noisy_us_total / noisy_n -- per-scan cost when there IS audio;
+       compares against silent average to factor out early-exit
+       discount (real audio early-exits on first non-silence byte;
+       silent scans full).
+
+  Either way, wave-37 picks the right shape (B/C/E or back to A)
+  armed with data instead of hypothesis. Companion to
+  memory/perf_predictions_unreliable.md.
+
+Cost when env-var OFF: zero (cached static-bool short-circuits at
+single-branch dispatch; SDL_GetTicksNS not called; cadence counter
+not incremented). Cost when ON: 2 SDL_GetTicksNS reads per Shape A
+scan + 1 accumulator add + 1 counter increment + 1 emit per 100
+PlayDevice calls = ~60 ns per scan = ~0.6 us per 100 scans = ~6 us
+per emit. Under SHAPE=D: 1 counter increment per PlayDevice call +
+1 emit per 100 calls = negligible.
+
+Compose with the rest of the audio-instr family:
+  - SDL/0055 -- P12 SDL-side audio brackets (independent gate;
+                FLIP_INSTR + P12_AUDIO_INSTR BOTH; emits
+                [p12-audio sdl n=100 ...])
+  - SDL/0057 -- Shape D dispatch (no per-bucket data under SHAPE=D;
+                cadence-driven all-zero emits when HISTO=1
+                confirm engagement)
+  - SDL/0058 -- this patch (HISTO=1; emits [silence-histo n=100 ...]
+                under both Shapes; per-bucket data Shape A only)
+  - All can coexist in same binary; gate independently; emit on
+    different cadences (FLIP_INSTR per-flip vs HISTO per-100-
+    PlayDevice).
+
+Banner variants:
+  ACTIVE (env=1):  "audio: SDL/0058 Shape A mechanism histogram
+                    ACTIVE (HISTO=1; emits [silence-histo n=100 ...]
+                    per 100 PlayDevice calls; rides Shape A only)"
+                    -- the "rides Shape A only" wording refers to
+                    PER-BUCKET DATA (silent_n/noisy_n accumulate
+                    only under Shape A scan); cadence + emit fire
+                    under both Shapes.
+  OFF (default):   "audio: SDL/0058 Shape A mechanism histogram OFF
+                    (set SDL_HINT_DOSKUTSU_SILENCE_HISTO=1 to engage)"
+
+Engagement-verify per contract_grep_targets_require_enabling_env_vars.md:
+operator's PLAY6 BAT cell sets HISTO=1 alongside SHAPE=D; the ACTIVE
+banner must appear in SDLDBG.LOG before any [silence-histo ...] emit
+is grepped. Under SHAPE=D the [silence-histo ...] line emits with
+silent_n=0 + noisy_n=0 -- this is the expected pattern AND the
+contract v3.3+ grep target.
+
+Workspace-local DOS-port patch per memory/sdl_ai_policy.md; never
+upstreamed.
+
+Validation:
+  - Compile clean at i486 -O3.
+  - Banner + emit template strings verified in libSDL3.a via
+    `strings | grep "silence-histo\\|histogram ACTIVE\\|HISTO"`.
+  - Off-path semantics unchanged: zero behavioral change when
+    HISTO is not set; bytewise scan dispatch identical to SDL/0057
+    Shape A branch.
+  - Cadence-counter-under-SHAPE=D verified mechanically: in PLAY6
+    BAT cell the emit fires every 100 PlayDevice calls regardless
+    of which scan branch dispatched.
+
+Cross-reference:
+  - docs/PHASE11-WAVE-36-CONTRACT.md v3.3+ section 4 + 5.7.1 + 6.4 +
+    8 (PLAY6 instrumentation spec; HISTO ride-along; presence-with-
+    zeros engagement-verify pattern; sub-bucket cross-cell delta
+    spec; SDL/0059 wave-37 conditional follow-up)
+  - docs/PHASE11-WAVE-35-FINDINGS.md section 2.5 (cost mechanism
+    hypothesis pressure-test)
+  - patches/SDL_mixer/0001-shape-d-mixer-flag-silence-detect-setter.patch
+    (the Shape D writer; this histogram does NOT consume its volatile,
+    but documents the alternative path the histogram pressure-tests)
+  - patches/SDL/0057-shape-d-mixer-flag-silence-detect.patch (the
+    Shape D reader; under SHAPE=D this histogram emits zeros which
+    confirms Shape D dispatch is live)
+  - memory/pressure_test_tidy_narratives.md (the discipline this
+    patch enforces: don't trust a tidy explanation without
+    measuring against the quiescent / silent case)
+  - memory/perf_predictions_unreliable.md (the framing for why
+    PLAY6 outcome alone is insufficient; HISTO gives mechanism
+    attribution for wave-37 picks)
+  - memory/no_playing_it_safe.md (aggressive-but-not-reckless: the
+    histogram is the "not reckless" half of Shape D shipping)
+  - memory/contract_grep_targets_require_enabling_env_vars.md
+    (rationale for cadence-counter-outside-SHAPE-dispatch: contract
+    grep target IS authoritative; presence-with-zeros >
+    absence-signal for engagement-verify discrimination)
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 133 ++++++++++++++++++++++++++++++++
+ 1 file changed, 133 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 6c040d7a1..0aeebfef7 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -153,6 +153,42 @@ static bool g_dos_silence_detect_enabled = true;
+                        fps lever; predicted +3 to +5 fps vs PLAY1) */
+ static bool g_dos_silence_shape_d_active = false;
+ 
++/* DOSKUTSU patch (Phase 11 patch 0058): Shape A mechanism-histogram
++   instrumentation state. Diagnostic backstop for wave-36 PLAY6 Shape
++   D fps lever per `pressure_test_tidy_narratives.md` discipline: if
++   PLAY6 doesn't deliver predicted +3 to +5 fps from Shape D
++   engagement, this histogram tells wave-37 whether the wave-35 cost
++   attribution hypothesis (per docs/PHASE11-WAVE-35-FINDINGS.md
++   section 2.1 -- "scan during dosmemput on cooperative scheduler
++   adds wall-clock to fi_ms") was correct, or whether the real cost
++   driver lives elsewhere (mixer-tick, cooperative-scheduler yield,
++   audio-thread wall-clock, etc.).
++
++   Per-100-PlayDevice-call histogram of:
++     - scan outcomes: silent vs noisy buffers per block
++     - scan wall-clock per outcome: lets us see if scan-loop wall-
++       clock alone matches the +3.34 ms fi_ms regression, or if the
++       cost is somewhere OTHER than the scan itself
++     - per-scan averages: instructions-per-byte sanity check
++
++   Gated on SDL_HINT_DOSKUTSU_SILENCE_HISTO=1 (strict-"1" match per
++   CLAUDE.md env-var convention; default OFF). Cost when OFF: zero
++   (cached static-bool short-circuits). Cost when ON: 2
++   SDL_GetTicksNS reads per Shape A scan + accumulator updates +
++   1 emit per 100 PlayDevice calls. Negligible.
++
++   Rides along Shape A path ONLY (Shape D doesn't perform the scan,
++   so wall-clock per scan is moot under Shape D). If PLAY6 sets BOTH
++   SHAPE=D and HISTO=1, the histogram still emits banner-active at
++   open but the per-block counters stay 0 because the Shape A branch
++   never executes. */
++static bool g_p58_silence_histo_active = false;
++static Uint32 g_p58_silent_count = 0;     /* scans that returned all-silence */
++static Uint32 g_p58_noisy_count = 0;      /* scans that returned non-silence */
++static Uint64 g_p58_silent_us_total = 0;  /* sum of wall-us for silent scans */
++static Uint64 g_p58_noisy_us_total = 0;   /* sum of wall-us for noisy scans */
++static Uint32 g_p58_pd_call_count = 0;    /* cadence: 100 PlayDevice calls/emit */
++
+ /* DOSKUTSU patch (Phase 11 patch 0057): weak-fallback definition for
+    the SDL_mixer-defined volatile. The strong definition lives in
+    SDL3_mixer's MixerCallback TU
+@@ -773,6 +809,44 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0058): resolve Shape A mechanism
++       histogram engagement gate once at OpenDevice time. Strict-"1"
++       match per CLAUDE.md env-var convention. Diagnostic backstop for
++       PLAY6 Shape D fps lever: if PLAY6 doesn't move the needle, this
++       histogram tells wave-37 whether scan-loop wall-clock alone
++       explained the +3.34 ms fi_ms regression (silent_us_total /
++       silent_n should approximate the per-scan wall-cost) or whether
++       the cost lives elsewhere (cooperative-scheduler, mixer-tick,
++       etc.).
++
++       Independent of SHAPE=D engagement: HISTO=1 rides along Shape A
++       branch in PlayDevice; under SHAPE=D the scan doesn't run and
++       histogram counters stay 0 (informative empty data -- confirms
++       Shape D dispatch is engaged). Per
++       contract_grep_targets_require_enabling_env_vars.md the BAT cell
++       that enables histo MUST set the env var; banner emit names the
++       var explicitly so the operator can grep-verify. */
++    {
++        const char *histo_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_SILENCE_HISTO");
++        g_p58_silence_histo_active =
++            (histo_hint && histo_hint[0] == '1' && histo_hint[1] == 0);
++        if (g_p58_silence_histo_active) {
++            doskutsu_dbg_log("audio: SDL/0058 Shape A mechanism histogram ACTIVE "
++                             "(HISTO=1; emits [silence-histo n=100 silent_n=N "
++                             "silent_us_total=N noisy_n=N noisy_us_total=N] "
++                             "per 100 PlayDevice calls; rides Shape A only)");
++            /* Reset counters so first emit measures from this point. */
++            g_p58_silent_count = 0;
++            g_p58_noisy_count = 0;
++            g_p58_silent_us_total = 0;
++            g_p58_noisy_us_total = 0;
++            g_p58_pd_call_count = 0;
++        } else {
++            doskutsu_dbg_log("audio: SDL/0058 Shape A mechanism histogram OFF "
++                             "(set SDL_HINT_DOSKUTSU_SILENCE_HISTO=1 to engage)");
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0055): resolve P12 SDL-side audio
+        instrumentation gates once at OpenDevice time. BOTH FLIP_INSTR
+        AND P12_AUDIO_INSTR must be set to "1" (strict-"1" match) for
+@@ -1394,6 +1468,11 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+         if (g_dos_silence_shape_d_active) {
+             all_silence = (doskutsu_mixer_actual_mixed_bytes == 0);
+         } else {
++            /* Shape A bytewise scan. SDL/0058 brackets the scan with
++               SDL_GetTicksNS when HISTO=1 to attribute scan-loop
++               wall-clock to silent-vs-noisy buckets per outcome. */
++            const Uint64 _p58_t0 =
++                g_p58_silence_histo_active ? SDL_GetTicksNS() : 0;
+             const Uint8 silence = soundblaster_silence_value;
+             const Uint8 *p = buffer;
+             const Uint8 *end = buffer + buffer_size;
+@@ -1401,6 +1480,60 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+             while (p < end) {
+                 if (*p++ != silence) { all_silence = false; break; }
+             }
++            if (g_p58_silence_histo_active) {
++                /* DOSKUTSU patch (Phase 11 patch 0058): per-bucket scan-
++                   wall-clock accumulation. Shape A path only (Shape D
++                   doesn't scan; its counters stay 0; the cadence-driven
++                   emit below still fires under both shapes). */
++                const Uint64 _p58_us =
++                    (SDL_GetTicksNS() - _p58_t0) / 1000ULL;
++                if (all_silence) {
++                    g_p58_silent_count++;
++                    g_p58_silent_us_total += _p58_us;
++                } else {
++                    g_p58_noisy_count++;
++                    g_p58_noisy_us_total += _p58_us;
++                }
++            }
++        }
++
++        /* DOSKUTSU patch (Phase 11 patch 0058): cadence counter +
++           emit-at-100 placed OUTSIDE the SHAPE dispatch so it fires
++           under BOTH Shape A and Shape D paths when HISTO=1.
++
++           Rationale: under SHAPE=D the Shape A scan branch doesn't
++           execute, but the cadence counter MUST still tick so the
++           engagement-verify emit fires per
++           docs/PHASE11-WAVE-36-CONTRACT.md v3.3+ section 4 grep target
++           specification `[silence-histo n=100 silent_n=0
++           silent_us_total=0 noisy_n=0 noisy_us_total=0] >= 1 emit`.
++           Initially (pre-amend) the counter was nested inside the
++           Shape A branch's histo-active block; under SHAPE=D the
++           counter never ticked + no emit fired (absence-signal
++           pattern); contract spec expected presence-with-zeros
++           pattern. Per
++           contract_grep_targets_require_enabling_env_vars.md the
++           contract grep target IS the authoritative signal; the
++           implementation must match. Presence-with-zeros is also
++           more discriminating than absence (an absent emit could
++           mean Shape D engaged OR HISTO env-var not set OR binary
++           crashed; a present-zero-valued emit unambiguously means
++           HISTO engaged + Shape A scan path didn't fire). */
++        if (g_p58_silence_histo_active) {
++            if (++g_p58_pd_call_count >= 100) {
++                doskutsu_dbg_log(
++                    "[silence-histo n=100 silent_n=%u silent_us_total=%lu "
++                    "noisy_n=%u noisy_us_total=%lu]",
++                    g_p58_silent_count,
++                    (unsigned long)g_p58_silent_us_total,
++                    g_p58_noisy_count,
++                    (unsigned long)g_p58_noisy_us_total);
++                g_p58_silent_count = 0;
++                g_p58_noisy_count = 0;
++                g_p58_silent_us_total = 0;
++                g_p58_noisy_us_total = 0;
++                g_p58_pd_call_count = 0;
++            }
+         }
+         if (all_silence) {
+             /* Skip the ring write — ring continues to drain via IRQ →
+-- 
+2.47.3
+
