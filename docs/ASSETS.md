@@ -107,6 +107,95 @@ If in doubt, extract yourself via Option A.
 
 The Cave Story Tribute Site at <https://www.cavestory.one/downloads/cavestoryen.zip> ships an Aeon-Genesis-pre-patched `Doukutsu.exe` plus the loose `data/` files (Stage/, Npc/, root .pbm/.tsc/npc.tbl). It does **not** include the embedded ORG/PXT data — those still need extraction from `Doukutsu.exe` itself via `7z x` (PE resources) for the `.org` files plus `scripts/extract-pxt.py` (binary-table-driven) for the `.pxt` files. The `scripts/extract-pxt.py` script is doskutsu-authored, transcribed from `vendor/nxengine-evo/src/extract/extractpxt.cpp`'s `extract_pxt()` algorithm — operates on file offsets, no Rust toolchain needed.
 
+For PXT specifically, **`scripts/fetch-cs-pxt.py`** is the one-shot
+orchestrator: it downloads `cavestoryen.zip` (SHA-256-pinned), extracts
+`Doukutsu.exe` to a tempdir, runs `scripts/extract-pxt.py` against it,
+emits the 86 `fx<HEX>.pxt` files into `data/pxt/`, and cleans up the
+tempdir so the freeware archive + binary do not persist on the user's
+machine. Same fetch-and-pin convention as `scripts/fetch-cs-midi.py`
+(Step 4.5 below). Usage:
+
+```bash
+python3 scripts/fetch-cs-pxt.py data/
+```
+
+#### Known upstream limitation: 37 Pixtone slots are gaps in Pixel's 2004 freeware
+
+The Cave Story 2004 EN freeware `Doukutsu.exe` defines Pixtone parameter
+blocks for exactly **86 of the 117 slots** NXEngine-evo's runtime
+iterates over (`NUM_SOUNDS = 0x75` per
+`vendor/nxengine-evo/src/sound/Pixtone.h:178`). The 37 absent slots are:
+
+```
+decimal:  8, 9, 10, 13, 19, 36, 66-69, 73-99
+hex:      fx08, fx09, fx0a, fx0d, fx13, fx24, fx42-45, fx49-63
+```
+
+These are **unnamed gaps in the engine's SFX enum** —
+`vendor/nxengine-evo/src/sound/SoundManager.h:63` declares
+`SND_<NAME> = <decimal-id>` constants for the 80 named SFX (1-7, 11-12,
+14-18, 20-35, 37-65, 70-72, 100-117, 150-155), and the 37 missing-PXT
+IDs land in the gaps between named ranges. **No engine code calls
+`Pixtone::play()` with these slot numbers.** They show up only because
+`Pixtone::Pixtone()` blindly iterates `slot = 1 .. NUM_SOUNDS` and
+attempts to load each one regardless of whether it has a named constant —
+a defensive iteration that lets mods add `fxNN.pxt` files for
+previously-unused slots without code changes.
+
+Verified at the TSC-script level too: decrypting all 95 vanilla
+`data/Stage/*.tsc` files and scanning for `<SOU` (Cave Story's
+SFX-trigger TSC command — note: NOT `<SND`, that's a different opcode
+in NXEngine's TSC interpreter), Pixel's freeware scripts reference
+**exactly 18 unique SFX slot numbers**:
+
+```
+TSC <SOU> args used in vanilla Cave Story:
+  [4, 11, 12, 16, 20, 22, 23, 26, 29, 35, 43, 44, 45, 70, 71, 72, 101, 105]
+```
+
+All 18 are present in our 86-file extracted set; zero overlap with the
+missing 37. So even the scripted SFX surface — independent of the
+engine's C++ SFX-by-name dispatch — never asks for the missing slots.
+The vanilla game runs to completion without ever needing a single
+parameter block from the 37 absent IDs.
+
+**Gameplay impact: zero.** The `LOG_WARN("pxt->load: file ... not
+found.")` line for each of the 37 absent slots is a one-time-per-boot
+warning emitted from `vendor/nxengine-evo/src/sound/Pixtone.cpp:76`
+during initialization. `stPXSound::load` returns `false` and Pixtone
+continues to the next slot. Runtime `Pixtone::play()` is silent on
+missing slots (no-op + no log line per call) because no game code ever
+references those slot numbers.
+
+**Sourcing**: there is no upstream-distributable source for these 37
+slots. Verified 2026-05-11:
+
+- NXEngine-evo's own `vendor/nxengine-evo/src/extract/extractpxt.cpp`
+  SND[] table is byte-for-byte identical to our `scripts/extract-pxt.py`
+  table — the same 86 IDs, in the same order, at the same byte offsets.
+  The gaps are gaps in `Doukutsu.exe`, not gaps in our extractor.
+- NXEngine-evo's bundled `vendor/nxengine-evo/data/` ships zero `.pxt`
+  files; upstream doesn't bundle the missing 37 either.
+- NXEngine-evo [issue #4](https://github.com/nxengine/nxengine-evo/issues/4)
+  (open since 2017) reports the same `pxt_load: file not found`
+  warn-spam. Maintainers don't document an upstream source — the
+  implication is that the gap is accepted as upstream behavior.
+- [doukutsu-rs](https://github.com/doukutsu-rs/doukutsu-rs) is the
+  sibling Cave Story re-implementation; their wiki documents an
+  architectural divergence (WAV samples for drums instead of PXT) but
+  no separate community PXT pack for the missing IDs.
+- GitHub search for the specific filenames (`fx49.pxt`, `fx4b.pxt`,
+  `fx5a.pxt`) returns zero indexed hits — no community PXT pack is
+  published anywhere on GitHub.
+- The Cave Story+ / Wii / 3DS DSiWare commercial releases contain
+  additional SFX, but they're WAV samples owned by NICALIS — neither
+  PXT-format nor GPLv3-compatible per `CLAUDE.md § Licensing`.
+
+The 37 warn lines at boot are cosmetic. If you're debugging an actual
+"no SFX" bug, look for slots that *do* exist in the canonical 86 set
+but fail to load (path issue, file corruption, etc.) — the missing 37
+are noise, not signal.
+
 ---
 
 ## Step 3: drop the files in place
@@ -123,9 +212,19 @@ for f in /path/to/extracted/PE-resources/ORG/*; do
   cp "$f" "data/org/${name}.org"
 done
 
-# Add the binary-extracted Pixtone params (use scripts/extract-pxt.py
-# or the doukutsu-rs / NXEngine-evo extract tool):
-# produces data/pxt/fxNN.pxt files
+# Add the binary-extracted Pixtone params. Two equivalent paths:
+#
+#   (a) one-shot orchestrator (recommended — handles source fetch + extract
+#       in one step, cleans up the freeware binary on exit):
+#         python3 scripts/fetch-cs-pxt.py data/
+#         # downloads cavestoryen.zip (SHA-256-pinned), extracts Doukutsu.exe
+#         # to a tempdir, runs scripts/extract-pxt.py, removes tempdir.
+#
+#   (b) manual path (if you already have Doukutsu.exe staged from any source):
+#         mkdir -p data/pxt
+#         scripts/extract-pxt.py /path/to/Doukutsu.exe data/pxt
+#
+# Either produces 86 data/pxt/fx<HEX>.pxt files.
 
 # Add the binary-extracted Organya wavetable + stage index + the
 # endpic/pixel.bmp blanking sprite. These three blobs live inside

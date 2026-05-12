@@ -1,0 +1,324 @@
+From e15e27665ec8ae65b31bba99f96935b2f7316d73 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 11 May 2026 13:00:18 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=2011=20patch=200053=20=E2=80=94=20?=
+ =?UTF-8?q?engine-signaled=20pre-shutdown=20gate=20disable?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Breaks the SDL/0050 quiescence-gate × DOS cooperative-scheduler
+deadlock on Quit-to-DOS without sacrificing the +7 fps gain.
+
+The bug (iter L L1 / iter M M1 2026-05-08, both freeze): SDL/0050's
+GetDeviceBuf quiescence-walk path calls SDL_Delay(10) under the
+audio thread's hold of device->lock (lock taken at SDL_audio.c:1179,
+not released until 1289). When the engine calls MIX_DestroyMixer,
+main blocks at SDL_LockMutex(device->lock) in DestroyPhysicalAudioDevice
+at line 586 BEFORE reaching the atomic shutdown=1 set at line 1668.
+Under DOS cooperative scheduling, audio's end-of-Iterate unlock →
+next-Iterate re-lock cycle re-acquires the lock before main wins the
+spin-loop race. Main starves indefinitely. SDL/0051's atomic-bypass
+at top of GetDeviceBuf is dead code because the atomic is INSIDE the
+lock main can't acquire.
+
+The fix: engine flips the SDL/0050 killswitch state from
+SoundManager::shutdown() immediately before MIX_DestroyMixer via a
+new workspace-local export, SDL_DOSAudioBeginShutdown(). After the
+flip, the next GetDeviceBuf takes the default-path return (staging
+buffer unchanged, no SDL_Delay). Audio thread cycles fast; lock is
+held only for the µs-class mix work; main wins lock contention in
+≤10 ms; sets shutdown=1; SDL_WaitThread joins cleanly.
+
+Reuses the existing g_dos_audio_quiescence_gate_disabled flag rather
+than introducing a parallel g_dos_audio_shutting_down state — avoids
+the gate-fragmentation footgun documented in the SDL/0048 follow-up
+work (memory/sdl_pause_api_must_audit_auto_resume_gates.md). One flag,
+one semantic ("gate is off"), set by either OpenDevice-time hint
+resolution or this engine-signaled mid-run flip.
+
+Zero risk to the +7 fps gain. The flag is only flipped during the
+engine's shutdown call. Gameplay-time path (gate engaged, fires
+SDL_Delay when quiescent) is byte-identical to current. Flag-check
+cost is one static-bool read; already in the current path.
+
+Engine-side companion: nxengine-evo adds a 5-LOC call to
+SDL_DOSAudioBeginShutdown() between the existing
+snd-shutdown[3/6]/[4/6] markers in SoundManager::shutdown(). Header
+declares the symbol via include/SDL3/SDL_dosaudio_shutdown.h
+(workspace-local; mirrors SDL/0034's SDL_dosvesa_directaccess.h
+pattern).
+
+DOSBox-X smoke can validate structurally (new path executes; log
+markers emit; game still hits title) but cannot reliably reproduce
+the cooperative-scheduler-vs-mutex contention timing per
+dosbox_not_behavioral_proxy_for_io.md. The wave-33 quit-cycle PLAY
+cell is the behavioral gate.
+
+Per sdl_ai_policy.md the patch stays workspace-local; not for
+upstream.
+
+Files touched:
+  vendor/SDL/include/SDL3/SDL_dosaudio_shutdown.h     (new)
+  vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c          (include +
+                                                       ~10 LOC function +
+                                                       inline reasoning)
+
+Companion patches:
+  SDL/0050 — DOS GetDeviceBuf quiescence gate (this patch unblocks
+             its shutdown-path interaction)
+  SDL/0051 — atomic-bypass-at-top (dead code; left in tree for
+             documentation of the wrong-hypothesis attempt)
+  SDL/0046 — WaitDevice shutdown bail (sibling deadlock fix, still
+             needed for the non-quiescence WaitDevice path)
+  nxengine-evo/0129 — companion call site
+---
+ include/SDL3/SDL_dosaudio_shutdown.h | 142 +++++++++++++++++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c      |  75 ++++++++++++++
+ 2 files changed, 217 insertions(+)
+ create mode 100644 include/SDL3/SDL_dosaudio_shutdown.h
+
+diff --git a/include/SDL3/SDL_dosaudio_shutdown.h b/include/SDL3/SDL_dosaudio_shutdown.h
+new file mode 100644
+index 000000000..b22a0f219
+--- /dev/null
++++ b/include/SDL3/SDL_dosaudio_shutdown.h
+@@ -0,0 +1,142 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/**
++ * # CategoryDOSAudioShutdown
++ *
++ * **DOSKUTSU local addition (patches/SDL/0053, never upstreamed).** This
++ * header exports a single SDL3-DOS audio-backend helper: the engine signals
++ * "audio teardown is starting" before calling `MIX_DestroyMixer` so the
++ * backend can pre-empt its own SDL/0050 quiescence-gate path. Without that
++ * signal, the audio thread can be inside `SDL_Delay(10)` inside
++ * `DOSSOUNDBLASTER_GetDeviceBuf` *while holding `device->lock`*, and the
++ * cooperative scheduler under DOS prevents the main thread from acquiring
++ * the same lock long enough to set the SDL atomic shutdown flag. Result:
++ * indefinite freeze on Quit-to-DOS (iter L L1 2026-05-08, iter M M1
++ * 2026-05-08; see `docs/PHASE11-ITER-M-FREEZE-DIAGNOSTIC.md` for the full
++ * call-chain trace).
++ *
++ * ## How it works
++ *
++ * `SDL_DOSAudioBeginShutdown()` flips the same module-scope state variable
++ * that the SDL/0050 killswitch (`SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE`
++ * = "0") already controls. From the next `DOSSOUNDBLASTER_GetDeviceBuf`
++ * iteration on, the gate is bypassed — `GetDeviceBuf` returns the staging
++ * buffer normally without entering the 10 ms `SDL_Delay` quiescence-walk
++ * path. The audio thread cycles fast through `PlaybackAudioThreadIterate`,
++ * releases `device->lock` on each iteration, and the main thread wins the
++ * `SDL_LockMutex(device->lock)` call in `DestroyPhysicalAudioDevice`
++ * within at most one residual delay window (≤10 ms). Main then sets
++ * `device->shutdown = 1`, releases the lock, and joins the audio thread
++ * via `SDL_WaitThread`. Clean teardown.
++ *
++ * Reusing the existing killswitch state — rather than introducing a new
++ * `g_dos_audio_shutting_down` flag — avoids the state-flag fragmentation
++ * footgun documented in the SDL/0048 follow-up work (see
++ * `memory/sdl_pause_api_must_audit_auto_resume_gates.md`).
++ *
++ * ## When to call it
++ *
++ * From `SoundManager::shutdown()` (or equivalent engine teardown path)
++ * **immediately before** the call to `MIX_DestroyMixer`. The
++ * `[3/6] pre-Pixtone::shutdown` → `[4/6] pre-MIX_DestroyMixer` window in
++ * the doskutsu engine's `snd-shutdown` log markers is the canonical
++ * insertion point.
++ *
++ * ## Lifecycle + idempotence
++ *
++ * - The call is **one-shot per process lifetime**, but **idempotent**:
++ *   calling it twice has no additional effect (the underlying flag is
++ *   already set).
++ * - Safe to call even when `SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0`
++ *   killswitched the gate at OpenDevice time — the flag is already true;
++ *   this is a no-op redundant set.
++ * - Safe to call even when the audio device was never opened, or when
++ *   audio is otherwise uninitialized — the function simply writes to a
++ *   static module-scope variable; no SDL API dependencies.
++ * - The flag is **reset** the next time `DOSSOUNDBLASTER_OpenDevice` is
++ *   called (open-time hint re-resolution) — so if a future engine
++ *   re-initializes audio in the same process (Cave Story never does),
++ *   the gate engages again per the hint state.
++ *
++ * ## Threading
++ *
++ * The flag is a plain `bool` written by main (`SDL_DOSAudioBeginShutdown`)
++ * and read by the audio thread (`DOSSOUNDBLASTER_GetDeviceBuf`). On x86
++ * (DJGPP target), aligned bool writes are atomic; readers see either the
++ * old or new value but never a torn read. A racing reader observing the
++ * old value at most enters one more SDL_Delay(10) cycle before re-reading.
++ * No barrier or atomic primitive is required.
++ *
++ * ## Real-HW gate
++ *
++ * Per `memory/dosbox_not_behavioral_proxy_for_io.md`, DOSBox-X cannot
++ * reliably reproduce the cooperative-scheduler-vs-mutex contention timing
++ * that produces the freeze on real PODP83 + SB16. A DOSBox-X smoke gate
++ * can verify structural correctness (the new path executes, the log
++ * markers emit, the game still hits title) but only a real-hardware
++ * Quit-to-DOS cycle confirms the fix engages behaviorally. The wave-33
++ * PLAY matrix carries a dedicated quit-cycle cell for this gate.
++ *
++ * Like SDL_dosvesa_directaccess.h, this header is a workspace-local
++ * doskutsu addition. SDL/0053 hunks and these declarations are not
++ * contributed back to libsdl-org/SDL.
++ */
++
++#ifndef SDL_dosaudio_shutdown_h_
++#define SDL_dosaudio_shutdown_h_
++
++#include <SDL3/SDL_stdinc.h>
++
++#include <SDL3/SDL_begin_code.h>
++/* Set up for C function definitions, even when using C++ */
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Signal to the SDL3-DOS audio backend that engine-side teardown has begun
++ * and the SDL/0050 GetDeviceBuf quiescence gate should be disabled for the
++ * remainder of the process lifetime.
++ *
++ * Call this from the engine's audio-shutdown path immediately before
++ * `MIX_DestroyMixer()`. See the header-level documentation above for the
++ * call-chain reasoning and threading semantics.
++ *
++ * Idempotent; safe to call when audio was never initialized, when the gate
++ * is already killswitched, or repeatedly.
++ *
++ * \threadsafety Call from the main thread (the same thread that will call
++ *               `MIX_DestroyMixer`). Concurrent calls from other threads
++ *               are technically safe (single-bit one-way flag flip) but
++ *               not the intended use.
++ *
++ * \since SDL 3 — doskutsu workspace-local patch 0053, 2026-05-11.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSAudioBeginShutdown(void);
++
++/* Ends C function definitions when using C++ */
++#ifdef __cplusplus
++}
++#endif
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_dosaudio_shutdown_h_ */
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index e39bba163..4a5dc2b05 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -27,6 +27,7 @@
+ #include "../../core/dos/SDL_dos_scheduler.h"
+ #include "../../video/dos/SDL_dosdbg.h" /* DOSKUTSU patch 0041: doskutsu_dbg_log routing */
+ #include "SDL_dosaudio_sb.h"
++#include <SDL3/SDL_dosaudio_shutdown.h> /* DOSKUTSU patch 0053: engine-callable SDL_DOSAudioBeginShutdown export */
+ 
+ /* DOSKUTSU patch (Phase 10 patch 0038): IRQ-5 instrumentation +
+    idle-pause coordination state. The public-API state vars are defined
+@@ -819,6 +820,80 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+     return true;
+ }
+ 
++/* DOSKUTSU patch (Phase 11 patch 0053): engine-signaled pre-shutdown gate
++   disable. Called from the engine's SoundManager::shutdown() immediately
++   before MIX_DestroyMixer to break the SDL/0050 quiescence-gate × DOS
++   cooperative-scheduler deadlock on Quit-to-DOS.
++
++   The deadlock geometry (iter L L1 / iter M M1 + docs/PHASE11-ITER-M-
++   FREEZE-DIAGNOSTIC.md § 18):
++     1. SDL3 main thread enters MIX_DestroyMixer → SDL_QuitSubSystem
++        (or SDL_DestroyAudioStream for simplified-bound streams) →
++        DestroyPhysicalAudioDevice (SDL_audio.c:579).
++     2. DestroyPhysicalAudioDevice acquires device->lock at line 586
++        BEFORE calling ClosePhysicalAudioDevice. Main blocks here.
++     3. Audio thread holds device->lock for the entire body of
++        PlaybackAudioThreadIterate (SDL_audio.c:1179 → 1289) — including
++        DOSSOUNDBLASTER_GetDeviceBuf, where SDL/0050's quiescence-walk
++        path calls SDL_Delay(10) under cooperative scheduler.
++     4. Audio's end-of-Iterate SDL_UnlockMutex → next-Iterate
++        SDL_LockMutex cycle re-acquires the lock before main's spin
++        loop wins under DOS cooperative scheduling. Main starves; the
++        atomic shutdown=1 set at SDL_audio.c:1668 is INSIDE the lock
++        main cannot reach. SDL/0051's atomic-check-at-top-of-GetDeviceBuf
++        is dead code for the same reason.
++
++   The fix is to flip the gate's killswitch state from the engine BEFORE
++   main thread enters MIX_DestroyMixer. We reuse the existing
++   g_dos_audio_quiescence_gate_disabled flag (set/reset normally at
++   OpenDevice time via SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE) rather
++   than introducing a parallel g_dos_audio_shutting_down state — this
++   avoids the gate-fragmentation footgun documented in
++   memory/sdl_pause_api_must_audit_auto_resume_gates.md (the SDL/0048
++   ForcePause-vs-force_dsp_pause split that bit us in iter J).
++
++   After the flag flips true, the next DOSSOUNDBLASTER_GetDeviceBuf
++   iteration takes the default-path return (staging_buffer unchanged,
++   no SDL_Delay). Audio thread cycles fast through Iterate; lock is
++   held only for the µs-class mix work; main wins the lock contention
++   within ≤10 ms (one residual SDL_Delay if the flip races mid-delay);
++   main sets shutdown=1, releases lock, calls SDL_WaitThread. Audio
++   thread's WaitDevice (SDL/0046 shutdown bail) returns true; next
++   Iterate observes shutdown=1, returns false; thread exits cleanly.
++
++   Lifecycle / idempotence:
++     - One-shot per process lifetime, but safe to call twice (no-op
++       redundant set).
++     - Safe when SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0 already
++       killswitched the gate at OpenDevice (flag already true).
++     - Safe when audio was never initialized (writes a static; no SDL
++       state dependency).
++     - DOSSOUNDBLASTER_OpenDevice re-resolves the hint on each open,
++       so a hypothetical re-open in the same process resets cleanly
++       (Cave Story never does this).
++
++   Threading: aligned bool writes are atomic on x86 (DJGPP target).
++   Audio-thread readers see either the old or new value; a racing
++   reader observing old enters at most one more SDL_Delay(10) before
++   re-reading. No barrier required.
++
++   Per memory/sdl_ai_policy.md the patch stays workspace-local; the
++   exported symbol is declared in include/SDL3/SDL_dosaudio_shutdown.h
++   alongside the SDL_DOSVesaDirect* pattern from SDL/0034. */
++void SDL_DOSAudioBeginShutdown(void)
++{
++    if (!g_dos_audio_quiescence_gate_disabled) {
++        g_dos_audio_quiescence_gate_disabled = true;
++        doskutsu_dbg_log("audio: SDL_DOSAudioBeginShutdown — gate disabled "
++                         "for shutdown lock-handoff (engine pre-empted "
++                         "SDL/0050 GetDeviceBuf quiescence walk before "
++                         "MIX_DestroyMixer)");
++    } else {
++        doskutsu_dbg_log("audio: SDL_DOSAudioBeginShutdown — gate already "
++                         "disabled (killswitch or repeat call); no-op");
++    }
++}
++
+ // Return the staging buffer. The SDL audio pipeline writes the mixed audio
+ // here; PlayDevice then copies it into the ring buffer.
+ static Uint8 *DOSSOUNDBLASTER_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_size)
+-- 
+2.47.3
+

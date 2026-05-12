@@ -1,0 +1,484 @@
+From f2bd2fec7bebdb1010fc4c7bf8d250870d83b8a9 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 11 May 2026 15:26:21 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200131=20=E2=80=94=20?=
+ =?UTF-8?q?wave-35=20Phase=2012=20audio=20instrumentation?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Engine-side audio bracket set for the wave-35 Phase 12 instrumentation
+contract (`docs/PHASE11-WAVE-35-CONTRACT.md` § 8). Pre-instrumentation
+iter for the wave-36+ Phase 12 audio-cost-attribution program; the
+~31 ms unattributed audio cost from `audio_cost_attribution_unknown.md`
+gets decomposed into engine-side (this patch) + audio-thread + IRQ-5
+sub-buckets (sibling SDL/0054 covers SDL-side).
+
+Context. Wave-33 § 7 ranking put "Phase 12 Pixtone-decouple" at rank #1
+based on the premise that Pixtone synthesizes per-frame inside audio
+IRQ. Tree-grep revealed the premise is wrong: Pixtone is ALREADY pre-
+rendered at init (`stPXSound::render()` at Pixtone.cpp:157 runs once
+per .pxt slot in `Pixtone::init()` at line 318; MIX_Audio cached;
+audio thread does memcpy not synthesis). The original Phase 12
+"decouple" framing therefore had no work to do. Team-lead Option (b)
+pivot per `reconcile_deepdive_against_tree_facts.md`: instrumentation-
+first; measure the real bottleneck; then attack the dominant slice in
+wave-36+.
+
+Mechanism. 3 RAII timer brackets in NXE::Diag namespace
+(diagnostic_timers.h) + 6 per-block counter pairs (accum_ns + count) in
+Renderer.cpp's NXE::Diag storage block + audit-flush emit one-liner
+gated on FLIP_INSTR. Bracket call sites:
+
+- MidiScheduler::tick body (per-frame from SoundManager::runFade for
+  opl3/wb/midi_stub backends). Captures MIDI event dispatch + per-
+  backend register writes (OPL3 ADL writes; WB MPU-401 writes;
+  midi_stub LOG_DEBUG silence).
+
+- Pixtone::play body (per-SFX-trigger). Captures MIX_StopTrack +
+  MIX_SetTrackAudio + MIX_PlayTrack chain cost.
+
+- Pixtone::playResampled body (per-SFX-trigger; SHARED accumulator
+  with Pixtone::play since both are per-SFX-trigger dispatch). On
+  first call per (slot, percent), includes SDL_AudioStream resample
+  cost; subsequent calls hit the cache.
+
+- Pixtone::stop body (per-SFX-event). Captures MIX_StopTrack call cost
+  + bookkeeping.
+
+NOT bracketed (already covered elsewhere):
+
+- organyaStreamCallback body — patch 0062 AudioMixerTimer covers it
+  via g_audio_mix_accum_ns_block (audio thread; same TU reads).
+- IRQ-5 ISR work — patch 0100 doskutsu_audio_irq_count +
+  doskutsu_audio_irq_wall_us already export this; flush-instr's
+  decomp reads them directly.
+- SDL_mixer MIX_Mixer mix-down — sdl-engine's SDL/0054 lane.
+- SDL3-DOS audio thread main loop — sdl-engine's SDL/0054 lane.
+
+Gating. SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 (strict-"1"; default OFF).
+Cost when off: ~zero (cached static-const-bool; -O3 hoists destructor
+guard). Cost when on: 2 SDL_GetTicksNS reads per bracketed function
++ 1 accumulator add + 1 counter increment on the on-path.
+
+Per-call frequency in steady-state gameplay (Tier-2 OPL3 First Cave
+heavy-music as the wave-35 target):
+- midi_tick: ~100 calls per 100-flip block (one per frame)
+- pixtone_play: ~5-20 calls per block (sparse SFX triggers; rate
+  depends on combat density)
+- pixtone_stop: ~5-20 calls per block (mirrors play)
+
+Total instrumentation overhead at peak: ~ 130 × 2 × ~30 cycles
+per RDTSC read on PODP83 ≈ ~25 µs / block (0.0003% measurement
+distortion at 31 ms baseline). Negligible.
+
+Audit-flush emit (gated on FLIP_INSTR, same as flip-stat / flip-body-
+stat / bg-subregion families):
+
+  [p12-audio n=100 midi_tick_us=N midi_tick_count=N
+   pixtone_play_us=N pixtone_play_count=N
+   pixtone_stop_us=N pixtone_stop_count=N]
+
+ns→us conversion in emit (accumulator stored in ns for precision; emit
+in µs for readability). Counter equation
+  midi_tick_count ≈ 100  (per-frame)
+  pixtone_play_count + pixtone_stop_count ≈ SFX-event-rate × 100/fps
+  midi_tick_us / midi_tick_count = avg-µs-per-tick
+holds when env-var is on across the full block.
+
+All 6 counters reset unconditionally on audit-flush exit. Sample
+contents are overwritten by next block's brackets; idx-style reset
+zeros them for the next emit cycle.
+
+Cross-thread NOTE. Engine-side brackets are MAIN THREAD only. No
+volatile / atomic semantics needed; the cooperative DOS scheduler
+doesn't preempt main-thread code while it's in these bodies. Sibling
+SDL/0054 handles audio-thread brackets and uses the patch 0062 / 0100
+volatile-uint pattern for cross-thread reads at audit-flush.
+
+Coordination with SDL/0054 (sdl-engine's lane). Same env-var
+SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 gates both bracket sets so single
+SET in the BAT enables both engine-side + SDL-side measurement. SDL/-
+0054 emit line will be `[p12-sdl ...]` (different prefix; same FLIP_-
+INSTR gate; sdl-engine designs the field set).
+
+Wave-35 ride-along fps lever (per `realhw_iter_must_test_fps_idea.md`
+that instrumentation iters MUST ride along with a fps probe). Initial
+contract proposed patch 0132 cross-scrolltype extension of wave-34's
+slot 0130 to BK_FOLLOWFG; tree-grep revealed slot 0130 already covers
+all cacheable scrolltypes (BK_FIXED / BK_FOLLOWFG / BK_PARALLAX /
+BK_FASTLEFT) by virtue of being in the post-switch generic branch.
+flush-instr coordination in flight on the actual wave-35 ride-along —
+likely slot 0117 extension to mds_tilemap_bg drawTileFast (rank #2 in
+session-snapshot 2026-05-08 § 6; -1 to -2 ms predicted; mechanism
+already proven in wave-33).
+
+Files. New: src/Utils/diagnostic_timers.h 6 counter externs + 3 RAII
+timer structs + forward-decl; src/graphics/Renderer.cpp 6 counter
+storage + _abl_p12_audio_instr() env-helper + forward-decl + file-
+scope wrapper + audit-flush emit/reset block; src/sound/MidiScheduler-
+.cpp diagnostic_timers.h include + P12MidiTickTimer RAII at tick()
+entry; src/sound/Pixtone.cpp diagnostic_timers.h include +
+P12PixtonePlayTimer RAII at play()/playResampled() entries +
+P12PixtoneStopTimer RAII at stop() entry. docs/BOOT.md entry. ~200
+LOC including comments.
+
+Smoke. Builds clean at i486 -O3 -funroll-loops -fno-rtti. New strings
+in binary: SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR env-var symbol,
+[p12-audio n=100 ...] emit template. All prior slot markers (slot
+0128 TILE_BOUNDS_SKIP, slot 0129 snd-shutdown[3.5/6], slot 0130
+BG_SUBREGION_BLIT, slot 0126 thrashing-detect engaged) retained.
+Slot 0127 Lever B markers still absent (wave-32 revert intact).
+Real-HW gate: wave-35 production PLAY1 (env unset; instrumentation
+silent; pure fps measurement of ride-along fps lever) vs PLAY2
+(SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 + FLIP_INSTR=1; counters emit).
+
+Predicted measurement outcome (per flush-instr's contract § 5.4 +
+audio_cost_attribution_unknown.md):
+- midi_tick_us per block: 0.1-2 ms (one MIDI event dispatch per frame
+  + per-backend write — OPL3 has ~5-30 register writes per tempo-tick
+  event); flush-instr's decomp validates whether the OPL3 backend is
+  the dominant slice of "main-thread audio work" or not.
+- pixtone_play_us / pixtone_stop_us: small (~tens of µs per call;
+  ~hundreds of µs per block in combat-heavy scenes).
+- The bulk of the ~31 ms unattributed cost likely lives in SDL/0054's
+  audio-thread brackets, not here. This patch's main contribution is
+  ruling out engine-side main-thread audio work as the dominant
+  attribution.
+
+Architectural classification. Pure instrumentation; no behavior
+change. 0 fps direct impact (counters update + per-frame guard;
+~25 µs/block overhead negligible). Wave-35 ride-along fps gain comes
+from the separate ride-along lever (TBD with flush-instr).
+
+STOP-and-ack hygiene. The "slot 0132 redundant with slot 0130 for
+BK_FOLLOWFG" question was caught via cross-domain grep BEFORE
+authoring 0132; flagged to flush-instr for scope re-pick. Slot 0131
+is uncontroversial; no design ambiguity.
+---
+ src/Utils/diagnostic_timers.h | 103 ++++++++++++++++++++++++++++++++++
+ src/graphics/Renderer.cpp     |  80 ++++++++++++++++++++++++++
+ src/sound/MidiScheduler.cpp   |  14 +++++
+ src/sound/Pixtone.cpp         |  23 ++++++++
+ 4 files changed, 220 insertions(+)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index e3b014d..220fe38 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -1002,6 +1002,109 @@ bool p10_audio_instr_active();
+ // BK_FOLLOWFG / BK_FASTLEFT branches are clipped.
+ bool bg_subregion_active();
+ 
++// patch 0131 (Phase 11 wave-35 Phase 12 instrumentation contract per
++// `docs/PHASE11-WAVE-35-CONTRACT.md` § 8). Engine-side P12 audio
++// brackets — pre-instrumentation iter for the wave-36+ Phase 12
++// audio-cost-attribution optimization program. The wave-33 § 7 anchor
++// that put "Phase 12 Pixtone-decouple" at rank #1 was based on a
++// pre-port-era understanding of Pixtone synthesis (per-frame); tree-
++// grep revealed Pixtone is ALREADY pre-rendered at init (line 318
++// `snd.render()` runs once per .pxt slot). The ~31 ms unattributed
++// audio cost from `audio_cost_attribution_unknown.md` lives somewhere
++// in: main-thread MidiScheduler::tick + Pixtone::play/stop dispatch,
++// or audio-thread SDL3_mixer mix-down, or cross-thread cooperative-
++// scheduler yield. Wave-35 instrumentation decomposes the slice into
++// timeable sub-buckets so wave-36 can attack the right one.
++//
++// 3 main-thread counter pairs + 6 RAII bracket timers per § 8 contract:
++//
++//   midi_tick:    MidiScheduler::tick body bracket (per-frame, all
++//                 backends that dispatch through MidiScheduler — opl3,
++//                 wb, midi_stub). Captures MIDI event dispatch + per-
++//                 backend register writes (OPL3 ADL writes; WB MPU-401
++//                 writes; midi_stub LOG_DEBUG silence).
++//   pixtone_play: Pixtone::play + Pixtone::playResampled body bracket
++//                 (per-SFX-trigger). Captures the MIX_StopTrack +
++//                 MIX_SetTrackAudio + MIX_PlayTrack chain cost + (in
++//                 playResampled) SDL_AudioStream resample cost on first
++//                 (slot, percent) hit.
++//   pixtone_stop: Pixtone::stop body bracket (per-SFX-event). Captures
++//                 the MIX_StopTrack call cost.
++//
++// All gated on SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 (strict-"1"; default
++// OFF). Cost when env off: ~zero (cached static-const-bool; -O3 hoists
++// the per-call guard). Cost when env on: ~6 SDL_GetTicksNS reads per
++// flip (MidiScheduler::tick) + ~2 reads per SFX trigger (rare).
++//
++// Audit-emit line in _maybe_flush_phase_timing_audit (Renderer.cpp,
++// gated on FLIP_INSTR per § 8): one-liner with all 6 counter values.
++// Per-block reset cluster runs unconditionally to keep cadence clean.
++//
++// Cross-thread NOTE: these brackets are MAIN THREAD only. Audio-thread
++// SDL3_mixer mix-down is sdl-engine's SDL/0054 lane (separate patch);
++// IRQ-5 ISR work is covered by patch 0100 existing exports
++// (g_p10_audio_irq_count_block / g_p10_audio_irq_wall_us_block). Cross-
++// thread synchronization not required — main-thread-only writes from
++// engine-owned code paths.
++extern std::uint64_t g_p12_midi_tick_accum_ns_block;
++extern std::uint32_t g_p12_midi_tick_count_block;
++extern std::uint64_t g_p12_pixtone_play_accum_ns_block;
++extern std::uint32_t g_p12_pixtone_play_count_block;
++extern std::uint64_t g_p12_pixtone_stop_accum_ns_block;
++extern std::uint32_t g_p12_pixtone_stop_count_block;
++
++// Forward-decl env helper. Definition in Renderer.cpp anonymous-
++// namespace ablation cluster; file-scope wrapper at end-of-file per
++// W20B build-fix amendment. Strict-"1" match per CLAUDE.md convention;
++// default OFF (instrumentation has per-call cost; opt-in only).
++bool p12_audio_instr_active();
++
++// RAII timer structs — pattern matches MdtBgBackdropTimer (slot 0125).
++// Constructor reads SDL_GetTicksNS unconditionally; destructor
++// short-circuits on the env-helper guard (the cached const-bool keeps
++// the guard out of the hot per-flip path at -O3). Off-path overhead:
++// 2 SDL_GetTicksNS calls per construction + 1 guard read on destruct.
++// On-path: same 2 reads + 1 accumulator add + 1 counter increment.
++//
++// Per call site: place RAII timer at function entry; scope ends at
++// function exit. All return paths (early return, normal fall-through)
++// trigger the destructor identically.
++struct P12MidiTickTimer
++{
++  std::uint64_t t0;
++  P12MidiTickTimer() : t0(SDL_GetTicksNS()) {}
++  ~P12MidiTickTimer()
++  {
++    if (!p12_audio_instr_active()) return;
++    g_p12_midi_tick_accum_ns_block += SDL_GetTicksNS() - t0;
++    ++g_p12_midi_tick_count_block;
++  }
++};
++
++struct P12PixtonePlayTimer
++{
++  std::uint64_t t0;
++  P12PixtonePlayTimer() : t0(SDL_GetTicksNS()) {}
++  ~P12PixtonePlayTimer()
++  {
++    if (!p12_audio_instr_active()) return;
++    g_p12_pixtone_play_accum_ns_block += SDL_GetTicksNS() - t0;
++    ++g_p12_pixtone_play_count_block;
++  }
++};
++
++struct P12PixtoneStopTimer
++{
++  std::uint64_t t0;
++  P12PixtoneStopTimer() : t0(SDL_GetTicksNS()) {}
++  ~P12PixtoneStopTimer()
++  {
++    if (!p12_audio_instr_active()) return;
++    g_p12_pixtone_stop_accum_ns_block += SDL_GetTicksNS() - t0;
++    ++g_p12_pixtone_stop_count_block;
++  }
++};
++
+ }  // namespace Diag
+ }  // namespace NXE
+ 
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 0d0baaa..1514ade 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -296,6 +296,17 @@ std::uint32_t g_bg_subregion_clip_bot_block         = 0;
+ std::uint32_t g_bg_subregion_engaged_count_block    = 0;
+ std::uint32_t g_bg_subregion_fallback_count_block   = 0;
+ std::uint32_t g_bg_visible_y_recomputes_block       = 0;
++
++// patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation per
++// docs/PHASE11-WAVE-35-CONTRACT.md § 8). 3 main-thread audio bracket
++// pairs (accum_ns + count). Decls in Utils/diagnostic_timers.h.
++// Per-block reset alongside the FLIP_INSTR audit-flush family.
++std::uint64_t g_p12_midi_tick_accum_ns_block        = 0;
++std::uint32_t g_p12_midi_tick_count_block           = 0;
++std::uint64_t g_p12_pixtone_play_accum_ns_block     = 0;
++std::uint32_t g_p12_pixtone_play_count_block        = 0;
++std::uint64_t g_p12_pixtone_stop_accum_ns_block     = 0;
++std::uint32_t g_p12_pixtone_stop_count_block        = 0;
+ }  // namespace Diag
+ }  // namespace NXE
+ 
+@@ -379,6 +390,9 @@ bool tile_bounds_skip_active();
+ // bg_subregion_active() forward-decl. Same file-scope-after-both-
+ // namespace-closes definition pattern.
+ bool bg_subregion_active();
++// patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation):
++// p12_audio_instr_active() forward-decl. Same pattern.
++bool p12_audio_instr_active();
+ // patch 0125 (Phase 11 wave-29 mds_tilemap_bg sub-decomposition):
+ // mds_bg_instr_active() forward-decl joins the family. Same file-
+ // scope-after-both-namespace-closes definition pattern (heeds W20B
+@@ -773,6 +787,35 @@ inline bool _abl_bg_subregion()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0131, Phase 11 wave-35 Phase 12 audio instrumentation
++// per docs/PHASE11-WAVE-35-CONTRACT.md § 8). Strict-"1" match, default
++// OFF (instrumentation has per-call cost — 2 SDL_GetTicksNS reads per
++// bracketed function + per-block accumulator updates). Opt-in via
++// SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 for the wave-35 measurement iter.
++//
++// Single env-var gates 3 bracket families:
++//   - MidiScheduler::tick body (main thread, per-frame)
++//   - Pixtone::play + Pixtone::playResampled bodies (main thread, per-
++//     SFX-trigger)
++//   - Pixtone::stop body (main thread, per-SFX-event)
++//
++// Same env-var convention as the wave-35 SDL/0054 sibling (sdl-engine
++// will use the SAME hint name so a single SET in the BAT enables both
++// engine-side and SDL-side bracket sets simultaneously).
++//
++// Cached static-const-bool — -O3 hoists the per-call guard out of the
++// RAII timer's destructor guard expression at most call sites; the
++// MidiScheduler::tick guard cannot hoist further because each tick()
++// call constructs a new RAII timer instance, but the cost on the off
++// path is one cached-bool branch + one SDL_GetTicksNS (constructor
++// unconditional read; destructor short-circuits before accumulator
++// touch).
++inline bool _abl_p12_audio_instr()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR");
++  return v;
++}
++
+ // drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
+ // Track which Surface objects produce NULL textures so we log each origin
+ // once + a periodic running count, instead of hundreds of identical lines
+@@ -1873,6 +1916,36 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_bg_visible_y_recomputes_block     = 0;
+   // (clip_top / clip_bot kept across boundary; they're sample-readout.)
+ 
++  // patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation per
++  // docs/PHASE11-WAVE-35-CONTRACT.md § 8). Emit [p12-audio ...] line
++  // gated on FLIP_INSTR (same gate as flip-stat / flip-body-stat /
++  // bg-subregion). Reports per-block accumulator sums in µs + counts
++  // for 3 main-thread audio brackets. Counts vary by event frequency:
++  // midi_tick_count typically ~100 per block (per-frame); pixtone_play
++  // / pixtone_stop counts ~SFX-trigger-rate × 100/fps (sparse in
++  // steady-state). Audio-thread + IRQ-5 timing comes from sibling
++  // SDL/0054 [p12-sdl ...] emit line (sdl-engine's lane).
++  if (_abl_flip_instr())
++  {
++    LOG_INFO("[p12-audio n=100 midi_tick_us={} midi_tick_count={} pixtone_play_us={} pixtone_play_count={} pixtone_stop_us={} pixtone_stop_count={}]",
++             (unsigned long)(NXE::Diag::g_p12_midi_tick_accum_ns_block / 1000ULL),
++             NXE::Diag::g_p12_midi_tick_count_block,
++             (unsigned long)(NXE::Diag::g_p12_pixtone_play_accum_ns_block / 1000ULL),
++             NXE::Diag::g_p12_pixtone_play_count_block,
++             (unsigned long)(NXE::Diag::g_p12_pixtone_stop_accum_ns_block / 1000ULL),
++             NXE::Diag::g_p12_pixtone_stop_count_block);
++  }
++  // patch 0131: reset all 6 P12 counters unconditionally — sample
++  // contents accumulated since prior reset; idx-style reset zeroes
++  // them for the next block. Per-flush guard above only emits;
++  // counters always reset cleanly.
++  NXE::Diag::g_p12_midi_tick_accum_ns_block    = 0;
++  NXE::Diag::g_p12_midi_tick_count_block       = 0;
++  NXE::Diag::g_p12_pixtone_play_accum_ns_block = 0;
++  NXE::Diag::g_p12_pixtone_play_count_block    = 0;
++  NXE::Diag::g_p12_pixtone_stop_accum_ns_block = 0;
++  NXE::Diag::g_p12_pixtone_stop_count_block    = 0;
++
+   // DOS-PORT (patch 0124): reset W28 sub-bucket sample idx unconditionally
+   // (sample-array contents are overwritten next flip; idx reset lets the
+   // cadence repeat cleanly).
+@@ -7117,3 +7190,10 @@ bool tile_bounds_skip_active() { return ::NXE::Graphics::_abl_tile_bounds_skip()
+ namespace NXE { namespace Diag {
+ bool bg_subregion_active() { return ::NXE::Graphics::_abl_bg_subregion(); }
+ }}
++
++// DOS-PORT (patch 0131, Phase 11 wave-35 Phase 12 audio
++// instrumentation): p12_audio_instr_active() env-helper accessor.
++// Same file-scope-after-both-namespace-closes definition pattern.
++namespace NXE { namespace Diag {
++bool p12_audio_instr_active() { return ::NXE::Graphics::_abl_p12_audio_instr(); }
++}}
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+index 41512f8..0a5360b 100644
+--- a/src/sound/MidiScheduler.cpp
++++ b/src/sound/MidiScheduler.cpp
+@@ -5,6 +5,11 @@
+ #include "MidiScheduler.h"
+ 
+ #include "../Utils/Logger.h"
++// patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation): RAII
++// timer for the per-frame MidiScheduler::tick bracket. Default OFF;
++// strict-"1" via SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 enables. Per
++// `docs/PHASE11-WAVE-35-CONTRACT.md` § 8.
++#include "../Utils/diagnostic_timers.h"
+ 
+ #include <algorithm>
+ #include <cstdio>
+@@ -280,6 +285,15 @@ void MidiScheduler::shutdown()
+ 
+ void MidiScheduler::tick(std::uint64_t now_ms)
+ {
++  // patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation):
++  // RAII bracket for the entire tick() body. Captures MIDI event
++  // dispatch + per-backend register writes (OPL3 ADL writes, WB MPU-
++  // 401 writes, MidiBackendStub LOG_DEBUG silence). All return paths
++  // (early-return on !_playing / empty events / no backend, normal
++  // dispatch fall-through, end-of-song loop branch) trigger the
++  // destructor identically. Gated on SDL_HINT_DOSKUTSU_P12_AUDIO_-
++  // INSTR=1; off-path cost: 2 SDL_GetTicksNS + 1 cached-bool branch.
++  NXE::Diag::P12MidiTickTimer _p12_mtt;
+   if (!_playing || _events.empty() || !_backend)
+     return;
+ 
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index bac9883..ead8f2a 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -6,6 +6,11 @@
+ #include "Pixtone.h"
+ 
+ #include "../ResourceManager.h"
++// patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation): RAII
++// timers for Pixtone::play / playResampled / stop brackets. Default
++// OFF; strict-"1" via SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 enables.
++// Per `docs/PHASE11-WAVE-35-CONTRACT.md` § 8.
++#include "../Utils/diagnostic_timers.h"
+ #include "../common/misc.h"
+ #include "../Utils/Logger.h"
+ #include "../config.h"
+@@ -408,6 +413,12 @@ void Pixtone::shutdown()
+ 
+ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+ {
++  // patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation):
++  // bracket the entire play() body. Captures MIX_StopTrack +
++  // MIX_SetTrackAudio + MIX_PlayTrack chain cost. All return paths
++  // (early-return on !chunk, _findFreeTrack failure, normal play
++  // dispatch) trigger the destructor identically.
++  NXE::Diag::P12PixtonePlayTimer _p12_ppt;
+   if (_sound_fx[slot].chunk)
+   {
+     // DOS-PORT: same track-pool dispatch as playResampled(). chan == -1
+@@ -504,6 +515,14 @@ int Pixtone::_findFreeTrack()
+ 
+ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t percent)
+ {
++  // patch 0131 (Phase 11 wave-35): share the play accumulator with
++  // Pixtone::play (playResampled is the same lever class — per-SFX-
++  // trigger dispatch). The first-call-per-(slot,percent) cost
++  // includes the SDL_AudioStream resample (CPU work proportional to
++  // raw_master_len) which is NOT amortized by the resampled[]
++  // cache after that; flush-instr's decomp distinguishes cached vs
++  // fresh by the count/avg ratio if it matters.
++  NXE::Diag::P12PixtonePlayTimer _p12_ppt;
+   if (_sound_fx[slot].chunk)
+   {
+     uint32_t resampled_rate = SAMPLE_RATE * (percent / 100);
+@@ -683,6 +702,10 @@ int Pixtone::prepareResampled(int32_t slot, uint32_t percent)
+ 
+ void Pixtone::stop(int32_t slot)
+ {
++  // patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation):
++  // bracket the entire stop() body. Captures MIX_StopTrack call
++  // cost + per-SFX bookkeeping. Per-SFX-event; not per-frame.
++  NXE::Diag::P12PixtoneStopTimer _p12_pst;
+   if (_sound_fx[slot].channel != -1)
+   {
+     int32_t chan = _sound_fx[slot].channel;
+-- 
+2.47.3
+

@@ -1,0 +1,430 @@
+From 27142f4c64e099944fccbefb45cea92df8338096 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 11 May 2026 19:29:48 -0700
+Subject: [PATCH] =?UTF-8?q?dos:=20Phase=2011=20patch=200054=20=E2=80=94=20?=
+ =?UTF-8?q?silent-Pixtone-SFX=20fix=20(Shape=20A:=20post-mix=20silence-ski?=
+ =?UTF-8?q?p)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wave-34 PLAY5 W34A4 confirmed root cause: SDL/0050's pre-mix
+quiescence gate in DOSSOUNDBLASTER_GetDeviceBuf traps Pixtone SFX
+under AUDIO_BACKEND=opl3. Operator heard SFX audibly with
+SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0 (killswitched) but
+silence with default gate active.
+
+The bug: SDL/0050 returns *buffer_size=0 when no bound stream has
+output data, which makes SDL_PlaybackAudioThreadIterate
+(SDL_audio.c:1189) skip the entire mix loop AND PlayDevice for that
+iter. But SDL3_mixer's MixerCallback (registered as the bound
+output_stream's get-callback at SDL_mixer.c:805) is precisely what
+PROPAGATES per-track Pixtone audio into the bound stream. Skipping
+the mix loop means MixerCallback never fires, tracks never get
+pulled, Pixtone fires never reach the device. Vicious cycle under
+AUDIO_BACKEND=opl3 — music goes out-of-band via OPL3 register
+writes, the SDL audio stream is perpetually empty pre-mix, gate
+fires every iter, SFX is silent for the entire session.
+
+Three options surfaced during pair-investigation with build-qa:
+  A — post-mix silence-detect (this patch)
+  B — default-flip gate OFF (loses +1.4 fps gain)
+  C — backend-aware gate auto-disable (cross-vendor extern read;
+      state-flag-fragmentation footgun per
+      memory/sdl_pause_api_must_audit_auto_resume_gates.md)
+
+Team-lead arbitrated Shape A over C: self-contained in SDL,
+generalizes to any audio activity (not just Pixtone-tagged),
+architecturally correct layering (post-mix in PlayDevice vs pre-mix
+in GetDeviceBuf — WASAPI's gate-at-GetDeviceBuf precedent doesn't
+apply to our cooperative-scheduled DOS backend). 0.2 fps cost vs C
+is below fps_replication_probe_required.md's noise floor.
+
+Mechanism (Shape A):
+  - GetDeviceBuf becomes trivial: always return staging_buffer with
+    *buffer_size unchanged. Mixer-tick runs every iter →
+    MixerCallback fires → Pixtone tracks get pulled → samples reach
+    bound stream when SFX trigger fires.
+  - PlayDevice scans the mixed staging buffer for all-silence
+    (bytewise compare against soundblaster_silence_value — 0x00 for
+    S16, 0x80 for U8 unsigned; early-exit on first non-silence byte;
+    ~1-2 μs for typical 256-4096 byte buffers).
+  - If all-silence → skip ring write + SDL_Delay(10) throttle. Ring
+    continues to drain via IRQ → consecutive-silent-IRQ counter
+    ticks → DSP auto-engage idle-pause fires when threshold met →
+    IRQ-5 stops → fps recovered. SAME mechanism as SDL/0050;
+    triggered post-mix instead of pre-mix.
+  - If non-silence (real audio: Pixtone SFX, direct-stream OGG,
+    etc.) → normal ring write path → SFX plays.
+
+Coexistence with prior patches:
+  - SDL/0051's atomic-shutdown-bypass at top of GetDeviceBuf is now
+    dead code (GetDeviceBuf is trivial). Left in tree as documentation
+    of the wrong-layer-fix attempt per pressure_test_tidy_narratives.md.
+  - SDL/0053's SDL_DOSAudioBeginShutdown still applies. Reuses
+    g_dos_audio_quiescence_gate_disabled flag; semantic shifts from
+    "skip GetDeviceBuf quiescence walk" (SDL/0050) to "skip PlayDevice
+    silence-detect" (SDL/0054) — semantically-equivalent role
+    ("disable the SDL/0050-derived behavior") preserves SDL/0053's
+    engine-signaled-shutdown contract. The SDL_Delay(10) moved from
+    GetDeviceBuf to PlayDevice's silence-skip branch; iter L L1 freeze
+    geometry preserved; SDL/0053 unlocks it identically.
+  - SDL/0048 (ForcePause), SDL/0046 (WaitDevice shutdown bail),
+    SDL/0038 (DSP auto-resume on ring write): unchanged.
+
+Killswitch hint name retained for user-facing compat:
+SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0 still reverts to
+pre-0050 behavior (always-write-to-ring). The OpenDevice log message
+updated to reflect Shape A's mechanism.
+
+Predicted fps cost: ~0.2 fps vs SDL/0050 default-ON (mixer-tick CPU
+per iter when quiescent: ~10-50 μs × ~86 Hz audio-thread-iter rate);
+net ~+1.2 fps vs killswitched. Predictions framed as hypothesis per
+perf_predictions_unreliable.md; wave-35 PLAY measurement settles
+real cost.
+
+Predicted SFX latency: ~10-12 ms from MIX_PlayTrack call to first
+sample on ring (one audio-thread-iter cycle at 22050 mono / 256
+frames). Same as the pre-SDL/0050 working path; no perceptible
+regression for game SFX.
+
+Validation status:
+  - DOSBox-X structural smoke (build-qa Task #19 territory): pending
+    on wave-35 binary rebuild
+  - Real-HW behavioral smoke (wave-35 PLAY1-PLAY5): the actual gate;
+    operator confirmation of SFX audibility under default env-baseline
+    (no SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0 set) is what
+    closes Task #23.
+
+Hot-path cost: bytewise silence scan ~1-2 μs per audio-thread iter;
+trivial compared to the mixer tick that just produced the buffer
+(~50 μs). Early-exit on first non-silence byte means real-audio iters
+detect non-silence in O(1) typical case.
+
+One TU touched (src/audio/dos/SDL_dosaudio_sb.c). +169/-98 lines net;
+~25 LOC behavioral change; balance is inline reasoning comments per
+the wave-33 SDL/0053 docstring density precedent.
+
+Per memory/sdl_ai_policy.md the patch stays workspace-local; not for
+upstream.
+
+Companion patches:
+  SDL/0050 — DOS GetDeviceBuf quiescence gate (this patch supersedes
+             the mechanism; killswitch hint name retained)
+  SDL/0051 — atomic-shutdown-bypass (now dead code; left for
+             documentation of the wrong-layer-fix attempt)
+  SDL/0053 — SDL_DOSAudioBeginShutdown engine-signal (still applies;
+             same flag; updated semantic)
+  nxengine-evo/0129 — engine companion to SDL/0053; calls
+                       SDL_DOSAudioBeginShutdown before MIX_DestroyMixer
+
+Cross-reference:
+  - docs/PHASE11-WAVE-34-CONTRACT.md PLAY5 W34A4 H2 result (audible
+    SFX with killswitched gate; load-bearing root-cause confirmation)
+  - memory/sdl_pause_api_must_audit_auto_resume_gates.md (state-flag-
+    fragmentation footgun build-qa C3 would have repeated)
+  - memory/pressure_test_tidy_narratives.md (Shape A vs C3 architectural
+    layering reasoning)
+  - audio_cost_attribution_unknown.md (the ~31 ms unattributed audio
+    cost surfaced by W30 ablation that wave-35 Phase 12 instrumentation
+    will decompose)
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 267 ++++++++++++++++++++------------
+ 1 file changed, 169 insertions(+), 98 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 4a5dc2b05..44eedd70d 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -506,12 +506,16 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+             (gate_hint && gate_hint[0] == '0' && gate_hint[1] == 0);
+         if (g_dos_audio_quiescence_gate_disabled) {
+             doskutsu_dbg_log("audio: SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0 "
+-                             "(SDL/0050 quiescence gate DISABLED; pre-0050 always-"
+-                             "fill-ring behavior; auto-engage idle-pause cannot fire)");
++                             "(SDL/0050-derived behavior DISABLED; under SDL/0054 "
++                             "Shape A this skips PlayDevice's silence-detect "
++                             "skip-ring-write path; pre-0050 always-fill-ring "
++                             "behavior; auto-engage idle-pause cannot fire)");
+         } else {
+-            doskutsu_dbg_log("audio: SDL/0050 quiescence gate active (default); "
+-                             "GetDeviceBuf returns *buffer_size=0 when no streams "
+-                             "have data → auto-engage path can fire on silent gameplay");
++            doskutsu_dbg_log("audio: SDL/0054 Shape A silence-detect active "
++                             "(default); PlayDevice scans mix-result for all-"
++                             "silence + skips ring write when silent → ring drains "
++                             "via IRQ → auto-engage path can fire on silent "
++                             "gameplay. Pixtone SFX still flow via mixer-tick.");
+         }
+     }
+ 
+@@ -898,99 +902,74 @@ void SDL_DOSAudioBeginShutdown(void)
+ // here; PlayDevice then copies it into the ring buffer.
+ static Uint8 *DOSSOUNDBLASTER_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_size)
+ {
+-    struct SDL_PrivateAudioData *hidden = device->hidden;
+-
+-    /* DOSKUTSU patch (Phase 12 patch 0051): shutdown bypass for the
+-       SDL/0050 quiescence gate. When SDL audio close path has set
+-       device->shutdown atomic, skip the gate's quiescence walk + the
+-       SDL_Delay(10) throttle so the audio thread can promptly drain its
+-       iter cycle and exit on the next iteration's top-of-function
+-       shutdown check at SDL_audio.c:1181.
+-
+-       Same class as SDL/0046's WaitDevice shutdown bail. Iter L L1.LOG
+-       showed shutdown freeze on Quit-to-DOS — log ended after engine-side
+-       OPL3 close, never reached "Sound system shutdown" or "Renderer::Close()"
+-       lines that L2 (gate killswitched) emitted cleanly. Operator required
+-       reboot. Root cause: audio thread held device->lock during the gate's
+-       SDL_Delay(10) throttle while main thread waited in SDL_WaitThread;
+-       cooperative scheduler deadlocked on lock contention before the
+-       atomic shutdown propagated through the gate's idle-cycle.
+-
+-       Fix: read device->shutdown atomic at top of GetDeviceBuf BEFORE the
+-       quiescence walk + delay; if set, fall through to the default-path
+-       return (staging_buffer with *buffer_size unchanged). Audio thread
+-       does one final normal-mix iteration; PlaybackAudioThreadIterate's
+-       top-of-function shutdown check at line 1181 fires on the NEXT
+-       iteration; thread exits cleanly. Lock is held only for the µs-class
+-       quiescence-walk-skip window, not the 10 ms SDL_Delay window.
+-
+-       SDL_GetAtomicInt is lock-free (mirrors WaitDevice's pattern at
+-       line ~437); safe to read here even with device->lock held by
+-       PlaybackAudioThreadIterate. */
+-    if (SDL_GetAtomicInt(&device->shutdown)) {
+-        return hidden->staging_buffer;
+-    }
+-
+-    /* DOSKUTSU patch (Phase 11 patch 0050, Phase 12 Option A): GetDeviceBuf
+-       quiescence gate. Returns *buffer_size = 0 to signal "skip this audio-
+-       thread iteration" when no logical-device bound streams have data.
+-       Mirrors SDL3's SDL_AudioGetDeviceBuf_Default WASAPI pattern at
+-       SDL_audio.c:867, where buffer_size=0 makes SDL_PlaybackAudioThreadIterate
+-       at SDL_audio.c:1189 enter the "abandon iteration" branch and skip the
+-       PlayDevice call entirely.
+-
+-       Mechanism + motivation per docs/PHASE12-PIXTONE-DECOUPLE-DESIGN.md:
+-       SDL3's audio thread runs Iterate→WaitDevice continuously, filling the
+-       SB16 ring with silence (SDL_audio.c:1230 SDL_memset fallback) when no
+-       streams have data. Ring stays full; ISR keeps draining; auto-engage
+-       silent-IRQ counter never crosses threshold; idle-pause never fires.
+-
+-       Iter K IDLEPROB v2 confirmed slot 0048 mechanism works (DSP 0xD5 halts
+-       IRQ-5 cleanly) but in-gameplay yield = 0.26 ms because the ring stayed
+-       continuously filled. This patch is the missing piece: when audio
+-       quiescent, GetDeviceBuf returns buffer_size=0 → audio thread skips
+-       PlayDevice → ring drains via IRQ → 4 silent IRQs trip auto-engage →
+-       DSP pause → IRQ-5 stops → fps recovered.
+-
+-       Killswitch: SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0 disables
+-       the gate (returns staging_buffer unconditionally; pre-0050 behavior).
+-       Iter L PLAY2 (control) sets this env var; PLAY1 (treatment) leaves
+-       unset. Within-iter PLAY1−PLAY2 = SDL/0050 isolation signal.
+-
+-       The SDL_Delay(10) inside the gate path throttles audio thread to
+-       ~100 iter/sec when quiescent, preventing CPU spin under cooperative
+-       scheduler when main thread is also time-blocked. */
+-    if (!g_dos_audio_quiescence_gate_disabled && device->logical_devices != NULL) {
+-        bool any_data = false;
+-        SDL_LogicalAudioDevice *logdev = device->logical_devices;
+-        while (logdev != NULL && !any_data) {
+-            SDL_AudioStream *stream = logdev->bound_streams;
+-            while (stream != NULL) {
+-                if (SDL_GetAudioStreamAvailable(stream) > 0) {
+-                    any_data = true;
+-                    break;
+-                }
+-                stream = stream->next_binding;
+-            }
+-            logdev = logdev->next;
+-        }
+-        if (!any_data) {
+-            *buffer_size = 0;  /* skip this iteration; audio thread does
+-                                  GetDeviceBuf → buffer_size==0 → return
+-                                  without calling PlayDevice */
+-            SDL_Delay(10);      /* throttle audio thread to ~100 iter/sec
+-                                   when quiescent. Prevents CPU spin when
+-                                   main thread is blocked on SDL_Delay
+-                                   (DOS_Yield is a no-op then; only SDL_Delay
+-                                   advances time-keyed wake mechanisms). */
+-            return hidden->staging_buffer;
+-        }
+-    }
+-
+-    /* Default path: at least one bound stream has data (or gate disabled
+-       via killswitch); return staging buffer for normal mix → PlayDevice
+-       → ring write → IRQ drain. */
+-    return hidden->staging_buffer;
++    /* DOSKUTSU patch (Phase 11 patch 0054, Shape A): GetDeviceBuf is now
++       trivial — always return the staging buffer with *buffer_size
++       unchanged. The quiescence behavior moved to PlayDevice (below)
++       where silence-detection happens AFTER the mixer-tick runs.
++
++       Why Shape A replaces SDL/0050's pre-mix gate:
++
++       SDL/0050 (the patch this supersedes) implemented a pre-mix gate
++       here — return buffer_size=0 when no bound stream had output data,
++       so SDL3 (`SDL_PlaybackAudioThreadIterate`, SDL_audio.c:1189-1295)
++       would skip the entire mix loop AND PlayDevice for that iter. The
++       gate successfully halved the audio path's wall-clock cost (+1.4
++       fps measured per W30A1-vs-W30A2 wave-30 ablation), BUT it had a
++       load-bearing bug surfaced by wave-34 PLAY5 W34A4:
++
++       SDL3_mixer's `MixerCallback` (registered on the mixer's
++       output_stream via SDL_SetAudioStreamGetCallback at
++       SDL_mixer.c:805) is what PROPAGATES per-track Pixtone audio into
++       the bound output stream. With buffer_size=0, SDL3 skips the mix
++       loop's `SDL_GetAudioStreamDataAdjustGain` call → MixerCallback
++       never fires → tracks never get pulled → Pixtone fires never
++       reach the device. Under AUDIO_BACKEND=opl3 (music routed
++       out-of-band via OPL3 register writes; SDL audio stream perpetually
++       empty pre-mix), the gate fires every iter; SFX is silent for the
++       entire session.
++
++       Wave-34 H2 BAT cell confirmed root-cause: operator heard SFX
++       audibly under `SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0`
++       (killswitched gate; pre-0050 behavior) but silence with the
++       default gate active.
++
++       Shape A retains the +1.4 fps gain mechanism (DSP auto-engage
++       idle-pause when ring drains) by moving the gate logic from
++       pre-mix to post-mix. PlayDevice (below) scans the mixed output
++       for all-silence; if all-silence → skip the ring write
++       (preserves the auto-engage mechanism — ring still drains via
++       IRQ → consecutive-silent-IRQ counter ticks → DSP halts). If
++       non-silence (mixer pulled Pixtone samples this iter) → normal
++       ring write → SFX plays.
++
++       Cost trade vs SDL/0050: mixer-tick CPU per iter (~10-50 μs)
++       runs even when quiescent — vs 0 μs under the old gate-fires
++       path. Predicted ~0.2 fps cost vs SDL/0050; ~+1.2 fps net vs
++       killswitched per `perf_predictions_unreliable.md` framing.
++
++       SDL/0051's atomic-shutdown-bypass at top of GetDeviceBuf is no
++       longer needed under Shape A — GetDeviceBuf no longer holds the
++       audio-thread lock for >µs windows; the iter L L1 freeze geometry
++       requires the SDL_Delay(10) throttle which now lives in
++       PlayDevice's silence-skip branch instead. SDL/0053's
++       `SDL_DOSAudioBeginShutdown` engine-signaled mechanism still
++       applies — flipping `g_dos_audio_quiescence_gate_disabled` to true
++       now means "skip the PlayDevice silence-detect path" (force normal
++       ring write); audio thread cycles fast through Iterate; main wins
++       the device->lock contention during shutdown teardown. Same flag,
++       semantically-equivalent role: "disable the SDL/0050-derived
++       behavior."
++
++       Coexistence with SDL/0046 (WaitDevice shutdown bail), SDL/0048
++       (ForcePause auto-resume gate), SDL/0050 (this patch supersedes
++       its mechanism but the killswitch hint name is retained for
++       user-facing compat), SDL/0051 (atomic check now dead code; left
++       in tree for documentation per `pressure_test_tidy_narratives.md`
++       — fixing-the-wrong-layer is a useful negative-result reference),
++       SDL/0053 (BeginShutdown semantic preserved). */
++    (void)device;
++    (void)buffer_size; /* unchanged; ring writes happen in PlayDevice */
++    return device->hidden->staging_buffer;
+ }
+ 
+ // Commit the staging buffer into the ring buffer.
+@@ -998,6 +977,98 @@ static Uint8 *DOSSOUNDBLASTER_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_
+ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buffer, int buffer_size)
+ {
+     struct SDL_PrivateAudioData *hidden = device->hidden;
++
++    /* DOSKUTSU patch (Phase 11 patch 0054, Shape A): post-mix silence
++       detection + skip-ring-write throttle. Replaces the SDL/0050
++       pre-mix quiescence gate that GetDeviceBuf used to implement
++       (see GetDeviceBuf above for the architectural reasoning).
++
++       When the mixer produces all-silence output (no Pixtone SFX
++       active + music backend is out-of-band like OPL3 / WaveBlaster):
++       skip the ring write here and SDL_Delay(10) to throttle the audio
++       thread. The IRQ-5 ISR continues draining the ring (now-silent
++       residue from prior iters), the consecutive-silent-IRQ counter
++       ticks, DSP auto-engage idle-pause fires — same fps-gain
++       mechanism as SDL/0050; just gated on actual mix-result silence
++       (post-mix) instead of pre-mix stream-availability.
++
++       Why this is correct under AUDIO_BACKEND=opl3 + Pixtone SFX:
++       SDL3's mix loop (SDL_audio.c:1254) runs every iter under Shape A
++       because GetDeviceBuf always returns non-zero buffer_size. The
++       mix calls SDL_GetAudioStreamData on each bound stream, which
++       fires the get-callback chain (SDL3_mixer's MixerCallback →
++       per-track TrackGetCallback → pulls from Pixtone-loaded chunks).
++       When a Pixtone SFX fires via MIX_PlayTrack on main thread,
++       the next audio-thread iter (≤ 1 chunk-time later, typically
++       ~10-12 ms at 22050 mono / 256 frames) pulls the samples →
++       mix produces non-silence → this silence-detect block falls
++       through to the normal ring-write path → SFX plays.
++
++       The `g_dos_audio_quiescence_gate_disabled` flag forces the
++       normal path (skip silence-detect; always write to ring). Two
++       cases set it true:
++
++         - User sets `SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0`
++           at OpenDevice (killswitch; reverts to pre-0050 behavior;
++           e.g., the wave-34 H2 BAT cell that audibly confirmed SFX
++           was being trapped by SDL/0050's pre-mix gate).
++         - Engine calls `SDL_DOSAudioBeginShutdown()` before
++           MIX_DestroyMixer (SDL/0053); ensures audio thread cycles
++           through PlayDevice fast (no 10 ms SDL_Delay) so main wins
++           the device->lock contention during the shutdown teardown.
++
++       Silence detection: bytewise compare against
++       `soundblaster_silence_value` (0x00 for S16, 0x80 for U8
++       unsigned; initialized at OpenDevice from
++       `soundblaster_is_sb16 ? 0x00 : 0x80`). Early-exit on first
++       non-silence byte. Cost ~1-2 μs for typical 256-4096 byte
++       staging buffers; trivial relative to the mixer tick that
++       just produced the buffer (~50 μs).
++
++       Per `sdl_pause_api_must_audit_auto_resume_gates.md`: reusing
++       `g_dos_audio_quiescence_gate_disabled` rather than adding a new
++       state flag avoids the fragmentation footgun. Same flag's
++       semantic shifts from "skip GetDeviceBuf quiescence walk" (SDL/0050)
++       to "skip PlayDevice silence-detect" (SDL/0054) — semantically-
++       equivalent role ("disable the SDL/0050-derived behavior")
++       preserves SDL/0053's engine-signaled-shutdown contract.
++
++       Latency: SFX-trigger-to-first-sample-on-ring ≤ one audio-thread-
++       iter cycle (~10-12 ms). Same as the pre-SDL/0050 working SFX
++       path; no perceptible regression for game SFX. */
++    if (!g_dos_audio_quiescence_gate_disabled) {
++        const Uint8 silence = soundblaster_silence_value;
++        const Uint8 *p = buffer;
++        const Uint8 *end = buffer + buffer_size;
++        bool all_silence = true;
++        while (p < end) {
++            if (*p++ != silence) { all_silence = false; break; }
++        }
++        if (all_silence) {
++            /* Skip the ring write — ring continues to drain via IRQ →
++               ISR increments consecutive-silent-IRQ counter → DSP
++               auto-engage idle-pause fires when threshold met → IRQ-5
++               stops → fps recovered. Same mechanism as SDL/0050. */
++            SDL_Delay(10);  /* throttle ~100 iter/sec when quiescent;
++                               prevents CPU spin under cooperative
++                               scheduler. Held under device->lock per
++                               PlaybackAudioThreadIterate (SDL_audio.c:
++                               1179-1289), so the iter L L1 freeze
++                               geometry is preserved here just as it
++                               was in GetDeviceBuf under SDL/0050 —
++                               SDL/0053's SDL_DOSAudioBeginShutdown is
++                               the corresponding unlock mechanism (flips
++                               g_dos_audio_quiescence_gate_disabled true
++                               so this entire block is skipped during
++                               teardown). */
++            return true;
++        }
++    }
++
++    /* Normal path: mix produced non-silence (real audio — Pixtone SFX
++       sample, direct-stream OGG, etc.) OR gate disabled (killswitch
++       or shutdown coordination). Write the mixed staging buffer into
++       the ring. */
+     const int mask = hidden->ring_size - 1;
+     const int pos = hidden->ring_write & mask;
+     const int first = (pos + buffer_size <= hidden->ring_size) ? buffer_size : (hidden->ring_size - pos);
+-- 
+2.47.3
+

@@ -1,0 +1,134 @@
+From c7604d11e7755a7cb6e9099f703b973e3d8da97c Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 11 May 2026 13:10:49 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200129=20=E2=80=94=20?=
+ =?UTF-8?q?wave-33=20SoundManager::shutdown=20SDL/0053=20companion?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Engine companion to sdl-engine's SDL/0053 ("dos: engine-signaled
+pre-shutdown gate disable"). 5 functional LOC in SoundManager.cpp.
+
+Mechanism. SDL/0050 ships a default-ON GetDeviceBuf quiescence gate
+that gives +7 fps in steady-state gameplay (sdl_0050_ship_with_freeze.md)
+but causes Quit-to-DOS to freeze the system: the SDL audio thread
+holds `device->lock` during an `SDL_Delay(10)` inside the gate, and
+the cooperative DOS scheduler never gives the main thread enough
+runtime inside `SDL_LockMutex(device->lock)` (called from
+`DestroyPhysicalAudioDevice` via `MIX_DestroyMixer`) to set the
+shutdown atomic. SDL/0051's atomic-bypass at the top of GetDeviceBuf
+is dead code for the same reason: main can't reach the line that
+sets the atomic.
+
+SDL/0053 exports `void SDL_DOSAudioBeginShutdown(void)` via the
+workspace-local header `<SDL3/SDL_dosaudio_shutdown.h>`. The function
+flips the same module-scope state variable that the SDL/0050 hint
+killswitch (`SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE`) controls,
+but from outside the audio thread's lock window. After the call,
+the audio thread takes the fast default-path return on its next IRQ
+wake (no SDL_Delay, no lock held); main acquires the lock within
+~10 ms; teardown completes cleanly.
+
+Engine companion. Add `#include <SDL3/SDL_dosaudio_shutdown.h>` to
+SoundManager.cpp (unconditional; the header is safe on any host —
+sdl-engine style-matched it to `SDL_dosvesa_directaccess.h` which
+also has no header-body platform guard; the symbol only exists in
+`libSDL3.a` on DOS builds via `SDL_AUDIO_DRIVER_DOS_SOUNDBLASTER`).
+Insert the call between the existing `[3/6]: pre-Pixtone::shutdown`
+and `[4/6]: pre-MIX_DestroyMixer` debug-log markers, with a new
+`[3.5/6]` marker so the doskutsu_dbg_log trace shows the gate-disable
+happened in the correct ordering relative to MIX_DestroyMixer.
+
+Why call from SoundManager::shutdown(), not main.cpp engine-
+shutdown. The contract requires the call to land AFTER all engine-
+side audio producers have stopped (Pixtone::shutdown, Organya::
+shutdown, MidiScheduler::shutdown — all complete by the `[3/6]`
+marker) but BEFORE MIX_DestroyMixer triggers SDL_audio.c's
+DestroyPhysicalAudioDevice path. The SoundManager::shutdown body is
+the only place that ordering is guaranteed and visible in one
+function. Placement at engine-level `main.cpp` shutdown-[7/8] would
+be wrong direction (audio thread already torn down by then).
+
+The call is unconditional (no env-var gate). The engine-side does
+not check whether SDL/0050's quiescence gate is currently ON or OFF
+because (a) the gate is default-ON in production, (b) calling
+`SDL_DOSAudioBeginShutdown` when the gate is already OFF is a cheap
+state-flip no-op, (c) any gating would just add a fragile second
+hint to keep in sync. The unconditional call is the simplest correct
+behavior.
+
+fps impact. Zero direct. This is purely a quit-cycle correctness
+fix. Removes the freeze-on-quit known-issue #18 documented in
+`sdl_0050_ship_with_freeze.md`. The SDL/0050 +7 fps gameplay gain
+is preserved unchanged (the gate only disables during the
+SoundManager::shutdown sequence; before that, every flip still
+benefits from the quiescence skip).
+
+Smoke. Builds clean at i486 -O3 -funroll-loops. New strings in
+binary: `snd-shutdown[3.5/6]: SDL_DOSAudioBeginShutdown ...`
+(SDLDBG.LOG bracket); `_SDL_DOSAudioBeginShutdown` symbol link
+verified via nm; sdl-engine's audio-side `audio: SDL_DOSAudioBegin-
+Shutdown` SDLDBG marker also pulled in. Existing slot 0128 markers
+(TILE_BOUNDS_SKIP, thrashing-detect engaged) retained; slot 0127
+Lever B markers still absent (wave-32 revert intact). Real-HW gate
+is operator quitting cleanly from PLAY5 quit-cycle (no freeze, no
+soft-reset required).
+
+STOP-and-ack hygiene. None triggered. SDL/0053 header signature
+(`void SDL_DOSAudioBeginShutdown(void)`) matches the spec from
+sdl-engine's DM; nm verification on `libSDL3.a` confirms symbol
+exported; SoundManager.cpp shutdown ordering matches the spec
+(`[3/6]` and `[4/6]` markers at lines 740 + 745 respectively;
+companion lands as `[3.5/6]`).
+---
+ src/sound/SoundManager.cpp | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index fcf610d..3bea1e5 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -1,4 +1,11 @@
+ #include "SoundManager.h"
++// patch 0129 (Phase 11 wave-33): SDL/0053 companion. Header exports the
++// `SDL_DOSAudioBeginShutdown(void)` symbol that lets the engine pre-empt
++// the SDL/0050 quiescence gate before MIX_DestroyMixer reaches the
++// device->lock contention point. Workspace-local header (never
++// upstreamed); only defined on DOS builds via libSDL3.a's
++// SDL_AUDIO_DRIVER_DOS_SOUNDBLASTER outer guard.
++#include <SDL3/SDL_dosaudio_shutdown.h>
+ 
+ #include "../ResourceManager.h"
+ #include "../common/misc.h"
+@@ -740,6 +747,27 @@ void SoundManager::shutdown()
+   doskutsu_dbg_log("snd-shutdown[3/6]: pre-Pixtone::shutdown");
+   Pixtone::getInstance()->shutdown();
+ 
++  // patch 0129 (Phase 11 wave-33): pre-empt SDL/0050's GetDeviceBuf
++  // quiescence gate so the audio thread takes the fast default-path
++  // return on its next wake. Without this signal, MIX_DestroyMixer below
++  // calls into SDL_audio.c's DestroyPhysicalAudioDevice which blocks on
++  // SDL_LockMutex(device->lock) — but the audio thread holds that lock
++  // during a 10 ms SDL_Delay inside DOSSOUNDBLASTER_GetDeviceBuf's
++  // quiescence gate. Cooperative DOS scheduler never lets main acquire
++  // the lock long enough to set the atomic shutdown flag, so the lock
++  // contention is indefinite and the system freezes on Quit-to-DOS
++  // (iter L L1, iter M M1 2026-05-08; root cause in
++  // docs/PHASE11-ITER-M-FREEZE-DIAGNOSTIC.md § 18). Calling
++  // SDL_DOSAudioBeginShutdown here flips the gate state OUTSIDE the
++  // audio thread's lock window — audio thread takes the fast return
++  // on next IRQ wake, lock releases within ~10 ms, main acquires it,
++  // teardown completes. The SDL/0050 fps gain (+7 fps) is preserved
++  // during gameplay; only the shutdown path bypasses the gate.
++  doskutsu_dbg_log("snd-shutdown[3.5/6]: SDL_DOSAudioBeginShutdown "
++                   "(flips SDL/0050 quiescence gate disable; avoids "
++                   "device->lock contention freeze)");
++  SDL_DOSAudioBeginShutdown();
++
+   // DOS-PORT: SDL3_mixer's destroy is MIX_DestroyMixer(mixer); pairs with
+   // MIX_CreateMixerDevice. MIX_Quit() then unwinds the global state.
+   doskutsu_dbg_log("snd-shutdown[4/6]: pre-MIX_DestroyMixer "
+-- 
+2.47.3
+

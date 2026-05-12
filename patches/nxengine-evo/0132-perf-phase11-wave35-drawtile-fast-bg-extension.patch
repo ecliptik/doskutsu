@@ -1,0 +1,505 @@
+From 18676442b64150302570f259bc6005c598b094e0 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 11 May 2026 15:38:32 -0700
+Subject: [PATCH] =?UTF-8?q?perf=20phase=2011=20patch=200132=20=E2=80=94=20?=
+ =?UTF-8?q?wave-35=20mds=5Ftilemap=5Fbg=20drawTileFast=20BG-extension?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Slot 0117 (FG-loop drawTileFast inline) measured +5 fps on the FG-
+tilemap render path by replacing Renderer::drawSurface's entry chain
+with a direct call to the INDEX8→INDEX8 hand-rolled _blit_indexed
+primitive. This patch extends the same mechanism to the BG-tilemap
+cache-fill path (slot 0097 Path B): tile blits into the cache surface
+go through SDL_BlitSurface, which has format-dispatch overhead that
+_blit_indexed skips.
+
+Mechanism. New methods on the Tileset / Renderer pair:
+
+- Tileset::drawTileFastToSurface(target, x, y, t)
+- Renderer::drawTileFastToSurface(src, target, dstx, dsty, srcx, srcy)
+
+Mirror of drawTileFast / Renderer::drawTileFast but with a target-
+surface override (rather than the cached window surface). The
+Renderer-side method calls `_blit_indexed(target, src_sfc, srcrect,
+dstrect, colorkey, has_colorkey)` directly when src and target are
+both INDEX8. Defensive fallback: if format precondition fails (rare;
+indicates Wave-16 indexed-mode invariant violation), falls back to
+SDL_BlitSurface — the fallback path increments the engagement
+discriminator `fallback` counter to surface the unexpected mode.
+
+Caller (`map.cpp::_tilemap_render_plain_tiles_into_cache`) reads the
+new env-helper `drawtile_fast_bg_active()` once at function entry
+(cached static-const-bool; -O3 hoists out of the per-tile loop) and
+dispatches each per-tile cache-fill call through
+`tileset.drawTileFastToSurface(cache, ...)` when env on or
+`tileset.drawTileToSurface(cache, ...)` when env off. Per-tile
+counter bumps `calls` unconditionally + `engaged` or `fallback`
+depending on dispatch path — flush-instr's wave-35 contract § 5.3
+fast-path-engagement discriminator.
+
+Killswitch. `SDL_HINT_DOSKUTSU_DRAWTILE_FAST_BG=0` (strict-"0"
+disables; default ON; mirror of patches 0088 / 0093 / 0117 / 0126 /
+0128 / 0130 inverse-killswitch convention). Independent of slot
+0117's `SDL_HINT_DOSKUTSU_DRAWTILE_FAST` per flush-instr's contract
+spec — separate killswitch allows wave-35 A/B PLAY4 to isolate
+slot-0132 effect from slot-0117's FG-loop effect. (My initial lean
+was to share slot 0117's killswitch since the mechanism is uniform;
+flush-instr overrode for A/B-isolation clarity.)
+
+Per-block engagement counters in NXE::Diag (Renderer.cpp storage;
+diagnostic_timers.h externs; per-block reset alongside the existing
+FLIP_INSTR audit-flush family):
+
+- g_drawtile_fast_bg_calls_count_block — total per-tile cache-fill
+  calls (regardless of env state)
+- g_drawtile_fast_bg_engaged_count_block — fast-path dispatches
+- g_drawtile_fast_bg_fallback_count_block — slot-0097-fallback
+  dispatches (env off OR format mismatch)
+
+Equality holds modulo NULL-tileset early-return:
+`engaged + fallback ≈ calls` per block.
+
+Emit line in `_maybe_flush_phase_timing_audit` gated on FLIP_INSTR:
+
+  [drawtile-fast-bg n=100 engaged=N fallback=N calls=N]
+
+flush-instr's grep tooling uses engagement rate as the load-bearing
+discriminator before attributing fps delta to the patch mechanism.
+
+Predicted savings + architectural caveat. Per flush-instr's wave-35
+contract § 5.3: -3 to -8 ms / flip predicted (anchored on slot 0117's
++5 fps measured-precedent for the FG-loop). **Important caveat**:
+slot 0117's precedent fired EVERY FRAME (FG-loop dispatch is per-
+flip, per-tile, ~100-200 tiles), whereas slot 0132 fires only on
+BG-tilemap cache FILLS — which happen on slot 0097 cache MISSES.
+In steady-state gameplay the BG cache hit rate is typically ~95-100%,
+so cache-fill only runs on map transitions or rare invalidations.
+The per-flip amortized savings may be substantially smaller than the
+precedent suggests. Wave-35 PLAY3-PLAY4 measurement is the load-
+bearing architectural test:
+
+- If delta ∈ [+3, +8 fps]: CPU-bound class translates; absorption-
+  by-wall-clock-sink is bucket-dependent. wave-36+ direction =
+  more CPU-bound levers in similar code paths.
+- If delta ≈ 0 fps: absorption applies universally OR engagement
+  frequency was too low; wave-36+ direction = Phase 12 audio attack
+  becomes the only remaining viable lever.
+
+Either outcome is informative per `cpu_savings_absorbed_by_wall_-
+clock_sink.md` companion memory.
+
+Architectural classification. Pure CPU-bound win (eliminates
+SDL_BlitSurface format-dispatch overhead; inline _blit_indexed
+memcpy/colorkey loop). Same class as slot 0117 (FG) / slot 0128
+(H3 visit-loop). Subject to absorption-by-wall-clock-sink risk.
+
+Smoke. Builds clean at i486 -O3 -funroll-loops -fno-rtti. New strings
+in binary: SDL_HINT_DOSKUTSU_DRAWTILE_FAST_BG env-var symbol,
+[drawtile-fast-bg n=100 ...] emit template, drawTileFastToSurface
+symbols (both Renderer + Tileset). Prior slot markers (0128 TILE_-
+BOUNDS_SKIP, 0129 snd-shutdown[3.5/6], 0130 BG_SUBREGION_BLIT, 0131
+P12_AUDIO_INSTR, 0126 thrashing-detect engaged, 0117 DRAWTILE_FAST)
+all retained. Slot 0127 Lever B markers still absent (wave-32
+revert intact).
+
+Files. New: src/graphics/Tileset.h drawTileFastToSurface decl;
+src/graphics/Tileset.cpp drawTileFastToSurface impl;
+src/graphics/Renderer.h drawTileFastToSurface decl;
+src/graphics/Renderer.cpp drawTileFastToSurface impl + _abl_drawtile-
+_fast_bg() env-helper + forward-decl + file-scope wrapper + 3 counter
+storage + audit-flush emit/reset; src/Utils/diagnostic_timers.h 3
+counter externs + forward-decl;
+src/map.cpp _tilemap_render_plain_tiles_into_cache dispatcher edit.
+docs/BOOT.md entry. ~120 LOC including comments.
+
+STOP-and-ack hygiene. Three potential concerns flagged + cleared
+before authoring: (1) killswitch share-vs-separate (flush-instr
+overrode to separate); (2) engagement-frequency uncertainty
+(documented in BOOT.md + commit message; wave-35 measurement is the
+test); (3) cross-domain grep verified slot 0117's drawtile_fast_on
+swap is in `_tilemap_render_uncached_full_loop` (uncached path; runs
+for both FG and BG) — slot 0132's BG-extension covers the
+COMPLEMENTARY cached BG path (slot 0097), not redundant.
+---
+ src/Utils/diagnostic_timers.h |  34 ++++++++
+ src/graphics/Renderer.cpp     | 145 ++++++++++++++++++++++++++++++++++
+ src/graphics/Renderer.h       |  13 +++
+ src/graphics/Tileset.cpp      |  28 +++++++
+ src/graphics/Tileset.h        |  14 ++++
+ src/map.cpp                   |  23 +++++-
+ 6 files changed, 256 insertions(+), 1 deletion(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 220fe38..3f90ac9 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -1105,6 +1105,40 @@ struct P12PixtoneStopTimer
+   }
+ };
+ 
++// patch 0132 (Phase 11 wave-35 mds_tilemap_bg drawTileFast BG-ext).
++// Engagement counters per flush-instr's wave-35 contract § 5.3 "fast-
++// path hit-rate verification" requirement. `engaged` ticks when slot
++// 0132's `drawTileFastToSurface` fast path fires (env on AND format
++// match); `fallback` ticks when env off OR format mismatch defensive
++// fallback. `calls` is the unconditional total (engaged + fallback ≈
++// calls with NULL-tileset early-return modulo). All 3 per-block
++// reset alongside the FLIP_INSTR audit-flush family in Renderer.cpp.
++//
++// Engine-side single-writer; no atomics. Storage definitions in
++// Renderer.cpp NXE::Diag block; emit line in
++// _maybe_flush_phase_timing_audit gated on
++// SDL_HINT_DOSKUTSU_FLIP_INSTR=1 (same gate as flip-stat / bg-
++// subregion / p12-audio per the existing emit-line family).
++extern std::uint32_t g_drawtile_fast_bg_engaged_count_block;
++extern std::uint32_t g_drawtile_fast_bg_fallback_count_block;
++extern std::uint32_t g_drawtile_fast_bg_calls_count_block;
++
++// patch 0132 (Phase 11 wave-35 mds_tilemap_bg drawTileFast BG-ext).
++// Forward-decl env helper for the BG-cache-fill fast-path killswitch
++// reader. Default ON; literal "0" disables (mirror of patches 0088 /
++// 0093 / 0117 / 0126 / 0128 / 0130 inverse-killswitch convention).
++// When ON, map.cpp's `_tilemap_render_plain_tiles_into_cache` swaps
++// `tileset.drawTileToSurface(cache, ...)` for `tileset.drawTileFast-
++// ToSurface(cache, ...)` per tile — skips SDL_BlitSurface's format-
++// dispatch overhead by calling `_blit_indexed` INDEX8→INDEX8 hand-
++// rolled primitive directly. When OFF (env=0), the original slot
++// 0097 cache-fill path runs unchanged. Predicted savings: -3 to -8
++// ms / flip (per slot 0117 measured-precedent); engagement-frequency
++// dependent on slot 0097 BG-cache hit rate. Wave-35 PLAY3-PLAY4 delta
++// is the architectural test for `cpu_savings_absorbed_by_wall_clock_-
++// sink.md` translation question.
++bool drawtile_fast_bg_active();
++
+ }  // namespace Diag
+ }  // namespace NXE
+ 
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 1514ade..ef18544 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -307,6 +307,20 @@ std::uint64_t g_p12_pixtone_play_accum_ns_block     = 0;
+ std::uint32_t g_p12_pixtone_play_count_block        = 0;
+ std::uint64_t g_p12_pixtone_stop_accum_ns_block     = 0;
+ std::uint32_t g_p12_pixtone_stop_count_block        = 0;
++
++// patch 0132 (Phase 11 wave-35 mds_tilemap_bg drawTileFast BG-ext).
++// Engagement counters per flush-instr's wave-35 contract § 5.3
++// "engagement counter same in both" refutation threshold requirement.
++// `engaged` increments when slot 0132 fast-path fires (env on AND
++// INDEX8↔INDEX8 format match); `fallback` increments when env off OR
++// format-mismatch defensive path. `calls` is the unconditional total
++// (engaged + fallback ≈ calls; equality holds modulo NULL-tileset
++// early-return). Storage in NXE::Diag namespace; decls in
++// Utils/diagnostic_timers.h; per-block reset alongside the FLIP_INSTR
++// audit-flush family.
++std::uint32_t g_drawtile_fast_bg_engaged_count_block  = 0;
++std::uint32_t g_drawtile_fast_bg_fallback_count_block = 0;
++std::uint32_t g_drawtile_fast_bg_calls_count_block    = 0;
+ }  // namespace Diag
+ }  // namespace NXE
+ 
+@@ -393,6 +407,9 @@ bool bg_subregion_active();
+ // patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation):
+ // p12_audio_instr_active() forward-decl. Same pattern.
+ bool p12_audio_instr_active();
++// patch 0132 (Phase 11 wave-35 mds_tilemap_bg drawTileFast BG-ext):
++// drawtile_fast_bg_active() forward-decl. Same pattern.
++bool drawtile_fast_bg_active();
+ // patch 0125 (Phase 11 wave-29 mds_tilemap_bg sub-decomposition):
+ // mds_bg_instr_active() forward-decl joins the family. Same file-
+ // scope-after-both-namespace-closes definition pattern (heeds W20B
+@@ -816,6 +833,49 @@ inline bool _abl_p12_audio_instr()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0132, Phase 11 wave-35 mds_tilemap_bg drawTileFast
++// BG-extension). Killswitch for the BG-tilemap-cache fill fast-path.
++// Default ON; literal "0" disables (mirror of patch 0088 / 0093 /
++// 0117 / 0126 / 0128 / 0130 inverse-killswitch convention). When
++// ENABLED, map.cpp's `_tilemap_render_plain_tiles_into_cache` routes
++// the per-tile cache-fill blit through `Tileset::drawTileFastToSurface`
++// (slot 0132) which uses the INDEX8→INDEX8 hand-rolled `_blit_indexed`
++// primitive — same code path drawTileFast (slot 0117) uses for the
++// FG-tilemap window write. When DISABLED (env=0), the original
++// `drawTileToSurface` (slot 0097) path runs unchanged: single
++// SDL_BlitSurface per tile with format-dispatch overhead.
++//
++// Polarity: only literal "0" disables (mirror of inverse-killswitch
++// convention). Any other value (unset, empty, "1", garbage) keeps the
++// fast path engaged. Cached lambda + static const bool so the per-
++// call dispatch guard is hoisted by -O3.
++//
++// Predicted savings: -3 to -8 ms / flip (per slot 0117's +5 fps
++// measured-precedent at +5 fps on FG-loop drawTile/drawTileFast swap;
++// flush-instr's wave-35 contract § 5.3). HOWEVER — engagement
++// frequency depends on slot 0097 BG-tilemap cache hit rate. If cache
++// hits ~95% in steady-state gameplay, cache-fill fires only on the
++// remaining ~5% of frames + map transitions, so the per-flip
++// amortized win may be substantially smaller than the precedent
++// suggests. Wave-35 PLAY3 - PLAY4 measurement is the load-bearing
++// test for this architectural class question (see `cpu_savings_-
++// absorbed_by_wall_clock_sink.md` companion memory).
++//
++// Architectural classification. CPU-bound work (eliminate SDL_Blit-
++// Surface dispatch overhead; inline _blit_indexed memcpy loop). Same
++// class as slot 0117 / 0128. Subject to absorption-by-wall-clock-sink
++// risk if the per-flip slack lands inside the audio+engine bucket
++// rather than translating to fps. Wave-35's architectural test
++// distinguishes these scenarios.
++inline bool _abl_drawtile_fast_bg()
++{
++  static const bool v = []() {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_DRAWTILE_FAST_BG");
++    return !(e && e[0] == '0' && e[1] == 0);
++  }();
++  return v;
++}
++
+ // drawSurface NULL-texture diagnostic (Phase 7 black-screen bug, task #14).
+ // Track which Surface objects produce NULL textures so we log each origin
+ // once + a periodic running count, instead of hundreds of identical lines
+@@ -1946,6 +2006,28 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_p12_pixtone_stop_accum_ns_block = 0;
+   NXE::Diag::g_p12_pixtone_stop_count_block    = 0;
+ 
++  // patch 0132 (Phase 11 wave-35 mds_tilemap_bg drawTileFast BG-ext).
++  // Emit [drawtile-fast-bg ...] line gated on FLIP_INSTR (same gate as
++  // bg-subregion / p12-audio per flush-instr's contract). Reports
++  // engagement + fallback + total-calls for the BG-cache-fill fast-
++  // path discriminator. In steady-state gameplay with default-ON env:
++  // `engaged + fallback ≈ calls` (NULL-tileset early-returns are the
++  // ~zero-frequency residual). With env=0 control PLAY: `engaged = 0,
++  // fallback = calls`. flush-instr's grep tooling uses engagement
++  // rate as the load-bearing discriminator before attributing fps
++  // delta to the patch mechanism.
++  if (_abl_flip_instr())
++  {
++    LOG_INFO("[drawtile-fast-bg n=100 engaged={} fallback={} calls={}]",
++             NXE::Diag::g_drawtile_fast_bg_engaged_count_block,
++             NXE::Diag::g_drawtile_fast_bg_fallback_count_block,
++             NXE::Diag::g_drawtile_fast_bg_calls_count_block);
++  }
++  // patch 0132: reset counters unconditionally.
++  NXE::Diag::g_drawtile_fast_bg_engaged_count_block  = 0;
++  NXE::Diag::g_drawtile_fast_bg_fallback_count_block = 0;
++  NXE::Diag::g_drawtile_fast_bg_calls_count_block    = 0;
++
+   // DOS-PORT (patch 0124): reset W28 sub-bucket sample idx unconditionally
+   // (sample-array contents are overwritten next flip; idx reset lets the
+   // cadence repeat cleanly).
+@@ -6056,6 +6138,62 @@ void Renderer::drawTileFast(Surface *src, int dstx, int dsty, int srcx, int srcy
+                 (Uint8)src->colorkey(), src->hasColorkey());
+ }
+ 
++// DOS-PORT (patch 0132, Phase 11 wave-35 mds_tilemap_bg drawTileFast
++// BG-extension). Sibling to drawTileFast that takes a target surface
++// override. Used during BG-tilemap cache-fill (slot 0097 Path B) to
++// blit tiles into the cache surface directly. Skips SDL_BlitSurface's
++// format-dispatch overhead by calling _blit_indexed INDEX8→INDEX8
++// hand-rolled primitive (same code path that makes drawTileFast
++// faster than drawTile).
++//
++// Renderer drain: NOT applicable here (target is the cache surface,
++// not the window surface). The cache surface holds the rendered
++// BG-tilemap layer for later cache→window blit (handled by
++// drawCachedTilemap). Queued slow-path renderer commands target
++// _renderer, not the cache surface, so cache-fill blits don't
++// interleave with renderer-queue dispatch order. Per slot 0097
++// path-B correctness invariant.
++//
++// Format fallback: if the destination's format != INDEX8 OR the
++// source's format != INDEX8, fall back to SDL_BlitSurface to maintain
++// correctness. _blit_indexed assumes INDEX8↔INDEX8 (per its dispatch-
++// table sibling _try_fast_blit). This fallback is essentially never
++// taken in normal indexed-mode operation (Wave-16 indexed-mode
++// invariant + tilesheet INDEX8 invariant), but defensive.
++void Renderer::drawTileFastToSurface(Surface *src, SDL_Surface *target,
++                                     int dstx, int dsty, int srcx, int srcy)
++{
++  if (!src || !target) return;
++  SDL_Surface *src_sfc = src->surfaceCpu();
++  if (!src_sfc) return;
++
++  SDL_Rect srcrect = {srcx, srcy, TILE_W, TILE_H};
++  SDL_Rect dstrect = {dstx, dsty, TILE_W, TILE_H};
++
++  if (src_sfc->format == SDL_PIXELFORMAT_INDEX8 &&
++      target->format  == SDL_PIXELFORMAT_INDEX8)
++  {
++    // INDEX8↔INDEX8 fast path — _blit_indexed inline.
++    _blit_indexed(target, src_sfc,
++                  srcrect, dstrect,
++                  (Uint8)src->colorkey(), src->hasColorkey());
++  }
++  else
++  {
++    // Defensive fallback: format mismatch (should not occur in
++    // normal indexed-mode operation). Use SDL_BlitSurface which
++    // handles arbitrary format conversion. Same behavior as
++    // Tileset::drawTileToSurface so correctness is preserved at
++    // the cost of foregoing the _blit_indexed speedup for this
++    // (rare) call.
++    if (!SDL_BlitSurface(src_sfc, &srcrect, target, &dstrect))
++    {
++      LOG_ERROR("Renderer::drawTileFastToSurface: SDL_BlitSurface fallback failed: {}",
++                SDL_GetError());
++    }
++  }
++}
++
+ // blit the specified portion of the surface to the screen
+ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, int srcy, int wd, int ht)
+ {
+@@ -7197,3 +7335,10 @@ bool bg_subregion_active() { return ::NXE::Graphics::_abl_bg_subregion(); }
+ namespace NXE { namespace Diag {
+ bool p12_audio_instr_active() { return ::NXE::Graphics::_abl_p12_audio_instr(); }
+ }}
++
++// DOS-PORT (patch 0132, Phase 11 wave-35 mds_tilemap_bg drawTileFast
++// BG-extension): drawtile_fast_bg_active() env-helper accessor.
++// Same file-scope-after-both-namespace-closes definition pattern.
++namespace NXE { namespace Diag {
++bool drawtile_fast_bg_active() { return ::NXE::Graphics::_abl_drawtile_fast_bg(); }
++}}
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index 8012727..e37b911 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -161,6 +161,19 @@ class Renderer
+     // branch when SDL_HINT_DOSKUTSU_BG_SUBREGION_BLIT is on (default).
+     bool drawCachedBackdropClipped(SDL_Surface *src, int y_start, int y_end_inclusive);
+ 
++    // DOS-PORT (patch 0132, Phase 11 wave-35 mds_tilemap_bg drawTileFast
++    // BG-extension). Sibling to drawTileFast that takes a target
++    // surface override (rather than blitting to the cached window
++    // surface). Used by Tileset::drawTileFastToSurface from map.cpp's
++    // `_tilemap_render_plain_tiles_into_cache` to populate the
++    // BG-tilemap cache surface (slot 0097 Path B). Skips
++    // SDL_BlitSurface's format-dispatch overhead by calling the
++    // INDEX8→INDEX8 hand-rolled `_blit_indexed` primitive directly
++    // (same primitive Renderer::drawTileFast uses). Caller-side
++    // gating via SDL_HINT_DOSKUTSU_DRAWTILE_FAST_BG; falls back to
++    // SDL_BlitSurface if INDEX8↔INDEX8 format precondition fails.
++    void drawTileFastToSurface(Surface *src, SDL_Surface *target, int dstx, int dsty, int srcx, int srcy);
++
+     // DOS-PORT (patch 0126, Phase 11 wave-30 Option 2 — backdrop miss-
+     // streak direct-to-window). Two-phase helper for the case where
+     // map_draw_backdrop has detected the cache is thrashing (≥N
+diff --git a/src/graphics/Tileset.cpp b/src/graphics/Tileset.cpp
+index ccee838..4afccc2 100644
+--- a/src/graphics/Tileset.cpp
++++ b/src/graphics/Tileset.cpp
+@@ -88,6 +88,28 @@ void Tileset::drawTileFast(int x, int y, int t)
+   Renderer::getInstance()->drawTileFast(_tileset, x, y, srcx, srcy);
+ }
+ 
++// DOS-PORT (patch 0132, Phase 11 wave-35 mds_tilemap_bg drawTileFast
++// BG-extension). Sibling to `drawTileToSurface` that bypasses
++// SDL_BlitSurface's format-dispatch overhead by calling
++// `Renderer::drawTileFastToSurface` which uses the INDEX8→INDEX8
++// hand-rolled `_blit_indexed` primitive directly. Same src-rect math
++// as drawTileToSurface (16 tiles per row).
++//
++// Defensive: NULL-checks _tileset (matches drawTileFast's pattern
++// per patch 0117). Renderer-side fallback to SDL_BlitSurface if
++// INDEX8↔INDEX8 format precondition fails (mirror of
++// drawTileFast's _blit_indexed fallback behavior).
++void Tileset::drawTileFastToSurface(SDL_Surface *target, int x, int y, int t)
++{
++  if (!_tileset) return;
++
++  // 16 tiles per row on all tilesheet
++  int srcx = (t % 16) * TILE_W;
++  int srcy = (t / 16) * TILE_H;
++
++  Renderer::getInstance()->drawTileFastToSurface(_tileset, target, x, y, srcx, srcy);
++}
++
+ // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): raw blit a tile
+ // into a destination SDL_Surface, bypassing Renderer overhead. Used
+ // during tilemap cache miss-render in map.cpp. Same src-rect math as
+@@ -97,6 +119,12 @@ void Tileset::drawTileFast(int x, int y, int t)
+ // Mirrors patch 0080's pattern (raw tile blits into backdrop cache):
+ // the cost of running this 30+ times during a cache miss is dominated
+ // by the per-row memcpy in SDL_BlitSurface, NOT Renderer dispatch.
++//
++// NOTE (post-patch 0132): this method is preserved as the slot 0132
++// killswitch fallback. When SDL_HINT_DOSKUTSU_DRAWTILE_FAST_BG=0 OR
++// the BG-cache surface format != tilesheet format (rare; should be
++// INDEX8↔INDEX8 in normal indexed-mode operation), this remains the
++// authoritative cache-fill primitive.
+ void Tileset::drawTileToSurface(SDL_Surface *dst, int dst_x, int dst_y, int t)
+ {
+   if (!_tileset || !dst) return;
+diff --git a/src/graphics/Tileset.h b/src/graphics/Tileset.h
+index ac35f3f..42fa25b 100644
+--- a/src/graphics/Tileset.h
++++ b/src/graphics/Tileset.h
+@@ -35,6 +35,20 @@ class Tileset
+     // per row tilesheet); same per-tile result.
+     void drawTileFast(int x, int y, int t);
+ 
++    // DOS-PORT (patch 0132, Phase 11 wave-35 mds_tilemap_bg drawTileFast
++    // BG-extension). Sibling to `drawTileToSurface` that bypasses
++    // SDL_BlitSurface's format-dispatch overhead by calling the
++    // INDEX8→INDEX8 hand-rolled `_blit_indexed` primitive directly
++    // (via Renderer::drawTileFastToSurface). Caller (map.cpp's
++    // `_tilemap_render_plain_tiles_into_cache`) selects between
++    // drawTileToSurface (slot 0132 killswitch=0) and
++    // drawTileFastToSurface (default ON) based on
++    // SDL_HINT_DOSKUTSU_DRAWTILE_FAST_BG. Same src-rect math; same
++    // per-tile result. Note: the precondition INDEX8↔INDEX8 format
++    // match must hold; Renderer-side fallback to SDL_BlitSurface
++    // applies if formats differ.
++    void drawTileFastToSurface(SDL_Surface *target, int x, int y, int t);
++
+     // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): raw blit of
+     // a tile from the loaded tileset into an arbitrary destination
+     // SDL_Surface (intended target: map.cpp's tilemap cache surface).
+diff --git a/src/map.cpp b/src/map.cpp
+index 82f234a..0a4e108 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1727,6 +1727,14 @@ bool _tilemap_cache_keys_equal(const TilemapCacheKey &a, const TilemapCacheKey &
+ void _tilemap_render_plain_tiles_into_cache(SDL_Surface *cache, uint8_t foreground)
+ {
+   if (!cache) return;
++  // patch 0132 (Phase 11 wave-35 mds_tilemap_bg drawTileFast BG-ext):
++  // read the BG-fast-path killswitch once at function entry. When ON
++  // (default), per-tile cache-fill calls dispatch to
++  // tileset.drawTileFastToSurface (uses _blit_indexed). When OFF,
++  // falls back to tileset.drawTileToSurface (slot 0097 original path).
++  // Engagement counters bumped per call for flush-instr's wave-35
++  // contract § 5.3 verification grep.
++  const bool drawtile_fast_bg_on = NXE::Diag::drawtile_fast_bg_active();
+   int scroll_x = (map.displayed_xscroll / CSFI);
+   int scroll_y = (map.displayed_yscroll / CSFI);
+   int mapx = scroll_x / TILE_W;
+@@ -1751,7 +1759,20 @@ void _tilemap_render_plain_tiles_into_cache(SDL_Surface *cache, uint8_t foregrou
+           // those render live, not cached.
+           if (!(tileattr[t] & TA_CURRENT) && tilecode[t] != 0x43)
+           {
+-            Renderer::getInstance()->tileset.drawTileToSurface(cache, blit_x, blit_y, t);
++            // patch 0132: bump total-calls counter; dispatch to
++            // fast-path when env on, slot-0097 fallback when env off.
++            // engaged / fallback discriminator per flush-instr § 5.3.
++            ++NXE::Diag::g_drawtile_fast_bg_calls_count_block;
++            if (drawtile_fast_bg_on)
++            {
++              ++NXE::Diag::g_drawtile_fast_bg_engaged_count_block;
++              Renderer::getInstance()->tileset.drawTileFastToSurface(cache, blit_x, blit_y, t);
++            }
++            else
++            {
++              ++NXE::Diag::g_drawtile_fast_bg_fallback_count_block;
++              Renderer::getInstance()->tileset.drawTileToSurface(cache, blit_x, blit_y, t);
++            }
+           }
+         }
+       }
+-- 
+2.47.3
+
