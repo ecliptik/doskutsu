@@ -141,8 +141,6 @@ DOSKUTSU is developed primarily through [Claude Code](https://claude.com/code), 
 - **Workspace-local patches only.** This project does not contribute patches upstream to [libsdl-org/SDL](https://github.com/libsdl-org/SDL), [libsdl-org/SDL_mixer](https://github.com/libsdl-org/SDL_mixer), [libsdl-org/SDL_image](https://github.com/libsdl-org/SDL_image), or [nxengine/nxengine-evo](https://github.com/nxengine/nxengine-evo).
 - **Agent-team coordination.** Specialist roles (engine, SDL backend, build orchestration, real-hardware iter, perf diagnostics) coordinate via shared task lists and peer messaging during development sessions. The per-role specialist definitions live under `.claude/agents/` in this repository for reference.
 
-If a fix is so generally useful that it should land upstream, that is a separate human-authored effort outside this repository.
-
 ---
 
 ## Acknowledgments
