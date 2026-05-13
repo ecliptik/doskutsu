@@ -33,6 +33,12 @@
 #   tests/run-gameplay-smoke.sh --parity          # parity DOSBox-X config (cycles=fixed 40000)
 #   tests/run-gameplay-smoke.sh --out /tmp/foo    # custom artifact dir
 #   tests/run-gameplay-smoke.sh --keep-running    # don't kill DOSBox-X at the end
+#   tests/run-gameplay-smoke.sh --skip-gate       # capture logs but skip the banner-emit gate
+#                                                 # (intended for wave-39 ablation builds where
+#                                                 # reverted patches make required banners
+#                                                 # unreachable by design — gate would fail
+#                                                 # spuriously; flush-instr decomp verifies the
+#                                                 # expected absences from the captured logs)
 
 set -euo pipefail
 
@@ -41,6 +47,7 @@ LAUNCHER="$REPO_ROOT/tools/dosbox-launch.sh"
 LAUNCHER_FLAGS=(--stage --exe DOSKUTSU.EXE --fast)
 OUT_DIR="/tmp/gameplay-smoke"
 KEEP_RUNNING=0
+SKIP_GATE=0
 DISPLAY="${DOSBOX_DISPLAY:-:0}"
 
 while (($#)); do
@@ -48,6 +55,7 @@ while (($#)); do
     --parity)         LAUNCHER_FLAGS=(--stage --exe DOSKUTSU.EXE) ;;
     --out)            shift; OUT_DIR="$1" ;;
     --keep-running)   KEEP_RUNNING=1 ;;
+    --skip-gate)      SKIP_GATE=1 ;;
     -h|--help)        sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# //' ; exit 0 ;;
     *)                echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -163,28 +171,140 @@ shoot "07-jumped"
 sleep 2
 shoot "08-final"
 
-# Capture engine-side logs before killing DOSBox-X (they only flush on exit
-# — see memory note `check_debug_log.md`).
+# Capture engine-side logs before killing DOSBox-X. DJGPP fopen writes uppercase
+# 8.3 names; the staged Linux tree is case-sensitive, so the engine's DEBUG.LOG
+# lands at build/stage/DEBUG.LOG and SDL/0024's SDLDBG.LOG lands inside the
+# DOSKUTSU subdir per its hard-coded "/DOSKUTSU/sdldbg.log" path. Patch 0036
+# (nxengine) + SDL/0024 fsync-per-line make these readable without waiting for
+# DOSBox-X to exit, but we still kill the process first so the gate runs on a
+# fully-flushed log without a race window.
 if [[ "$KEEP_RUNNING" == "0" ]]; then
   log "killing DOSBox-X..."
   pkill -x dosbox-x || true
   sleep 2
-  cp "$REPO_ROOT/build/stage/debug.log" "$OUT_DIR/debug.log" 2>/dev/null || log "no debug.log captured"
-  cp "$REPO_ROOT/build/stage/sdldbg.log" "$OUT_DIR/sdldbg.log" 2>/dev/null || log "no sdldbg.log captured"
+  cp "$REPO_ROOT/build/stage/DEBUG.LOG" "$OUT_DIR/debug.log" 2>/dev/null || log "no debug.log captured (looked at build/stage/DEBUG.LOG)"
+  cp "$REPO_ROOT/build/stage/DOSKUTSU/SDLDBG.LOG" "$OUT_DIR/sdldbg.log" 2>/dev/null || log "no sdldbg.log captured (looked at build/stage/DOSKUTSU/SDLDBG.LOG)"
 fi
 
 # Quick error-count summary so a human reviewer can spot regressions fast.
 DEBUG_LOG="$OUT_DIR/debug.log"
 SDLDBG_LOG="$OUT_DIR/sdldbg.log"
 if [[ -f "$DEBUG_LOG" ]]; then
-  ERR_COUNT=$(grep -c '\[error\]' "$DEBUG_LOG" 2>/dev/null || echo 0)
-  CRIT_COUNT=$(grep -c '\[critical\]' "$DEBUG_LOG" 2>/dev/null || echo 0)
-  DRAWSURF_COUNT=$(grep -c "drawSurface.*invalid" "$DEBUG_LOG" 2>/dev/null || echo 0)
-  log "debug.log: $ERR_COUNT errors, $CRIT_COUNT criticals, $DRAWSURF_COUNT drawSurface-invalid"
+  # grep -c outputs "0" + exit 1 on zero matches; `|| true` suppresses the
+  # non-zero exit without appending a second "0" the way `|| echo 0` would.
+  ERR_COUNT=$(grep -c '\[error\]' "$DEBUG_LOG" 2>/dev/null || true)
+  CRIT_COUNT=$(grep -c '\[critical\]' "$DEBUG_LOG" 2>/dev/null || true)
+  DRAWSURF_COUNT=$(grep -c "drawSurface.*invalid" "$DEBUG_LOG" 2>/dev/null || true)
+  log "debug.log: ${ERR_COUNT:-0} errors, ${CRIT_COUNT:-0} criticals, ${DRAWSURF_COUNT:-0} drawSurface-invalid"
 fi
 if [[ -f "$SDLDBG_LOG" ]]; then
   log "sdldbg.log: $(wc -l <"$SDLDBG_LOG") lines"
 fi
 
+# Banner-emit gate. `strings | grep` of the binary proves the literal lives in
+# .rodata but NOT that the surrounding LOG_* call site is reachable from
+# runtime — dead code paths keep their string literals. This gate captures the
+# logs after the smoke run and requires each regex below to match ≥1 line in
+# DEBUG.LOG ∪ SDLDBG.LOG. Regex alternations cover both default-ON and
+# default-OFF variants so the gate stays correct across killswitch flips and
+# only fails when the call site itself is dead. Add a new entry whenever a
+# lever ships a boot/init banner. See CLAUDE.md § Critical Rules § Build
+# verification.
+#
+# Parallel arrays (indexed by position). REGEX uses `|` for alternations so
+# fields are kept separate rather than packed-and-split.
+
+BANNER_REGEX=(
+  "Renderer::initVideo: opaque-tile fastpath (ENABLED|DISABLED)"
+  "Renderer::initVideo: Cirrus BLT solid-fill consumer (ENABLED|DISABLED)"
+  "sdl: SDL/0059 Cirrus BLT solid-fill (ACTIVE|DISABLED|N/A)"
+  "cirrus-blt-async: (enabled|disabled)"
+  "gameloop: (legacy combined-tick path|Mechanism A.2 tick split ACTIVE)"
+  "\[0142 abl_cache_test n="
+  "sdl: SDL/0060 Cirrus BLT pattern-copy (ACTIVE|DISABLED|N/A)"
+)
+BANNER_SEVERITY=(
+  "required"
+  "required"
+  "required"
+  "required"
+  "required"
+  "required"
+  "required"
+)
+BANNER_LABEL=(
+  "lever-1 opaque-tile fastpath (patch 0137)"
+  "lever-2b nx-engine consumer (patch 0138)"
+  "lever-2a SDL primitive (patch SDL/0059)"
+  "lever-3 BULK_COPY async (patch 0139)"
+  "A.2 gameloop tick (patch 0141)"
+  "abl-cache disambiguation bench (patch 0142)"
+  "BLTPAT primitive (patch SDL/0060)"
+)
+
+if [[ "$SKIP_GATE" == "1" ]]; then
+  log ""
+  log "=== Banner-emit gate SKIPPED (--skip-gate) ==="
+  log "Logs still captured at $OUT_DIR/{debug,sdldbg}.log for flush-instr decomp."
+  log "Caller must verify expected banner absences match the ablation contract."
+  log "done. Artifacts in: $OUT_DIR"
+  exit 0
+fi
+
+GATE_FAIL=0
+log ""
+log "=== Banner-emit gate (proves runtime invocation, not just embed) ==="
+
+for i in "${!BANNER_REGEX[@]}"; do
+  regex="${BANNER_REGEX[$i]}"
+  severity="${BANNER_SEVERITY[$i]}"
+  label="${BANNER_LABEL[$i]}"
+
+  hit_total=0
+  hit_source=""
+  for src in "$DEBUG_LOG" "$SDLDBG_LOG"; do
+    [[ -f "$src" ]] || continue
+    c=$(grep -cE "$regex" "$src" 2>/dev/null || true)
+    c="${c:-0}"
+    if [[ "$c" -gt 0 ]]; then
+      hit_total=$((hit_total + c))
+      hit_source="${hit_source:+$hit_source,}$(basename "$src")=$c"
+    fi
+  done
+
+  case "$severity" in
+    required)
+      if [[ "$hit_total" -gt 0 ]]; then
+        log "  PASS [$label] emits=$hit_total ($hit_source)"
+      else
+        log "  FAIL [$label] emits=0 — REQUIRED banner absent; runtime code path is dead"
+        log "        regex: $regex"
+        GATE_FAIL=1
+      fi
+      ;;
+    forbidden)
+      if [[ "$hit_total" -gt 0 ]]; then
+        log "  FAIL [$label] emits=$hit_total ($hit_source) — FORBIDDEN banner present"
+        log "        regex: $regex"
+        GATE_FAIL=1
+      else
+        log "  PASS [$label] emits=0 (correctly absent)"
+      fi
+      ;;
+  esac
+done
+
+if [[ "$GATE_FAIL" -gt 0 ]]; then
+  log ""
+  log "GATE FAIL: one or more REQUIRED banners absent (or FORBIDDEN banners present)."
+  log "This is the wave-38 failure mode: code that strings|grep finds in the binary"
+  log "is not actually reached at runtime. Investigate the failing patch(es) before"
+  log "shipping. See CLAUDE.md § Critical Rules — Build verification."
+  log "done. Artifacts in: $OUT_DIR"
+  exit 5
+fi
+
+log ""
+log "GATE PASS: all required banners emit at runtime."
 log "done. Artifacts in: $OUT_DIR"
 log "Review screenshots 01..08, debug.log, sdldbg.log."
