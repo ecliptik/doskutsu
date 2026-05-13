@@ -108,7 +108,7 @@ NPROC := $(shell nproc 2>/dev/null || echo 4)
 # --- Top-level targets --------------------------------------------------------
 
 .PHONY: all
-all: nxengine
+all: verify-patches-applied nxengine
 
 .PHONY: help
 help:
@@ -117,7 +117,8 @@ help:
 	@echo "One-time setup:"
 	@echo "  ./scripts/setup-symlinks.sh      link tools/djgpp to ~/emulators/tools/djgpp"
 	@echo "  ./scripts/fetch-sources.sh       clone vendored upstreams at pinned SHAs"
-	@echo "  ./scripts/apply-patches.sh       apply patches/<name>/*.patch"
+	@echo "  make patches                     apply patches/<name>/*.patch via scripts/apply-patches.sh"
+	@echo "                                   (or equivalently: ./scripts/apply-patches.sh)"
 	@echo
 	@echo "Build stages:"
 	@echo "  make sdl3                        stage 1: SDL3 (+ DOS backend)"
@@ -195,10 +196,31 @@ vendor-check:
 fetch-binaries:
 	@scripts/fetch-vendor-binaries.sh
 
+# --- Patch orchestration ------------------------------------------------------
+#
+# `make patches` dispatches to scripts/apply-patches.sh — `git reset --hard`
+# each vendor to its manifest-pinned SHA and re-applies the full
+# patches/<name>/*.patch series via `git am`. Idempotent; safe to re-run.
+#
+# `make verify-patches-applied` is a non-destructive pre-flight: for each
+# vendor with a patches/<name>/ dir, compares count of *.patch files to count
+# of commits since the pinned SHA. Mismatch = a patch landed in patches/ but
+# wasn't `git am`'d to vendor/, OR vendor has commits the patch series
+# doesn't represent. Wired as a regular prereq on every build-stage
+# convenience target below so the build fails before producing a binary
+# that silently lacks a patch's effects.
+
+.PHONY: patches verify-patches-applied
+patches:
+	@$(REPO_ROOT)/scripts/apply-patches.sh
+
+verify-patches-applied:
+	@$(REPO_ROOT)/scripts/verify-patches-applied.sh
+
 # --- Stage 1: SDL3 ------------------------------------------------------------
 
 .PHONY: sdl3
-sdl3: $(SYSROOT)/lib/libSDL3.a
+sdl3: verify-patches-applied $(SYSROOT)/lib/libSDL3.a
 
 # DOSKUTSU: pin SDL_REVISION to a deterministic string to keep build sha
 # reproducible across agent rebuilds. By default SDL3's CMakeLists.txt does
@@ -233,7 +255,7 @@ $(SYSROOT)/lib/libSDL3.a: | djgpp-check
 SDL3_MIXER_BUILD := $(BUILD_DIR)/sdl3-mixer
 
 .PHONY: sdl3-mixer
-sdl3-mixer: $(SYSROOT)/lib/libSDL3_mixer.a
+sdl3-mixer: verify-patches-applied $(SYSROOT)/lib/libSDL3_mixer.a
 
 # NOSIMD flag train moved to CMAKE_COMMON (project-wide) per team-lead — every
 # SDL3 consumer on DJGPP needs the same defines. See the NOSIMD_FLAGS block
@@ -278,7 +300,7 @@ SDL3_IMAGE_BUILD := $(BUILD_DIR)/sdl3-image
 # NOSIMD flag train inherited from CMAKE_COMMON. See top-of-file NOSIMD_FLAGS.
 
 .PHONY: sdl3-image
-sdl3-image: $(SYSROOT)/lib/libSDL3_image.a
+sdl3-image: verify-patches-applied $(SYSROOT)/lib/libSDL3_image.a
 
 $(SYSROOT)/lib/libSDL3_image.a: $(SYSROOT)/lib/libSDL3.a
 	@test -d "$(IMAGE_SRC)" || (echo "error: $(IMAGE_SRC) not present — run scripts/fetch-sources.sh" >&2; exit 1)
@@ -368,7 +390,7 @@ $(SYSROOT)/lib/libSDL2_image.a: $(SYSROOT)/lib/libSDL2.a
 MINSTACK := 2048k
 
 .PHONY: nxengine
-nxengine: $(BUILD_DIR)/doskutsu.exe
+nxengine: verify-patches-applied $(BUILD_DIR)/doskutsu.exe
 
 $(BUILD_DIR)/doskutsu.exe: $(SYSROOT)/lib/libSDL3_mixer.a $(SYSROOT)/lib/libSDL3_image.a
 	@test -d "$(NXENGINE_SRC)" || (echo "error: $(NXENGINE_SRC) not present" >&2; exit 1)
