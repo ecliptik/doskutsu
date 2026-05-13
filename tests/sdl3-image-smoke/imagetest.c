@@ -1,5 +1,5 @@
 /*
- * imagetest.c — Phase B (path-B) SDL3_image DJGPP functional smoke test.
+ * imagetest.c -- Phase B (path-B) SDL3_image DJGPP functional smoke test.
  *
  * Loads a 68-byte hand-built 1x1 RGBA transparent PNG via IMG_Load_IO and
  * verifies the returned SDL_Surface has the expected geometry. Confirms:

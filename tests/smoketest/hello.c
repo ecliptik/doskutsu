@@ -1,5 +1,5 @@
 /*
- * hello.c — Phase 0 / 1 smoke test for the DOSKUTSU toolchain.
+ * hello.c -- Phase 0 / 1 smoke test for the DOSKUTSU toolchain.
  *
  * Minimal DJGPP program: prints a known string and exits 0. Exercises
  * the full DJGPP + CWSDPMI + DOSBox-X pipeline without pulling in SDL.
@@ -16,7 +16,7 @@
 #include <stdlib.h>
 
 int main(void) {
-    /* setvbuf to line-buffered so the message flushes before exit — DOS
+    /* setvbuf to line-buffered so the message flushes before exit -- DOS
      * stdout can be surprisingly slow and unbuffered, and a test runner
      * that captures stdout needs the line to actually land in the file. */
     setvbuf(stdout, NULL, _IOLBF, 256);

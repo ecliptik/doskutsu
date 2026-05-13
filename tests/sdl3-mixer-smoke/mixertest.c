@@ -1,13 +1,13 @@
 /*
- * mixertest.c — Phase B (path-B) SDL3_mixer DJGPP functional smoke test.
+ * mixertest.c -- Phase B (path-B) SDL3_mixer DJGPP functional smoke test.
  *
  * Software-architect's #26 sharpening: linking libSDL3_mixer.a is necessary
  * but not sufficient; the three NXEngine audio code paths must actually
  * execute. This probe exercises the SDL3_mixer equivalents:
  *
- *   - MIX_LoadRawAudio        — Organya synth output path (was Mix_QuickLoad_RAW)
- *   - MIX_LoadAudio_IO + WAV  — Cave Story SFX path     (was Mix_LoadWAV)
- *   - VORBIS in decoder list  — Remix soundtrack path   (was OGG via stb_vorbis)
+ *   - MIX_LoadRawAudio        -- Organya synth output path (was Mix_QuickLoad_RAW)
+ *   - MIX_LoadAudio_IO + WAV  -- Cave Story SFX path     (was Mix_LoadWAV)
+ *   - VORBIS in decoder list  -- Remix soundtrack path   (was OGG via stb_vorbis)
  *
  * For Vorbis we verify the decoder is registered (proves stb_vorbis is
  * compiled in and discoverable at runtime). Loading an actual OGG would
@@ -44,7 +44,7 @@ static const unsigned char tiny_wav[] = {
     /* block align = 2 */ 0x02, 0x00,
     /* bits/sample = 16 */ 0x10, 0x00,
     /* "data" */ 'd','a','t','a',
-    /* data chunk size = 8 (4 samples × 2 bytes) */ 0x08, 0x00, 0x00, 0x00,
+    /* data chunk size = 8 (4 samples x 2 bytes) */ 0x08, 0x00, 0x00, 0x00,
     /* 4 silent 16-bit samples */ 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00,
 };
 
@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
     int rc_init = 0, rc_decoders = 0, rc_mixer = 0;
     int rc_raw = 0, rc_wav = 0, rc_vorbis_listed = 0;
 
-    /* Bypass the PR #15377 SB16 detection bug — we want decoder paths,
+    /* Bypass the PR #15377 SB16 detection bug -- we want decoder paths,
      * not playback. SDL3 dummy audio driver always succeeds. */
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
 
@@ -80,7 +80,7 @@ int main(int argc, char *argv[])
     printf("MIX-INIT: OK\n");
     fflush(stdout);
 
-    /* Decoder enumeration — proves which formats are compiled in. */
+    /* Decoder enumeration -- proves which formats are compiled in. */
     int ndec = MIX_GetNumAudioDecoders();
     printf("MIX-DECODERS: count=%d\n", ndec);
     rc_decoders = (ndec <= 0) ? 1 : 0;
@@ -146,7 +146,7 @@ int main(int argc, char *argv[])
     fflush(stdout);
 
     /* Test 3 (Remix soundtrack path): VORBIS decoder listed?
-     * Already determined during enumeration — just print the verdict.
+     * Already determined during enumeration -- just print the verdict.
      * Loading an actual OGG would require an asset fixture; the registered
      * decoder list is the canonical signal that stb_vorbis is wired in. */
     printf("VORBIS-DECODER: %s\n", rc_vorbis_listed ? "OK present" : "FAIL not in decoder list");

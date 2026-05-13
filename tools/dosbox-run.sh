@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dosbox-run.sh — run a DOS executable under DOSBox-X and capture its stdout.
+# dosbox-run.sh -- run a DOS executable under DOSBox-X and capture its stdout.
 #
 # Headless mode (the common case): stages the exe + any --include files into
 # a temp C:\, writes a RUN.BAT that invokes the exe with stdout redirected to
@@ -9,7 +9,7 @@
 #   tools/dosbox-run.sh --exe build/hello.exe --stdout /tmp/hello.out
 #   tools/dosbox-run.sh --exe build/hello.exe --fast
 #
-# Interactive mode (opens the window — prefer dosbox-launch.sh for playtest):
+# Interactive mode (opens the window -- prefer dosbox-launch.sh for playtest):
 #   tools/dosbox-run.sh --exe build/hello.exe --interactive
 #
 # DOS has no LFN support. Filenames passed via --include are staged to C:\
@@ -30,7 +30,7 @@ INCLUDES=()
 KEEP_STAGE=0
 FAST=0
 # --merge-stderr: capture stderr too (e.g. SDL_Log goes there). DOSBox-X / DOS shells
-# don't always honor `2>&1` cleanly — prefer printf-to-stdout in tests where possible.
+# don't always honor `2>&1` cleanly -- prefer printf-to-stdout in tests where possible.
 MERGE_STDERR=0
 CWSDPMI="${CWSDPMI:-$SCRIPT_DIR/../vendor/cwsdpmi/cwsdpmi.exe}"
 
@@ -116,7 +116,7 @@ for f in "${INCLUDES[@]:-}"; do
   cp "$f" "$STAGE/$dest_name"
 done
 
-# RUN.BAT — invokes the exe with stdout captured to STDOUT.TXT.
+# RUN.BAT -- invokes the exe with stdout captured to STDOUT.TXT.
 # With --merge-stderr we add `2>&1` so SDL_Log (and any stderr writer) is also
 # captured. DJGPP's runtime parses argv-level redirection itself, so 2>&1 works
 # under DOS even though MS-DOS COMMAND.COM proper doesn't support it natively.
@@ -136,10 +136,10 @@ esac
 {
   printf '@ECHO OFF\r\n'
   printf 'SET BLASTER=A220 I5 D1 H5 T6\r\n'
-  # SDL_DOS_AUDIO_SB_SKIP_DETECTION — escape hatch from patches/SDL/0001.
+  # SDL_DOS_AUDIO_SB_SKIP_DETECTION -- escape hatch from patches/SDL/0001.
   # DOSBox-X's emulated SB16 returns 0xFF on the DSP detection read regardless
   # of timing tuning, so SDL3-DOS audio init fails without this in the emulator.
-  # Real hardware (g2k Phase 8) MUST NOT set this — would mask Vibra16S regressions.
+  # Real hardware (g2k Phase 8) MUST NOT set this -- would mask Vibra16S regressions.
   # See tools/dosbox-launch.sh for the matching parity-config injection.
   printf 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1\r\n'
   printf '%s' "$INVOKE_LINE"
@@ -152,7 +152,7 @@ DBX_ARGS=(-conf "$CONF" -nopromptfolder
           -c "CALL RUN.BAT")
 
 if [[ "$INTERACTIVE" == "1" ]]; then
-  # Visible run — user drives; don't auto-exit.
+  # Visible run -- user drives; don't auto-exit.
   export DISPLAY="${DOSBOX_DISPLAY:-:0}"
   dosbox-x "${DBX_ARGS[@]}"
 else

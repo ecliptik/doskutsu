@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-sdl3-smoke.sh — Phase 2d SDL3 DOS-backend smoke runner.
+# run-sdl3-smoke.sh -- Phase 2d SDL3 DOS-backend smoke runner.
 #
 # Runs build/sdl3-smoke/sdltest.exe under DOSBox-X headless, captures stdout
 # (the probe writes via printf so plain `> STDOUT.TXT` redirection suffices),
@@ -12,9 +12,9 @@
 #                                              real-HW diff)
 #
 # Exit codes:
-#   0  — all required substrings present
-#   1  — one or more required substrings missing
-#   2  — invocation error (exe missing, dosbox-run.sh failed, etc.)
+#   0  -- all required substrings present
+#   1  -- one or more required substrings missing
+#   2  -- invocation error (exe missing, dosbox-run.sh failed, etc.)
 
 set -uo pipefail
 # NOTE: deliberately not using `set -e` because we want to keep running
@@ -29,7 +29,7 @@ FIXTURE="$REPO_ROOT/tests/fixtures/sdl3-modes-dosbox.txt"
 RUN_SMOKE="$SCRIPT_DIR/run-smoke.sh"
 
 if [[ ! -f "$EXE" ]]; then
-    echo "run-sdl3-smoke.sh: $EXE missing — build with \`make sdl3-smoke\`" >&2
+    echo "run-sdl3-smoke.sh: $EXE missing -- build with \`make sdl3-smoke\`" >&2
     exit 2
 fi
 
@@ -45,7 +45,7 @@ if [[ ! -s "$LOG" ]]; then
     exit 2
 fi
 
-# Required substrings — each represents a code path that MUST survive in
+# Required substrings -- each represents a code path that MUST survive in
 # the DOS backend for the probe to be considered to have run at all.
 # Audio device enumeration is intentionally NOT in this list because PR
 # #15377's SoundBlaster detection has a known DOSBox-X interaction issue
@@ -60,7 +60,7 @@ REQUIRED=(
     "SDLTEST-END:"             # process reached the bottom of main()
 )
 
-# Informational substrings — present when the corresponding subsystem fully
+# Informational substrings -- present when the corresponding subsystem fully
 # initialized. Their absence is reported but does not fail the gate; the
 # operator should investigate via the build/sdl3-smoke/sdltest.log capture.
 INFO=(
@@ -83,15 +83,15 @@ for needle in "${INFO[@]}"; do
     if tr -d '\r' < "$LOG" | grep -F -q -- "$needle"; then
         echo "  INFO  present:   $needle"
     else
-        echo "  WARN  absent:    $needle  (subsystem partial — see log)" >&2
+        echo "  WARN  absent:    $needle  (subsystem partial -- see log)" >&2
     fi
 done
 
-# Phase 8 baseline — annotated capture written into tests/fixtures/ regardless
+# Phase 8 baseline -- annotated capture written into tests/fixtures/ regardless
 # of test outcome (a failed run is still useful provenance for debugging).
 mkdir -p "$(dirname "$FIXTURE")"
 {
-    printf '# Phase 2d / Phase 8 baseline — SDL3 DOS-backend display+audio info\r\n'
+    printf '# Phase 2d / Phase 8 baseline -- SDL3 DOS-backend display+audio info\r\n'
     printf '# Source: build/sdl3-smoke/sdltest.exe (tests/sdl3-smoke/sdltest.c)\r\n'
     printf '# Host:   DOSBox-X under tools/dosbox-x.conf (cycles=fixed 40000,\r\n'
     printf '#         memsize=48, VESA modelist=compatible, SB16 IRQ 5 / DMA 1,5).\r\n'

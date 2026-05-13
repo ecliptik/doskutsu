@@ -5,7 +5,7 @@ Cave Story Pixtone (PXT) extractor.
 Mirrors vendor/nxengine-evo/src/extract/extractpxt.cpp's `extract_pxt()`
 algorithm exactly: reads parameter blocks at fixed offsets in the 2004 EN
 freeware Doukutsu.exe and emits one ASCII text file per SFX slot under
-data/pxt/fx<HEX-ID>.pxt — the format Pixtone.cpp expects at runtime.
+data/pxt/fx<HEX-ID>.pxt -- the format Pixtone.cpp expects at runtime.
 
 Usage: extract_pxt.py <path-to-Doukutsu.exe> <output-pxt-dir>
 """
@@ -75,7 +75,7 @@ def main():
                         # fgetfloat: skip 4 bytes, then read 8-byte double LE
                         fp.read(4)
                         chan[c][i] = struct.unpack("<d", fp.read(8))[0]
-                # padding sentinel — must be 0
+                # padding sentinel -- must be 0
                 pad = struct.unpack("<I", fp.read(4))[0]
                 if pad != 0:
                     sys.exit(f"PXT out of sync at id=0x{sid:02x} channel {c}: pad={pad}")

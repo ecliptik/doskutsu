@@ -17,7 +17,7 @@ Complete attribution and license matrix for everything DOSKUTSU touches, vendors
 | stb_image | bundled in SDL_image | **public domain / MIT** | Yes (via SDL_image) | PNG decoder |
 | [DJGPP libc](https://www.delorie.com/djgpp/) | 2.05+ (via GCC 12.2.0) | **GPL + runtime-library exception** | Yes (statically linked) | C runtime on DOS |
 | [CWSDPMI](https://sandmann.dotster.com/cwsdpmi/) | r7 | **freeware, redistribution permitted** | Yes (separate .exe, not linked) | DPMI host |
-| [Cave Story / Doukutsu Monogatari](https://www.cavestory.org/) | 2004 freeware EN | **freeware per Pixel's 2004 terms** | **No** — user-extracted | Game content (maps, sprites, music, text) |
+| [Cave Story / Doukutsu Monogatari](https://www.cavestory.org/) | 2004 freeware EN | **freeware per Pixel's 2004 terms** | **No** -- user-extracted | Game content (maps, sprites, music, text) |
 | [DOSBox-X](https://dosbox-x.com/) | system package | GPLv2 | No (dev-only) | Pre-hardware testing emulator |
 | [andrewwutw/build-djgpp](https://github.com/andrewwutw/build-djgpp) | upstream | MIT-like | No (dev-only) | DJGPP installer script |
 
@@ -31,7 +31,7 @@ Complete attribution and license matrix for everything DOSKUTSU touches, vendors
 
 - **zlib** (SDL3, sdl2-compat, SDL_mixer, SDL_image) is GPLv3-compatible (FSF-listed as compatible).
 - **stb_* public domain / MIT** are GPLv3-compatible.
-- **DJGPP libc's runtime-library exception** explicitly permits distributing statically-linked binaries under terms of the program's own license — exactly how libstdc++'s exception works. Statically linking DJGPP libc into a GPLv3 binary is fine; the libc does not re-impose its own GPL on downstream.
+- **DJGPP libc's runtime-library exception** explicitly permits distributing statically-linked binaries under terms of the program's own license -- exactly how libstdc++'s exception works. Statically linking DJGPP libc into a GPLv3 binary is fine; the libc does not re-impose its own GPL on downstream.
 
 All GPLv3-compatible. No conflicts.
 
@@ -39,16 +39,16 @@ All GPLv3-compatible. No conflicts.
 
 The source code in this repository is licensed MIT:
 
-- Makefile, build scripts, tools/, docs — **MIT**.
-- `tests/smoketest/hello.c` — **MIT** (no upstream code in it).
-- `patches/SDL/*.patch`, `patches/sdl2-compat/*.patch`, `patches/SDL_mixer/*.patch`, `patches/SDL_image/*.patch` — **derivatives of zlib-licensed upstreams**, therefore zlib. More permissive than MIT; no conflict.
-- `patches/nxengine-evo/*.patch` — **derivatives of a GPLv3 upstream**, therefore GPLv3. This does not conflict with the repo's `LICENSE` — our MIT license correctly describes our original, non-derivative code, and the GPLv3 on patches is inherited by operation of copyright law, not by our choice.
+- Makefile, build scripts, tools/, docs -- **MIT**.
+- `tests/smoketest/hello.c` -- **MIT** (no upstream code in it).
+- `patches/SDL/*.patch`, `patches/sdl2-compat/*.patch`, `patches/SDL_mixer/*.patch`, `patches/SDL_image/*.patch` -- **derivatives of zlib-licensed upstreams**, therefore zlib. More permissive than MIT; no conflict.
+- `patches/nxengine-evo/*.patch` -- **derivatives of a GPLv3 upstream**, therefore GPLv3. This does not conflict with the repo's `LICENSE` -- our MIT license correctly describes our original, non-derivative code, and the GPLv3 on patches is inherited by operation of copyright law, not by our choice.
 
 No conflicts. The MIT license on the repo is accurate.
 
 ### CWSDPMI is separate
 
-CWSDPMI is a DPMI host — a separate `.exe` that `DOSKUTSU.EXE` invokes at runtime via the DPMI API. It is not statically linked, not dynamically linked, not an ABI-level dependency in the C-library sense. Same legal posture as shipping `glibc.so` alongside a GPL binary, or a GPL program invoking `/bin/sh`: aggregation, not combination.
+CWSDPMI is a DPMI host -- a separate `.exe` that `DOSKUTSU.EXE` invokes at runtime via the DPMI API. It is not statically linked, not dynamically linked, not an ABI-level dependency in the C-library sense. Same legal posture as shipping `glibc.so` alongside a GPL binary, or a GPL program invoking `/bin/sh`: aggregation, not combination.
 
 CWSDPMI's license requires:
 - Redistribution is permitted
@@ -59,7 +59,7 @@ We satisfy all three by shipping `CWSDPMI.EXE` + `CWSDPMI.DOC` in `dist/doskutsu
 
 ### Cave Story data is user-supplied
 
-Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted under his terms. We do not redistribute it — users extract their own assets per `docs/ASSETS.md`. This keeps us cleanly out of:
+Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted under his terms. We do not redistribute it -- users extract their own assets per `docs/ASSETS.md`. This keeps us cleanly out of:
 
 - Pixel's 2004 terms (we aren't the redistributor)
 - NXEngine-evo's GPLv3 attempting to re-license game data by inclusion (nothing is included)
@@ -76,7 +76,7 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 - **Pinned ref:** `master` @ `1f093d1423cc395eb199230cd609b806ef1daa36` (per `vendor/sources.manifest`)
 - **Role:** Cave Story engine re-implementation in C++11. Statically linked into `DOSKUTSU.EXE`.
 - **Modifications:** DOS-port patches in `patches/nxengine-evo/*.patch`
-- **Redistribution:** GPLv3 terms — we include `vendor/nxengine-evo/LICENSE` as `GPLV3.TXT` in `dist/doskutsu-cf.zip` and point to this repo for corresponding source
+- **Redistribution:** GPLv3 terms -- we include `vendor/nxengine-evo/LICENSE` as `GPLV3.TXT` in `dist/doskutsu-cf.zip` and point to this repo for corresponding source
 
 ### SDL3
 
@@ -84,7 +84,7 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 - **Source:** https://github.com/libsdl-org/SDL
 - **Pinned ref:** `main` @ `74a746281f2208e07a7680560fcb7ec57565228e` (post-[PR #15377](https://github.com/libsdl-org/SDL/pull/15377), the DOS-backend merge)
 - **Role:** Platform abstraction. The DOS backend (VESA video + SoundBlaster audio drivers from PR #15377) is what makes this entire port possible.
-- **Modifications:** any DJGPP fixes land in `patches/SDL/*.patch` as local-only patches (we do not upstream — see `CLAUDE.md § Vendoring` for the policy and rationale). Phase 2d uncovered an SB16-detection bug under DOSBox-X tracked as TODO #16; lands as `patches/SDL/0001-sb16-dsp-detection-fix.patch`. See CHANGELOG `### Known issues` for status.
+- **Modifications:** any DJGPP fixes land in `patches/SDL/*.patch` as local-only patches (we do not upstream -- see `CLAUDE.md sec. Vendoring` for the policy and rationale). Phase 2d uncovered an SB16-detection bug under DOSBox-X tracked as TODO #16; lands as `patches/SDL/0001-sb16-dsp-detection-fix.patch`. See CHANGELOG `### Known issues` for status.
 - **Redistribution:** zlib permits redistribution under the same terms
 
 ### sdl2-compat
@@ -92,8 +92,8 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 - **License:** zlib
 - **Source:** https://github.com/libsdl-org/sdl2-compat
 - **Pinned ref:** `main` @ `91d36b8d9d06958e2663623d100d12b596675120`
-- **Role:** Pure-C shim exposing the SDL2 API on top of SDL3. Lets NXEngine-evo (SDL2-written) link against SDL3 (the only SDL with a DOS backend) without the SDL2→SDL3 migration.
-- **Modifications:** expected — DJGPP port patches land in `patches/sdl2-compat/`
+- **Role:** Pure-C shim exposing the SDL2 API on top of SDL3. Lets NXEngine-evo (SDL2-written) link against SDL3 (the only SDL with a DOS backend) without the SDL2->SDL3 migration.
+- **Modifications:** expected -- DJGPP port patches land in `patches/sdl2-compat/`
 - **Redistribution:** zlib
 
 ### SDL_mixer (release-2.8.x)
@@ -124,7 +124,7 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 
 - **License:** freeware with specific redistribution terms; see `vendor/cwsdpmi/cwsdpmi.doc`
 - **Source:** https://sandmann.dotster.com/cwsdpmi/
-- **Role:** DPMI host — provides 32-bit protected mode services to DJGPP binaries on DOS
+- **Role:** DPMI host -- provides 32-bit protected mode services to DJGPP binaries on DOS
 - **Shipped:** `CWSDPMI.EXE` + `CWSDPMI.DOC` in `dist/doskutsu-cf.zip`. **Not statically linked**; it's a separate `.exe` invoked at runtime.
 - **Redistribution:** permitted with `CWSDPMI.DOC` bundled
 
@@ -132,13 +132,13 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 
 - **License:** freeware, redistribution permitted per Daisuke "Pixel" Amaya's 2004 terms
 - **Source:** https://www.cavestory.org/ (2004 EN freeware)
-- **Role:** the actual game — maps, sprites, music, dialogue, NPCs
+- **Role:** the actual game -- maps, sprites, music, dialogue, NPCs
 - **Shipped:** **No.** Users extract their own per `docs/ASSETS.md`.
 
 ### DOSBox-X
 
 - **License:** GPLv2
-- **Role:** Pre-hardware testing emulator. Dev tool only — not shipped, not linked.
+- **Role:** Pre-hardware testing emulator. Dev tool only -- not shipped, not linked.
 - **Our use:** `tools/dosbox-x.conf`, `tools/dosbox-x-fast.conf`, `tools/dosbox-launch.sh`, `tools/dosbox-run.sh`
 
 ### andrewwutw/build-djgpp
@@ -148,9 +148,9 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 
 ### Sibling projects (documentation inspiration)
 
-- **vellm** (DOS port pattern): https://forgejo.ecliptik.com/ecliptik/vellm — MIT
-- **Geomys** (doc style, team structure): https://codeberg.org/ecliptik/geomys — ISC
-- **Flynn** (doc style, team structure): https://codeberg.org/ecliptik/flynn — ISC
+- **vellm** (DOS port pattern): https://forgejo.ecliptik.com/ecliptik/vellm -- MIT
+- **Geomys** (doc style, team structure): https://codeberg.org/ecliptik/geomys -- ISC
+- **Flynn** (doc style, team structure): https://codeberg.org/ecliptik/flynn -- ISC
 
 No code from these projects is linked into DOSKUTSU; they are stylistic and structural references only.
 

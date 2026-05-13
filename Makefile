@@ -1,13 +1,13 @@
-# doskutsu — top-level orchestrator for the five-stage DOS cross-build.
+# doskutsu -- top-level orchestrator for the five-stage DOS cross-build.
 #
 # Stages (each a CMake invocation against the DJGPP toolchain, each installing
 # into build/sysroot/ so the next stage consumes it):
 #
-#   1. sdl3        — libsdl-org/SDL @ pinned SHA, with DOS backend from PR #15377
-#   2. sdl2-compat — libsdl-org/sdl2-compat, forwarding SDL2 API to SDL3
-#   3. sdl2-mixer  — SDL_mixer release-2.8.x, built against sdl2-compat
-#   4. sdl2-image  — SDL_image release-2.8.x, built against sdl2-compat
-#   5. nxengine    — nxengine/nxengine-evo, links everything into build/doskutsu.exe
+#   1. sdl3        -- libsdl-org/SDL @ pinned SHA, with DOS backend from PR #15377
+#   2. sdl2-compat -- libsdl-org/sdl2-compat, forwarding SDL2 API to SDL3
+#   3. sdl2-mixer  -- SDL_mixer release-2.8.x, built against sdl2-compat
+#   4. sdl2-image  -- SDL_image release-2.8.x, built against sdl2-compat
+#   5. nxengine    -- nxengine/nxengine-evo, links everything into build/doskutsu.exe
 #
 # See PLAN.md for the phased rationale behind each stage; see docs/BUILDING.md
 # for prerequisites and troubleshooting.
@@ -70,15 +70,15 @@ CWSDPMI_DOC     := $(VENDOR_DIR)/cwsdpmi/cwsdpmi.doc
 # SDL3-NOSIMD compile defines for any SDL3 consumer on DJGPP. SDL3's PUBLIC
 # `SDL_intrin.h` (vendor/SDL/include/SDL3/SDL_intrin.h:291-292, 367) enables
 # `SDL_SSE_INTRINSICS=1` for any gcc>=4.9 because the compiler *supports*
-# `__attribute__((target("sse")))` — even though our P54C / 486 target has
+# `__attribute__((target("sse")))` -- even though our P54C / 486 target has
 # no SSE. SDL3 itself sets `SDL_DISABLE_SSE=1` in its INTERNAL build_config.h
 # so its own code is fine, but downstream consumers (SDL3_mixer, SDL3_image,
 # NXEngine) compile without that internal config and pick up the SSE intrinsic
-# paths — which then emit a runtime check that fails on Pentium-class hardware
+# paths -- which then emit a runtime check that fails on Pentium-class hardware
 # (e.g. SDL_mixer.c:685 `MIX_Init: Need SSE instructions but this CPU doesn't
 # offer it`). Forwarding these defines through CMAKE_C_FLAGS suppresses the
 # intrinsic gate at every consumer's preprocessor level. Includes the AVX
-# family for completeness — same upstream issue applies. Found via #26 spike;
+# family for completeness -- same upstream issue applies. Found via #26 spike;
 # upstream issue draft at .tmp/upstream-sdl-issue-sdl-intrin-propagation.md.
 NOSIMD_FLAGS := -DSDL_DISABLE_MMX=1 -DSDL_DISABLE_SSE=1 -DSDL_DISABLE_SSE2=1 \
                 -DSDL_DISABLE_SSE3=1 -DSDL_DISABLE_SSE4_1=1 -DSDL_DISABLE_SSE4_2=1 \
@@ -94,7 +94,7 @@ CMAKE_COMMON := \
     -DCMAKE_CXX_FLAGS="$(NOSIMD_FLAGS)" \
     -DBUILD_SHARED_LIBS=OFF
 # CMAKE_FIND_ROOT_PATH=$(SYSROOT) is pre-populated so the DJGPP toolchain file's
-# `list(APPEND CMAKE_FIND_ROOT_PATH ${CC_ROOTS})` keeps both — needed because
+# `list(APPEND CMAKE_FIND_ROOT_PATH ${CC_ROOTS})` keeps both -- needed because
 # the toolchain sets CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY, which restricts
 # find_package() to those paths. Without our sysroot prepended, downstream
 # stages (sdl3-mixer, sdl3-image, nxengine) couldn't find_package(SDL3).
@@ -112,7 +112,7 @@ all: verify-patches-applied nxengine
 
 .PHONY: help
 help:
-	@echo "doskutsu — five-stage DOS cross-build"
+	@echo "doskutsu -- five-stage DOS cross-build"
 	@echo
 	@echo "One-time setup:"
 	@echo "  ./scripts/setup-symlinks.sh      link tools/djgpp to ~/emulators/tools/djgpp"
@@ -170,12 +170,12 @@ vendor-check:
 	@missing=0; \
 	for d in $(SDL3_SRC) $(COMPAT_SRC) $(MIXER_SRC) $(IMAGE_SRC) $(NXENGINE_SRC); do \
 	    if [ ! -d "$$d" ]; then \
-	        echo "error: $$d not present — run ./scripts/fetch-sources.sh" >&2; \
+	        echo "error: $$d not present -- run ./scripts/fetch-sources.sh" >&2; \
 	        missing=1; \
 	    fi; \
 	done; \
 	if [ ! -f "$(CWSDPMI_EXE)" ]; then \
-	    echo "error: $(CWSDPMI_EXE) missing — run ./scripts/fetch-vendor-binaries.sh" >&2; \
+	    echo "error: $(CWSDPMI_EXE) missing -- run ./scripts/fetch-vendor-binaries.sh" >&2; \
 	    missing=1; \
 	fi; \
 	if [ "$$missing" = "1" ]; then exit 1; fi
@@ -189,7 +189,7 @@ vendor-check:
 # when files already exist with the manifest-pinned hash.
 #
 # Targets that need the binaries (stage, dist, install, dpmi-lfn-smoke) take
-# fetch-binaries as an order-only prerequisite — runs once on first build,
+# fetch-binaries as an order-only prerequisite -- runs once on first build,
 # subsequent rebuilds short-circuit on the sha check.
 
 .PHONY: fetch-binaries
@@ -198,7 +198,7 @@ fetch-binaries:
 
 # --- Patch orchestration ------------------------------------------------------
 #
-# `make patches` dispatches to scripts/apply-patches.sh — `git reset --hard`
+# `make patches` dispatches to scripts/apply-patches.sh -- `git reset --hard`
 # each vendor to its manifest-pinned SHA and re-applies the full
 # patches/<name>/*.patch series via `git am`. Idempotent; safe to re-run.
 #
@@ -227,7 +227,7 @@ sdl3: verify-patches-applied $(SYSROOT)/lib/libSDL3.a
 # `git describe` on vendor/SDL/, which embeds the current HEAD commit hash
 # into the binary as `SDL-<version>-<sha>`. apply-patches.sh re-applies our
 # patch series via `git am`, and `git am` uses wall-clock time for the
-# COMMITTER timestamp — so HEAD commit hashes change every time apply runs,
+# COMMITTER timestamp -- so HEAD commit hashes change every time apply runs,
 # making the embedded revision string non-deterministic. Pin it explicitly
 # to the base manifest SHA + a doskutsu marker so the binary's embedded
 # revision is determined purely by the source content, not by when
@@ -235,8 +235,8 @@ sdl3: verify-patches-applied $(SYSROOT)/lib/libSDL3.a
 SDL_REVISION_PIN := SDL-3.5.0-74a746281+doskutsu
 
 $(SYSROOT)/lib/libSDL3.a: | djgpp-check
-	@test -d "$(SDL3_SRC)" || (echo "error: $(SDL3_SRC) not present — run scripts/fetch-sources.sh" >&2; exit 1)
-	@test -f "$(TOOLCHAIN_FILE)" || (echo "error: $(TOOLCHAIN_FILE) not found — PR #15377 not in this SDL checkout?" >&2; exit 1)
+	@test -d "$(SDL3_SRC)" || (echo "error: $(SDL3_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
+	@test -f "$(TOOLCHAIN_FILE)" || (echo "error: $(TOOLCHAIN_FILE) not found -- PR #15377 not in this SDL checkout?" >&2; exit 1)
 	cmake -S $(SDL3_SRC) -B $(SDL3_BUILD) $(CMAKE_COMMON) \
 	    -DSDL_SHARED=OFF -DSDL_STATIC=ON \
 	    -DSDL_REVISION="$(SDL_REVISION_PIN)"
@@ -257,13 +257,13 @@ SDL3_MIXER_BUILD := $(BUILD_DIR)/sdl3-mixer
 .PHONY: sdl3-mixer
 sdl3-mixer: verify-patches-applied $(SYSROOT)/lib/libSDL3_mixer.a
 
-# NOSIMD flag train moved to CMAKE_COMMON (project-wide) per team-lead — every
+# NOSIMD flag train moved to CMAKE_COMMON (project-wide) per team-lead -- every
 # SDL3 consumer on DJGPP needs the same defines. See the NOSIMD_FLAGS block
 # at the top of this file for the full rationale. Per-stage CMAKE_C_FLAGS
 # overrides removed; they'd shadow the CMAKE_COMMON value.
 
 $(SYSROOT)/lib/libSDL3_mixer.a: $(SYSROOT)/lib/libSDL3.a
-	@test -d "$(MIXER_SRC)" || (echo "error: $(MIXER_SRC) not present — run scripts/fetch-sources.sh" >&2; exit 1)
+	@test -d "$(MIXER_SRC)" || (echo "error: $(MIXER_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
 	cmake -S $(MIXER_SRC) -B $(SDL3_MIXER_BUILD) $(CMAKE_COMMON) \
 	    -DSDLMIXER_VENDORED=ON \
 	    -DSDLMIXER_DEPS_SHARED=OFF \
@@ -290,11 +290,11 @@ $(SYSROOT)/lib/libSDL3_mixer.a: $(SYSROOT)/lib/libSDL3.a
 # Builds SDL_image release-3.2.x against libSDL3.a with PNG-via-stb_image
 # only. All other codecs OFF; SDLIMAGE_DEPS_SHARED=OFF disables the
 # SDL_LoadObject codec loader path. Same SDL_DISABLE_SSE/MMX flag train as
-# sdl3-mixer — the SDL3 PUBLIC SDL_intrin.h enables SDL_SSE_INTRINSICS for
+# sdl3-mixer -- the SDL3 PUBLIC SDL_intrin.h enables SDL_SSE_INTRINSICS for
 # any gcc>=4.9 regardless of target CPU, which would otherwise enable code
 # paths that fail on P54C-class hardware. SDL3_image kept the IMG_* prefix
 # from SDL2_image (signature drift, not the architectural redesign that
-# SDL3_mixer underwent) — see software-architect's note on #28.
+# SDL3_mixer underwent) -- see software-architect's note on #28.
 
 SDL3_IMAGE_BUILD := $(BUILD_DIR)/sdl3-image
 # NOSIMD flag train inherited from CMAKE_COMMON. See top-of-file NOSIMD_FLAGS.
@@ -303,7 +303,7 @@ SDL3_IMAGE_BUILD := $(BUILD_DIR)/sdl3-image
 sdl3-image: verify-patches-applied $(SYSROOT)/lib/libSDL3_image.a
 
 $(SYSROOT)/lib/libSDL3_image.a: $(SYSROOT)/lib/libSDL3.a
-	@test -d "$(IMAGE_SRC)" || (echo "error: $(IMAGE_SRC) not present — run scripts/fetch-sources.sh" >&2; exit 1)
+	@test -d "$(IMAGE_SRC)" || (echo "error: $(IMAGE_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
 	cmake -S $(IMAGE_SRC) -B $(SDL3_IMAGE_BUILD) $(CMAKE_COMMON) \
 	    -DSDLIMAGE_VENDORED=ON \
 	    -DSDLIMAGE_DEPS_SHARED=OFF \
@@ -396,7 +396,7 @@ $(BUILD_DIR)/doskutsu.exe: $(SYSROOT)/lib/libSDL3_mixer.a $(SYSROOT)/lib/libSDL3
 	@test -d "$(NXENGINE_SRC)" || (echo "error: $(NXENGINE_SRC) not present" >&2; exit 1)
 	cmake -S $(NXENGINE_SRC) -B $(NXENGINE_BUILD) $(CMAKE_COMMON)
 	cmake --build $(NXENGINE_BUILD) -j$(NPROC)
-	@# Find the produced exe — upstream may put it at the build root or under bin/.
+	@# Find the produced exe -- upstream may put it at the build root or under bin/.
 	@src_exe=""; \
 	for candidate in $(NXENGINE_BUILD)/doskutsu.exe $(NXENGINE_BUILD)/bin/doskutsu.exe; do \
 	    if [ -f "$$candidate" ]; then src_exe="$$candidate"; break; fi; \
@@ -433,12 +433,12 @@ smoke: $(HELLO_EXE)
 
 # --- Phase 8 prerequisite: DPMI LFN propagation probe (task #20) ------------
 #
-# Builds tests/dpmi-lfn-smoke/probe.c — tiny DJGPP DOS exe that issues
+# Builds tests/dpmi-lfn-smoke/probe.c -- tiny DJGPP DOS exe that issues
 # INT 21h function 716Ch (LFN Extended Open/Create) for a long-named test
 # fixture (wavetable.dat, 9-char base, breaks 8.3) via three different paths:
-#   1. open() with 8.3 name           — control, always passes
-#   2. open() after _use_lfn(1)       — DJGPP libc LFN path
-#   3. __dpmi_int(0x21, AX=716Ch)     — raw DPMI, isolates the libc question
+#   1. open() with 8.3 name           -- control, always passes
+#   2. open() after _use_lfn(1)       -- DJGPP libc LFN path
+#   3. __dpmi_int(0x21, AX=716Ch)     -- raw DPMI, isolates the libc question
 #
 # Answers the gating Phase 8 question (docs/PHASE8-LFN-DECISION.md): does
 # CWSDPMI's INT 21h reflector pass LFN-family calls (function codes
@@ -447,7 +447,7 @@ smoke: $(HELLO_EXE)
 # probe.exe on g2k with LFNDOS.COM (or DOSLFN.COM) loaded. See the runner
 # script header + tests/dpmi-lfn-smoke/README.md for the decision tree.
 #
-# 8.3 DOS filename: basename "probe" + ".exe" — fits.
+# 8.3 DOS filename: basename "probe" + ".exe" -- fits.
 # minstack=256k: probe is tiny, default DPMI stack is plenty.
 
 DPMI_LFN_SMOKE_DIR := $(BUILD_DIR)/dpmi-lfn-smoke
@@ -465,15 +465,15 @@ dpmi-lfn-smoke: $(DPMI_LFN_SMOKE_EXE) | fetch-binaries
 
 # --- Phase 2d smoke: SDL3 DOS-backend probe -----------------------------------
 #
-# Builds tests/sdl3-smoke/sdltest.c — our own minimal probe authored against
-# public SDL3 APIs — into build/sdl3-smoke/sdltest.exe. Same coverage as
+# Builds tests/sdl3-smoke/sdltest.c -- our own minimal probe authored against
+# public SDL3 APIs -- into build/sdl3-smoke/sdltest.exe. Same coverage as
 # upstream's testaudioinfo + testdisplayinfo combined (audio driver/device
 # enumeration + video driver/display/mode enumeration), but writes via
 # printf() to stdout instead of SDL_Log() to stderr.
 #
 # Why our own probe instead of upstream's tests: SDL_Log goes to stderr
 # unconditionally (vendor/SDL/src/SDL_log.c), and neither MS-DOS COMMAND.COM
-# nor DOSBox-X's built-in shell support `2>&1` redirection — the headless
+# nor DOSBox-X's built-in shell support `2>&1` redirection -- the headless
 # capture would always be empty. Patching SDL test source to redirect log
 # output would conflict with vendor/SDL/CLAUDE.md (no AI-generated code into
 # SDL upstream). See tests/sdl3-smoke/README.md for the full rationale.
@@ -502,14 +502,14 @@ sdl3-smoke: $(SDL3_SMOKE_EXE)
 #
 # Software-architect added a functional gate on top of "libSDL3_mixer.a links":
 # three NXEngine audio code paths must execute end-to-end. This probe maps:
-#   Mix_QuickLoad_RAW (Organya) → MIX_LoadRawAudio
-#   Mix_LoadWAV (SFX)           → MIX_LoadAudio_IO from in-memory WAV
-#   OGG via stb_vorbis (Remix)  → VORBIS in MIX_GetAudioDecoder list
+#   Mix_QuickLoad_RAW (Organya) -> MIX_LoadRawAudio
+#   Mix_LoadWAV (SFX)           -> MIX_LoadAudio_IO from in-memory WAV
+#   OGG via stb_vorbis (Remix)  -> VORBIS in MIX_GetAudioDecoder list
 # See tests/sdl3-mixer-smoke/mixertest.c file header for full rationale.
 
 SDL3_MIXER_SMOKE_DIR := $(BUILD_DIR)/sdl3-mixer-smoke
 SDL3_MIXER_SMOKE_SRC := tests/sdl3-mixer-smoke/mixertest.c
-# 8.3 DOS filename: basename "mixsmk" (6) + ".exe" (4) — RUN.BAT references it
+# 8.3 DOS filename: basename "mixsmk" (6) + ".exe" (4) -- RUN.BAT references it
 # uppercased; DJGPP-built exe with > 8-char basename gets truncated by DOS and
 # becomes unfindable from the generated batch invocation.
 SDL3_MIXER_SMOKE_EXE := $(SDL3_MIXER_SMOKE_DIR)/mixsmk.exe
@@ -535,7 +535,7 @@ sdl3-mixer-smoke: $(SDL3_MIXER_SMOKE_EXE)
 
 SDL3_IMAGE_SMOKE_DIR := $(BUILD_DIR)/sdl3-image-smoke
 SDL3_IMAGE_SMOKE_SRC := tests/sdl3-image-smoke/imagetest.c
-# 8.3 DOS filename — basename "imgsmk" (6) + ".exe" (4); see sdl3-mixer-smoke
+# 8.3 DOS filename -- basename "imgsmk" (6) + ".exe" (4); see sdl3-mixer-smoke
 # for the rationale on why long basenames break headless DOSBox-X invocation.
 SDL3_IMAGE_SMOKE_EXE := $(SDL3_IMAGE_SMOKE_DIR)/imgsmk.exe
 
@@ -553,26 +553,26 @@ sdl3-image-smoke: $(SDL3_IMAGE_SMOKE_EXE)
 
 # --- Phase 9 wave 20 standalone diagnostic probes ----------------------------
 #
-# Builds tests/probes/*.c — small, isolated DJGPP probes that characterize
+# Builds tests/probes/*.c -- small, isolated DJGPP probes that characterize
 # real-HW behavior in ways the live binary's in-context instrumentation can't
 # reach. Each probe is a single .c file, pure DJGPP libc + chip-direct I/O,
 # NO SDL / NO engine dependency, NO DPMI assumptions beyond what `dosmemput`
 # and `__dpmi_int` need.
 #
 # Source + binaries are gitignored under /tests/probes/ (per
-# memory/never_commit_internal_plans.md — dev-only test scratch). The
+# memory/never_commit_internal_plans.md -- dev-only test scratch). The
 # `probes` target itself is the discoverability anchor.
 #
-# Per-probe DOSBox-X smoke is correctness-only — DOSBox-X is NOT a
+# Per-probe DOSBox-X smoke is correctness-only -- DOSBox-X is NOT a
 # perf proxy (see memory/dosbox_not_perf_proxy.md). Real numbers require
 # the CF-swap iter loop on g2k.
 #
-# 8.3 DOS filename rule: basename ≤ 8 chars, .ext ≤ 3 chars
+# 8.3 DOS filename rule: basename <= 8 chars, .ext <= 3 chars
 # (memory/dos_filename_8_3.md). All probe binaries pass.
 #
 # P0 (load-bearing for Lever C go/no-go + every future iter):
-#   DACPROG.EXE  — VGA DAC programming-cost ablation (FULL/PART64/SINGLE)
-#   HWLOG.EXE    — VBE info + CRTC + chip ID + PCI config-space dump
+#   DACPROG.EXE  -- VGA DAC programming-cost ablation (FULL/PART64/SINGLE)
+#   HWLOG.EXE    -- VBE info + CRTC + chip ID + PCI config-space dump
 #
 # P1 / P2 probes will land here when authored.
 
@@ -586,7 +586,7 @@ PROBE_DACPROG_EXE := $(PROBES_DIR)/dacprog.exe
 PROBE_HWLOG_SRC   := tests/probes/hwlog.c
 PROBE_HWLOG_EXE   := $(PROBES_DIR)/hwlog.exe
 
-# P1 — bandwidth/cost characterization (task #8)
+# P1 -- bandwidth/cost characterization (task #8)
 PROBE_DPMITHN_SRC := tests/probes/dpmithn.c
 PROBE_DPMITHN_EXE := $(PROBES_DIR)/dpmithn.exe
 
@@ -596,7 +596,7 @@ PROBE_L1FILL_EXE  := $(PROBES_DIR)/l1fill.exe
 PROBE_PARTIAL_SRC := tests/probes/partial.c
 PROBE_PARTIAL_EXE := $(PROBES_DIR)/partial.exe
 
-# P3 — diagnostic probes for the 13.5 ms flip() body baseline (task #12).
+# P3 -- diagnostic probes for the 13.5 ms flip() body baseline (task #12).
 # YIELD.EXE links libSDL3 because SDL_Delay / SDL_PumpEvents are SDL3 entry
 # points. CFFSYNC + IRQRATE remain pure-DJGPP.
 PROBE_YIELD_SRC   := tests/probes/yield.c
@@ -608,12 +608,12 @@ PROBE_CFFSYNC_EXE := $(PROBES_DIR)/cffsync.exe
 PROBE_IRQRATE_SRC := tests/probes/irqrate.c
 PROBE_IRQRATE_EXE := $(PROBES_DIR)/irqrate.exe
 
-# P4 — Phase 11 wave-22.5 path-B (tilemap caching) decision probe (task #14).
+# P4 -- Phase 11 wave-22.5 path-B (tilemap caching) decision probe (task #14).
 # 76800-byte read/write/memcpy decomposition + cache-tier sweep. Pure DJGPP.
 PROBE_MEMBW_SRC   := tests/probes/membw.c
 PROBE_MEMBW_EXE   := $(PROBES_DIR)/membw.exe
 
-# P5 — Phase 10 wave-22-WB-E MPU-401 / WaveBlaster init-sequence probe.
+# P5 -- Phase 10 wave-22-WB-E MPU-401 / WaveBlaster init-sequence probe.
 # Source name `mpuwbprobe.c` is host-side (no 8.3 limit); binary renamed to
 # the 8.3-fitting MPUPROBE.EXE via explicit Makefile rule below (the generic
 # %.exe pattern would emit `mpuwbprobe.exe` whose 9-char basename DOS would
@@ -624,63 +624,63 @@ PROBE_MEMBW_EXE   := $(PROBES_DIR)/membw.exe
 PROBE_MPUWB_SRC   := tests/probes/mpuwbprobe.c
 PROBE_MPUWB_EXE   := $(PROBES_DIR)/mpuprobe.exe
 
-# P6 — Phase 10 wave W22-WB iter H reduced-scope SDL+MPU probe.
+# P6 -- Phase 10 wave W22-WB iter H reduced-scope SDL+MPU probe.
 # Authors: SDL_Init(AUDIO) + audio device open + 1-sec service + direct-port
-# MPU-401 init + MIDI byte writes — all under SDL audio runtime. Discriminates
-# "is SDL audio init alone enough to break direct-port MPU access?" — a
+# MPU-401 init + MIDI byte writes -- all under SDL audio runtime. Discriminates
+# "is SDL audio init alone enough to break direct-port MPU access?" -- a
 # question MPUPROBE iter F (zero SDL) couldn't answer. SDL3-linked; minstack
 # 2048k matches PROBE_YIELD recipe. Source basename `mpusdlprobe` (host-side,
-# 11 chars) → binary basename `mpusdl` (8.3-fit) via explicit rule below.
+# 11 chars) -> binary basename `mpusdl` (8.3-fit) via explicit rule below.
 PROBE_MPUSDL_SRC  := tests/probes/mpusdlprobe.c
 PROBE_MPUSDL_EXE  := $(PROBES_DIR)/mpusdl.exe
 
-# P7 — Phase 11 wave-22.5 / iter H visit-loop overhead measurement.
+# P7 -- Phase 11 wave-22.5 / iter H visit-loop overhead measurement.
 # Decides nx-engine slot 0113 (off-screen tile skip) ship/no-ship: measures
 # real cost of iterating 30000 tiles vs 1900 tiles in tight loop with
-# RDTSC timing. Source basename `tileprobe` (9 chars host-side) → binary
+# RDTSC timing. Source basename `tileprobe` (9 chars host-side) -> binary
 # basename `tileprob` (8.3-fit) via explicit Makefile rule. Pure DJGPP.
 PROBE_TILE_SRC    := tests/probes/tileprobe.c
 PROBE_TILE_EXE    := $(PROBES_DIR)/tileprob.exe
 
-# P8 — Phase 11 wave-22.5 / iter H Pixtone synth cost characterization.
+# P8 -- Phase 11 wave-22.5 / iter H Pixtone synth cost characterization.
 # Decides nx-engine slot 0114 (alternate-flip Pixtone mix) ship/no-ship via
 # RDTSC-timed Pixtone-equivalent synth. Source basename `pixprobe` (8 chars
-# host-side) → binary `pixprob` (7+3 fits 8.3) per team-lead brief naming.
+# host-side) -> binary `pixprob` (7+3 fits 8.3) per team-lead brief naming.
 # Pure DJGPP + libm (math.h: sin in init only).
 PROBE_PIX_SRC     := tests/probes/pixprobe.c
 PROBE_PIX_EXE     := $(PROBES_DIR)/pixprob.exe
 
-# P9 — Phase 11 wave-25 / iter J probe suite (4 probes).
+# P9 -- Phase 11 wave-25 / iter J probe suite (4 probes).
 #
-# AUDBUF.EXE — SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES sweep (slot 0116 verify).
+# AUDBUF.EXE -- SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES sweep (slot 0116 verify).
 #   Sweeps buffer sizes {default,512,1024,2048,4096}, opens audio device at
 #   each, samples doskutsu_audio_irq_count over 1 sec wall, computes IRQ-rate
 #   ratio. SDL3-linked (PROBES_SDL_* recipe).
 PROBE_AUDBUF_SRC  := tests/probes/audbuf.c
 PROBE_AUDBUF_EXE  := $(PROBES_DIR)/audbuf.exe
 #
-# IDLEPROB.EXE — DSP idle-pause CPU yield (slot 0115 verify).
+# IDLEPROB.EXE -- DSP idle-pause CPU yield (slot 0115 verify).
 #   Scenarios A (audio active) vs B (SDL_DOSAudioForcePause), both running
 #   identical synth-engine loop for 1.0 sec wall; reports yield ms/flip.
 #   SDL3-linked. Watchdog: 200 ms pause-engagement cap, 30 sec total cap.
 PROBE_IDLE_SRC    := tests/probes/idleprob.c
 PROBE_IDLE_EXE    := $(PROBES_DIR)/idleprob.exe
 #
-# OPAQUE.EXE — opaque-tile bitmask audit (FPS-DEEPDIVE Cand #2 gating).
+# OPAQUE.EXE -- opaque-tile bitmask audit (FPS-DEEPDIVE Cand #2 gating).
 #   Pure DJGPP, no SDL. Parses 4bpp Windows BMP (data/Stage/PrtCave.pbm),
 #   walks 16x16 tiles, counts colorkey (master-black palette index 0)
 #   pixels per tile, reports pct_opaque + per-tile bitmask.
 PROBE_OPAQUE_SRC  := tests/probes/opaque.c
 PROBE_OPAQUE_EXE  := $(PROBES_DIR)/opaque.exe
 #
-# BLTFILL.EXE — Cirrus 5434 BLT solid-fill vs dosmemput head-to-head
+# BLTFILL.EXE -- Cirrus 5434 BLT solid-fill vs dosmemput head-to-head
 #               (FPS-DEEPDIVE Cand #4 gating).
 #   v2 in iter K with 3-mode fallback ladder (COLOR_EXPAND -> PATTERN_COPY
 #   -> BULK_COPY) + bit-3 busy poll + GR[0x0B] errata clear.
 PROBE_BLTFILL_SRC := tests/probes/bltfill.c
 PROBE_BLTFILL_EXE := $(PROBES_DIR)/bltfill.exe
 #
-# CHIPID.EXE — Cirrus chip-detect + BLT-engagement forensic dump
+# CHIPID.EXE -- Cirrus chip-detect + BLT-engagement forensic dump
 #              (BLTFILL v2 companion for iter K).
 #   Read-only register dump; lighter than HWLOG.EXE focused on
 #   the BLT-engagement question. Dumps full CRTC + SR + GR + VBE info +
@@ -688,37 +688,37 @@ PROBE_BLTFILL_EXE := $(PROBES_DIR)/bltfill.exe
 PROBE_CHIPID_SRC  := tests/probes/chipid.c
 PROBE_CHIPID_EXE  := $(PROBES_DIR)/chipid.exe
 
-# P12 — Phase 11 wave-36 task #10 Cirrus BLT async-parallelism probe.
+# P12 -- Phase 11 wave-36 task #10 Cirrus BLT async-parallelism probe.
 #   Gates hail-mary slot 0133 (BLT async backdrop flush): does the chip
 #   actually let the CPU do useful parallel work while the BLT runs? Source
-#   basename `cirrus-blt-async-probe` (host-side, 21 chars, descriptive) →
+#   basename `cirrus-blt-async-probe` (host-side, 21 chars, descriptive) ->
 #   binary basename `bltasync` (8.3-fit) via explicit Makefile rule below.
 #   Pure DJGPP. RDTSC-timed (calibrated against uclock at probe init).
 PROBE_BLTASYNC_SRC := tests/probes/cirrus-blt-async-probe.c
 PROBE_BLTASYNC_EXE := $(PROBES_DIR)/bltasync.exe
 
-# P13 — Phase 11 wave-36 Task A Cirrus BLT BULK_COPY variant-matrix probe.
+# P13 -- Phase 11 wave-36 Task A Cirrus BLT BULK_COPY variant-matrix probe.
 #   Root-cause investigation of BLTASYNC v2 REFUTE_VERIFY_FAIL: 8 variants
 #   systematically explore BULK_COPY register sequence + alternates (different
 #   src offsets, BLT_RESET ordering, color-reg state, PATTERN_COPY,
 #   COLOR_EXPAND reference anchor, offscreen-dst). Per-variant: raw dst
 #   first-16 + last-16 hex bytes + auto-classified status. Source basename
-#   `cirrus-blt-variant-probe` (host-side, 23 chars) → binary basename
+#   `cirrus-blt-variant-probe` (host-side, 23 chars) -> binary basename
 #   `bltvar` (8.3-fit) via explicit Makefile rule below.
 PROBE_BLTVAR_SRC := tests/probes/cirrus-blt-variant-probe.c
 PROBE_BLTVAR_EXE := $(PROBES_DIR)/bltvar.exe
 
-# P14 — Phase 11 wave-36 ceiling-bust probe A: LFB nearptr VRAM-write
+# P14 -- Phase 11 wave-36 ceiling-bust probe A: LFB nearptr VRAM-write
 #   throughput vs banked dosmemput. Tests whether the 19 MB/s dosmemput
 #   ceiling is a banked-mode CPU-PIO artifact (not a chip bandwidth limit)
 #   by directly mapping the Cirrus 5434 LFB via DPMI int 0x31 / fn 0x0800 +
 #   __djgpp_nearptr_enable() + base-address subtraction for a dereferenceable
-#   C pointer. Source basename `lfbnear-probe` (host-side, 13 chars) →
+#   C pointer. Source basename `lfbnear-probe` (host-side, 13 chars) ->
 #   binary basename `lfbnear` (8.3-fit) via explicit Makefile rule below.
 PROBE_LFBNEAR_SRC := tests/probes/lfbnear-probe.c
 PROBE_LFBNEAR_EXE := $(PROBES_DIR)/lfbnear.exe
 
-# P15 — Phase 11 wave-36 ceiling-bust probe B: Mode 13h packed-pixel bandwidth.
+# P15 -- Phase 11 wave-36 ceiling-bust probe B: Mode 13h packed-pixel bandwidth.
 #   Tests whether bank-switch overhead OR per-byte CPU PIO is the dominant
 #   dosmemput-bandwidth ceiling, by running same-shape transfers into a
 #   single-bank 64000-byte FB at 0xA000:0. Cross-anchor against LFBNEAR
@@ -726,14 +726,58 @@ PROBE_LFBNEAR_EXE := $(PROBES_DIR)/lfbnear.exe
 PROBE_MODE13H_SRC := tests/probes/mode13h-probe.c
 PROBE_MODE13H_EXE := $(PROBES_DIR)/mode13h.exe
 
-# SDLPROB1 + SDLPROB2 — SDL3-DOS cost decomposition split into two binaries
+# P16 -- Phase 11 wave-38 ride-along: Cirrus BLT PATTERN_COPY hail-mary
+#   re-attempt of wave-36 V6 (which emitted dst=all-0x00 / FAIL_OTHER).
+#   Variants V_PAT_A/B/C/D test mode-agnostic baseline, 1bpp-vs-8bpp
+#   source-interp discriminator, BLT_RESET pre-programming, and src-adjacency
+#   constraint. V7-lesson-aware probe authoring: FG+BG color regs set
+#   explicitly per variant; classifier emits expected-vs-got hex for both
+#   1bpp + 8bpp source interpretations. Source basename `bltpat-v2`
+#   (host-side, descriptive) -> binary basename `bltpat` (8.3-fit).
+PROBE_BLTPAT_SRC := tests/probes/bltpat-v2.c
+PROBE_BLTPAT_EXE := $(PROBES_DIR)/bltpat.exe
+
+# P17 -- Phase 11 wave-38 audio Tier 1: pure SB16 IRQ-hook wall-clock probe.
+#   Isolates SB16 IRQ-5 dispatch + minimal-ISR cost from SDL_mixer mix cost.
+#   Installs minimal ISR (ack DSP + count++; no RingCopyOut, no memset) +
+#   runs DMA auto-init playback at 4 rate variants. Refutation candidate
+#   vs wave-20 v3 "IRQ IS the cost" prior; informs wave-39 P1/P2/P9 dispatch.
+PROBE_AUDRQ_SRC := tests/probes/audrq.c
+PROBE_AUDRQ_EXE := $(PROBES_DIR)/audrq.exe
+
+# P18 -- Phase 11 wave-38 audio Tier 1: SDL_MixAudio mix-cost benchmark.
+#   Measures SDL3 mix-loop cost at 4 rate variants x 3 channel populations
+#   = 12 sub-scenarios. Sizes wave-39 P7 (Lever G rate reduction) precisely;
+#   discriminates P4 (silent-channel-skip) and P5 (mix-tick batching).
+#   Uses SDL_MixAudio as pure function (no audio device opened).
+PROBE_MIXBENCH_SRC := tests/probes/mixbench.c
+PROBE_MIXBENCH_EXE := $(PROBES_DIR)/mixbench.exe
+
+# P19 -- Phase 11 wave-38 audio Tier 2: Organya live-synth cost benchmark.
+#   Ports Song::Synth() nearest-neighbour per-sample math (Organya.cpp
+#   lines 282-328) into a pure DJGPP probe with synthetic wavetable.
+#   Measures wave-39 P1 (OPL3) + P2 (WaveBlaster MIDI) candidate work-
+#   elimination via MIDI hardware offload. 4 rate variants x 6 instruments.
+PROBE_ORGSYNTH_SRC := tests/probes/orgsynth.c
+PROBE_ORGSYNTH_EXE := $(PROBES_DIR)/orgsynth.exe
+
+# P20 -- Phase 11 wave-40 task #29: WaveBlaster MIDI sanity probe.
+#   Single-mechanism: send Note On + wait 1 sec + Note Off via MPU-401 UART
+#   ports (0x330/0x331). First sanity gate for wave-41+ WaveBlaster MIDI
+#   offload pipeline (Organya->MIDI bypass of SDL_mixer's mix loop). Per-stage
+#   emits between every outportb so hang stage is pinpointed on first iter
+#   per defensive_rewrite_requires_identified_failure_stage memory.
+PROBE_WBMIDI_SRC := tests/probes/wbmidi.c
+PROBE_WBMIDI_EXE := $(PROBES_DIR)/wbmidi.exe
+
+# SDLPROB1 + SDLPROB2 -- SDL3-DOS cost decomposition split into two binaries
 #   per docs/PHASE11-SDLPROBE-CONTRACT.md (sdl-engine task #23 designs the
 #   contract + authors sdlprob1; probe-engineer task #24 authors sdlprob2 +
 #   shared sdlprobe_common.h forensic-protocol header).
 #
-#   SDLPROB1.EXE — sdl-engine: per-primitive § 1 22 sub-cells + auxiliary § 3
-#   SDLPROB2.EXE — probe-engineer: composites § 2 A-D (this task #24)
-#   sdlprobe_common.h — probe-engineer: shared § 4 forensic-protocol header
+#   SDLPROB1.EXE -- sdl-engine: per-primitive sec. 1 22 sub-cells + auxiliary sec. 3
+#   SDLPROB2.EXE -- probe-engineer: composites sec. 2 A-D (this task #24)
+#   sdlprobe_common.h -- probe-engineer: shared sec. 4 forensic-protocol header
 #                       (BEGIN/DONE markers, watchdog, sample-stash, RDTSC
 #                       calibration, scenario-emit framework). Both binaries
 #                       #include this header.
@@ -742,8 +786,8 @@ PROBE_MODE13H_EXE := $(PROBES_DIR)/mode13h.exe
 # real HW.
 PROBE_SDLPROB2_SRC := tests/probes/sdlprob2.c
 PROBE_SDLPROB2_EXE := $(PROBES_DIR)/sdlprob2.exe
-# sdlprob1.c (sdl-engine task #23): per-primitive § 1 22+ sub-cells +
-# auxiliary § 3 PR #15377 hint status.
+# sdlprob1.c (sdl-engine task #23): per-primitive sec. 1 22+ sub-cells +
+# auxiliary sec. 3 PR #15377 hint status.
 PROBE_SDLPROB1_SRC := tests/probes/sdlprob1.c
 PROBE_SDLPROB1_EXE := $(PROBES_DIR)/sdlprob1.exe
 
@@ -753,7 +797,7 @@ $(PROBES_DIR)/%.exe: tests/probes/%.c | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-# Explicit rule for SDL3-linked probes — overrides the pattern rule above
+# Explicit rule for SDL3-linked probes -- overrides the pattern rule above
 # because Make picks the more-specific dep + recipe when both match.
 PROBES_SDL_CFLAGS := $(PROBES_CFLAGS) -I$(SYSROOT)/include
 PROBES_SDL_LDLIBS := -L$(SYSROOT)/lib -lSDL3 -lm
@@ -764,10 +808,10 @@ $(PROBE_YIELD_EXE): $(PROBE_YIELD_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
 	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
 	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
 
-# Explicit rule for MPU-401/WB probe — maps source basename `mpuwbprobe`
+# Explicit rule for MPU-401/WB probe -- maps source basename `mpuwbprobe`
 # (host-side, descriptive) to binary basename `mpuprobe` (8.3-clean for DOS).
 # Without this, the generic pattern rule `$(PROBES_DIR)/%.exe: tests/probes/%.c`
-# would produce `mpuprobe.exe` from a `mpuprobe.c` source — but team-lead
+# would produce `mpuprobe.exe` from a `mpuprobe.c` source -- but team-lead
 # requested the source filename be `mpuwbprobe.c`. Explicit rule has
 # precedence over the pattern rule, so this works without conflicts.
 $(PROBE_MPUWB_EXE): $(PROBE_MPUWB_SRC) | djgpp-check
@@ -775,8 +819,8 @@ $(PROBE_MPUWB_EXE): $(PROBE_MPUWB_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-# Explicit rule for the reduced-scope SDL+MPU probe — same source-vs-binary
-# basename divergence as PROBE_MPUWB (mpusdlprobe.c → mpusdl.exe; the source
+# Explicit rule for the reduced-scope SDL+MPU probe -- same source-vs-binary
+# basename divergence as PROBE_MPUWB (mpusdlprobe.c -> mpusdl.exe; the source
 # name is descriptive and host-side, the binary fits 8.3 for DOS). This probe
 # links libSDL3.a (PROBES_SDL_* recipe) + minstack=2048k to match YIELD.
 $(PROBE_MPUSDL_EXE): $(PROBE_MPUSDL_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
@@ -784,15 +828,15 @@ $(PROBE_MPUSDL_EXE): $(PROBE_MPUSDL_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
 	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
 	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
 
-# Explicit rule for visit-loop measurement probe — same source-vs-binary
-# basename divergence as PROBE_MPUWB (tileprobe.c → tileprob.exe). Pure
+# Explicit rule for visit-loop measurement probe -- same source-vs-binary
+# basename divergence as PROBE_MPUWB (tileprobe.c -> tileprob.exe). Pure
 # DJGPP, no SDL deps; uses the same PROBES_CFLAGS as P0/P1 probes.
 $(PROBE_TILE_EXE): $(PROBE_TILE_SRC) | djgpp-check
 	@mkdir -p $(PROBES_DIR)
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-# Explicit rule for Pixtone-synth-cost probe — pixprobe.c → pixprob.exe per
+# Explicit rule for Pixtone-synth-cost probe -- pixprobe.c -> pixprob.exe per
 # team-lead brief naming convention. Links libm for sin() used in wavetable
 # init only; the timed synth loop has no libm calls. Pure DJGPP otherwise.
 $(PROBE_PIX_EXE): $(PROBE_PIX_SRC) | djgpp-check
@@ -800,7 +844,7 @@ $(PROBE_PIX_EXE): $(PROBE_PIX_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $< -lm
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-# P9 explicit rules — iter J probe suite.
+# P9 explicit rules -- iter J probe suite.
 # AUDBUF + IDLEPROB are SDL3-linked (PROBES_SDL_* recipe, minstack 2048k).
 $(PROBE_AUDBUF_EXE): $(PROBE_AUDBUF_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
 	@mkdir -p $(PROBES_DIR)
@@ -827,7 +871,7 @@ $(PROBE_SDLPROB1_EXE): $(PROBE_SDLPROB1_SRC) $(PROBE_SDLPROB1_HDR) $(SYSROOT)/li
 # OPAQUE + BLTFILL are pure DJGPP (use the generic %.exe pattern rule above).
 # No explicit rules needed; the pattern handles them.
 
-# Explicit rule for Cirrus BLT async probe — same source-vs-binary basename
+# Explicit rule for Cirrus BLT async probe -- same source-vs-binary basename
 # divergence as PROBE_MPUWB / PROBE_TILE (host-side descriptive source name
 # maps to 8.3-clean DOS binary basename). Pure DJGPP, no SDL deps.
 $(PROBE_BLTASYNC_EXE): $(PROBE_BLTASYNC_SRC) | djgpp-check
@@ -853,12 +897,45 @@ $(PROBE_MODE13H_EXE): $(PROBE_MODE13H_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15
+# Explicit rule for Cirrus BLT PATTERN_COPY hail-mary probe (wave-38 ride-along).
+$(PROBE_BLTPAT_EXE): $(PROBE_BLTPAT_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# Explicit rule for pure SB16 IRQ-hook wall-clock probe (wave-38 audio Tier 1).
+$(PROBE_AUDRQ_EXE): $(PROBE_AUDRQ_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# Explicit rule for SDL_MixAudio mix-cost probe (wave-38 audio Tier 1).
+# SDL3-linked (like AUDBUF + YIELD); minstack 2048k.
+$(PROBE_MIXBENCH_EXE): $(PROBE_MIXBENCH_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
+# Explicit rule for Organya live-synth cost probe (wave-38 audio Tier 2).
+# Pure DJGPP + libm (for pow() in panning math).
+$(PROBE_ORGSYNTH_EXE): $(PROBE_ORGSYNTH_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $< -lm
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+# Explicit rule for WaveBlaster MIDI sanity probe (wave-40 task #29).
+# Pure DJGPP, no library deps; output-only port writes.
+$(PROBE_WBMIDI_EXE): $(PROBE_WBMIDI_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20
 dacprog: $(PROBE_DACPROG_EXE)
-	@echo "Built $(PROBE_DACPROG_EXE) — ship via real-HW iter (DOSBox-X is correctness-only)."
+	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
 hwlog: $(PROBE_HWLOG_EXE)
-	@echo "Built $(PROBE_HWLOG_EXE) — ship via real-HW iter (DOSBox-X PCI/VBE values differ from real HW)."
+	@echo "Built $(PROBE_HWLOG_EXE) -- ship via real-HW iter (DOSBox-X PCI/VBE values differ from real HW)."
 
 dpmithn: $(PROBE_DPMITHN_EXE)
 	@echo "Built $(PROBE_DPMITHN_EXE)"
@@ -870,7 +947,7 @@ partial: $(PROBE_PARTIAL_EXE)
 	@echo "Built $(PROBE_PARTIAL_EXE)"
 
 yield: $(PROBE_YIELD_EXE)
-	@echo "Built $(PROBE_YIELD_EXE) — SDL3-linked; ship via real-HW iter."
+	@echo "Built $(PROBE_YIELD_EXE) -- SDL3-linked; ship via real-HW iter."
 
 cffsync: $(PROBE_CFFSYNC_EXE)
 	@echo "Built $(PROBE_CFFSYNC_EXE)"
@@ -879,36 +956,36 @@ irqrate: $(PROBE_IRQRATE_EXE)
 	@echo "Built $(PROBE_IRQRATE_EXE)"
 
 membw: $(PROBE_MEMBW_EXE)
-	@echo "Built $(PROBE_MEMBW_EXE) — phase11 wave-22.5 path-B decision probe."
+	@echo "Built $(PROBE_MEMBW_EXE) -- phase11 wave-22.5 path-B decision probe."
 	@echo "  Real-HW iter: bundle MEMBW.EXE + CWSDPMI.EXE + tests/probes/membw.bat;"
 	@echo "  operator runs MEMBW.BAT once; output -> MEMBW.OUT (logback collects)."
 
 mpuwbprobe: $(PROBE_MPUWB_EXE)
-	@echo "Built $(PROBE_MPUWB_EXE) — phase10 wave-22-WB-E MPU-401 / WaveBlaster"
+	@echo "Built $(PROBE_MPUWB_EXE) -- phase10 wave-22-WB-E MPU-401 / WaveBlaster"
 	@echo "  init-sequence probe. Real-HW iter: bundle as MPUPROBE.EXE alongside"
 	@echo "  CWSDPMI.EXE + tests/probes/mpuprobe.bat; operator runs MPUPROBE.BAT;"
 	@echo "  output -> MPUPROBE.LOG (logback collects). HAZARD: this probe may"
-	@echo "  hang the ISA bus on real Vibra16S+S2 — that's the diagnostic signal."
+	@echo "  hang the ISA bus on real Vibra16S+S2 -- that's the diagnostic signal."
 	@echo "  Per-step BEGIN/DONE markers in the log identify the hung instruction."
 
 mpusdlprobe: $(PROBE_MPUSDL_EXE)
-	@echo "Built $(PROBE_MPUSDL_EXE) — phase10 wave-22-WB iter H reduced-scope"
+	@echo "Built $(PROBE_MPUSDL_EXE) -- phase10 wave-22-WB iter H reduced-scope"
 	@echo "  SDL+MPU probe. Tests direct-port MPU-401 init AFTER SDL audio is"
 	@echo "  running (1 sec service). Real-HW iter: bundle as MPUSDL.EXE +"
 	@echo "  CWSDPMI.EXE + tests/probes/mpusdl.bat. Output -> MPUSDL.LOG."
 	@echo "  HAZARD: probe may hang mid-step on real HW; that IS the diagnostic."
 
 tileprobe: $(PROBE_TILE_EXE)
-	@echo "Built $(PROBE_TILE_EXE) — phase11 wave-22.5 / iter H visit-loop"
+	@echo "Built $(PROBE_TILE_EXE) -- phase11 wave-22.5 / iter H visit-loop"
 	@echo "  overhead probe. Decides slot 0113 ship/no-ship via 30000-tile"
 	@echo "  full-loop vs 1900-tile bbox-loop RDTSC measurement. Real-HW iter:"
 	@echo "  bundle as TILEPROB.EXE + CWSDPMI.EXE + tests/probes/tileprob.bat."
 	@echo "  Output -> TILEPROB.LOG. No hang risk; runtime ~1-3 sec."
 
 pixprobe: $(PROBE_PIX_EXE)
-	@echo "Built $(PROBE_PIX_EXE) — phase11 wave-22.5 / iter H Pixtone synth"
+	@echo "Built $(PROBE_PIX_EXE) -- phase11 wave-22.5 / iter H Pixtone synth"
 	@echo "  cost probe. Decides slot 0114 (alternate-flip mix) ship/no-ship"
-	@echo "  via faithful Pixtone-equivalent synth × 9-scenario sweep with"
+	@echo "  via faithful Pixtone-equivalent synth x 9-scenario sweep with"
 	@echo "  RDTSC timing. Real-HW iter: bundle as PIXPROB.EXE + CWSDPMI.EXE +"
 	@echo "  tests/probes/pixprob.bat. Output -> PIXPROB.LOG. No hang risk."
 
@@ -928,52 +1005,52 @@ probes-p5: $(PROBE_MPUWB_EXE)
 	@echo "Built P5 probe set: mpuprobe.exe (wave-22-WB-E MPU/WB init diagnosis)"
 
 probes-p6: $(PROBE_MPUSDL_EXE)
-	@echo "Built P6 probe set: mpusdl.exe (wave-22-WB iter H — reduced-scope SDL+MPU)"
+	@echo "Built P6 probe set: mpusdl.exe (wave-22-WB iter H -- reduced-scope SDL+MPU)"
 
 probes-p7: $(PROBE_TILE_EXE)
-	@echo "Built P7 probe set: tileprob.exe (wave-22.5 / iter H — visit-loop overhead)"
+	@echo "Built P7 probe set: tileprob.exe (wave-22.5 / iter H -- visit-loop overhead)"
 
 probes-p8: $(PROBE_PIX_EXE)
-	@echo "Built P8 probe set: pixprob.exe (wave-22.5 / iter H — Pixtone synth cost)"
+	@echo "Built P8 probe set: pixprob.exe (wave-22.5 / iter H -- Pixtone synth cost)"
 
 audbuf: $(PROBE_AUDBUF_EXE)
-	@echo "Built $(PROBE_AUDBUF_EXE) — phase11 wave-25 / iter J SAMPLE_FRAMES sweep"
+	@echo "Built $(PROBE_AUDBUF_EXE) -- phase11 wave-25 / iter J SAMPLE_FRAMES sweep"
 	@echo "  (slot 0116 deferred 2026-05-07; AUDBUF data-driven for iter K choice)."
 	@echo "  Sweeps 256/384/512/1024/2048/4096; argmin(irq_wall_pct) = recommended."
 	@echo "  SDL3-linked. Real-HW iter: bundle alongside CWSDPMI.EXE +"
 	@echo "  tests/probes/audbuf.bat. Output -> AUDBUF.LOG."
 
 idleprob: $(PROBE_IDLE_EXE)
-	@echo "Built $(PROBE_IDLE_EXE) — phase11 wave-25 / iter J slot 0115 verify."
+	@echo "Built $(PROBE_IDLE_EXE) -- phase11 wave-25 / iter J slot 0115 verify."
 	@echo "  SDL3-linked. Real-HW iter: bundle alongside CWSDPMI.EXE +"
 	@echo "  tests/probes/idleprob.bat. Output -> IDLEPROB.LOG."
-	@echo "  HAZARD: SDL_DOSAudioForcePause manipulates DSP DMA — bus-lock"
+	@echo "  HAZARD: SDL_DOSAudioForcePause manipulates DSP DMA -- bus-lock"
 	@echo "  potential on real Vibra16S; BEGIN/DONE markers in log identify"
 	@echo "  the stalling instruction if hung."
 
 opaque: $(PROBE_OPAQUE_EXE)
-	@echo "Built $(PROBE_OPAQUE_EXE) — phase11 wave-25 / iter J cand #2 gating."
+	@echo "Built $(PROBE_OPAQUE_EXE) -- phase11 wave-25 / iter J cand #2 gating."
 	@echo "  Pure DJGPP, no hardware-IO. Real-HW iter: bundle alongside"
 	@echo "  CWSDPMI.EXE + tests/probes/opaque.bat. Loads PrtCave.pbm from"
 	@echo "  data/Stage/, outputs OPAQUE.LOG with pct_opaque + per-tile bitmask."
 
 bltfill: $(PROBE_BLTFILL_EXE)
-	@echo "Built $(PROBE_BLTFILL_EXE) — phase11 wave-27 / iter K cand #4 gating (v2)."
+	@echo "Built $(PROBE_BLTFILL_EXE) -- phase11 wave-27 / iter K cand #4 gating (v2)."
 	@echo "  Pure DJGPP. v2: bit-3 BLT_PROGRESS busy poll + GR[0x0B] errata clear +"
 	@echo "  3-mode fallback ladder (COLOR_EXPAND -> PATTERN_COPY -> BULK_COPY)."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/bltfill.bat."
 	@echo "  Output -> BLTFILL.LOG. Companion: CHIPID.EXE forensic dump."
 
 chipid: $(PROBE_CHIPID_EXE)
-	@echo "Built $(PROBE_CHIPID_EXE) — phase11 wave-27 / iter K BLTFILL v2 companion."
+	@echo "Built $(PROBE_CHIPID_EXE) -- phase11 wave-27 / iter K BLTFILL v2 companion."
 	@echo "  Pure DJGPP, read-only chip-state probe (only side-effect: SR[0x06]"
-	@echo "  Cirrus extension unlock — non-destructive). Dumps full CRTC + SR + GR"
+	@echo "  Cirrus extension unlock -- non-destructive). Dumps full CRTC + SR + GR"
 	@echo "  + VBE info + PCI config + decodes BLT engine extension regs."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/chipid.bat."
 	@echo "  Output -> CHIPID.LOG."
 
 sdlprob2: $(PROBE_SDLPROB2_EXE)
-	@echo "Built $(PROBE_SDLPROB2_EXE) — phase11 iter L composites § 2 (task #24)."
+	@echo "Built $(PROBE_SDLPROB2_EXE) -- phase11 iter L composites sec. 2 (task #24)."
 	@echo "  SDL3-linked. 4 composite scenarios A-D per docs/PHASE11-SDLPROBE-CONTRACT.md:"
 	@echo "  A=tile_pre_0117  B=tile_post_0117  C=sprite_full  D=menu_INDEX8_alpha_CK_slow."
 	@echo "  Includes shared sdlprobe_common.h forensic-protocol header (also used by"
@@ -981,9 +1058,9 @@ sdlprob2: $(PROBE_SDLPROB2_EXE)
 	@echo "  Output -> SDLPROB2.LOG. flush-instr authors SDLPROB2.BAT for iter L bundle."
 
 sdlprob1: $(PROBE_SDLPROB1_EXE)
-	@echo "Built $(PROBE_SDLPROB1_EXE) — phase11 iter L per-primitive § 1 + aux § 3 (task #23)."
+	@echo "Built $(PROBE_SDLPROB1_EXE) -- phase11 iter L per-primitive sec. 1 + aux sec. 3 (task #23)."
 	@echo "  SDL3-linked. 24 sub-cell scenarios per docs/PHASE11-SDLPROBE-CONTRACT.md:"
-	@echo "  GetTicks / PumpEvents (2) / BlitSurface (12 = 3 sizes × ±CK × ±alpha) /"
+	@echo "  GetTicks / PumpEvents (2) / BlitSurface (12 = 3 sizes x +/-CK x +/-alpha) /"
 	@echo "  CreateTex+Destroy / RenderTexture (2) / ColorMod+BlendMode / RenderPresent /"
 	@echo "  Delay(1) / audio_callback_overhead / irq_count_baseline. Auxiliary section 3"
 	@echo "  emits PR #15377 hint status block at probe init. Includes shared sdlprobe_common.h."
@@ -991,26 +1068,26 @@ sdlprob1: $(PROBE_SDLPROB1_EXE)
 
 probes-p9: $(PROBE_AUDBUF_EXE) $(PROBE_IDLE_EXE) $(PROBE_OPAQUE_EXE) $(PROBE_BLTFILL_EXE)
 	@echo "Built P9 probe set: audbuf.exe + idleprob.exe + opaque.exe + bltfill.exe"
-	@echo "  Phase 11 wave-25 / iter J — AUDBUF/IDLEPROB verify slot 0115/0116;"
+	@echo "  Phase 11 wave-25 / iter J -- AUDBUF/IDLEPROB verify slot 0115/0116;"
 	@echo "  OPAQUE/BLTFILL gate FPS-DEEPDIVE candidates #2/#4 for iter K."
 
-# P10 — Phase 11 wave-27 / iter K probe additions: BLTFILL v2 fixup + CHIPID
+# P10 -- Phase 11 wave-27 / iter K probe additions: BLTFILL v2 fixup + CHIPID
 # forensic companion. BLTFILL v2 supersedes iter J's v1 (build target unchanged).
 probes-p10: $(PROBE_BLTFILL_EXE) $(PROBE_CHIPID_EXE)
 	@echo "Built P10 probe set: bltfill.exe (v2) + chipid.exe"
-	@echo "  Phase 11 wave-27 / iter K — BLTFILL v2 fixes register encoding +"
+	@echo "  Phase 11 wave-27 / iter K -- BLTFILL v2 fixes register encoding +"
 	@echo "  CHIPID forensic dump runs alongside as fallback diagnostic."
 
-# P11 — Phase 11 iter L SDL3-DOS cost decomposition: split into SDLPROB1
+# P11 -- Phase 11 iter L SDL3-DOS cost decomposition: split into SDLPROB1
 # (sdl-engine task #23) + SDLPROB2 (probe-engineer task #24, this lane).
 # Aggregate target builds whichever is currently authored; sdlprob1 lands
 # when sdl-engine completes their work.
 probes-p11: $(PROBE_SDLPROB2_EXE)
-	@echo "Built P11 probe set (partial): sdlprob2.exe (iter L — composites § 2)"
+	@echo "Built P11 probe set (partial): sdlprob2.exe (iter L -- composites sec. 2)"
 	@echo "  sdlprob1.exe (sdl-engine task #23) lands separately."
 
 bltasync: $(PROBE_BLTASYNC_EXE)
-	@echo "Built $(PROBE_BLTASYNC_EXE) — phase11 wave-36 task #10."
+	@echo "Built $(PROBE_BLTASYNC_EXE) -- phase11 wave-36 task #10."
 	@echo "  Gates hail-mary slot 0133 (Cirrus BLT async backdrop flush)."
 	@echo "  Pure DJGPP; RDTSC-timed. Real-HW iter: bundle alongside CWSDPMI.EXE"
 	@echo "  + tests/probes/bltasync.bat. Output -> BLTASYNC.LOG."
@@ -1019,7 +1096,7 @@ bltasync: $(PROBE_BLTASYNC_EXE)
 	@echo "  restores text mode before exit. Runtime ~30-60 sec on PODP83."
 
 bltvar: $(PROBE_BLTVAR_EXE)
-	@echo "Built $(PROBE_BLTVAR_EXE) — phase11 wave-36 Task A."
+	@echo "Built $(PROBE_BLTVAR_EXE) -- phase11 wave-36 Task A."
 	@echo "  Root-cause investigation of BLTASYNC v2 REFUTE_VERIFY_FAIL: 8 variants"
 	@echo "  systematically explore BULK_COPY register sequence + alternates."
 	@echo "  Pure DJGPP. Per-variant: raw dst first-16 + last-16 hex bytes +"
@@ -1028,7 +1105,7 @@ bltvar: $(PROBE_BLTVAR_EXE)
 	@echo "  HAZARD: enters VBE 8bpp mode; restores text mode. Runtime ~5 sec."
 
 lfbnear: $(PROBE_LFBNEAR_EXE)
-	@echo "Built $(PROBE_LFBNEAR_EXE) — phase11 wave-36 ceiling-bust A."
+	@echo "Built $(PROBE_LFBNEAR_EXE) -- phase11 wave-36 ceiling-bust A."
 	@echo "  Tests whether 19 MB/s dosmemput ceiling is banked-mode-CPU-PIO artifact"
 	@echo "  by mapping Cirrus 5434 LFB via DPMI + nearptr. Pure DJGPP."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/lfbnear.bat."
@@ -1036,7 +1113,7 @@ lfbnear: $(PROBE_LFBNEAR_EXE)
 	@echo "  HAZARD: enters VBE mode 0x4101; restores text. Runtime ~10 sec."
 
 mode13h: $(PROBE_MODE13H_EXE)
-	@echo "Built $(PROBE_MODE13H_EXE) — phase11 wave-36 ceiling-bust B."
+	@echo "Built $(PROBE_MODE13H_EXE) -- phase11 wave-36 ceiling-bust B."
 	@echo "  Tests Mode 13h (single-bank 320x200x8) vs banked-mode bandwidth."
 	@echo "  Cross-anchor against LFBNEAR to triangulate bank-switch vs DPMI thunk"
 	@echo "  vs sysmem-to-VRAM CPU bandwidth ceiling. Pure DJGPP."
@@ -1044,25 +1121,96 @@ mode13h: $(PROBE_MODE13H_EXE)
 	@echo "  Output -> MODE13H.LOG. Verdict: SHIP_MODE13H/SHIP_NEARPTR/DROP/HARNESS_SUSPECT."
 	@echo "  HAZARD: enters Mode 13h; restores text. Runtime ~5 sec."
 
-# P12 — Phase 11 wave-36 task #10 Cirrus BLT async-parallelism probe.
+bltpat: $(PROBE_BLTPAT_EXE)
+	@echo "Built $(PROBE_BLTPAT_EXE) -- phase11 wave-38 ride-along (PATTERN_COPY hail-mary)."
+	@echo "  Re-attempts wave-36 V6 with V7-lesson-aware probe authoring: 4 variants"
+	@echo "  (V_PAT_A baseline_uniform / V_PAT_B byte_checker / V_PAT_C reset_pre /"
+	@echo "  V_PAT_D src_far) set FG+BG color regs explicitly, emit expected-vs-got hex"
+	@echo "  for both 1bpp and 8bpp source interpretations. Pure DJGPP."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/bltpat.bat."
+	@echo "  Output -> BLTPAT.LOG. Runtime ~5 sec."
+	@echo "  HAZARD: enters VBE 8bpp mode; restores text mode before exit."
+
+audrq: $(PROBE_AUDRQ_EXE)
+	@echo "Built $(PROBE_AUDRQ_EXE) -- phase11 wave-39 task #18 (audrq v2 defensive re-author)."
+	@echo "  Isolates SB16 IRQ-5 dispatch + minimal-ISR wall-clock from SDL_mixer mix cost."
+	@echo "  4 rate variants: 44100s/22050s/11025s/11025m. 1 sec measurement each (v2)."
+	@echo "  v2 defenses: ISR deadman + atexit panic + IRQ-vector verify + pre-mask-during-setup"
+	@echo "  + per-stage progress emits. Status enum adds RATE_IRQ_STORM_DETECTED."
+	@echo "  Pure DJGPP; raw SB16 DSP+DMA+IRQ-hook (no SDL link). RDTSC min/med/p95/max."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/audrq.bat."
+	@echo "  Output -> AUDRQ.LOG. Runtime ~5-8 sec (down from v1's 15-20)."
+	@echo "  HAZARD: directly programs SB16; 60-sec watchdog before Ctrl-Alt-Del."
+	@echo "  Reduced operator-time on hang AND atexit panic handler in v2."
+
+mixbench: $(PROBE_MIXBENCH_EXE)
+	@echo "Built $(PROBE_MIXBENCH_EXE) -- phase11 wave-38 audio Tier 1 (SDL_MixAudio mix-cost)."
+	@echo "  Measures SDL3 mix-loop cost: 4 rates x 3 channel-populations = 12 scenarios."
+	@echo "  SDL3-linked but does NOT open audio device (pure SDL_MixAudio benchmark)."
+	@echo "  Sizes wave-39 P7 (Lever G); discriminates P4 (silent-skip), P5 (batching)."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/mixbench.bat."
+	@echo "  Output -> MIXBENCH.LOG. Runtime ~30-60 sec."
+	@echo "  HAZARD: none (no audio device, no chip-state); standard DJGPP runtime."
+
+orgsynth: $(PROBE_ORGSYNTH_EXE)
+	@echo "Built $(PROBE_ORGSYNTH_EXE) -- phase11 wave-38 audio Tier 2 (Organya synth cost)."
+	@echo "  Ports Organya Song::Synth nearest-neighbour per-sample math from vendor"
+	@echo "  Organya.cpp. Synthetic wavetable (100x256). 6 simulated instruments."
+	@echo "  Measures wave-39 P1 (OPL3) + P2 (WaveBlaster MIDI) work-elimination."
+	@echo "  4 rate variants. Pure DJGPP + libm. No audio device, no chip-state."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/orgsynth.bat."
+	@echo "  Output -> ORGSYNTH.LOG. Runtime ~10-20 sec."
+	@echo "  HAZARD: none (offline synth; no IRQ/DMA touched)."
+
+wbmidi: $(PROBE_WBMIDI_EXE)
+	@echo "Built $(PROBE_WBMIDI_EXE) -- phase11 wave-40 task #29 (WaveBlaster MIDI sanity)."
+	@echo "  Single-mechanism probe: Note On / wait 1 sec / Note Off via MPU-401."
+	@echo "  Per-stage emits between every outportb (defensive_rewrite memory disc)."
+	@echo "  First sanity gate for wave-41+ WaveBlaster MIDI offload pipeline."
+	@echo "  Pure DJGPP, no SDL link, output-only port writes (0x330/0x331)."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/wbmidi.bat."
+	@echo "  Output -> WBMIDI.LOG. Runtime ~2 sec."
+	@echo "  HAZARD: none (no IRQ/DMA/SDL/audio-device); pure port writes."
+
+# P12 -- Phase 11 wave-36 task #10 Cirrus BLT async-parallelism probe.
 # Standalone gate for slot 0133 hail-mary; bundled into wave-36 iter or its
 # own quick-probe iter per team-lead direction.
 probes-p12: $(PROBE_BLTASYNC_EXE)
-	@echo "Built P12 probe set: bltasync.exe (wave-36 task #10 — BLT async gate)"
+	@echo "Built P12 probe set: bltasync.exe (wave-36 task #10 -- BLT async gate)"
 
-# P13 — Phase 11 wave-36 Task A BLT BULK_COPY variant matrix.
+# P13 -- Phase 11 wave-36 Task A BLT BULK_COPY variant matrix.
 probes-p13: $(PROBE_BLTVAR_EXE)
-	@echo "Built P13 probe set: bltvar.exe (wave-36 Task A — BULK_COPY root-cause)"
+	@echo "Built P13 probe set: bltvar.exe (wave-36 Task A -- BULK_COPY root-cause)"
 
-# P14 — Phase 11 wave-36 ceiling-bust A: LFB nearptr throughput probe.
+# P14 -- Phase 11 wave-36 ceiling-bust A: LFB nearptr throughput probe.
 probes-p14: $(PROBE_LFBNEAR_EXE)
-	@echo "Built P14 probe set: lfbnear.exe (wave-36 ceiling-bust A — LFB nearptr vs banked)"
+	@echo "Built P14 probe set: lfbnear.exe (wave-36 ceiling-bust A -- LFB nearptr vs banked)"
 
-# P15 — Phase 11 wave-36 ceiling-bust B: Mode 13h packed-pixel bandwidth probe.
+# P15 -- Phase 11 wave-36 ceiling-bust B: Mode 13h packed-pixel bandwidth probe.
 probes-p15: $(PROBE_MODE13H_EXE)
-	@echo "Built P15 probe set: mode13h.exe (wave-36 ceiling-bust B — Mode 13h vs banked)"
+	@echo "Built P15 probe set: mode13h.exe (wave-36 ceiling-bust B -- Mode 13h vs banked)"
 
-probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15
+# P16 -- Phase 11 wave-38 ride-along: Cirrus BLT PATTERN_COPY hail-mary.
+probes-p16: $(PROBE_BLTPAT_EXE)
+	@echo "Built P16 probe set: bltpat.exe (wave-38 PATTERN_COPY hail-mary -- V_PAT_A/B/C/D)"
+
+# P17 -- Phase 11 wave-38 audio Tier 1: pure SB16 IRQ-hook wall-clock probe.
+probes-p17: $(PROBE_AUDRQ_EXE)
+	@echo "Built P17 probe set: audrq.exe (wave-38 audio Tier 1 -- IRQ-hook wall-clock)"
+
+# P18 -- Phase 11 wave-38 audio Tier 1: SDL_MixAudio mix-cost benchmark.
+probes-p18: $(PROBE_MIXBENCH_EXE)
+	@echo "Built P18 probe set: mixbench.exe (wave-38 audio Tier 1 -- mix-cost benchmark)"
+
+# P19 -- Phase 11 wave-38 audio Tier 2: Organya live-synth cost benchmark.
+probes-p19: $(PROBE_ORGSYNTH_EXE)
+	@echo "Built P19 probe set: orgsynth.exe (wave-38 audio Tier 2 -- Organya synth cost)"
+
+# P20 -- Phase 11 wave-40 task #29: WaveBlaster MIDI sanity probe.
+probes-p20: $(PROBE_WBMIDI_EXE)
+	@echo "Built P20 probe set: wbmidi.exe (wave-40 task #29 -- WaveBlaster MIDI sanity)"
+
+probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
 	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (BAT redirect)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"
@@ -1071,11 +1219,11 @@ probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 pr
 #
 # make dist        produces dist/doskutsu-cf.zip with the legal-complete payload
 # make dist-list   prints the manifest of what dist would package, without
-#                  building the binary or staging files — for sanity-checking
-#                  the bundle composition against PLAN.md § Licensing
+#                  building the binary or staging files -- for sanity-checking
+#                  the bundle composition against PLAN.md sec. Licensing
 # make install     copies the same payload to a mounted CF card ($CF required)
 #
-# PAYLOAD (matches PLAN.md § Licensing § Downstream redistribution checklist):
+# PAYLOAD (matches PLAN.md sec. Licensing sec. Downstream redistribution checklist):
 #   DOSKUTSU.EXE       the binary
 #   CWSDPMI.EXE        DPMI host
 #   CWSDPMI.DOC        CWSDPMI redistribution terms (required by its license)
@@ -1083,13 +1231,13 @@ probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 pr
 #   GPLV3.TXT          NXEngine-evo's GPLv3 (dominant license of the binary)
 #   THIRD-PARTY.TXT    attribution matrix (CRLF normalized)
 #   README.TXT         DOS-readable quick-start + asset-extraction pointer
-#   DATA/...           NXEngine-evo bundled engine data — fonts, baseline
+#   DATA/...           NXEngine-evo bundled engine data -- fonts, baseline
 #                      .pbm backgrounds, sprite metadata, JSON configs,
 #                      tilekey.dat, StageMeta/, endpic/. Cloned verbatim
-#                      from vendor/nxengine-evo/data/ — GPLv3-inherited.
+#                      from vendor/nxengine-evo/data/ -- GPLv3-inherited.
 #
 # Cave Story freeware game data (maps, NPC sprites, .org music, .pxt SFX,
-# wavetable.dat, stage.dat) is **NEVER** in this zip — those come from the
+# wavetable.dat, stage.dat) is **NEVER** in this zip -- those come from the
 # user's own Doukutsu.exe extraction per docs/ASSETS.md. The DATA/ subdir
 # in the dist contains only what NXEngine-evo upstream ships in its data/
 # directory; users add their extracted Cave Story content on top after install.
@@ -1105,7 +1253,7 @@ CRLF := awk 'BEGIN{ORS="\r\n"} {sub(/\r$$/, ""); print}'
 # GPL text source: the cloned NXEngine-evo tree ships its LICENSE file at the root.
 NX_LICENSE := $(NXENGINE_SRC)/LICENSE
 
-# Engine-bundled data tree — cloned verbatim into the zip's DATA/ subdir.
+# Engine-bundled data tree -- cloned verbatim into the zip's DATA/ subdir.
 # Contents (as of vendor SHA pinned in vendor/sources.manifest): bitmap
 # fonts (font_*.fnt + font_*_*.png), Face*.pbm dialog portraits, sprites.sif
 # atlas, tilekey.dat, system.json + music.json + music_dirs.json, spot.png
@@ -1185,13 +1333,13 @@ Full source, including build scripts and DOS-port patches:
 endef
 export DIST_README
 
-# --- dist-list — manifest dry-run ---------------------------------------------
+# --- dist-list -- manifest dry-run ---------------------------------------------
 #
 # Prints what `make dist` would package, without building doskutsu.exe or
 # staging files. Used to sanity-check the bundle composition against
-# PLAN.md § Licensing § Downstream redistribution checklist before cutting
+# PLAN.md sec. Licensing sec. Downstream redistribution checklist before cutting
 # a release. Sources that don't exist (e.g. vendor tree not cloned, binary
-# not built) are flagged "[MISSING]" but do not fail the target — this is
+# not built) are flagged "[MISSING]" but do not fail the target -- this is
 # intentional: dist-list answers "would this bundle the right things?"
 # regardless of whether the build artifacts are present yet.
 
@@ -1212,7 +1360,7 @@ dist-list:
 	@# manifest output drifts between en_US.UTF-8 and C locales (UTF-8
 	@# collation treats underscore specially, so 'Face_0.pbm' sorts before
 	@# 'Face.pbm' under UTF-8 but after under C). Same trap as the
-	@# patches/<name>/ alpha-suffix numbering issue — keep dry-run output
+	@# patches/<name>/ alpha-suffix numbering issue -- keep dry-run output
 	@# diffable across reviewer environments.
 	@if [ -d "$(NX_DATA_SRC)" ]; then \
 	    cd "$(NX_DATA_SRC)" && find . -type f | LC_ALL=C sort | sed 's|^\./|  DATA/|'; \
@@ -1242,10 +1390,10 @@ endef
 
 .PHONY: dist
 dist: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
-	@test -f "$(CWSDPMI_EXE)"   || (echo "error: $(CWSDPMI_EXE) missing — run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
+	@test -f "$(CWSDPMI_EXE)"   || (echo "error: $(CWSDPMI_EXE) missing -- run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
 	@test -f "$(CWSDPMI_DOC)"   || (echo "error: $(CWSDPMI_DOC) missing" >&2; exit 1)
-	@test -f "$(NX_LICENSE)"    || (echo "error: $(NX_LICENSE) missing — run scripts/fetch-sources.sh" >&2; exit 1)
-	@test -d "$(NX_DATA_SRC)"   || (echo "error: $(NX_DATA_SRC) missing — run scripts/fetch-sources.sh" >&2; exit 1)
+	@test -f "$(NX_LICENSE)"    || (echo "error: $(NX_LICENSE) missing -- run scripts/fetch-sources.sh" >&2; exit 1)
+	@test -d "$(NX_DATA_SRC)"   || (echo "error: $(NX_DATA_SRC) missing -- run scripts/fetch-sources.sh" >&2; exit 1)
 	@test -f LICENSE            || (echo "error: LICENSE missing in repo root" >&2; exit 1)
 	@test -f THIRD-PARTY.md     || (echo "error: THIRD-PARTY.md missing" >&2; exit 1)
 	@rm -rf "$(CF_STAGE)" "$(CF_ZIP)"
@@ -1260,7 +1408,7 @@ dist: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 	    printf '%s\n' "$$DIST_README" | \
 	    awk -v url="$$url" '{gsub(/@REPO_URL@/, url); print}' | \
 	    $(CRLF) > "$(CF_STAGE)/README.TXT"
-	@# Engine-bundled data tree → DATA/ in the zip. cp -R preserves the
+	@# Engine-bundled data tree -> DATA/ in the zip. cp -R preserves the
 	@# StgMeta/ and endpic/ subdirs; no Cave Story freeware data here.
 	@# bk*480fix.pbm files are widescreen-only backdrops; the source path
 	@# that would load them (map.cpp:560) is gated on `widescreen` which
@@ -1276,14 +1424,14 @@ dist: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 
 # --- Runtime staging for DOSBox-X testing -------------------------------------
 #
-# `make stage` produces $(BUILD_DIR)/stage/ — the DOS-side runtime layout
-# (DOSKUTSU.EXE + CWSDPMI.EXE + DATA/) — which is what tools/dosbox-launch.sh
+# `make stage` produces $(BUILD_DIR)/stage/ -- the DOS-side runtime layout
+# (DOSKUTSU.EXE + CWSDPMI.EXE + DATA/) -- which is what tools/dosbox-launch.sh
 # mounts as C: when invoked with `--stage`. NXEngine-evo's ResourceManager
 # resolves data via SDL_GetBasePath() + "data/" on DOS, so the .exe and the
 # data tree must be co-located at runtime; the repo layout (build/doskutsu.exe
 # + data/ at repo root) doesn't satisfy that on its own.
 #
-# data/ is symlinked rather than copied — fast iteration, no rsync churn, and
+# data/ is symlinked rather than copied -- fast iteration, no rsync churn, and
 # DOSBox-X's host-mount layer follows the symlink transparently. The symlink
 # is recreated each run to track repo-side data/ updates without stale-link
 # guards.
@@ -1292,11 +1440,11 @@ STAGE_DIR := $(BUILD_DIR)/stage
 
 .PHONY: stage
 stage: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
-	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing — run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
+	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing -- run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
 	@mkdir -p "$(STAGE_DIR)"
 	@# SDL/0024 routes SDL_Log to /DOSKUTSU/sdldbg.log (or /DOSKUTSU/<TAG>SDL.LOG
 	@# when DOSKUTSU_LOG_TAG is set). Under the staged layout DOSBox-X mounts
-	@# STAGE_DIR as C:, so the engine fopens "/DOSKUTSU/sdldbg.log" → host path
+	@# STAGE_DIR as C:, so the engine fopens "/DOSKUTSU/sdldbg.log" -> host path
 	@# $(STAGE_DIR)/DOSKUTSU/sdldbg.log. DJGPP fopen silently returns NULL when
 	@# the target dir is missing; SDL_Log messages get lost without any error.
 	@# Pre-create the subdir so the smoke gate's banner-emit check sees SDL_Log
@@ -1309,7 +1457,7 @@ stage: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 	    ln -s "$(REPO_ROOT)/data" "$(STAGE_DIR)/data"; \
 	    echo "staged $(STAGE_DIR)/ (data/ symlinked from repo)"; \
 	else \
-	    echo "note: data/ not present at repo root — see docs/ASSETS.md"; \
+	    echo "note: data/ not present at repo root -- see docs/ASSETS.md"; \
 	    echo "      $(STAGE_DIR)/ contains only DOSKUTSU.EXE + CWSDPMI.EXE"; \
 	fi
 
@@ -1319,7 +1467,7 @@ ifeq ($(strip $(CF)),)
 	@echo "error: set CF=/path/to/cf/mount (e.g. make install CF=/mnt/cf)" >&2; exit 1
 else
 	@test -d "$(CF)" || (echo "error: CF=$(CF) is not a directory" >&2; exit 1)
-	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing — run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
+	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing -- run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
 	@test -f "$(CWSDPMI_DOC)" || (echo "error: $(CWSDPMI_DOC) missing" >&2; exit 1)
 	@mkdir -p "$(CF)/DOSKUTSU"
 	@install -m 0644 $(BUILD_DIR)/doskutsu.exe "$(CF)/DOSKUTSU/DOSKUTSU.EXE"
@@ -1330,9 +1478,9 @@ else
 	    mkdir -p "$(CF)/DOSKUTSU/DATA"; \
 	    cp -r "$(REPO_ROOT)/data/"* "$(CF)/DOSKUTSU/DATA/"; \
 	    rm -f "$(CF)/DOSKUTSU/DATA/"bk*480fix.pbm; \
-	    echo "  (excluded bk*480fix.pbm — dead code on DOS per patch 0005)"; \
+	    echo "  (excluded bk*480fix.pbm -- dead code on DOS per patch 0005)"; \
 	else \
-	    echo "note: data/ not present — see docs/ASSETS.md for extraction"; \
+	    echo "note: data/ not present -- see docs/ASSETS.md for extraction"; \
 	fi
 	@echo "installed doskutsu payload to $(CF)/DOSKUTSU/"
 endif

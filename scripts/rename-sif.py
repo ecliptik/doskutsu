@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-rename-sif.py — apply 8.3-filename renames to a sprites.sif file.
+rename-sif.py -- apply 8.3-filename renames to a sprites.sif file.
 
 The 2FIS container format (reverse-engineered from
 vendor/nxengine-evo/src/siflib/sifloader.cpp + sectStringArray.cpp):
@@ -12,7 +12,7 @@ vendor/nxengine-evo/src/siflib/sifloader.cpp + sectStringArray.cpp):
                                  disk as the bytes "2FIS".
     [1]  nsections    uint8
 
-  Index table (nsections × 9 bytes):
+  Index table (nsections x 9 bytes):
     [1]  type         uint8   -- SIF_SECTION_* enum value
     [4]  foffset      uint32  -- absolute file offset to section data
     [4]  length       uint32  -- length of section data in bytes
@@ -74,7 +74,7 @@ SIF_SECTION_SHEETS = 1
 #
 # The map covers ONLY the sprite-sheet paths embedded in sprites.sif.
 # Other long-name renames (StageMeta dir, root JSONs, etc.) are handled
-# separately — by the source-side patch and the data-tree rename
+# separately -- by the source-side patch and the data-tree rename
 # instructions in docs/ASSETS.md.
 RENAME_MAP = {
     "ArmsImage.pbm": "ArmImg.pbm",
@@ -180,11 +180,11 @@ def write_sif(nsections, entries, sections):
         out += bytes([t])
         out += struct.pack("<II", new_off, new_len)
 
-    assert len(out) == header_size, "header size mismatch — index table miscomputed"
+    assert len(out) == header_size, "header size mismatch -- index table miscomputed"
 
     # Emit section bodies in disk order.
     for idx in disk_order:
-        # Pad/truncate? No — section bodies are emitted verbatim, no
+        # Pad/truncate? No -- section bodies are emitted verbatim, no
         # alignment requirements per the loader.
         assert len(out) == new_offsets[idx], (
             f"emit order vs offset table mismatch at section {idx}"
@@ -228,7 +228,7 @@ def cmd_check(in_path):
         print(f"rename-sif --check: OK ({len(original)} bytes, byte-identical round-trip)")
         return 0
 
-    # Diagnostic — find first divergence.
+    # Diagnostic -- find first divergence.
     for i in range(min(len(original), len(rebuilt))):
         if original[i] != rebuilt[i]:
             print(f"rename-sif --check: FAIL at byte {i}: "

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-audit-palettes.py — Phase 9 Lever 3 palette diversity audit for Cave Story sprites.
+audit-palettes.py -- Phase 9 Lever 3 palette diversity audit for Cave Story sprites.
 
 Reads every Windows BMP (.pbm / .bmp) under data/, extracts its color palette,
 and reports cluster structure to drive the choice between Lever 3 approaches:
 
-  A — single canonical palette  (only viable if palettes are already similar)
-  B — per-stage palette swaps   (only viable if palettes cluster by stage)
-  C — octree merge to a master  (always viable, most work)
+  A -- single canonical palette  (only viable if palettes are already similar)
+  B -- per-stage palette swaps   (only viable if palettes cluster by stage)
+  C -- octree merge to a master  (always viable, most work)
 
 stdlib only.
 
@@ -16,7 +16,7 @@ Output:
   - CSV at  tools/audit-palettes-clusters.csv (cluster representatives + members)
   - Stats summary printed to stdout.
 
-The "BMP" files Cave Story ships use the .pbm extension. They are NOT Netpbm —
+The "BMP" files Cave Story ships use the .pbm extension. They are NOT Netpbm --
 they are standard Microsoft DIB (BITMAPINFOHEADER), which `SDL_LoadBMP()`
 consumes directly in `vendor/nxengine-evo/src/graphics/Surface.cpp:28`.
 
@@ -49,7 +49,7 @@ CLUSTER_THRESH = 0.90
 def parse_bmp_palette(path):
     """Return (width, height, bpp, palette[(R,G,B)*N], distinct_used) or None.
 
-    palette is None if the BMP is truecolor (>= 16 bpp) — those have no palette.
+    palette is None if the BMP is truecolor (>= 16 bpp) -- those have no palette.
     distinct_used is None for truecolor; for indexed images it's the count of
     distinct RGB triples actually present in the palette table.
     """
@@ -230,7 +230,7 @@ def main():
 
     # Stats summary to stdout
     print("=" * 70)
-    print("Cave Story sprite palette audit — Phase 9 Lever 3")
+    print("Cave Story sprite palette audit -- Phase 9 Lever 3")
     print("=" * 70)
     print(f"Data directory:      {DATA_DIR}")
     print(f"Total BMP files:     {len(rows)}")
@@ -256,7 +256,7 @@ def main():
     for avg, fn, bpp, psize in divergent:
         print(f"      {avg*100:6.1f}%  {fn:<36s}  {bpp:3d}  {psize:4d}")
     print()
-    print(f"Truecolor sprites (no palette — gradient cutscene art):")
+    print(f"Truecolor sprites (no palette -- gradient cutscene art):")
     for r in rows:
         if r["palette"] is None:
             print(f"  - {r['filename']}  ({r['width']}x{r['height']}x{r['bpp']})")
@@ -271,7 +271,7 @@ def main():
     elif len(clusters) <= 10:
         print("\nVERDICT: STAGE-CLUSTERED  (Approach B candidate; check cluster names)")
     else:
-        print("\nVERDICT: DIVERSE  (Approach C — octree merge — recommended)")
+        print("\nVERDICT: DIVERSE  (Approach C -- octree merge -- recommended)")
 
 
 if __name__ == "__main__":

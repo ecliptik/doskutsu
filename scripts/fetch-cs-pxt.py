@@ -7,24 +7,24 @@ Background
 The freeware Cave Story 2004 EN soundboard ships 86 Pixtone synth parameter
 blocks embedded in `Doukutsu.exe`'s data section. NXEngine-evo's stock
 audio path reads these at runtime as ASCII text files under
-`data/pxt/fx<HEX-ID>.pxt` — the format `scripts/extract-pxt.py` produces.
+`data/pxt/fx<HEX-ID>.pxt` -- the format `scripts/extract-pxt.py` produces.
 
 The canonical extractor (`scripts/extract-pxt.py`) operates on `Doukutsu.exe`
 at fixed byte offsets. Before today, the source-acquisition step was a manual
-prerequisite — "stage Doukutsu.exe somewhere, then run extract-pxt.py".
+prerequisite -- "stage Doukutsu.exe somewhere, then run extract-pxt.py".
 This script closes the gap: it fetches `cavestoryen.zip` from the project's
 documented source (the Cave Story Tribute Site / cavestory.one), extracts
 `Doukutsu.exe` to a tempdir, runs `extract-pxt.py` against it, and emits
 the 86 fx*.pxt files into `<data-dir>/pxt/`. The downloaded zip and the
 extracted Doukutsu.exe do NOT persist on the user's machine after the script
-completes — they live in a tempdir that's removed on exit (or on error).
+completes -- they live in a tempdir that's removed on exit (or on error).
 
 Source
 ------
 `cavestoryen.zip` from <https://www.cavestory.one/downloads/cavestoryen.zip>
 (Cave Story Tribute Site). The archive ships the 2004 EN Aeon-Genesis-
-patched `Doukutsu.exe` plus loose `data/` files. See docs/ASSETS.md § Option
-D for the broader context — that path covers Stage/, Npc/, and root .pbm /
+patched `Doukutsu.exe` plus loose `data/` files. See docs/ASSETS.md sec. Option
+D for the broader context -- that path covers Stage/, Npc/, and root .pbm /
 .tsc / npc.tbl entries. This script handles the embedded PXT subset only;
 ORG extraction is a separate flow (7z PE-resource extraction per ASSETS.md),
 and engine-data extraction (wavetbl.dat, stage.dat, pixel.bmp, credit*.bmp)
@@ -32,12 +32,12 @@ is handled by `scripts/extract-engine-data.py`.
 
 Sibling scripts
 ---------------
-- `scripts/extract-pxt.py` — canonical PXT extractor. Called by this script
+- `scripts/extract-pxt.py` -- canonical PXT extractor. Called by this script
   via subprocess so the SND[] offset table stays defined in exactly one
   place.
-- `scripts/extract-engine-data.py` — sibling extractor for wavetbl.dat /
+- `scripts/extract-engine-data.py` -- sibling extractor for wavetbl.dat /
   stage.dat / pixel.bmp / credit*.bmp. Also consumes `Doukutsu.exe`.
-- `scripts/fetch-cs-midi.py` — the analogous fetch-and-process script for
+- `scripts/fetch-cs-midi.py` -- the analogous fetch-and-process script for
   hardware-MIDI tracks (Phase 10). Same URL+SHA pin convention.
 
 Coverage: 86 of NXEngine-evo's 117 Pixtone slots
@@ -46,11 +46,11 @@ Coverage: 86 of NXEngine-evo's 117 Pixtone slots
 iterates `slot = 1..NUM_SOUNDS` where `NUM_SOUNDS = 0x75` (117) and so
 emits one `LOG_WARN("pxt->load: file ... not found.")` per absent slot
 at boot. The 37 absent slots (`fx08, fx09, fx0a, fx0d, fx13, fx24,
-fx42-45, fx49-63`) are unnamed gaps in the engine's SFX enum — no
+fx42-45, fx49-63`) are unnamed gaps in the engine's SFX enum -- no
 engine code ever calls `Pixtone::play()` with those slot numbers, so
 the absent files have zero gameplay impact. This is a known upstream
 limitation, not a build bug. Don't chase it. See `docs/ASSETS.md`
-§ Option D for the full source-hunt audit trail (NXEngine-evo issue #4,
+sec. Option D for the full source-hunt audit trail (NXEngine-evo issue #4,
 doukutsu-rs wiki, GitHub indexing, Cave Story+ licensing block) and
 the affected-slot enum gap analysis.
 
@@ -61,12 +61,12 @@ License posture
   Pixel's terms). The Aeon-Genesis English translation patch is fan-work
   under separate terms maintained by Aeon Genesis Productions.
 - We DO NOT redistribute `cavestoryen.zip` or `Doukutsu.exe` from this
-  repo — same posture as Pixel's original release. User-fetches-locally
+  repo -- same posture as Pixel's original release. User-fetches-locally
   via this script; download stays in a tempdir.
 - The extracted `data/pxt/fx*.pxt` files are derivative Pixel freeware
   data; they land in `data/` which is gitignored. They also never land
   in our public `dist/doskutsu-cf.zip` (see Makefile's dist target).
-- See `docs/ASSETS.md § Legal notes` for the full reasoning.
+- See `docs/ASSETS.md sec. Legal notes` for the full reasoning.
 
 Usage
 -----
@@ -97,7 +97,7 @@ import zipfile
 # Source URL + integrity pin
 # ============================================================================
 
-# cavestoryen.zip — Cave Story 2004 EN freeware bundle (Aeon-Genesis-patched
+# cavestoryen.zip -- Cave Story 2004 EN freeware bundle (Aeon-Genesis-patched
 # Doukutsu.exe + loose data files). Pin recorded 2026-05-11; if cavestory.one
 # refreshes the archive, verify the new SHA-256 reflects an intentional
 # upstream change (not a defacement) before bumping the constant.
@@ -111,7 +111,7 @@ CAVESTORYEN_EXE_MEMBER = "CaveStory/Doukutsu.exe"
 # Expected post-extraction count. SND[] in scripts/extract-pxt.py has 87
 # entries; id 0x68 appears twice (second overwrites first on disk) so the
 # unique output set is 86 files. If extract-pxt.py emits a different count,
-# either upstream cavestoryen.zip changed or our extractor regressed —
+# either upstream cavestoryen.zip changed or our extractor regressed --
 # either way, investigate before bumping this constant.
 EXPECTED_PXT_COUNT = 86
 
@@ -139,7 +139,7 @@ def _download(url: str, expected_size: int, expected_sha: str,
 
     if len(data) != expected_size:
         sys.exit(
-            f"{label}: size mismatch — expected {expected_size} bytes, "
+            f"{label}: size mismatch -- expected {expected_size} bytes, "
             f"got {len(data)} bytes. Upstream may have changed; verify the "
             f"change is benign and update the size + SHA-256 constants."
         )
@@ -147,7 +147,7 @@ def _download(url: str, expected_size: int, expected_sha: str,
     actual_sha = _sha256(data)
     if actual_sha != expected_sha:
         sys.exit(
-            f"{label}: SHA-256 mismatch — expected {expected_sha}, "
+            f"{label}: SHA-256 mismatch -- expected {expected_sha}, "
             f"got {actual_sha}. Upstream content has changed; verify before "
             f"bumping the SHA-256 constant."
         )
@@ -186,7 +186,7 @@ def fetch_and_extract_pxt(out_dir: str, verbose: bool = True) -> int:
         )
 
     # Work in a tempdir so cavestoryen.zip + Doukutsu.exe NEVER persist on
-    # the user's filesystem (per docs/ASSETS.md § Legal notes — Pixel's
+    # the user's filesystem (per docs/ASSETS.md sec. Legal notes -- Pixel's
     # freeware stays out of our repo / dist / user-machine-residue).
     work = tempfile.mkdtemp(prefix="doskutsu-cs-pxt-")
     try:
@@ -212,7 +212,7 @@ def fetch_and_extract_pxt(out_dir: str, verbose: bool = True) -> int:
         if verbose:
             exe_sha = _sha256(exe_data)
             print(f"  extracted Doukutsu.exe ({len(exe_data):,} bytes, "
-                  f"SHA-256 {exe_sha[:12]}…) to tempdir")
+                  f"SHA-256 {exe_sha[:12]}...) to tempdir")
 
         # 3. Run scripts/extract-pxt.py against the freeware binary.
         if verbose:
@@ -270,8 +270,8 @@ def print_sha_manifest(out_dir: str) -> None:
     for name in pxt_files:
         sha = _file_sha256(os.path.join(pxt_dir, name))
         fileset_h.update(f"{sha}  {name}\n".encode("ascii"))
-    print(f"    first  : {pxt_files[0]}  {_file_sha256(os.path.join(pxt_dir, pxt_files[0]))[:16]}…")
-    print(f"    last   : {pxt_files[-1]}  {_file_sha256(os.path.join(pxt_dir, pxt_files[-1]))[:16]}…")
+    print(f"    first  : {pxt_files[0]}  {_file_sha256(os.path.join(pxt_dir, pxt_files[0]))[:16]}...")
+    print(f"    last   : {pxt_files[-1]}  {_file_sha256(os.path.join(pxt_dir, pxt_files[-1]))[:16]}...")
     print(f"    fileset SHA-256: {fileset_h.hexdigest()}")
 
 
@@ -291,7 +291,7 @@ def main():
     print()
     print("Note: cavestoryen.zip and the extracted Doukutsu.exe live only in")
     print("a tempdir during this script's run and are removed on exit.")
-    print("Per docs/ASSETS.md § Legal notes, Pixel's freeware never lands in")
+    print("Per docs/ASSETS.md sec. Legal notes, Pixel's freeware never lands in")
     print("this repo or dist/doskutsu-cf.zip.")
 
 

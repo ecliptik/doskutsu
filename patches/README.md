@@ -4,11 +4,11 @@ DOS-port patches against the five vendored upstream repos. Each subdirectory cor
 
 ```
 patches/
-├── SDL/               0001-*.patch ...   → applied to vendor/SDL/
-├── sdl2-compat/       0001-*.patch ...   → applied to vendor/sdl2-compat/
-├── SDL_mixer/         0001-*.patch ...   → applied to vendor/SDL_mixer/
-├── SDL_image/         0001-*.patch ...   → applied to vendor/SDL_image/
-└── nxengine-evo/      0001-*.patch ...   → applied to vendor/nxengine-evo/
++-- SDL/               0001-*.patch ...   -> applied to vendor/SDL/
++-- sdl2-compat/       0001-*.patch ...   -> applied to vendor/sdl2-compat/
++-- SDL_mixer/         0001-*.patch ...   -> applied to vendor/SDL_mixer/
++-- SDL_image/         0001-*.patch ...   -> applied to vendor/SDL_image/
+`-- nxengine-evo/      0001-*.patch ...   -> applied to vendor/nxengine-evo/
 ```
 
 ## Convention
@@ -57,7 +57,7 @@ When bumping a `vendor/sources.manifest` SHA to a newer upstream commit:
 
 1. Update the SHA in the manifest.
 2. `./scripts/fetch-sources.sh` to pull the new tree.
-3. `./scripts/apply-patches.sh` — if all patches still apply cleanly, you're done.
+3. `./scripts/apply-patches.sh` -- if all patches still apply cleanly, you're done.
 4. If a patch fails: the script aborts and leaves `vendor/<name>/` in a conflict state. Either:
    - Fix the patch: resolve conflicts in the vendor tree, `git am --continue`, then `git format-patch` the updated commit back to `patches/<name>/` (overwriting the stale version).
    - Or revert the SHA bump if the upstream change isn't essential.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dosbox-launch.sh — launch DOSBox-X visible on the local X session for
+# dosbox-launch.sh -- launch DOSBox-X visible on the local X session for
 # manual testing, screenshot capture, and xdotool automation.
 #
 # Differs from tools/dosbox-run.sh (which stages one exe and exits): this
@@ -47,7 +47,7 @@ Usage: dosbox-launch.sh [--fast] [--kill-first] [--stage] [--exe PATH]
   --fast, -f         Use dosbox-x-fast.conf (cycles=max) instead of parity config
   --kill-first, -k   Kill any running dosbox-x process first
   --stage, -s        Run `make stage` and mount build/stage/ as C: (where
-                     DOSKUTSU.EXE + CWSDPMI.EXE + data/ sit together — the
+                     DOSKUTSU.EXE + CWSDPMI.EXE + data/ sit together -- the
                      layout NXEngine-evo's ResourceManager expects on DOS).
   --exe PATH         Path to an .exe to auto-run. Without --stage, PATH is
                      relative to repo root. With --stage, PATH should be a
@@ -101,12 +101,12 @@ export DISPLAY="${DOSBOX_DISPLAY:-:0}"
 # binaries that aren't yet staged. The BLASTER env var matches the
 # [sblaster] block in dosbox-x.conf; SDL3-DOS reads it.
 #
-# SDL_DOS_AUDIO_SB_SKIP_DETECTION — escape hatch from patches/SDL/0001. The
+# SDL_DOS_AUDIO_SB_SKIP_DETECTION -- escape hatch from patches/SDL/0001. The
 # real-HW timing fixes in that patch are correct, but DOSBox-X's emulated SB16
 # returns 0xFF on the DSP detection read regardless of timing tuning. Setting
 # this env var tells SDL3-DOS to skip detection and trust BLASTER, which is the
 # only way audio inits in the emulator. Real hardware (g2k Phase 8) MUST NOT
-# set this — it would mask a legitimate Vibra16S regression.
+# set this -- it would mask a legitimate Vibra16S regression.
 
 if [[ "$STAGE" == "1" ]]; then
   echo "Running 'make stage' to populate build/stage/..."

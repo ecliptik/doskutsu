@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-sdl3-image-smoke.sh — Path B / #28 functional smoke runner.
+# run-sdl3-image-smoke.sh -- Path B / #28 functional smoke runner.
 
 set -uo pipefail
 
@@ -10,7 +10,7 @@ EXE="$REPO_ROOT/build/sdl3-image-smoke/imgsmk.exe"
 LOG="$REPO_ROOT/build/sdl3-image-smoke/imgsmk.log"
 
 if [[ ! -f "$EXE" ]]; then
-    echo "run-sdl3-image-smoke.sh: $EXE missing — build with \`make sdl3-image-smoke\`" >&2
+    echo "run-sdl3-image-smoke.sh: $EXE missing -- build with \`make sdl3-image-smoke\`" >&2
     exit 2
 fi
 

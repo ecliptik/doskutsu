@@ -1,5 +1,5 @@
 /*
- * sdltest.c — Phase 2d SDL3 DOS-backend smoke test.
+ * sdltest.c -- Phase 2d SDL3 DOS-backend smoke test.
  *
  * Exercises the same SDL3 DOS-backend code paths as upstream's testaudioinfo
  * and testdisplayinfo (init the audio + video subsystems, enumerate drivers,
@@ -7,8 +7,8 @@
  * output via printf() to stdout instead of SDL_Log() to stderr.
  *
  * Why we don't use upstream tests directly: SDL_Log writes to stderr (see
- * vendor/SDL/src/SDL_log.c:808 — fprintf(stderr,...)). Our headless DOSBox-X
- * harness only redirects stdout — neither MS-DOS COMMAND.COM nor DOSBox-X's
+ * vendor/SDL/src/SDL_log.c:808 -- fprintf(stderr,...)). Our headless DOSBox-X
+ * harness only redirects stdout -- neither MS-DOS COMMAND.COM nor DOSBox-X's
  * built-in shell support `2>&1` syntax, so stderr cannot be merged at the
  * shell level. Patching SDL test source to call SDL_SetLogOutputFunction
  * would conflict with vendor/SDL/CLAUDE.md (no AI-generated code into SDL).
@@ -21,7 +21,7 @@
  *
  * Phase 8 baseline: the VIDEO:/MODE: lines are captured to
  * tests/fixtures/sdl3-modes-dosbox.txt for later diffing against real
- * hardware (M64VBE on the g2k Mach64) — divergence flags VESA backend
+ * hardware (M64VBE on the g2k Mach64) -- divergence flags VESA backend
  * quirks early.
  *
  * License: MIT (this file). See LICENSE in repo root.
@@ -54,7 +54,7 @@ static void list_audio_devices(bool recording)
 
 static int run_audio(void)
 {
-    /* Driver enumeration does NOT require SDL_Init — these are the
+    /* Driver enumeration does NOT require SDL_Init -- these are the
      * compile-time bootstrap entries. Print them first so the capture
      * proves the DOS audio driver is in the binary even if init below
      * fails (it might: see comment in SDLTEST-END). */
@@ -66,7 +66,7 @@ static int run_audio(void)
 
     if (!SDL_Init(SDL_INIT_AUDIO)) {
         /* Note: PR #15377's SoundBlaster detection currently fails under
-         * DOSBox-X's SB16 emulation — DSP reset returns "ready" but the
+         * DOSBox-X's SB16 emulation -- DSP reset returns "ready" but the
          * post-reset 0xAA byte read is wrong. The audio driver IS compiled
          * in (see AUDIO-DRIVER lines above); init just can't pick a
          * working device under emulation. We treat this as a soft failure

@@ -1,10 +1,10 @@
-# tests/dpmi-lfn-smoke — DPMI LFN propagation probe
+# tests/dpmi-lfn-smoke -- DPMI LFN propagation probe
 
 Smoke test answering a gating empirical question for real-DOS deployment:
 **does CWSDPMI's INT 21h reflector pass LFN-family calls (function codes
 7140h-71A8h) through to a real-mode TSR loaded under plain MS-DOS 6.22?**
 
-If yes → bundle LFNDOS.COM (or DOSLFN.COM as fallback). If no → source-rename
+If yes -> bundle LFNDOS.COM (or DOSLFN.COM as fallback). If no -> source-rename
 every long-named asset (the multi-week fallback).
 
 This probe is the cheapest possible way to settle that question. Without it,
@@ -26,12 +26,12 @@ DOSBox-X for the dev-host baseline.
 ## What the three tests check
 
 The test fixtures are two paired files staged at the test exe's working
-directory by the runner — both single-byte sentinels, distinguished only by
+directory by the runner -- both single-byte sentinels, distinguished only by
 filename:
 
 | Filename | 8.3? | Purpose |
 |---|---|---|
-| `WAVETABL.DAT` | yes (8 char base, 3 char ext) | control — proves the harness reaches a real DOS |
+| `WAVETABL.DAT` | yes (8 char base, 3 char ext) | control -- proves the harness reaches a real DOS |
 | `wavetable.dat` | no (9 char base) | the actual LFN test |
 
 Both files are content-identical, but a no-LFN DOS sees only the 8.3 form
@@ -49,19 +49,19 @@ long name" from "DOS API can't see it through DPMI."
 The two long-name tests target the same effective question but isolate the
 failure surface:
 
-- If `long_libc_lfn` fails but `long_int21_716c` passes → bug is in DJGPP
+- If `long_libc_lfn` fails but `long_int21_716c` passes -> bug is in DJGPP
   libc's path-handling, not DPMI. (Workaround: skip libc, code direct INT 21h
   in the port.)
-- If both fail with `doserr=0x57` (invalid function) → CWSDPMI passes the
+- If both fail with `doserr=0x57` (invalid function) -> CWSDPMI passes the
   call to real mode but the kernel/TSR doesn't recognize it. Either the
   TSR isn't loaded or it doesn't claim function 716Ch. Re-check
   AUTOEXEC.BAT.
-- If both fail with `doserr=0x02` (file not found) → call reached a
+- If both fail with `doserr=0x02` (file not found) -> call reached a
   non-LFN-aware INT 21h handler that truncated the long name to 8.3 and
   missed. CWSDPMI's reflector likely strips the LFN function or doesn't
   translate the DS:SI pointer. **This is the failure mode that mandates
   source-rename.**
-- If both pass → ship the LFN TSR, source-rename is unnecessary.
+- If both pass -> ship the LFN TSR, source-rename is unnecessary.
 
 ## How to run on the dev host (DOSBox-X baseline)
 
@@ -76,7 +76,7 @@ The runner:
    `cwsdpmi.exe` into a temp DOS volume.
 2. Invokes DOSBox-X headless with `lfn = true` (already in `tools/dosbox-x.conf`).
 3. Captures stdout via `> STDOUT.TXT` (the probe writes via `printf`, so
-   no `2>&1` complications — see `tests/sdl3-smoke/README.md` for the
+   no `2>&1` complications -- see `tests/sdl3-smoke/README.md` for the
    DOSBox-X stderr-redirection caveat).
 4. Asserts each PROBE line. Exit 0 if all PASS.
 
@@ -88,7 +88,7 @@ For that, see below.
 
 1. Copy `build/dpmi-lfn-smoke/probe.exe`, `vendor/cwsdpmi/cwsdpmi.exe`,
    `WAVETABL.DAT`, and `wavetable.dat` to a CF card.
-2. Boot the target machine normally (no LFN TSR loaded — control run).
+2. Boot the target machine normally (no LFN TSR loaded -- control run).
 3. Run `PROBE.EXE`. Capture stdout to `PROBE0.LOG` (no LFN baseline).
 4. Edit `AUTOEXEC.BAT` to add `LH LFNDOS.COM` (or `LH DOSLFN.COM`). Reboot.
 5. Re-run `PROBE.EXE`. Capture to `PROBE1.LOG` (with LFN TSR).
@@ -97,12 +97,12 @@ For that, see below.
 
 Decision pivot:
 
-- LFNDOS-loaded run shows `PROBE: long_int21_716c PASS handle=0x????` →
+- LFNDOS-loaded run shows `PROBE: long_int21_716c PASS handle=0x????` ->
   **option A confirmed. Ship LFNDOS.** Update `Makefile` `dist` target
   and `THIRD-PARTY.md` accordingly.
 - LFNDOS-loaded run still shows `PROBE: long_int21_716c FAIL doserr=0x02`
-  → re-test with DOSLFN.COM. If DOSLFN passes, ship DOSLFN. If both fail
-  → **option B mandatory. Source-rename** every long-named asset.
+  -> re-test with DOSLFN.COM. If DOSLFN passes, ship DOSLFN. If both fail
+  -> **option B mandatory. Source-rename** every long-named asset.
 
 ## Why the probe doesn't ship LFNDOS itself
 

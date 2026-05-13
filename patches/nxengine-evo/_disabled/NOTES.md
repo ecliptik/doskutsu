@@ -1,4 +1,4 @@
-# Disabled patches — historical record
+# Disabled patches -- historical record
 
 This directory holds nxengine-evo patches that were authored, real-HW
 measured, and reverted as a deliberate engineering decision. They are
@@ -21,7 +21,7 @@ the slot:
   noise + every iter handoff has to explain "patch 0129 reverts patch
   0127" which is the same cognitive overhead as the _disabled/ form.
 - **(c)** Apply the revert directly in the vendor tree without
-  capturing the patch state in `patches/`. Most fragile — gets re-
+  capturing the patch state in `patches/`. Most fragile -- gets re-
   applied on every `scripts/fetch-sources.sh` re-clone.
 
 Option (a) is the workspace convention going forward. The slot number
@@ -38,8 +38,8 @@ analysis.
 
 **Mechanism.** Engine-signaled invalidation cache for the natural-
 origin backdrop output: cache the parscroll-independent tiled backdrop
-at `(screenWidth+bg_w) × (screenHeight+bg_h)`; on hit, apply parscroll
-as a SRC offset in the cache→window blit; engine signals invalidation
+at `(screenWidth+bg_w) x (screenHeight+bg_h)`; on hit, apply parscroll
+as a SRC offset in the cache->window blit; engine signals invalidation
 on map change.
 
 **Why it worked mechanically (per W31A1 measurement).** Cache hit-rate
@@ -49,7 +49,7 @@ boundaries (`invalidate=N` markers visible at room transitions). The
 mechanism was exactly as designed.
 
 **Why it didn't deliver fps (per W31A1 / W32A1 cross-iter).** Caching
-the OUTPUT means subsequent flips do `SDL_BlitSurface(cache_buffer →
+the OUTPUT means subsequent flips do `SDL_BlitSurface(cache_buffer ->
 window_surface)` instead of `map_draw_backdrop()` rendering. Both are
 ~76,800-byte INDEX8 operations on PODP83 + Cirrus, both write-
 dominant. Per `podp83_membw_real_hw_actuals.md` sysmem memcpy at 76,800
@@ -57,12 +57,12 @@ bytes is bandwidth-bound at ~17 MB/s (~4.30 ms). Cache hit saves the
 COMPUTATIONAL work of computing parallax pixel-by-pixel (~13 ms) but
 ADDS the cache-blit-OUT bandwidth (~13 ms). Net wall-clock: zero.
 
-W31A1 measured 35.71 fps vs wave-30 W30A1 baseline 38.46 fps — a
--2.75 fps regression. The +4 ms modal-peak shift (24 ms → 28 ms) was
+W31A1 measured 35.71 fps vs wave-30 W30A1 baseline 38.46 fps -- a
+-2.75 fps regression. The +4 ms modal-peak shift (24 ms -> 28 ms) was
 attributable to Lever B's per-flip cache-tracking overhead (hash
 compute + hit/miss accounting + invalidation-check branches) being net
 greater than the rendering work it eliminated. W32A1 (this patch
-reverted, all else equal) measured 40.00 fps median — confirming the
+reverted, all else equal) measured 40.00 fps median -- confirming the
 revert as the correct ship decision.
 
 **Architectural class.** Same as `wave_17_4_partial_flush_regression.md`:
@@ -84,7 +84,7 @@ than the underlying render. Move the .patch file back out of
 
 Until then, the `BACKDROP_CACHE` killswitch in `docs/BOOT.md` only
 controls the original patch 0080 cache + the wave-30 patch 0126
-thrashing-detect bypass — both of which DO contribute fps gains
+thrashing-detect bypass -- both of which DO contribute fps gains
 because they REMOVE bandwidth-bound transfers rather than just shift
 their location.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# rename-user-data-83.sh — rename user-extracted Cave Story content files
+# rename-user-data-83.sh -- rename user-extracted Cave Story content files
 # to fit MS-DOS 8.3.
 #
 # The user's `data/` tree (typically populated by doukutsu-rs / NXExtract /
@@ -20,7 +20,7 @@
 #   StageSelect.tsc      -> StgSel.tsc
 #
 # It also deletes the widescreen-only backdrops that the engine never opens
-# on DOS (bk*480fix.pbm — the source path map.cpp:560 is gated on
+# on DOS (bk*480fix.pbm -- the source path map.cpp:560 is gated on
 # `widescreen` which patch 0005-renderer-lock-320x240-fullscreen forces to
 # false). Same exclusion that `make dist` and `make install` apply per
 # Makefile:706; mirroring it here keeps the dev-side data/ tree consistent

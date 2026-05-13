@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-build-master-palette.py — Phase 9 Wave 16 / Lever 3 master palette builder.
+build-master-palette.py -- Phase 9 Wave 16 / Lever 3 master palette builder.
 
-Reads every Microsoft DIB BMP (.pbm / .bmp) under data/, runs Gervautz–
+Reads every Microsoft DIB BMP (.pbm / .bmp) under data/, runs Gervautz-
 Purgathofer octree quantization across the whole pixel-frequency corpus, and
 emits two files:
 
-  data/master.pal     — 768 bytes, 256 RGB triples. Reserved indices:
+  data/master.pal     -- 768 bytes, 256 RGB triples. Reserved indices:
                           0       = pure black (colorkey for Surface::loadImage)
                           1..16   = pre-baked gradient ramp from the 3 truecolor
                                     backgrounds (bkHellsh / bkLight / bkSunset)
@@ -14,12 +14,12 @@ emits two files:
                                     descending
                           255     = magenta colorkey for fonts / PNG transparency
 
-  data/master.map     — per-asset source-palette → master-palette index remap
+  data/master.map     -- per-asset source-palette -> master-palette index remap
                         LUTs. Format: 12-byte PMAP/v1 header + N entries of
                           uint16 path_len, ascii path, uint16 src_palette_size,
                           remap[src_palette_size].
                         Truecolor sources (no source palette) are written with
-                        src_palette_size=0 and no LUT — runtime falls back to
+                        src_palette_size=0 and no LUT -- runtime falls back to
                         per-pixel nearest-color search at load time.
 
                         Filename is `master.map` (8.3-clean) by default so it
@@ -28,11 +28,11 @@ emits two files:
                         --output-palmap to emit the legacy 13-char name on a
                         host with LFN support; the byte format is identical.
 
-Colorkey-stable special-case rules (per /tmp/wave-16-1-palette-format.md §3.4):
-  * Master index 0  is FORCED to (0, 0, 0)         — colorkey for Surface::loadImage
-  * Master index 255 is FORCED to (255, 0, 255)    — magenta colorkey for fonts / PNG α
-  * Source-palette entry == (0, 0, 0)        → master index 0   (direct, no nearest-search)
-  * Source-palette entry == (255, 0, 255)    → master index 255 (direct, no nearest-search)
+Colorkey-stable special-case rules (per /tmp/wave-16-1-palette-format.md sec.3.4):
+  * Master index 0  is FORCED to (0, 0, 0)         -- colorkey for Surface::loadImage
+  * Master index 255 is FORCED to (255, 0, 255)    -- magenta colorkey for fonts / PNG alpha
+  * Source-palette entry == (0, 0, 0)        -> master index 0   (direct, no nearest-search)
+  * Source-palette entry == (255, 0, 255)    -> master index 255 (direct, no nearest-search)
   * All other source colors run through CCIR-601 weighted-Euclidean nearest match.
 
 Without these special cases, octree may pick a near-black (e.g. (0,0,32)) into
@@ -64,7 +64,7 @@ import sys
 
 
 # === Reserved master-palette slot allocation ===
-# Per /tmp/wave-16-1-palette-format.md §1.2.
+# Per /tmp/wave-16-1-palette-format.md sec.1.2.
 RESERVED_BLACK_IDX = 0
 RESERVED_MAGENTA_IDX = 255
 RAMP_START = 1
@@ -81,7 +81,7 @@ PSNR_FLOOR_FACE = 30.0
 # === master.map (a.k.a. legacy master.palmap) header ===
 # Magic is the four ASCII bytes 'P','M','A','P' written in that order to the
 # file. Read as a little-endian uint32 they form 0x50414D50. (NOT 0x504D4150,
-# which would write the bytes 'P','A','M','P' — the parent spec text was
+# which would write the bytes 'P','A','M','P' -- the parent spec text was
 # imprecise about endianness.)
 PMAP_MAGIC_BYTES = b"PMAP"
 PMAP_MAGIC_LE_U32 = 0x50414D50
@@ -95,11 +95,11 @@ PMAP_VERSION = 1
 def parse_bmp(path):
     """Parse a Microsoft DIB BMP. Returns dict with keys:
 
-        width, height, bpp                — image dimensions and bit depth
-        palette                           — list[(r,g,b)] for indexed (None for truecolor)
-        palette_pixel_count               — list[int] per-palette-index count
+        width, height, bpp                -- image dimensions and bit depth
+        palette                           -- list[(r,g,b)] for indexed (None for truecolor)
+        palette_pixel_count               -- list[int] per-palette-index count
                                              (None for truecolor)
-        pixels                            — list[(r,g,b)] row-major top-to-bottom
+        pixels                            -- list[(r,g,b)] row-major top-to-bottom
                                              (only populated for truecolor; indexed
                                              gets None to save memory)
 
@@ -194,7 +194,7 @@ def parse_bmp(path):
 
 
 # ----------------------------------------------------------------------------
-# Octree quantizer (Gervautz–Purgathofer 1988)
+# Octree quantizer (Gervautz-Purgathofer 1988)
 # ----------------------------------------------------------------------------
 
 class _OctreeNode:
@@ -331,7 +331,7 @@ class OctreeQuantizer:
 # ----------------------------------------------------------------------------
 
 def color_distance_sq(r1, g1, b1, r2, g2, b2):
-    """Weighted-Euclidean distance squared. Coefficients × 1000 for integer math."""
+    """Weighted-Euclidean distance squared. Coefficients x 1000 for integer math."""
     dr = r1 - r2
     dg = g1 - g2
     db = b1 - b2
@@ -340,9 +340,9 @@ def color_distance_sq(r1, g1, b1, r2, g2, b2):
 
 def nearest_index(palette, r, g, b):
     """Find the index in `palette` minimizing weighted-Euclidean distance to
-    (r,g,b). Special cases (per format spec §3.4):
-      (0, 0, 0)        → RESERVED_BLACK_IDX (0)
-      (0xFF, 0, 0xFF)  → RESERVED_MAGENTA_IDX (255)
+    (r,g,b). Special cases (per format spec sec.3.4):
+      (0, 0, 0)        -> RESERVED_BLACK_IDX (0)
+      (0xFF, 0, 0xFF)  -> RESERVED_MAGENTA_IDX (255)
     """
     if r == 0 and g == 0 and b == 0:
         return RESERVED_BLACK_IDX
@@ -469,7 +469,7 @@ def main():
     out_pal = args.output_pal or os.path.join(data_dir, "master.pal")
     # Default to the 8.3-clean filename `master.map`. The 13-char legacy name
     # `master.palmap` aliases onto `master.pal` under DOS LFN-off. See
-    # /tmp/wave-16-1-palette-format.md §3.5 (corrigendum).
+    # /tmp/wave-16-1-palette-format.md sec.3.5 (corrigendum).
     out_palmap = args.output_palmap or os.path.join(data_dir, "master.map")
 
     # Walk corpus
@@ -512,12 +512,12 @@ def main():
 
     # === Step 2: feed pixel-frequency-weighted colors into octree ===
     # Skip the two reserved-slot colors so the octree doesn't waste leaves on
-    # them — and, more importantly, doesn't pull near-black colors (e.g.
+    # them -- and, more importantly, doesn't pull near-black colors (e.g.
     # Fade.pbm's (0,0,32)) toward the (0,0,0) centroid via merge averaging.
     # Without this skip, near-black colors get a centroid shift from the
     # massive pixel-count of pure-black backgrounds across the corpus.
     print("[2/8] Building octree from pixel-frequency corpus...")
-    print("       (skipping pure black / pure magenta — handled by reserved slots)")
+    print("       (skipping pure black / pure magenta -- handled by reserved slots)")
     quant = OctreeQuantizer()
 
     skipped_black_pixels = 0
@@ -525,7 +525,7 @@ def main():
 
     # Per-image normalization: each image contributes a fixed total weight to
     # the octree regardless of image size. Without this, large-area assets
-    # (e.g. 320×240 truecolor backgrounds at 76800 pixels) drown out
+    # (e.g. 320x240 truecolor backgrounds at 76800 pixels) drown out
     # small-area assets (e.g. bkMaze.pbm at 4096 pixels), causing the
     # latter's distinctive gradients to merge into oblivion during
     # octree reduction. Per-image normalization keeps every asset's color
@@ -621,7 +621,7 @@ def main():
     print("[5/8] Assembling master palette...")
     print("       (colorkey-stable: index 0 := (0,0,0), index 255 := (255,0,255), forced)")
     palette = [None] * 256
-    # Colorkey-stable enforcement (per format spec §3.4): these slots are FORCED
+    # Colorkey-stable enforcement (per format spec sec.3.4): these slots are FORCED
     # to the dedicated colorkey colors regardless of what octree picked. The
     # octree already skips pure-black and pure-magenta pixels (Step 2) so it
     # cannot produce a leaf at exactly (0,0,0) or (255,0,255), but we override
@@ -675,7 +675,7 @@ def main():
 
     for im in indexed_images:
         src_pal = im["palette"]
-        # src_palette_size is one of {2, 16, 256} per format spec §2.2.
+        # src_palette_size is one of {2, 16, 256} per format spec sec.2.2.
         src_size = len(src_pal)
         if src_size <= 2:
             target_size = 2
@@ -689,7 +689,7 @@ def main():
             r, g, b = src_pal[i]
             remap[i] = nearest_index(palette, r, g, b)
         # Padding entries that exceed src_pal length stay at 0 (=master black,
-        # harmless because no source pixel can reference them — palette would
+        # harmless because no source pixel can reference them -- palette would
         # have been padded by parse_bmp).
 
         palmap_entries.append((im["rel_path"], target_size, bytes(remap)))
@@ -708,7 +708,7 @@ def main():
         pm_bytes += struct.pack("<H", len(path_bytes))
         pm_bytes += path_bytes
         # uint16 (not uint8, since 256-entry palettes don't fit in a byte).
-        # Per format spec §2.2.
+        # Per format spec sec.2.2.
         pm_bytes += struct.pack("<H", src_size)
         pm_bytes += remap
 
@@ -719,9 +719,9 @@ def main():
 
     # === Step 7b: colorkey-stability verification ===
     # For every indexed asset whose source palette contains exactly (0,0,0),
-    # the LUT entry must point to master index 0; same for (255,0,255) →
+    # the LUT entry must point to master index 0; same for (255,0,255) ->
     # master 255. This is the contract the wave-16-2 INDEX8 colorkey skip
-    # path relies on. Hard-fail if violated — that's a tool bug.
+    # path relies on. Hard-fail if violated -- that's a tool bug.
     print("[7b/8] Colorkey-stability verification...")
     assert palette[RESERVED_BLACK_IDX] == (0, 0, 0), \
         f"master[0] must be (0,0,0), got {palette[RESERVED_BLACK_IDX]}"
@@ -750,14 +750,14 @@ def main():
                           f"maps to master {remap[src_idx]} (expected 255)",
                           file=sys.stderr)
                     n_violations += 1
-    print(f"  source-(0,0,0)   → master 0:   {n_black_assets} occurrences across corpus")
-    print(f"  source-(255,0,255) → master 255: {n_magenta_assets} occurrences across corpus")
+    print(f"  source-(0,0,0)   -> master 0:   {n_black_assets} occurrences across corpus")
+    print(f"  source-(255,0,255) -> master 255: {n_magenta_assets} occurrences across corpus")
     print(f"  violations: {n_violations}")
     if n_violations > 0:
-        print("FATAL: colorkey-stability violated. Tool bug — investigate "
+        print("FATAL: colorkey-stability violated. Tool bug -- investigate "
               "nearest_index() and reserved-slot assignment.", file=sys.stderr)
         sys.exit(2)
-    print("  PASS — all source colorkey colors map to dedicated master slots.")
+    print("  PASS -- all source colorkey colors map to dedicated master slots.")
     print()
 
     # === Step 8: PSNR validation ===
@@ -804,7 +804,7 @@ def main():
             mse_sum += dr * dr + dg * dg + db * db
         mse = mse_sum / (n_pixels * 3)
         psnr = compute_psnr_from_mse(mse)
-        # Truecolor backgrounds have no hard floor — they dither by design.
+        # Truecolor backgrounds have no hard floor -- they dither by design.
         psnr_results.append((psnr, im["rel_path"], 0.0, True, "truecolor"))
 
     psnr_results.sort(key=lambda r: r[0])
@@ -834,7 +834,7 @@ def main():
     print(f"  indexed pass:    {n_pass_indexed}/{n_total_indexed} "
           f"(general gate {PSNR_FLOOR_GENERAL} dB / face gate {PSNR_FLOOR_FACE} dB)")
     print(f"  truecolor:       {sum(1 for r in psnr_results if r[4] == 'truecolor')} "
-          "(no hard PSNR floor — dithering is by design)")
+          "(no hard PSNR floor -- dithering is by design)")
     print(f"  failures:        {len(fails)}")
     print()
 

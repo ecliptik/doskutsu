@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fetch-sources.sh — clone (or update) the five vendored upstreams per
+# fetch-sources.sh -- clone (or update) the five vendored upstreams per
 # vendor/sources.manifest. Each entry specifies a URL, a tracking ref
 # (branch or tag), and a pinned SHA.
 #
@@ -9,7 +9,7 @@
 #   - If the manifest's SHA is the literal string PIN_ME, fetch the ref,
 #     resolve its HEAD SHA, print it (for the operator to copy into the
 #     manifest), and leave the working tree at that SHA. This is the
-#     Phase-2 bootstrap convenience — normal operation has concrete SHAs.
+#     Phase-2 bootstrap convenience -- normal operation has concrete SHAs.
 #
 # Run AFTER scripts/setup-symlinks.sh (not strictly required, but build
 # order is: symlinks -> fetch -> patches -> make).
@@ -97,7 +97,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     # Handle PIN_ME: check out the tip of ref, print the resolved SHA for
     # the operator to copy back into the manifest.
     if [[ "$sha" == "PIN_ME" ]]; then
-        log "$name: SHA is PIN_ME — checking out tip of '$ref'"
+        log "$name: SHA is PIN_ME -- checking out tip of '$ref'"
         (cd "$dest" && git checkout --detach "$ref")
         resolved="$(cd "$dest" && git rev-parse HEAD)"
         log "$name: resolved $ref -> $resolved"

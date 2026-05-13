@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# run-dpmi-lfn-smoke.sh — Phase 8 DPMI LFN propagation probe runner.
+# run-dpmi-lfn-smoke.sh -- Phase 8 DPMI LFN propagation probe runner.
 #
 # Three variants:
 #
 #   baseline   DOSBox-X with lfn=true (built-in emulator LFN, no TSR loaded).
-#              Should PASS — proves the probe code itself is correct.
+#              Should PASS -- proves the probe code itself is correct.
 #              Does NOT exercise CWSDPMI's INT 21h reflector; DOSBox-X's
 #              kernel sees the LFN call directly.
 #
@@ -22,16 +22,16 @@
 # sentinels). On a no-LFN DOS the long form is invisible; the probe
 # distinguishes "8.3 reaches DOS at all" from "long names work via LFN."
 #
-# Self-contained staging — does not use tools/dosbox-run.sh, because the
+# Self-contained staging -- does not use tools/dosbox-run.sh, because the
 # tsr variant needs a custom RUN.BAT (load LFNDOS.EXE before probe.exe) and
 # the no-tsr / tsr variants both need a -set override to force lfn=false
 # regardless of what tools/dosbox-x.conf says. Keeping all three variants
 # in one runner simplifies the "run all and summarize" flow.
 #
 # Exit codes:
-#   0  — all selected variants behaved as expected
-#   1  — one or more variants produced an unexpected outcome
-#   2  — invocation error (missing exe/fixture, dosbox-x crash, etc.)
+#   0  -- all selected variants behaved as expected
+#   1  -- one or more variants produced an unexpected outcome
+#   2  -- invocation error (missing exe/fixture, dosbox-x crash, etc.)
 #
 # Usage:
 #   tests/run-dpmi-lfn-smoke.sh                       # all three variants
@@ -91,13 +91,13 @@ for fx in wavetabl.dat wavetable.dat; do
 done
 if [[ "$VARIANT" == "all" || "$VARIANT" == "tsr" ]]; then
     if [[ ! -f "$LFNDOS" ]]; then
-        echo "$(basename "$0"): LFNDOS missing at $LFNDOS — see vendor/lfndos/README.md" >&2
+        echo "$(basename "$0"): LFNDOS missing at $LFNDOS -- see vendor/lfndos/README.md" >&2
         exit 2
     fi
 fi
 if [[ "$VARIANT" == "all" || "$VARIANT" == "tsr-doslfn" ]]; then
     if [[ ! -f "$DOSLFN" ]]; then
-        echo "$(basename "$0"): DOSLFN missing at $DOSLFN — see vendor/doslfn/README.md" >&2
+        echo "$(basename "$0"): DOSLFN missing at $DOSLFN -- see vendor/doslfn/README.md" >&2
         exit 2
     fi
 fi
@@ -122,7 +122,7 @@ run_variant() {
     cp "$FIXTURE_DIR/wavetabl.dat" "$stage/WAVETABL.DAT"
     cp "$FIXTURE_DIR/wavetable.dat" "$stage/wavetable.dat"
 
-    # RUN.BAT — variant-specific. CRLF line endings (DOS).
+    # RUN.BAT -- variant-specific. CRLF line endings (DOS).
     {
         printf '@ECHO OFF\r\n'
         printf 'SET LFN=y\r\n'
@@ -149,7 +149,7 @@ run_variant() {
     esac
 
     echo
-    echo "════ variant: $variant ════"
+    echo "==== variant: $variant ===="
     echo "  stage:   $stage"
     echo "  log:     $log"
 
@@ -166,7 +166,7 @@ run_variant() {
     fi
 
     if [[ ! -f "$stage/STDOUT.TXT" ]]; then
-        echo "  FAIL: no STDOUT.TXT produced — probe may have crashed under DPMI" >&2
+        echo "  FAIL: no STDOUT.TXT produced -- probe may have crashed under DPMI" >&2
         if [[ "$KEEP_STAGE" == "0" ]]; then rm -rf "$stage"; fi
         return 1
     fi
@@ -198,7 +198,7 @@ run_variant() {
                 echo "  UNEXPECTED: short_baseline did not PASS (control should always pass)"; rc=1
             fi
             if [[ "$long_libc_pass" != "1" || "$long_int21_pass" != "1" ]]; then
-                echo "  UNEXPECTED: baseline (lfn=true) should PASS all probes — probe code may have a bug"; rc=1
+                echo "  UNEXPECTED: baseline (lfn=true) should PASS all probes -- probe code may have a bug"; rc=1
             fi
             if [[ "$rc" == "0" ]]; then
                 echo "  EXPECTED: all PROBE: lines PASS (baseline confirms probe code is correct)"
@@ -214,16 +214,16 @@ run_variant() {
             if grep -q '_ERRORLEVEL_GE_1' "$stage/TSRLOAD.TXT" 2>/dev/null; then
                 echo "  TSR REFUSED TO INSTALL: $(basename "$variant" | tr '[:lower:]' '[:upper:]') exited with errorlevel >= 1."
                 echo "  Likely cause on DOSBox-X: LFN TSRs require direct disk access (FAT12/16/32)."
-                echo "  DOSBox-X's MOUNT C is a host-redirector, not a real FAT volume — see"
+                echo "  DOSBox-X's MOUNT C is a host-redirector, not a real FAT volume -- see"
                 echo "  vendor/lfndos/lfndos.doc 'System Requirements' and tests/dpmi-lfn-smoke/README.md."
                 echo "  This variant is INCONCLUSIVE under DOSBox-X; defer to Phase B (real-HW)."
-                # Treat as "expected outcome under DOSBox-X" — not a probe-code bug.
+                # Treat as "expected outcome under DOSBox-X" -- not a probe-code bug.
             elif [[ "$long_int21_pass" == "1" ]]; then
-                echo "  PASS: TSR loaded AND LFN function propagated via CWSDPMI — Phase A confirmed for this driver."
+                echo "  PASS: TSR loaded AND LFN function propagated via CWSDPMI -- Phase A confirmed for this driver."
             else
-                echo "  TSR loaded but long_int21_716c failed — INT 21h 716Ch did NOT reach the TSR through DPMI."
+                echo "  TSR loaded but long_int21_716c failed -- INT 21h 716Ch did NOT reach the TSR through DPMI."
                 echo "  Either (a) CWSDPMI's reflector strips the LFN function, or (b) the TSR didn't hook 716Ch correctly."
-                echo "  Defer to Phase B (real-HW) — DOSBox-X may behave differently than real DPMI."
+                echo "  Defer to Phase B (real-HW) -- DOSBox-X may behave differently than real DPMI."
             fi
             ;;
         no-tsr)
@@ -236,13 +236,13 @@ run_variant() {
                 echo "  UNEXPECTED: short_baseline did not PASS (control should always pass)"; rc=1
             fi
             if [[ "$long_int21_pass" == "1" ]]; then
-                echo "  UNEXPECTED: long_int21_716c PASSED with no TSR loaded — DOSBox-X may be falling back to its built-in LFN despite -set lfn=false"; rc=1
+                echo "  UNEXPECTED: long_int21_716c PASSED with no TSR loaded -- DOSBox-X may be falling back to its built-in LFN despite -set lfn=false"; rc=1
             fi
             if grep -q 'doserr=0x7100' "$log"; then
-                echo "  EXPECTED: long_int21_716c FAIL doserr=0x7100 (\"LFN API not present\") — DOSBox-X correctly reports no LFN handler"
+                echo "  EXPECTED: long_int21_716c FAIL doserr=0x7100 (\"LFN API not present\") -- DOSBox-X correctly reports no LFN handler"
             fi
             if [[ "$long_libc_pass" == "1" ]]; then
-                echo "  NOTE: long_libc_lfn PASS — DOSBox-X's host-mount opened the file via direct host-fs lookup, bypassing DOS's 8.3 layer. This is a DOSBox-X harness quirk, not a real LFN observation. The raw INT 21h test (long_int21_716c) is the authoritative no-tsr signal."
+                echo "  NOTE: long_libc_lfn PASS -- DOSBox-X's host-mount opened the file via direct host-fs lookup, bypassing DOS's 8.3 layer. This is a DOSBox-X harness quirk, not a real LFN observation. The raw INT 21h test (long_int21_716c) is the authoritative no-tsr signal."
             fi
             ;;
     esac
@@ -272,11 +272,11 @@ esac
 
 echo
 if [[ "$overall_rc" == "0" ]]; then
-    echo "════ SUMMARY: probe code verified; TSR variants may be inconclusive under DOSBox-X ════"
+    echo "==== SUMMARY: probe code verified; TSR variants may be inconclusive under DOSBox-X ===="
     echo "  Definitive answer for LFN-TSR-via-CWSDPMI requires Phase B (real-HW g2k)."
     echo "  See per-variant interpretation lines above + tests/dpmi-lfn-smoke/README.md."
 else
-    echo "════ SUMMARY: one or more variants behaved unexpectedly ════"
+    echo "==== SUMMARY: one or more variants behaved unexpectedly ===="
     echo "See per-variant 'UNEXPECTED:' lines above. Logs in $LOG_DIR/probe-*.log."
 fi
 exit $overall_rc

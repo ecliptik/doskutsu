@@ -1,4 +1,4 @@
-# tests/sdl3-smoke — Phase 2d SDL3 DOS-backend smoke test
+# tests/sdl3-smoke -- Phase 2d SDL3 DOS-backend smoke test
 
 Phase 2 gate (#14): exercise the SDL3 DOS backend (PR #15377) under DOSBox-X
 to confirm `libSDL3.a` links, the DPMI runtime survives `SDL_Init`, the VESA
@@ -31,7 +31,7 @@ DOSBox-X harness redirects stdout to a file via `> STDOUT.TXT` in a generated
 `RUN.BAT`. Merging stderr into stdout would require `2>&1` syntax, which
 **neither MS-DOS COMMAND.COM nor DOSBox-X's built-in shell support**:
 DOSBox-X parses the `2>` token as a separate stderr-redirect to a file
-literally named `&1` (verified empirically — the `&1` file appears in the
+literally named `&1` (verified empirically -- the `&1` file appears in the
 stage with zero bytes). Result: capture is empty, gate cannot pass.
 
 Two paths to fix were considered and rejected:
@@ -39,12 +39,12 @@ Two paths to fix were considered and rejected:
 1. **Patch SDL test source to call `SDL_SetLogOutputFunction(stdout_writer, ...)`.**
    Conflicts with `vendor/SDL/CLAUDE.md` ("AI must not be used to generate code
    for contributions to this project"). Even maintaining the patch in
-   `patches/SDL/` long-term is awkward — the policy reads as a request not to
+   `patches/SDL/` long-term is awkward -- the policy reads as a request not to
    produce SDL-derivative code via LLMs even when it's never submitted upstream.
 
 2. **Wait for DOSBox-X / DJGPP to support `2>&1`.** DJGPP's argv-level
    redirection is real but only kicks in for tokens left after COMMAND.COM
-   parsing — and DOSBox's shell consumes `2>` first. Even if we worked around
+   parsing -- and DOSBox's shell consumes `2>` first. Even if we worked around
    it, MS-DOS 6.22 on real hardware won't behave the same, so the gate would
    break on real hardware anyway. Shell-agnostic capture is the only future-
    proof answer.
@@ -55,16 +55,16 @@ Equivalent coverage, shell-agnostic.
 
 ## What we explicitly skip and why
 
-- **Renderer test (`testdraw.c`).** Keyboard-driven exit only — no
+- **Renderer test (`testdraw.c`).** Keyboard-driven exit only -- no
   `--frames N` flag in this SDL SHA. Auto-exit would require patching SDL
   test source (rejected above). The audio + video init gate alone is
   sufficient to confirm both DOS-backend subsystems initialize. Renderer
   smoke deferred to Phase 5 (NXEngine itself is the renderer harness).
-- **Audio playback test (`testaudio`).** Produces a tone — not verifiable
+- **Audio playback test (`testaudio`).** Produces a tone -- not verifiable
   from captured stdout.
 - **`testkeyboard`, `testevents`.** Interactive.
 - **Anything pulling in SDL_image or SDL_mixer.** Those layers don't exist
-  yet (Phases 3–4).
+  yet (Phases 3-4).
 
 ## Output format
 

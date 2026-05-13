@@ -1,5 +1,5 @@
 /*
- * probe.c — DPMI INT 21h LFN propagation smoke test (Phase 8 prerequisite).
+ * probe.c -- DPMI INT 21h LFN propagation smoke test (Phase 8 prerequisite).
  *
  * Answers: does CWSDPMI's INT 21h reflector pass LFN-family calls (function
  * codes 7140h-71A8h) through to a real-mode TSR (LFNDOS.COM, DOSLFN.COM)
@@ -13,17 +13,17 @@
  *
  * DJGPP-built DOSKUTSU.EXE runs under CWSDPMI. NXEngine-evo issues plain
  * fopen() calls for files like "wavetable.dat" (9-char base, breaks 8.3).
- * If CWSDPMI's INT 21h reflector strips the LFN function codes — or fails
+ * If CWSDPMI's INT 21h reflector strips the LFN function codes -- or fails
  * to translate the DS:SI ASCIZ pointer across the protected/real-mode
- * boundary correctly — then loading an LFN TSR on g2k won't help, and
+ * boundary correctly -- then loading an LFN TSR on g2k won't help, and
  * we have to fall back to source-renaming every long-named asset.
  *
  * This probe runs THREE tests against a paired fixture (same byte-content
- * staged under two names — one 8.3-clean, one not):
+ * staged under two names -- one 8.3-clean, one not):
  *
- *   1. open(SHORT_NAME, O_RDONLY)         — control. Pure 8.3, always works.
- *   2. open(LONG_NAME,  O_RDONLY)         — DJGPP libc with _use_lfn(1).
- *   3. INT 21h AX=716Ch via __dpmi_int    — bypasses libc, pure DPMI path.
+ *   1. open(SHORT_NAME, O_RDONLY)         -- control. Pure 8.3, always works.
+ *   2. open(LONG_NAME,  O_RDONLY)         -- DJGPP libc with _use_lfn(1).
+ *   3. INT 21h AX=716Ch via __dpmi_int    -- bypasses libc, pure DPMI path.
  *
  * Exit code is the count of FAILing assertions (0 = all PASS). Output is
  * line-prefixed for grep-friendly assertion in run-dpmi-lfn-smoke.sh.
@@ -31,18 +31,18 @@
  * Interpretation:
  *
  *   Test 1 must pass everywhere (proves the harness reaches a real DOS).
- *   Tests 2/3 pass on DOSBox-X with `lfn = true` — emulator bakes LFN in
+ *   Tests 2/3 pass on DOSBox-X with `lfn = true` -- emulator bakes LFN in
  *     at the kernel layer with no DPMI server in the loop. This is the
  *     baseline we run on the dev host.
  *   Tests 2/3 on g2k with no LFN TSR loaded must FAIL (control: confirms
  *     real-HW behaves as theorized).
- *   Tests 2/3 on g2k with LFNDOS.COM (or DOSLFN.COM) loaded — answers the
+ *   Tests 2/3 on g2k with LFNDOS.COM (or DOSLFN.COM) loaded -- answers the
  *     load-bearing question. If they pass: ship the LFN TSR per option A
  *     of docs/PHASE8-LFN-DECISION.md. If they fail: source-rename per
  *     option B is mandatory.
  *
  * Test 3 (raw INT 21h via __dpmi_int) isolates the DPMI question from the
- * libc question — if test 2 fails but test 3 passes, the failure is in
+ * libc question -- if test 2 fails but test 3 passes, the failure is in
  * DJGPP's libc, not CWSDPMI. If both fail, CWSDPMI's reflector is the
  * culprit.
  *
@@ -66,8 +66,8 @@
  * LFN-extended INT 21h variants vs. the legacy 8.3 calls. We force it
  * on at probe startup via setenv() so the test result doesn't depend on
  * how the harness was invoked. The libc function _use_lfn(path) is a
- * QUERY — it returns whether LFN is currently active for a given path,
- * not a setter — used here only for diagnostic reporting. */
+ * QUERY -- it returns whether LFN is currently active for a given path,
+ * not a setter -- used here only for diagnostic reporting. */
 
 /* Paired fixtures staged into C:\ by the test harness. Both files contain
  * the same single-byte sentinel ('!'). Each name targets a different LFN
@@ -111,7 +111,7 @@ static int test_long_libc_lfn(void)
 
 /* Issue INT 21h AX=716Ch (LFN Extended Open/Create) directly via DPMI,
  * bypassing DJGPP libc. The filename ASCIZ string must live in DOS-addressable
- * memory below 1 MB — DJGPP's __tb (transfer buffer) is the canonical
+ * memory below 1 MB -- DJGPP's __tb (transfer buffer) is the canonical
  * place for that. */
 static int test_long_int21_716c(void)
 {
@@ -139,7 +139,7 @@ static int test_long_int21_716c(void)
         return 1;
     }
     if (regs.x.flags & 1) {
-        /* Carry set → AX is a DOS error code. 0x02 = file not found,
+        /* Carry set -> AX is a DOS error code. 0x02 = file not found,
          * 0x03 = path not found, 0x05 = access denied, 0x57 = invalid
          * function (no LFN driver), etc. */
         printf("PROBE: long_int21_716c FAIL doserr=0x%04X\n", regs.x.ax);

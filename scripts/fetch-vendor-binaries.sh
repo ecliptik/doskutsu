@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fetch-vendor-binaries.sh — populate vendor/<name>/<binary> entries from
+# fetch-vendor-binaries.sh -- populate vendor/<name>/<binary> entries from
 # vendor/binaries.manifest. Idempotent: skips files that already exist with
 # the manifest-pinned sha256.
 #
@@ -69,7 +69,7 @@ fetch_one() {
         return 1
     fi
 
-    log "fetch $path  ←  $url${member:+  (member: $member)}"
+    log "fetch $path  <-  $url${member:+  (member: $member)}"
     mkdir -p "$(dirname "$abs")"
 
     if [[ -n "$member" ]]; then
@@ -112,7 +112,7 @@ if [[ "$mode" == check ]]; then
     if [[ $rc -eq 0 ]]; then
         log "all binaries verified."
     else
-        log "verification failed — run without --check to fetch."
+        log "verification failed -- run without --check to fetch."
     fi
 fi
 

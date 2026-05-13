@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# apply-patches.sh — apply patches/<name>/*.patch to vendor/<name>/.
+# apply-patches.sh -- apply patches/<name>/*.patch to vendor/<name>/.
 #
 # Patches are produced by `git format-patch` from a working branch in the
 # vendor tree and numbered lexically (0001-, 0002-, ...). Ordering matters;
@@ -54,7 +54,7 @@ apply_one() {
     local patches_path="$PATCHES_DIR/$name"
 
     if [[ ! -d "$vendor_path" ]]; then
-        log "$name: vendor tree not present — run scripts/fetch-sources.sh first"
+        log "$name: vendor tree not present -- run scripts/fetch-sources.sh first"
         return 1
     fi
 
@@ -73,7 +73,7 @@ apply_one() {
     fi
 
     if [[ ! -d "$patches_path" ]]; then
-        log "$name: no patches/ directory — nothing to apply"
+        log "$name: no patches/ directory -- nothing to apply"
         return 0
     fi
 
@@ -81,7 +81,7 @@ apply_one() {
     #
     # LC_ALL=C forces ASCII byte-order sort. Without it, glibc's default
     # locale-aware collation treats `-` (0x2D) as punctuation that gets
-    # promoted next to alphabetics — so a filename like `0014a-...patch`
+    # promoted next to alphabetics -- so a filename like `0014a-...patch`
     # would sort BEFORE `0014-...patch` on en_US.UTF-8 even though ASCII
     # byte order has the reverse (0x2D < 0x61). Caught by nxengine during
     # Phase 5 attempt 4 when sdl-engine's `0014a` and `0010a` follow-up
@@ -95,7 +95,7 @@ apply_one() {
     done < <(find "$patches_path" -maxdepth 1 -name '*.patch' -type f -print0 | LC_ALL=C sort -z)
 
     if [[ "${#patches[@]}" -eq 0 ]]; then
-        log "$name: no *.patch files in $patches_path — nothing to apply"
+        log "$name: no *.patch files in $patches_path -- nothing to apply"
         return 0
     fi
 
@@ -104,7 +104,7 @@ apply_one() {
     # Pass patches explicitly rather than via stdin so error messages reference
     # the failing file path.
     if ! (cd "$vendor_path" && git am --keep-cr "${patches[@]}"); then
-        log "$name: git am failed — last patch left conflicts in $vendor_path"
+        log "$name: git am failed -- last patch left conflicts in $vendor_path"
         log "       Inspect with: (cd $vendor_path && git status)"
         log "       Abort with:   (cd $vendor_path && git am --abort)"
         return 1
@@ -134,7 +134,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < "$MANIFEST"
 
 if [[ "$rc" -ne 0 ]]; then
-    log "one or more vendors had patch failures — see above"
+    log "one or more vendors had patch failures -- see above"
     exit 1
 fi
 log "done."

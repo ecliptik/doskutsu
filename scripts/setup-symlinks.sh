@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup-symlinks.sh — wire this repo to the shared ~/emulators/ toolchain hub.
+# setup-symlinks.sh -- wire this repo to the shared ~/emulators/ toolchain hub.
 #
 # The DJGPP cross-compiler lives canonically at ~/emulators/tools/djgpp/
 # alongside the sibling projects (vellm, geomys, flynn). Symlinking it into

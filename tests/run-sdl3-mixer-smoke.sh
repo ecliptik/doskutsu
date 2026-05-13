@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run-sdl3-mixer-smoke.sh — Path B spike functional gate runner.
+# run-sdl3-mixer-smoke.sh -- Path B spike functional gate runner.
 #
 # Runs build/sdl3-mixer-smoke/mixertest.exe under DOSBox-X headless and
 # verifies SDL3_mixer's three NXEngine-equivalent code paths actually work.
@@ -9,12 +9,12 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# 8.3 DOS filename — matches Makefile's SDL3_MIXER_SMOKE_EXE.
+# 8.3 DOS filename -- matches Makefile's SDL3_MIXER_SMOKE_EXE.
 EXE="$REPO_ROOT/build/sdl3-mixer-smoke/mixsmk.exe"
 LOG="$REPO_ROOT/build/sdl3-mixer-smoke/mixsmk.log"
 
 if [[ ! -f "$EXE" ]]; then
-    echo "run-sdl3-mixer-smoke.sh: $EXE missing — build with \`make sdl3-mixer-smoke\`" >&2
+    echo "run-sdl3-mixer-smoke.sh: $EXE missing -- build with \`make sdl3-mixer-smoke\`" >&2
     exit 2
 fi
 
@@ -28,7 +28,7 @@ if [[ ! -s "$LOG" ]]; then
     exit 2
 fi
 
-# Required substrings — each represents one of the three NXEngine audio
+# Required substrings -- each represents one of the three NXEngine audio
 # code paths confirmed working end-to-end on DJGPP under DOSBox-X.
 REQUIRED=(
     "MIXTEST-BEGIN:"           # exe started

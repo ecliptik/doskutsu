@@ -1,6 +1,6 @@
 # Cave Story Game Assets
 
-DOSKUTSU requires the Cave Story game data (maps, sprites, music, dialogue) at runtime. **These are not redistributed in this repository** — they are freeware-licensed by Daisuke "Pixel" Amaya under his 2004 terms, but we keep them out of the repo and out of `dist/doskutsu-cf.zip` to avoid licensing ambiguity.
+DOSKUTSU requires the Cave Story game data (maps, sprites, music, dialogue) at runtime. **These are not redistributed in this repository** -- they are freeware-licensed by Daisuke "Pixel" Amaya under his 2004 terms, but we keep them out of the repo and out of `dist/doskutsu-cf.zip` to avoid licensing ambiguity.
 
 This document tells you how to obtain and extract the assets yourself, and where DOSKUTSU expects to find them.
 
@@ -8,7 +8,7 @@ This document tells you how to obtain and extract the assets yourself, and where
 
 ## Target layout
 
-DOSKUTSU's NXEngine-evo source resolves assets via `data/<filename>` relative to the runtime base. **There is no `base/` subdirectory** — all assets (Cave Story content + NXEngine engine support files) coexist under a single `data/` tree.
+DOSKUTSU's NXEngine-evo source resolves assets via `data/<filename>` relative to the runtime base. **There is no `base/` subdirectory** -- all assets (Cave Story content + NXEngine engine support files) coexist under a single `data/` tree.
 
 On DOS:
 
@@ -18,13 +18,13 @@ C:\DOSKUTSU\CWSDPMI.EXE
 C:\DOSKUTSU\DATA\
     Stage\                  (map data from Cave Story: .pxm, .pxe, .pxa, .tsc)
     Npc\                    (NPC sprite sheets: .pbm)
-    org\                    (Organya music: .org — extracted from Doukutsu.exe PE resources)
-    pxt\                    (Pixtone synth params: fxNN.pxt — extracted from Doukutsu.exe binary)
+    org\                    (Organya music: .org -- extracted from Doukutsu.exe PE resources)
+    pxt\                    (Pixtone synth params: fxNN.pxt -- extracted from Doukutsu.exe binary)
     StageMeta\              (NXEngine-evo engine: stage metadata JSON)
     endpic\                 (NXEngine-evo engine: end-game pictures)
-    npc.tbl                 (NPC behaviour table — Cave Story)
-    MyChar.pbm              (player sprite — Cave Story)
-    ArmsImage.pbm           (weapon sprites — Cave Story)
+    npc.tbl                 (NPC behaviour table -- Cave Story)
+    MyChar.pbm              (player sprite -- Cave Story)
+    ArmsImage.pbm           (weapon sprites -- Cave Story)
     bk*.pbm, Caret.pbm, Bullet.pbm, ... (other Cave Story root assets)
     font_*.fnt, font_*.png  (NXEngine-evo engine bitmap fonts)
     ...                     (other engine + game assets, all flat under DATA\)
@@ -34,21 +34,21 @@ On the Linux dev host (for DOSBox-X testing), the same layout under `<repo>/data
 
 ```
 data/
-├── Stage/                  (Cave Story maps)
-├── Npc/                    (Cave Story NPC sprites)
-├── org/                    (Cave Story Organya music, extracted from Doukutsu.exe PE)
-├── pxt/                    (Cave Story Pixtone synth params, extracted from Doukutsu.exe data)
-├── StageMeta/              (engine, from vendor/nxengine-evo/data/)
-├── endpic/                 (engine, from vendor/nxengine-evo/data/)
-├── npc.tbl                 (Cave Story root)
-├── MyChar.pbm              (Cave Story root)
-├── font_*.fnt              (engine, from vendor/nxengine-evo/data/)
-└── ...                     (everything else, flat)
++-- Stage/                  (Cave Story maps)
++-- Npc/                    (Cave Story NPC sprites)
++-- org/                    (Cave Story Organya music, extracted from Doukutsu.exe PE)
++-- pxt/                    (Cave Story Pixtone synth params, extracted from Doukutsu.exe data)
++-- StageMeta/              (engine, from vendor/nxengine-evo/data/)
++-- endpic/                 (engine, from vendor/nxengine-evo/data/)
++-- npc.tbl                 (Cave Story root)
++-- MyChar.pbm              (Cave Story root)
++-- font_*.fnt              (engine, from vendor/nxengine-evo/data/)
+`-- ...                     (everything else, flat)
 ```
 
-`data/` is gitignored — Cave Story content is freeware-from-Pixel and we don't redistribute, NXEngine engine data is GPLv3 and is shipped only via the dist bundle (see Phase 8).
+`data/` is gitignored -- Cave Story content is freeware-from-Pixel and we don't redistribute, NXEngine engine data is GPLv3 and is shipped only via the dist bundle (see Phase 8).
 
-**Historical note:** earlier docs and the Makefile install target used a `data/base/` subdirectory convention. That was inconsistent with NXEngine-evo's actual source-side path resolution (`getPath("Stage/0.pxm")` → `data/Stage/0.pxm`, no base prefix). The convention has been reconciled: Cave Story content and engine support files coexist directly under `data/`. The Makefile install target deploys `data/*` to `C:\DOSKUTSU\DATA\` (no `BASE\` subdirectory).
+**Historical note:** earlier docs and the Makefile install target used a `data/base/` subdirectory convention. That was inconsistent with NXEngine-evo's actual source-side path resolution (`getPath("Stage/0.pxm")` -> `data/Stage/0.pxm`, no base prefix). The convention has been reconciled: Cave Story content and engine support files coexist directly under `data/`. The Makefile install target deploys `data/*` to `C:\DOSKUTSU\DATA\` (no `BASE\` subdirectory).
 
 ---
 
@@ -60,13 +60,13 @@ The canonical source is **https://www.cavestory.org/**. The site hosts:
 - Aeon Genesis's English fan translation patch + patched binary
 - Older mirrors of both
 
-**Use the English translation** — that's what NXEngine-evo expects by default. Japanese original support would require Phase 2+ work (different font, different text encoding).
+**Use the English translation** -- that's what NXEngine-evo expects by default. Japanese original support would require Phase 2+ work (different font, different text encoding).
 
 Verify the download:
 - The English freeware `Doukutsu.exe` is roughly 1.4 MB
 - Running it on a modern Linux under Wine should produce the title screen (a quick sanity check before extraction)
 
-**The cavestory.org layout drifts.** Verify URLs manually before scripting any download — a hardcoded path that works today may 404 in six months.
+**The cavestory.org layout drifts.** Verify URLs manually before scripting any download -- a hardcoded path that works today may 404 in six months.
 
 ---
 
@@ -99,13 +99,13 @@ Original tool for the Cave Story fan scene. Predates doukutsu-rs. Works but incr
 
 ### Option C: a pre-extracted `data/` from a trusted NXEngine-evo fork
 
-Some NXEngine-evo forks (e.g., Debian packaging, retro-gaming community forks) ship pre-extracted `data/` trees. This is the fastest path but only trustworthy if the source is a known-good fork — **not** a random archive. **Note:** older forks may use a `data/base/` layout; you'll need to flatten it (`mv data/base/* data/ && rmdir data/base`) since NXEngine-evo's source-side path resolution doesn't honour a `base/` subdir.
+Some NXEngine-evo forks (e.g., Debian packaging, retro-gaming community forks) ship pre-extracted `data/` trees. This is the fastest path but only trustworthy if the source is a known-good fork -- **not** a random archive. **Note:** older forks may use a `data/base/` layout; you'll need to flatten it (`mv data/base/* data/ && rmdir data/base`) since NXEngine-evo's source-side path resolution doesn't honour a `base/` subdir.
 
 If in doubt, extract yourself via Option A.
 
 ### Option D: a pre-patched English archive (cavestory.one fastest path)
 
-The Cave Story Tribute Site at <https://www.cavestory.one/downloads/cavestoryen.zip> ships an Aeon-Genesis-pre-patched `Doukutsu.exe` plus the loose `data/` files (Stage/, Npc/, root .pbm/.tsc/npc.tbl). It does **not** include the embedded ORG/PXT data — those still need extraction from `Doukutsu.exe` itself via `7z x` (PE resources) for the `.org` files plus `scripts/extract-pxt.py` (binary-table-driven) for the `.pxt` files. The `scripts/extract-pxt.py` script is doskutsu-authored, transcribed from `vendor/nxengine-evo/src/extract/extractpxt.cpp`'s `extract_pxt()` algorithm — operates on file offsets, no Rust toolchain needed.
+The Cave Story Tribute Site at <https://www.cavestory.one/downloads/cavestoryen.zip> ships an Aeon-Genesis-pre-patched `Doukutsu.exe` plus the loose `data/` files (Stage/, Npc/, root .pbm/.tsc/npc.tbl). It does **not** include the embedded ORG/PXT data -- those still need extraction from `Doukutsu.exe` itself via `7z x` (PE resources) for the `.org` files plus `scripts/extract-pxt.py` (binary-table-driven) for the `.pxt` files. The `scripts/extract-pxt.py` script is doskutsu-authored, transcribed from `vendor/nxengine-evo/src/extract/extractpxt.cpp`'s `extract_pxt()` algorithm -- operates on file offsets, no Rust toolchain needed.
 
 For PXT specifically, **`scripts/fetch-cs-pxt.py`** is the one-shot
 orchestrator: it downloads `cavestoryen.zip` (SHA-256-pinned), extracts
@@ -131,20 +131,20 @@ decimal:  8, 9, 10, 13, 19, 36, 66-69, 73-99
 hex:      fx08, fx09, fx0a, fx0d, fx13, fx24, fx42-45, fx49-63
 ```
 
-These are **unnamed gaps in the engine's SFX enum** —
+These are **unnamed gaps in the engine's SFX enum** --
 `vendor/nxengine-evo/src/sound/SoundManager.h:63` declares
 `SND_<NAME> = <decimal-id>` constants for the 80 named SFX (1-7, 11-12,
 14-18, 20-35, 37-65, 70-72, 100-117, 150-155), and the 37 missing-PXT
 IDs land in the gaps between named ranges. **No engine code calls
 `Pixtone::play()` with these slot numbers.** They show up only because
 `Pixtone::Pixtone()` blindly iterates `slot = 1 .. NUM_SOUNDS` and
-attempts to load each one regardless of whether it has a named constant —
+attempts to load each one regardless of whether it has a named constant --
 a defensive iteration that lets mods add `fxNN.pxt` files for
 previously-unused slots without code changes.
 
 Verified at the TSC-script level too: decrypting all 95 vanilla
 `data/Stage/*.tsc` files and scanning for `<SOU` (Cave Story's
-SFX-trigger TSC command — note: NOT `<SND`, that's a different opcode
+SFX-trigger TSC command -- note: NOT `<SND`, that's a different opcode
 in NXEngine's TSC interpreter), Pixel's freeware scripts reference
 **exactly 18 unique SFX slot numbers**:
 
@@ -154,8 +154,8 @@ TSC <SOU> args used in vanilla Cave Story:
 ```
 
 All 18 are present in our 86-file extracted set; zero overlap with the
-missing 37. So even the scripted SFX surface — independent of the
-engine's C++ SFX-by-name dispatch — never asks for the missing slots.
+missing 37. So even the scripted SFX surface -- independent of the
+engine's C++ SFX-by-name dispatch -- never asks for the missing slots.
 The vanilla game runs to completion without ever needing a single
 parameter block from the 37 absent IDs.
 
@@ -172,28 +172,28 @@ slots. Verified 2026-05-11:
 
 - NXEngine-evo's own `vendor/nxengine-evo/src/extract/extractpxt.cpp`
   SND[] table is byte-for-byte identical to our `scripts/extract-pxt.py`
-  table — the same 86 IDs, in the same order, at the same byte offsets.
+  table -- the same 86 IDs, in the same order, at the same byte offsets.
   The gaps are gaps in `Doukutsu.exe`, not gaps in our extractor.
 - NXEngine-evo's bundled `vendor/nxengine-evo/data/` ships zero `.pxt`
   files; upstream doesn't bundle the missing 37 either.
 - NXEngine-evo [issue #4](https://github.com/nxengine/nxengine-evo/issues/4)
   (open since 2017) reports the same `pxt_load: file not found`
-  warn-spam. Maintainers don't document an upstream source — the
+  warn-spam. Maintainers don't document an upstream source -- the
   implication is that the gap is accepted as upstream behavior.
 - [doukutsu-rs](https://github.com/doukutsu-rs/doukutsu-rs) is the
   sibling Cave Story re-implementation; their wiki documents an
   architectural divergence (WAV samples for drums instead of PXT) but
   no separate community PXT pack for the missing IDs.
 - GitHub search for the specific filenames (`fx49.pxt`, `fx4b.pxt`,
-  `fx5a.pxt`) returns zero indexed hits — no community PXT pack is
+  `fx5a.pxt`) returns zero indexed hits -- no community PXT pack is
   published anywhere on GitHub.
 - The Cave Story+ / Wii / 3DS DSiWare commercial releases contain
-  additional SFX, but they're WAV samples owned by NICALIS — neither
-  PXT-format nor GPLv3-compatible per `CLAUDE.md § Licensing`.
+  additional SFX, but they're WAV samples owned by NICALIS -- neither
+  PXT-format nor GPLv3-compatible per `CLAUDE.md sec. Licensing`.
 
 The 37 warn lines at boot are cosmetic. If you're debugging an actual
 "no SFX" bug, look for slots that *do* exist in the canonical 86 set
-but fail to load (path issue, file corruption, etc.) — the missing 37
+but fail to load (path issue, file corruption, etc.) -- the missing 37
 are noise, not signal.
 
 ---
@@ -214,7 +214,7 @@ done
 
 # Add the binary-extracted Pixtone params. Two equivalent paths:
 #
-#   (a) one-shot orchestrator (recommended — handles source fetch + extract
+#   (a) one-shot orchestrator (recommended -- handles source fetch + extract
 #       in one step, cleans up the freeware binary on exit):
 #         python3 scripts/fetch-cs-pxt.py data/
 #         # downloads cavestoryen.zip (SHA-256-pinned), extracts Doukutsu.exe
@@ -236,9 +236,9 @@ done
 # algorithm from vendor/nxengine-evo/src/extract/extractstages.cpp +
 # extractfiles.cpp and produces:
 #   data/wavetbl.dat         (25600 bytes; renamed from upstream's
-#                             wavetable.dat to fit DOS 8.3, see § 8.3)
+#                             wavetable.dat to fit DOS 8.3, see sec. 8.3)
 #   data/stage.dat           (6936 bytes, 95 stages)
-#   data/endpic/pixel.bmp    (1398 bytes — 25-byte BMP file-header
+#   data/endpic/pixel.bmp    (1398 bytes -- 25-byte BMP file-header
 #                             reconstruction + 1373 bytes of palette and
 #                             pixel data; CRC-32 verified against the
 #                             0x6181d0a1 value in extractfiles.cpp's
@@ -251,13 +251,13 @@ done
 scripts/extract-engine-data.py /path/to/Doukutsu.exe data/
 
 # Also merge NXEngine-evo's engine support data (fonts, UI, PBM backgrounds,
-# StgMeta, endpic) — these live at the same level as the Cave Story content:
+# StgMeta, endpic) -- these live at the same level as the Cave Story content:
 cp -r vendor/nxengine-evo/data/* data/
 
 # Rename the user-extracted Cave Story content files that violate DOS 8.3
 # (PrtAlmond.pbm, Almond.pxa, NpcBallos.pbm, NpcIsland.pbm, NpcPriest.pbm,
 # NpcStream.pbm, ArmsImage.pbm, ItemImage.pbm, StageImage.pbm,
-# StageSelect.tsc). Idempotent — safe to run on already-renamed trees.
+# StageSelect.tsc). Idempotent -- safe to run on already-renamed trees.
 scripts/rename-user-data-83.sh data
 ```
 
@@ -272,30 +272,30 @@ renderer consumes at boot:
 ```bash
 python3 tools/build-master-palette.py data/
 # Outputs:
-#   data/master.pal     — 768 bytes, 256 RGB triples (reserved: index 0 = black,
+#   data/master.pal     -- 768 bytes, 256 RGB triples (reserved: index 0 = black,
 #                         indices 1..16 = gradient ramp slots, indices 17..254 =
 #                         octree-quantized leaves, index 255 = magenta colorkey)
-#   data/master.map     — ~5 KB, per-asset source-palette → master remap LUTs
+#   data/master.map     -- ~5 KB, per-asset source-palette -> master remap LUTs
 #                         (PMAP/v1 header + 12 bytes overhead + 110 entries).
-#                         8.3-clean filename — survives DOSBox-X lfn=false and
+#                         8.3-clean filename -- survives DOSBox-X lfn=false and
 #                         real DOS 6.22 (where the legacy 13-char `master.palmap`
 #                         would alias onto `master.pal`).
 ```
 
-The tool runs Gervautz–Purgathofer octree quantization across the corpus and
+The tool runs Gervautz-Purgathofer octree quantization across the corpus and
 validates each indexed asset's remap quality via PSNR. It exits non-zero if
 any indexed sprite falls below 28 dB (or 30 dB for `Face*.pbm` portraits) so
 you'll know immediately if a mod's assets broke the gate. Truecolor
 backgrounds (`bkHellsh.pbm` / `bkLight.pbm` / `bkSunset.pbm`) take the slow
 per-pixel nearest-color path at boot and have no PSNR floor (they dither by
-design — see `docs/PHASE9-PALETTE-AUDIT.md`).
+design -- see `docs/PHASE9-PALETTE-AUDIT.md`).
 
 These two files are **derivative works of Cave Story freeware data**; they
 are NOT redistributed via this repo or `dist/doskutsu-cf.zip`. Re-run the
 tool any time you change `data/` (e.g. installing a mod or replacing a
 sprite sheet).
 
-Verify (using NXEngine-source-true paths — note: no `base/` subdir):
+Verify (using NXEngine-source-true paths -- note: no `base/` subdir):
 ```
 data/Stage/0.pxm          # Cave Story maps exist
 data/Npc/NpcSym.pbm       # Cave Story NPC sprites exist
@@ -314,9 +314,9 @@ data/font_1.fnt           # NXEngine-evo engine bitmap font exists
 data/StgMeta/*.jsn        # NXEngine-evo engine stage metadata
                           # (Cave Story stems are all 8.3-clean; only the
                           # extension and the parent directory needed
-                          # 8.3 trims; see § 8.3 below)
+                          # 8.3 trims; see sec. 8.3 below)
 data/master.pal           # 256-color master palette (768 bytes; Step 4)
-data/master.map           # per-asset source → master remap LUTs (Step 4;
+data/master.map           # per-asset source -> master remap LUTs (Step 4;
                           # 8.3-clean filename for DOS LFN-off compatibility)
 ```
 
@@ -328,13 +328,13 @@ Real MS-DOS 6.22 (no LFN driver) enforces 8.3 at the filesystem layer.
 DOSKUTSU runs against this constraint by renaming all engine and
 extractor-emitted assets to fit. The renames live in three patches:
 
-- `patches/nxengine-evo/0033-asset-renames-source.patch` — source-side
+- `patches/nxengine-evo/0033-asset-renames-source.patch` -- source-side
   string-literal updates (Organya.cpp, SoundManager.cpp, translate.cpp,
   tsc.cpp, map.cpp, credits.cpp, stagedata.cpp).
-- `patches/nxengine-evo/0034-asset-renames-data-files.patch` — physical
-  rename of the engine-bundled data tree (`StageMeta/` → `StgMeta/`,
-  `*.json` → `*.jsn`, `bkHellish.pbm` → `bkHellsh.pbm`, etc.).
-- `patches/nxengine-evo/0035-asset-renames-sprites-sif.patch` — binary
+- `patches/nxengine-evo/0034-asset-renames-data-files.patch` -- physical
+  rename of the engine-bundled data tree (`StageMeta/` -> `StgMeta/`,
+  `*.json` -> `*.jsn`, `bkHellish.pbm` -> `bkHellsh.pbm`, etc.).
+- `patches/nxengine-evo/0035-asset-renames-sprites-sif.patch` -- binary
   regeneration of `sprites.sif` to update the embedded sheet-path
   strings via `scripts/rename-sif.py`.
 
@@ -353,7 +353,7 @@ as the last extraction step. The full rename map:
 | `ItemImage.pbm` | `ItmImg.pbm` |
 | `StageImage.pbm` | `StgImg.pbm` |
 | `bkHellish.pbm` | `bkHellsh.pbm` |
-| `bk*480fix.pbm` (×5) | (excluded from staging — dead code at 320×240) |
+| `bk*480fix.pbm` (x5) | (excluded from staging -- dead code at 320x240) |
 | `StageMeta/` | `StgMeta/` |
 | `StageMeta/<name>.json` | `StgMeta/<name>.jsn` |
 | `Stage/PrtAlmond.pbm` | `Stage/PrtAlmnd.pbm` |
@@ -373,7 +373,7 @@ under DOSKUTSU on real DOS without renaming. The current decision is
 
 ---
 
-## Step 4.5: optional — fetch MIDI tracks for hardware-MIDI audio (Phase 10)
+## Step 4.5: optional -- fetch MIDI tracks for hardware-MIDI audio (Phase 10)
 
 Phase 10 introduces a hardware-MIDI audio backend (WaveBlaster daughterboard
 on Tier-1 g2k; OPL3 register programming on Tier-2/3 fallback) that bypasses
@@ -394,17 +394,17 @@ The script does three things in sequence (no flags or env vars required):
 1. **Downloads `wiimidi2.zip`** from cavestory.one (~5.4 MB; SHA-256-pinned).
    Yann van der Cruyssen's WiiWare MIDI arrangements (2010); extracts 39 of
    41 engine-relevant tracks with filename normalization (e.g.
-   `game over.mid` → `gameover.mid`, `lastbtl3.mid` → `lastbt3.mid`).
+   `game over.mid` -> `gameover.mid`, `lastbtl3.mid` -> `lastbt3.mid`).
 
 2. **Downloads `wiimidi.zip`** from cavestory.one (~138 KB; SHA-256-pinned).
    The 2010 predecessor archive by the same arranger; extracts the one
-   engine-track NOT present in wiimidi2.zip — `Curly.mid` → `curly.mid`.
+   engine-track NOT present in wiimidi2.zip -- `Curly.mid` -> `curly.mid`.
 
 3. **Builds Robert Hart's ORGMID converter locally** (~12 KB source archive;
    SHA-256-pinned at the rnhart.net upstream URL) and runs it against
    your local `data/org/white.org` to produce `data/midi/white.mid`. This
    is the one engine-track for which no community .mid exists in any
-   cavestory.one archive; ORGMID converts ORG → MIDI deterministically
+   cavestory.one archive; ORGMID converts ORG -> MIDI deterministically
    on your machine. ORGMID source + binary live in a tempdir during the
    build and are removed when the script finishes; never persist on disk
    or in this repo.
@@ -422,7 +422,7 @@ The script does three things in sequence (no flags or env vars required):
 
 If the ORGMID step skips for any reason, the MIDI scheduler (Phase 10
 Stage 2) handles missing `white.mid` by falling back to silence-with-
-Pixtone for that song slot — Pixtone SFX continues; only the background
+Pixtone for that song slot -- Pixtone SFX continues; only the background
 music is silent during white.org's gameplay segments. Documented
 degradation, not a bug.
 
@@ -444,7 +444,7 @@ hardware-MIDI route trades that wall-clock cost for offloaded rendering
 on the audio device, with the aesthetic trade-off that the GM patches
 in your audio device's onboard bank don't sound like Organya waveforms.
 
-**Provenance + license posture:** see `docs/PHASE10-DESIGN.md` § 3 for
+**Provenance + license posture:** see `docs/PHASE10-DESIGN.md` sec. 3 for
 the full mapping table + license-posture audit. Same redistribution
 posture throughout: user-fetches-locally; sources never in our repo or
 dist zip. ORGMID source archive's license is unspecified on the
@@ -477,7 +477,7 @@ If the title screen appears but stages don't load, the Cave Story content under 
 
 ## Deploying to real hardware
 
-`make install CF=/mnt/cf` copies the binary + CWSDPMI + (if `data/` is present) the full extracted asset tree (Cave Story content + NXEngine-evo engine data) to `C:\DOSKUTSU\` on the mounted CF card. This is a convenience for your own use — the assets are being copied onto your own storage, not uploaded or redistributed.
+`make install CF=/mnt/cf` copies the binary + CWSDPMI + (if `data/` is present) the full extracted asset tree (Cave Story content + NXEngine-evo engine data) to `C:\DOSKUTSU\` on the mounted CF card. This is a convenience for your own use -- the assets are being copied onto your own storage, not uploaded or redistributed.
 
 `make dist` (for producing `dist/doskutsu-cf.zip` to share publicly) **does not include `data/`**. End users of the zip must follow this document themselves to assemble Cave Story assets.
 
@@ -490,6 +490,6 @@ If the title screen appears but stages don't load, the Cave Story content under 
   1. It avoids any ambiguity about whether NXEngine-evo's GPLv3 (the dominant license of `DOSKUTSU.EXE`) could attempt to re-license game data by inclusion.
   2. It puts users directly in contact with Pixel's original release, which is the canonical way to obtain the game.
   3. It keeps the repo small and the dist bundle focused on the port itself.
-- The NXEngine-evo-bundled engine data (fonts, PBM UI, etc.) **is** redistributed — that data is part of NXEngine-evo and thus GPLv3 under its upstream license. It's separate from Cave Story game content.
+- The NXEngine-evo-bundled engine data (fonts, PBM UI, etc.) **is** redistributed -- that data is part of NXEngine-evo and thus GPLv3 under its upstream license. It's separate from Cave Story game content.
 
 See [THIRD-PARTY.md](../THIRD-PARTY.md) for the full attribution matrix.

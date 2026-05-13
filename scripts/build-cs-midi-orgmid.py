@@ -8,12 +8,12 @@ output +12 semitones to compensate for ORGMID's known octave-down quirk.
 
 Output sits parallel to data/midi/ (the WiiWare arrangements from
 fetch-cs-midi.py). The engine selects between them at runtime via
-SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE — `wiimidi` (default; data/midi/) vs
-`orgmid` (data/orgmid/) — for A/B operator listening on real HW.
+SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE -- `wiimidi` (default; data/midi/) vs
+`orgmid` (data/orgmid/) -- for A/B operator listening on real HW.
 
 Background
 ----------
-ORGMID is a literal Organya-format → SMF transcription, so the result
+ORGMID is a literal Organya-format -> SMF transcription, so the result
 matches Pixel's original Cave Story aesthetic (chiptune, note-for-note)
 rather than the WiiWare port's professional re-arrangement (orchestral).
 Through OPL3 / DreamBlaster S2 GM rendering, the literal transcription
@@ -60,7 +60,7 @@ ORGMID_SHA256 = "151579170860c9f608327bd59cc4cbd2f6cc561a0a99ccaaddb144bc2264a3b
 ORGMID_SIZE = 11_823
 
 # xxxx.org is leftover from Pixel's freeware development, NOT indexed by
-# vendor/nxengine-evo/data/music.jsn — engine cannot play it. Skip.
+# vendor/nxengine-evo/data/music.jsn -- engine cannot play it. Skip.
 SKIP_ORGS = {"xxxx.org"}
 
 

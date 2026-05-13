@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# tests/run-gameplay-smoke.sh — visible DOSBox-X gameplay smoke test
+# tests/run-gameplay-smoke.sh -- visible DOSBox-X gameplay smoke test
 #
 # Drives DOSKUTSU.EXE through a scripted sequence of keystrokes via xdotool,
 # capturing screenshots at named milestones. Designed for repeatable smoke
 # verification without a human at the keyboard. Distinct from the headless
-# library smokes (run-smoke.sh, run-sdl3-smoke.sh, etc.) — those exercise
+# library smokes (run-smoke.sh, run-sdl3-smoke.sh, etc.) -- those exercise
 # isolated SDL/SDL_mixer/SDL_image; this one exercises the full game binary
 # end-to-end through the visible-DOSBox-X path used for screenshots.
 #
@@ -20,7 +20,7 @@
 #   - Whether the rendered content is *correct* (sprite alignment, palette
 #     fidelity, text legibility, scrolling smoothness).
 #   - Whether audio plays (no audio-capture path on the headless test bot).
-#   - Long-running stability (heap fragmentation, memory leaks) — that's
+#   - Long-running stability (heap fragmentation, memory leaks) -- that's
 #     the Phase 7 gate's 30-min run and it remains human-in-the-loop.
 #   - Save/load round-trip integrity.
 #
@@ -36,7 +36,7 @@
 #   tests/run-gameplay-smoke.sh --skip-gate       # capture logs but skip the banner-emit gate
 #                                                 # (intended for wave-39 ablation builds where
 #                                                 # reverted patches make required banners
-#                                                 # unreachable by design — gate would fail
+#                                                 # unreachable by design -- gate would fail
 #                                                 # spuriously; flush-instr decomp verifies the
 #                                                 # expected absences from the captured logs)
 
@@ -71,7 +71,7 @@ log() {
 }
 
 shoot() {
-  # shoot <name> — capture a screenshot, store under OUT_DIR/<name>.png
+  # shoot <name> -- capture a screenshot, store under OUT_DIR/<name>.png
   local name="$1"
   DISPLAY=$DISPLAY scrot -u "$OUT_DIR/$name.png" 2>/dev/null || true
   local size
@@ -80,7 +80,7 @@ shoot() {
 }
 
 key() {
-  # key <name> — send a key via xdotool; we do NOT focus the window each
+  # key <name> -- send a key via xdotool; we do NOT focus the window each
   # time (focus once at the start) because re-focusing introduces a
   # window-manager round-trip that desynchronizes the keystroke timing.
   local name="$1"
@@ -88,7 +88,7 @@ key() {
   log "sent key: $name"
 }
 
-# Refuse to run if DOSBox-X is already up — don't fight the existing lock.
+# Refuse to run if DOSBox-X is already up -- don't fight the existing lock.
 if pgrep -x dosbox-x >/dev/null; then
   echo "[gameplay-smoke] error: dosbox-x already running. Kill it first or use --kill-first via the launcher." >&2
   exit 3
@@ -117,7 +117,7 @@ fi
 log "dosbox-x started, PID $(pgrep -x dosbox-x)"
 
 # Focus the DOSBox-X window once (xdotool's search is racy if many X clients
-# claim "DOSBox" in the title — we wait + retry).
+# claim "DOSBox" in the title -- we wait + retry).
 for _ in $(seq 1 10); do
   if DISPLAY=$DISPLAY xdotool search --name DOSBox windowactivate --sync 2>/dev/null; then
     log "DOSBox window focused"
@@ -150,7 +150,7 @@ sleep 3
 shoot "04-after-z2"
 
 # Probe player input: send a Right arrow press, see if the screen changes.
-# Held key — release shortly after.
+# Held key -- release shortly after.
 DISPLAY=$DISPLAY xdotool keydown Right
 sleep 1.5
 DISPLAY=$DISPLAY xdotool keyup Right
@@ -203,12 +203,12 @@ fi
 
 # Banner-emit gate. `strings | grep` of the binary proves the literal lives in
 # .rodata but NOT that the surrounding LOG_* call site is reachable from
-# runtime — dead code paths keep their string literals. This gate captures the
-# logs after the smoke run and requires each regex below to match ≥1 line in
-# DEBUG.LOG ∪ SDLDBG.LOG. Regex alternations cover both default-ON and
+# runtime -- dead code paths keep their string literals. This gate captures the
+# logs after the smoke run and requires each regex below to match >=1 line in
+# DEBUG.LOG  U  SDLDBG.LOG. Regex alternations cover both default-ON and
 # default-OFF variants so the gate stays correct across killswitch flips and
 # only fails when the call site itself is dead. Add a new entry whenever a
-# lever ships a boot/init banner. See CLAUDE.md § Critical Rules § Build
+# lever ships a boot/init banner. See CLAUDE.md sec. Critical Rules sec. Build
 # verification.
 #
 # Parallel arrays (indexed by position). REGEX uses `|` for alternations so
@@ -277,14 +277,14 @@ for i in "${!BANNER_REGEX[@]}"; do
       if [[ "$hit_total" -gt 0 ]]; then
         log "  PASS [$label] emits=$hit_total ($hit_source)"
       else
-        log "  FAIL [$label] emits=0 — REQUIRED banner absent; runtime code path is dead"
+        log "  FAIL [$label] emits=0 -- REQUIRED banner absent; runtime code path is dead"
         log "        regex: $regex"
         GATE_FAIL=1
       fi
       ;;
     forbidden)
       if [[ "$hit_total" -gt 0 ]]; then
-        log "  FAIL [$label] emits=$hit_total ($hit_source) — FORBIDDEN banner present; incomplete revert (banner literal in .rodata + runtime emit means the patch's code is still live)"
+        log "  FAIL [$label] emits=$hit_total ($hit_source) -- FORBIDDEN banner present; incomplete revert (banner literal in .rodata + runtime emit means the patch's code is still live)"
         log "        regex: $regex"
         GATE_FAIL=1
       else
@@ -292,7 +292,7 @@ for i in "${!BANNER_REGEX[@]}"; do
       fi
       ;;
     optional)
-      log "  INFO [$label] emits=$hit_total ($hit_source) — informational; no gate effect"
+      log "  INFO [$label] emits=$hit_total ($hit_source) -- informational; no gate effect"
       ;;
   esac
 done
@@ -302,7 +302,7 @@ if [[ "$GATE_FAIL" -gt 0 ]]; then
   log "GATE FAIL: one or more REQUIRED banners absent (or FORBIDDEN banners present)."
   log "This is the wave-38 failure mode: code that strings|grep finds in the binary"
   log "is not actually reached at runtime. Investigate the failing patch(es) before"
-  log "shipping. See CLAUDE.md § Critical Rules — Build verification."
+  log "shipping. See CLAUDE.md sec. Critical Rules -- Build verification."
   log "done. Artifacts in: $OUT_DIR"
   exit 5
 fi

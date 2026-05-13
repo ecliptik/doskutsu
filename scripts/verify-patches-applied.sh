@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify-patches-applied.sh — pre-flight that each vendor's commit count
+# verify-patches-applied.sh -- pre-flight that each vendor's commit count
 # matches its patches/*.patch count.
 #
 # Non-destructive. For each vendor in vendor/sources.manifest with a concrete
@@ -15,7 +15,7 @@
 # root cause: the wave-38 patches DID `git am` to vendor (per the commit
 # log timestamps), but the next time a patch lands in patches/<name>/
 # without a manual `git am`, the build would silently produce a binary
-# missing it — `make patches` reorchestrates `apply-patches.sh`, this
+# missing it -- `make patches` reorchestrates `apply-patches.sh`, this
 # pre-flight verifies the resulting state matches expectations.
 #
 # Wired into the Makefile as a regular dependency of every build-stage
@@ -54,7 +54,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     vendor_path="$VENDOR_DIR/$name"
     patches_path="$PATCHES_DIR/$name"
 
-    # No patches/<name>/ dir → no patch series for this vendor → nothing to verify.
+    # No patches/<name>/ dir -> no patch series for this vendor -> nothing to verify.
     [[ -d "$patches_path" ]] || continue
 
     # Vendor tree must exist and be a git repo so we can count commits.
@@ -69,7 +69,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     n_applied=$(cd "$vendor_path" && git log --oneline "${sha}..HEAD" 2>/dev/null | wc -l)
 
     if [[ "$n_patches" -ne "$n_applied" ]]; then
-        log "$name: MISMATCH — $n_patches patch(es) in patches/$name/, $n_applied commit(s) since pinned SHA $sha"
+        log "$name: MISMATCH -- $n_patches patch(es) in patches/$name/, $n_applied commit(s) since pinned SHA $sha"
         log "$name:    delta = $((n_patches - n_applied))"
         log "$name:    fix:  make patches      (re-applies the full series; idempotent)"
         log "$name:           OR (cd $vendor_path && git am path/to/missing.patch)  (incremental)"
@@ -78,7 +78,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < "$MANIFEST"
 
 if [[ "$rc" -ne 0 ]]; then
-    log "patches-applied check FAILED — see above"
+    log "patches-applied check FAILED -- see above"
     exit 1
 fi
 exit 0

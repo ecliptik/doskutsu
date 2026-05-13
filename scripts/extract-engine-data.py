@@ -36,7 +36,7 @@ and extractstages.cpp:
                     blank images.
 
 This script is the freestanding-Python sibling of NXEngine's own extract
-tools — we don't ship those because (a) we don't want to cross-build them
+tools -- we don't ship those because (a) we don't want to cross-build them
 through DJGPP and (b) running the extractor at user install-time would mean
 shipping a binary that touches Pixel's freeware EXE, which we prefer to do
 on the developer side once.
@@ -53,19 +53,19 @@ import zlib  # CRC-32 verification of extracted blobs
 
 WAVETABLE_OFFSET = 0x110664
 WAVETABLE_LENGTH = 25600
-WAVETABLE_CRC = 0xB3A3B7EF  # not verified — we trust the offset+length
+WAVETABLE_CRC = 0xB3A3B7EF  # not verified -- we trust the offset+length
 
 # --- data/endpic/pixel.bmp --------------------------------------------------
 #
 # Cave Story embeds bitmap resources in the .exe stripped of their 14-byte
-# BMP file header (Windows resource format — DIB header onward only). The
+# BMP file header (Windows resource format -- DIB header onward only). The
 # extractor prepends a per-file fixed header to reconstruct a valid BMP.
 # pixel.bmp is 160x16 4bpp (16-color palette + 1280 bytes pixel data).
 #
 # Constants verbatim from extractfiles.cpp's files[] entry for pixel.bmp
 # and the pixel_header[] array. CRC-32 is the standard polynomial
 # 0x04C11DB7 (reflected input/output, init 0xFFFFFFFF, xor-out 0xFFFFFFFF)
-# — i.e., zlib.crc32 — verified by reading vendor/nxengine-evo/src/extract/
+# -- i.e., zlib.crc32 -- verified by reading vendor/nxengine-evo/src/extract/
 # crc.cpp.
 PIXEL_BMP_OFFSET = 0x16722F
 PIXEL_BMP_LENGTH = 1373
@@ -80,7 +80,7 @@ assert len(PIXEL_BMP_HEADER) == 25, "pixel.bmp header must be 25 bytes"
 # --- data/endpic/credit01.bmp..credit18.bmp ---------------------------------
 #
 # Same shape as pixel.bmp but for the larger 160x240 4bpp end-credits images.
-# 17 entries (credit13 intentionally absent — the EXE's contiguous run jumps
+# 17 entries (credit13 intentionally absent -- the EXE's contiguous run jumps
 # straight from credit12 to credit14). Each output file is the 25-byte
 # CREDIT_HEADER + 19293 bytes lifted from the EXE = 19318 bytes total.
 # CRC-32 is computed over the EXE-resident 19293 bytes only (header is not
@@ -94,7 +94,7 @@ CREDIT_HEADER = bytes([
 ])
 assert len(CREDIT_HEADER) == 25, "credit*.bmp header must be 25 bytes"
 
-# (filename, offset, crc32) — verbatim from extractfiles.cpp lines 33-49.
+# (filename, offset, crc32) -- verbatim from extractfiles.cpp lines 33-49.
 CREDIT_FILES = [
     ("credit01.bmp", 0x117047, 0xEB87B19B),
     ("credit02.bmp", 0x11BBAF, 0x239C1A37),
@@ -108,7 +108,7 @@ CREDIT_FILES = [
     ("credit10.bmp", 0x1416EF, 0x56390A07),
     ("credit11.bmp", 0x146257, 0xFF3D6D83),
     ("credit12.bmp", 0x14ADBF, 0x9E948DC2),
-    # credit13.bmp intentionally absent — not in extractfiles.cpp's files[].
+    # credit13.bmp intentionally absent -- not in extractfiles.cpp's files[].
     ("credit14.bmp", 0x14F927, 0x32B6CE2D),
     ("credit15.bmp", 0x15448F, 0x88539803),
     ("credit16.bmp", 0x158FF7, 0xC0EF9ADF),
@@ -136,7 +136,7 @@ EXE_RECORD_SIZE = 200
 EXE_RECORD_FMT = "<32s32si32s32s32sB35s"
 assert struct.calcsize(EXE_RECORD_FMT) == EXE_RECORD_SIZE
 
-# Lookup tables — transcribed verbatim from
+# Lookup tables -- transcribed verbatim from
 # vendor/nxengine-evo/src/extract/extractstages.cpp (npcsetnames) and
 # vendor/nxengine-evo/src/stagedata.cpp (tileset_names, backdrop_names).
 TILESET_NAMES = [
@@ -253,7 +253,7 @@ def extract_pixel_bmp(exe, out_dir):
 
     actual_crc = zlib.crc32(blob) & 0xFFFFFFFF
     if actual_crc != PIXEL_BMP_CRC:
-        sys.exit(f"pixel.bmp: CRC mismatch at 0x{PIXEL_BMP_OFFSET:x} — "
+        sys.exit(f"pixel.bmp: CRC mismatch at 0x{PIXEL_BMP_OFFSET:x} -- "
                  f"expected 0x{PIXEL_BMP_CRC:08x}, got 0x{actual_crc:08x}. "
                  "The Doukutsu.exe at the given path is probably not the "
                  "2004 EN freeware build extractfiles.cpp's offsets target.")
@@ -273,7 +273,7 @@ def extract_credit_bmps(exe, out_dir):
     Extract data/endpic/credit01.bmp..credit18.bmp (17 files; credit13 is
     intentionally absent). Each output file is the 25-byte CREDIT_HEADER +
     19293 bytes from the EXE at the entry's offset = 19318 bytes per file.
-    CRC-32 is verified over the EXE-resident 19293 bytes only — the header
+    CRC-32 is verified over the EXE-resident 19293 bytes only -- the header
     is reconstructed locally and not CRC'd, matching extractfiles.cpp's
     crc_calc(file, files[i].length) call which runs on the buffer position
     past the prepended header.
@@ -291,7 +291,7 @@ def extract_credit_bmps(exe, out_dir):
 
         actual_crc = zlib.crc32(blob) & 0xFFFFFFFF
         if actual_crc != expected_crc:
-            sys.exit(f"{filename}: CRC mismatch at 0x{offset:x} — "
+            sys.exit(f"{filename}: CRC mismatch at 0x{offset:x} -- "
                      f"expected 0x{expected_crc:08x}, got 0x{actual_crc:08x}. "
                      "The Doukutsu.exe at the given path is probably not the "
                      "2004 EN freeware build extractfiles.cpp's offsets target.")

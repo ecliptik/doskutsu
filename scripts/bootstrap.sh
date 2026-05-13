@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# scripts/bootstrap.sh — one-shot setup: prerequisites → DJGPP check →
-# vendor sources → patches → build → optional asset extraction → stage.
+# scripts/bootstrap.sh -- one-shot setup: prerequisites -> DJGPP check ->
+# vendor sources -> patches -> build -> optional asset extraction -> stage.
 #
 # After this finishes successfully you have:
 #   - build/doskutsu.exe       the DJGPP-built game binary
@@ -124,7 +124,7 @@ step "4/7  Apply DOS-port patches"
 note "patches applied to all vendor trees"
 
 # ----------------------------------------------------------------------------
-step "5/7  Build the four-stage chain (SDL3 → SDL3_mixer → SDL3_image → NXEngine-evo)"
+step "5/7  Build the four-stage chain (SDL3 -> SDL3_mixer -> SDL3_image -> NXEngine-evo)"
 
 make all
 note "build/doskutsu.exe produced ($(stat -c %s build/doskutsu.exe 2>/dev/null || stat -f %z build/doskutsu.exe) bytes)"
@@ -153,7 +153,7 @@ else
   note "    ./scripts/rename-user-data-83.sh data"
   note ""
   note "  You'll also need the rest of the game content (sprites, maps, music,"
-  note "  TSC scripts) — extract via doukutsu-rs / NXExtract / cavestory.one"
+  note "  TSC scripts) -- extract via doukutsu-rs / NXExtract / cavestory.one"
   note "  per docs/ASSETS.md, drop them into ./data/, then re-run the 8.3 renamer."
 fi
 
