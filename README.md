@@ -36,10 +36,6 @@ The canonical extraction procedure and expected directory layout are documented 
 
 The same posture applies as the broader Cave Story port community ([NXEngine-evo](https://github.com/nxengine/nxengine-evo), [doukutsu-rs](https://github.com/doukutsu-rs/doukutsu-rs)): the engine code is open source; the game data is user-supplied freeware.
 
-### Pixtone slot coverage and the 37 unused slots
-
-Pixel's 2004 freeware `Doukutsu.exe` defines Pixtone parameter blocks for 86 of the 117 SFX slots that NXEngine-evo's runtime iterates over. The 37 absent slots are unnamed gaps in the engine's SFX enum that no game code actually triggers; the engine's `Pixtone::Pixtone()` constructor blindly probes the whole slot range, which produces 37 `pxt_load: file not found` warnings at boot. **These warnings are cosmetic; gameplay impact is zero.** Full audit trail (NXEngine-evo upstream identity check, GitHub search, freeware-vs-commercial license posture, TSC-script SFX usage map) is in [docs/ASSETS.md](./docs/ASSETS.md) under the "Known upstream limitation" section.
-
 ### Cave Story+ commercial release: incompatible
 
 NICALIS published Cave Story+ as a commercial product across multiple platforms. It contains additional SFX as proprietary WAV samples. Those samples are NICALIS-owned and not GPLv3-compatible; DOSKUTSU cannot use them and the build system has no integration path for them. Use the 2004 freeware exclusively.
