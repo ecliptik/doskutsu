@@ -224,13 +224,13 @@ BANNER_REGEX=(
   "sdl: SDL/0060 Cirrus BLT pattern-copy (ACTIVE|DISABLED|N/A)"
 )
 BANNER_SEVERITY=(
-  "required"
-  "required"
-  "required"
-  "required"
-  "required"
-  "required"
-  "required"
+  "forbidden"
+  "forbidden"
+  "forbidden"
+  "forbidden"
+  "forbidden"
+  "forbidden"
+  "forbidden"
 )
 BANNER_LABEL=(
   "lever-1 opaque-tile fastpath (patch 0137)"
@@ -284,12 +284,15 @@ for i in "${!BANNER_REGEX[@]}"; do
       ;;
     forbidden)
       if [[ "$hit_total" -gt 0 ]]; then
-        log "  FAIL [$label] emits=$hit_total ($hit_source) — FORBIDDEN banner present"
+        log "  FAIL [$label] emits=$hit_total ($hit_source) — FORBIDDEN banner present; incomplete revert (banner literal in .rodata + runtime emit means the patch's code is still live)"
         log "        regex: $regex"
         GATE_FAIL=1
       else
         log "  PASS [$label] emits=0 (correctly absent)"
       fi
+      ;;
+    optional)
+      log "  INFO [$label] emits=$hit_total ($hit_source) — informational; no gate effect"
       ;;
   esac
 done
