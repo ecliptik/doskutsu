@@ -42,11 +42,15 @@ WAVE_DIR="/tmp/wave<N>"        # claude-side landing dir
 # PLAY cell indices to pull logs for. REQUIRED -> scp_one_required (reports
 # MISSING if not on CF; tally counter increments). OPTIONAL -> scp_one_optional
 # (silent skip if not on CF). Sparse-PLAY waves can have non-consecutive indices
-# in either array. Common shapes:
-#   wave-38/wave-39: REQUIRED=( 1 2 3 4 ); OPTIONAL=( 5 ) for quit-cycle
-#   wave-40 sparse: REQUIRED=( 1 );        OPTIONAL=( 5 )
-PLAY_REQUIRED_CELLS=( 1 2 3 4 )
-PLAY_OPTIONAL_CELLS=( 5 )
+# in either array.
+#
+# Per-wave declares its quit-cycle index (if any); no implicit default. Common
+# patterns observed so far:
+#   wave-38/wave-39 4-cell:  REQUIRED=( 1 2 3 4 ); OPTIONAL=( 5 )  -- quit-cycle at PLAY5
+#   wave-40 single-mechanism: REQUIRED=( 1 );     OPTIONAL=( 2 )  -- quit-cycle at PLAY2
+# Empty OPTIONAL is fine when the wave has no quit-cycle ride-along.
+PLAY_REQUIRED_CELLS=( 1 )
+PLAY_OPTIONAL_CELLS=()
 
 # Probe logs to pull from CF. Each entry maps a CF filename to a label.
 # Mark as optional if the probe may legitimately not have completed (e.g.

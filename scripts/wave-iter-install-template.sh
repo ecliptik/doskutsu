@@ -72,11 +72,16 @@ EXPECTED_AUDRQ_SHA="<full 64-char sha256 of AUDRQ.EXE; remove if probe not bundl
 # REQUIRED cells: must exist on CF + must CRLF/ASCII-verify. Failure aborts install.
 # OPTIONAL cells: may be absent (no fail). If present, must still CRLF/ASCII-verify.
 #
+# Per-wave declares its quit-cycle index (if any); no implicit default. Common
+# patterns observed so far:
+#   wave-38/wave-39 4-cell:  REQUIRED=( 1 2 3 4 ); OPTIONAL=( 5 )  -- quit-cycle at PLAY5
+#   wave-40 single-mechanism: REQUIRED=( 1 );     OPTIONAL=( 2 )  -- quit-cycle at PLAY2
 # Sparse-PLAY waves (per `single_lever_per_binary_or_else_attribution_impossible.md`)
-# can have non-consecutive cell indices -- e.g. wave-40: REQUIRED=( 1 ); OPTIONAL=( 5 ).
-# Common wave-38/wave-39 shape: REQUIRED=( 1 2 3 4 ); OPTIONAL=( 5 ) for quit-cycle.
-PLAY_REQUIRED_CELLS=( 1 2 3 4 )
-PLAY_OPTIONAL_CELLS=( 5 )
+# typically have a single optional cell adjacent to the required ones. Edit per
+# wave with explicit intent -- empty OPTIONAL is fine when the wave has no
+# quit-cycle ride-along.
+PLAY_REQUIRED_CELLS=( 1 )
+PLAY_OPTIONAL_CELLS=()
 
 # Names of any non-PLAY BATs (probe BATs typically). Empty if none.
 PROBE_BATS=( BLTPAT AUDRQ )    # adjust per wave
