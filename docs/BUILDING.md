@@ -209,6 +209,27 @@ This runs the binary under `dosbox-x -silent -exit`, captures its stdout to `STD
 
 Both configs are otherwise identical: 48 MB RAM, SB16 on IRQ 5 / DMA 1/5 / base 220, VESA SVGA (`svga_s3` machine), `quit warning = false`.
 
+### Smoke-gate banner-emit verification
+
+`tests/run-gameplay-smoke.sh` runs DOSBox-X at parity cycles, captures the engine + SDL runtime logs, and asserts that each patch's boot banner string was actually emitted at runtime — not just that the string is embedded in the binary. This is the canonical pre-ship gate for any cross-build.
+
+**Why two gates instead of one.** `strings build/doskutsu.exe | grep <banner>` proves the literal compiled into the binary; it does not prove the code path that emits the banner runs. Wave-38 shipped a binary where `patches/nxengine-evo/0138-*.patch` was silently dropped during the cross-build (stale `.obj` linked against post-patch source); the strings-grep gate false-passed because patch 0138 happened to share an env-var name with patch SDL/0059, which DID apply. The runtime banner-emit gate is the direct detector for that failure mode: if the consumer code path is missing or never invoked, the banner doesn't fire, and the gate fails.
+
+**Two-banner-target discipline.** Every patch must carry a patch-id-prefixed unique banner string (e.g. `sdl: SDL/0060 Cirrus BLT pattern-copy (ACTIVE|DISABLED|N/A)`); never share sentinels across patches. Sharing makes the strings-grep gate ambiguous about which patch contributed the literal — the wave-38 failure mode.
+
+**Where banners should fire.** Init-time banners (boot-banner / framebuffer-init / `Renderer::initVideo` head) survive missing-asset early-returns and consumer-wire-up gaps. SDL-side primitives that need ship-verification should hook lazy-init into a known-fire site like `populate_fb_state_for_direct_fb()` so the banner emits even when the consumer hasn't engaged yet. Banners that live deep inside `Renderer::initVideo` after asset loads are fragile against asset-stage gaps; the wave-39 pattern is to keep banners ahead of any `return` points.
+
+**BANNERS array — parallel arrays, severity-typed.** The gate is driven by three parallel arrays in `tests/run-gameplay-smoke.sh`: `BANNER_REGEX[]` (regex per banner, alternation-friendly to cover `ENABLED|DISABLED|ACTIVE|N/A` variants under default-flips), `BANNER_SEVERITY[]` (`required` = must emit ≥1, `forbidden` = must emit 0), and `BANNER_LABEL[]` (human-readable label for failure messages). Add a row for each new lever or instrumentation patch when shipping; the gate exits 5 on FAIL.
+
+**Maintenance rule.** When authoring a new lever or instrumentation patch:
+
+1. Add the patch's boot banner regex to `BANNER_REGEX[]` + severity + label, atomic with the patch (same author cycle; not as follow-up).
+2. Confirm `strings build/doskutsu.exe | grep <new-patch-id>` after a forced rebuild — the in-binary check.
+3. Run `tests/run-gameplay-smoke.sh` — the runtime-emit check.
+4. Both must pass before the patch is considered shipped.
+
+**After patch application, force a clean rebuild.** CMake's incremental build can silently link a stale `.obj` against the latest source. `make distclean && make` or an explicit `touch vendor/<name>/src/**/*.cpp` chain before `cmake --build` is required after every `make patches`. The smoke-gate catches this latent failure downstream; forced rebuild prevents it upstream.
+
 ---
 
 ## Deploy
