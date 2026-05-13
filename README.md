@@ -4,7 +4,7 @@ DOSKUTSU is a faithful port of Cave Story (Doukutsu Monogatari) to MS-DOS 6.22 o
 
 The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's original Japanese title); it also fits the DOS 8.3 filename convention as `DOSKUTSU.EXE`.
 
-This project exists for preservation, for the historical-computing community, and as an engineering artifact: running Cave Story on hardware that became obsolete eight years before Pixel released it. The reference target is a 1995 Gateway 2000 desktop with an Intel Pentium OverDrive 83 MHz CPU upgrade. Companion architectural overview: [DOSKUTSU.md](./DOSKUTSU.md).
+This project exists for preservation, for the historical-computing community, and as an engineering artifact: running Cave Story on hardware that became obsolete eight years before Pixel released it. The reference PC is a 1995-era desktop with an Intel Pentium OverDrive 83 MHz CPU upgrade. Companion architectural overview: [DOSKUTSU.md](./DOSKUTSU.md).
 
 <p align="center">
 <a href="#game-assets">Game Assets</a> · <a href="#status">Status</a> · <a href="#requirements">Requirements</a> · <a href="#usage">Usage</a> · <a href="#building">Building</a> · <a href="#boot-profile">Boot Profile</a> · <a href="#how-this-project-is-developed">How It's Developed</a> · <a href="#acknowledgments">Acknowledgments</a> · <a href="#license">License</a>
@@ -42,7 +42,7 @@ NICALIS published Cave Story+ as a commercial product across multiple platforms.
 
 ## Status
 
-DOSKUTSU plays at ~38 fps median on the reference g2k machine (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP). This is the maximum framerate currently achieved on this class of hardware; ongoing work targets Cave Story's original 50 Hz design rate.
+DOSKUTSU plays at ~38 fps median on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP). This is the maximum framerate currently achieved on this class of hardware; ongoing work targets Cave Story's original 50 Hz design rate.
 
 Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Per-wave performance history and release notes are in [CHANGELOG.md](./CHANGELOG.md).
 
@@ -54,7 +54,7 @@ DOSKUTSU defines three named hardware tiers; full per-tier rationale and BIOS no
 
 **Tier 1: Reference (tested)**
 
-- CPU: Pentium 75 MHz or faster (g2k uses Pentium OverDrive 83)
+- CPU: Pentium 75 MHz or faster (reference PC uses Pentium OverDrive 83)
 - RAM: 16 MB or more
 - Video: VESA 1.2+ with chip-level 320x240 support (Cirrus CL-GD5434, Tseng, Trident, S3, etc.; UNIVBE 6.70 acceptable as a VESA fallback driver)
 - Sound: Sound Blaster 16 or compatible
@@ -137,7 +137,7 @@ Full boot profile guidance: [docs/BOOT.md](./docs/BOOT.md).
 DOSKUTSU is developed primarily through [Claude Code](https://claude.com/code), Anthropic's CLI for the Claude model family. The development pattern:
 
 - **Claude authors patches across the full source stack.** Patches touch the SDL3 DOS backend (in `vendor/SDL/`), the NXEngine-evo engine (in `vendor/nxengine-evo/`), the build system, scripts, documentation, and test harnesses. Patches land as `patches/<vendor>/NNNN-*.patch` files in this repository.
-- **Humans review every patch before commit.** Commit messages cite reasoning and measurement evidence; speculative perf claims are refuted or confirmed against real-hardware iter results on the g2k reference machine before patches are promoted from instrumentation to optimization.
+- **Humans review every patch before commit.** Commit messages cite reasoning and measurement evidence; speculative perf claims are refuted or confirmed against real-hardware iter results on the reference PC before patches are promoted from instrumentation to optimization.
 - **Workspace-local patches only.** This project does not contribute patches upstream to [libsdl-org/SDL](https://github.com/libsdl-org/SDL), [libsdl-org/SDL_mixer](https://github.com/libsdl-org/SDL_mixer), [libsdl-org/SDL_image](https://github.com/libsdl-org/SDL_image), or [nxengine/nxengine-evo](https://github.com/nxengine/nxengine-evo).
 - **Agent-team coordination.** Specialist roles (engine, SDL backend, build orchestration, real-hardware iter, perf diagnostics) coordinate via shared task lists and peer messaging during development sessions. The per-role specialist definitions live under `.claude/agents/` in this repository for reference.
 
