@@ -1294,6 +1294,14 @@ STAGE_DIR := $(BUILD_DIR)/stage
 stage: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing — run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
 	@mkdir -p "$(STAGE_DIR)"
+	@# SDL/0024 routes SDL_Log to /DOSKUTSU/sdldbg.log (or /DOSKUTSU/<TAG>SDL.LOG
+	@# when DOSKUTSU_LOG_TAG is set). Under the staged layout DOSBox-X mounts
+	@# STAGE_DIR as C:, so the engine fopens "/DOSKUTSU/sdldbg.log" → host path
+	@# $(STAGE_DIR)/DOSKUTSU/sdldbg.log. DJGPP fopen silently returns NULL when
+	@# the target dir is missing; SDL_Log messages get lost without any error.
+	@# Pre-create the subdir so the smoke gate's banner-emit check sees SDL_Log
+	@# output (real-HW CF cards already have this dir from `make install`).
+	@mkdir -p "$(STAGE_DIR)/DOSKUTSU"
 	@install -m 0644 $(BUILD_DIR)/doskutsu.exe "$(STAGE_DIR)/DOSKUTSU.EXE"
 	@install -m 0644 $(CWSDPMI_EXE)            "$(STAGE_DIR)/CWSDPMI.EXE"
 	@if [ -d "$(REPO_ROOT)/data" ]; then \
