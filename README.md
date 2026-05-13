@@ -56,7 +56,7 @@ DOSKUTSU defines three named hardware tiers.
 
 - CPU: Pentium 75 MHz or faster (reference PC uses Pentium OverDrive 83)
 - RAM: 16 MB or more
-- Video: VESA 1.2+ with chip-level 320x240 support (Cirrus CL-GD5434, Tseng, Trident, S3, etc.; UNIVBE 6.70 acceptable as a VESA fallback driver)
+- Video: VESA 1.2+ with chip-level 320x240 support (Cirrus CL-GD5434, Tseng, Trident, S3, etc.; [UniVBE](https://en.wikipedia.org/wiki/UniVBE) 6.70 acceptable as a VESA fallback driver)
 - Sound: Sound Blaster 16 or compatible
 - OS: MS-DOS 6.22 or compatible
 - Disk: ~10 MB free
@@ -137,7 +137,7 @@ DOSKUTSU is developed agentically through [Claude Code](https://claude.com/code)
 - **Claude authors patches across the full source stack.** Patches touch the SDL3 DOS backend (in `vendor/SDL/`), the NXEngine-evo engine (in `vendor/nxengine-evo/`), the build system, scripts, documentation, and test harnesses. Patches land as `patches/<vendor>/NNNN-*.patch` files in this repository.
 - **Humans review every patch before commit.** Commit messages cite reasoning and measurement evidence; speculative perf claims are refuted or confirmed against real-hardware iter results on the reference PC before patches are promoted from instrumentation to optimization.
 - **Workspace-local patches only.** This project does not contribute patches upstream to [libsdl-org/SDL](https://github.com/libsdl-org/SDL), [libsdl-org/SDL_mixer](https://github.com/libsdl-org/SDL_mixer), [libsdl-org/SDL_image](https://github.com/libsdl-org/SDL_image), or [nxengine/nxengine-evo](https://github.com/nxengine/nxengine-evo).
-- **Agent-team coordination.** Specialist roles (engine, SDL backend, build orchestration, real-hardware iter, perf diagnostics) coordinate via shared task lists and peer messaging during development sessions. The per-role specialist definitions live under `.claude/agents/` in this repository for reference.
+- **Agent-team coordination.** Specialist roles (engine, SDL backend, build orchestration, real-hardware iter, perf diagnostics) coordinate via shared task lists and peer messaging during development sessions.
 
 ---
 
