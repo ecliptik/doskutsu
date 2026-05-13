@@ -4,7 +4,7 @@ DOSKUTSU is a faithful port of Cave Story (Doukutsu Monogatari) to MS-DOS 6.22 o
 
 The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's original Japanese title); it also fits the DOS 8.3 filename convention as `DOSKUTSU.EXE`.
 
-This project exists for preservation, for the historical-computing community, and as an engineering artifact: running Cave Story on hardware that became obsolete eight years before Pixel released it. The reference PC is a 1995-era desktop with an Intel Pentium OverDrive 83 MHz CPU upgrade. Companion architectural overview: [DOSKUTSU.md](./DOSKUTSU.md).
+This project exists for preservation, for the historical-computing community, and as an engineering artifact: running Cave Story on hardware that became obsolete eight years before Pixel released it. The reference PC is a 1995-era desktop with an Intel Pentium OverDrive 83 MHz CPU upgrade.
 
 <p align="center">
 <a href="#status">Status</a> · <a href="#game-assets">Game Assets</a> · <a href="#requirements">Requirements</a> · <a href="#usage">Usage</a> · <a href="#building">Building</a> · <a href="#boot-profile">Boot Profile</a> · <a href="#how-this-project-is-developed">How It's Developed</a> · <a href="#acknowledgments">Acknowledgments</a> · <a href="#license">License</a>
@@ -50,7 +50,7 @@ NICALIS published Cave Story+ as a commercial product across multiple platforms.
 
 ## Requirements
 
-DOSKUTSU defines three named hardware tiers; full per-tier rationale and BIOS notes are in [docs/HARDWARE.md](./docs/HARDWARE.md).
+DOSKUTSU defines three named hardware tiers.
 
 **Tier 1: Reference (tested)**
 
@@ -71,7 +71,7 @@ DOSKUTSU defines three named hardware tiers; full per-tier rationale and BIOS no
 
 **Tier 3: Absolute Minimum (research target)**
 
-The lowest spec DOSKUTSU is designed for. Untested on real hardware. See [docs/HARDWARE.md § Tier 3](./docs/HARDWARE.md) for the engineering work required to reach this tier.
+The lowest spec DOSKUTSU is designed for. Untested on real hardware.
 
 Hard floors below Tier 3 are non-negotiable: no 486SX without a 487 coprocessor (DJGPP emits x87 instructions); no pre-VESA video (the SDL3 DOS backend requires VESA 1.2+ LFB); no DOS variant that can't host CWSDPMI's DPMI 0.9 service.
 
@@ -127,8 +127,6 @@ DOSKUTSU runs under any DJGPP-compatible DOS boot profile with:
 - SB16-compatible `BLASTER` environment variable set
 - VESA 1.2+ video BIOS (UNIVBE works as a fallback)
 - CTMOUSE or equivalent INT 33h mouse driver (optional; keyboard-only play is fully supported)
-
-Full boot profile guidance: [docs/BOOT.md](./docs/BOOT.md).
 
 ---
 
