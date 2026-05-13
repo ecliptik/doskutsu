@@ -6,8 +6,6 @@ The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's o
 
 This project exists for preservation, for the historical-computing community, and as an engineering artifact: running Cave Story on hardware that became obsolete eight years before Pixel released it. The reference target is a 1995 Gateway 2000 desktop with an Intel Pentium OverDrive 83 MHz CPU upgrade. Companion architectural overview: [DOSKUTSU.md](./DOSKUTSU.md).
 
-Source: `ssh://git@forgejo.ecliptik.com/ecliptik/doskutsu.git` (primary remote on [Forgejo](https://forgejo.ecliptik.com/ecliptik/doskutsu)).
-
 <p align="center">
 <a href="#game-assets">Game Assets</a> · <a href="#status">Status</a> · <a href="#requirements">Requirements</a> · <a href="#usage">Usage</a> · <a href="#building">Building</a> · <a href="#boot-profile">Boot Profile</a> · <a href="#how-this-project-is-developed">How It's Developed</a> · <a href="#acknowledgments">Acknowledgments</a> · <a href="#license">License</a>
 </p>
