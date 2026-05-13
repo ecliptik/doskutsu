@@ -132,7 +132,7 @@ DOSKUTSU runs under any DJGPP-compatible DOS boot profile with:
 
 ## How This Project Is Developed
 
-DOSKUTSU is developed agentically through [Claude Code](https://claude.com/code). The development pattern:
+DOSKUTSU is developed agentically through [Claude Code](https://claude.com/code).
 
 - **Claude authors patches across the full source stack.** Patches touch the SDL3 DOS backend (in `vendor/SDL/`), the NXEngine-evo engine (in `vendor/nxengine-evo/`), the build system, scripts, documentation, and test harnesses. Patches land as `patches/<vendor>/NNNN-*.patch` files in this repository.
 - **Humans review every patch before commit.** Commit messages cite reasoning and measurement evidence; speculative perf claims are refuted or confirmed against real-hardware iter results on the reference PC before patches are promoted from instrumentation to optimization.
