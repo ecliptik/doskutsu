@@ -7,7 +7,7 @@ The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's o
 This project exists for preservation, for the historical-computing community, and as an engineering artifact: running Cave Story on hardware that became obsolete eight years before Pixel released it. The reference PC is a 1995-era desktop with an Intel Pentium OverDrive 83 MHz CPU upgrade. Companion architectural overview: [DOSKUTSU.md](./DOSKUTSU.md).
 
 <p align="center">
-<a href="#game-assets">Game Assets</a> · <a href="#status">Status</a> · <a href="#requirements">Requirements</a> · <a href="#usage">Usage</a> · <a href="#building">Building</a> · <a href="#boot-profile">Boot Profile</a> · <a href="#how-this-project-is-developed">How It's Developed</a> · <a href="#acknowledgments">Acknowledgments</a> · <a href="#license">License</a>
+<a href="#status">Status</a> · <a href="#game-assets">Game Assets</a> · <a href="#requirements">Requirements</a> · <a href="#usage">Usage</a> · <a href="#building">Building</a> · <a href="#boot-profile">Boot Profile</a> · <a href="#how-this-project-is-developed">How It's Developed</a> · <a href="#acknowledgments">Acknowledgments</a> · <a href="#license">License</a>
 </p>
 
 ### DOSBox-X
@@ -20,6 +20,14 @@ This project exists for preservation, for the historical-computing community, an
 | **First Lab Room** | **First Cave** |
 
 <p align="center">captures from DOSBox-X running <code>DOSKUTSU.EXE</code></p>
+
+---
+
+## Status
+
+DOSKUTSU plays at ~38 fps median on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP). This is the maximum framerate currently achieved on this class of hardware; ongoing work targets Cave Story's original 50 Hz design rate.
+
+Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Per-wave performance history and release notes are in [CHANGELOG.md](./CHANGELOG.md).
 
 ---
 
@@ -37,14 +45,6 @@ The same posture applies as the broader Cave Story port community ([NXEngine-evo
 ### Cave Story+ commercial release: incompatible
 
 NICALIS published Cave Story+ as a commercial product across multiple platforms. It contains additional SFX as proprietary WAV samples. Those samples are NICALIS-owned and not GPLv3-compatible; DOSKUTSU cannot use them and the build system has no integration path for them. Use the 2004 freeware exclusively.
-
----
-
-## Status
-
-DOSKUTSU plays at ~38 fps median on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP). This is the maximum framerate currently achieved on this class of hardware; ongoing work targets Cave Story's original 50 Hz design rate.
-
-Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Per-wave performance history and release notes are in [CHANGELOG.md](./CHANGELOG.md).
 
 ---
 
