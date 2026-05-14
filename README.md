@@ -25,7 +25,7 @@ This project exists for preservation, for the historical-computing community, an
 
 ## Status
 
-DOSKUTSU plays at ~30 fps median on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP) at the Mimiga BK_PARALLAX heavy-music scene with the OPL3 audio backend. Ongoing work targets Cave Story's original 50 Hz design rate.
+DOSKUTSU runs at ~20 fps median on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP) with the original Cave Story organya synthesizer, and at ~30 fps median when MIDI music is offloaded to dedicated synth hardware (the SB16 OPL3 FM synth or a WaveBlaster header daughterboard). Ongoing work targets Cave Story's original 50fps at 50hz design.
 
 Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Per-wave performance history and release notes are in [CHANGELOG.md](./CHANGELOG.md).
 
