@@ -1,0 +1,734 @@
+From 64842ee5ba0f91b2e4fcf64c169edeaea006f2da Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 13 May 2026 15:46:42 -0700
+Subject: [PATCH] perf phase 11 patch 0135 -- wave-41 TAS record/replay
+ (engine-side, tick-keyed)
+
+Add a TAS (tool-assisted) input record/replay subsystem for the
+real-HW iter loop. Eliminates operator-timing variability from
+cross-iter perf comparison: record a canonical scenario once, replay
+byte-identically across every iter binary.
+
+Design doc: docs/internal/WAVE-41-TAS-DESIGN.md in the parent
+doskutsu repo (gitignored under docs/internal/).
+
+Architecture: engine-side, game-tick-keyed. Hook lives in run_tick()
+(main.cpp:123) AFTER input_poll() refreshes the global inputs[]
+array and BEFORE any game logic reads inputs[]. The hook either
+snapshots inputs[] to a .TAS file (record mode) or overwrites
+inputs[] from a pre-recorded .TAS file (replay mode). Game-tick
+keying (not wall-clock) makes the same .TAS file work across any
+fps; wave-37 35.71 fps and a future 50 fps iter both produce
+byte-identical engine state from the same recording.
+
+TSR (INT 16h hook) was considered + rejected: wall-clock keying
+would diverge within seconds when fps differs between record and
+replay. See WAVE-41-TAS-DESIGN.md sec. A for the full trade-off.
+
+Four DOSKUTSU_TAS_* env vars (bare prefix, not SDL_HINT_; precedent:
+DOSKUTSU_LOG_TAG at main.cpp:371):
+
+  DOSKUTSU_TAS_RECORD=<path>          record mode; .TAS output
+  DOSKUTSU_TAS_REPLAY=<path>          replay mode; .TAS input
+  DOSKUTSU_TAS_PRNG_SEED=<u32>        seedrand() at boot (insurance)
+  DOSKUTSU_TAS_AUTO_EXIT_TICK=<u32>   game.running=false at tick N
+
+Default-OFF: when no DOSKUTSU_TAS_* env var is set, init() bails
+early and apply_input() returns at its first guard (two pointer
+checks). The binary's per-tick path is unchanged except for one
+cheap predicate; behavior is bit-identical to wave-37 production.
+
+PRNG note: NXEngine has its own deterministic LCG at misc.cpp:271
+(seed * 214013L + 2531011L), not libc rand(). seedrand() is never
+called in the existing tree -- seed starts at 0 and increments
+deterministically. So engine randomness is ALREADY deterministic
+from process-start. DOSKUTSU_TAS_PRNG_SEED is therefore a
+belt-and-braces insurance, not a load-bearing fix.
+
+.TAS file format (binary, little-endian):
+
+  offset  size  field
+  ------- ----- -----
+  0       7     magic "DTASv1\\n"
+  7       1     version 0x01
+  8       4     u32 LE prng_seed (echoes the env var at record time)
+  12      4     u32 LE flags (reserved, 0)
+  16      4     u32 LE n_events (0xFFFFFFFF = stream-mode = read until EOF)
+  20      ...   events: 8 bytes each, (u32 tick, u32 mask) LE
+
+Mask: bit i = inputs[i] per the INPUT_COUNT enum order in input.h.
+Events sorted by tick; one event written only when mask changes
+(coalesced). Replay uses a 1-event lookahead cache; while
+pending.tick <= tick_id, applies mask + advances. The <= (not ==)
+tolerates the tick-skipping case per
+[[wave_38_cooperative_scheduler_starvation_is_real]] -- late-fire
+event with LOG_DEBUG narration rather than abort.
+
+Auto-exit: TAS::should_exit(tick_id) returns true once tick_count
+reaches DOSKUTSU_TAS_AUTO_EXIT_TICK; caller (run_tick) sets
+game.running=false. The existing gameloop() while-predicate
+(main.cpp:241) exits naturally; engine-shutdown[1..8] sequence at
+main.cpp:723+ runs unchanged. No new shutdown path.
+
+TAS::shutdown() runs BEFORE SDL_Quit so the .TAS record file is
+flushed even if SDL_Quit hangs (W22-WB-D shutdown-hang precedent).
+
+MVP excludes (deferred to a v2 TAS patch): save-file
+canonicalization, joystick capture, byte-state divergence
+verification, tick-skipping abort (warn-only in MVP).
+
+Single-mechanism preservation per
+[[single_lever_per_binary_or_else_attribution_impossible]]: TAS is
+default-OFF instrumentation. Binary behaves byte-identical to
+wave-37 with no TAS env vars; PLAY1 (no TAS) preserves the
+wave-37 35.71 fps anchor; PLAY2/3 all use TAS replay (constant
+across the matrix) so cross-PLAY audio-backend perf comparison
+remains clean (only the audio backend differs).
+
+Files:
+  src/tas.h   -- public API (4 functions; namespace TAS)
+  src/tas.cpp -- implementation (env parsing, file I/O, format)
+  src/main.cpp -- hook integration in 4 places:
+    - #include "tas.h"
+    - TAS::init() after Logger::init (line ~376)
+    - TAS::apply_input() after input_poll() (line ~125)
+    - TAS::should_exit() at end of run_tick (line ~208)
+    - TAS::shutdown() before SDL_Quit (line ~742)
+
+CMakeLists.txt unchanged: src/*.cpp glob picks up tas.cpp.
+
+Smoke gate banners (parent repo tests/run-gameplay-smoke.sh):
+  "tas: (record opened|replay opened)"  -- optional
+  "tas: auto-exit at tick"               -- optional
+Both optional because default smoke runs without TAS env vars.
+
+docs/BOOT.md env-var entries land in parent doskutsu repo
+(not in this vendor commit) per env_vars_document_in_user_docs.
+---
+ src/main.cpp |  41 +++++
+ src/tas.cpp  | 446 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/tas.h    |  79 +++++++++
+ 3 files changed, 566 insertions(+)
+ create mode 100644 src/tas.cpp
+ create mode 100644 src/tas.h
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 502e943..67478f1 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -18,6 +18,7 @@
+ #include "profile.h"
+ #include "settings.h"
+ #include "statusbar.h"
++#include "tas.h"
+ #include "trig.h"
+ #include "tsc.h"
+ 
+@@ -122,6 +123,16 @@ static inline void run_tick()
+ 
+   input_poll();
+ 
++  // TAS hook (patch 0135, wave 41): after input_poll() refreshes the
++  // global inputs[] array and BEFORE any game logic reads it, give
++  // TAS subsystem a chance to record (snapshot inputs[] -> .TAS file
++  // on mask change) or replay (overwrite inputs[] from .TAS file).
++  // No-op when neither DOSKUTSU_TAS_RECORD nor _REPLAY env var is set;
++  // returns at first guard in tas.cpp. Default-OFF preserves wave-37
++  // binary behavior bit-for-bit when env vars unset (the binary's
++  // engine_tick path is unchanged except for one cheap branch).
++  TAS::apply_input((uint32_t)tick_count, inputs, INPUT_COUNT);
++
+   // input handling for a few global things
+ 
+   if (justpushed(F9KEY))
+@@ -203,6 +214,17 @@ static inline void run_tick()
+ 
+   SoundManager::getInstance()->runFade();
+   if (log_beat) LOG_INFO("run_tick #{}: heartbeat (loop alive)", tick_count);
++
++  // TAS auto-exit (patch 0135). When DOSKUTSU_TAS_AUTO_EXIT_TICK is set
++  // and tick_count has reached it, terminate the main loop cleanly via
++  // the existing game.running mechanism. gameloop()'s while-predicate
++  // (main.cpp:241) natively exits when !game.running, falling through
++  // to the engine-shutdown[1..8] sequence at line 723+. No new
++  // shutdown path needed; just trips an existing flag.
++  if (TAS::should_exit((uint32_t)tick_count))
++  {
++    game.running = false;
++  }
+ }
+ 
+ void AppMinimized(void)
+@@ -375,6 +397,18 @@ int main(int argc, char *argv[])
+   Logger::init(ResourceManager::getInstance()->getPrefPath(_log_basename));
+ //  SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+ 
++  // TAS subsystem init (patch 0135, wave 41). Runs AFTER Logger::init
++  // so LOG_INFO / LOG_WARN / LOG_ERROR are usable for engagement
++  // banners + error narration. Runs BEFORE SDL_Init + game state
++  // machinery so:
++  //   (a) seedrand() (called from TAS::init when DOSKUTSU_TAS_PRNG_SEED
++  //       is set) happens before any random() consumer
++  //   (b) the engagement banner emit happens early enough to be
++  //       visible in DEBUG.LOG even if a later init step crashes
++  // No-op when no DOSKUTSU_TAS_* env vars set; default-OFF preserves
++  // wave-37 binary behavior bit-for-bit.
++  TAS::init();
++
+ #ifdef NXE_DOS
+   // Force-disable SDL3's object-validation hash lookup before SDL_Init so the
+   // hint is in place when the first SDL_SetObjectValid call (inside SDL_Init's
+@@ -738,6 +772,13 @@ shutdown:;
+ #if defined(__SWITCH__)
+   romfsExit();
+ #endif
++  // TAS shutdown (patch 0135). Runs BEFORE SDL_Quit so any open .TAS
++  // record/replay file is flushed + closed even if SDL_Quit hangs
++  // (per W22-WB-D evidence that the shutdown path itself has
++  // historically hung on real DOS hardware). No-op when no TAS env
++  // vars set.
++  TAS::shutdown();
++
+   doskutsu_dbg_log("engine-shutdown[8/8]: pre-SDL_Quit");
+   SDL_Quit();
+   doskutsu_dbg_log("engine-shutdown[final]: post-SDL_Quit; engine "
+diff --git a/src/tas.cpp b/src/tas.cpp
+new file mode 100644
+index 0000000..5676b5e
+--- /dev/null
++++ b/src/tas.cpp
+@@ -0,0 +1,446 @@
++/* Cave Story port -- TAS (tool-assisted) record/replay implementation.
++ *
++ * See tas.h for the design + API contract; docs/internal/WAVE-41-TAS-DESIGN.md
++ * (gitignored) for the full architecture rationale.
++ *
++ * SPDX-License-Identifier: GPL-3.0-only
++ */
++#include "tas.h"
++
++#include "Utils/Logger.h"
++#include "common/misc.h"  // seedrand
++
++#include <cstdio>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++
++namespace TAS
++{
++
++// ===================================================================
++// File format constants (see WAVE-41-TAS-DESIGN.md sec. D).
++// ===================================================================
++//
++// Header (20 bytes):
++//   off  size  field
++//   ---  ----  -----
++//   0    7     magic   "DTASv1\n"
++//   7    1     version 0x01
++//   8    4     u32 LE prng_seed
++//   12   4     u32 LE flags     (reserved, 0)
++//   16   4     u32 LE n_events  (0xFFFFFFFF = stream-mode, read until EOF)
++//
++// Each event (8 bytes):
++//   0    4     u32 LE tick
++//   4    4     u32 LE mask
++//
++// Events sorted by tick ascending. Mask: bit i = inputs[i] (i.e.
++// bit 0 = LEFTKEY, bit 1 = RIGHTKEY, ... per input.h INPUTS enum order).
++//
++// Stream-mode (n_events = 0xFFFFFFFF) is the runtime default for RECORD
++// since we don't know n_events at start; replay reads until EOF anyway.
++// A future "finalize" pass could backfill n_events for self-validating
++// playback, but MVP doesn't require it.
++
++static const char TAS_MAGIC[7] = { 'D', 'T', 'A', 'S', 'v', '1', '\n' };
++static const uint8_t TAS_VERSION = 0x01;
++static const uint32_t TAS_STREAM_MODE_N_EVENTS = 0xFFFFFFFFu;
++
++// ===================================================================
++// File-scope state.
++// ===================================================================
++
++// Open file handles. Exactly one of these is non-NULL during a run
++// (mutually exclusive at init time; REPLAY wins if both env vars set).
++static FILE *_record_fp = nullptr;
++static FILE *_replay_fp = nullptr;
++
++// Last-recorded input mask. Used to coalesce: we only write an event
++// when the mask CHANGES, not on every tick. Initialized to a sentinel
++// that can't equal any real mask so the first tick's mask is always
++// emitted (unless every input is held in a state matching the sentinel,
++// which is impossible since the sentinel has all-high bits set).
++static uint32_t _record_last_mask = 0xFFFFFFFFu;
++
++// Pending replay event lookahead. We read one event ahead so apply_input
++// can do `while pending.tick == tick_id` without re-reading the file
++// inside the inner branch.
++static bool      _replay_pending_valid = false;
++static uint32_t  _replay_pending_tick  = 0;
++static uint32_t  _replay_pending_mask  = 0;
++
++// Auto-exit threshold. 0 = no auto-exit; positive = exit when
++// tick_count >= this value.
++static uint32_t _auto_exit_tick = 0;
++
++// End-of-replay auto-exit (default ON when REPLAY is active). When the
++// replay file is consumed (EOF in _prefetch_next_event), set
++// _replay_eof_seen = true. should_exit() returns true on the next tick,
++// trips game.running = false, gameloop() exits, engine-shutdown[1..8]
++// runs unchanged.
++//
++// Rationale: per realhw + team-lead arbitration 2026-05-13, eliminating
++// the AUTO_EXIT_TICK-vs-noise-floor tuning question: with EOF-auto-exit,
++// recording duration IS the iter sample window. Operator records once,
++// every PLAY's replay exits exactly when recording ends. AUTO_EXIT_TICK
++// stays as a safety override that wins if it fires earlier.
++//
++// Opt-out: DOSKUTSU_TAS_REPLAY_HOLD=1 disables EOF-auto-exit, restores
++// the original MVP behavior (replay holds last applied mask after EOF
++// until AUTO_EXIT_TICK or operator ESC). Use case: long steady-state
++// observation past the recorded scenario without re-recording.
++static bool _replay_hold     = false;
++static bool _replay_eof_seen = false;
++
++// ===================================================================
++// Little-endian helpers.
++// ===================================================================
++
++static void _put_u32le(FILE *fp, uint32_t v)
++{
++    uint8_t buf[4];
++    buf[0] = (uint8_t)(v        & 0xFF);
++    buf[1] = (uint8_t)((v >>  8) & 0xFF);
++    buf[2] = (uint8_t)((v >> 16) & 0xFF);
++    buf[3] = (uint8_t)((v >> 24) & 0xFF);
++    fwrite(buf, 1, 4, fp);
++}
++
++// Returns true on success, false on EOF / short read.
++static bool _get_u32le(FILE *fp, uint32_t *out)
++{
++    uint8_t buf[4];
++    if (fread(buf, 1, 4, fp) != 4) return false;
++    *out = (uint32_t)buf[0]
++         | ((uint32_t)buf[1] <<  8)
++         | ((uint32_t)buf[2] << 16)
++         | ((uint32_t)buf[3] << 24);
++    return true;
++}
++
++// ===================================================================
++// Header I/O.
++// ===================================================================
++
++static void _write_header(FILE *fp, uint32_t prng_seed)
++{
++    fwrite(TAS_MAGIC, 1, sizeof(TAS_MAGIC), fp);
++    fputc(TAS_VERSION, fp);
++    _put_u32le(fp, prng_seed);
++    _put_u32le(fp, 0);                          // flags (reserved)
++    _put_u32le(fp, TAS_STREAM_MODE_N_EVENTS);   // n_events (stream-mode)
++    fflush(fp);
++}
++
++// Returns true if header parses + matches expected format. On false,
++// caller must close the file and disable replay.
++static bool _read_header(FILE *fp, uint32_t *out_prng_seed)
++{
++    char magic[sizeof(TAS_MAGIC)];
++    if (fread(magic, 1, sizeof(magic), fp) != sizeof(magic)) {
++        LOG_ERROR("tas: replay header truncated (could not read magic)");
++        return false;
++    }
++    if (memcmp(magic, TAS_MAGIC, sizeof(TAS_MAGIC)) != 0) {
++        LOG_ERROR("tas: replay magic mismatch (expected 'DTASv1\\n')");
++        return false;
++    }
++    int ver_c = fgetc(fp);
++    if (ver_c == EOF) {
++        LOG_ERROR("tas: replay header truncated (no version byte)");
++        return false;
++    }
++    if ((uint8_t)ver_c != TAS_VERSION) {
++        LOG_ERROR("tas: replay version mismatch (got {}; expected {})",
++                  ver_c, (int)TAS_VERSION);
++        return false;
++    }
++    uint32_t prng_seed, flags, n_events;
++    if (!_get_u32le(fp, &prng_seed) || !_get_u32le(fp, &flags) ||
++        !_get_u32le(fp, &n_events)) {
++        LOG_ERROR("tas: replay header truncated (could not read seed/flags/n_events)");
++        return false;
++    }
++    *out_prng_seed = prng_seed;
++    // flags + n_events presently informational only. Stream-mode is the
++    // default; we read events until EOF regardless of n_events value.
++    return true;
++}
++
++// ===================================================================
++// Event I/O.
++// ===================================================================
++
++// Read one event into the pending-lookahead slot. Returns true on
++// success, false on EOF / parse failure (caller treats as end of replay).
++// Sets _replay_eof_seen = true on the EOF transition so should_exit() can
++// auto-terminate the replay.
++static bool _prefetch_next_event()
++{
++    if (!_replay_fp) return false;
++    uint32_t tick, mask;
++    if (!_get_u32le(_replay_fp, &tick) || !_get_u32le(_replay_fp, &mask)) {
++        _replay_pending_valid = false;
++        _replay_eof_seen      = true;
++        return false;
++    }
++    _replay_pending_tick  = tick;
++    _replay_pending_mask  = mask;
++    _replay_pending_valid = true;
++    return true;
++}
++
++static void _write_event(uint32_t tick, uint32_t mask)
++{
++    if (!_record_fp) return;
++    _put_u32le(_record_fp, tick);
++    _put_u32le(_record_fp, mask);
++    fflush(_record_fp);
++    // Per-event fsync precedent: patch 0036 (DEBUG.LOG per-line fsync).
++    // Standard fflush is sufficient on DJGPP for the libc buffer; the
++    // OS write-cache flush is implicit on DOS since there's no
++    // write-back caching layer between us and the FAT driver.
++}
++
++// ===================================================================
++// Mask <-> inputs[] conversion.
++// ===================================================================
++
++static uint32_t _mask_from_inputs(const bool *inputs, int n_inputs)
++{
++    // input.h INPUT_COUNT = 28; fits in u32 with 4 bits to spare.
++    // We bound to 32 here defensively; a future INPUT_COUNT > 32
++    // breaks the format and would require a version bump.
++    if (n_inputs > 32) n_inputs = 32;
++    uint32_t mask = 0;
++    for (int i = 0; i < n_inputs; ++i) {
++        if (inputs[i]) mask |= (1u << i);
++    }
++    return mask;
++}
++
++static void _inputs_from_mask(uint32_t mask, bool *inputs, int n_inputs)
++{
++    if (n_inputs > 32) n_inputs = 32;
++    for (int i = 0; i < n_inputs; ++i) {
++        inputs[i] = ((mask >> i) & 1u) != 0;
++    }
++}
++
++// ===================================================================
++// Env var parsing.
++// ===================================================================
++
++// Parse a decimal u32 from env var value. Returns true on success.
++// Treats empty / unset as "not set" (returns false; caller uses default).
++static bool _parse_u32_env(const char *env_name, uint32_t *out)
++{
++    const char *v = std::getenv(env_name);
++    if (!v || v[0] == '\0') return false;
++    char *end = nullptr;
++    unsigned long n = std::strtoul(v, &end, 10);
++    if (end == v || (*end != '\0' && *end != '\n')) {
++        LOG_WARN("tas: env var {}='{}' is not a decimal integer; ignoring",
++                 env_name, v);
++        return false;
++    }
++    *out = (uint32_t)n;
++    return true;
++}
++
++// ===================================================================
++// Public API.
++// ===================================================================
++
++void init()
++{
++    // 1. PRNG seed -- belt-and-braces. Engine LCG defaults seed=0 so
++    //    same-input runs from process-start are ALREADY deterministic.
++    //    This env var only matters if a future code path calls
++    //    seedrand() before/after our init (currently nothing does).
++    uint32_t prng_seed_env = 0;
++    bool prng_seed_set = _parse_u32_env("DOSKUTSU_TAS_PRNG_SEED",
++                                        &prng_seed_env);
++    if (prng_seed_set) {
++        seedrand(prng_seed_env);
++        LOG_INFO("tas: PRNG seed forced to {} via DOSKUTSU_TAS_PRNG_SEED",
++                 (unsigned long)prng_seed_env);
++    }
++
++    // 2. Auto-exit tick.
++    uint32_t exit_tick = 0;
++    if (_parse_u32_env("DOSKUTSU_TAS_AUTO_EXIT_TICK", &exit_tick) &&
++        exit_tick > 0) {
++        _auto_exit_tick = exit_tick;
++        LOG_INFO("tas: auto-exit armed at tick {} via "
++                 "DOSKUTSU_TAS_AUTO_EXIT_TICK", (unsigned long)exit_tick);
++    }
++
++    // 2b. Replay hold-after-EOF opt-out. Strict-"1" match. Default OFF
++    // (-> EOF-auto-exit ON by default). Per realhw + team-lead
++    // arbitration 2026-05-13: recording duration owns the iter sample
++    // window; AUTO_EXIT_TICK becomes a safety upper bound rather than
++    // the primary termination mechanism.
++    {
++        const char *hold_env = std::getenv("DOSKUTSU_TAS_REPLAY_HOLD");
++        _replay_hold = (hold_env && hold_env[0] == '1' && hold_env[1] == '\0');
++        if (_replay_hold) {
++            LOG_INFO("tas: replay hold-after-EOF armed via "
++                     "DOSKUTSU_TAS_REPLAY_HOLD=1 (engine holds last input "
++                     "mask after replay file exhausts; AUTO_EXIT_TICK or "
++                     "operator ESC needed for clean termination)");
++        }
++    }
++
++    // 3. RECORD / REPLAY paths. Mutually exclusive at runtime; REPLAY
++    //    wins if both set (caller probably left a stale RECORD var).
++    const char *rec_path = std::getenv("DOSKUTSU_TAS_RECORD");
++    const char *rep_path = std::getenv("DOSKUTSU_TAS_REPLAY");
++    const bool rec_set = rec_path && rec_path[0] != '\0';
++    const bool rep_set = rep_path && rep_path[0] != '\0';
++
++    if (rec_set && rep_set) {
++        LOG_WARN("tas: both DOSKUTSU_TAS_RECORD='{}' and "
++                 "DOSKUTSU_TAS_REPLAY='{}' set; preferring REPLAY "
++                 "(unset RECORD to suppress this warning)",
++                 rec_path, rep_path);
++    }
++
++    if (rep_set) {
++        _replay_fp = std::fopen(rep_path, "rb");
++        if (!_replay_fp) {
++            LOG_ERROR("tas: could not open replay file '{}'; replay "
++                      "disabled, falling back to live input", rep_path);
++        } else {
++            uint32_t file_seed = 0;
++            if (!_read_header(_replay_fp, &file_seed)) {
++                LOG_ERROR("tas: replay file '{}' has invalid header; "
++                          "replay disabled", rep_path);
++                std::fclose(_replay_fp);
++                _replay_fp = nullptr;
++            } else {
++                // Apply file's recorded seed even if PRNG_SEED env var
++                // wasn't set -- guarantees byte-identical replay PRNG
++                // sequence as recording. If env var WAS set, file_seed
++                // and env-applied seed should match; if they don't,
++                // log a warning + take env var precedence (operator
++                // override).
++                if (!prng_seed_set && file_seed != 0) {
++                    seedrand(file_seed);
++                    LOG_INFO("tas: replay opened, PRNG seed = {} (from file header)",
++                             (unsigned long)file_seed);
++                } else if (prng_seed_set && file_seed != prng_seed_env) {
++                    LOG_WARN("tas: replay file seed={} differs from "
++                             "env-set seed={}; env wins; replay may "
++                             "diverge from recording",
++                             (unsigned long)file_seed,
++                             (unsigned long)prng_seed_env);
++                }
++                LOG_INFO("tas: replay opened path='{}' header_seed={}",
++                         rep_path, (unsigned long)file_seed);
++                // Prefetch the first event.
++                _prefetch_next_event();
++            }
++        }
++    } else if (rec_set) {
++        _record_fp = std::fopen(rec_path, "wb");
++        if (!_record_fp) {
++            LOG_ERROR("tas: could not open record file '{}'; record "
++                      "disabled", rec_path);
++        } else {
++            _write_header(_record_fp, prng_seed_env);
++            LOG_INFO("tas: record opened path='{}' header_seed={}",
++                     rec_path, (unsigned long)prng_seed_env);
++            // _record_last_mask stays at sentinel so first tick's
++            // mask is always emitted.
++        }
++    }
++}
++
++void apply_input(uint32_t tick_id, bool *inputs, int n_inputs)
++{
++    // First guard: most ticks for most users hit this branch and bail.
++    // Default-OFF behavior depends on this short-circuit being cheap
++    // (two pointer comparisons + a branch). No malloc, no syscall,
++    // no env-read.
++    if (!_record_fp && !_replay_fp) return;
++
++    if (_replay_fp) {
++        // Apply every event whose tick is <= tick_id. The <= (not ==)
++        // tolerates the tick-skipping case per sec. E.3 of the design
++        // (cooperative-scheduler starvation can skip a tick; we fire
++        // the event late rather than abort).
++        while (_replay_pending_valid && _replay_pending_tick <= tick_id) {
++            _inputs_from_mask(_replay_pending_mask, inputs, n_inputs);
++            if (_replay_pending_tick < tick_id) {
++                // Late-fire diagnostic. Useful for catching divergence
++                // in real-HW iters; intentionally LOG_DEBUG (silent in
++                // release) so we don't flood the log if drift is
++                // persistent. Operator can promote to LOG_INFO in a
++                // diagnostic build if needed.
++                LOG_DEBUG("tas: replay drift: event tick {} < current {}; "
++                          "firing late", _replay_pending_tick, tick_id);
++            }
++            _prefetch_next_event();
++        }
++        return;
++    }
++
++    // Record mode. Coalesce on mask change.
++    uint32_t mask = _mask_from_inputs(inputs, n_inputs);
++    if (mask != _record_last_mask) {
++        _write_event(tick_id, mask);
++        _record_last_mask = mask;
++    }
++}
++
++bool should_exit(uint32_t tick_id)
++{
++    // 1. End-of-replay auto-exit (default ON when REPLAY is active).
++    //    Fires once _prefetch_next_event hits EOF and the apply_input
++    //    loop consumes the last queued event (or the very first prefetch
++    //    fails for an empty/header-only file). Whichever happens first
++    //    between EOF-auto-exit and AUTO_EXIT_TICK wins.
++    if (_replay_eof_seen && !_replay_hold) {
++        static bool logged_once = false;
++        if (!logged_once) {
++            LOG_INFO("tas: end-of-replay auto-exit at tick {} (recording "
++                     "exhausted; set DOSKUTSU_TAS_REPLAY_HOLD=1 to "
++                     "disable + observe steady-state past recording end)",
++                     (unsigned long)tick_id);
++            logged_once = true;
++        }
++        return true;
++    }
++
++    // 2. AUTO_EXIT_TICK safety / primary termination for the no-replay
++    //    case (record mode + manual play with tick-precise termination).
++    if (_auto_exit_tick == 0) return false;
++    if (tick_id >= _auto_exit_tick) {
++        LOG_INFO("tas: auto-exit at tick {} (DOSKUTSU_TAS_AUTO_EXIT_TICK={})",
++                 (unsigned long)tick_id, (unsigned long)_auto_exit_tick);
++        return true;
++    }
++    return false;
++}
++
++void shutdown()
++{
++    if (_record_fp) {
++        // Flush + close. The kernel-side write cache is generally a
++        // no-op on DOS (FAT writes are synchronous through INT 21h)
++        // but we fflush defensively anyway.
++        std::fflush(_record_fp);
++        std::fclose(_record_fp);
++        _record_fp = nullptr;
++        LOG_INFO("tas: record file closed");
++    }
++    if (_replay_fp) {
++        std::fclose(_replay_fp);
++        _replay_fp = nullptr;
++        LOG_INFO("tas: replay file closed");
++    }
++}
++
++} // namespace TAS
+diff --git a/src/tas.h b/src/tas.h
+new file mode 100644
+index 0000000..c24a7af
+--- /dev/null
++++ b/src/tas.h
+@@ -0,0 +1,79 @@
++/* Cave Story port -- TAS (tool-assisted) record/replay support.
++ *
++ * Engine-side, game-tick-keyed input record/replay for the doskutsu real-HW
++ * iter loop. Eliminates operator-timing variability from cross-iter perf
++ * comparisons by serving deterministic input from a pre-recorded `.TAS` file.
++ *
++ * Design: docs/internal/WAVE-41-TAS-DESIGN.md (gitignored).
++ *
++ * Threading-zero invariant per CLAUDE.md: all hooks run synchronously on the
++ * main loop's call stack (called from run_tick() in main.cpp). No worker
++ * threads. File I/O is blocking; per-event fsync on record to survive
++ * mid-run crashes (precedent: patch 0036 DEBUG.LOG fsync).
++ *
++ * Default-OFF gate: when neither DOSKUTSU_TAS_RECORD nor _REPLAY is set, all
++ * hooks are no-ops at their first guard. Binary behaves byte-identical to
++ * wave-37 production. Verified by build-qa task #5 re-gate + the two-witness
++ * pattern (strings + runtime banner).
++ *
++ * Copyright (C) 2026 Micheal Waltz / doskutsu authors.
++ * SPDX-License-Identifier: GPL-3.0-only
++ */
++#ifndef _TAS_H
++#define _TAS_H
++
++#include <cstdint>
++
++namespace TAS
++{
++
++// Boot-time init. Reads the four DOSKUTSU_TAS_* env vars, parses, opens
++// the record/replay file if applicable, calls seedrand() if PRNG_SEED is
++// set. Safe to call with no env vars set (no-op).
++//
++// Called from main() in main.cpp early (after Logger::init runs, before
++// game state machinery is built so logging is available + seedrand can
++// run before any random() call).
++//
++// Idempotent at the env-var level: re-invoking would attempt to reopen
++// files. Intended for single-call usage.
++void init();
++
++// Per-tick hook. Called from run_tick() in main.cpp AFTER input_poll()
++// has updated the global inputs[] array, BEFORE any game logic reads
++// inputs[].
++//
++//   tick_id   monotonically-increasing tick counter from run_tick's
++//             static int tick_count; source of truth for replay timing
++//   inputs    pointer to global inputs[INPUT_COUNT] from input.h
++//   n_inputs  INPUT_COUNT (=28 per input.h)
++//
++// Behavior:
++//   neither RECORD nor REPLAY set: returns immediately (no-op)
++//   RECORD: compute mask from inputs[]; if mask differs from
++//           last-recorded mask, append (tick_id, mask) to the open
++//           record file and fsync.
++//   REPLAY: while pending event tick <= tick_id, apply the recorded
++//           mask to inputs[] (full overwrite of inputs[0..n_inputs-1]),
++//           consume the event, prefetch next.
++void apply_input(uint32_t tick_id, bool *inputs, int n_inputs);
++
++// Auto-exit predicate. Returns true if DOSKUTSU_TAS_AUTO_EXIT_TICK is
++// non-zero AND tick_id has reached it. Caller (run_tick) sets
++// game.running = false to terminate the main loop cleanly; the
++// existing engine-shutdown[1..8] sequence in main.cpp runs unchanged.
++//
++// Returns false when env var is 0 / unset (no auto-exit; runs until
++// operator presses ESC or QUIT event).
++bool should_exit(uint32_t tick_id);
++
++// Shutdown hook. Closes any open record/replay file. Called from
++// main()'s shutdown path before SDL_Quit so the record file is fully
++// flushed even if SDL_Quit hangs (per cooperative-scheduler concerns
++// in [[wave_38_cooperative_scheduler_starvation_is_real]] -- shutdown
++// path itself has historically hung on real HW per W22-WB-D triage).
++void shutdown();
++
++} // namespace TAS
++
++#endif // _TAS_H
+-- 
+2.47.3
+

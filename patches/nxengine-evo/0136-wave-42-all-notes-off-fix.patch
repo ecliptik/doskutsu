@@ -1,0 +1,267 @@
+From dfb01b6db96e6cdab7edbe264c26a1fe3ca74014 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 13 May 2026 18:47:17 -0700
+Subject: [PATCH 1/2] perf phase 11 patch 0136 -- wave-42 all-notes-off fix on
+ real DreamBlaster S2
+
+Wave-41 real-HW operator finding: music note hangs indefinitely after
+engine quit on g2k Vibra16S CT2490 + DreamBlaster S2; persists until
+machine reboot. Affects PLAY3/PLAY4 in the wave-41-valid iter where
+DOSKUTSU_AUDIO_BACKEND=wb is engaged.
+
+Root cause (flush-instr WAVE-41-LOG-ANALYSIS.md sec. 4.2): the existing
+on_song_stop / dtor all-notes-off path was running (per captured log
+lines "wb backend: on_song_stop" + "wb backend shutdown (MPU-401 reset
+issued)") but the silence dispatch was failing to reach the DreamBlaster
+S2 daughterboard. SDL/0047's claim that DSP cmd 0xD3 (audio backend
+CloseDevice's speaker-off) silences MIDI output alongside DAC was
+empirically refuted: the WaveBlaster header is MIDI-bus driven, NOT
+DAC-driven, so 0xD3 doesn't reach it.
+
+flush-instr's three failure-mode hypotheses (all engine-domain except
+(c)):
+  (a) WB backend dtor logic bug under DSP cmd 0x38 dispatch
+      (some subtle state interaction with concurrent SDL audio DSP DMA
+      programming during teardown)
+  (b) MidiScheduler::stop not always firing on_song_stop at shutdown
+      (only at song-change)
+  (c) DreamBlaster S2 firmware quirk ignoring CC 123 in some mode
+      (rare; not engine-fixable)
+
+Mitigation: add an EARLIER explicit emit at the engine-shutdown
+boundary, well before the SDL audio backend's DSP DMA stops (the most
+plausible trigger for (a)/(b)). The existing on_song_stop + dtor
+all-notes-off path stays in place as belt-and-suspenders; this is
+ADDITIONAL coverage, not a replacement.
+
+API surface added:
+
+  MidiBackend::silence_for_shutdown()  -- new virtual, default no-op.
+    Called by MidiScheduler::silence_for_shutdown() BEFORE
+    SoundManager teardown touches the DSP. Backend has free rein to
+    emit chip-specific silence commands.
+
+  MidiBackendWaveBlaster::silence_for_shutdown()  -- override; emits
+    CC 123 (All Notes Off) on each of 16 MIDI channels via the
+    DSP-mediated path (SDL_DOSMpu401WriteByte -> DSP cmd 0x38).
+    Tighter than the existing _all_notes_off_all_channels: emits ONLY
+    CC 123 (graceful release), not both CC 120 + CC 123. Reduces total
+    byte count from 96 to 48; lower interleave risk with concurrent
+    SDL audio teardown. Per flush-instr's specific recommendation at
+    LOG-ANALYSIS sec. 4.2 final paragraph.
+
+  MidiScheduler::silence_for_shutdown()  -- new public method; thin
+    wrapper that calls _backend->silence_for_shutdown() if a backend
+    is bound. Does NOT mutate _playing or release the backend. Safe
+    to call any number of times.
+
+  SoundManager::shutdown()  -- new snd-shutdown[0/6] step invokes
+    MidiScheduler::silence_for_shutdown() BEFORE the existing
+    snd-shutdown[1/6] (MidiScheduler::shutdown). doskutsu_dbg_log
+    bracket logged via SDL/0024's per-line fsync to PAUSESDL.LOG.
+
+Stub + OPL3 backends inherit the default no-op silence_for_shutdown()
+from the base class -- their existing on_song_stop / dtor paths are
+correctness-complete (Stub has nothing to silence; OPL3's dtor
+unconditional 18-voice KEY-OFF works because OPL3 is a direct-register
+write path with no DSP cmd indirection that could fail).
+
+Single-mechanism preservation per
+[[single_lever_per_binary_or_else_attribution_impossible]]: this is a
+correctness patch on the wave-41-valid-TAS binary (sha 466976316b9d).
+Default-OFF behavior bit-identical: silence_for_shutdown only fires
+when a backend with a non-default override is bound (= when WB
+backend is engaged via DOSKUTSU_AUDIO_BACKEND=wb). PLAY1 (no audio
+backend env var) sees the no-op base implementation; wave-41 fps
+anchor comparison preserved.
+
+DOSBox-X smoke gate: no DreamBlaster S2 emulation per
+WAVE-41-DOSBOX-PROFILING-PLAN sec. 5.1, so DOSBox-X cannot validate
+the actual silence behavior. Smoke verifies:
+  - Binary builds clean
+  - String 'wb backend: silence_for_shutdown' present in .rodata
+  - snd-shutdown[0/6] banner fires at shutdown in RECORDSD.LOG
+  - make tas-smoke PASS (no regression on default organya backend)
+Real-HW verification gates on operator's ear in wave-42-valid PLAY4
+(quit-cycle ear-test cell per WAVE-41-LOG-ANALYSIS sec. 5.3).
+
+Coordination: peer-DM build-qa with new sha for re-gate + new banner
+regex; peer-DM realhw with new sha for wave-42 tarball composition.
+
+Files:
+  src/sound/MidiScheduler.h            -- declare silence_for_shutdown
+                                           on MidiBackend + MidiScheduler
+  src/sound/MidiScheduler.cpp          -- MidiScheduler impl (~5 lines)
+  src/sound/MidiBackendWB.h            -- declare WB override
+  src/sound/MidiBackendWB.cpp          -- WB override impl (~10 lines)
+  src/sound/SoundManager.cpp           -- new snd-shutdown[0/6] step
+---
+ src/sound/MidiBackendWB.cpp | 46 +++++++++++++++++++++++++++++++++++++
+ src/sound/MidiBackendWB.h   |  1 +
+ src/sound/MidiScheduler.cpp | 12 ++++++++++
+ src/sound/MidiScheduler.h   | 26 +++++++++++++++++++++
+ src/sound/SoundManager.cpp  | 13 +++++++++++
+ 5 files changed, 98 insertions(+)
+
+diff --git a/src/sound/MidiBackendWB.cpp b/src/sound/MidiBackendWB.cpp
+index 63bd495..4af3815 100644
+--- a/src/sound/MidiBackendWB.cpp
++++ b/src/sound/MidiBackendWB.cpp
+@@ -166,5 +166,51 @@ void MidiBackendWaveBlaster::on_song_stop()
+   LOG_INFO("wb backend: on_song_stop");
+ }
+ 
++void MidiBackendWaveBlaster::silence_for_shutdown()
++{
++  // Patch 0136 (wave 42; flush-instr WAVE-41-LOG-ANALYSIS.md sec. 4):
++  // emergency CC 123 (All Notes Off) emit on all 16 MIDI channels,
++  // called from SoundManager::shutdown() at the VERY START -- BEFORE
++  // any other DSP-touching teardown step.
++  //
++  // Wave-41 real-HW observation (operator-reported PLAY3/PLAY4):
++  // music note rings indefinitely after engine quit on g2k Vibra16S
++  // CT2490 + DreamBlaster S2. Note persists until reboot. Root cause
++  // (flush-instr WAVE-41-LOG-ANALYSIS sec. 4.2): the existing on_song_stop
++  // / dtor all-notes-off path was running (per captured log lines
++  // "wb backend: on_song_stop" + "wb backend shutdown") but the
++  // silence dispatch was failing to reach the daughterboard for one
++  // of three hypothesized reasons:
++  //   (a) WB backend's dtor logic bug under DSP cmd 0x38 dispatch
++  //       (some subtle state interaction with the SDL audio backend's
++  //       in-flight DSP DMA programming)
++  //   (b) MidiScheduler::stop not always firing on_song_stop at
++  //       shutdown (only at song-change)
++  //   (c) DreamBlaster S2 firmware-quirk ignoring CC 123 in some mode
++  //
++  // Mitigation: add an EARLIER explicit emit at the engine-shutdown
++  // boundary, well before the SDL audio backend's DSP DMA stops
++  // (which is the most plausible trigger for (a)/(b)). The existing
++  // on_song_stop + dtor all-notes-off path stays in place as belt-
++  // and-suspenders -- this is ADDITIONAL coverage, not a replacement.
++  //
++  // Tighter dispatch than _all_notes_off_all_channels: emit ONLY
++  // CC 123 (graceful release), not both CC 120 (immediate cut) and
++  // CC 123 like the existing helper. flush-instr's specific
++  // recommendation per LOG-ANALYSIS sec. 4.2 final paragraph.
++  // Reduces total byte count from 96 to 48; lower interleave risk
++  // with concurrent SDL audio teardown.
++  if (!_ready) return;
++  for (int ch = 0; ch < 16; ++ch)
++  {
++    SDL_DOSMpu401WriteByte((uint8_t)(MIDI_CONTROL_CHANGE | ch));
++    SDL_DOSMpu401WriteByte(CC_ALL_NOTES_OFF);
++    SDL_DOSMpu401WriteByte(0x00);
++  }
++  LOG_INFO("wb backend: silence_for_shutdown (CC 123 on all 16 ch via "
++           "DSP cmd 0x38; pre-SoundManager-teardown coverage for "
++           "wave-41 hanging-note bug)");
++}
++
+ }  // namespace Sound
+ }  // namespace NXE
+diff --git a/src/sound/MidiBackendWB.h b/src/sound/MidiBackendWB.h
+index 1e0a534..babe7ec 100644
+--- a/src/sound/MidiBackendWB.h
++++ b/src/sound/MidiBackendWB.h
+@@ -55,6 +55,7 @@ public:
+   void program_change(int channel, int program)                   override;
+   void on_song_start()                                            override;
+   void on_song_stop()                                             override;
++  void silence_for_shutdown()                                     override;
+ 
+ private:
+   // Send a 3-byte MIDI message via SDL_DOSMpu401WriteByte. Inline-friendly
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+index 0a5360b..a4bea4a 100644
+--- a/src/sound/MidiScheduler.cpp
++++ b/src/sound/MidiScheduler.cpp
+@@ -245,6 +245,18 @@ void MidiScheduler::stop()
+   _playing = false;
+ }
+ 
++void MidiScheduler::silence_for_shutdown()
++{
++  // Patch 0136 (wave 42): pre-SoundManager-teardown explicit silence.
++  // Delegates to backend; no scheduler state mutation. See
++  // MidiBackend::silence_for_shutdown header doc for the wave-41
++  // hanging-MIDI-note-on-quit root cause + flush-instr's analysis.
++  if (_backend)
++  {
++    _backend->silence_for_shutdown();
++  }
++}
++
+ void MidiScheduler::shutdown()
+ {
+   // patch 0106 (Phase 10 OPL3 hanging-note fix): explicit teardown
+diff --git a/src/sound/MidiScheduler.h b/src/sound/MidiScheduler.h
+index 558666d..07f12ab 100644
+--- a/src/sound/MidiScheduler.h
++++ b/src/sound/MidiScheduler.h
+@@ -69,6 +69,20 @@ public:
+   // (e.g., reset OPL3 voice allocator on song change) override these.
+   virtual void on_song_start() {}
+   virtual void on_song_stop()  {}
++
++  // Patch 0136 (wave 42; flush-instr's wave-41 LOG-ANALYSIS sec. 4):
++  // explicit emergency-silence hook called BEFORE SoundManager teardown
++  // touches the DSP. Independent of on_song_stop. Belt-and-suspenders
++  // for the wave-41-observed hanging-note bug on real DreamBlaster S2:
++  // SDL/0047's claim that DSP cmd 0xD3 (speaker off at audio CloseDevice)
++  // silences the WaveBlaster header was empirically refuted -- the
++  // WB header is MIDI-bus driven, not DAC-driven, so 0xD3 doesn't reach
++  // it. WB backend overrides this to emit CC 123 (All Notes Off) on all
++  // 16 MIDI channels via the DSP-mediated path while the chip is still
++  // in MIDI-UART mode. Other backends default no-op (OPL3's existing
++  // on_song_stop + dtor 18-voice KEY-OFF is correctness-complete; Stub
++  // has nothing to silence).
++  virtual void silence_for_shutdown() {}
+ };
+ 
+ // ----------------------------------------------------------------------
+@@ -152,6 +166,18 @@ public:
+   // state same as load() does.
+   bool load_from_preload_cache(const std::string &cache_key);
+ 
++  // Patch 0136 (wave 42; flush-instr's wave-41 LOG-ANALYSIS sec. 4.3):
++  // explicit emergency-silence call BEFORE SoundManager::shutdown
++  // touches the DSP. Delegates to backend->silence_for_shutdown() if
++  // a backend is bound; otherwise no-op. Independent of stop(); does
++  // NOT mutate _playing or release the backend. Safe to call any
++  // number of times. Intended call site: main.cpp engine-shutdown
++  // sequence, right before the SoundManager::shutdown() invocation
++  // at step [6/8]. See header comment on MidiBackend::
++  // silence_for_shutdown() for the DSP-cmd-0xD3-doesn't-reach-WB
++  // root cause.
++  void silence_for_shutdown();
++
+   // Tear down the scheduler: stop any active playback (which fires
+   // on_song_stop on the backend, propagating per-backend cleanup
+   // like MidiBackendWaveBlaster's All-Notes-Off + MidiBackendOpl3's
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 3bea1e5..bf476fe 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -729,6 +729,19 @@ void SoundManager::shutdown()
+   // the highest-numbered "snd-shutdown[N/6]" line in PAUSESDL.LOG
+   // identifies the last sub-step that completed before the hang.
+ 
++  // Patch 0136 (wave 42; flush-instr WAVE-41-LOG-ANALYSIS sec. 4.2):
++  // emergency MIDI silence BEFORE any other shutdown step. Per wave-41
++  // real-HW finding -- music note hangs forever on quit because the
++  // existing on_song_stop / dtor all-notes-off path was failing to
++  // silence the DreamBlaster S2 daughterboard. This explicit pre-
++  // teardown emit gives an additional chance while the chip + DSP are
++  // both in their full operational state (no SDL audio teardown has
++  // begun yet). For WB backend: emits CC 123 (All Notes Off) on all
++  // 16 channels via DSP cmd 0x38. For Stub / OPL3 backends: no-op
++  // (their own on_song_stop / dtor paths are correctness-complete).
++  doskutsu_dbg_log("snd-shutdown[0/6]: pre-MidiScheduler::silence_for_shutdown");
++  MidiScheduler::getInstance()->silence_for_shutdown();
++
+   doskutsu_dbg_log("snd-shutdown[1/6]: pre-MidiScheduler::shutdown");
+   // patch 0106 (Phase 10 OPL3 hanging-note fix): MidiScheduler shutdown
+   // FIRST. Released backend's dtor (MidiBackendOpl3 / WaveBlaster /
+-- 
+2.47.3
+

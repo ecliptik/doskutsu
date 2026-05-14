@@ -25,9 +25,19 @@ This project exists for preservation, for the historical-computing community, an
 
 ## Status
 
-DOSKUTSU plays at ~38 fps median on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP). This is the maximum framerate currently achieved on this class of hardware; ongoing work targets Cave Story's original 50 Hz design rate.
+DOSKUTSU plays at ~30 fps median on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP) at the Mimiga BK_PARALLAX heavy-music scene with the OPL3 audio backend. Ongoing work targets Cave Story's original 50 Hz design rate.
 
 Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Per-wave performance history and release notes are in [CHANGELOG.md](./CHANGELOG.md).
+
+### Audio backends
+
+`DOSKUTSU.EXE` ships three MIDI music backends, selected via the `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` environment variable:
+
+- **organya** (default): the original Cave Story `.org` synthesizer, software-mixed inside the engine. Faithful timbre; the per-tick mixer cost dominates the audio path on Pentium-class CPUs.
+- **opl3**: dispatches converted MIDI files to the SB16 / Sound Blaster Pro 2 OPL3 FM synthesizer. Frees the CPU from per-frame mixer work and measures **+8.77 fps** over organya at the canonical scene on the reference PC. The bundled WiiWare-arrangement MIDIs sound closest to the original soundtrack.
+- **wb** (WaveBlaster): dispatches converted MIDI files to a WaveBlaster header daughterboard (e.g. Serdaco DreamBlaster S2) via the SB16 DSP-mediated path. Same architectural-lever class as OPL3; wavetable timbre depends on the specific daughterboard's firmware.
+
+MIDI source-file selection is independent of backend choice and is controlled by `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` (`wiimidi` for the WiiWare arrangement, `orgmid` for the Hart legacy `.mid` set, with optional `DOSKUTSU_GM_VARIANT=v1` or `v2` to select an `org2mid`-converted variant).
 
 ---
 

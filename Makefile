@@ -84,14 +84,39 @@ NOSIMD_FLAGS := -DSDL_DISABLE_MMX=1 -DSDL_DISABLE_SSE=1 -DSDL_DISABLE_SSE2=1 \
                 -DSDL_DISABLE_SSE3=1 -DSDL_DISABLE_SSE4_1=1 -DSDL_DISABLE_SSE4_2=1 \
                 -DSDL_DISABLE_AVX=1 -DSDL_DISABLE_AVX2=1 -DSDL_DISABLE_AVX512F=1
 
+# --- Wave-43 RUNMANIFEST flags ------------------------------------------------
+#
+# Patch 0138 (wave 43): shared schema-v1 emit helper at
+# `include/runmanifest.h` consumed by both DOSKUTSU.EXE (engine-side) and
+# HWINV.EXE (probe-engineer's task #10/16). All SDL3 + NXEngine compile
+# stages get the `-I include/` flag so the engine TU finds runmanifest.h
+# without modifying the vendored CMakeLists.txt; harmless to other
+# stages since they don't `#include` it.
+#
+# DOSKUTSU_BUILD_SHA12: source-tree git short sha at make-config time,
+# embedded into the binary's RUNMANIFEST `binary_sha12` field. Per
+# probe-engineer 2026-05-14 recommendation: git short sha as the
+# strongest "this commit produced this binary" anchor. Fallback
+# "UNKNOWN_____" (12 chars; pads the sha12 field) if git unavailable
+# or repo not yet cloned. Evaluated immediately (`:=`) so we capture
+# the sha at the top of the build, not at recipe-execution time.
+RUNMANIFEST_INC := -I$(REPO_ROOT)/include
+DOSKUTSU_BUILD_SHA12 := $(shell git -C $(REPO_ROOT) rev-parse --short=12 HEAD 2>/dev/null || echo UNKNOWN_____)
+# Pass SHA as BARE TOKEN (no quotes); main.cpp's _DOSKUTSU_STR macro
+# stringifies via C preprocessor. Avoids multi-layer quote escaping
+# through bash + make + cmake -> compiler. SHA is always 12 hex chars
+# (a..f, 0..9), valid as a C identifier; fallback "UNKNOWN_____" also
+# valid identifier characters.
+RUNMANIFEST_FLAGS := $(RUNMANIFEST_INC) -DDOSKUTSU_BUILD_SHA12=$(DOSKUTSU_BUILD_SHA12)
+
 CMAKE_COMMON := \
     -DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=$(SYSROOT) \
     -DCMAKE_PREFIX_PATH=$(SYSROOT) \
     -DCMAKE_FIND_ROOT_PATH=$(SYSROOT) \
-    -DCMAKE_C_FLAGS="$(NOSIMD_FLAGS)" \
-    -DCMAKE_CXX_FLAGS="$(NOSIMD_FLAGS)" \
+    -DCMAKE_C_FLAGS="$(NOSIMD_FLAGS) $(RUNMANIFEST_FLAGS)" \
+    -DCMAKE_CXX_FLAGS="$(NOSIMD_FLAGS) $(RUNMANIFEST_FLAGS)" \
     -DBUILD_SHARED_LIBS=OFF
 # CMAKE_FIND_ROOT_PATH=$(SYSROOT) is pre-populated so the DJGPP toolchain file's
 # `list(APPEND CMAKE_FIND_ROOT_PATH ${CC_ROOTS})` keeps both -- needed because
@@ -133,12 +158,19 @@ help:
 	@echo "  make smoke-fast                  run hello.exe in DOSBox-X (cycles=max)"
 	@echo "  make smoke                       run hello.exe in DOSBox-X (parity cycles)"
 	@echo "  make dpmi-lfn-smoke              Phase 8 prereq: DPMI LFN propagation probe"
+	@echo "  make tas-smoke                   wave 41 patch 0135 TAS record/replay round-trip"
 	@echo "  make probes                      Phase 9 wave 20 P0 probes (dacprog + hwlog)"
+	@echo "  make hwinv-86box-smoke           wave-41 hwinv parity smoke under 86Box (closer to real HW)"
 	@echo
 	@echo "Deploy:"
 	@echo "  make dist                        dist/doskutsu-cf.zip (CF-ready bundle)"
 	@echo "  make dist-list                   dry-run: print dist manifest, no staging"
 	@echo "  make install CF=/mnt/cf          copy payload to mounted CF card"
+	@echo
+	@echo "Host tooling (Linux-only):"
+	@echo "  make org2mid                     build tools/org2mid/org2mid (Organya -> SMF)"
+	@echo "  make convert-music               run org2mid across data/org/*.org -> data/mid/"
+	@echo "                                   (offline only; not auto-wired into engine path yet)"
 	@echo
 	@echo "Cleanup:"
 	@echo "  make clean                       remove build/"
@@ -551,6 +583,152 @@ $(SDL3_IMAGE_SMOKE_EXE): $(SDL3_IMAGE_SMOKE_SRC) $(SYSROOT)/lib/libSDL3_image.a 
 sdl3-image-smoke: $(SDL3_IMAGE_SMOKE_EXE)
 	tests/run-sdl3-image-smoke.sh
 
+# --- Wave 41 hwinv: 86Box parity smoke for HWINV.EXE --------------------------
+#
+# Companion to probe-engineer's `make hwinv-dosbox-smoke`. Runs the same
+# build/probes/hwinv.exe binary under 86Box (closer-to-real-HW per
+# docs/internal/WAVE-41-DOSBOX-PROFILING-PLAN.md sec. 5.1) and verifies:
+#
+#   1. All 9 HWINV-<TAG>-BEGIN + HWINV-<TAG>-DONE sentinel PAIRS emit
+#      (TAG in {ENV, CPU, MEM, VID, AUD, DSK, IRQ, PORT, PCI} per probe-
+#      engineer's emit shape; sentinel format is the load-bearing match).
+#   2. The final [HWINV-EXIT_OK] marker emits (proves clean exit).
+#   3. The DOSBOX_DETECTED=1 line is ABSENT (proves 86Box, not silent
+#      mis-routing to DOSBox-X via xvfb-run failure cascade). Per probe-
+#      engineer, hwinv emits DOSBOX_DETECTED=1 only when it detects
+#      DOSBox via INT 21h AX=4452h. 86Box does not respond; the line
+#      should read DOSBOX_DETECTED=0 (or be absent entirely; the gate
+#      treats both as PASS).
+#
+# Failure of (3) is STOP-AND-ACK -- a =1 result means the harness
+# silently fell back to DOSBox-X. This MUST NOT pass with a warning.
+#
+# Section-subset signal (per probe-engineer's 86Box guidance + WAVE-41-HW-
+# INVENTORY-PROBE-PLAN sec. 5.1-5.2):
+#   RUN under 86Box (silicon-proximity buys signal):
+#     ENV / CPU / MEM / IRQ / PORT / PCI
+#   RUN-BUT-TAG-EMULATOR-SPECIFIC:
+#     AUD (86Box SB16 model unlikely to reproduce CTL0026 quirk)
+#   SKIP / delegate elsewhere:
+#     VID (HWLOG.EXE + CHIPID.EXE), DSK (86Box CF identify is fictitious)
+#
+# This gate runs the FULL HWINV.EXE and checks all 9 BEGIN/DONE pairs
+# emit (we want sentinel parity for the 3-way-diff matrix). The
+# subset-signal advice is recorded here for downstream analysis; the
+# smoke does not skip sections at HWINV.EXE invocation level. If probe-
+# engineer ships a --sections= flag in a future iter, this target gets
+# a --sections=ENV,CPU,MEM,IRQ,PORT,PCI invocation alongside the full
+# run for comparison.
+#
+# Prerequisites NOT installed by this target (operator-side; see
+# tools/86box-run.sh header for the full bootstrap):
+#   - 86Box AppImage at ~/emulators/86box/86Box.AppImage (or BOX86_APPIMAGE)
+#   - 86Box ROMs at ~/emulators/86box/roms (or BOX86_ROMPATH)
+#   - DOS hard-disk image at tools/86box-vm/doskutsu-c.img (or BOX86_IMG)
+#     with CWSDPMI.EXE installed at C:\
+#   - apt: mtools, xvfb
+# If any prerequisite is missing, tools/86box-run.sh prints a specific
+# message naming the missing piece + exits non-zero (rc=2 = bootstrap).
+
+HWINV_EXE := $(BUILD_DIR)/probes/hwinv.exe
+HWINV_86BOX_SMOKE_DIR := $(BUILD_DIR)/hwinv-86box-smoke
+
+.PHONY: hwinv-86box-smoke
+hwinv-86box-smoke:
+	@test -x "$(HWINV_EXE)" || (echo "error: $(HWINV_EXE) missing -- build with 'make hwinv' (probe-engineer task #10)" >&2; exit 2)
+	@mkdir -p $(HWINV_86BOX_SMOKE_DIR)
+	@echo "[hwinv-86box-smoke] running HWINV.EXE under 86Box (parity conf: tools/86box-x.conf)"
+	@tools/86box-run.sh --exe $(HWINV_EXE) --log $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG --timeout 90 || \
+		(echo "[hwinv-86box-smoke] FAIL: 86box-run.sh did not produce a log" >&2; exit 3)
+	@echo "[hwinv-86box-smoke] log captured ($$(wc -l <$(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG) lines)"
+	@echo "[hwinv-86box-smoke] verifying all 9 HWINV-<TAG>-BEGIN/DONE pairs present..."
+	@gate_fail=0; \
+	for tag in ENV CPU MEM VID AUD DSK IRQ PORT PCI; do \
+		bhits=$$(grep -cE "^\[HWINV-$$tag-BEGIN\]" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG 2>/dev/null || echo 0); \
+		dhits=$$(grep -cE "^\[HWINV-$$tag-DONE\]" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG 2>/dev/null || echo 0); \
+		if [ "$$bhits" -gt 0 ] && [ "$$dhits" -gt 0 ]; then \
+			echo "  PASS  HWINV-$$tag  BEGIN=$$bhits DONE=$$dhits"; \
+		else \
+			echo "  FAIL  HWINV-$$tag  BEGIN=$$bhits DONE=$$dhits -- pair incomplete" >&2; \
+			gate_fail=1; \
+		fi; \
+	done; \
+	echo "[hwinv-86box-smoke] verifying [HWINV-EXIT_OK] terminal marker..."; \
+	if grep -qE "^\[HWINV-EXIT_OK\]" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG; then \
+		echo "  PASS  HWINV-EXIT_OK present"; \
+	else \
+		echo "  FAIL  HWINV-EXIT_OK absent -- probe did not reach clean exit" >&2; \
+		gate_fail=1; \
+	fi; \
+	echo "[hwinv-86box-smoke] verifying CPUID_FAMILY=5 (Pentium-class; proves 86Box ap5s, not DOSBox-X 486 fictitious)..."; \
+	if grep -qE "^\[HWINV-CPU\] CPUID_FAMILY=5" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG; then \
+		fam_line=$$(grep -E "^\[HWINV-CPU\] CPUID_FAMILY=" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG | head -1); \
+		echo "  PASS  $$fam_line"; \
+	else \
+		fam_line=$$(grep -E "^\[HWINV-CPU\] CPUID_FAMILY=" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG | head -1); \
+		echo "  FAIL  expected CPUID_FAMILY=5 (Pentium under 86Box ap5s parity); got: $${fam_line:-no CPUID_FAMILY line}" >&2; \
+		echo "        STOP-AND-ACK: 86Box machine config drift or harness misroute. Do NOT pass-with-warning." >&2; \
+		gate_fail=1; \
+	fi; \
+	echo "[hwinv-86box-smoke] verifying ENVIRONMENT=86box (v2 classifier per probe-engineer task #16)..."; \
+	if grep -qE "^\[HWINV-ENV\] ENVIRONMENT=86box" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG; then \
+		env_line=$$(grep -E "^\[HWINV-ENV\] ENVIRONMENT=" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG | head -1); \
+		echo "  PASS  $$env_line"; \
+	else \
+		env_line=$$(grep -E "^\[HWINV-ENV\] ENVIRONMENT=" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG | head -1); \
+		echo "  FAIL  expected ENVIRONMENT=86box; got: $${env_line:-no ENVIRONMENT line}" >&2; \
+		echo "        Workaround: 86box-run.sh must SET DOSKUTSU_ENVIRONMENT=86box at master DOS prompt" >&2; \
+		echo "        (NOT inside HWBOX.BAT -- MS-DOS 6.22 env block may be too full for inner SET to" >&2; \
+		echo "        propagate to child)." >&2; \
+		gate_fail=1; \
+	fi; \
+	echo "[hwinv-86box-smoke] verifying DOSBOX_DETECTED=0 (v2 AND-gate per probe-engineer #16; was =1 false-positive in v1)..."; \
+	if grep -qE "^\[HWINV-ENV\] DOSBOX_DETECTED=0" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG; then \
+		echo "  PASS  DOSBOX_DETECTED=0"; \
+	else \
+		dbline=$$(grep -E "^\[HWINV-ENV\] DOSBOX_DETECTED=" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG | head -1); \
+		echo "  FAIL  expected DOSBOX_DETECTED=0; got: $${dbline:-no DOSBOX_DETECTED line}" >&2; \
+		gate_fail=1; \
+	fi; \
+	echo "[hwinv-86box-smoke] verifying RUNMANIFEST schema-v1 block (flush-instr task #20)..."; \
+	rm_begin=$$(grep -cE "^\[RUNMANIFEST-BEGIN\]" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG); \
+	rm_end=$$(grep -cE "^\[RUNMANIFEST-END\]" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG); \
+	rm_keys=$$(sed -n '/\[RUNMANIFEST-BEGIN\]/,/\[RUNMANIFEST-END\]/p' $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG | grep -cE "^[a-z][a-z_0-9]*="); \
+	if [ "$$rm_begin" -ge 1 ] && [ "$$rm_end" -ge 1 ] && [ "$$rm_keys" -ge 18 ]; then \
+		echo "  PASS  RUNMANIFEST sentinels=$$rm_begin/$$rm_end keys=$$rm_keys"; \
+	else \
+		echo "  FAIL  RUNMANIFEST incomplete: BEGIN=$$rm_begin END=$$rm_end keys=$$rm_keys (expected 1/1/>=18)" >&2; \
+		gate_fail=1; \
+	fi; \
+	echo "[hwinv-86box-smoke] verifying RUNMANIFEST environment field matches gate expectation..."; \
+	if sed -n '/\[RUNMANIFEST-BEGIN\]/,/\[RUNMANIFEST-END\]/p' $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG | grep -qE "^environment=86box[[:space:]]*$$"; then \
+		echo "  PASS  environment=86box"; \
+	else \
+		rm_env=$$(sed -n '/\[RUNMANIFEST-BEGIN\]/,/\[RUNMANIFEST-END\]/p' $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG | grep -E "^environment=" | head -1 | tr -d '\r'); \
+		echo "  FAIL  expected environment=86box; got: $${rm_env:-no environment line}" >&2; \
+		gate_fail=1; \
+	fi; \
+	echo "[hwinv-86box-smoke] verifying CIRRUS_CHIP_ID via PCI_FALLBACK (v2 per probe-engineer #16)..."; \
+	if grep -qE "^\[HWINV-VID\] CIRRUS_CHIP_ID=0x00A8 .* CHIP_ID_SOURCE=PCI_FALLBACK" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG; then \
+		echo "  PASS  CIRRUS_CHIP_ID=0x00A8 NAME=Cirrus CL-GD5434 via PCI_FALLBACK (86Box SR[0x27]=0x00; falls back to PCI walk)"; \
+	else \
+		cirrus_line=$$(grep -E "^\[HWINV-VID\] CIRRUS_CHIP_ID=" $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG | head -1); \
+		echo "  FAIL  expected CIRRUS_CHIP_ID=0x00A8 via PCI_FALLBACK; got: $${cirrus_line:-no CHIP_ID line}" >&2; \
+		gate_fail=1; \
+	fi; \
+	if [ "$$gate_fail" -gt 0 ]; then \
+		echo "[hwinv-86box-smoke] GATE FAIL: see above" >&2; \
+		echo "[hwinv-86box-smoke] log preserved at $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG" >&2; \
+		exit 5; \
+	fi
+	@echo "[hwinv-86box-smoke] GATE PASS: 9 BEGIN/DONE pairs + EXIT_OK + CPUID_FAMILY=5 + ENVIRONMENT=86box + DOSBOX_DETECTED=0 + RUNMANIFEST schema-v1 + CIRRUS_CHIP_ID PCI_FALLBACK"
+	@echo "[hwinv-86box-smoke] log: $(HWINV_86BOX_SMOKE_DIR)/HWINV.LOG"
+
+# Convenience target alias -- the smoke is what's wanted; 86Box harness
+# is the implementation detail.
+.PHONY: 86box-smoke
+86box-smoke: hwinv-86box-smoke
+
 # --- Phase 9 wave 20 standalone diagnostic probes ----------------------------
 #
 # Builds tests/probes/*.c -- small, isolated DJGPP probes that characterize
@@ -577,7 +755,8 @@ sdl3-image-smoke: $(SDL3_IMAGE_SMOKE_EXE)
 # P1 / P2 probes will land here when authored.
 
 PROBES_DIR     := $(BUILD_DIR)/probes
-PROBES_CFLAGS  := -march=i486 -mtune=pentium -O2 -Wall
+PROBES_INC     := $(REPO_ROOT)/include
+PROBES_CFLAGS  := -march=i486 -mtune=pentium -O2 -Wall -I$(PROBES_INC)
 PROBES_MINSTK  := 512k
 
 PROBE_DACPROG_SRC := tests/probes/dacprog.c
@@ -770,6 +949,47 @@ PROBE_ORGSYNTH_EXE := $(PROBES_DIR)/orgsynth.exe
 PROBE_WBMIDI_SRC := tests/probes/wbmidi.c
 PROBE_WBMIDI_EXE := $(PROBES_DIR)/wbmidi.exe
 
+# P21 -- Phase 11 wave-41 task #10 + wave-43 task #16: comprehensive HW-
+#   inventory snapshot + RUNMANIFEST schema v1 emit.
+#
+#   Wave-41 MVP (task #10) per docs/internal/WAVE-41-HW-INVENTORY-PROBE-PLAN.md
+#   sec. 4: 8 read-only sections (CPU/MEM/VID/AUD/DSK/IRQ+DMA/PORT/PCI) + ENV
+#   marker header. Per-section BEGIN/DONE sentinels with 500 ms watchdog.
+#   Pattern-S1 WaveBlaster enumeration (SB DSP reset + version query; ZERO MPU
+#   port reads per SDL/0047 + MPUPROBE-W22WB-F finding #1: "MPU status bit 7
+#   lies").
+#
+#   Wave-43 task #16 fixes integrated:
+#     1. AND-gated DOSBOX_DETECTED via include/runmanifest.h helper (fixes the
+#        OR-gate false-positive under 86Box that build-qa task #11 surfaced)
+#     2. CIRRUS_CHIP_ID PCI fallback when SR[0x27]=0x00 (86Box Cirrus emulation
+#        doesn't decode the SR extension reg even when PCI walk finds the chip)
+#     3. ENVIRONMENT 3-state classifier + RUNMANIFEST schema-v1 emit per
+#        docs/internal/WAVE-41-TRI-ENV-CORRELATION-PLAN.md sec. 4.2 + 4.3
+#
+#   Pure DJGPP. No SDL link. Side-effects bounded to chip-spec-mandated
+#   non-destructive operations (Cirrus SR[0x06] unlock; SB DSP reset; OPL3
+#   detect-then-reset). Real-HW iter: bundle alongside CWSDPMI.EXE.
+#   Output -> HWINV.LOG. Runtime ~3 sec.
+PROBE_HWINV_SRC  := tests/probes/hwinv.c
+PROBE_HWINV_EXE  := $(PROBES_DIR)/hwinv.exe
+PROBE_HWINV_HDR  := $(PROBES_INC)/runmanifest.h
+
+# Stamp the binary's sha12 at compile time so the RUNMANIFEST block's
+# binary_sha12 field can be cross-tier matched per schema v1 (proves the
+# same binary ran in all three tiers). Computed from the .c source file
+# sha256 (first 12 hex chars). tests/probes/ is gitignored so we can't
+# use git tree sha; the source content sha is the next-best stable id.
+PROBE_HWINV_SHA12 := $(shell sha256sum $(PROBE_HWINV_SRC) 2>/dev/null | cut -c1-12)
+
+# Explicit rule: the generic pattern rule doesn't know HWINV depends on the
+# shared runmanifest.h header. Without an explicit dep, a header-only edit
+# wouldn't rebuild the binary.
+$(PROBE_HWINV_EXE): $(PROBE_HWINV_SRC) $(PROBE_HWINV_HDR) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -DHWINV_BUILD_SHA12=\"$(PROBE_HWINV_SHA12)\" -o $@ $<
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
 # SDLPROB1 + SDLPROB2 -- SDL3-DOS cost decomposition split into two binaries
 #   per docs/PHASE11-SDLPROBE-CONTRACT.md (sdl-engine task #23 designs the
 #   contract + authors sdlprob1; probe-engineer task #24 authors sdlprob2 +
@@ -930,7 +1150,7 @@ $(PROBE_WBMIDI_EXE): $(PROBE_WBMIDI_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -1210,7 +1430,29 @@ probes-p19: $(PROBE_ORGSYNTH_EXE)
 probes-p20: $(PROBE_WBMIDI_EXE)
 	@echo "Built P20 probe set: wbmidi.exe (wave-40 task #29 -- WaveBlaster MIDI sanity)"
 
-probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20
+# P21 -- Phase 11 wave-41 task #10: HW-inventory snapshot.
+hwinv: $(PROBE_HWINV_EXE)
+	@echo "Built $(PROBE_HWINV_EXE) -- phase11 wave-41 task #10 (HW-inventory MVP)."
+	@echo "  Pure DJGPP. 8 read-only sections (CPU/MEM/VID/AUD/DSK/IRQ+DMA/PORT/PCI)"
+	@echo "  + ENV marker header. Per-section BEGIN/DONE sentinels with 500 ms watchdog."
+	@echo "  Pattern-S1 WaveBlaster enumeration (SB DSP reset + version query; ZERO"
+	@echo "  MPU port reads). Real-HW iter: bundle alongside CWSDPMI.EXE +"
+	@echo "  tests/probes/hwinv.bat. Output -> HWINV.LOG. Runtime ~3 sec."
+	@echo "  HAZARD: minimal -- non-destructive Cirrus SR[0x06] unlock + SB DSP reset"
+	@echo "  + OPL3 detect-then-reset. MPU-401 ports explicitly skipped (lockup-prone)."
+
+probes-p21: $(PROBE_HWINV_EXE)
+	@echo "Built P21 probe set: hwinv.exe (wave-41 task #10 -- HW-inventory MVP)"
+
+# DOSBox-X correctness smoke for HWINV.EXE. Stages probe + CWSDPMI in a temp
+# dir, runs hwinv.exe under DOSBox-X, verifies HWINV.LOG has every section's
+# BEGIN+DONE sentinels and the EXIT_OK marker. Numbers are emulator-fictitious
+# per [[dosbox_not_proxy]]; this gates emit-structure correctness only.
+# Companion to build-qa's 86Box parity-smoke target (task #11).
+hwinv-dosbox-smoke: $(PROBE_HWINV_EXE) $(CWSDPMI_EXE)
+	@tests/run-hwinv-smoke.sh
+
+probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
 	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (BAT redirect)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"
@@ -1485,11 +1727,117 @@ else
 	@echo "installed doskutsu payload to $(CF)/DOSKUTSU/"
 endif
 
+# --- TAS smoke (patch nxengine-evo/0135, wave 41) ----------------------------
+#
+# Round-trips the TAS subsystem under DOSBox-X: records a short
+# title-screen session into PLAY.TAS, then replays it back. Validates
+# the .TAS file magic + the engagement banners in both passes.
+#
+# Depends on `make stage` (full layout under build/stage/) since
+# DOSKUTSU.EXE requires the data/ tree.
+
+.PHONY: tas-smoke
+tas-smoke: stage
+	tests/run-tas-smoke.sh
+
+# --- Host tooling: org2mid (Linux-only Organya -> SMF converter) --------------
+#
+# Wave 41 first cycle. tools/org2mid/ is a standalone C99 host tool (no DJGPP,
+# no SDL, no engine link). Converts data/org/*.org files into Standard MIDI
+# Files compatible with the engine's MidiScheduler (vendor/nxengine-evo/src/
+# sound/MidiScheduler.{h,cpp}). Output ships nowhere on the CF card by itself;
+# it's an offline pre-build artifact for wave-41's task #4 listening session.
+#
+# Output directory note: `make convert-music` writes to data/mid/. This dir is
+# OFFLINE-ONLY for now -- the engine recognizes SDL_HINT_DOSKUTSU_AUDIO_MIDI_
+# SOURCE=wiimidi (-> data/midi/) and =orgmid (-> data/orgmid/) only. There is
+# NO engine path to data/mid/ today. A future cycle ("WB-with-org2mid" iter)
+# will either add a new value =org2mid -> data/mid/ or replace data/midi/
+# contents with our converter output. Don't accidentally wire data/mid/ into
+# the engine's search path here -- that's the next cycle's lever.
+#
+# The data/ directory is .gitignored at the repo root (/data/), so data/mid/
+# is automatically untracked. Treat as user-extracted/build-time-derived,
+# same posture as data/base/.
+
+ORG2MID_DIR := $(REPO_ROOT)/tools/org2mid
+ORG2MID_BIN := $(ORG2MID_DIR)/org2mid
+ORG_SRC_DIR := $(REPO_ROOT)/data/org
+
+# Wave-42 (patch 0137; GM_VARIANT engine env var; revised 2026-05-14
+# after STOP-2 design-flaw catch): GM_VARIANT controls our org2mid's
+# GM-patch table; ONLY affects the orgmid source path. Wiimidi source
+# is external GitHub content with pre-baked GM events not under our
+# converter's control -- variant is a no-op on wiimidi.
+#
+# 3-tool, 4-output story (engine resolution table per team-lead's
+# corrected wave-42 spec):
+#   SOURCE     VARIANT  ->  dir            ; provenance
+#   wiimidi    (any)    ->  data/midi/     ; external WiiMidi GitHub
+#   orgmid     (unset)  ->  data/orgmid/   ; Hart's ORGMID (legacy)
+#   orgmid     v1       ->  data/orgmid1/  ; our org2mid v1 GM
+#   orgmid     v2       ->  data/orgmid2/  ; our org2mid v2 GM
+#
+# DOS 8.3 dir-naming preserved (7-char basenames; no orgmid-v1 trap).
+ORGMID_V1_DIR := $(REPO_ROOT)/data/orgmid1
+ORGMID_V2_DIR := $(REPO_ROOT)/data/orgmid2
+
+.PHONY: org2mid
+org2mid: $(ORG2MID_BIN)
+
+# Sub-make PATH override: the top-level Makefile exports PATH with DJGPP_BIN
+# prepended (line 30) so all build-stage targets find the cross-compiler. But
+# tools/org2mid/ is a HOST build -- host `cc` would then find DJGPP `as` first
+# on PATH and fail with "as: unrecognized option '--64'" because the host x86_64
+# assembler flags don't match the DJGPP i486 assembler. Override PATH back to a
+# host-default set for just this sub-make invocation.
+$(ORG2MID_BIN): $(ORG2MID_DIR)/org2mid.c $(ORG2MID_DIR)/Makefile
+	@PATH=/usr/local/bin:/usr/bin:/bin $(MAKE) -C $(ORG2MID_DIR)
+
+# convert-music: generate the 2 wave-42 A/B-listening .mid dirs from
+# data/org/*.org using our org2mid converter. v1 = original task #2
+# design-doc GM mapping; v2 = wave-42 retune addressing operator
+# wave-41 "thumps and cowbell" feedback. Both dirs ship in the wave-42
+# tarball; operator A/B's between them via the SDL_HINT_DOSKUTSU_AUDIO_
+# MIDI_GM_VARIANT engine env var in TAS-deterministic PLAY cells.
+#
+# Does NOT generate data/midi-v1/ or data/midi-v2/: wiimidi source is
+# external GitHub content (data/midi/, fetched by scripts/fetch-cs-
+# midi.py); GM_VARIANT cannot rewrite its pre-baked GM events without
+# a separate midi-retagger tool (out of scope for wave-42 per team-
+# lead arbitration). data/orgmid/ (Hart's ORGMID, legacy from wave-41)
+# is also untouched; ships alongside as the 4th audio reference.
+.PHONY: convert-music
+convert-music: $(ORG2MID_BIN)
+	@if [ ! -d "$(ORG_SRC_DIR)" ]; then \
+	    echo "error: $(ORG_SRC_DIR) not present -- see docs/ASSETS.md for extraction" >&2; \
+	    exit 1; \
+	fi
+	@mkdir -p $(ORGMID_V1_DIR) $(ORGMID_V2_DIR)
+	@for variant in v1 v2; do \
+	    case "$$variant" in v1) outdir=$(ORGMID_V1_DIR);; v2) outdir=$(ORGMID_V2_DIR);; esac; \
+	    n_done=0; n_fail=0; \
+	    for f in $(ORG_SRC_DIR)/*.org; do \
+	        base=`basename $$f .org`; \
+	        out=$$outdir/$$base.mid; \
+	        if $(ORG2MID_BIN) --force --gm-table=$$variant $$f $$out >/dev/null 2>&1; then \
+	            n_done=$$((n_done + 1)); \
+	        else \
+	            echo "convert-music: FAIL $$f -> $$outdir" >&2; \
+	            n_fail=$$((n_fail + 1)); \
+	        fi; \
+	    done; \
+	    printf '  %s/%s: %d converted, %d failed (--gm-table=%s)\n' "data" "`basename $$outdir`" "$$n_done" "$$n_fail" "$$variant"; \
+	    if [ $$n_fail -gt 0 ]; then exit 1; fi; \
+	done; \
+	echo "convert-music: 2 dirs populated (data/orgmid1, data/orgmid2)"
+
 # --- Housekeeping -------------------------------------------------------------
 
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)
+	@$(MAKE) -C $(ORG2MID_DIR) clean 2>/dev/null || true
 
 .PHONY: distclean
 distclean: clean

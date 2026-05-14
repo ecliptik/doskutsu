@@ -1,0 +1,113 @@
+org2mid -- Cave Story Organya (.org) -> Standard MIDI File (.mid)
+==================================================================
+
+Linux host-side converter for the doskutsu DOS port. NOT a DOS binary;
+NOT linked against the engine. Standalone C99 + libc.
+
+Why this exists
+---------------
+doskutsu's MidiScheduler (vendor/nxengine-evo/src/sound/MidiScheduler.{h,cpp})
+parses Standard MIDI Files and dispatches events to a chip-side backend
+(WaveBlaster / DreamBlaster S2 via DSP-mediated MIDI per SDL/0047, OPL3
+FM, or a no-op stub). Cave Story's freeware music is in Pixel's custom
+Organya format (.org), so a build-time converter is needed.
+
+Prior art (scripts/build-cs-midi-orgmid.py) downloads + builds Robert
+Hart's ORGMID v0.82 C source from rnhart.net, then hacks +12 semitones
+onto every note to fix ORGMID's known octave-down quirk. org2mid
+replaces that pipeline with a first-party converter we own (GPLv3,
+no network fetch, correct octave at first emission, configurable
+loop-replication count).
+
+Design reference
+----------------
+docs/internal/WAVE-41-CONVERTER-DESIGN.md (gitignored under
+docs/internal/). All conversion decisions (PPQ choice, GM mappings,
+loop strategy, edge cases) are documented there with citations to
+the engine's Organya parser at vendor/nxengine-evo/src/sound/Organya.cpp.
+
+Build
+-----
+    make
+
+Produces ./org2mid in the current directory. C99 + libc; tested with
+gcc -O2 -Wall -Wextra -Wpedantic.
+
+Usage
+-----
+    ./org2mid [OPTIONS] <input.org> <output.mid>
+
+Options:
+    --loop-strategy=N   Number of loop-body repetitions appended after
+                        the intro (default 4). Higher = longer gap
+                        before the intro re-plays at SMF end-of-track
+                        loop-from-start. Range 0..32.
+    --no-pipi-swap      Disable the pipi-flag GM-program swap (use the
+                        base melody GM table for every instrument
+                        regardless of pipi).
+    --force             Overwrite <output.mid> if it exists.
+    -h, --help          Show help and exit.
+
+Exit codes:
+    0  success
+    1  conversion failure (malformed input, I/O error, etc.)
+    2  CLI argument error
+
+Self-test
+---------
+    make selftest
+
+Converts data/org/quiet.org -> /tmp/quiet.mid and validates the MThd
+header. Does NOT validate audible correctness -- that requires real
+hardware (DreamBlaster S2 + WaveBlaster header on the operator's g2k)
+and is gated by wave-41 task #4's listening session.
+
+Output format
+-------------
+Standard MIDI File, Format 1, PPQ = 48, 10 MTrks:
+    Track 0: metadata (tempo, time-sig, loopStart/loopEnd markers, EOT)
+    Tracks 1..8: Organya melody instruments 0..7 on MIDI channels 0..7
+    Track 9: Organya drum instruments 8..15 merged on MIDI channel 9
+
+GM program assignment (sec. 3.1 of the design doc, subject to revision
+after task #4 listening verification):
+    Org track 0 -> GM 80 (Lead 1 Square)        [or 84 Charang if pipi]
+    Org track 1 -> GM 81 (Lead 2 Sawtooth)      [or 85 Lead 6 Voice]
+    Org track 2 -> GM 56 (Trumpet)              [or 60 French Horn]
+    Org track 3 -> GM 73 (Flute)                [or 75 Pan Flute]
+    Org track 4 -> GM 88 (Pad 1 New Age)        [or 89 Pad 2 Warm]
+    Org track 5 -> GM 25 (Steel Guitar)         [or 27 EGuitar Jazz]
+    Org track 6 -> GM 33 (Electric Bass finger) [or 34 EBass picked]
+    Org track 7 -> GM 5  (Electric Piano 2)     [or 4  Electric Piano 1]
+
+Drum mapping (sec. 3.2):
+    Org drum 0 (BASS)       -> GM 35
+    Org drum 1 (SNARE)      -> GM 38
+    Org drum 2 (HI-CLOSE)   -> GM 42
+    Org drum 3 (HI-OPEN)    -> GM 46
+    Org drum 4 (TOM)        -> GM 45
+    Org drum 5 (PERCUSSION) -> GM 39
+    Org drums 6 + 7 are SND_NULL across the entire Cave Story corpus.
+
+Known limitations (v1)
+----------------------
+- Organya per-event waveform field (`event.wave`) is discarded; melody
+  GM patches are per-track, not per-event. v2 may add per-event
+  program-change.
+- Organya `tuning` field is discarded (MidiScheduler skips pitch-bend
+  events per MidiScheduler.h:93-96; tuning would need a scheduler
+  patch first).
+- Organya drum-channel pitch field is discarded; every event on a given
+  drum slot emits the same GM percussion key.
+- Loop semantics emit `intro + N body reps` inline; the v2 fix is a
+  MidiScheduler patch that honors the loopStart/loopEnd meta-text
+  markers this tool already emits at the original tick positions.
+
+License
+-------
+GPL-3.0-only. See SPDX-License-Identifier in org2mid.c.
+
+Patches against the NXEngine-evo vendored source are GPLv3-derivative
+per CLAUDE.md. This tool is conceptually a derivative of that work
+(uses the Organya format spec captured by vendor/nxengine-evo's source)
+so it ships under the same license.

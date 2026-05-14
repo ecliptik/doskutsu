@@ -1,0 +1,194 @@
+From 0ff8637b44260c326d0cbe4350b2ab4ed831cd74 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 13 May 2026 18:56:07 -0700
+Subject: [PATCH 2/2] perf phase 11 patch 0137 -- wave-42 GM_VARIANT env var
+ for org2mid v1/v2 A/B
+
+Wave-42 ride-along to #18 notesoff fix: add engine-side support for
+in-iter listening A/B between org2mid v1 (current) and v2 (retuned)
+GM-patch tables. Per user direction 2026-05-14: ship BOTH tables in
+the same iter so operator can compare across the TAS-deterministic
+real-HW session instead of cycling two separate iters.
+
+New env var: SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT
+  Values: "v1" | "v2" (strict-match; anything else falls back to legacy)
+  Default: unset -> legacy dir (= wave-41 behavior preserved bit-for-bit)
+
+Engine resolution table:
+  SOURCE    VARIANT  ->  dir
+  wiimidi   unset    ->  data/midi/      (legacy wave-41 default)
+  wiimidi   v1       ->  data/midi-v1/   (org2mid v1 .mid output)
+  wiimidi   v2       ->  data/midi-v2/   (org2mid v2 .mid output; retuned)
+  orgmid    unset    ->  data/orgmid/    (legacy wave-41 default)
+  orgmid    v1       ->  data/orgmid1/   (org2mid v1 ORGMID transcription)
+  orgmid    v2       ->  data/orgmid2/   (org2mid v2 ORGMID retune)
+
+DOS 8.3 constraint per existing patch 0109: 8 chars max in directory
+basename or fopen returns EINVAL on real HW with lfn=false (silently
+falls back to LOG_WARN; PLAY cell produces no music). Dir naming
+chosen for 7-char max basenames:
+  - "midi-v1" / "midi-v2" : 7 chars each
+  - "orgmid1" / "orgmid2" : 7 chars each (NO hyphen; "orgmid-v1" at
+    9 chars would replicate the patch-0109 EINVAL trap)
+Asymmetric per-source naming (hyphen for midi-*, no hyphen for
+orgmid*) was the deliberate trade-off team-lead approved 2026-05-14:
+per-source internal consistency > cross-source symmetry; avoids
+renaming the existing `data/orgmid/` dir that operator's wave-41 CF
+state already depends on.
+
+Default-OFF preservation per
+[[single_lever_per_binary_or_else_attribution_impossible]]: legacy
+behavior unchanged. PLAY1 (codegen parity probe) with no env vars
+resolves to existing data/midi/ or data/orgmid/ exactly as wave-41
+did. The GM_VARIANT env var is the only ADD; no replacement of
+existing behavior. wave-41-anchor comparison preserved.
+
+Diagnostic LOG_INFO updates: every dir-resolution path now logs
+the resolved variant (`variant=v1` / `variant=v2` / `variant=(unset; legacy)`)
+so post-iter log parsing can verify the right dir was hit per PLAY.
+LOG_WARN fires when env var is set to a non-recognized value (typo
+guard; operator gets explicit feedback instead of silent legacy
+fallback).
+
+Files:
+  src/sound/SoundManager.cpp  -- dir resolution logic extended (~40 lines)
+                                  + LOG_INFO message updates per branch
+
+No CMakeLists.txt changes (env-var consumer is purely runtime).
+
+org2mid host-side support (the v1/v2 GM-table data generation; CLI
+flag --gm-table=v1|v2) lands as #19 PART A in a separate commit; this
+patch is PART B only (engine env var wiring). The two patches can
+land independently; engine reads from whatever .mid files exist in
+the resolved dir (missing files degrade gracefully per existing
+LOG_WARN at SoundManager.cpp:1082 unchanged).
+
+docs/BOOT.md entry: separate update in parent repo (not vendor
+commit) per env_vars_document_in_user_docs.md.
+---
+ src/sound/SoundManager.cpp | 92 +++++++++++++++++++++++++++++++++-----
+ 1 file changed, 81 insertions(+), 11 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index bf476fe..ab7f4d2 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -373,13 +373,68 @@ bool SoundManager::init()
+   // see which set was in use without diffing audio output.
+   {
+     const char *src = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE");
++
++    // Patch 0137 (wave 42 ride-along to #18; revised 2026-05-14 v2 per
++    // team-lead arbitration after STOP-2 surfaced wiimidi/orgmid
++    // content-collapse): GM_VARIANT env var for in-iter A/B listening
++    // between org2mid v1 and v2 GM-patch mapping tables.
++    //
++    // Design rationale (corrected from v1): GM_VARIANT controls which
++    // GM-patch table our `tools/org2mid/` host converter applies. It
++    // ONLY affects the orgmid source path -- the wiimidi source is
++    // external WiiWare GitHub content with pre-baked GM events that
++    // our converter cannot influence. v1 of this patch incorrectly
++    // produced 4 dirs treating wiimidi-vN and orgmidN as parallel
++    // axes; in practice they were byte-identical because the same
++    // converter generated both. Revised semantics: wiimidi axis
++    // ignores variant; orgmid axis honors it. 3-tool-4-output story:
++    //
++    //   SOURCE     VARIANT  ->  dir            ; provenance
++    //   wiimidi    (any)    ->  data/midi/     ; external WiiMidi GitHub
++    //   orgmid     (unset)  ->  data/orgmid/   ; Hart's ORGMID (legacy)
++    //   orgmid     v1       ->  data/orgmid1/  ; our org2mid v1 GM
++    //   orgmid     v2       ->  data/orgmid2/  ; our org2mid v2 GM
++    //
++    // DOS 8.3 dir-name constraint (per existing patch 0109): 7-char
++    // basenames work (`orgmid1`, `orgmid2`); 9-char `orgmid-v1` would
++    // EINVAL on lfn=false real HW.
++    //
++    // Default behavior preserved bit-for-bit from wave-41:
++    // - SOURCE=wiimidi + VARIANT unset -> data/midi/   (same as wave-41)
++    // - SOURCE=orgmid + VARIANT unset  -> data/orgmid/ (same as wave-41)
++    //
++    // Strict-match: only literal "v1" or "v2" engage variant; any
++    // other value (empty, "V1", "1", garbage) leaves variant unset =
++    // legacy dir.
++    //
++    // Cross-validity check: if SOURCE=wiimidi + VARIANT set, the
++    // variant is silently ignored (resolves to data/midi/) but a
++    // LOG_WARN narrates the no-op so operator sees what happened
++    // instead of being confused by perceived no-effect.
++    const char *variant = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT");
++    const bool is_v1 = variant && std::strcmp(variant, "v1") == 0;
++    const bool is_v2 = variant && std::strcmp(variant, "v2") == 0;
++    const bool variant_set = is_v1 || is_v2;
++    const char *variant_str = is_v1 ? "v1" : (is_v2 ? "v2" : "(unset; legacy)");
++
+     if (src == nullptr || src[0] == '\0' || std::strcmp(src, "wiimidi") == 0)
+     {
+       _midi_source_dir = "midi";
+-      LOG_INFO("MidiScheduler: MIDI source = 'wiimidi' "
+-               "(default; resolves to data/midi/<name>.mid; the WiiWare "
++      if (variant_set)
++      {
++        LOG_WARN("MidiScheduler: SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT={} "
++                 "is set but SOURCE=wiimidi ignores it (the WiiMidi GitHub "
++                 "set has pre-baked GM events not under our converter "
++                 "control). To engage v1/v2 GM-table A/B, also set "
++                 "SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=orgmid. Resolving "
++                 "to data/midi/ (legacy WiiMidi).", variant_str);
++      }
++      LOG_INFO("MidiScheduler: MIDI source = 'wiimidi' variant={} "
++               "(resolves to data/midi/<name>.mid; the WiiWare "
+                "arrangement set fetched by scripts/fetch-cs-midi.py per "
+-               "docs/ASSETS.md Step 4.5).");
++               "docs/ASSETS.md Step 4.5; pre-baked GM events; variant "
++               "is a no-op on this source).",
++               variant_str);
+     }
+     else if (std::strcmp(src, "orgmid") == 0)
+     {
+@@ -393,20 +448,35 @@ bool SoundManager::init()
+       // output dir. Caught by my additional smoke after team-lead
+       // confirmed the dir was in tree (errno 22 not ENOENT was the
+       // diagnostic clue per dos_filename_8_3.md memory).
+-      _midi_source_dir = "orgmid";
+-      LOG_INFO("MidiScheduler: MIDI source = 'orgmid' "
+-               "(resolves to data/orgmid/<name>.mid; literal ORGMID "
+-               "transcription set generated by scripts/build-cs-midi-"
+-               "orgmid.py — alternative to the WiiWare arrangements for "
+-               "W22-WB-E A/B comparison; transposed +12 to match Cave "
+-               "Story canonical pitch).");
++      //
++      // Patch 0137 (wave 42): variant suffix appended without hyphen
++      // for orgmid case to stay <=7 chars (orgmid1 / orgmid2 = 7 chars
++      // each). orgmid-v1 / orgmid-v2 would be 9 chars = same 8.3
++      // EINVAL trap as the original midi-orgmid.
++      if (is_v1)        _midi_source_dir = "orgmid1";
++      else if (is_v2)   _midi_source_dir = "orgmid2";
++      else              _midi_source_dir = "orgmid";
++      LOG_INFO("MidiScheduler: MIDI source = 'orgmid' variant={} "
++               "(resolves to data/{}/<name>.mid; v1/v2 = wave-42 "
++               "org2mid GM-table A/B per operator wave-41 'thumps "
++               "and cowbell' aesthetic feedback; unset = Hart's "
++               "legacy ORGMID transcription preserved from wave-41).",
++               variant_str, _midi_source_dir);
+     }
+     else
+     {
+       _midi_source_dir = "midi";
+       LOG_INFO("MidiScheduler: unrecognized SDL_HINT_DOSKUTSU_AUDIO_MIDI_"
+                "SOURCE value '{}'; falling back to 'wiimidi' (data/midi/). "
+-               "Recognized values: wiimidi (default) | orgmid.", src);
++               "Recognized values: wiimidi (default) | orgmid. Variant={} "
++               "ignored in fallback path.", src, variant_str);
++    }
++
++    if (variant && variant[0] != '\0' && !variant_set)
++    {
++      LOG_WARN("MidiScheduler: SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT "
++               "value '{}' is not recognized; recognized values: v1 | v2. "
++               "Falling back to legacy dir (variant unset).", variant);
+     }
+   }
+ 
+-- 
+2.47.3
+

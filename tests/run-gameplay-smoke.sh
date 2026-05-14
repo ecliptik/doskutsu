@@ -222,6 +222,16 @@ BANNER_REGEX=(
   "gameloop: (legacy combined-tick path|Mechanism A.2 tick split ACTIVE)"
   "\[0142 abl_cache_test n="
   "sdl: SDL/0060 Cirrus BLT pattern-copy (ACTIVE|DISABLED|N/A)"
+  "Sound system: MidiScheduler armed with MidiBackendWaveBlaster|Sound system: WB probe failed; falling back to organya"
+  "Sound system: MidiScheduler armed with MidiBackendOpl3|Sound system: OPL3 probe failed; falling back to organya"
+  "tas: (record opened|replay opened)"
+  "tas: (auto-exit at tick|end-of-replay auto-exit at tick)"
+  "snd-shutdown\[0/6\]: pre-MidiScheduler::silence_for_shutdown"
+  "wb backend: silence_for_shutdown"
+  "MidiScheduler: MIDI source = 'orgmid' variant=v[12]"
+  "\[RUNMANIFEST-BEGIN\]"
+  "\[RUNMANIFEST-END\]"
+  "\[runmanifest-emit\] schema=v"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -231,6 +241,16 @@ BANNER_SEVERITY=(
   "forbidden"
   "forbidden"
   "forbidden"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
 )
 BANNER_LABEL=(
   "lever-1 opaque-tile fastpath (patch 0137)"
@@ -240,6 +260,16 @@ BANNER_LABEL=(
   "A.2 gameloop tick (patch 0141)"
   "abl-cache disambiguation bench (patch 0142)"
   "BLTPAT primitive (patch SDL/0060)"
+  "wave-41 WB-engaged path (AUDIO_BACKEND=wb -> probe success OR fallback narration; optional so default smoke does not gate-fail when env unset)"
+  "wave-44 OPL3-engaged path (AUDIO_BACKEND=opl3 -> probe success OR fallback narration; optional so default smoke does not gate-fail when env unset; PLAY1-PLAY4 in wave-44 matrix exercise this banner)"
+  "wave-41 TAS record/replay engaged (patch 0135; optional -- emits only when DOSKUTSU_TAS_RECORD or _REPLAY env var is set; default smoke runs with neither so banner absent is correct)"
+  "wave-41 TAS clean termination (patch 0135; optional -- emits either end-of-replay-auto-exit (default; recording exhausted) or auto-exit-at-tick (AUTO_EXIT_TICK reached); EOF-auto-exit is the default-ON behavior since patch 0135 v1.1)"
+  "wave-42 #18 MidiScheduler shutdown narration (patch 0136; optional -- fires on every clean engine exit through SoundManager::shutdown; emits regardless of backend choice; absence under smoke means pkill-on-timeout kill-path, not a bug)"
+  "wave-42 #18 WB silence-for-shutdown override (patch 0136; optional -- WB-only; emits only under AUDIO_BACKEND=wb on clean exit; fixes the wave-41 hanging-MIDI-note-on-quit bug)"
+  "wave-42 #19 GM_VARIANT engaged (patch 0137; optional -- emits when SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT=v1 or v2 selects data/orgmid1// or data/orgmid2/; default smoke leaves env unset so default-orgmid path runs and banner is absent)"
+  "wave-43 RUNMANIFEST block begin sentinel (patch 0138; optional -- fires on every clean engine exit; absence under smoke means pkill-on-timeout kill-path, not a bug; severity matches snd-shutdown[0/6] precedent)"
+  "wave-43 RUNMANIFEST block end sentinel (patch 0138; optional -- pairs with begin sentinel; the smoke gate can extract the schema-v1 block via awk '/RUNMANIFEST-BEGIN/,/RUNMANIFEST-END/' for post-process consumption per WAVE-41-TRI-ENV-CORRELATION-PLAN sec. 4.4)"
+  "wave-43 RUNMANIFEST engagement banner (patch 0138; optional -- the runtime-witness side of the two-witness pattern; complements strings|grep RUNMANIFEST-BEGIN which only proves embed)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

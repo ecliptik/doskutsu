@@ -1,0 +1,341 @@
+From 2f2f344f1754bd04d8451a6741e394cdb8d74927 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 13 May 2026 19:22:22 -0700
+Subject: [PATCH] perf phase 11 patch 0138 -- wave-43 RUNMANIFEST schema-v1
+ emit
+
+flush-instr's wave-41 tri-env correlation framework (per
+docs/internal/WAVE-41-TRI-ENV-CORRELATION-PLAN.md sec. 4) defines an
+18-field RUNMANIFEST schema-v1 block that every instrumented binary
+emits at end of clean exit. This patch wires DOSKUTSU.EXE's emit.
+HWINV.EXE-side emit was authored by probe-engineer task #10/#16.
+Shared header at `include/runmanifest.h` (probe-engineer task #16);
+this patch consumes it.
+
+Schema fields populated per spec sec. 4.2 (those in the engine's
+purview at MVP):
+- schema_version=1 (constant)
+- environment={dosbox-x|86box|realhw|unknown} via 3-state auto-detect
+  (CPUID hypervisor + INT 21h AX=4452h AND-gate for DOSBox-X; 86Box
+  BIOS-string scan at F000:E000-FFFF for 86Box; DOSKUTSU_ENVIRONMENT
+  env var as belt-and-suspenders override per probe-engineer's
+  recommendation for cross-binary consistency)
+- binary_sha12 = compile-time git short-SHA stamp via Makefile
+  -DDOSKUTSU_BUILD_SHA12 (bare token; C preprocessor stringifies
+  via _DOSKUTSU_STR macro)
+- wave_tag from existing DOSKUTSU_LOG_TAG env var
+- scene from new DOSKUTSU_SCENE_TAG env var (operator sets per-BAT)
+- env_block_sha12 = runmanifest_compute_env_block_sha12() over a
+  30-entry pre-sorted alphabetical allowlist (DOSKUTSU_TAS_*,
+  SDL_HINT_DOSKUTSU_*, BLASTER, DOSKUTSU_LOG_TAG, DOSKUTSU_SCENE_TAG)
+- started_utc captured in main() at very start via std::time + gmtime
+  + strftime ISO8601
+- duration_s = std::time(nullptr) - _runmanifest_boot_time at emit
+- exit_code = 0 on clean shutdown path (ingame_error: sets error=true
+  but goto-jumps through this code path -- MVP emits 0 since reaching
+  here means we made it through engine teardown without abort)
+
+Schema fields populated NA per spec (perf-vital pass-throughs filled
+by future wave-42-iter04+ work per docs/internal/WAVE-41-PERF-LOGGING-
+PLAN.md sec. 7):
+- fps_p50, fps_p95: emit NA via runmanifest_init() default sentinels
+- audio_vital_status, regime: emit NA via NULL pointer defaults
+
+Schema fields placeholder per spec (smoke gate post-processes via grep):
+- banner_required_hit / _total / _forbidden / _optional: 0
+- critical_count / warn_count: 0
+
+Hook point: after engine-shutdown[final] doskutsu_dbg_log + before
+return from main(). All teardown complete + Logger djgpp_log_fp still
+open (closes implicitly at process exit). emit_run_manifest() is a
+static file-scope function; single call site; pure side-effect on
+djgpp_log_fp. Per-line fsync after emit per [[sdl3_dos_quirks]]
+DEBUG.LOG-fsync precedent.
+
+Boot wall-clock captured at FIRST line of main() via static-file-
+scope std::time_t _runmanifest_boot_time so the duration_s field is
+process-lifetime (not engine-init-to-shutdown which would miss the
+Logger::init + SDL_Init prelude).
+
+Two-witness banner: LOG_INFO "[runmanifest-emit] schema=v{} env={}
+sha12={} dur={}s tag='{}' scene='{}' env_sha={} (signals=0x{:x})"
+fires after the bracketed block. Allows smoke gate to verify runtime
+emit happened (separate from strings|grep `RUNMANIFEST-BEGIN` which
+only proves embed).
+
+Default-OFF: emit happens unconditionally on clean shutdown (NOT
+env-var-gated). Rationale: RUNMANIFEST is instrumentation that
+benefits ALL iters, has zero perf cost at runtime (one fsync at
+exit; immeasurable vs the ~1-2 sec engine-shutdown sequence
+overall), and the no-env-block-sha case is harmless (env_block_sha
+just hashes an empty allowlist match). Smoke gates can ignore the
+block if they don't consume the manifest. Per
+[[single_lever_per_binary_or_else_attribution_impossible]]: this is
+INSTRUMENTATION (not an fps lever); attribution preserved.
+
+Build-flag additions in top-level Makefile (RUNMANIFEST_FLAGS):
+- -I${REPO_ROOT}/include: lets engine TU find runmanifest.h without
+  modifying vendored CMakeLists.txt; harmless to other build stages
+  since they don't #include it
+- -DDOSKUTSU_BUILD_SHA12=<bare-token>: passes git short SHA at
+  make-config time as a bare C identifier token; main.cpp's _DOSKUTSU_
+  STR macro stringifies via C preprocessor. Avoids the multi-layer
+  quote-escape pain through bash + make + cmake -> compiler -D
+  forwarding. Fallback "UNKNOWN_____" (12 chars; pads sha12 field)
+  if git unavailable.
+
+Files:
+  src/main.cpp  -- include runmanifest.h, file-scope boot-time
+                   static + allowlist + emit fn (~150 lines added),
+                   2 call sites (boot capture in main() entry + emit
+                   call before return error;)
+
+CMakeLists.txt unchanged (no new .cpp files; emit fn is in main.cpp).
+
+docs/BOOT.md entries for DOSKUTSU_ENVIRONMENT + DOSKUTSU_SCENE_TAG
+land in parent doskutsu repo (not vendor commit) per
+[[env_vars_document_in_user_docs]].
+
+tools/dosbox-x.conf + tools/dosbox-x-fast.conf will add
+`SET DOSKUTSU_ENVIRONMENT=dosbox-x` to their autoexec sections so
+smoke runs self-identify as dosbox-x (separate parent-repo change;
+not in vendor commit).
+---
+ src/main.cpp | 200 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 200 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 67478f1..0608ac2 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -22,6 +22,21 @@
+ #include "trig.h"
+ #include "tsc.h"
+ 
++// Patch 0138 (wave 43 RUNMANIFEST): shared schema-v1 emit helper from
++// probe-engineer's task #16 handoff. Header-only C; `extern "C"` guards
++// for our C++ TU. The same header is consumed by tests/probes/hwinv.c
++// for HWINV.EXE-side emit; matching schemas across DOSKUTSU.EXE +
++// HWINV.EXE per flush-instr's tri-env correlation framework
++// (docs/internal/WAVE-41-TRI-ENV-CORRELATION-PLAN.md sec. 4.2).
++// Include path: -I${REPO_ROOT}/include added in top-level Makefile.
++extern "C" {
++#include "runmanifest.h"
++}
++#include <ctime>   // time(), gmtime(), strftime() for started_utc + duration_s
++#if defined(__DJGPP__)
++#include <unistd.h>  // fsync() per [[sdl3_dos_quirks]] DEBUG.LOG fsync precedent
++#endif
++
+ #include <SDL3_mixer/SDL_mixer.h>
+ #include <SDL3_image/SDL_image.h>
+ using namespace NXE::Graphics;
+@@ -227,6 +242,174 @@ static inline void run_tick()
+   }
+ }
+ 
++// === RUNMANIFEST schema-v1 emit (patch 0138, wave 43) ==================
++//
++// Single-mechanism instrumentation: at clean engine exit, emit a
++// `[RUNMANIFEST-BEGIN] ... [RUNMANIFEST-END]` block to the end of
++// DEBUG.LOG containing the 18 schema fields per
++// docs/internal/WAVE-41-TRI-ENV-CORRELATION-PLAN.md sec. 4.2. The
++// per-binary emit makes cross-tier (DOSBox-X / 86Box / real-HW) +
++// cross-iter (wave-N vs wave-N+1) log correlation a `grep` problem
++// instead of a manual log-archaeology problem.
++//
++// Schema sourced from `include/runmanifest.h` (shared with HWINV.EXE
++// per probe-engineer's task #16 handoff). Helpers do the env-detection
++// (CPUID hypervisor + INT 21h + 86Box BIOS-string + DOSKUTSU_ENVIRONMENT
++// env-var override), env_block_sha12 over an allowlisted env-var set,
++// and the [...BEGIN]/[...END]-bracketed key=value emit.
++//
++// Hook point (per probe-engineer's recommendation): main.cpp's clean-
++// shutdown path AFTER engine-shutdown[8/8]/SDL_Quit, BEFORE return from
++// main(). The djgpp_log_fp FILE* is still open at that point (Logger
++// doesn't have a shutdown call; the FILE* closes implicitly at process
++// exit). Per-line fsync via runmanifest_emit + an explicit fsync after.
++
++// Boot wall-clock captured at main() entry; used for started_utc +
++// duration_s at emit time.
++static std::time_t _runmanifest_boot_time = 0;
++
++// Pre-sorted (alphabetical) NULL-terminated env-var allowlist used by
++// runmanifest_compute_env_block_sha12(). New env vars added in alpha-
++// position. Values are sha-hashed at emit time; empty values are
++// skipped per the helper's canonical-form normalization (per probe-
++// engineer 2026-05-14 design note).
++static const char *const _runmanifest_env_allowlist[] = {
++    "BLASTER",
++    "DOSKUTSU_ENVIRONMENT",
++    "DOSKUTSU_LOG_TAG",
++    "DOSKUTSU_SCENE_TAG",
++    "DOSKUTSU_TAS_AUTO_EXIT_TICK",
++    "DOSKUTSU_TAS_PRNG_SEED",
++    "DOSKUTSU_TAS_RECORD",
++    "DOSKUTSU_TAS_REPLAY",
++    "DOSKUTSU_TAS_REPLAY_HOLD",
++    "SDL_HINT_DOSKUTSU_AUDIO_BACKEND",
++    "SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT",
++    "SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE",
++    "SDL_HINT_DOSKUTSU_AUDIO_OFF",
++    "SDL_HINT_DOSKUTSU_AUDIO_TIER2",
++    "SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT",
++    "SDL_HINT_DOSKUTSU_BACKDROP_CACHE",
++    "SDL_HINT_DOSKUTSU_DIRECT_VESA",
++    "SDL_HINT_DOSKUTSU_DIRTY_RECTS",
++    "SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE",
++    "SDL_HINT_DOSKUTSU_FLIP_INSTR",
++    "SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD",
++    "SDL_HINT_DOSKUTSU_IDLE_PAUSE",
++    "SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR",
++    "SDL_HINT_DOSKUTSU_MODE_TICK_INSTR",
++    "SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8",
++    "SDL_HINT_DOSKUTSU_PRELOAD_MIDI",
++    "SDL_HINT_DOSKUTSU_SILENCE_DETECT",
++    "SDL_HINT_DOSKUTSU_SILENCE_SHAPE",
++    "SDL_HINT_DOSKUTSU_TILEMAP_CACHE",
++    "SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP",
++    NULL  // sentinel
++};
++
++// Build-time source-content sha12 for the binary_sha12 field. Defined at
++// compile time via -DDOSKUTSU_BUILD_SHA12=<git-short-sha> from the
++// top-level Makefile. The Makefile passes it as a bare token (no
++// quotes); C preprocessor stringify converts to "literal" at compile
++// time. Avoids the multi-layer quote-escape pain through bash + make
++// + cmake -> compiler -D forwarding.
++// Fallback "UNKNOWN_____" (12 chars; pads the sha12 field) if the
++// Makefile didn't pass the define (e.g., out-of-tree CMake build).
++#define _DOSKUTSU_STRINGIFY(x) #x
++#define _DOSKUTSU_STR(x) _DOSKUTSU_STRINGIFY(x)
++#ifndef DOSKUTSU_BUILD_SHA12
++#define DOSKUTSU_BUILD_SHA12 UNKNOWN_____
++#endif
++#define _DOSKUTSU_BUILD_SHA12_STR _DOSKUTSU_STR(DOSKUTSU_BUILD_SHA12)
++
++static void emit_run_manifest(void)
++{
++#if defined(__DJGPP__)
++  std::FILE *fp = NXE::Utils::Logger::djgpp_log_fp;
++  if (!fp) return;  // log file failed to open at init; skip silently
++
++  runmanifest_t m;
++  runmanifest_init(&m);
++
++  // Environment: 3-state auto-detect + DOSKUTSU_ENVIRONMENT override.
++  unsigned signals = 0;
++  m.environment = runmanifest_detect_environment(&signals);
++
++  // binary_sha12 from compile-time stamp (stringify-converted).
++  std::snprintf(m.binary_sha12, sizeof m.binary_sha12, "%s",
++                _DOSKUTSU_BUILD_SHA12_STR);
++
++  // wave_tag from existing DOSKUTSU_LOG_TAG env var (preserves wave-37+
++  // multi-PLAY log-routing convention; empty if unset).
++  const char *wave_tag = std::getenv("DOSKUTSU_LOG_TAG");
++  std::snprintf(m.wave_tag, sizeof m.wave_tag, "%s",
++                wave_tag ? wave_tag : "");
++
++  // scene from new DOSKUTSU_SCENE_TAG env var (set per-BAT by operator;
++  // documents the canonical scene the PLAY targets). Empty if unset;
++  // schema-tolerant parsers treat "" as "field present, empty".
++  const char *scene_tag = std::getenv("DOSKUTSU_SCENE_TAG");
++  std::snprintf(m.scene, sizeof m.scene, "%s",
++                scene_tag ? scene_tag : "");
++
++  // env_block_sha12 over the allowlisted env-var set.
++  runmanifest_compute_env_block_sha12(_runmanifest_env_allowlist,
++                                      m.env_block_sha,
++                                      sizeof m.env_block_sha);
++
++  // Timestamps (ISO8601 UTC for started_utc; integer seconds for
++  // duration_s).
++  if (_runmanifest_boot_time != 0)
++  {
++    std::tm *gm = std::gmtime(&_runmanifest_boot_time);
++    if (gm)
++    {
++      std::strftime(m.started_utc, sizeof m.started_utc,
++                    "%Y-%m-%dT%H:%M:%SZ", gm);
++    }
++    m.duration_s = (int)(std::time(nullptr) - _runmanifest_boot_time);
++  }
++
++  // exit_code: reaching this code path = clean shutdown = 0. The
++  // ingame_error: branch (main.cpp:788) sets error=true then jumps to
++  // shutdown which still hits this emit -- the caller passes the exit
++  // code via the outer function. For MVP we emit 0 here since we're
++  // on the clean path; future iters can pipe `error` into this fn.
++  m.exit_code = 0;
++
++  // Perf-vital fields (fps_p50/p95/audio_vital_status/regime) left at
++  // runmanifest_init() defaults (NA emission). Populated by future
++  // wave-42-iter04+ perf-logging plan iters per
++  // docs/internal/WAVE-41-PERF-LOGGING-PLAN.md sec. 7.
++
++  // Banner counters + critical/warn counts: 0 placeholder. Smoke gate
++  // post-processes the produced log to fill these (sec. 4.4 of the
++  // tri-env correlation plan).
++
++  // Emit the [RUNMANIFEST-BEGIN] ... [RUNMANIFEST-END] block + fsync
++  // per [[sdl3_dos_quirks]] DEBUG.LOG-fsync precedent.
++  runmanifest_emit(fp, &m);
++  std::fflush(fp);
++  ::fsync(::fileno(fp));
++
++  // Engagement banner for build-qa's two-witness gate (strings audit
++  // proves embed; this LOG_INFO proves runtime emit at the documented
++  // hook point). Optional severity per existing wave-41+ banner
++  // convention.
++  LOG_INFO("[runmanifest-emit] schema=v{} env={} sha12={} dur={}s tag='{}' "
++           "scene='{}' env_sha={} (signals=0x{:x})",
++           m.schema_version, runmanifest_env_str(m.environment),
++           m.binary_sha12, m.duration_s, m.wave_tag, m.scene,
++           m.env_block_sha, signals);
++#else
++  // Host (non-DJGPP) build: no-op. The spdlog path doesn't expose a
++  // FILE* for the bracketed emit; RUNMANIFEST is production-DOS-only.
++  // If host-side testing of the emit is ever needed, add a similar
++  // path through spdlog's basic_file_sink (would require accessing
++  // the sink's underlying FILE*).
++#endif
++}
++
+ void AppMinimized(void)
+ {
+   LOG_DEBUG("Game minimized or lost focus--pausing...");
+@@ -336,6 +519,13 @@ void InitNewGame(bool with_intro)
+ 
+ int main(int argc, char *argv[])
+ {
++  // Patch 0138 (wave 43 RUNMANIFEST): capture boot wall-clock at the very
++  // first moment of main() so the shutdown-time `duration_s` field is
++  // an accurate "process lifetime" measurement (not "engine-init-to-
++  // shutdown" which would miss the Logger::init / SDL_Init prelude).
++  // Logged at engine exit via emit_run_manifest().
++  _runmanifest_boot_time = std::time(nullptr);
++
+   bool error            = false;
+   bool freshstart;
+ 
+@@ -783,6 +973,16 @@ shutdown:;
+   SDL_Quit();
+   doskutsu_dbg_log("engine-shutdown[final]: post-SDL_Quit; engine "
+                    "teardown complete; control returning to main()");
++
++  // Patch 0138 (wave 43 RUNMANIFEST): emit the schema-v1 block AFTER
++  // all teardown completes but BEFORE returning to the OS (Logger's
++  // djgpp_log_fp is still open at this point -- closes implicitly at
++  // process exit). The block is the LAST entry in DEBUG.LOG so a
++  // simple `awk '/RUNMANIFEST-BEGIN/,/RUNMANIFEST-END/'` extraction
++  // works without backtracking. See emit_run_manifest() above for
++  // field semantics + schema doc reference.
++  emit_run_manifest();
++
+   return error;
+ 
+ ingame_error:;
+-- 
+2.47.3
+
