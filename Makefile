@@ -1702,6 +1702,14 @@ stage: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 	    echo "note: data/ not present at repo root -- see docs/ASSETS.md"; \
 	    echo "      $(STAGE_DIR)/ contains only DOSKUTSU.EXE + CWSDPMI.EXE"; \
 	fi
+	@# Stage the canonical PLAY.TAS recording so DOSBox-X gameplay smoke
+	@# exercises the same scene the real-HW iter exercises. Non-fatal: if no
+	@# canonical TAS is on the host, just warn (CI without the operator's
+	@# /tmp/wave-43-archaeology/ tree is a legitimate environment). See
+	@# scripts/stage-tas.sh for the rationale (wave-44 tri-env regression).
+	@$(REPO_ROOT)/scripts/stage-tas.sh --quiet 2>/dev/null \
+	  && echo "staged PLAY.TAS (canonical recording)" \
+	  || echo "note: no canonical PLAY.TAS staged -- gameplay smoke will boot-only"
 
 .PHONY: install
 install: $(BUILD_DIR)/doskutsu.exe | fetch-binaries

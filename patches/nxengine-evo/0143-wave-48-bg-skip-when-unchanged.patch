@@ -1,0 +1,461 @@
+From 4dedf8df4e3e1369db0b4af5510c3f05478c5682 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 14 May 2026 13:08:33 -0700
+Subject: [PATCH] perf phase 11 patch 0143 -- wave-48 H-A skip-when-unchanged
+ backdrop
+
+Per flush-instr's WAVE-47-V1-LOG-ANALYSIS sec. 6 recommendation: H-A
+backdrop dominance was confirmed via wave-47 v1 mds-bg sub-decomp
+diagnostic at canonical Mimiga BK_PARALLAX scene (backdrop = 5.4 ms /
+57% of mds_tilemap_bg parent; 4.18 ms / 51% averaged across multi-
+scene TAS). Predicted savings -2 to -4 ms / flip = +1.5 to +3 fps on
+the wave-46 28.85 fps baseline.
+
+LEVER MECHANISM: memoize the BG scroll-state tuple (curmap,
+backdrop_id, scrolltype, displayed_xscroll, displayed_yscroll,
+flipacceltime_nonzero, _cached_window_surface ptr, direct-VESA gen)
+across frames. When the current frame's tuple matches the last
+successfully-drawn frame AND killswitch is not engaged AND not in
+flipacceltime mode, skip BOTH clearScreen(BLACK) and
+map_draw_backdrop() entirely. The window surface's BG-visible
+regions retain pixels from the previous frame's draw; subsequent
+FG-tilelayer + sprite + textbox passes write over their own regions
+normally (FG draws are NOT skipped -- only the per-frame BG
+preservation is memoized).
+
+SCOPE EXPANSION FROM ORIGINAL BRIEF: flush-instr's WAVE-47-V1
+sec. 6.1 framed the lever as "scope to BK_PARALLAX branch in
+map_draw_backdrop." nx-engine audit found this scope was load-
+bearing-incorrect: skipping only the backdrop blit leaves the
+window's BG-visible regions BLACK because Renderer::clearScreen runs
+unconditionally at game.cpp:DrawScene line 666-669 BEFORE
+map_draw_backdrop, blanking the full 320x240 surface every frame
+via patch 0058's memset16 fast path. Patch 0071 (wave 15) explicitly
+removed the earlier fingerprint-skip mechanism. For Mimiga
+BK_PARALLAX scenes with substantial sky regions (FG doesn't cover
+them), skipping only the backdrop produces visible black-sky
+regression -- a ship-blocking correctness bug, not a subtle issue.
+
+Team-lead ack'd scope expansion to DrawScene: skip BOTH the
+clearScreen AND map_draw_backdrop atomically via a single skip-state
+helper. LOC budget went 30-50 -> ~70 (within the 50-80 expanded
+band).
+
+SUPERSEDES PARTIAL-SKIP BEHAVIOR OF PATCHES 0080/0126: those patches
+implement a backdrop tile-loop cache (skip the tile loop on cache
+HIT; render direct-to-window on thrashing miss). On cache HIT they
+STILL issue drawCachedBackdrop (cache->window blit). The 5.4 ms
+flush-instr measured at Mimiga BK_PARALLAX IS that blit (plus the
+clearScreen it has to undo). Patch 0143 layers ON TOP of 0080/0126:
+when the scroll-state key matches AND last present succeeded, we
+skip BOTH the clearScreen AND the entire map_draw_backdrop call --
+including the cache-HIT blit that 0080/0126's HIT path still pays.
+The pre-existing cache machinery continues to handle the cache-MISS
+case (player motion changes parscroll -> cache MISS -> tile-loop
+render into cache -> blit cache to window) which is when state IS
+changing and the BG must be redrawn. NOT a refactor of 0080/0126
+(scope-creep avoided); just a stronger early-out at the caller.
+
+FILES (~70 LOC total):
+- vendor/nxengine-evo/src/map.h:
+    + Public API decls for the 3 lifecycle hooks
+    + Documentation of correctness contract + caller responsibilities
+- vendor/nxengine-evo/src/map.cpp:
+    + File-scope state (last-drawn key, validity flag, telemetry
+      counters, killswitch decision cache)
+    + _bg_skip_killswitch_engaged() -- strict-0 match on env var
+    + map_backdrop_should_skip_clear_and_draw() -- the decision API;
+      bumps tot-flips; on match bumps tot-skips + emits banners
+      (first-event + every 100 skips)
+    + map_backdrop_record_present_success() -- snapshots the current
+      key as last-drawn; called from inside map_draw_backdrop after
+      the no-backdrop check passes (single call site; eager record)
+    + map_backdrop_invalidate_skip_state() -- marks state invalid;
+      called from inside map_draw_backdrop's no-backdrop early-return
+    + Wired into map_draw_backdrop: 2 single-line calls (record at
+      top after no-backdrop check; invalidate in the no-backdrop
+      early-return branch)
+- vendor/nxengine-evo/src/game.cpp:
+    + DrawScene calls map_backdrop_should_skip_clear_and_draw()
+      BEFORE the MdsClearTimer scope
+    + clearScreen(BLACK) call gated on !bg_skip_unchanged
+    + map_draw_backdrop() call gated on !bg_skip_unchanged
+    + RAII timer scopes (MdsClearTimer, MdtBgBackdropTimer)
+      preserved unconditionally so [mds-clear-stat] / [mds-bg-stat]
+      sample counts remain comparable across skip/no-skip frames;
+      inner bucket value drops to ~0 us on skip
+
+KEY INVALIDATION LIST (verified comprehensive):
+- First frame post-init: sentinel curmap=-1 mismatches game.curmap
+- flipacceltime transitions: encoded in key field
+- Scene transition (map / backdrop / scrolltype): key mismatch
+- Player motion (displayed_xscroll / yscroll): key mismatch
+- Window surface re-fetch: _cached_window_surface pointer change
+  (patch 0036 line 3611 path; DOSKUTSU_CACHE_WINSURF=1 ablation
+  doesn't impact this because pointer stays stable when caching)
+- Direct-VESA mode change: SDL_DOSVesaDirectGetGeneration bump (same
+  source-of-truth used by direct-VESA fast path at
+  Renderer.cpp:4072)
+- LoadBackdropIfNeeded failure: explicit invalidate call
+- Killswitch SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED=0 active
+
+KILLSWITCH: SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED=0 (strict-0
+match; default ON). Engagement logged once on first-call via
+LOG_INFO "map: BG skip-when-unchanged ENABLED|DISABLED ...".
+
+TELEMETRY BANNERS (added to tests/run-gameplay-smoke.sh BANNERS):
+- "bg-skip: first event" (once per process; first skip)
+- "bg-skip: backdrop redraw skipped (state unchanged; tot skips=X /
+  tot flips=Y / hit-rate=Z% / global skips=N since boot)" (every
+  100 skips per block; counters reset per emit so hit-rate is
+  windowed not cumulative)
+- "map: BG skip-when-unchanged (ENABLED|DISABLED)" (killswitch
+  decision, once per process)
+
+THE WAVE-47 BUILD-SHA HYGIENE FLAG: wave-47 patch 0142 produced sha
+90fee82b54f5 vs wave-46 0e23463015df only because of the new banner
+string + helper call. The patch was content-substantive but tiny,
+and the __BUILD_SHA__ codegen is COFF-relocate-friendly enough that
+small additions DO drift sha. flush-instr's WAVE-47-V1 sec. 8 row 3
+flagged the RUNMANIFEST emit showing wave-46 sha for the wave-47
+binary -- that's the __BUILD_SHA__ Makefile/codegen bug, separate
+from the binary sha. Patch 0143 produces a substantially-different
+binary (~250 LOC of new code) so sha drift is robust regardless.
+The __BUILD_SHA__ Makefile bug is unaddressed here (out of scope per
+team-lead "do not let it expand scope"); flagging for build-qa.
+
+RIDE-ALONG DISCIPLINE: ZERO ride-along patches in this iter.
+Single mechanism per binary per
+[[single_lever_per_binary_or_else_attribution_impossible]]. User
+pivoted to perf-only focus per WAVE-47-V1 sec. 6.
+---
+ src/game.cpp |  47 +++++++++---
+ src/map.cpp  | 202 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/map.h    |  19 +++++
+ 3 files changed, 256 insertions(+), 12 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index 56f3c95..4d6e9a0 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -645,19 +645,38 @@ void DrawScene(void)
+   // line to validate the per-block bg_h+bg_m==n invariant.
+   ++NXE::Diag::g_tilemap_cache_n_block;
+ 
+-  // patch 0096 (wave 22.5 W22B): mode_draw_scene decomposition -- 6
+-  // sub-bracket RAII timers wrapping non-overlapping work types per
+-  // contract sec. 1. Each bracket scopes one of the per-frame work
+-  // clusters. The function-entry init lines (491-492 + 506
+-  // nOnscreenObjects=0) and the debug DrawBoundingBoxes at end
+-  // (794-795) fall into mds_residual -- sub-us each; residual stays
+-  // small. Per contract sec. 8 #8 the residual block lives in
+-  // game_tick_normal() AFTER the ModeDrawSceneTimer scope closes,
+-  // NOT here at end-of-DrawScene; reading g_mt_draw_scene_dt_this_-
+-  // tick inside DrawScene would see stale data from prior tick.
++  // patch 0143 (wave 48 H-A skip-when-unchanged): consult the BG
++  // skip-state decision BEFORE clearScreen runs. When the scroll-
++  // state key matches the last successfully-drawn frame AND the
++  // killswitch is not engaged AND we're not in flipacceltime mode,
++  // skip BOTH clearScreen(BLACK) and map_draw_backdrop() entirely.
++  // The window surface's BG-visible regions retain pixels from the
++  // previous frame's draw; subsequent FG-tilelayer + sprite +
++  // textbox passes write over their own regions normally.
++  //
++  // Bracket structure preserved: MdsClearTimer + MdtBgBackdropTimer
++  // RAII scopes still enter+exit on every flip so the existing
++  // [mds-clear-stat] / [mds-bg-stat] emit lines see consistent
++  // sample counts. Per-skip the inner work is empty -> sub-us bucket
++  // value -> flush-instr's [mds-bg-stat] mdt_bg_backdrop med should
++  // drop from ~5.4 ms to ~0 ms on skip-eligible blocks. Hit rate
++  // visible in [bg-skip ...] LOG_INFO emit cadence (every 100 skips
++  // + first-event).
++  //
++  // Single-mechanism preserved (single perf lever per binary per
++  // [[single_lever_per_binary_or_else_attribution_impossible]]):
++  // the lever is "skip-when-unchanged"; no ride-along correctness
++  // changes in this iter.
++  const bool bg_skip_unchanged = map_backdrop_should_skip_clear_and_draw();
++
+   {
+     NXE::Diag::MdsClearTimer _mc;
+-    Renderer::getInstance()->clearScreen(BLACK);
++    if (!bg_skip_unchanged)
++    {
++      Renderer::getInstance()->clearScreen(BLACK);
++    }
++    // else: empty timer scope; ~0 us cost; preserves [mds-clear-stat]
++    // sample count parity with the legacy code path.
+   }
+ 
+   // draw background map tiles
+@@ -668,9 +687,13 @@ void DrawScene(void)
+       // patch 0125 (wave 29 W29A): mdt_bg_backdrop sub-bracket -- wraps
+       // map_draw_backdrop() (BK_FASTLEFT_LAYERS parallax, BK_FOLLOW,
+       // BK_FIXED, etc.). H-A hypothesis (per contract sec. 0.3).
++      // patch 0143: gated on bg_skip_unchanged; empty scope on skip.
+       {
+         NXE::Diag::MdtBgBackdropTimer _mtbg_bd;
+-        map_draw_backdrop();
++        if (!bg_skip_unchanged)
++        {
++          map_draw_backdrop();
++        }
+       }
+       // patch 0125 (wave 29 W29A): mdt_bg_tilelayer sub-bracket -- wraps
+       // map_draw(false), the BG tile-layer render via
+diff --git a/src/map.cpp b/src/map.cpp
+index 0a4e108..83c57a4 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -145,6 +145,189 @@ static int g_bg_visible_cache_curmap = -1;
+ static int g_bg_visible_cached_top = 0;
+ static int g_bg_visible_cached_bot_inclusive = -1;  // -1 = empty range
+ 
++// DOS-PORT (patch 0143, Phase 11 wave 48 H-A skip-when-unchanged):
++// memoize the BG state across frames + early-out at the
++// clearScreen+map_draw_backdrop pair when nothing has changed since
++// the last successful BG render. See map.h for API contract.
++//
++// Correctness contract (per nx-engine wave-48 audit; team-lead ack):
++// skip MUST cover BOTH the per-frame clearScreen(BLACK) at the top
++// of DrawScene AND the map_draw_backdrop() call below it. The wave-
++// 15-and-later unconditional Renderer::clearScreen blanks the
++// full 320x240 window surface to BLACK every frame; skipping only
++// the backdrop blit leaves BG-visible regions black. The pre-
++// existing backdrop cache (patches 0080 / 0126) skips the tile-loop
++// on cache HIT but STILL issues drawCachedBackdrop (cache->window
++// blit) -- the 5.4 ms flush-instr measured at Mimiga BK_PARALLAX
++// canonical scene IS that blit (plus the clearScreen it has to
++// undo). Patch 0143 supersedes that partial-skip behavior: when the
++// scroll-state key matches the last successful frame, we skip BOTH
++// the clear and the cache->window blit entirely, relying on the
++// window surface's pre-existing pixels to remain valid for the BG-
++// visible region. (FG-tilelayer + sprites continue to redraw on
++// top, so they remain correctness-safe.)
++//
++// Key invalidation list:
++//   - First frame post-init (sentinel curmap=-1)
++//   - flipacceltime transitions in either direction (encoded in key)
++//   - curmap / backdrop_id / scrolltype change (scene transition)
++//   - displayed_xscroll / displayed_yscroll change (player motion)
++//   - Renderer::_cached_window_surface pointer change (window
++//     surface re-fetch via SDL_GetWindowSurface; patch 0036 line
++//     3611 path)
++//   - SDL_DOSVesaDirectGetGeneration bump (direct-VESA mode change;
++//     same source-of-truth used by the existing direct-VESA fast
++//     path at Renderer.cpp:4072)
++//   - LoadBackdropIfNeeded failure (explicit invalidate call)
++//   - Killswitch SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED=0 active
++//
++// Telemetry:
++//   - g_bg_skip_total_skips_block, g_bg_skip_total_flips_block
++//     reset every 100 emitted banners; first-skip banner fires once
++//     on the first skip event per process lifetime.
++static int  g_bg_skip_killswitch_decided = -1;  // -1=undecided, 0=ON, 1=killswitch
++static bool g_bg_skip_state_valid        = false;
++static int  g_bg_skip_last_curmap        = -1;
++static int  g_bg_skip_last_backdrop_id   = -1;
++static int  g_bg_skip_last_scrolltype    = -1;
++static int  g_bg_skip_last_displayed_xscroll = INT_MIN;
++static int  g_bg_skip_last_displayed_yscroll = INT_MIN;
++static int  g_bg_skip_last_flipacceltime_nz  = -1;
++static void *g_bg_skip_last_win_ptr      = nullptr;
++static Uint32 g_bg_skip_last_dvesa_gen   = 0;
++static unsigned g_bg_skip_total_skips_block = 0;
++static unsigned g_bg_skip_total_flips_block = 0;
++static unsigned g_bg_skip_total_skips_global = 0;
++static bool g_bg_skip_first_event_logged = false;
++// Banner cadence: emit one line per N skips so the log doesn't
++// drown in steady-state skip telemetry. Patch 0126's WARM->THRASHING
++// emit uses 1-per-transition; here we use 1-per-100-skips because
++// skips are expected to be the common case in stationary scenes.
++static constexpr unsigned BG_SKIP_BANNER_INTERVAL = 100;
++
++extern int flipacceltime;  // global; also re-declared at the bottom of
++                            // this file alongside the patch-0097 tilemap
++                            // cache machinery (multiple extern decls are
++                            // harmless in C++ as long as they agree).
++
++// Strict-0 killswitch match. Mirrors Renderer.cpp's _strict_falsy_env
++// helper signature; consolidated locally to avoid pulling in
++// graphics/Renderer.h's helper namespace.
++static bool _bg_skip_killswitch_engaged()
++{
++  if (g_bg_skip_killswitch_decided < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED");
++    g_bg_skip_killswitch_decided = (e && e[0] == '0' && e[1] == 0) ? 1 : 0;
++    LOG_INFO("map: BG skip-when-unchanged {} (set SDL_HINT_DOSKUTSU_"
++             "BG_SKIP_WHEN_UNCHANGED=0 to disable; default ON; "
++             "patch 0143 supersedes partial-skip behavior of 0080/0126)",
++             g_bg_skip_killswitch_decided ? "DISABLED (killswitch)"
++                                          : "ENABLED (default)");
++  }
++  return g_bg_skip_killswitch_decided == 1;
++}
++
++// Public API impl (declared in map.h).
++
++bool map_backdrop_should_skip_clear_and_draw()
++{
++  ++g_bg_skip_total_flips_block;
++
++  if (_bg_skip_killswitch_engaged())
++    return false;
++
++  // Never skip when flipacceltime is set -- BG isn't drawn on those
++  // frames either way, and the prior frame's BG content may be stale
++  // relative to current scene state. Encoded via key field below too,
++  // but explicit early-out keeps the skip-decision readable.
++  if (flipacceltime != 0)
++    return false;
++
++  if (!g_bg_skip_state_valid)
++    return false;
++
++  Renderer *r = Renderer::getInstance();
++  if (!r)
++    return false;
++  void *win_ptr = (void *)r->_cached_window_surface;
++  Uint32 dvesa_gen = SDL_DOSVesaDirectGetGeneration();
++
++  const bool keys_match =
++      g_bg_skip_last_curmap            == game.curmap          &&
++      g_bg_skip_last_backdrop_id       == map.backdrop         &&
++      g_bg_skip_last_scrolltype        == map.scrolltype       &&
++      g_bg_skip_last_displayed_xscroll == map.displayed_xscroll &&
++      g_bg_skip_last_displayed_yscroll == map.displayed_yscroll &&
++      g_bg_skip_last_flipacceltime_nz  == 0                    &&
++      g_bg_skip_last_win_ptr           == win_ptr              &&
++      g_bg_skip_last_dvesa_gen         == dvesa_gen;
++
++  if (!keys_match)
++    return false;
++
++  // Commit to skip. Telemetry side-effects from here.
++  ++g_bg_skip_total_skips_block;
++  ++g_bg_skip_total_skips_global;
++
++  if (!g_bg_skip_first_event_logged)
++  {
++    g_bg_skip_first_event_logged = true;
++    LOG_INFO("bg-skip: first event (state unchanged; backdrop_id={} "
++             "scrolltype={} curmap={} dscroll=({},{}); tot skips=1 / "
++             "tot flips={} this block)",
++             map.backdrop, map.scrolltype, game.curmap,
++             map.displayed_xscroll, map.displayed_yscroll,
++             g_bg_skip_total_flips_block);
++  }
++  else if ((g_bg_skip_total_skips_block % BG_SKIP_BANNER_INTERVAL) == 0)
++  {
++    const unsigned hit_pct = g_bg_skip_total_flips_block
++        ? (g_bg_skip_total_skips_block * 100u) / g_bg_skip_total_flips_block
++        : 0u;
++    LOG_INFO("bg-skip: backdrop redraw skipped (state unchanged; "
++             "tot skips={} / tot flips={} / hit-rate={}% / global "
++             "skips={} since boot)",
++             g_bg_skip_total_skips_block, g_bg_skip_total_flips_block,
++             hit_pct, g_bg_skip_total_skips_global);
++    // Reset block counters after each emit so the hit-rate is windowed
++    // not cumulative (cumulative climbs asymptotically and stops being
++    // diagnostic after a few seconds). Mirrors patch 0125's [mds-bg-
++    // stat ...] per-N-flush block cadence.
++    g_bg_skip_total_skips_block = 0;
++    g_bg_skip_total_flips_block = 0;
++  }
++
++  return true;
++}
++
++void map_backdrop_record_present_success()
++{
++  // Snapshot the current frame's key. Called from map_draw_backdrop
++  // after the backdrop[] surface check passes (i.e., we've committed
++  // to drawing BG content this frame). All subsequent code paths
++  // inside map_draw_backdrop (cache HIT, cache MISS render+blit,
++  // thrashing direct-to-window, legacy tile-loop fallback) draw the
++  // BG to the window surface, so recording success eagerly here is
++  // safe -- the only "didn't draw" exit is the no-backdrop early-
++  // return which calls map_backdrop_invalidate_skip_state() instead.
++  Renderer *r = Renderer::getInstance();
++  g_bg_skip_last_curmap            = game.curmap;
++  g_bg_skip_last_backdrop_id       = map.backdrop;
++  g_bg_skip_last_scrolltype        = map.scrolltype;
++  g_bg_skip_last_displayed_xscroll = map.displayed_xscroll;
++  g_bg_skip_last_displayed_yscroll = map.displayed_yscroll;
++  g_bg_skip_last_flipacceltime_nz  = (flipacceltime != 0) ? 1 : 0;
++  g_bg_skip_last_win_ptr           = r ? (void *)r->_cached_window_surface : nullptr;
++  g_bg_skip_last_dvesa_gen         = SDL_DOSVesaDirectGetGeneration();
++  g_bg_skip_state_valid            = true;
++}
++
++void map_backdrop_invalidate_skip_state()
++{
++  g_bg_skip_state_valid = false;
++}
++
+ // DOS-PORT (patch 0080): probe killswitch once on first call. Strict
+ // "0" match disables the cache (lets a real-HW iter reproduce wave-9
+ // pre-cache behavior for ablation). All other values keep the
+@@ -973,9 +1156,28 @@ void map_draw_backdrop(void)
+   {
+     LoadBackdropIfNeeded(map.backdrop);
+     if (!backdrop[map.backdrop])
++    {
++      // patch 0143: BG was NOT drawn this frame -- invalidate
++      // skip-state so next frame's should_skip_clear_and_draw()
++      // returns false regardless of key match.
++      map_backdrop_invalidate_skip_state();
+       return;
++    }
+   }
+ 
++  // patch 0143 (wave 48 skip-when-unchanged): record current scroll-
++  // state key as "last successfully-drawn frame" before we drop into
++  // the per-scrolltype switch. From this point forward, every code
++  // path returns having drawn the BG to the window surface (cache HIT
++  // drawCachedBackdrop, cache MISS render+blit, thrashing direct-to-
++  // window, BK_FASTLEFT_LAYERS DrawFastLeftLayered fallback, BK_HIDE
++  // clearScreen, legacy tile-loop fall-through at function end).
++  // Recording success eagerly here saves us from instrumenting each
++  // of the ~7 return points; the only "didn't draw" exit is the no-
++  // backdrop early-return above, which already called
++  // map_backdrop_invalidate_skip_state() instead.
++  map_backdrop_record_present_success();
++
+   switch (map.scrolltype)
+   {
+     case BK_FIXED:
+diff --git a/src/map.h b/src/map.h
+index 91b780c..480d6f4 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -123,6 +123,25 @@ void initmap(void);
+ void map_set_backdrop(int backdrop_no);
+ void map_draw_backdrop(void);
+ void DrawFastLeftLayered(void);
++
++// DOS-PORT (patch 0143, Phase 11 wave 48 H-A skip-when-unchanged):
++// memoize the backdrop's scroll-state key + early-out at the
++// clearScreen+map_draw_backdrop pair when nothing has changed since
++// the previous successful BG render. Default-ON; killswitch via
++// SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED=0 (strict-0 match).
++//
++// Per nx-engine's wave-48 audit + team-lead scope-expansion ack: skip
++// is correctness-safe ONLY when we skip BOTH the per-frame
++// clearScreen(BLACK) (game.cpp DrawScene) AND map_draw_backdrop().
++// Skipping only the backdrop leaves the window's BG-visible regions
++// black (the wave-15-and-later unconditional clear in
++// Renderer::clearScreen blanks the full 320x240 surface before
++// map_draw_backdrop runs). Scoped to DrawScene caller, not the
++// backdrop function's internals.
++bool map_backdrop_should_skip_clear_and_draw();
++void map_backdrop_record_present_success();
++void map_backdrop_invalidate_skip_state();
++
+ void map_flush_graphics();
+ void map_drawwaterlevel(void);
+ void map_draw(uint8_t foreground);
+-- 
+2.47.3
+

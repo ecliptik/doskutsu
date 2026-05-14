@@ -1,0 +1,330 @@
+From 4ef9b69f0c8f99ed4a4c4184c1dad484911db2d2 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 14 May 2026 11:07:25 -0700
+Subject: [PATCH 2/2] perf phase 11 patch 0141 -- wave-46 Phase 10.5 OPL3
+ patch-bank loader
+
+Per flush-instr's docs/internal/WAVE-44-OPL3-LOG-ANALYSIS.md sec. 6.2:
+the 8-patch family-bucket placeholder in MidiBackendOpl3 doesn't cover
+the dense GM program-change usage in org2mid v1/v2 output -- some
+programs map to audibly-wrong patches when collapsed into 7 distinct
+buckets. Operator real-HW report (sec. 6.1): PLAY3 + PLAY4 Shack-entry
+MIDI "stops" at scene transition because vivi.mid's high-program
+events (>= bucket 8 reed/pipe; >= bucket 11 synth-pad on the dense
+v1/v2 layout) collapse to family buckets that don't match the SBI
+patches in the placeholder bank.
+
+Implement the Phase 10.5 runtime patch-bank loader path that was
+already referenced in the existing 8-patch placeholder's banner
+("Phase 10.5 may swap in a fuller community bank via runtime
+data/opl3-patches.dat loader when operator listening identifies
+tracks needing better timbre"). This patch ships the LOADER ONLY;
+the actual .dat data file is a ride-along for a follow-on iter
+(operator-listening cycle + bank authoring).
+
+File format `data/opl3-patches.dat` (binary):
+
+  offset  size  field
+  ------  ----  -----
+  0       8     magic: "DOPL3v1\n" (the \n is 0x0A; sha-friendly first
+                                    line for grep + visual inspection)
+  8       1     version: 0x01 (rejects higher)
+  9       1     num_programs: 0..128 (typically 128 for full GM)
+  10      2     reserved: must be 0 (forward-compat)
+  12      N*12  patches: N x 12-byte SBI records (same layout as the
+                inline PATCH_PIANO et al. constants above; op0 5 bytes
+                / channel FB_CONN / op1 5 bytes / fine-tune)
+  12+N*12       EOF
+
+Loader behavior:
+- At MidiBackendOpl3 ctor (after SDL_DOSOpl3Detect succeeds),
+  _try_load_opl3_patches_dat() tries to fopen
+  data/opl3-patches.dat via ResourceManager::getPath.
+- On absence: LOG_INFO with the expected-fallback narration (no
+  warning -- this is the wave-46 ship state).
+- On file truncation, wrong magic, unsupported version, num_programs
+  out of range, or reserved field nonzero: LOG_WARN with specific
+  reason + zero the partial-load buffer + leave loaded_count = 0.
+- On success: copy patches into _loaded_patch_bank[128][12] static
+  buffer; set _loaded_patch_bank_count = N. LOG_INFO with payload
+  size + program count.
+
+Per-program patch lookup (_program_to_patch) consults the loaded
+bank first: if program < _loaded_patch_bank_count, return the
+loaded patch; else fall through to the existing 8-patch family-
+bucket switch. Drum channel (MIDI ch 9) always uses PATCH_DRUM
+regardless of bank loading (drum kit slots are pitch-keyed not
+program-keyed; separate concern; not in scope for v1).
+
+Memory cost: 128 * 12 = 1536 bytes static when loaded; zero before
+loader runs (zero-init by default). Negligible.
+
+Backward compat: when .dat is absent (the wave-46 ship state),
+behavior is bit-for-bit identical to the pre-patch baseline. The
+8-patch placeholder remains the active bank. No fps impact in
+either case (lookup is one extra branch; sub-cycle overhead).
+
+Banner narrates loaded-vs-fallback state at backend init so smoke
+gate + flush-instr post-process can verify which bank is active.
+
+Files:
+  src/sound/MidiBackendOpl3.cpp -- loader + lookup wiring (~140 new
+                                    lines; mostly comment + error
+                                    narration); also picks up the
+                                    new include of ResourceManager.h
+                                    + <cstdio>.
+
+Ride-along patches for wave-46-opl3-prod bundle:
+- nxengine-evo/0139 (default OPL3 backend; the perf lever)
+- SDL/0059 (DSP cmd 0x06 RESET; wub-wub fix)
+- This patch (the Shack-scene fix loader path)
+
+Stub data/opl3-patches.dat with full ~64-GM-program bank is
+ride-along for a follow-on iter -- needs operator listening + bank
+selection, both of which sit outside nx-engine's scope.
+
+Banner regex addition for tests/run-gameplay-smoke.sh BANNERS array:
+"Patch bank state: (runtime opl3-patches.dat ACTIVE|8-patch placeholder ACTIVE)".
+---
+ src/sound/MidiBackendOpl3.cpp | 192 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 186 insertions(+), 6 deletions(-)
+
+diff --git a/src/sound/MidiBackendOpl3.cpp b/src/sound/MidiBackendOpl3.cpp
+index 064b19f..77b662b 100644
+--- a/src/sound/MidiBackendOpl3.cpp
++++ b/src/sound/MidiBackendOpl3.cpp
+@@ -43,9 +43,11 @@
+ 
+ #include "MidiBackendOpl3.h"
+ 
++#include "../ResourceManager.h"
+ #include "../Utils/Logger.h"
+ 
+ #include <cstdint>
++#include <cstdio>
+ #include <cstring>
+ 
+ // Cross-vendor extern declarations for SDL/0037+ OPL3 helpers. Same
+@@ -182,6 +184,159 @@ static constexpr uint8_t PATCH_DRUM[12] = {
+   0x00,
+ };
+ 
++// ============================================================================
++// Patch 0141 (wave 46 Phase 10.5): runtime patch-bank loader
++// ============================================================================
++//
++// Per flush-instr's docs/internal/WAVE-44-OPL3-LOG-ANALYSIS.md sec. 6.2:
++// the 8-patch placeholder above doesn't cover the dense GM program-change
++// usage in org2mid v1/v2 output -- some programs lookup-to-bucket result
++// in audibly-wrong patches (Shack scene MIDI-stop on PLAY3/PLAY4 of
++// wave-44; operator report). The original Phase 10.5 plan called out the
++// runtime-loader hook in the existing banner: "may swap in a fuller
++// community bank via runtime data/opl3-patches.dat loader when operator
++// listening identifies tracks needing better timbre."
++//
++// This patch implements the loader path only. The .dat data file is a
++// ride-along for a follow-on iter (operator-listening + actual bank
++// authoring). If the file is absent at engine init, the loader logs a
++// warning + falls back to the 8-patch placeholder above (existing
++// behavior preserved bit-for-bit). When the .dat file is present + valid,
++// per-program lookups consult the loaded 128-entry table instead.
++//
++// File format `data/opl3-patches.dat` (binary, little-endian where MB):
++//   offset  size  field
++//   ------  ----  -----
++//   0       8     magic: ASCII "DOPL3v1\n" (the \n is byte 0x0A)
++//   8       1     version: 0x01 (rejects > 1)
++//   9       1     num_programs: 0..128 (typically 128 for full GM melody)
++//   10      2     reserved: must be 0 (alignment + forward-compat field)
++//   12      N*12  patches: N x 12-byte SBI-style records (same layout as
++//                 the inline PATCH_PIANO et al. above; same byte ordering
++//                 op0/KSL_TL/AR_DR/SL_RR/WS, channel FB_CONN, op1...)
++//   12+N*12       EOF
++//
++// N may be < 128 (partial bank); programs >= N fall back to the 8-patch
++// family bucket. The drum channel (MIDI ch 9) always uses PATCH_DRUM
++// regardless of bank loading -- drums are a separate concern (kit slots
++// by note, not program).
++//
++// Loader behavior:
++//   - At MidiBackendOpl3 ctor (after SDL_DOSOpl3Detect succeeds), try to
++//     fopen data/opl3-patches.dat via ResourceManager::getPath.
++//   - On any failure (file missing, wrong magic, bad version, truncated
++//     header, truncated payload, bad reserved field), LOG_WARN with
++//     specific reason + leave _patch_bank_loaded = false. Engine falls
++//     back to 8-patch placeholder.
++//   - On success, copy patches into _loaded_patch_bank static buffer;
++//     set _loaded_patch_bank_count to the actual N.
++//   - At _program_to_patch lookup time: if program < _loaded_patch_bank_
++//     count, return the loaded patch; else fall back to the existing
++//     8-patch family-bucket lookup.
++//
++// Memory cost: 128 * 12 = 1536 bytes static when loaded; zero when not.
++// Negligible for any DOS target.
++
++// Storage for the loaded bank. Static file-scope, zero-init by default.
++// Indexed directly by GM program 0..127.
++static uint8_t _loaded_patch_bank[128][12];
++static int     _loaded_patch_bank_count = 0;  // 0 = not loaded; loader uses
++                                              // this as both "is-loaded" flag
++                                              // AND ceiling for fallback.
++
++// Try to load data/opl3-patches.dat. Returns true on success (sets
++// _loaded_patch_bank + _loaded_patch_bank_count); false otherwise (state
++// unchanged; engine falls back to 8-patch placeholder).
++static bool _try_load_opl3_patches_dat(void)
++{
++  const std::string path =
++      ResourceManager::getInstance()->getPath(
++          "opl3-patches.dat", false);
++  std::FILE *fp = std::fopen(path.c_str(), "rb");
++  if (!fp)
++  {
++    LOG_INFO("opl3 backend: opl3-patches.dat not found at '{}'; "
++             "falling back to 8-patch placeholder. (This is expected "
++             "in the wave-46 iter -- the .dat data file is ride-along "
++             "for a follow-on iter; the loader path itself is shipping.)",
++             path);
++    return false;
++  }
++
++  // Header: 8 magic + 1 version + 1 num_programs + 2 reserved = 12 bytes
++  uint8_t header[12];
++  if (std::fread(header, 1, sizeof header, fp) != sizeof header)
++  {
++    LOG_WARN("opl3 backend: opl3-patches.dat header truncated "
++             "(< 12 bytes); using 8-patch placeholder.");
++    std::fclose(fp);
++    return false;
++  }
++  static const uint8_t k_magic[8] = {
++    'D', 'O', 'P', 'L', '3', 'v', '1', 0x0A
++  };
++  if (std::memcmp(header, k_magic, 8) != 0)
++  {
++    LOG_WARN("opl3 backend: opl3-patches.dat magic mismatch "
++             "(expected 'DOPL3v1\\n'); using 8-patch placeholder.");
++    std::fclose(fp);
++    return false;
++  }
++  const uint8_t version       = header[8];
++  const uint8_t num_programs  = header[9];
++  const uint8_t reserved_lo   = header[10];
++  const uint8_t reserved_hi   = header[11];
++  if (version != 0x01)
++  {
++    LOG_WARN("opl3 backend: opl3-patches.dat version {} unsupported "
++             "(this build expects v1); using 8-patch placeholder.",
++             (int)version);
++    std::fclose(fp);
++    return false;
++  }
++  if (num_programs == 0 || num_programs > 128)
++  {
++    LOG_WARN("opl3 backend: opl3-patches.dat num_programs={} out of "
++             "range [1..128]; using 8-patch placeholder.",
++             (int)num_programs);
++    std::fclose(fp);
++    return false;
++  }
++  if (reserved_lo != 0 || reserved_hi != 0)
++  {
++    LOG_WARN("opl3 backend: opl3-patches.dat reserved field nonzero "
++             "(forward-compat reject); using 8-patch placeholder.");
++    std::fclose(fp);
++    return false;
++  }
++
++  // Payload: num_programs * 12 bytes.
++  const std::size_t payload_bytes = (std::size_t)num_programs * 12u;
++  if (std::fread(_loaded_patch_bank, 1, payload_bytes, fp) != payload_bytes)
++  {
++    LOG_WARN("opl3 backend: opl3-patches.dat payload truncated "
++             "(expected {} bytes for {} programs); using 8-patch "
++             "placeholder. Loaded buffer NOT used (zeroed via static-"
++             "init guard).",
++             (unsigned long)payload_bytes, (int)num_programs);
++    // Zero the partial-load to prevent half-loaded bank from being used.
++    std::memset(_loaded_patch_bank, 0, sizeof _loaded_patch_bank);
++    std::fclose(fp);
++    return false;
++  }
++  std::fclose(fp);
++
++  _loaded_patch_bank_count = (int)num_programs;
++  LOG_INFO("opl3 backend: opl3-patches.dat loaded {} programs from '{}' "
++           "(v1; {} bytes payload). Per-program GM patches now use the "
++           "runtime bank; programs >= {} fall back to 8-patch family "
++           "bucket. Drum channel (MIDI ch 9) unchanged (uses PATCH_DRUM "
++           "regardless of bank loading).",
++           (int)num_programs, path,
++           (unsigned long)payload_bytes, (int)num_programs);
++  return true;
++}
++
+ // GM program (0-127) -> patch family. Buckets per GM sec. standard:
+ //   0-7   piano       -> PATCH_PIANO
+ //   8-15  chrom perc  -> PATCH_MALLET
+@@ -202,6 +357,15 @@ static constexpr uint8_t PATCH_DRUM[12] = {
+ static const uint8_t *_program_to_patch(int program)
+ {
+   if (program < 0 || program > 127) return PATCH_PIANO;
++
++  // Patch 0141 (wave 46): if a runtime bank is loaded AND covers this
++  // program, return the loaded patch. Otherwise fall through to the
++  // 8-patch family-bucket lookup (existing behavior).
++  if (program < _loaded_patch_bank_count)
++  {
++    return _loaded_patch_bank[program];
++  }
++
+   const int bucket = program / 8;
+   switch (bucket)
+   {
+@@ -308,6 +472,15 @@ MidiBackendOpl3::MidiBackendOpl3()
+   SDL_DOSOpl3InitChip();
+   _ready = true;
+ 
++  // Patch 0141 (wave 46 Phase 10.5): try to load runtime patch bank
++  // from data/opl3-patches.dat. On absence/failure, falls back to the
++  // 8-patch placeholder above (existing behavior preserved). Banner
++  // narration happens inside the loader; engine doesn't need to log
++  // here. Loader is idempotent on this static state -- safe even if
++  // some future code path constructs a second MidiBackendOpl3 (only
++  // one is constructed today; design contract is singleton-ish).
++  _try_load_opl3_patches_dat();
++
+   // Initialize per-MIDI-channel state to GM defaults.
+   for (int ch = 0; ch < MIDI_CHANNELS; ++ch)
+   {
+@@ -316,14 +489,21 @@ MidiBackendOpl3::MidiBackendOpl3()
+     _channel_expression[ch] = 127;  // GM default (full-on)
+   }
+ 
++  // Patch 0141 (wave 46): banner narrates whether the runtime bank
++  // loaded successfully. Programs >= _loaded_patch_bank_count fall back
++  // to the 8-patch family-bucket placeholder.
+   LOG_INFO("opl3 backend ready (OPL3 detected via Adlib timer-1; "
+            "InitChip applied 18 x 2-op layout; voice allocator armed). "
+-           "Patch bank: 8-patch placeholder covering GM family "
+-           "categories (piano/mallet/organ/guitar/strings/brass/reed/"
+-           "pad). Aesthetic note: this placeholder will sound generic-"
+-           "FM on real OPL3; Phase 10.5 may swap in a fuller community "
+-           "bank via runtime data/opl3-patches.dat loader when "
+-           "operator listening identifies tracks needing better timbre.");
++           "Patch bank state: {} (loaded_count={}; programs >= "
++           "loaded_count fall back to 8-patch placeholder covering "
++           "GM family categories piano/mallet/organ/guitar/strings/"
++           "brass/reed/pad). Phase 10.5 path: ship a fuller community "
++           "bank as data/opl3-patches.dat (DOPL3v1 format; 12-byte SBI "
++           "records per GM program; loader at MidiBackendOpl3 ctor).",
++           _loaded_patch_bank_count > 0
++               ? "runtime opl3-patches.dat ACTIVE"
++               : "8-patch placeholder ACTIVE (no opl3-patches.dat loaded)",
++           _loaded_patch_bank_count);
+ }
+ 
+ MidiBackendOpl3::~MidiBackendOpl3()
+-- 
+2.47.3
+

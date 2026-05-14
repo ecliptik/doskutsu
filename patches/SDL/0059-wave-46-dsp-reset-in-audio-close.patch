@@ -1,0 +1,96 @@
+From 19098664a3d08ebeef880ecab68343735469aaa6 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 14 May 2026 11:06:36 -0700
+Subject: [PATCH] dos: Phase 11 patch 0059 -- DSP cmd 0x06 RESET in audio close
+ (wub-wub fix)
+
+Per flush-instr's docs/internal/WAVE-44-OPL3-LOG-ANALYSIS.md sec. 7.3
+candidate (c2): the existing audio close sequence (0xD5/0xD9/0xD3 for
+16-bit; 0xD0/0xDA/0xD3 for 8-bit) issues halt + exit-auto-init +
+speaker-off, but the SB16 spec is explicit that 0xD3 only turns off
+the analog output stage. The DAC continues to drive output level 0x80
+(silence-center) until a full DSP RESET (0x06) is issued.
+
+Operator-reported "wub-wub-wub-wub" post-quit artifact on wave-44 OPL3
+PLAYs matches this DAC-residual signature: rhythmic / oscillating low-
+frequency noise (not a held note; not WB-routed since OPL3 backend
+doesn't touch WB header). Distinct from wave-42 hanging-note (WB-side)
+and from wave-iter-N+1 16-bit teardown bug (already fixed by SDL/0052
+adding 0xD5/0xD9 for 16-bit symmetry with 8-bit's 0xD0/0xDA).
+
+Fix: add ResetSoundBlasterDSP() call AFTER 0xD3 in both 16-bit and
+8-bit branches of the normal-path teardown (force-pause branch above
+already uses the helper). ResetSoundBlasterDSP() drives port_base+0x6
+with the standard 1->100us->0 reset pulse; state-independent; safe
+regardless of DAC sample-latch or DMA mid-transfer state.
+
+~70% probability of full fix per flush-instr's wave-44 sec. 7.3
+analysis. Alternative candidates (c1 = analog crosstalk independent
+of DSP state; c3 = DMA buffer not zeroed) would require additional
+work; this patch addresses the most-likely candidate first.
+
+Doskutsu-banner update: doskutsu_dbg_log line now narrates "(0xD5/
+0xD9/0xD3/RESET)" so the smoke gate's log audit can verify the new
+RESET step fires. Both branches updated.
+
+Workspace-local per [[sdl_ai_policy]]; never upstreamed.
+
+Validation: DOSBox-X smoke is insufficient for DAC-residual class bugs
+per [[dosbox_not_proxy]]. Real-HW iter on g2k Vibra16S CT2490 is the
+authoritative gate. Operator-perceptual confirmation = "wub-wub
+silenced after quit" in wave-46-opl3-prod iter.
+
+Pairs with engine patch nxengine-evo/0139 (default OPL3 backend) and
+nxengine-evo/0141 (Phase 10.5 runtime patch-bank loader) for the
+wave-46-opl3-prod bundle.
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 0aeebfef7..cac185c3b 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -1773,14 +1773,38 @@ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
+                    docs/PHASE11-WAVE-28-FINDINGS-N-PLUS-1.md sec. 4 is the
+                    root-cause analysis. */
+                 doskutsu_dbg_log("audio close: 16-bit DSP halt-then-exit "
+-                                 "(0xD5/0xD9/0xD3)");
++                                 "(0xD5/0xD9/0xD3/RESET)");
+                 WriteSoundBlasterDSP(0xD5); // halt 16-bit DAC
+                 WriteSoundBlasterDSP(0xD9); // exit 16-bit auto-init DMA
+                 WriteSoundBlasterDSP(0xD3); // turn off the speaker
++                /* DOSKUTSU patch (Phase 11 wave 46 patch 0059): full DSP
++                   RESET (port_base+0x6 pulse) AFTER the halt/exit/speaker-
++                   off sequence to silence the SB16 DAC residual ("wub-
++                   wub-wub-wub" post-quit artifact). Per flush-instr's
++                   docs/internal/WAVE-44-OPL3-LOG-ANALYSIS.md sec. 7.3
++                   candidate (c2): SB16 spec says 0xD3 only turns off
++                   speaker output but does NOT silence the DAC; the DAC
++                   continues to drive output level 0x80 (silence-center)
++                   until a DSP RESET (0x06) is issued. Wave-44 operator-
++                   reported wub-wub matches this DAC-residual signature.
++                   ~70% probability of full fix per flush-instr's analysis
++                   (alternative candidate c1 = analog-stage crosstalk
++                   independent of DSP state; c3 = DMA buffer not zeroed).
++                   ResetSoundBlasterDSP() drives port_base+0x6 with the
++                   standard 1->100us->0 pulse (already used in the force-
++                   pause hard-reset branch above; reusing for normal
++                   teardown coverage). State-independent; safe regardless
++                   of DAC sample latch or DMA mid-transfer state. */
++                ResetSoundBlasterDSP();
+             } else {
+                 WriteSoundBlasterDSP(0xD0); // halt 8-bit DMA
+                 WriteSoundBlasterDSP(0xDA); // exit auto-init DMA
+                 WriteSoundBlasterDSP(0xD3); // turn off the speaker
++                /* DOSKUTSU patch (Phase 11 wave 46 patch 0059): see
++                   16-bit branch above for full rationale. Same DSP RESET
++                   needed on 8-bit teardown -- the DAC-residual mechanism
++                   is data-path-agnostic. */
++                ResetSoundBlasterDSP();
+ 
+                 // SB Pro: reset stereo bit in mixer register 0x0E
+                 if (soundblaster_version >= 3) {
+-- 
+2.47.3
+

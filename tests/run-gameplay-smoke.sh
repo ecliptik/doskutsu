@@ -98,6 +98,29 @@ fi
 log "make stage..."
 make -C "$REPO_ROOT" stage >>"$RESULTS" 2>&1
 
+# PLAY.TAS sanity check (catches the wave-44 stub regression). When a
+# PLAY.TAS is present at the stage root, it must be a real recording, not
+# the 28-byte DTASv1-header-only stub that auto-exits at tick 1 the moment
+# TAS replay engages. Absence is OK -- existing gameplay smoke does not
+# require TAS replay (it drives input via xdotool). But a sub-1000-byte
+# PLAY.TAS is the wave-44 bug shape and must be loud, not silent.
+# scripts/stage-tas.sh (called from `make stage`) is responsible for
+# staging the canonical 1932-byte recording.
+STAGED_TAS="$REPO_ROOT/build/stage/PLAY.TAS"
+if [[ -f "$STAGED_TAS" ]]; then
+  TAS_BYTES=$(stat -c%s "$STAGED_TAS")
+  if (( TAS_BYTES < 1000 )); then
+    log "FAIL: $STAGED_TAS is $TAS_BYTES bytes (< 1000 = stub regression)."
+    log "      Fix: run ./scripts/stage-tas.sh or set DOSKUTSU_TAS_SRC."
+    log "      See scripts/stage-tas.sh header for the wave-44 rationale."
+    exit 5
+  fi
+  TAS_SHA=$(sha256sum "$STAGED_TAS" | awk '{print $1}')
+  log "staged PLAY.TAS: $TAS_BYTES bytes, sha ${TAS_SHA:0:12}"
+else
+  log "note: no PLAY.TAS at $STAGED_TAS (TAS replay unavailable; xdotool drive only)"
+fi
+
 # Clear prior logs so debug.log/sdldbg.log only contain this run's output.
 rm -f "$REPO_ROOT/build/stage/debug.log" "$REPO_ROOT/build/stage/sdldbg.log"
 
@@ -232,6 +255,12 @@ BANNER_REGEX=(
   "\[RUNMANIFEST-BEGIN\]"
   "\[RUNMANIFEST-END\]"
   "\[runmanifest-emit\] schema=v"
+  "audio backend: opl3 \(default since wave 46 patch 0139"
+  "audio close: (16-bit|8-bit) DSP halt-then-exit \(0x(D5/D9|D0/DA)/D3/RESET\)"
+  "opl3 backend: opl3-patches\.dat (loaded|not found|invalid|truncated|version mismatch|too many programs)"
+  "opl3 backend: cleared reg 0xBD chip-wide latch \(wub-wub mitigation per flush-instr WAVE-46 H6\)"
+  "map: BG skip-when-unchanged (ENABLED \(default\)|DISABLED \(killswitch\))"
+  "bg-skip: (first event|backdrop redraw skipped)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -241,6 +270,12 @@ BANNER_SEVERITY=(
   "forbidden"
   "forbidden"
   "forbidden"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
   "optional"
   "optional"
   "optional"
@@ -270,6 +305,12 @@ BANNER_LABEL=(
   "wave-43 RUNMANIFEST block begin sentinel (patch 0138; optional -- fires on every clean engine exit; absence under smoke means pkill-on-timeout kill-path, not a bug; severity matches snd-shutdown[0/6] precedent)"
   "wave-43 RUNMANIFEST block end sentinel (patch 0138; optional -- pairs with begin sentinel; the smoke gate can extract the schema-v1 block via awk '/RUNMANIFEST-BEGIN/,/RUNMANIFEST-END/' for post-process consumption per WAVE-41-TRI-ENV-CORRELATION-PLAN sec. 4.4)"
   "wave-43 RUNMANIFEST engagement banner (patch 0138; optional -- the runtime-witness side of the two-witness pattern; complements strings|grep RUNMANIFEST-BEGIN which only proves embed)"
+  "wave-46 default OPL3 backend (patch 0139; optional -- emits when SDL_HINT_DOSKUTSU_AUDIO_BACKEND is unset, which is the wave-46 production default; absent under explicit AUDIO_BACKEND=organya/wb/auto override)"
+  "wave-46 DSP RESET in audio close (patch SDL/0059; optional -- fires on every clean engine exit through the SDL_dosaudio_sb teardown path; emits in both 16-bit and 8-bit DSP variants; absence under smoke means pkill-on-timeout kill-path, not a bug)"
+  "wave-46 OPL3 patch-bank loader (patch 0141; optional -- emits when MidiBackendOpl3 ctor runs; one of: loaded / not found / invalid / truncated / version mismatch / too many programs; default ship state is 'not found' since data/opl3-patches.dat is a ride-along for a follow-on iter)"
+  "wave-47 OPL3 reg 0xBD clear (patch 0142; optional -- emits in MidiBackendOpl3 dtor on clean exit; pkill-on-timeout DOSBox-X smoke won't fire this banner; absent under explicit AUDIO_BACKEND=organya/wb/auto override or under OPL3 probe failure path; wub-wub mitigation per flush-instr WAVE-46 H6 60-70% probability)"
+  "wave-48 BG skip-when-unchanged killswitch decision (patch 0143; optional -- one banner per process emitted on first call to map_backdrop_should_skip_clear_and_draw, narrating ENABLED (default) vs DISABLED (killswitch=0); fires deterministically on first DrawScene call so should emit even under DOSBox-X smoke if engine reaches DrawScene at all)"
+  "wave-48 BG skip engagement (patch 0143; optional -- fires the first time scroll-state key matches last-drawn frame, then again every 100 skip events; absence under smoke may indicate either (a) zero-skip-eligible frames in the test scene (e.g. attract reel scrolls every frame) or (b) the killswitch path is engaged; check the killswitch decision banner to disambiguate)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
