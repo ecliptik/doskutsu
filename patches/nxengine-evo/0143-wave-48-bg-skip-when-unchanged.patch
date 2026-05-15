@@ -1,6 +1,6 @@
-From 4dedf8df4e3e1369db0b4af5510c3f05478c5682 Mon Sep 17 00:00:00 2001
+From 8aca22f61ef668cc57868b420d9af91534edca3b Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
-Date: Thu, 14 May 2026 13:08:33 -0700
+Date: Thu, 14 May 2026 15:29:27 -0700
 Subject: [PATCH] perf phase 11 patch 0143 -- wave-48 H-A skip-when-unchanged
  backdrop
 
@@ -56,78 +56,14 @@ render into cache -> blit cache to window) which is when state IS
 changing and the BG must be redrawn. NOT a refactor of 0080/0126
 (scope-creep avoided); just a stronger early-out at the caller.
 
-FILES (~70 LOC total):
-- vendor/nxengine-evo/src/map.h:
-    + Public API decls for the 3 lifecycle hooks
-    + Documentation of correctness contract + caller responsibilities
-- vendor/nxengine-evo/src/map.cpp:
-    + File-scope state (last-drawn key, validity flag, telemetry
-      counters, killswitch decision cache)
-    + _bg_skip_killswitch_engaged() -- strict-0 match on env var
-    + map_backdrop_should_skip_clear_and_draw() -- the decision API;
-      bumps tot-flips; on match bumps tot-skips + emits banners
-      (first-event + every 100 skips)
-    + map_backdrop_record_present_success() -- snapshots the current
-      key as last-drawn; called from inside map_draw_backdrop after
-      the no-backdrop check passes (single call site; eager record)
-    + map_backdrop_invalidate_skip_state() -- marks state invalid;
-      called from inside map_draw_backdrop's no-backdrop early-return
-    + Wired into map_draw_backdrop: 2 single-line calls (record at
-      top after no-backdrop check; invalidate in the no-backdrop
-      early-return branch)
-- vendor/nxengine-evo/src/game.cpp:
-    + DrawScene calls map_backdrop_should_skip_clear_and_draw()
-      BEFORE the MdsClearTimer scope
-    + clearScreen(BLACK) call gated on !bg_skip_unchanged
-    + map_draw_backdrop() call gated on !bg_skip_unchanged
-    + RAII timer scopes (MdsClearTimer, MdtBgBackdropTimer)
-      preserved unconditionally so [mds-clear-stat] / [mds-bg-stat]
-      sample counts remain comparable across skip/no-skip frames;
-      inner bucket value drops to ~0 us on skip
+Regenerated from current vendor state to fix patch context drift
+(team-lead's ASCII-cleanup substitution broke the original patch's
+context-line matching; source content unchanged; this re-emits a
+byte-exact patch against the current upstream context).
 
-KEY INVALIDATION LIST (verified comprehensive):
-- First frame post-init: sentinel curmap=-1 mismatches game.curmap
-- flipacceltime transitions: encoded in key field
-- Scene transition (map / backdrop / scrolltype): key mismatch
-- Player motion (displayed_xscroll / yscroll): key mismatch
-- Window surface re-fetch: _cached_window_surface pointer change
-  (patch 0036 line 3611 path; DOSKUTSU_CACHE_WINSURF=1 ablation
-  doesn't impact this because pointer stays stable when caching)
-- Direct-VESA mode change: SDL_DOSVesaDirectGetGeneration bump (same
-  source-of-truth used by direct-VESA fast path at
-  Renderer.cpp:4072)
-- LoadBackdropIfNeeded failure: explicit invalidate call
-- Killswitch SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED=0 active
-
-KILLSWITCH: SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED=0 (strict-0
-match; default ON). Engagement logged once on first-call via
-LOG_INFO "map: BG skip-when-unchanged ENABLED|DISABLED ...".
-
-TELEMETRY BANNERS (added to tests/run-gameplay-smoke.sh BANNERS):
-- "bg-skip: first event" (once per process; first skip)
-- "bg-skip: backdrop redraw skipped (state unchanged; tot skips=X /
-  tot flips=Y / hit-rate=Z% / global skips=N since boot)" (every
-  100 skips per block; counters reset per emit so hit-rate is
-  windowed not cumulative)
-- "map: BG skip-when-unchanged (ENABLED|DISABLED)" (killswitch
-  decision, once per process)
-
-THE WAVE-47 BUILD-SHA HYGIENE FLAG: wave-47 patch 0142 produced sha
-90fee82b54f5 vs wave-46 0e23463015df only because of the new banner
-string + helper call. The patch was content-substantive but tiny,
-and the __BUILD_SHA__ codegen is COFF-relocate-friendly enough that
-small additions DO drift sha. flush-instr's WAVE-47-V1 sec. 8 row 3
-flagged the RUNMANIFEST emit showing wave-46 sha for the wave-47
-binary -- that's the __BUILD_SHA__ Makefile/codegen bug, separate
-from the binary sha. Patch 0143 produces a substantially-different
-binary (~250 LOC of new code) so sha drift is robust regardless.
-The __BUILD_SHA__ Makefile bug is unaddressed here (out of scope per
-team-lead "do not let it expand scope"); flagging for build-qa.
-
-RIDE-ALONG DISCIPLINE: ZERO ride-along patches in this iter.
-Single mechanism per binary per
-[[single_lever_per_binary_or_else_attribution_impossible]]. User
-pivoted to perf-only focus per WAVE-47-V1 sec. 6.
+Banner regex for tests/run-gameplay-smoke.sh BANNERS:
+"map: BG skip-when-unchanged (ENABLED|DISABLED)"
+"bg-skip: (first event|backdrop redraw skipped)"
 ---
  src/game.cpp |  47 +++++++++---
  src/map.cpp  | 202 +++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -135,20 +71,20 @@ pivoted to perf-only focus per WAVE-47-V1 sec. 6.
  3 files changed, 256 insertions(+), 12 deletions(-)
 
 diff --git a/src/game.cpp b/src/game.cpp
-index 56f3c95..4d6e9a0 100644
+index 56f3c95..ff3b076 100644
 --- a/src/game.cpp
 +++ b/src/game.cpp
 @@ -645,19 +645,38 @@ void DrawScene(void)
    // line to validate the per-block bg_h+bg_m==n invariant.
    ++NXE::Diag::g_tilemap_cache_n_block;
  
--  // patch 0096 (wave 22.5 W22B): mode_draw_scene decomposition -- 6
+-  // patch 0096 (wave 22.5 W22B): mode_draw_scene decomposition — 6
 -  // sub-bracket RAII timers wrapping non-overlapping work types per
--  // contract sec. 1. Each bracket scopes one of the per-frame work
+-  // contract § 1. Each bracket scopes one of the per-frame work
 -  // clusters. The function-entry init lines (491-492 + 506
 -  // nOnscreenObjects=0) and the debug DrawBoundingBoxes at end
--  // (794-795) fall into mds_residual -- sub-us each; residual stays
--  // small. Per contract sec. 8 #8 the residual block lives in
+-  // (794-795) fall into mds_residual — sub-µs each; residual stays
+-  // small. Per contract § 8 #8 the residual block lives in
 -  // game_tick_normal() AFTER the ModeDrawSceneTimer scope closes,
 -  // NOT here at end-of-DrawScene; reading g_mt_draw_scene_dt_this_-
 -  // tick inside DrawScene would see stale data from prior tick.
@@ -189,9 +125,9 @@ index 56f3c95..4d6e9a0 100644
  
    // draw background map tiles
 @@ -668,9 +687,13 @@ void DrawScene(void)
-       // patch 0125 (wave 29 W29A): mdt_bg_backdrop sub-bracket -- wraps
+       // patch 0125 (wave 29 W29A): mdt_bg_backdrop sub-bracket — wraps
        // map_draw_backdrop() (BK_FASTLEFT_LAYERS parallax, BK_FOLLOW,
-       // BK_FIXED, etc.). H-A hypothesis (per contract sec. 0.3).
+       // BK_FIXED, etc.). H-A hypothesis (per contract § 0.3).
 +      // patch 0143: gated on bg_skip_unchanged; empty scope on skip.
        {
          NXE::Diag::MdtBgBackdropTimer _mtbg_bd;
@@ -201,7 +137,7 @@ index 56f3c95..4d6e9a0 100644
 +          map_draw_backdrop();
 +        }
        }
-       // patch 0125 (wave 29 W29A): mdt_bg_tilelayer sub-bracket -- wraps
+       // patch 0125 (wave 29 W29A): mdt_bg_tilelayer sub-bracket — wraps
        // map_draw(false), the BG tile-layer render via
 diff --git a/src/map.cpp b/src/map.cpp
 index 0a4e108..83c57a4 100644

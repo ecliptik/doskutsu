@@ -1,0 +1,480 @@
+From 3c3538f9f91d0b4ce267ded4cdcc6dd7fad4de27 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 14 May 2026 14:10:38 -0700
+Subject: [PATCH] dos: Phase 11 patch 0060 -- Cirrus 5434 chip-driven BLT
+ helper (wave-49)
+
+Exposes the Cirrus CL-GD5434 BLT engine's NORMAL screen-to-screen rect
+copy mode (BLT_MODE 0x00, ROP SRCCOPY) so NXEngine-evo's FG tilemap
+render can replace ~1881 per-flush sysmem-memcpys with chip-driven
+VRAM-to-VRAM rect copies. Engine-side integration (sprite/tileset
+relocation to off-screen VRAM at load time + per-tile BLTCopy calls)
+ships separately in nx-engine's lane; this patch is the SDL-side
+primitive only.
+
+Two new public APIs in include/SDL3/SDL_dosvesa_directaccess.h:
+
+  bool SDL_DOSVesaDirect_IsCirrusBLTAvailable(void);
+  bool SDL_DOSVesaDirect_BLTCopy(Uint32 src_vram_off, Uint32 dst_vram_off,
+                                  int w, int h, int src_pitch, int dst_pitch);
+
+Probe anchor: tests/probes/bltpat-v2.c (Phase 11 wave-38 ride-along) which
+validated the Cirrus 5434 BLT engine's PATTERN_COPY mode at 68 MB/s on
+actual g2k Pentium OverDrive 83 MHz + Cirrus CL-GD5434 + UNIVBE 6.70.
+The wave-49 helper uses NORMAL mode (0x00) rather than PATTERN_COPY (0x40)
+because the engine needs arbitrary rect copy, not 8x8 pattern tiling --
+but the rest of the register-programming sequence is identical to the
+probe's proven path (GR[0x20-0x33] layout; BLT_RESET pre-programming
+per V_PAT_C anchor; SRCCOPY ROP).
+
+Chip-presence detection (one-time, cached, lazy):
+
+  - Killswitch first: SDL_HINT_DOSKUTSU_CIRRUS_BLT=0 (strict-"0") forces
+    availability=false regardless of chip detection. Strict-match per
+    CLAUDE.md DOSKUTSU env-var convention.
+  - Unlock Cirrus extension registers: SR[0x06]=0x12.
+  - Read CRTC[0x27] for chip-rev. STRICT 5434-only detection (CRTC[0x27]
+    == 0xA8). Other Cirrus variants (5430=0xA0 / 5436=0xAC / 5446=0xB8)
+    AND non-Cirrus chips fall through to availability=false. Engine
+    must use its software-blit fallback when availability is false.
+  - Clear GR[0x0B] bits 1 + 4 per bltpat-v2 errata (screen-to-screen
+    BLT constraints).
+
+Per-call BLT sequence:
+
+  - GR[0x31]=0x04 -- BLT_RESET pre-programming clears stale state.
+  - Spin busy-bit clear (capped 200k iters ~ 10 ms on PODP83).
+  - Program BLT registers GR[0x20-0x33]: width-1, height-1, dst_pitch,
+    src_pitch, dst_offset (24-bit), src_offset (24-bit), no transparency
+    (0x2F=0), NORMAL mode (0x30=0x00), SRCCOPY ROP (0x32=0x0D).
+  - GR[0x31]=0x02 -- kick the BLT engine.
+  - Spin busy-bit clear (same cap). On timeout, emergency-reset chip
+    and return false so engine falls back to software blit.
+
+Return-false paths:
+
+  - Availability off (chip not 5434, killswitch engaged).
+  - Out-of-range params (w/h <= 0 or > 4096; non-positive pitches).
+  - Chip stuck busy on pre-flight or post-kick poll.
+
+Engine must handle false return by falling back to its existing
+software _blit_indexed primitive. The chip state is left in a clean
+(post-reset) state on the timeout path so the next call starts fresh.
+
+doskutsu_dbg_log banners (smoke-gate two-witness pattern):
+
+  - "sdl: wave-49 Cirrus BLTCopy: ENABLED (Cirrus 5434 detected; ...)"
+    on successful chip detection.
+  - "sdl: wave-49 Cirrus BLTCopy: DISABLED (chip not Cirrus 5434; ...)"
+    on non-5434 fallback.
+  - "sdl: wave-49 Cirrus BLTCopy: DISABLED (killswitch ...)"
+    on killswitch.
+  - "sdl: wave-49 Cirrus BLTCopy: first BLT success (src_off=... ...)"
+    on first successful BLT (one-time gate so the smoke can verify the
+    runtime path is exercised, not just the literals embedded).
+
+Per CLAUDE.md sec. Critical Rules:
+  - Strict-match env-var per DOSKUTSU convention.
+  - ASCII-only source text.
+  - DOS-PORT: tag is not used here -- this is SDL3-DOS-backend-native
+    code, not port glue. The "DOSKUTSU patch 0060" block comment is
+    the equivalent attribution.
+
+No coupling with the existing direct-VESA fast path
+(SDL_DOSVesaDirectPresentFull / GetState / BankedFlush) -- the BLT
+engine writes to VRAM independently. Engine code that mixes BLT-driven
+tile rendering with dosmemput-based present must ensure CPU writes
+complete before chip BLT reads its source; on single-threaded DOS this
+is automatic for sequential calls.
+
+Workspace-local patch (per sdl_ai_policy memory + this repo's
+vendor/SDL/CLAUDE.md notice: SDL upstream forbids AI-authored code;
+patches live in patches/SDL/ and are never contributed back).
+
+Modifies:
+  include/SDL3/SDL_dosvesa_directaccess.h  (new API declarations)
+  src/video/dos/SDL_dosframebuffer.c       (new API implementations)
+
+Engine-side integration + smoke-gate BANNERS array update + docs/
+internal/BOOT.md entry live in the parent doskutsu repo (not in this
+vendor commit).
+---
+ include/SDL3/SDL_dosvesa_directaccess.h | 129 ++++++++++++++
+ src/video/dos/SDL_dosframebuffer.c      | 223 ++++++++++++++++++++++++
+ 2 files changed, 352 insertions(+)
+
+diff --git a/include/SDL3/SDL_dosvesa_directaccess.h b/include/SDL3/SDL_dosvesa_directaccess.h
+index 034bedf74..528f1e7f0 100644
+--- a/include/SDL3/SDL_dosvesa_directaccess.h
++++ b/include/SDL3/SDL_dosvesa_directaccess.h
+@@ -504,6 +504,135 @@ extern SDL_DECLSPEC void SDLCALL SDL_DOSVesaDirectProgramPalette(const SDL_Palet
+ extern SDL_DECLSPEC bool SDLCALL SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+                                                                const void *pixels);
+ 
++/* ------------------------------------------------------------------------
++ * Cirrus 5434 chip-driven BLT engine helper (patch SDL/0060, wave-49)
++ * ------------------------------------------------------------------------
++ *
++ * Exposes the Cirrus CL-GD5434 BLT engine's NORMAL (screen-to-screen
++ * linear) rect-copy mode. Used by engines that have already staged
++ * source pixel data into off-screen VRAM (sprite/tileset atlas) and
++ * want to replace per-tile system-RAM memcpys with chip-driven
++ * VRAM-to-VRAM rect copies.
++ *
++ * Anchor: tests/probes/bltpat-v2.c (wave-38 ride-along) validated the
++ * Cirrus PATTERN_COPY mode at 68 MB/s on actual g2k Pentium OverDrive
++ * 83 MHz + Cirrus CL-GD5434 + UNIVBE 6.70. This helper uses NORMAL mode
++ * (BLT_MODE 0x00) for arbitrary rect copy rather than 8x8 PATTERN_COPY
++ * mode (0x40), but the same chip-side register sequence + BLT_RESET
++ * pre-programming applies. The Cirrus 5434 chip-rev anchor is
++ * CRTC[0x27] = 0xA8 (other Cirrus variants are NOT engaged by this
++ * helper -- 5430/5436/5446 fall through to the "available=false" path
++ * because the BLT register layout differs subtly across the family).
++ *
++ * Engine-side contract:
++ *   1. Detect availability ONCE at startup via
++ *      SDL_DOSVesaDirect_IsCirrusBLTAvailable(). If false, use the
++ *      existing SDL_memcpy/dosmemput fallback path.
++ *   2. At sprite/tileset load time, push pixel data to an off-screen
++ *      VRAM region (>= vram_pitch * vram_h bytes past the visible
++ *      framebuffer) via SDL_DOSVesaDirectBankedFlush(). The engine
++ *      manages off-screen VRAM allocation; SDL does NOT track it.
++ *   3. Per-tile: call SDL_DOSVesaDirect_BLTCopy(src_vram_off,
++ *      dst_vram_off, w, h, src_pitch, dst_pitch). Returns true on
++ *      success; false means the BLT engine errored (e.g. chip stuck
++ *      busy on the kick poll). On false, engine must fall back to
++ *      software blit for that tile and may retry the next flip.
++ *
++ * Killswitch: SDL_HINT_DOSKUTSU_CIRRUS_BLT=0 (strict-"0") forces
++ * "available=false" regardless of chip detection. Default = ON when
++ * Cirrus 5434 is detected. Any other value (including unset or "1")
++ * uses the default-ON behavior.
++ *
++ * No coupling with the existing direct-VESA fast path -- the BLT
++ * engine writes to VRAM independently of the dosmemput/LFB-memcpy
++ * path used by SDL_DOSVesaDirectPresentFull. Engine code that mixes
++ * the two MUST issue a flush of any pending VRAM write before the
++ * BLT engine reads its source, but this is the engine's
++ * responsibility (the chip doesn't see partial CPU writes from a
++ * separate execution context -- DOS is single-threaded).
++ */
++
++/**
++ * Returns true if the Cirrus 5434 BLT engine is available for use via
++ * SDL_DOSVesaDirect_BLTCopy().
++ *
++ * On first call: probes CRTC[0x27] for chip rev 0xA8 (Cirrus 5434),
++ * clears the screen-to-screen BLT constraints in GR[0x0B], and caches
++ * the result. Also emits a one-time `doskutsu_dbg_log` banner narrating
++ * either ENABLED (chip detected) or DISABLED (with reason: chip not
++ * Cirrus 5434, or killswitch SDL_HINT_DOSKUTSU_CIRRUS_BLT=0). On
++ * subsequent calls returns the cached result without re-probing.
++ *
++ * Safe to call before any window is created (the probe only touches
++ * VGA Sequencer / CRTC / Graphics Controller indexed ports).
++ *
++ * \returns true if the BLT engine is available; false if the chip is
++ *          not a Cirrus 5434 or the killswitch is engaged.
++ *
++ * \threadsafety Single-threaded.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0060).
++ *
++ * \sa SDL_DOSVesaDirect_BLTCopy
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSVesaDirect_IsCirrusBLTAvailable(void);
++
++/**
++ * Chip-driven VRAM-to-VRAM rectangular copy via the Cirrus 5434 BLT
++ * engine (NORMAL mode, BLT_MODE 0x00, ROP SRCCOPY).
++ *
++ * Both source and destination MUST be in VRAM (no system-RAM source
++ * allowed -- the chip BLT engine reads only from VRAM). The engine is
++ * responsible for staging source pixel data into off-screen VRAM at
++ * load time via SDL_DOSVesaDirectBankedFlush() (or equivalent) before
++ * calling this helper.
++ *
++ * Issues BLT_RESET (GR[0x31]=0x04) before programming the rect copy
++ * to clear any stale BLT state per the wave-38 V_PAT_C probe anchor.
++ * After programming the BLT registers (0x20-0x33), kicks the engine
++ * via GR[0x31]=0x02 and polls busy bit 0x08 with a capped iteration
++ * count (~200k) so a stuck chip can't hang the caller.
++ *
++ * Width and height registers are 12-bit on Cirrus 5434, so the
++ * maximum rect dimensions are 4096 x 4096. The function returns
++ * false (with no chip state mutation) for out-of-range or non-positive
++ * dimensions.
++ *
++ * On the FIRST successful BLT, emits a one-time `doskutsu_dbg_log`
++ * banner narrating the src/dst offsets and rect size so the smoke
++ * gate can verify the path is actually exercised (two-witness pattern
++ * per CLAUDE.md sec. Build verification).
++ *
++ * \param src_vram_off byte offset into VRAM of the source rect's
++ *                     top-left corner. Engine manages off-screen
++ *                     VRAM addressing.
++ * \param dst_vram_off byte offset into VRAM of the destination rect's
++ *                     top-left corner.
++ * \param w rect width in pixels (1..4096). At 8bpp this is also bytes.
++ * \param h rect height in pixels (1..4096).
++ * \param src_pitch source-stride in bytes per row (typically the
++ *                  off-screen atlas's pitch).
++ * \param dst_pitch destination-stride in bytes per row (typically
++ *                  vram_pitch from SDL_DOSVesaDirectGetState).
++ * \returns true if the BLT completed; false if availability is off,
++ *          parameters are out of range, or the BLT engine errored
++ *          (timeout on busy poll). On false the engine should fall
++ *          back to its software-blit path for this tile.
++ *
++ * \threadsafety Single-threaded.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0060).
++ *
++ * \sa SDL_DOSVesaDirect_IsCirrusBLTAvailable
++ * \sa SDL_DOSVesaDirectBankedFlush
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSVesaDirect_BLTCopy(Uint32 src_vram_off,
++                                                             Uint32 dst_vram_off,
++                                                             int w,
++                                                             int h,
++                                                             int src_pitch,
++                                                             int dst_pitch);
++
+ /* Ends C function definitions when using C++ */
+ #ifdef __cplusplus
+ }
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 1ee59c1e5..8fdc0fa00 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -2606,4 +2606,227 @@ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+     return true;
+ }
+ 
++// ============================================================================
++// DOSKUTSU patch 0060 (Phase 11 wave-49) -- Cirrus 5434 chip-driven BLT helper.
++//
++// Exposes the Cirrus CL-GD5434 BLT engine's NORMAL screen-to-screen rect
++// copy (BLT_MODE 0x00, ROP SRCCOPY) for engines that have staged source
++// pixel data into off-screen VRAM. Replaces ~1881 per-flush sysmem memcpys
++// in NXEngine-evo's FG tilemap render with chip-driven VRAM-to-VRAM
++// rect copies. Probe anchor: tests/probes/bltpat-v2.c (wave-38) which
++// validated PATTERN_COPY at 68 MB/s on actual g2k. NORMAL mode uses the
++// same chip-side register sequence + the V_PAT_C BLT_RESET anchor; the
++// only mode-bit difference is GR[0x30]=0x00 here vs 0x40 in the probe.
++//
++// Strict Cirrus 5434 detection (CRTC[0x27] == 0xA8). Other Cirrus
++// variants (5430/5436/5446) fall through to availability=false because
++// the BLT register layout differs subtly across the family. Non-Cirrus
++// VESA chips also fall through. Engine must check availability and use
++// its software-blit fallback when this returns false.
++//
++// Killswitch: SDL_HINT_DOSKUTSU_CIRRUS_BLT=0 (strict-"0") disables.
++// Default: ON when Cirrus 5434 detected.
++//
++// Workspace-local patch; never upstreamed (per sdl_ai_policy memory).
++// ============================================================================
++
++// VGA / Cirrus extended-register port macros. Same constants as
++// tests/probes/bltpat-v2.c (the probe that validated this register
++// sequence on real g2k). VGA_DAC_* are already defined elsewhere in
++// this file; the Cirrus extended-register set is added here.
++#define CIRRUS_SR_INDEX  0x3C4
++#define CIRRUS_SR_DATA   0x3C5
++#define CIRRUS_GR_INDEX  0x3CE
++#define CIRRUS_GR_DATA   0x3CF
++#define CIRRUS_CRTC_IDX  0x3D4
++#define CIRRUS_CRTC_DATA 0x3D5
++
++// Tri-state availability cache. -1 = not yet probed; 0 = unavailable
++// (chip not 5434, or killswitch engaged); 1 = available. Single-
++// threaded backend -> no atomic needed.
++static int _cirrus_blt_available = -1;
++
++// One-time first-success banner gate. Bumped to 1 the first time
++// SDL_DOSVesaDirect_BLTCopy returns true so the smoke gate can verify
++// the path is exercised (two-witness pattern per CLAUDE.md).
++static int _cirrus_blt_first_success_logged = 0;
++
++// Probe + cache chip availability. Called lazily from
++// SDL_DOSVesaDirect_IsCirrusBLTAvailable and SDL_DOSVesaDirect_BLTCopy.
++// Emits a one-time doskutsu_dbg_log banner narrating the verdict.
++static int _cirrus_blt_check_availability(void)
++{
++    if (_cirrus_blt_available >= 0) {
++        return _cirrus_blt_available;
++    }
++
++    // Killswitch first -- if env is strict "0", skip chip probe entirely.
++    // Strict-match per CLAUDE.md DOSKUTSU env-var convention: only the
++    // literal string "0" disables. Unset or any other value uses the
++    // default-ON behavior.
++    const char *env = SDL_getenv("SDL_HINT_DOSKUTSU_CIRRUS_BLT");
++    if (env && env[0] == '0' && env[1] == 0) {
++        doskutsu_dbg_log("sdl: wave-49 Cirrus BLTCopy: DISABLED "
++                         "(killswitch SDL_HINT_DOSKUTSU_CIRRUS_BLT=0)");
++        _cirrus_blt_available = 0;
++        return 0;
++    }
++
++    // Unlock Cirrus extension registers. SR[0x06]=0x12 -- canonical Cirrus
++    // unlock sequence. On non-Cirrus chips the SR readback won't match.
++    outportb(CIRRUS_SR_INDEX, 0x06);
++    outportb(CIRRUS_SR_DATA, 0x12);
++    outportb(CIRRUS_SR_INDEX, 0x06);
++    Uint8 sr06_rd = inportb(CIRRUS_SR_DATA);
++
++    // Read CRTC[0x27] for chip-rev identification.
++    outportb(CIRRUS_CRTC_IDX, 0x27);
++    Uint8 crtc27 = inportb(CIRRUS_CRTC_DATA);
++
++    if (crtc27 != 0xA8) {
++        // Strict 5434-only detection per the patch contract.
++        // Other Cirrus variants (5430=0xA0 / 5436=0xAC / 5446=0xB8)
++        // fall through to availability=false. Non-Cirrus also lands here.
++        doskutsu_dbg_log("sdl: wave-49 Cirrus BLTCopy: DISABLED "
++                         "(chip not Cirrus 5434; CRTC[0x27]=0x%02X "
++                         "sr06_rd=0x%02X; engine uses sysmem fallback)",
++                         (unsigned)crtc27, (unsigned)sr06_rd);
++        _cirrus_blt_available = 0;
++        return 0;
++    }
++
++    // Cirrus 5434 detected. Clear screen-to-screen BLT constraints
++    // in GR[0x0B] bits 1 + 4 per the bltpat-v2 probe errata.
++    outportb(CIRRUS_GR_INDEX, 0x0B);
++    Uint8 gr0b = inportb(CIRRUS_GR_DATA);
++    gr0b &= (Uint8)~((1u << 1) | (1u << 4));
++    outportb(CIRRUS_GR_INDEX, 0x0B);
++    outportb(CIRRUS_GR_DATA, gr0b);
++
++    doskutsu_dbg_log("sdl: wave-49 Cirrus BLTCopy: ENABLED "
++                     "(Cirrus 5434 detected; CRTC[0x27]=0xA8; "
++                     "GR[0x0B] screen-to-screen constraints cleared; "
++                     "engine may call SDL_DOSVesaDirect_BLTCopy)");
++    _cirrus_blt_available = 1;
++    return 1;
++}
++
++bool SDL_DOSVesaDirect_IsCirrusBLTAvailable(void)
++{
++    return _cirrus_blt_check_availability() != 0;
++}
++
++bool SDL_DOSVesaDirect_BLTCopy(Uint32 src_vram_off,
++                                Uint32 dst_vram_off,
++                                int w,
++                                int h,
++                                int src_pitch,
++                                int dst_pitch)
++{
++    if (_cirrus_blt_check_availability() == 0) {
++        return false;
++    }
++    if (w <= 0 || h <= 0 || src_pitch <= 0 || dst_pitch <= 0) {
++        return false;
++    }
++    // Cirrus 5434 BLT width/height registers are 12-bit (max 4096).
++    if (w > 4096 || h > 4096) {
++        return false;
++    }
++
++    // BLT_RESET pre-programming per V_PAT_C anchor (bltpat-v2 line 488-
++    // 493). Clears any stale BLT state from a prior op so the new
++    // programming starts from a known-idle baseline.
++    outportb(CIRRUS_GR_INDEX, 0x31);
++    outportb(CIRRUS_GR_DATA, 0x04);
++
++    // Spin until chip is idle (busy bit GR[0x31] bit 0x08 clear).
++    // Capped iteration count so a stuck chip can't hang the caller --
++    // ~200k iterations is roughly 10 ms on PODP83 worst-case, which is
++    // far longer than a successful BLT (~1 ms for 320x240).
++    {
++        int idle = 0;
++        for (int spin = 0; spin < 200000; spin++) {
++            outportb(CIRRUS_GR_INDEX, 0x31);
++            if ((inportb(CIRRUS_GR_DATA) & 0x08) == 0) {
++                idle = 1;
++                break;
++            }
++        }
++        if (!idle) {
++            // Chip is stuck even after BLT_RESET. Mark this BLT as
++            // failed; engine falls back to software blit. The chip
++            // state may or may not recover for the next call; we
++            // don't auto-disable the helper because a transient stick
++            // shouldn't permanently kill the path.
++            return false;
++        }
++    }
++
++    // Program BLT registers. Same layout as bltpat-v2's blt_program_pattern
++    // EXCEPT GR[0x30]=0x00 (NORMAL screen-to-screen mode) instead of
++    // 0x40 (PATTERN_COPY mode). This is the only mode-bit difference;
++    // the rest of the register sequence is identical to the probe's
++    // proven path. ROP 0x0D = SRCCOPY (same as probe).
++    const Uint16 w_m1 = (Uint16)(w - 1);
++    const Uint16 h_m1 = (Uint16)(h - 1);
++
++    outportb(CIRRUS_GR_INDEX, 0x20); outportb(CIRRUS_GR_DATA, (Uint8)(w_m1 & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x21); outportb(CIRRUS_GR_DATA, (Uint8)((w_m1 >> 8) & 0x0F));
++    outportb(CIRRUS_GR_INDEX, 0x22); outportb(CIRRUS_GR_DATA, (Uint8)(h_m1 & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x23); outportb(CIRRUS_GR_DATA, (Uint8)((h_m1 >> 8) & 0x0F));
++    outportb(CIRRUS_GR_INDEX, 0x24); outportb(CIRRUS_GR_DATA, (Uint8)(dst_pitch & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x25); outportb(CIRRUS_GR_DATA, (Uint8)((dst_pitch >> 8) & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x26); outportb(CIRRUS_GR_DATA, (Uint8)(src_pitch & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x27); outportb(CIRRUS_GR_DATA, (Uint8)((src_pitch >> 8) & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x28); outportb(CIRRUS_GR_DATA, (Uint8)(dst_vram_off & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x29); outportb(CIRRUS_GR_DATA, (Uint8)((dst_vram_off >> 8) & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x2A); outportb(CIRRUS_GR_DATA, (Uint8)((dst_vram_off >> 16) & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x2C); outportb(CIRRUS_GR_DATA, (Uint8)(src_vram_off & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x2D); outportb(CIRRUS_GR_DATA, (Uint8)((src_vram_off >> 8) & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x2E); outportb(CIRRUS_GR_DATA, (Uint8)((src_vram_off >> 16) & 0xFF));
++    outportb(CIRRUS_GR_INDEX, 0x2F); outportb(CIRRUS_GR_DATA, 0x00); // no transparency
++    outportb(CIRRUS_GR_INDEX, 0x30); outportb(CIRRUS_GR_DATA, 0x00); // NORMAL screen-to-screen mode
++    outportb(CIRRUS_GR_INDEX, 0x32); outportb(CIRRUS_GR_DATA, 0x0D); // SRCCOPY ROP
++    outportb(CIRRUS_GR_INDEX, 0x33); outportb(CIRRUS_GR_DATA, 0x00); // no extension flags
++
++    // Kick the BLT engine: GR[0x31]=0x02 starts the operation.
++    outportb(CIRRUS_GR_INDEX, 0x31);
++    outportb(CIRRUS_GR_DATA, 0x02);
++
++    // Spin until busy bit clears (BLT complete). Same iteration cap as
++    // the pre-flight idle check. 320x240 at 68 MB/s -> ~1 ms; cap is
++    // way longer so stuck-chip path falls through cleanly.
++    int idle = 0;
++    for (int spin = 0; spin < 200000; spin++) {
++        outportb(CIRRUS_GR_INDEX, 0x31);
++        if ((inportb(CIRRUS_GR_DATA) & 0x08) == 0) {
++            idle = 1;
++            break;
++        }
++    }
++    if (!idle) {
++        // BLT did not complete within the budget. Emergency-reset
++        // the chip so the NEXT call starts clean, then return false
++        // so the engine falls back to software.
++        outportb(CIRRUS_GR_INDEX, 0x31);
++        outportb(CIRRUS_GR_DATA, 0x04);
++        return false;
++    }
++
++    // First-success banner: emit once for the smoke gate's
++    // two-witness pattern. Subsequent successful BLTs are silent
++    // (no per-call log spam in the hot path).
++    if (!_cirrus_blt_first_success_logged) {
++        _cirrus_blt_first_success_logged = 1;
++        doskutsu_dbg_log("sdl: wave-49 Cirrus BLTCopy: first BLT success "
++                         "(src_off=0x%06lx dst_off=0x%06lx %dx%d "
++                         "src_pitch=%d dst_pitch=%d)",
++                         (unsigned long)src_vram_off,
++                         (unsigned long)dst_vram_off,
++                         w, h, src_pitch, dst_pitch);
++    }
++    return true;
++}
++
+ #endif // SDL_VIDEO_DRIVER_DOSVESA
+-- 
+2.47.3
+

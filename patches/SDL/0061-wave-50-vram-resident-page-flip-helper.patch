@@ -1,0 +1,645 @@
+From 07ff8d1d4df43876eccb1daaa8c7c159c0f1315d Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 14 May 2026 18:10:16 -0700
+Subject: [PATCH] dos: Phase 11 patch 0061 -- wave-50 cycle 1 VRAM-resident
+ page-flip helper
+
+Cycle 1 of the multi-wave VRAM-resident render pivot per
+docs/internal/WAVE-50-VRAM-RESIDENT-RENDER-DESIGN.md. LOAD-BEARING
+DIAGNOSTIC, not an fps lever -- this cycle answers whether VRAM writes
+(LFB nearptr or banked dosmemput to off-screen pages) escape the
+PODP83 sysmem 20 MB/s bandwidth ceiling that probe-engineer's wave-50 v0
+verdict identified as structural. If they do, the multi-cycle pivot
+proceeds (cycle 2 repoints engine surface; cycle 3 reanimates Cirrus
+BLT); if they don't, KPI retargets to ~30 fps per WAVE-49 sec. 7.
+
+Three new public APIs in include/SDL3/SDL_dosvesa_directaccess.h:
+
+  #define SDL_HINT_DOSKUTSU_VRAM_RESIDENT "SDL_HINT_DOSKUTSU_VRAM_RESIDENT"
+  bool SDL_DOSVesaGetBackBufferPage(const SDL_DOSVesaDirectState *st,
+                                     int page_idx, Uint8 **out_nearptr,
+                                     int *out_pitch);
+  bool SDL_DOSVesaPagePresent(const SDL_DOSVesaDirectState *st, int page_idx);
+
+The killswitch hint is strict-"1" match per CLAUDE.md DOSKUTSU env-var
+convention: default OFF for cycle 1 (load-bearing diagnostic ships
+default-OFF per [[author_flagged_caveat_overrides_let_data_decide]]);
+flips to default-ON after cycle 2 validates fps gain.
+
+Encoding anchor: tests/probes/crtcswap.c verdict at
+docs/internal/WAVE-50-CRTCSWAP-PROBE-RESULTS.md sec. 3 confirmed
+BYTE-units encoding for CRTC[0x0C/0x0D] on g2k Cirrus 5434 + UniVBE 6.70
+in VBE 8bpp linear modes; CRTC[0x1B] bit 0 carries display-start bit 16
+for offsets >= 65536. The 76800-byte page-1 offset fits in 17 bits via
+0x0C/0x0D + 0x1B bit 0. Helper defensively programs CRTC[0x1D] bits
+6:7 for bits 17:18 even though pages 0..1 don't need them, so the
+register state stays deterministic across page toggles.
+
+Strict Cirrus 5434 detection (CRTC[0x27] == 0xA8) reuses SDL/0060's
+SDL_DOSVesaDirect_IsCirrusBLTAvailable() probe -- same chip-rev anchor,
+same killswitch composition (SDL_HINT_DOSKUTSU_CIRRUS_BLT=0 also
+disables this helper because the probe was verified only on Cirrus 5434).
+Other Cirrus variants (5430/5436/5446) and non-Cirrus VESA chips fall
+through to "not available" since the encoding probe verified only on
+5434 + UniVBE 6.7.
+
+Runtime encoding sanity check per probe-engineer recommendation:
+
+  - CRTC[0x14] bit 6 (Underline Location, double-word mode flag) --
+    if set, abort engagement with a WARN banner; the probe verified
+    only byte-units encoding, so dword addressing is a clearly
+    disqualifying configuration.
+  - CRTC[0x17] bit 6 (Mode Control, word/byte mode flag) -- logged
+    for diagnostic visibility but NOT used to gate engagement (VGA
+    bit polarity varies across implementations; safe default is to
+    trust the probe-verified byte path unless dword is configured).
+  - SR[0x07] (Cirrus extended display mode) -- logged for diagnostic
+    visibility only.
+
+Divert mechanism in SDL_DOSVesaDirectPresentFull:
+
+  - Pre-divert path (default-OFF): identical to pre-patch behavior;
+    LFB SDL_memcpy / banked dosmemput / BankedDosmemput at
+    st->page_offset (=0 in current build).
+  - Divert path (VRAM_RESIDENT=1 + chip OK + sanity OK):
+    1. Compute back-page = 1 - visible_page; back_offset = back * fb_size.
+    2. Write pixels to back_offset via LFB SDL_memcpy or banked
+       BankedDosmemput (single-bank dosmemput cannot reach the
+       offset-76800 back-page because it crosses the 64 KB bank
+       boundary -- force the multi-bank walker).
+    3. CRTC swap to back_offset via direct programming of CRTC[0x0D]
+       (low), CRTC[0x0C] (high), CRTC[0x1B] bit 0 (bit-16 extension),
+       and CRTC[0x1D] bits 6:7 (bits 17:18 extension; defensively
+       cleared for pages 0/1).
+    4. WaitForVBlank() (existing primitive at SDL_dosframebuffer.c:1098)
+       before CRTC programming so the swap takes effect at the next
+       frame boundary instead of mid-scan (tear-free).
+    5. Toggle visible_page_idx so the NEXT present writes to the
+       OTHER page.
+
+Engagement-flag decoupled from back-page-offset value: the back-page
+byte offset is LEGITIMATELY 0 when the visible page is page 1
+(back = page 0 = offset 0). The compute helper returns a bool
+"engaged" plus an out-pointer for the offset, so callers cannot
+mistakenly disengage the divert based on offset==0.
+
+doskutsu_dbg_log banners (smoke-gate two-witness pattern):
+
+  - "sdl: wave-50 VRAM-resident page-flip ENABLED (back-page=0x012C00;
+    CRTC encoding=BYTE verified via probe; CRTC[0x14]=0xXX CRTC[0x17]=
+    0xXX SR[0x07]=0xXX)" on successful first engagement.
+  - "sdl: wave-50 VRAM-resident page-flip DISABLED (chip not Cirrus
+    5434 OR ...)" on non-5434 fallback.
+  - "sdl: wave-50 VRAM-resident page-flip DISABLED (chip configured
+    for non-byte encoding: CRTC[0x14]=0xXX bit6=1 (dword); ...
+    UNEXPECTED -- file probe-engineer follow-up)" on sanity-check
+    fail.
+  - "sdl: wave-50 VRAM-resident page-flip first swap (back_page_
+    byte_offset=0x000000; visible_page now=1)" once on first
+    successful divert + swap (runtime-witness for the two-witness
+    smoke gate).
+
+Per CLAUDE.md sec. Critical Rules:
+  - Strict-match env-var per DOSKUTSU convention.
+  - ASCII-only source text.
+  - "DOSKUTSU patch 0061" block comment for attribution; no DOS-PORT
+    tag (this is SDL3-DOS-backend-native code, not port glue).
+
+No engine code touched -- cycle 1 mechanism is "SDL CRTC-page-flip
+primitive + VRAM-back-page write divert + runtime encoding sanity
+check". Cycle 2 (nx-engine surface repointing) ships separately if
+the cycle-1 diagnostic validates the LFB-bandwidth assumption.
+
+Workspace-local patch (per sdl_ai_policy memory + this repo's
+vendor/SDL/CLAUDE.md notice: AI-authored SDL patches stay local,
+never contributed back).
+
+Modifies:
+  include/SDL3/SDL_dosvesa_directaccess.h  (new API + hint name decl)
+  src/video/dos/SDL_dosframebuffer.c       (divert + helpers + statics)
+
+Engine-side integration (cycle 2) + smoke-gate BANNERS array update
++ docs/internal/BOOT.md entry live in the parent doskutsu repo (not
+in this vendor commit).
+---
+ include/SDL3/SDL_dosvesa_directaccess.h | 134 ++++++++++
+ src/video/dos/SDL_dosframebuffer.c      | 338 ++++++++++++++++++++++--
+ 2 files changed, 456 insertions(+), 16 deletions(-)
+
+diff --git a/include/SDL3/SDL_dosvesa_directaccess.h b/include/SDL3/SDL_dosvesa_directaccess.h
+index 528f1e7f0..041d140fd 100644
+--- a/include/SDL3/SDL_dosvesa_directaccess.h
++++ b/include/SDL3/SDL_dosvesa_directaccess.h
+@@ -633,6 +633,140 @@ extern SDL_DECLSPEC bool SDLCALL SDL_DOSVesaDirect_BLTCopy(Uint32 src_vram_off,
+                                                              int src_pitch,
+                                                              int dst_pitch);
+ 
++/* ------------------------------------------------------------------------
++ * VRAM-resident page-flip helpers (patch SDL/0061, wave-50 cycle 1)
++ * ------------------------------------------------------------------------
++ *
++ * Off-screen VRAM page management + CRTC start-address swap, for engines
++ * that want to bypass the per-frame sysmem-to-VRAM dosmemput by writing
++ * pixel data directly into an off-screen VRAM page and then flipping the
++ * display origin to that page via CRTC[0x0C/0x0D] direct programming.
++ *
++ * Cycle 1 (wave-50) is a LOAD-BEARING DIAGNOSTIC: when
++ * SDL_HINT_DOSKUTSU_VRAM_RESIDENT=1, SDL diverts the existing dosmemput
++ * / SDL_memcpy in SDL_DOSVesaDirectPresentFull to write to an off-screen
++ * back-page, then CRTC-swaps that page into visibility. Engine code is
++ * unchanged. The diagnostic answers whether VRAM writes (LFB nearptr OR
++ * banked dosmemput to off-screen pages) escape the PODP83 sysmem
++ * 20 MB/s bandwidth ceiling that probe-engineer's wave-50 v0 verdict
++ * identified as structural. If they do, the multi-cycle VRAM-resident
++ * pivot proceeds (cycle 2 repoints the engine surface; cycle 3
++ * reanimates the Cirrus BLT helper). If they don't, the pivot dies and
++ * the project retargets the KPI per Option 3 of WAVE-49-LOG-ANALYSIS
++ * sec. 7.
++ *
++ * Encoding anchor: probe-engineer's `tests/probes/crtcswap.c` verdict
++ * at `docs/internal/WAVE-50-CRTCSWAP-PROBE-RESULTS.md` sec. 3 confirmed
++ * BYTE-units encoding for CRTC[0x0C/0x0D] on g2k Cirrus 5434 + UniVBE
++ * 6.70 in VBE 8bpp linear modes; CRTC[0x1B] bit 0 carries the
++ * display-start bit 16 for offsets >= 65536. The 76800-byte page-1
++ * offset fits in 17 bits via 0x0C/0x0D + 0x1B bit 0; CRTC[0x1D] high
++ * bits are NOT needed for offsets < 256 KB.
++ *
++ * Strict Cirrus 5434 detection (CRTC[0x27] == 0xA8) is required;
++ * other Cirrus variants and non-Cirrus VESA chips fall through to
++ * "not available" because the encoding probe verified only on 5434.
++ * Killswitch SDL_HINT_DOSKUTSU_VRAM_RESIDENT=0 (default; cycle 1)
++ * keeps the legacy sysmem-to-visible-page path; =1 engages the divert.
++ *
++ * RUNTIME ENCODING SANITY CHECK: at first engagement the helper reads
++ * CRTC[0x14] (Underline Location, bit 6 = double-word mode flag),
++ * CRTC[0x17] (Mode Control, bit 6 = word/byte mode flag), and SR[0x07]
++ * (Cirrus extended display mode). If CRTC[0x14] bit 6 is set (dword
++ * addressing active), engagement aborts with a WARN banner and the
++ * helper returns false; engine falls back to the existing sysmem
++ * path. Other reads are logged for diagnostic visibility but do not
++ * gate engagement (VGA bit polarity for word/byte varies across
++ * implementations; the safe-default is to trust the probe-verified
++ * byte path unless a clearly disqualifying configuration appears).
++ */
++
++/**
++ * Hint name registered for the wave-50 VRAM-resident page-flip divert.
++ *
++ * Strict-`"1"` match per CLAUDE.md DOSKUTSU env-var convention: only
++ * the literal string "1" engages the back-page-write + CRTC-swap path.
++ * Any other value (unset, "0", empty, etc.) keeps the legacy
++ * sysmem-to-visible-page dosmemput. Default OFF for cycle 1 (load-
++ * bearing diagnostic; ship default-OFF per
++ * [[author_flagged_caveat_overrides_let_data_decide]]); flips to
++ * default-ON after cycle 2 validates fps gain.
++ */
++#define SDL_HINT_DOSKUTSU_VRAM_RESIDENT "SDL_HINT_DOSKUTSU_VRAM_RESIDENT"
++
++/**
++ * Returns an LFB nearptr to a specific off-screen VRAM page.
++ *
++ * `page_idx == 0` returns the visible page (offset 0 in VRAM);
++ * `page_idx == 1` returns the first off-screen back-buffer page at
++ * VRAM byte offset `fb_size`; higher indices follow at multiples of
++ * `fb_size`. The pitch is the same as the visible mode pitch
++ * (`st->vram_pitch`). The returned pointer is a DPMI-mapped nearptr
++ * usable for direct CPU writes; the chip BLT engine (SDL/0060) reads
++ * from the same VRAM but uses byte offsets, not pointers.
++ *
++ * Returns false if LFB is not engaged (banked-only path -- the engine
++ * must use SDL_DOSVesaDirectBankedFlush() with the appropriate
++ * `dst_offset` for off-screen page writes instead), if the snapshot is
++ * invalid, or if `page_idx` is out of range. The helper caps practical
++ * use to page_idx in [0..3] so the byte offset stays under 256 KB and
++ * Cirrus 5434 CRTC[0x1D] high-bit programming is not required.
++ *
++ * Caller-side responsibility: writes through the returned nearptr go
++ * directly to VRAM; reads from VRAM are slow (~5 MB/s on Cirrus 5434)
++ * so do NOT read-modify-write through this pointer for any non-trivial
++ * region. Stage in sysmem instead.
++ *
++ * \param st snapshot from SDL_DOSVesaDirectGetState().
++ * \param page_idx page index; 0 = visible, 1+ = off-screen back buffers.
++ * \param out_nearptr receives the LFB nearptr to the page; NULL-checked.
++ * \param out_pitch receives the VRAM mode pitch in bytes; NULL-checked.
++ * \returns true on success; false on invalid snapshot, banked-only
++ *          path, NULL output pointer, or out-of-range page_idx.
++ *
++ * \threadsafety Single-threaded.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0061).
++ *
++ * \sa SDL_DOSVesaPagePresent
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSVesaGetBackBufferPage(const SDL_DOSVesaDirectState *st,
++                                                                int page_idx,
++                                                                Uint8 **out_nearptr,
++                                                                int *out_pitch);
++
++/**
++ * Swap the displayed VRAM page via direct CRTC start-address programming.
++ *
++ * Programs CRTC port 0x3D4 register 0x0D (low byte) + 0x0C (high byte)
++ * + 0x1B bit 0 (Cirrus 5434 display-start bit 16 extension) with the
++ * byte offset `page_idx * st->fb_size`. Waits one VBL via the existing
++ * WaitForVBlank() primitive (port 0x3DA bit 3 edge) so the swap is
++ * tear-free.
++ *
++ * Cycle-1 self-test contract: when the SDL_HINT_DOSKUTSU_VRAM_RESIDENT
++ * divert is engaged, SDL_DOSVesaDirectPresentFull calls this helper
++ * internally after writing pixel data to the back-page. Engines need
++ * not call this directly until cycle 2 (engine surface repointing).
++ *
++ * Returns false on invalid snapshot, out-of-range page_idx, runtime
++ * encoding sanity-check failure (chip configured for dword addressing),
++ * or non-Cirrus-5434 chip detection.
++ *
++ * \param st snapshot from SDL_DOSVesaDirectGetState().
++ * \param page_idx page index to make visible; 0 = original visible
++ *                 page, 1+ = off-screen pages.
++ * \returns true on success; false on invalid input or sanity-check fail.
++ *
++ * \threadsafety Single-threaded.
++ *
++ * \since This function is available since SDL 3.2.0 (DOSKUTSU patch 0061).
++ *
++ * \sa SDL_DOSVesaGetBackBufferPage
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSVesaPagePresent(const SDL_DOSVesaDirectState *st,
++                                                          int page_idx);
++
+ /* Ends C function definitions when using C++ */
+ #ifdef __cplusplus
+ }
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 8fdc0fa00..18d02e062 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -2552,6 +2552,31 @@ void SDL_DOSVesaDirectProgramPalette(const SDL_Palette *palette)
+                            _instr_t_entry);
+ }
+ 
++// DOSKUTSU patch 0061 (Phase 11 wave-50 cycle 1) -- forward declarations
++// for the VRAM-resident page-flip divert helpers used from
++// SDL_DOSVesaDirectPresentFull below. Bodies appear at end of file
++// (after the SDL/0060 BLTCopy helpers) so the patch additions form a
++// contiguous block. Both helpers operate on the (single-TU) statics
++// declared alongside the bodies.
++//
++//   _vram_resident_compute_back_page(st, *out_back_off):
++//     Returns true when the divert is engaged; *out_back_off receives
++//     the VRAM byte offset of the back-buffer page (= back_idx *
++//     st->fb_size, where back_idx = 1 - visible_page_idx; legitimately
++//     0 when visible_page = page 1). Returns false when divert is not
++//     engaged (killswitch off OR chip not 5434 OR sanity fail);
++//     *out_back_off is set to 0 in that case but the caller should use
++//     st->page_offset instead. Lazy-probes killswitch + chip detection
++//     + runtime encoding sanity check on first call.
++//
++//   _vram_resident_finish_swap(back_page_byte_offset):
++//     Programs CRTC[0x0D]+[0x0C]+[0x1B] for the new display start in
++//     BYTE-units encoding, then toggles the internal visible-page index
++//     so the NEXT present writes to the OTHER page.
++static bool _vram_resident_compute_back_page(const SDL_DOSVesaDirectState *st,
++                                              Uint32 *out_back_off);
++static void _vram_resident_finish_swap(Uint32 back_page_byte_offset);
++
+ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+                                    const void *pixels)
+ {
+@@ -2578,30 +2603,59 @@ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+         _instr_record_dv_present_at_exit(_instr_t_entry);
+         return false;
+     }
++
++    // DOSKUTSU patch 0061 (Phase 11 wave-50 cycle 1) -- VRAM-resident
++    // page-flip divert. When SDL_HINT_DOSKUTSU_VRAM_RESIDENT=1 AND chip
++    // is Cirrus 5434 AND runtime encoding sanity-check passes, redirect
++    // the present write to an off-screen back-page and CRTC-swap. Else
++    // fall through to the legacy write-to-visible-page path. The
++    // forward-declared helpers below live at end of file. Engine code
++    // remains unchanged for cycle 1; this is the load-bearing diagnostic
++    // for whether VRAM writes escape the sysmem 20 MB/s ceiling.
++    //
++    // The helper returns a tri-valued result via the out-pointer pattern:
++    // engaged=true means use _vr_back_off as dst; engaged=false means
++    // take the legacy path (caller passes st->page_offset). The
++    // engagement flag is decoupled from the back-page offset value
++    // because the offset legitimately becomes 0 when the visible page
++    // is page 1 (back-page = page 0; offset 0 = visible region).
++    Uint32 _vr_back_off = 0;
++    const bool _vr_engaged = _vram_resident_compute_back_page(st, &_vr_back_off);
++    const Uint32 _dst_offset = _vr_engaged ? _vr_back_off : st->page_offset;
++
+     if (!st->use_dosmemput) {
+         // LFB nearptr — single SDL_memcpy. vram_ptr already includes
+-        // display_start_offset; page_offset is the future-page-flip
+-        // hook and is 0 in the current build.
++        // display_start_offset; _dst_offset is the back-page offset
++        // when VRAM-resident is engaged, else the legacy page_offset
++        // (0 today).
+         if (!st->vram_ptr) {
+             _instr_record_dv_present_at_exit(_instr_t_entry);
+             return false;
+         }
+-        SDL_memcpy(st->vram_ptr + st->page_offset, pixels, st->fb_size);
+-        _instr_record_dv_present_at_exit(_instr_t_entry);
+-        return true;
++        SDL_memcpy(st->vram_ptr + _dst_offset, pixels, st->fb_size);
++    } else if (_vr_engaged || st->banked_multibank) {
++        // Banked path -- multi-bank walker. VRAM-resident always uses
++        // this branch because the back-page (byte 76800) crosses the
++        // 64 KB bank boundary; single-bank dosmemput cannot reach it.
++        int current_bank = -1;
++        BankedDosmemput((const Uint8 *)pixels, st->fb_size, _dst_offset,
++                        st->win_gran_bytes, st->win_size_bytes,
++                        st->win_base, st->win_func_ptr, &current_bank);
++    } else {
++        // Banked path -- single-bank fast case (legacy behavior).
++        dosmemput(pixels, st->fb_size, st->vram_phys + _dst_offset);
+     }
+-    // Banked path: single dosmemput for single-bank, BankedDosmemput
+-    // walk for multi-bank. dst_offset is page_offset (0 today; future
+-    // page-flip back-page offset).
+-    if (!st->banked_multibank) {
+-        dosmemput(pixels, st->fb_size, st->vram_phys + st->page_offset);
+-        _instr_record_dv_present_at_exit(_instr_t_entry);
+-        return true;
++
++    if (_vr_engaged) {
++        // CRTC swap so the just-written back-page becomes visible. The
++        // helper waits one VBL for tear-free presentation, programs
++        // CRTC[0x0D] + [0x0C] + [0x1B] bit 0 (BYTE-units encoding per
++        // probe-engineer's crtcswap verdict), and toggles the internal
++        // s_vram_resident_visible_page so the NEXT present writes to
++        // the OTHER page.
++        _vram_resident_finish_swap(_vr_back_off);
+     }
+-    int current_bank = -1;
+-    BankedDosmemput((const Uint8 *)pixels, st->fb_size, st->page_offset,
+-                    st->win_gran_bytes, st->win_size_bytes,
+-                    st->win_base, st->win_func_ptr, &current_bank);
++
+     _instr_record_dv_present_at_exit(_instr_t_entry);
+     return true;
+ }
+@@ -2829,4 +2883,256 @@ bool SDL_DOSVesaDirect_BLTCopy(Uint32 src_vram_off,
+     return true;
+ }
+ 
++// ============================================================================
++// DOSKUTSU patch 0061 (Phase 11 wave-50 cycle 1) -- VRAM-resident page-flip.
++//
++// Two new public helpers (SDL_DOSVesaGetBackBufferPage +
++// SDL_DOSVesaPagePresent) plus an in-place divert inside
++// SDL_DOSVesaDirectPresentFull (above) that, when
++// SDL_HINT_DOSKUTSU_VRAM_RESIDENT=1, redirects the present write to an
++// off-screen back-page and CRTC-swaps that page into visibility. Engine
++// code is unchanged for cycle 1; this is the load-bearing diagnostic
++// for whether VRAM writes (LFB or banked dosmemput to off-screen pages)
++// escape the PODP83 sysmem 20 MB/s ceiling.
++//
++// Encoding anchor: tests/probes/crtcswap.c verdict at
++// docs/internal/WAVE-50-CRTCSWAP-PROBE-RESULTS.md sec. 3 = BYTE units;
++// CRTC[0x1B] bit 0 carries display-start bit 16 for offsets >= 65536.
++// CRTC[0x1D] high bits NOT needed for offsets < 256 KB (we cap practical
++// page count at 4 -> max offset 307200 = under 19 bits; bits 17/18
++// land in CRTC[0x1D] which we DO program in the helper for safety).
++//
++// Runtime encoding sanity check: at first engagement, reads CRTC[0x14]
++// bit 6 (dword-mode flag) and aborts if set. Other reads (CRTC[0x17]
++// bit 6 word/byte, SR[0x07] Cirrus ext) are logged for diagnostic
++// visibility but do not gate engagement (VGA bit polarity for word/byte
++// varies; safe default is trust the probe-verified byte path unless
++// dword is clearly configured).
++//
++// Workspace-local patch; never upstreamed (per sdl_ai_policy memory).
++// ============================================================================
++
++// VRAM-resident state. Tri-state availability: -1 unknown / 0 disabled
++// (killswitch OFF or chip not 5434 or sanity fail) / 1 enabled.
++static int _vram_resident_state = -1;
++
++// Visible-page index toggle. Starts at 0 (legacy state: visible page is
++// always page 0 before any divert engagement). On each successful
++// CRTC swap, toggles between 0 and 1 -- so the present write always
++// targets the page NOT currently visible.
++static int _vram_resident_visible_page = 0;
++
++// One-time banner emit gate so the smoke gate's two-witness check sees
++// "first engagement" + "first success" without per-flip log spam.
++static int _vram_resident_engage_banner_logged = 0;
++
++// CRTC index/data ports already named by SDL/0060 as CIRRUS_CRTC_IDX /
++// CIRRUS_CRTC_DATA (0x3D4 / 0x3D5). Sequencer index/data ports also
++// reused: CIRRUS_SR_INDEX / CIRRUS_SR_DATA (0x3C4 / 0x3C5).
++
++static inline Uint8 _crtc_read(Uint8 idx)
++{
++    outportb(CIRRUS_CRTC_IDX, idx);
++    return inportb(CIRRUS_CRTC_DATA);
++}
++
++static inline void _crtc_write(Uint8 idx, Uint8 val)
++{
++    outportb(CIRRUS_CRTC_IDX, idx);
++    outportb(CIRRUS_CRTC_DATA, val);
++}
++
++static inline Uint8 _sr_read(Uint8 idx)
++{
++    outportb(CIRRUS_SR_INDEX, idx);
++    return inportb(CIRRUS_SR_DATA);
++}
++
++// Probe + cache VRAM-resident availability. Called lazily from the
++// PresentFull divert and from SDL_DOSVesaPagePresent. Emits a one-time
++// doskutsu_dbg_log banner narrating either ENABLED + sanity-check
++// register values, or DISABLED + reason.
++static int _vram_resident_check_enabled(void)
++{
++    if (_vram_resident_state >= 0) {
++        return _vram_resident_state;
++    }
++
++    // Killswitch first -- strict-"1" match (default-OFF for cycle 1).
++    const char *env = SDL_getenv("SDL_HINT_DOSKUTSU_VRAM_RESIDENT");
++    if (!env || env[0] != '1' || env[1] != 0) {
++        // No banner emitted in the default-off path; the absence of any
++        // wave-50 banner in the log is itself the "off" signal.
++        _vram_resident_state = 0;
++        return 0;
++    }
++
++    // Chip detect: reuse SDL/0060's Cirrus 5434 strict probe. Returns
++    // true iff CRTC[0x27]==0xA8 AND its own killswitch is not engaged.
++    // The probe-verified CRTC encoding is specific to Cirrus 5434 + UniVBE
++    // 6.7; we refuse engagement on other chips/firmware combinations.
++    if (!SDL_DOSVesaDirect_IsCirrusBLTAvailable()) {
++        doskutsu_dbg_log("sdl: wave-50 VRAM-resident page-flip DISABLED "
++                         "(chip not Cirrus 5434 OR SDL_HINT_DOSKUTSU_CIRRUS_BLT=0; "
++                         "engine uses sysmem fallback)");
++        _vram_resident_state = 0;
++        return 0;
++    }
++
++    // Runtime encoding sanity check per probe-engineer recommendation.
++    Uint8 crtc14 = _crtc_read(0x14);
++    Uint8 crtc17 = _crtc_read(0x17);
++    Uint8 sr07   = _sr_read(0x07);
++    bool dword_mode = (crtc14 & 0x40) != 0;
++
++    if (dword_mode) {
++        // Clearly disqualifying: dword addressing is active; the probe
++        // verified only the byte-units encoding. Fall back rather than
++        // risk programming the wrong display-start.
++        doskutsu_dbg_log("sdl: wave-50 VRAM-resident page-flip DISABLED "
++                         "(chip configured for non-byte encoding: "
++                         "CRTC[0x14]=0x%02X bit6=1 (dword); CRTC[0x17]=0x%02X "
++                         "SR[0x07]=0x%02X; falling back to dosmemput; "
++                         "UNEXPECTED -- file probe-engineer follow-up)",
++                         (unsigned)crtc14, (unsigned)crtc17, (unsigned)sr07);
++        _vram_resident_state = 0;
++        return 0;
++    }
++
++    doskutsu_dbg_log("sdl: wave-50 VRAM-resident page-flip ENABLED "
++                     "(back-page=0x012C00; CRTC encoding=BYTE verified "
++                     "via probe; CRTC[0x14]=0x%02X CRTC[0x17]=0x%02X "
++                     "SR[0x07]=0x%02X)",
++                     (unsigned)crtc14, (unsigned)crtc17, (unsigned)sr07);
++    _vram_resident_state = 1;
++    _vram_resident_visible_page = 0; // reset toggle on (re-)enable
++    return 1;
++}
++
++// Helper called from SDL_DOSVesaDirectPresentFull's divert. Returns
++// true when the divert is engaged; *out_back_off receives the back-page
++// byte offset (= back_idx * fb_size, where back_idx = 1 - visible).
++// Returns false when not engaged; *out_back_off is set to 0.
++//
++// IMPORTANT: the back-page offset is LEGITIMATELY 0 when visible_page
++// is page 1 (the back-buffer is then page 0 = offset 0). Callers MUST
++// gate on the bool return value, not on (*out_back_off != 0), because
++// offset 0 is a valid in-band value once swaps have toggled the
++// visible-page index.
++static bool _vram_resident_compute_back_page(const SDL_DOSVesaDirectState *st,
++                                              Uint32 *out_back_off)
++{
++    if (out_back_off) {
++        *out_back_off = 0;
++    }
++    if (!st || !st->valid || st->fb_size == 0 || !out_back_off) {
++        return false;
++    }
++    if (_vram_resident_check_enabled() == 0) {
++        return false;
++    }
++    int back_idx = 1 - _vram_resident_visible_page;
++    *out_back_off = (Uint32)back_idx * st->fb_size;
++    return true;
++}
++
++// CRTC start-address swap in BYTE units. Programs 0x0D (low byte),
++// 0x0C (high byte), and Cirrus 5434 extension regs 0x1B bit 0 (bit 16)
++// + 0x1D bits 6:0 cleared (bits 23:17; we only need bits up to 17 for
++// page indices 0..3 of 76800 bytes each = max offset 230400 < 2^18).
++// Waits one VBL via WaitForVBlank() (already in this TU) for tear-free
++// swap; under DOSBox-X this is a no-op since the emulated VBL bit
++// toggles at high frequency.
++static void _crtc_set_display_start_byte(Uint32 byte_offset)
++{
++    // Wait for vertical blanking before re-programming so the new
++    // display origin takes effect at the next frame boundary instead
++    // of mid-scan. WaitForVBlank() is the existing primitive at
++    // SDL_dosframebuffer.c:1098.
++    WaitForVBlank();
++
++    // Low/high address bytes (bits 0..15).
++    _crtc_write(0x0D, (Uint8)(byte_offset & 0xFF));
++    _crtc_write(0x0C, (Uint8)((byte_offset >> 8) & 0xFF));
++
++    // Cirrus 5434 display-start bit 16 lives in CRTC[0x1B] bit 0.
++    // Read-modify-write to preserve the other bits in 0x1B (chip-state
++    // controls; should not be clobbered).
++    Uint8 v1b = _crtc_read(0x1B);
++    v1b = (Uint8)((v1b & ~(Uint8)0x01) |
++                  (Uint8)((byte_offset >> 16) & 0x01));
++    _crtc_write(0x1B, v1b);
++
++    // Cirrus 5434 display-start bits 17:18 live in CRTC[0x1D] bits 6:7.
++    // We program them defensively even though the probe verdict
++    // covers only bit 16 (page-1 offset 76800 = 0x012C00 needs only
++    // bit 16). Pages 2/3 would set these bits; clearing them in the
++    // common case keeps the state deterministic across page toggles.
++    Uint8 v1d = _crtc_read(0x1D);
++    Uint8 ext_hi = (Uint8)(((byte_offset >> 17) & 0x03) << 6);
++    v1d = (Uint8)((v1d & ~(Uint8)0xC0) | ext_hi);
++    _crtc_write(0x1D, v1d);
++}
++
++// Helper called from SDL_DOSVesaDirectPresentFull's divert AFTER the
++// write to the back-page completes. Programs CRTC for the new visible
++// origin, then toggles the visible-page index so the next present
++// targets the OTHER page.
++static void _vram_resident_finish_swap(Uint32 back_page_byte_offset)
++{
++    _crtc_set_display_start_byte(back_page_byte_offset);
++    _vram_resident_visible_page = 1 - _vram_resident_visible_page;
++
++    if (!_vram_resident_engage_banner_logged) {
++        _vram_resident_engage_banner_logged = 1;
++        doskutsu_dbg_log("sdl: wave-50 VRAM-resident page-flip first swap "
++                         "(back_page_byte_offset=0x%06lX; visible_page now=%d)",
++                         (unsigned long)back_page_byte_offset,
++                         _vram_resident_visible_page);
++    }
++}
++
++bool SDL_DOSVesaGetBackBufferPage(const SDL_DOSVesaDirectState *st,
++                                   int page_idx,
++                                   Uint8 **out_nearptr,
++                                   int *out_pitch)
++{
++    if (!st || !st->valid || !out_nearptr || !out_pitch) {
++        return false;
++    }
++    if (st->use_dosmemput || !st->vram_ptr) {
++        // Banked-only path: helper cannot return an LFB nearptr.
++        // Engine must use SDL_DOSVesaDirectBankedFlush() with the
++        // appropriate dst_offset to push pixel data to off-screen
++        // pages. Documented in the public header.
++        *out_nearptr = NULL;
++        *out_pitch = 0;
++        return false;
++    }
++    if (page_idx < 0 || page_idx > 3 || st->fb_size == 0) {
++        *out_nearptr = NULL;
++        *out_pitch = 0;
++        return false;
++    }
++    *out_nearptr = st->vram_ptr + (Uint32)page_idx * st->fb_size;
++    *out_pitch = st->vram_pitch;
++    return true;
++}
++
++bool SDL_DOSVesaPagePresent(const SDL_DOSVesaDirectState *st, int page_idx)
++{
++    if (!st || !st->valid || st->fb_size == 0) {
++        return false;
++    }
++    if (page_idx < 0 || page_idx > 3) {
++        return false;
++    }
++    if (_vram_resident_check_enabled() == 0) {
++        return false;
++    }
++    _crtc_set_display_start_byte((Uint32)page_idx * st->fb_size);
++    _vram_resident_visible_page = page_idx;
++    return true;
++}
++
+ #endif // SDL_VIDEO_DRIVER_DOSVESA
+-- 
+2.47.3
+

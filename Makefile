@@ -1,13 +1,12 @@
-# doskutsu -- top-level orchestrator for the five-stage DOS cross-build.
+# doskutsu -- top-level orchestrator for the four-stage DOS cross-build.
 #
 # Stages (each a CMake invocation against the DJGPP toolchain, each installing
 # into build/sysroot/ so the next stage consumes it):
 #
 #   1. sdl3        -- libsdl-org/SDL @ pinned SHA, with DOS backend from PR #15377
-#   2. sdl2-compat -- libsdl-org/sdl2-compat, forwarding SDL2 API to SDL3
-#   3. sdl2-mixer  -- SDL_mixer release-2.8.x, built against sdl2-compat
-#   4. sdl2-image  -- SDL_image release-2.8.x, built against sdl2-compat
-#   5. nxengine    -- nxengine/nxengine-evo, links everything into build/doskutsu.exe
+#   2. sdl3-mixer  -- SDL3_mixer, built against the staged SDL3
+#   3. sdl3-image  -- SDL3_image, built against the staged SDL3
+#   4. nxengine    -- nxengine/nxengine-evo, links everything into build/doskutsu.exe
 #
 # See PLAN.md for the phased rationale behind each stage; see docs/BUILDING.md
 # for prerequisites and troubleshooting.
@@ -20,10 +19,11 @@
 #
 # tools/djgpp is a symlink to ~/emulators/tools/djgpp, created by
 # scripts/setup-symlinks.sh. If that symlink isn't there the djgpp-check
-# target fails loud.
+# target fails loud. Set DJGPP_PREFIX=/path to use a system DJGPP install
+# instead of the symlink (matches scripts/bootstrap.sh's documented path).
 
 REPO_ROOT    := $(abspath .)
-DJGPP_ROOT   := $(REPO_ROOT)/tools/djgpp
+DJGPP_ROOT   := $(if $(DJGPP_PREFIX),$(DJGPP_PREFIX),$(REPO_ROOT)/tools/djgpp)
 DJGPP_BIN    := $(DJGPP_ROOT)/bin
 DJGPP_TBIN   := $(DJGPP_ROOT)/i586-pc-msdosdjgpp/bin
 
@@ -34,7 +34,7 @@ CXX      := i586-pc-msdosdjgpp-g++
 STUBEDIT := stubedit
 
 # CMake toolchain file lives inside the SDL3 tree (PR #15377 ships it).
-# It's the canonical DJGPP CMake toolchain; sdl2-compat / mixer / image / nxengine
+# It's the canonical DJGPP CMake toolchain; sdl3-mixer / sdl3-image / nxengine
 # all use the same one.
 TOOLCHAIN_FILE := $(REPO_ROOT)/vendor/SDL/build-scripts/i586-pc-msdosdjgpp.cmake
 
@@ -949,6 +949,22 @@ PROBE_ORGSYNTH_EXE := $(PROBES_DIR)/orgsynth.exe
 PROBE_WBMIDI_SRC := tests/probes/wbmidi.c
 PROBE_WBMIDI_EXE := $(PROBES_DIR)/wbmidi.exe
 
+# P22 -- Phase 11 wave-50 cycle 1: Cirrus 5434 CRTC start-address
+#   encoding probe. Gates SDL/0061 page-flip helper authoring.
+#   Per sdl-engine STOP-and-ack: VBE 0x4F07 silently fails on Cirrus 5434
+#   + UNIVBE 6.7 (patch SDL/0014 documents this); direct CRTC port
+#   programming is the only viable mechanism, but the start-address
+#   encoding unit (byte/word/dword/scanline) is chip-config-dependent
+#   at mode-set time. Probe writes 4 sentinel VRAM slabs at known
+#   offsets, then for each candidate encoding programs CRTC[0x0C/0x0D]
+#   + Cirrus ext CRTC[0x1B/0x1D] to point at offset 76800, waits one
+#   VBL, reads back latched values + emits to CRTCSWAP.LOG.
+#   Pure DJGPP. Real-HW iter: bundle alongside CWSDPMI.EXE +
+#   tests/probes/crtcswap.bat. Runtime ~12 sec.
+#   HAZARD: low; atexit restores text mode + zeros CRTC start-address.
+PROBE_CRTCSWAP_SRC := tests/probes/crtcswap.c
+PROBE_CRTCSWAP_EXE := $(PROBES_DIR)/crtcswap.exe
+
 # P21 -- Phase 11 wave-41 task #10 + wave-43 task #16: comprehensive HW-
 #   inventory snapshot + RUNMANIFEST schema v1 emit.
 #
@@ -1150,7 +1166,7 @@ $(PROBE_WBMIDI_EXE): $(PROBE_WBMIDI_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke crtcswap sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -1452,7 +1468,18 @@ probes-p21: $(PROBE_HWINV_EXE)
 hwinv-dosbox-smoke: $(PROBE_HWINV_EXE) $(CWSDPMI_EXE)
 	@tests/run-hwinv-smoke.sh
 
-probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21
+# P22 -- Phase 11 wave-50 cycle 1: Cirrus 5434 CRTC start-address probe.
+crtcswap: $(PROBE_CRTCSWAP_EXE)
+	@echo "Built $(PROBE_CRTCSWAP_EXE) -- wave-50 cycle 1 CRTC encoding probe (Cirrus 5434)."
+	@echo "  Gates SDL/0061 page-flip helper authoring per sdl-engine STOP-and-ack."
+	@echo "  Pure DJGPP. Real-HW iter: bundle alongside CWSDPMI.EXE +"
+	@echo "  tests/probes/crtcswap.bat. Output -> CRTCSWAP.LOG. Runtime ~12 sec."
+	@echo "  HAZARD: low; atexit restores text mode + zeros CRTC start-address."
+
+probes-p22: $(PROBE_CRTCSWAP_EXE)
+	@echo "Built P22 probe set: crtcswap.exe (wave-50 cycle 1 -- Cirrus CRTC encoding probe)"
+
+probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
 	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (BAT redirect)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"

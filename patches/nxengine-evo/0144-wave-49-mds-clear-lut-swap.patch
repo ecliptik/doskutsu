@@ -1,0 +1,442 @@
+From c70e6be47dfa455db0ce87c136e969476186f0da Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 14 May 2026 15:35:12 -0700
+Subject: [PATCH] perf phase 11 patch 0144 -- wave-49 H-A mds_clear LUT swap
+
+Per flush-instr's docs/internal/WAVE-49-MDS-CLEAR-DESIGN.md: per-row
+coverage LUT (240 bytes; 1 byte per screen-row) that skips the
+SDL_memset for rows guaranteed to be fully BG-covered by the BG tile
+layer that renders right after clearScreen. Bytes-eliminated
+bandwidth-bound lever (sec. 2.2 of design doc); architectural
+pressure-test of whether bandwidth-bound levers escape the wave-48
+cache-cost-matches-render-cost pattern.
+
+LEVER MECHANISM:
+- At map load (or any time map.tiles[][] mutates), walk the full map
+  width per row + aggregate via per-screen-Y scroll-range mapping.
+- LUT[sy] = 0 (skip) iff ALL map rows reachable at screen-Y sy have
+  zero tile-0 columns. LUT[sy] = 1 (clear) otherwise.
+- Lazy rebuild on map change OR tile mutation; explicit invalidate
+  hooks at the two mutation sites in the codebase.
+- DrawScene-scoped per-call signal gates the LUT dispatch path;
+  non-DrawScene clearScreen callers (title, save-select, mods menu,
+  end-game island, ScreenEffects flash) fall through to legacy full
+  memset because their BG tile layer doesn't subsequently render to
+  overwrite skipped rows.
+
+STOP-AND-ACK TRIGGER MITIGATIONS integrated (nx-engine wave-49 audit
+per flush-instr design contract sec. 6):
+- Trigger 1 (dynamic tile mutation): invalidate hooks at
+  map_ChangeTileWithSmoke (called from Heavypress boss + Balrog
+  cutscene + every AI tile-destroy) AND TSC <CMP at tsc.cpp:1062
+  (every scripted door-open / floor-reveal event). Lazy rebuild on
+  next clearScreen call after invalidate; ~76800 compares per
+  rebuild = negligible at TSC event cadence.
+- Trigger 2 (non-DrawScene clearScreen callers): per-call signal
+  via static flag set by DrawScene immediately before MdsClearTimer
+  scope, cleared immediately after. Renderer::clearScreen INDEX8
+  path checks the flag; only DrawScene-originated clears use the
+  LUT dispatch. Five non-DrawScene call sites identified in audit
+  (intro/title.cpp:66/367/387, pause/mods.cpp:75, endgame/island.
+  cpp:83, screeneffect.cpp:44/173) all naturally fall to legacy
+  full memset.
+- Trigger 3 (tile-ID 0 semantics): cleared via wave-34 patch 0130
+  documentation at map.cpp:126 ("tile_id 0 in Cave Story is the
+  'empty' tile -- no FG/BG draw -> backdrop pixel reaches the
+  composited framebuffer"). Canonical reuse; same conservatism
+  basis as wave-34's _build_bg_visible_table.
+
+FILES (~250 LOC total; ~70 LOC substantive + ~180 LOC comments per
+the design's load-bearing-correctness-doc convention):
+- src/map.h: API decls + correctness model docs (44 lines)
+- src/map.cpp: file-scope state + helpers + invalidation hook in
+  map_ChangeTileWithSmoke (165 lines)
+- src/graphics/Renderer.cpp: clearScreen INDEX8 path per-row
+  dispatch (32 lines)
+- src/game.cpp: DrawScene per-call signal set/reset (12 lines)
+- src/tsc.cpp: <CMP opcode invalidation hook (9 lines)
+
+KILLSWITCH: SDL_HINT_DOSKUTSU_MDS_CLEAR_LUT=0 (strict-0 match;
+default ON). Cached static-const-bool on first call; subsequent
+calls hit the cache. Per BOOT.md convention.
+
+PREDICTED OUTCOMES (per `[[perf_measurement_discipline]]`):
+- Canonical Mimiga scene: hypothesis 70% rows skippable
+  (sky regions clear; floor + walls skip). Bandwidth savings
+  ~54 KB / clearScreen call = ~1.6 ms saved at PODP83 17 MB/s
+  sysmem write speed.
+- Average across multi-scene TAS: -1 to -2 ms / flip = +0.5 to
+  +1.5 fps on the wave-48 30.02 fps baseline.
+- Architectural verdict at PLAY3 vs PLAY4 fps A/B: bandwidth-
+  bound levers viable vs absorbed-pattern. See
+  WAVE-49-MDS-CLEAR-DESIGN sec. 5.
+
+CORRECTNESS REASONING (per design sec. 2.3 + audit):
+- Skip-row pixels retain prior frame content; BG tile layer
+  subsequently overwrites EVERY pixel in those rows because by LUT
+  definition every column has tile != 0 in some reachable scroll
+  position.
+- Static analysis bound holds so long as map.tiles[][] doesn't
+  mutate; mutation invalidation hooks (trigger 1) cover the
+  failure mode.
+- Visual A/B at build-qa smoke is load-bearing per design sec. 6
+  trigger 5: any residual prior-frame pixels in nominally-cleared
+  areas = static analysis bug somewhere.
+
+Single-mechanism preserved per
+[[single_lever_per_binary_or_else_attribution_impossible]]:
+the lever is "per-row skip-clear via static BG-coverage LUT". NO
+ride-along correctness patches in this iter. NO audio code
+touched. NO wave-48 bg-skip code paths modified.
+
+Banner regex for tests/run-gameplay-smoke.sh BANNERS:
+"map: mds_clear LUT (ENABLED \(default\)|DISABLED \(killswitch\))"
+"mds-clear-lut: rebuilt N=\d+ entries \(k_skip=\d+% k_keep=\d+%"
+---
+ src/game.cpp              |  11 +++
+ src/graphics/Renderer.cpp |  44 +++++++++-
+ src/map.cpp               | 165 ++++++++++++++++++++++++++++++++++++++
+ src/map.h                 |  39 +++++++++
+ src/tsc.cpp               |   9 +++
+ 5 files changed, 264 insertions(+), 4 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index ff3b076..55f1a33 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -669,6 +669,16 @@ void DrawScene(void)
+   // changes in this iter.
+   const bool bg_skip_unchanged = map_backdrop_should_skip_clear_and_draw();
+ 
++  // patch 0144 (wave 49 mds_clear LUT): signal that the upcoming
++  // clearScreen call is from DrawScene's MdsClearTimer scope, where
++  // the per-row skip LUT is correctness-safe to engage. Non-DrawScene
++  // callers (title screen, save-select dialog, mods menu, end-game
++  // island, ScreenEffects flash) leave this flag false and fall
++  // through to the legacy full-screen memset path. The flag is reset
++  // immediately after the scope so any nested clearScreen call from
++  // map_draw_backdrop or further-down render code (none today, but
++  // defensive) also defaults to legacy.
++  map_mds_clear_lut_set_dispatch_eligible(true);
+   {
+     NXE::Diag::MdsClearTimer _mc;
+     if (!bg_skip_unchanged)
+@@ -678,6 +688,7 @@ void DrawScene(void)
+     // else: empty timer scope; ~0 us cost; preserves [mds-clear-stat]
+     // sample count parity with the legacy code path.
+   }
++  map_mds_clear_lut_set_dispatch_eligible(false);
+ 
+   // draw background map tiles
+   {
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index ef18544..c7ee478 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -6979,10 +6979,46 @@ void Renderer::clearScreen(uint8_t r, uint8_t g, uint8_t b)
+     if (win->format == SDL_PIXELFORMAT_INDEX8)
+     {
+       const Uint8 c = _packed_index_for(r, g, b);
+-      // 1 byte/pixel × pitch×h. SDL_memset is the natural fast path
+-      // (faster than per-Uint16 loop because byte stores fold trivially
+-      // into rep stosb on i486+).
+-      SDL_memset(win->pixels, c, (size_t)win->pitch * (size_t)win->h);
++      // patch 0144 (Phase 11 wave 49 mds_clear LUT): per-row skip
++      // dispatch when DrawScene marked this clearScreen call as
++      // dispatch-eligible AND the killswitch is unset AND the LUT is
++      // built for this map. The LUT marks rows guaranteed to be
++      // overwritten by the subsequent BG tile layer (every column has
++      // tile != 0) as skippable -- those rows skip the per-row
++      // SDL_memset entirely. Bytes-eliminated bandwidth-bound lever
++      // per WAVE-49-MDS-CLEAR-DESIGN sec. 2.2. Non-DrawScene callers
++      // (title / menus / screen effects / endgame) leave
++      // dispatch_eligible=false and fall to the legacy full memset
++      // -- their BG tile layer doesn't subsequently render, so per-
++      // row skip would leave stale prior-frame pixels visible (the
++      // correctness gap nx-engine flagged in STOP-and-ack trigger 2).
++      if (map_mds_clear_lut_dispatch_eligible())
++      {
++        // Ensure LUT is built/refreshed. Lazy: first call after a map
++        // load or tile-mutation invalidate triggers rebuild here.
++        map_mds_clear_lut_ensure_built();
++
++        Uint8 *row = (Uint8 *)win->pixels;
++        const size_t pitch = (size_t)win->pitch;
++        const int h = win->h;
++        for (int sy = 0; sy < h; sy++)
++        {
++          if (!map_mds_clear_lut_should_skip_row(sy))
++          {
++            SDL_memset(row, c, pitch);
++          }
++          // else: row will be fully overwritten by BG tile layer this
++          // frame; SDL_memset is wasted bandwidth. Skip.
++          row += pitch;
++        }
++      }
++      else
++      {
++        // 1 byte/pixel × pitch×h. SDL_memset is the natural fast path
++        // (faster than per-Uint16 loop because byte stores fold trivially
++        // into rep stosb on i486+).
++        SDL_memset(win->pixels, c, (size_t)win->pitch * (size_t)win->h);
++      }
+     }
+     else
+     {
+diff --git a/src/map.cpp b/src/map.cpp
+index 83c57a4..da2029f 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -328,6 +328,160 @@ void map_backdrop_invalidate_skip_state()
+   g_bg_skip_state_valid = false;
+ }
+ 
++// ============================================================================
++// patch 0144 (Phase 11 wave 49 H-A mds_clear LUT swap)
++// ============================================================================
++//
++// Per-row coverage LUT for the INDEX8 clearScreen path. See map.h for the
++// API contract + correctness model. The LUT is 256 entries (sized to
++// MAP_MAXSIZEY to cover any res-config; clearScreen only reads up through
++// win->h on each call).
++//
++// Wave-48 H-A bg-skip (patch 0143) ALREADY skips clearScreen + map_draw_
++// backdrop atomically on no-state-change frames. Patch 0144 attacks the
++// remaining clearScreen cost on the OTHER frames (when bg_skip_unchanged
++// is false: scene transition, player motion, flipacceltime exit). For
++// those non-skip frames, the clearScreen runs and pays ~2.23 ms for the
++// 76800-byte sysmem memset; patch 0144 reduces the byte count by ~70%
++// on Mimiga-class rooms via static per-row analysis.
++//
++// Lever class per WAVE-49-MDS-CLEAR-DESIGN sec. 2.2: bytes-ELIMINATED
++// (bandwidth-bound), not bytes-substituted. Architectural pressure-test
++// vs the wave-48 cache-cost-matches-render-cost pattern.
++
++static uint8_t g_mds_clear_row_skip_lut[MAP_MAXSIZEY];
++static bool    g_mds_clear_lut_built     = false;
++static int     g_mds_clear_lut_curmap    = -1;
++static int     g_mds_clear_lut_killswitch_decided = -1;  // -1=undecided, 0=ON, 1=killswitch
++static bool    g_mds_clear_lut_dispatch_eligible_flag = false;
++static unsigned g_mds_clear_lut_rebuilds_global = 0;
++
++static bool _mds_clear_lut_killswitch_engaged()
++{
++  if (g_mds_clear_lut_killswitch_decided < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_MDS_CLEAR_LUT");
++    g_mds_clear_lut_killswitch_decided = (e && e[0] == '0' && e[1] == 0) ? 1 : 0;
++    LOG_INFO("map: mds_clear LUT {} (set SDL_HINT_DOSKUTSU_MDS_CLEAR_LUT=0 "
++             "to disable; default ON; patch 0144 wave-49 bandwidth lever)",
++             g_mds_clear_lut_killswitch_decided ? "DISABLED (killswitch)"
++                                                : "ENABLED (default)");
++  }
++  return g_mds_clear_lut_killswitch_decided == 1;
++}
++
++// Build the per-row skip LUT for the currently-loaded map. For each
++// possible screen-row sy (0..SCREEN_HEIGHT-1), determine if ANY map row
++// that could land on sy under ANY valid scroll position has at least
++// one tile == 0 column. If yes: row may be exposable -> LUT[sy] = 1
++// (must clear). If no: row is statically FG-opaque -> LUT[sy] = 0 (skip).
++//
++// Conservative bound: walks the FULL map column range, not just visible
++// columns. The static analysis is correct so long as map.tiles[][] is
++// not mutated at runtime; runtime mutations call
++// map_mds_clear_lut_invalidate() to force a lazy rebuild.
++static void _mds_clear_lut_rebuild()
++{
++  // win->h depends on res config; we read it lazily from Renderer.
++  // Default to 240 if Renderer unavailable (early-boot pre-init).
++  Renderer *r = Renderer::getInstance();
++  const int screen_h = (r && r->screenHeight > 0 && r->screenHeight <= MAP_MAXSIZEY)
++                       ? r->screenHeight : 240;
++  const int tile_h   = TILE_H;
++  const int map_h_px = map.ysize * tile_h;
++  const int max_scroll_y_px = (map_h_px > screen_h) ? (map_h_px - screen_h) : 0;
++
++  // Pre-pass: per-map-row "has any tile == 0 column" flag.
++  // Avoids re-scanning map width for each screen-Y; trades O(SH * MX *
++  // MY/TILE_H) for O(MX * MY) + O(SH * MY/TILE_H).
++  bool row_has_tile_0[MAP_MAXSIZEY];
++  for (int my = 0; my < map.ysize && my < MAP_MAXSIZEY; my++)
++  {
++    bool has = false;
++    for (int mx = 0; mx < map.xsize; mx++)
++    {
++      if (map.tiles[mx][my] == 0) { has = true; break; }
++    }
++    row_has_tile_0[my] = has;
++  }
++
++  // Main pass: per-screen-Y aggregation.
++  int k_skip = 0;
++  for (int sy = 0; sy < screen_h && sy < MAP_MAXSIZEY; sy++)
++  {
++    const int map_y_min = sy / tile_h;
++    int map_y_max = (max_scroll_y_px + sy) / tile_h;
++    if (map_y_max >= map.ysize) map_y_max = map.ysize - 1;
++
++    bool exposable = false;
++    for (int my = map_y_min; my <= map_y_max; my++)
++    {
++      if (row_has_tile_0[my]) { exposable = true; break; }
++    }
++    g_mds_clear_row_skip_lut[sy] = exposable ? 1 : 0;
++    if (!exposable) ++k_skip;
++  }
++  // Fill the tail beyond screen_h with 1 (clear) as defensive default --
++  // any out-of-range query should fall to the safe "clear" verdict.
++  for (int sy = screen_h; sy < MAP_MAXSIZEY; sy++)
++    g_mds_clear_row_skip_lut[sy] = 1;
++
++  g_mds_clear_lut_built  = true;
++  g_mds_clear_lut_curmap = game.curmap;
++  ++g_mds_clear_lut_rebuilds_global;
++
++  const int k_keep = screen_h - k_skip;
++  const int k_skip_pct = (screen_h > 0) ? (k_skip * 100 / screen_h) : 0;
++  const int k_keep_pct = 100 - k_skip_pct;
++  LOG_INFO("mds-clear-lut: rebuilt N={} entries (k_skip={}% k_keep={}%; "
++           "curmap={} map_size={}x{}; rebuild #{} since boot)",
++           screen_h, k_skip_pct, k_keep_pct,
++           game.curmap, map.xsize, map.ysize,
++           g_mds_clear_lut_rebuilds_global);
++  (void)k_keep;  // computed for clarity; not directly used after format
++}
++
++void map_mds_clear_lut_invalidate()
++{
++  // Mark stale; next ensure_built() call triggers rebuild lazily.
++  // Lazy semantics: a TSC <CMP burst that fires N mutations in one tick
++  // produces a single rebuild on the next clearScreen call, not N
++  // rebuilds.
++  g_mds_clear_lut_built = false;
++}
++
++void map_mds_clear_lut_ensure_built()
++{
++  // Rebuild when (a) never built, (b) map changed since last build,
++  // (c) invalidated by a tile mutation. All three resolve to "built ==
++  // false || curmap != game.curmap."
++  if (!g_mds_clear_lut_built || g_mds_clear_lut_curmap != game.curmap)
++  {
++    _mds_clear_lut_rebuild();
++  }
++}
++
++void map_mds_clear_lut_set_dispatch_eligible(bool eligible)
++{
++  g_mds_clear_lut_dispatch_eligible_flag = eligible;
++}
++
++bool map_mds_clear_lut_dispatch_eligible()
++{
++  // Caller (Renderer::clearScreen INDEX8 path) ALSO checks the killswitch
++  // before consulting the LUT. Both must be true for skip-dispatch.
++  return g_mds_clear_lut_dispatch_eligible_flag
++         && !_mds_clear_lut_killswitch_engaged();
++}
++
++bool map_mds_clear_lut_should_skip_row(int sy)
++{
++  // Defensive bounds: out-of-range -> "clear" (safe default; never skip).
++  if (!g_mds_clear_lut_built || sy < 0 || sy >= MAP_MAXSIZEY) return false;
++  // LUT[sy] == 0 = skip-eligible; LUT[sy] == 1 = must clear.
++  return g_mds_clear_row_skip_lut[sy] == 0;
++}
++
+ // DOS-PORT (patch 0080): probe killswitch once on first call. Strict
+ // "0" match disables the cache (lets a real-HW iter reproduce wave-9
+ // pre-cache behavior for ablation). All other values keep the
+@@ -2936,6 +3090,17 @@ void map_ChangeTileWithSmoke(int x, int y, int newtile, int nclouds, bool boomfl
+   // ~hundreds of destroyable tiles per map, never approaches limit).
+   ++g_tile_mutation_counter;
+ 
++  // DOS-PORT (patch 0144, Phase 11 wave 49 mds_clear LUT): invalidate
++  // the per-row skip LUT. The mutation may have introduced a tile-0
++  // column into a previously-fully-FG-opaque row OR removed the last
++  // tile-0 column from an exposable row -- either direction can flip
++  // the row's LUT entry. Lazy semantics: invalidate marks stale; next
++  // clearScreen call triggers _mds_clear_lut_rebuild via
++  // map_mds_clear_lut_ensure_built. Heavypress floor-break (heavypress.
++  // cpp:136/220), Balrog cutscene (balrog.cpp:237), and every door-
++  // open scripted event reach this site.
++  map_mds_clear_lut_invalidate();
++
+   int xa = ((x * TILE_W) + (TILE_W / 2)) * CSFI;
+   int ya = ((y * TILE_H) + (TILE_H / 2)) * CSFI;
+   SmokeXY(xa, ya, nclouds, TILE_W / 2, TILE_H / 2, push_behind);
+diff --git a/src/map.h b/src/map.h
+index 480d6f4..335a2fd 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -142,6 +142,45 @@ bool map_backdrop_should_skip_clear_and_draw();
+ void map_backdrop_record_present_success();
+ void map_backdrop_invalidate_skip_state();
+ 
++// DOS-PORT (patch 0144, Phase 11 wave 49 H-A mds_clear LUT swap):
++// per-row coverage LUT that skips the SDL_memset for rows guaranteed
++// to be fully BG-covered. The lever attacks bandwidth-bound bytes-
++// written cost (rather than wave-48's cache-substitute pattern) per
++// docs/internal/WAVE-49-MDS-CLEAR-DESIGN.md.
++//
++// Correctness model (per flush-instr design contract sec. 2.3 + nx-
++// engine wave-49 audit):
++//   - LUT is built from the static map.tiles[][] data; rows where the
++//     FULL MAP across all reachable scroll positions has at least one
++//     tile == 0 column are marked "exposable" (must clear); rows where
++//     ALL columns are tile != 0 are marked "skippable."
++//   - LUT is INVALIDATED on any runtime tile mutation (TSC <CMP, AI
++//     map_ChangeTileWithSmoke) -- after invalidate, the next
++//     clearScreen path triggers rebuild lazily. This catches Heavypress
++//     floor-break, Balrog cutscene, every door-open scripted event.
++//   - LUT dispatch is gated on a per-call "dispatch eligible" flag set
++//     by DrawScene's MdsClearTimer scope only. Other clearScreen call
++//     sites (title, save-select, mods menu, end-game island, screen
++//     effects) fall through to legacy full-screen memset because their
++//     BG tile layer doesn't subsequently render to overwrite the
++//     skipped rows.
++//
++// API:
++//   - map_mds_clear_lut_invalidate(): called from tile-mutation sites.
++//   - map_mds_clear_lut_ensure_built(): lazy rebuild; called from
++//     Renderer::clearScreen INDEX8 path before LUT consultation.
++//   - map_mds_clear_lut_set_dispatch_eligible(bool): DrawScene flips
++//     the per-call signal on/off around the MdsClearTimer scope.
++//   - map_mds_clear_lut_dispatch_eligible(): Renderer reads the
++//     per-call signal.
++//   - map_mds_clear_lut_should_skip_row(int sy): returns true iff this
++//     screen-row is statically-covered and the memset can be skipped.
++void map_mds_clear_lut_invalidate();
++void map_mds_clear_lut_ensure_built();
++void map_mds_clear_lut_set_dispatch_eligible(bool eligible);
++bool map_mds_clear_lut_dispatch_eligible();
++bool map_mds_clear_lut_should_skip_row(int sy);
++
+ void map_flush_graphics();
+ void map_drawwaterlevel(void);
+ void map_draw(uint8_t foreground);
+diff --git a/src/tsc.cpp b/src/tsc.cpp
+index 3baea9d..71e45bf 100644
+--- a/src/tsc.cpp
++++ b/src/tsc.cpp
+@@ -1061,6 +1061,15 @@ void TSC::ExecScript(ScriptInstance *s)
+         int y           = parm[1];
+         map.tiles[x][y] = parm[2];
+ 
++        // DOS-PORT (patch 0144, Phase 11 wave 49 mds_clear LUT):
++        // invalidate the per-row skip LUT here too. TSC <CMP is the
++        // second tile-mutation site (alongside map_ChangeTileWithSmoke
++        // in map.cpp:2928); both must invalidate or the LUT goes
++        // stale on door-open events, scripted floor reveals, etc.
++        // See map.cpp _mds_clear_lut_rebuild for the correctness
++        // contract.
++        map_mds_clear_lut_invalidate();
++
+         // get smoke coords
+         x = ((x * TILE_W) + (TILE_W / 2)) * CSFI;
+         y = ((y * TILE_H) + (TILE_H / 2)) * CSFI;
+-- 
+2.47.3
+
