@@ -30,9 +30,13 @@
 #   `H` `Return` to the 86Box window during the 5-second menu prompt.
 #   That selects the HWINV menu choice -> CONFIG.SYS [HWINV] section
 #   (HIMEM only; no driver loads) -> AUTOEXEC.BAT :HWINV label
-#   (CD C:\DOSKUTSU + HWINV.EXE + write HWINV.DONE sentinel).
+#   (CD C:\DOSKUTSU + HWINV.EXE + write the run sentinel). The image's
+#   :HWINV slot does `ECHO ... > HWINV.DONE`, but MS-DOS 8.3 truncates a
+#   4-char extension -- the file actually created on the guest is
+#   HWINV.DON, so every host-side poll/clear below must match `.DON`
+#   (do not "correct" these back to `.DONE`).
 #
-# - After waiting for the C:\HWINV.DONE sentinel to appear in the
+# - After waiting for the C:\HWINV.DON sentinel to appear in the
 #   image (polled via mcopy), or after a fixed timeout, the harness
 #   pkills 86Box and mcopies HWINV.LOG out of C:\DOSKUTSU\.
 #
@@ -221,10 +225,10 @@ if ! mcopy -o -i "$BOX86_IMG@@$IMG_FAT_OFFSET" "$EXE" "::/DOSKUTSU/HWINV.EXE" 2>
     exit 2
 fi
 
-# Clear any stale HWINV.LOG + HWINV.DONE from a prior run so the
+# Clear any stale HWINV.LOG + HWINV.DON from a prior run so the
 # sentinel/log check below is hermetic to this run only.
 mdel -i "$BOX86_IMG@@$IMG_FAT_OFFSET" "::/DOSKUTSU/HWINV.LOG" 2>/dev/null || true
-mdel -i "$BOX86_IMG@@$IMG_FAT_OFFSET" "::/HWINV.DONE" 2>/dev/null || true
+mdel -i "$BOX86_IMG@@$IMG_FAT_OFFSET" "::/HWINV.DON" 2>/dev/null || true
 
 # Launch 86Box. Render to the host X display (no Xvfb).
 echo "[86box-run] launching 86Box (vmpath=$VMRUN_DIR, display=$BOX86_DISPLAY, timeout=${TIMEOUT_S}s)"
@@ -278,26 +282,27 @@ sleep 0.8
 DISPLAY="$BOX86_DISPLAY" xdotool type --window "$window_id" --delay 50 "HWBOX"
 DISPLAY="$BOX86_DISPLAY" xdotool key --window "$window_id" Return
 
-# Poll for the HWINV.DONE sentinel in the image. mcopy reads work
+# Poll for the HWINV.DON sentinel in the image (8.3-truncated from the
+# image AUTOEXEC's HWINV.DONE -- see header note). mcopy reads work
 # concurrently with 86Box (FAT16 on a single-writer DOS guest is safe
 # for host-side reads of files the guest has closed; HWINV.EXE closes
-# its log via fclose before AUTOEXEC.BAT writes HWINV.DONE).
+# its log via fclose before AUTOEXEC.BAT writes the sentinel).
 poll_start=$(date +%s)
-echo "[86box-run] polling for HWINV.DONE sentinel (timeout ${TIMEOUT_S}s)..."
+echo "[86box-run] polling for HWINV.DON sentinel (timeout ${TIMEOUT_S}s)..."
 done_seen=0
 while true; do
     now=$(date +%s)
     elapsed=$((now - poll_start))
     if [[ "$elapsed" -ge "$TIMEOUT_S" ]]; then
-        echo "[86box-run] timeout reached without HWINV.DONE; assuming completion or hang"
+        echo "[86box-run] timeout reached without HWINV.DON; assuming completion or hang"
         break
     fi
     if ! kill -0 "$BOX_PID" 2>/dev/null; then
         echo "[86box-run] 86Box process exited (PID $BOX_PID); finalizing"
         break
     fi
-    if mcopy -i "$BOX86_IMG@@$IMG_FAT_OFFSET" "::/HWINV.DONE" - 2>/dev/null | grep -q HWINV_DONE; then
-        echo "[86box-run] HWINV.DONE sentinel detected after ${elapsed}s"
+    if mcopy -i "$BOX86_IMG@@$IMG_FAT_OFFSET" "::/HWINV.DON" - 2>/dev/null | grep -q HWINV_DONE; then
+        echo "[86box-run] HWINV.DON sentinel detected after ${elapsed}s"
         done_seen=1
         # Give HWINV one more second to flush its log before we read it
         sleep 1
@@ -325,10 +330,10 @@ mkdir -p "$LOG_DIR"
 if ! mcopy -i "$BOX86_IMG@@$IMG_FAT_OFFSET" -o "::/DOSKUTSU/HWINV.LOG" "$LOG_PATH" 2>"$VMRUN_DIR/mcopy-out.err"; then
     echo "86box-run.sh: no HWINV.LOG produced in C:\\DOSKUTSU\\" >&2
     if [[ "$done_seen" == "1" ]]; then
-        echo "  HWINV.DONE present but HWINV.LOG absent -- HWINV.EXE may have" >&2
+        echo "  HWINV.DON present but HWINV.LOG absent -- HWINV.EXE may have" >&2
         echo "  exited before writing its log. Investigate $VMRUN_DIR/." >&2
     else
-        echo "  HWINV.DONE absent -- AUTOEXEC.BAT :HWINV did not complete." >&2
+        echo "  HWINV.DON absent -- AUTOEXEC.BAT :HWINV did not complete." >&2
         echo "  Likely causes: menu selection didn't reach AUTOEXEC; the" >&2
         echo "  HWINV menu choice + :HWINV label missing from the image" >&2
         echo "  (verify per docs/internal/G2K-CF-IMAGE-CHANGES.md)." >&2
