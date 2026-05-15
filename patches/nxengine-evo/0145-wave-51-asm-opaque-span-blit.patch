@@ -1,0 +1,498 @@
+From a6143648944ff17d6ecd5a747d9a947be6650c9e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 15 May 2026 09:01:45 -0700
+Subject: [PATCH] perf phase 11 patch 0145 -- wave-51 asm opaque-span
+ _blit_indexed lever
+
+Per flush-instr's docs/internal/WAVE-51-ASM-BLIT-DESIGN.md (task #5
+QUALIFIED GREENLIGHT): the "one untried lever" from the Latch & Plane
+consultancy memo -- hand-tuned CPU-side rewrite of the `_blit_indexed`
+INDEX8 colorkey blit, which carries ~6.5 ms / flip (~18-19% of
+inter_flip) across BG tilelayer + FG + sprite drawcalls.
+
+WHY DOS NEEDS THIS: the legacy colorkey path runs a per-pixel
+`if (px != colorkey) dp[col] = px;` branch. On the P54C (Pentium
+OverDrive 83) that branch is data-dependent and unpredictable -- every
+sprite/tile edge is a ~3-4 cycle mispredict bubble -- and DJGPP GCC
+12.2's Pentium U/V scheduler pairs the byte-granular conditional store
+poorly. The branch cannot be hoisted at runtime without either codegen
+(rejected: compiled sprites) or precomputed transparency structure.
+
+LEVER MECHANISM (opaque-span precompute; no runtime codegen):
+- At surface load, for each INDEX8 + colorkeyed source surface, scan
+  every row and collapse its non-colorkey ("opaque") pixels into
+  contiguous (start,len) runs -- BlitSpanTable. A fully-opaque tile
+  row collapses to one run; transparency splits it into several.
+- `_blit_indexed`'s colorkey path, when handed the table, no longer
+  tests pixels: it intersects each precomputed run with the clipped
+  source-column window and copies it via `_span_copy` -- the P54C
+  `rep movsl` + 0-3 byte tail fast-string idiom. The unpredictable
+  per-pixel branch is gone entirely; an opaque row becomes one
+  microcoded string move.
+- The win scales with opaque fraction + run contiguity: opaque-
+  dominated BG tiles collapse to row memcpys; transparency-fragmented
+  sprites keep short runs (smaller win). Sizing is left to the 0146
+  ride-along census -- see WAVE-51-ASM-BLIT-DESIGN sec. 5.
+
+KILLSWITCH: SDL_HINT_DOSKUTSU_ASM_BLIT (strict "1" opt-in; default-OFF
+for wave-51 per design sec. 4). Cached-at-boot static-const-bool
+(blit_asm_span_enabled()) -- never a per-blit getenv. When OFF, no
+span table is ever built (zero memory, zero scan cost) and
+`_blit_indexed` keeps its legacy per-pixel loop byte-for-byte: the
+`spans` parameter defaults to nullptr and the new fast-path branch is
+`if (has_colorkey && spans)`, so OFF is a literal no-op.
+
+CORRECTNESS REASONING:
+- The span path copies exactly the non-colorkey pixels of the clipped
+  region and leaves colorkey (transparent) pixels untouched -- which
+  is identically what the legacy `if (px != colorkey)` loop does.
+  Runs are emitted left-to-right (sorted ascending), intersected with
+  the post-clip [sx, sx+cols) window; `sp`/`dp` already point at the
+  clipped origin so a source column maps to one shared byte offset in
+  both rows. Pixel-identical output to the legacy path.
+- `_blit_indexed_mirrored` (column-reversed) is intentionally NOT
+  span-converted -- it stays on its per-pixel path; mirrored blits
+  are a minority of drawcalls (design sec. 1) and column reversal
+  defeats contiguous-run copies.
+- Span tables assume the source surface pixels are immutable after
+  load. Cave Story tilesets / sprite sheets / font atlases are loaded
+  once from .pbm/.png and never mutated; the table is freed + the
+  build-once flag reset in Surface::cleanup() so a Tileset reload
+  (delete + reload) rebuilds against new pixels.
+- build_blit_span_table bails to nullptr (legacy path) on any non-
+  INDEX8 / NULL-pixels / >65535-dimension surface -- run start/len
+  are Uint16.
+
+FILES (~212 LOC; ~70 substantive + ~140 comment per the load-bearing
+-correctness-doc convention):
+- src/graphics/BlitSpans.h (NEW): BlitSpanRun / BlitSpanTable types +
+  blit_asm_span_enabled() / build_blit_span_table() decls.
+- src/graphics/Renderer.cpp: _span_copy (rep movsl primitive),
+  blit_asm_span_enabled (cached gate), build_blit_span_table (load-
+  time row scan), `_blit_indexed` span fast-path branch + optional
+  `spans` param, 3 call-site updates (_try_fast_blit / drawTileFast /
+  drawTileFastToSurface), initVideo boot banner.
+- src/graphics/Surface.{h,cpp}: lazily-built _span_table member +
+  spanTable() accessor; freed in cleanup().
+
+Single-mechanism per [[single_lever_per_binary_or_else_attribution_
+impossible]]: the lever is "opaque-span precompute + rep movsl blit".
+NO ride-along correctness patches. NO audio code touched. The
+_blit_indexed sub-decomp instrumentation is a SEPARATE env-gate in
+patch 0146.
+
+PREDICTED OUTCOME (per [[perf_measurement_discipline]] -- hypothesis,
+not promise): design sec. 3 honest ceiling +2.0 to +2.5 fps if the
+~6.5 ms colorkey loop is cut 35-45%; conditional on BG opaque
+fraction + run contiguity, which patch 0146's census measures in the
+same iter. Not a 50-fps unlock; the best available CPU-side render
+lever post wave-50 NO-GO.
+
+Banner regex for tests/run-gameplay-smoke.sh BANNERS:
+"Renderer::initVideo: asm opaque-span blit lever (ENABLED|DISABLED)"
+---
+ src/graphics/BlitSpans.h  |  67 +++++++++++++++
+ src/graphics/Renderer.cpp | 170 ++++++++++++++++++++++++++++++++++++--
+ src/graphics/Surface.cpp  |  29 +++++++
+ src/graphics/Surface.h    |  18 ++++
+ 4 files changed, 279 insertions(+), 5 deletions(-)
+ create mode 100644 src/graphics/BlitSpans.h
+
+diff --git a/src/graphics/BlitSpans.h b/src/graphics/BlitSpans.h
+new file mode 100644
+index 0000000..54d5913
+--- /dev/null
++++ b/src/graphics/BlitSpans.h
+@@ -0,0 +1,67 @@
++#ifndef _BLITSPANS_H
++#define _BLITSPANS_H
++
++// DOS-PORT (patch 0145, Phase 11 wave-51): opaque-span tables for the
++// hand-tuned colorkey blit lever ("the one untried lever" from the
++// Latch & Plane consultancy memo). The legacy `_blit_indexed` colorkey
++// path runs a per-pixel `if (px != colorkey)` branch -- on the P54C
++// that branch is unpredictable and DJGPP GCC's Pentium U/V scheduler
++// pairs it poorly. This lever precomputes, ONCE at surface load, the
++// contiguous runs of non-colorkey ("opaque") pixels in each source row;
++// at blit time `_blit_indexed` copies each run with the `rep movsl`
++// fast-string idiom and never re-tests the colorkey. No runtime
++// codegen, modest memory.
++//
++// Gated on SDL_HINT_DOSKUTSU_ASM_BLIT (strict "1" opt-in, default-OFF
++// for wave-51). When the gate is OFF no span table is ever built (zero
++// memory, zero cost) and `_blit_indexed` keeps its legacy per-pixel
++// loop byte-for-byte.
++
++#include <SDL3/SDL.h>
++
++#include <cstdint>
++#include <vector>
++
++namespace NXE
++{
++namespace Graphics
++{
++
++// One contiguous run of non-colorkey ("opaque") pixels within a single
++// source-surface row. `start` / `len` are in source-surface column
++// coordinates (NOT clipped to any srcrect -- the blit intersects them).
++struct BlitSpanRun
++{
++  std::uint16_t start;
++  std::uint16_t len;
++};
++
++// Per-source-surface opaque-span table. Built once at surface load when
++// SDL_HINT_DOSKUTSU_ASM_BLIT is on AND the cached CPU surface is
++// INDEX8 + colorkeyed. For row y, runs[ row_off[y] .. row_off[y+1] )
++// are that row's opaque runs, sorted ascending by `start`; a
++// fully-opaque row collapses to a single run. `row_off` has h+1
++// entries (row_off[0]==0, row_off[h]==runs.size()).
++struct BlitSpanTable
++{
++  int w = 0;
++  int h = 0;
++  std::vector<BlitSpanRun>   runs;
++  std::vector<std::uint32_t> row_off;
++};
++
++// Cached-at-boot gate accessor (defined in Renderer.cpp). True when the
++// operator opted in with SDL_HINT_DOSKUTSU_ASM_BLIT=1. Constant for the
++// run -- evaluated once on first call, never per-blit.
++bool blit_asm_span_enabled();
++
++// Scan an INDEX8 SDL_Surface and build its opaque-span table. The
++// caller owns the returned pointer (delete it). Returns nullptr if the
++// surface is unusable (NULL, NULL pixels, or not INDEX8). `colorkey` is
++// the transparent palette index.
++BlitSpanTable *build_blit_span_table(SDL_Surface *s, std::uint8_t colorkey);
++
++}; // namespace Graphics
++}; // namespace NXE
++
++#endif // _BLITSPANS_H
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index c7ee478..4d85d95 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -9,6 +9,10 @@
+ #include "../pause/dialog.h"
+ #include "../version.h"
+ #include "Renderer.h"
++// DOS-PORT (patch 0145, Phase 11 wave-51): opaque-span colorkey blit
++// lever (BlitSpanTable + build/gate decls). Transitively pulled in via
++// Renderer.h -> Surface.h; included explicitly for clarity.
++#include "BlitSpans.h"
+ #include "nx_icon.h"
+ #ifndef NXE_DOS
+ #  include "pngfuncs.h"
+@@ -3248,6 +3252,22 @@ bool Renderer::initVideo()
+              "(default; set SDL_HINT_DOSKUTSU_FLIP_INSTR=1 to opt in for "
+              "wave-20 Lever A diagnostic)");
+   }
++  // DOS-PORT (patch 0145, Phase 11 wave-51): record asm opaque-span
++  // blit lever state in DEBUG.LOG so each iter's config is greppable.
++  if (blit_asm_span_enabled())
++  {
++    LOG_INFO("Renderer::initVideo: asm opaque-span blit lever ENABLED via "
++             "SDL_HINT_DOSKUTSU_ASM_BLIT=1 -- INDEX8 colorkey surfaces "
++             "build per-row opaque-run tables at load; _blit_indexed "
++             "copies runs via rep movsl, skipping the per-pixel colorkey "
++             "branch (wave-51 single lever; default-OFF)");
++  }
++  else
++  {
++    LOG_INFO("Renderer::initVideo: asm opaque-span blit lever DISABLED "
++             "(default; set SDL_HINT_DOSKUTSU_ASM_BLIT=1 to opt in -- "
++             "wave-51 _blit_indexed colorkey-blit lever)");
++  }
+   // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
+   // PumpEvents yield-skip is active. Default ON (skip); env-var override
+   // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
+@@ -5095,6 +5115,96 @@ static inline bool _blit_rgb565_mirrored(SDL_Surface *dst, SDL_Surface *src,
+   return true;
+ }
+ 
++// DOS-PORT (patch 0145, Phase 11 wave-51): opaque-span colorkey blit
++// lever. See BlitSpans.h for the rationale. Three pieces live here next
++// to `_blit_indexed`:
++//   _span_copy            -- per-run copy primitive (rep movsl idiom)
++//   blit_asm_span_enabled -- cached SDL_HINT_DOSKUTSU_ASM_BLIT gate
++//   build_blit_span_table -- the load-time per-row run scan
++
++// Copy `n` bytes src->dst with the P54C `rep movsl` fast-string idiom
++// plus a 0-3 byte tail. This is what replaces `_blit_indexed`'s
++// per-pixel `if (px != colorkey)` branch: the span table already
++// excluded every transparent pixel, so a run is an unconditional
++// contiguous copy. Forward copy only -- an opaque span never overlaps
++// its own destination.
++static inline void _span_copy(Uint8 *d, const Uint8 *s, unsigned n)
++{
++#if defined(__i386__)
++  unsigned dwords = n >> 2;
++  unsigned tail = n & 3u;
++  __asm__ __volatile__(
++      "cld\n\t"
++      "rep movsl\n\t"
++      "movl %3, %%ecx\n\t"
++      "rep movsb"
++      : "+D"(d), "+S"(s), "+c"(dwords)
++      : "r"(tail)
++      : "memory", "cc");
++#else
++  SDL_memcpy(d, s, (size_t)n);
++#endif
++}
++
++// Cached-at-boot gate. Strict "1" opt-in (default-OFF for wave-51) --
++// matches the project diagnostic-hint convention; `_strict_truthy_env`
++// is the shared helper near the top of this file. Evaluated once.
++bool blit_asm_span_enabled()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_ASM_BLIT");
++  return v;
++}
++
++// Scan an INDEX8 SDL_Surface and collapse each row's non-colorkey
++// pixels into contiguous (start,len) runs. Runs are emitted left-to-
++// right so each row's run list is sorted ascending by `start`. Called
++// once per candidate surface, at load (Surface::spanTable lazy build).
++BlitSpanTable *build_blit_span_table(SDL_Surface *s, Uint8 colorkey)
++{
++  if (!s || !s->pixels || s->format != SDL_PIXELFORMAT_INDEX8)
++    return nullptr;
++  if (s->w <= 0 || s->h <= 0 || s->w > 65535 || s->h > 65535)
++    return nullptr;  // run start/len are Uint16; bail rather than wrap
++
++  const bool must_lock = SDL_MUSTLOCK(s);
++  if (must_lock && !SDL_LockSurface(s))
++    return nullptr;
++
++  BlitSpanTable *t = new BlitSpanTable();
++  t->w = s->w;
++  t->h = s->h;
++  t->row_off.reserve((size_t)s->h + 1);
++  t->row_off.push_back(0);
++
++  const int pitch = s->pitch;
++  const int w = s->w;
++  const Uint8 *base = (const Uint8 *)s->pixels;
++  for (int y = 0; y < s->h; ++y)
++  {
++    const Uint8 *row = base + (size_t)y * pitch;
++    int col = 0;
++    while (col < w)
++    {
++      while (col < w && row[col] == colorkey)
++        ++col;                          // skip transparent run
++      if (col >= w)
++        break;
++      const int run_start = col;
++      while (col < w && row[col] != colorkey)
++        ++col;                          // accumulate opaque run
++      BlitSpanRun r;
++      r.start = (Uint16)run_start;
++      r.len = (Uint16)(col - run_start);
++      t->runs.push_back(r);
++    }
++    t->row_off.push_back((Uint32)t->runs.size());
++  }
++
++  if (must_lock)
++    SDL_UnlockSurface(s);
++  return t;
++}
++
+ // DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): INDEX8 blit primitive.
+ // Byte-per-pixel sibling of _blit_rgb565. Same dst-clip pattern, but 1
+ // byte per pixel instead of 2. Per format spec /tmp/wave-16-1-palette-
+@@ -5106,9 +5216,17 @@ static inline bool _blit_rgb565_mirrored(SDL_Surface *dst, SDL_Surface *src,
+ // palette indices, identical layout. The colorkey-skip loop is the
+ // slightly slower variant; the no-colorkey path uses SDL_memcpy per
+ // row (faster than the RGB565 path because no byte-doubling).
++//
++// DOS-PORT (patch 0145, Phase 11 wave-51): the optional `spans`
++// argument enables the opaque-span fast path. When non-NULL (and the
++// surface is colorkeyed) the per-pixel colorkey branch is replaced by
++// precomputed-run copies. nullptr (the default, and always when
++// SDL_HINT_DOSKUTSU_ASM_BLIT is off) preserves the legacy per-pixel
++// loop byte-for-byte -- this is the lever killswitch.
+ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+                                  SDL_Rect srcrect, SDL_Rect dstrect,
+-                                 Uint8 colorkey, bool has_colorkey)
++                                 Uint8 colorkey, bool has_colorkey,
++                                 const BlitSpanTable *spans = nullptr)
+ {
+   // patch 0111 (Phase 11 wave-25): time _blit_indexed body when called
+   // from FG-tilemap loop. Gate on loop_active flag set by map.cpp's
+@@ -5151,7 +5269,46 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+   const Uint8 *sp = (const Uint8 *)src->pixels + sy * src_pitch + sx;
+   Uint8 *dp = (Uint8 *)dst->pixels + dst_y * dst_pitch + dst_x;
+ 
+-  if (has_colorkey)
++  if (has_colorkey && spans)
++  {
++    // DOS-PORT (patch 0145, wave-51): opaque-span fast path. The
++    // colorkey test was hoisted to surface-load time -- here we only
++    // copy each precomputed run. `sx`/`sy` are the clip-adjusted
++    // source origin and sp/dp already point at (sx,sy)/(dst_x,dst_y),
++    // so a source column `c` maps to byte offset (c - sx) in BOTH the
++    // sp row and the dp row. Each run is intersected with the clipped
++    // column window [sx, sx+cols); runs are sorted ascending so the
++    // walk breaks once a run starts past the window. Pixel-identical
++    // to the per-pixel loop below (it copies exactly the non-colorkey
++    // pixels and leaves colorkey pixels untouched).
++    const int sx_end = sx + cols;
++    const int tbl_h = spans->h;
++    const BlitSpanRun *runs = spans->runs.data();
++    const Uint32 *row_off = spans->row_off.data();
++    for (int row = 0; row < rows; ++row)
++    {
++      const int srow = sy + row;
++      if (srow >= 0 && srow < tbl_h)
++      {
++        Uint32 ri = row_off[srow];
++        const Uint32 rend = row_off[srow + 1];
++        for (; ri < rend; ++ri)
++        {
++          int rs = runs[ri].start;
++          if (rs >= sx_end) break;       // sorted -- remaining runs off-clip
++          int re = rs + runs[ri].len;
++          if (re <= sx) continue;        // run entirely left of the clip
++          if (rs < sx) rs = sx;
++          if (re > sx_end) re = sx_end;
++          const int off = rs - sx;
++          _span_copy(dp + off, sp + off, (unsigned)(re - rs));
++        }
++      }
++      sp += src_pitch;
++      dp += dst_pitch;
++    }
++  }
++  else if (has_colorkey)
+   {
+     for (int row = 0; row < rows; ++row)
+     {
+@@ -5378,7 +5535,8 @@ static inline bool _try_fast_blit(SDL_Renderer *renderer,
+   if (win_surface->format == SDL_PIXELFORMAT_INDEX8)
+   {
+     return _blit_indexed(win_surface, src_surface, srcrect, dstrect,
+-                         (Uint8)src->colorkey(), src->hasColorkey());
++                         (Uint8)src->colorkey(), src->hasColorkey(),
++                         src->spanTable());
+   }
+   return _blit_rgb565(win_surface, src_surface, srcrect, dstrect,
+                       (Uint16)src->colorkey(), src->hasColorkey());
+@@ -6135,7 +6293,8 @@ void Renderer::drawTileFast(Surface *src, int dstx, int dsty, int srcx, int srcy
+   // set by the caller.
+   _blit_indexed(_cached_window_surface, src->surfaceCpu(),
+                 srcrect, dstrect,
+-                (Uint8)src->colorkey(), src->hasColorkey());
++                (Uint8)src->colorkey(), src->hasColorkey(),
++                src->spanTable());
+ }
+ 
+ // DOS-PORT (patch 0132, Phase 11 wave-35 mds_tilemap_bg drawTileFast
+@@ -6176,7 +6335,8 @@ void Renderer::drawTileFastToSurface(Surface *src, SDL_Surface *target,
+     // INDEX8↔INDEX8 fast path — _blit_indexed inline.
+     _blit_indexed(target, src_sfc,
+                   srcrect, dstrect,
+-                  (Uint8)src->colorkey(), src->hasColorkey());
++                  (Uint8)src->colorkey(), src->hasColorkey(),
++                  src->spanTable());
+   }
+   else
+   {
+diff --git a/src/graphics/Surface.cpp b/src/graphics/Surface.cpp
+index facc8d5..0b9ffba 100644
+--- a/src/graphics/Surface.cpp
++++ b/src/graphics/Surface.cpp
+@@ -592,6 +592,28 @@ SDL_PixelFormat Surface::pixelFormat()
+   return _surface_cpu ? _surface_cpu->format : SDL_PIXELFORMAT_UNKNOWN;
+ }
+ 
++// DOS-PORT (patch 0145, Phase 11 wave-51): opaque-span lever accessor.
++// Lazily builds the non-colorkey run table the first time it is asked
++// for, then caches it for the surface's lifetime. `_span_table_built`
++// guards the build so a non-candidate surface (lever off, non-INDEX8,
++// or no colorkey) is probed exactly once and thereafter returns nullptr
++// at zero cost. The actual scan + the gate check both live in
++// Renderer.cpp (build_blit_span_table / blit_asm_span_enabled) so the
++// lever's logic stays in one translation unit alongside `_blit_indexed`.
++const BlitSpanTable *Surface::spanTable()
++{
++  if (!_span_table_built)
++  {
++    _span_table_built = true;
++    if (blit_asm_span_enabled() && _surface_cpu && _has_colorkey &&
++        _surface_cpu->format == SDL_PIXELFORMAT_INDEX8)
++    {
++      _span_table = build_blit_span_table(_surface_cpu, (Uint8)_colorkey);
++    }
++  }
++  return _span_table;
++}
++
+ void Surface::cleanup()
+ {
+   if (_texture)
+@@ -607,6 +629,13 @@ void Surface::cleanup()
+     SDL_DestroySurface(_surface_cpu);
+     _surface_cpu = nullptr;
+   }
++  // DOS-PORT (patch 0145, Phase 11 wave-51): free the opaque-span table
++  // alongside the CPU surface it was built from. Reset `_span_table_built`
++  // so a reloaded surface (Tileset::load deletes+reloads) rebuilds its
++  // table against the new pixels.
++  delete _span_table;
++  _span_table = nullptr;
++  _span_table_built = false;
+   _has_colorkey = false;
+   _colorkey = 0;
+ }
+diff --git a/src/graphics/Surface.h b/src/graphics/Surface.h
+index a0c5222..546c4a9 100644
+--- a/src/graphics/Surface.h
++++ b/src/graphics/Surface.h
+@@ -7,6 +7,9 @@
+ #include <SDL3/SDL.h>
+ #include <string>
+ #include "types.h"
++// DOS-PORT (patch 0145, Phase 11 wave-51): BlitSpanTable for the asm
++// opaque-span colorkey blit lever (member pointer + spanTable()).
++#include "BlitSpans.h"
+ 
+ namespace NXE
+ {
+@@ -77,6 +80,14 @@ public:
+   bool hasColorkey();
+   SDL_PixelFormat pixelFormat();
+ 
++  // DOS-PORT (patch 0145, Phase 11 wave-51): opaque-span lever. Returns
++  // this surface's precomputed non-colorkey run table for the asm
++  // `_blit_indexed` fast path, or nullptr when the lever is disabled
++  // (SDL_HINT_DOSKUTSU_ASM_BLIT unset) or the surface is not an
++  // INDEX8+colorkey asset. Built lazily on first call and cached for
++  // the surface's lifetime; freed in cleanup(). Never a per-blit cost.
++  const BlitSpanTable *spanTable();
++
+ private:
+   void cleanup();
+ 
+@@ -88,6 +99,13 @@ private:
+   SDL_Surface *_surface_cpu = nullptr;
+   Uint32 _colorkey = 0;
+   bool _has_colorkey = false;
++  // DOS-PORT (patch 0145, Phase 11 wave-51): lazily-built opaque-span
++  // table for the asm colorkey blit lever. nullptr when the lever is
++  // off or the surface is not a span candidate. `_span_table_built`
++  // makes the lazy build a build-ONCE -- a non-candidate surface is not
++  // re-probed on every spanTable() call.
++  BlitSpanTable *_span_table = nullptr;
++  bool _span_table_built = false;
+   int _width;
+   int _height;
+ 
+-- 
+2.47.3
+

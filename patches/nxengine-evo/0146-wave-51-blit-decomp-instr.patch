@@ -1,0 +1,350 @@
+From 96f33074ade81f65f6b2871247a099b011c42334 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 15 May 2026 09:12:15 -0700
+Subject: [PATCH] perf phase 11 patch 0146 -- wave-51 _blit_indexed blit-decomp
+ instrumentation
+
+Per flush-instr's docs/internal/WAVE-51-ASM-BLIT-DESIGN.md sec. 5 + the
+0146 instrumentation contract. This is the INSTRUMENTATION ride-along
+for the wave-51 asm opaque-span lever (patch 0145) -- NOT a second
+lever. Per [[single_lever_per_binary_or_else_attribution_impossible]]
+it rides along on its OWN env gate, fully decoupled from 0145's
+internals: instrumentation is measurement, not a mechanism.
+
+WHY DOS NEEDS THIS: the 0145 asm lever's honest fps ceiling (+2.0-2.5
+fps) is conditional on two unknowns the analytical pass could not
+resolve from existing logs -- the opaque-pixel fraction of the BG
+tilemap and the per-tile opaque-run contiguity. If runs are fragmented
+the precompute-table overhead eats the gain. 0146 measures both in the
+SAME iter that A/Bs the lever, so a weak wave-51 delta is explained
+rather than mysterious.
+
+ENV GATE: SDL_HINT_DOSKUTSU_BLIT_DECOMP (strict "1" opt-in; default
+OFF). Cached-at-boot static-const-bool (_blit_decomp_enabled(),
+modelled on _strict_truthy_env) -- never a per-call getenv (the
+wave-38 STALL_REPORT per-call getenv cost -14 fps; that lesson is
+encoded here). When the bool is false every counter/timer below is
+untouched: the two clean PLAY cells (BLIT_DECOMP=0) pay exactly zero.
+
+WHAT IT MEASURES (accumulated in `_blit_indexed`, emitted per 100-flip
+block to the engine <TAG>.LOG via LOG_INFO, aligned to the existing
+flip-stat / flip-body-stat 100-flip cadence -- _maybe_flush_phase_
+timing_audit; own accumulators, reset at that boundary):
+
+1. PHASE SPLIT -- 3 SDL_GetTicksNS reads (entry / clip-done / blit-
+   branch-end). bi_dispatch = entry -> clip math done; bi_innerloop =
+   the asm-or-colorkey blit branch. Per-flip accumulation -> one
+   sample/flip pushed by flip() -> _compute_flip_phase_stats (the
+   wave-20 STAT machinery) -> `[blit-decomp-stat n=N phase=bi_dispatch
+   |bi_innerloop min/med/mean/p95/max ms]`. bi_innerloop is the
+   load-bearing A/B: PLAY1 (asm on) times the span path, PLAY2 (asm
+   off) times the colorkey loop -- the delta IS the lever.
+
+2. PIXEL CENSUS -- per-block integer counters: px_total / px_opaque
+   (px != colorkey) / px_skipped (== colorkey). Emits
+   `[blit-decomp-census n=N caller=<bg|other> px_total=.. px_opaque=..
+   px_skipped=.. opaque_pct_x10=..]`.
+
+3. RUN CENSUS -- run_count (contiguous opaque runs) + a {1-3,4-8,
+   9-15,>=16} run-length histogram, counted by a per-row rising-edge
+   state machine inside the instrumented colorkey loop. Emits
+   `[blit-decomp-runs n=N caller=<bg|other> run_count=.. hist_1_3=..
+   hist_4_8=.. hist_9_15=.. hist_16=..]`. This is the direct sizing
+   input for the 0145 asm ceiling.
+
+4. CALLER SPLIT -- counts 2+3 are split by the existing wave-25
+   g_mds_tfg_loop_active flag (cc=0 BG/FG tilemap loop, cc=1
+   sprite/HUD) so BG and sprite opaque fractions are separable.
+
+LEVER-INDEPENDENCE (contract Q2): the px/run census counting code
+lives INSIDE the legacy per-pixel colorkey loop in `_blit_indexed`,
+gated on BLIT_DECOMP -- it is NOT derived from 0145's span table.
+PLAY2 (ASM_BLIT=0, lever off) runs the colorkey loop and yields the
+full baseline census -- that is THE sizing measurement. In PLAY1
+(ASM_BLIT=1) the span path is taken and the census reads ~0; that
+asymmetry is expected and documented in the emit comment. To keep the
+BLIT_DECOMP=OFF path byte-identical, the colorkey branch is split
+`else if (has_colorkey && _bd_on) { instrumented loop } else if
+(has_colorkey) { plain loop }` -- the plain loop is the 0145 loop
+unchanged.
+
+COST: 3 SDL_GetTicksNS reads/call (~90 cyc) + ~6 int ops/row in the
+instrumented colorkey loop. At ~150-336 calls/flip ~ 0.1-0.25 ms/flip
+-- ACCEPTABLE, and only the two INSTR PLAY cells (PLAY1/PLAY2) carry
+it; PLAY3/PLAY4 run BLIT_DECOMP=0 and pay zero.
+
+NO COLLISION WITH WAVE-25: the patch-0111 wave-25 brackets (gated on
+g_mds_tfg_loop_active, bracket the WHOLE body) are untouched -- the
+0146 timers use a separate gate + separate accumulators and nest
+strictly inside. The 3rd SDL_GetTicksNS read sits exactly at the
+clip-done branch point.
+
+FILES: src/graphics/Renderer.cpp only (~110 LOC; file-scope blit-decomp
+state + _blit_decomp_enabled gate + _bd_record_run helper;
+`_blit_indexed` 3-read phase split + instrumented colorkey loop;
+flip() per-flip sample fill; _maybe_flush_phase_timing_audit emit +
+reset; initVideo banner).
+
+PLAY MATRIX (which cells carry it): PLAY1 = ASM_BLIT=1 + BLIT_DECOMP=1;
+PLAY2 = ASM_BLIT=0 + BLIT_DECOMP=1; PLAY3/PLAY4 = BLIT_DECOMP=0.
+
+Banner regex for tests/run-gameplay-smoke.sh BANNERS:
+"Renderer::initVideo: blit-decomp .* instrumentation (ENABLED|DISABLED)"
+---
+ src/graphics/Renderer.cpp | 191 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 191 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 4d85d95..bac36b4 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -1579,6 +1579,50 @@ Uint64 _flip_body_samples_audit_flushes[_flip_phase_block_size]    = {};
+ Uint64 _flip_body_samples_residual[_flip_phase_block_size]         = {};
+ int    _flip_body_sample_idx = 0;
+ 
++// DOS-PORT (patch 0146, Phase 11 wave-51): `_blit_indexed` sub-decomp
++// instrumentation storage. Rides along with the 0145 asm opaque-span
++// lever (own env gate SDL_HINT_DOSKUTSU_BLIT_DECOMP per single-lever
++// discipline -- measurement, not a mechanism). Two phase-timer sample
++// arrays carry one sample per flip (the per-flip accumulated ns);
++// flip() fills them at the 100-flip emit boundary, same cadence as
++// flip-stat / flip-body-stat. The px/run census counters are per-100-
++// flip-block, split [0]=bg (wave-25 g_mds_tfg_loop_active set) vs
++// [1]=other (sprite/HUD). Everything here is untouched when the
++// BLIT_DECOMP gate is OFF (the two clean PLAY cells pay zero).
++Uint64 _bd_dispatch_samples[_flip_phase_block_size]  = {};
++Uint64 _bd_innerloop_samples[_flip_phase_block_size] = {};
++int    _bd_sample_idx = 0;
++Uint64 _bd_dispatch_ns_this_flip  = 0;
++Uint64 _bd_innerloop_ns_this_flip = 0;
++Uint64 _bd_px_total[2]    = {};
++Uint64 _bd_px_opaque[2]   = {};
++Uint64 _bd_px_skipped[2]  = {};
++Uint64 _bd_run_count[2]   = {};
++Uint64 _bd_run_hist[2][4] = {};   // run-length buckets {1-3, 4-8, 9-15, >=16}
++
++// Cached-at-boot gate for the blit-decomp instrumentation. Strict "1"
++// opt-in; evaluated once. Modelled on _strict_truthy_env per the
++// project diagnostic-hint convention (wave-25 / FLIP_INSTR siblings).
++inline bool _blit_decomp_enabled()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_BLIT_DECOMP");
++  return v;
++}
++
++// Bucket one contiguous opaque-run length into the {1-3,4-8,9-15,>=16}
++// histogram for caller class cc. Called only from the BLIT_DECOMP-gated
++// instrumented colorkey loop in `_blit_indexed` -- zero-cost when OFF.
++inline void _bd_record_run(int cc, int run_len)
++{
++  ++_bd_run_count[cc];
++  int b;
++  if (run_len <= 3)       b = 0;
++  else if (run_len <= 8)  b = 1;
++  else if (run_len <= 15) b = 2;
++  else                    b = 3;
++  ++_bd_run_hist[cc][b];
++}
++
+ // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): summarize a sample
+ // array. n must be ≤ _flip_phase_block_size; copy is on-stack so total
+ // stack pressure is ~4 KB across the 5 phases × invocation site (one
+@@ -2032,6 +2076,61 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_drawtile_fast_bg_fallback_count_block = 0;
+   NXE::Diag::g_drawtile_fast_bg_calls_count_block    = 0;
+ 
++  // DOS-PORT (patch 0146, Phase 11 wave-51): emit `_blit_indexed`
++  // sub-decomp lines -- 2 STAT lines (bi_dispatch / bi_innerloop) +
++  // per-caller-class census + run-census. bi_innerloop times the
++  // asm-or-colorkey blit branch: PLAY1 vs PLAY2 bi_innerloop IS the
++  // 0145 lever A/B. The px/run census reads non-zero only in PLAY2
++  // (ASM_BLIT=0 -- legacy colorkey loop runs); in PLAY1 the span path
++  // is taken and the census reads ~0 (expected -- PLAY2 is the
++  // baseline sizing cell, see WAVE-51-ASM-BLIT-DESIGN sec. 5).
++  if (_blit_decomp_enabled() && _bd_sample_idx > 0)
++  {
++    const int n_bd = _bd_sample_idx;
++    _FlipPhaseStats st_bd_disp, st_bd_inner;
++    _compute_flip_phase_stats(_bd_dispatch_samples,  n_bd, st_bd_disp);
++    _compute_flip_phase_stats(_bd_innerloop_samples, n_bd, st_bd_inner);
++    LOG_INFO("[blit-decomp-stat n={} phase=bi_dispatch  min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_bd, st_bd_disp.min_ms, st_bd_disp.med_ms, st_bd_disp.mean_ms, st_bd_disp.p95_ms, st_bd_disp.max_ms);
++    LOG_INFO("[blit-decomp-stat n={} phase=bi_innerloop min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++             n_bd, st_bd_inner.min_ms, st_bd_inner.med_ms, st_bd_inner.mean_ms, st_bd_inner.p95_ms, st_bd_inner.max_ms);
++    for (int cc = 0; cc < 2; ++cc)
++    {
++      const char *cname = (cc == 0) ? "bg" : "other";
++      const Uint64 tot = _bd_px_total[cc];
++      const long long opct_x10 =
++          (tot > 0) ? (long long)((_bd_px_opaque[cc] * 1000ull) / tot) : 0;
++      LOG_INFO("[blit-decomp-census n={} caller={} px_total={} px_opaque={} px_skipped={} opaque_pct_x10={}]",
++               n_bd, cname,
++               (unsigned long)_bd_px_total[cc],
++               (unsigned long)_bd_px_opaque[cc],
++               (unsigned long)_bd_px_skipped[cc],
++               opct_x10);
++      LOG_INFO("[blit-decomp-runs n={} caller={} run_count={} hist_1_3={} hist_4_8={} hist_9_15={} hist_16={}]",
++               n_bd, cname,
++               (unsigned long)_bd_run_count[cc],
++               (unsigned long)_bd_run_hist[cc][0],
++               (unsigned long)_bd_run_hist[cc][1],
++               (unsigned long)_bd_run_hist[cc][2],
++               (unsigned long)_bd_run_hist[cc][3]);
++    }
++  }
++  // patch 0146: reset blit-decomp sample idx + census counters
++  // unconditionally (sample arrays + accumulators overwritten next
++  // block; per-flip accumulators are reset per-flip in flip()).
++  _bd_sample_idx = 0;
++  for (int cc = 0; cc < 2; ++cc)
++  {
++    _bd_px_total[cc]   = 0;
++    _bd_px_opaque[cc]  = 0;
++    _bd_px_skipped[cc] = 0;
++    _bd_run_count[cc]  = 0;
++    _bd_run_hist[cc][0] = 0;
++    _bd_run_hist[cc][1] = 0;
++    _bd_run_hist[cc][2] = 0;
++    _bd_run_hist[cc][3] = 0;
++  }
++
+   // DOS-PORT (patch 0124): reset W28 sub-bucket sample idx unconditionally
+   // (sample-array contents are overwritten next flip; idx reset lets the
+   // cadence repeat cleanly).
+@@ -3268,6 +3367,22 @@ bool Renderer::initVideo()
+              "(default; set SDL_HINT_DOSKUTSU_ASM_BLIT=1 to opt in -- "
+              "wave-51 _blit_indexed colorkey-blit lever)");
+   }
++  // DOS-PORT (patch 0146, Phase 11 wave-51): blit-decomp instrumentation
++  // engagement banner -- greppable witness for build-qa's BANNERS array.
++  if (_blit_decomp_enabled())
++  {
++    LOG_INFO("Renderer::initVideo: blit-decomp _blit_indexed sub-decomp "
++             "instrumentation ENABLED via SDL_HINT_DOSKUTSU_BLIT_DECOMP=1 "
++             "-- per-100-flip [blit-decomp-stat] / [blit-decomp-census] / "
++             "[blit-decomp-runs] emitted (wave-51 0145 lever sizing "
++             "ride-along; ~0.1-0.25 ms/flip cost; INSTR cells only)");
++  }
++  else
++  {
++    LOG_INFO("Renderer::initVideo: blit-decomp instrumentation DISABLED "
++             "(default; set SDL_HINT_DOSKUTSU_BLIT_DECOMP=1 to opt in -- "
++             "wave-51 _blit_indexed sub-decomp sizing)");
++  }
+   // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
+   // PumpEvents yield-skip is active. Default ON (skip); env-var override
+   // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
+@@ -4830,6 +4945,21 @@ void Renderer::flip()
+         = (Uint64)_fb_residual;
+     ++_flip_body_sample_idx;
+   }
++  // DOS-PORT (patch 0146, Phase 11 wave-51): push this flip's blit-
++  // decomp phase accumulators into the per-block sample arrays, then
++  // zero the per-flip accumulators. Gated on BLIT_DECOMP; same 100-flip
++  // cadence as flip-stat / flip-body-stat (_maybe_flush_phase_timing_
++  // audit resets _bd_sample_idx every 100 flips). The per-flip
++  // accumulators reset unconditionally so a mid-run enable starts clean.
++  if (_blit_decomp_enabled()
++      && _bd_sample_idx < _flip_phase_block_size)
++  {
++    _bd_dispatch_samples[_bd_sample_idx]  = _bd_dispatch_ns_this_flip;
++    _bd_innerloop_samples[_bd_sample_idx] = _bd_innerloop_ns_this_flip;
++    ++_bd_sample_idx;
++  }
++  _bd_dispatch_ns_this_flip  = 0;
++  _bd_innerloop_ns_this_flip = 0;
+   _maybe_flush_phase_timing_audit();
+   // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-
+   // tick split (per-100-flip cadence; reads counters bumped by RAII
+@@ -5238,6 +5368,15 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+   // calls — well under the § 6 budget).
+   const Uint64 _t0 = NXE::Diag::g_mds_tfg_loop_active ? SDL_GetTicksNS() : 0;
+ 
++  // patch 0146 (Phase 11 wave-51): blit-decomp sub-decomp timers. Gated
++  // on SDL_HINT_DOSKUTSU_BLIT_DECOMP (cached static-const-bool; OFF =
++  // zero-cost -- the three SDL_GetTicksNS reads below are never taken).
++  // Independent of the wave-25 `_t0` brackets above: separate gate,
++  // separate accumulators, nested strictly inside. bi_dispatch = entry
++  // -> clip-done; bi_innerloop = the asm-or-colorkey blit branch.
++  const bool _bd_on = _blit_decomp_enabled();
++  const Uint64 _bd_t0 = _bd_on ? SDL_GetTicksNS() : 0;
++
+   int dst_x = dstrect.x;
+   int dst_y = dstrect.y;
+   int sx = srcrect.x;
+@@ -5269,6 +5408,12 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+   const Uint8 *sp = (const Uint8 *)src->pixels + sy * src_pitch + sx;
+   Uint8 *dp = (Uint8 *)dst->pixels + dst_y * dst_pitch + dst_x;
+ 
++  // patch 0146 (wave-51): clip-done boundary -- bi_dispatch ends here,
++  // bi_innerloop covers the blit branch below. Early-out (zero-pixel)
++  // calls returned above before this read and are intentionally not
++  // timed (matches the wave-25 don't-count-early-outs convention).
++  const Uint64 _bd_t1 = _bd_on ? SDL_GetTicksNS() : 0;
++
+   if (has_colorkey && spans)
+   {
+     // DOS-PORT (patch 0145, wave-51): opaque-span fast path. The
+@@ -5308,6 +5453,43 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+       dp += dst_pitch;
+     }
+   }
++  else if (has_colorkey && _bd_on)
++  {
++    // patch 0146 (wave-51): instrumented colorkey loop -- the legacy
++    // per-pixel path PLUS the px + run census. Lever-INDEPENDENT by
++    // construction: this branch is the colorkey loop, NOT 0145's span
++    // path; with ASM_BLIT=1 (PLAY1) the `has_colorkey && spans` branch
++    // above is taken and this census reads ~0. PLAY2 (ASM_BLIT=0)
++    // yields the baseline px/run census -- that is the 0145 sizing
++    // input. Split by the wave-25 g_mds_tfg_loop_active caller flag:
++    // cc=0 BG/FG tilemap loop, cc=1 sprite/HUD.
++    const int cc = NXE::Diag::g_mds_tfg_loop_active ? 0 : 1;
++    for (int row = 0; row < rows; ++row)
++    {
++      bool in_run = false;
++      int run_len = 0;
++      for (int col = 0; col < cols; ++col)
++      {
++        const Uint8 px = sp[col];
++        if (px != colorkey)
++        {
++          dp[col] = px;
++          ++_bd_px_opaque[cc];
++          if (in_run) { ++run_len; }
++          else { in_run = true; run_len = 1; }
++        }
++        else
++        {
++          ++_bd_px_skipped[cc];
++          if (in_run) { _bd_record_run(cc, run_len); in_run = false; }
++        }
++      }
++      if (in_run) _bd_record_run(cc, run_len);
++      sp += src_pitch;
++      dp += dst_pitch;
++    }
++    _bd_px_total[cc] += (Uint64)rows * (Uint64)cols;
++  }
+   else if (has_colorkey)
+   {
+     for (int row = 0; row < rows; ++row)
+@@ -5331,6 +5513,15 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+       dp += dst_pitch;
+     }
+   }
++  // patch 0146 (wave-51): close the blit-decomp phase timers. Per-flip
++  // accumulation; flip() pushes the per-flip totals into the sample
++  // arrays at the 100-flip emit boundary.
++  if (_bd_on)
++  {
++    const Uint64 _bd_t2 = SDL_GetTicksNS();
++    _bd_dispatch_ns_this_flip += _bd_t1 - _bd_t0;
++    _bd_innerloop_ns_this_flip += _bd_t2 - _bd_t1;
++  }
+   if (NXE::Diag::g_mds_tfg_loop_active)
+   {
+     NXE::Diag::g_mds_tfg_blit_indexed_total_ns += SDL_GetTicksNS() - _t0;
+-- 
+2.47.3
+
