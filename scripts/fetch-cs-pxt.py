@@ -189,6 +189,11 @@ def fetch_and_extract_pxt(out_dir: str, verbose: bool = True) -> int:
     # the user's filesystem (per docs/ASSETS.md sec. Legal notes -- Pixel's
     # freeware stays out of our repo / dist / user-machine-residue).
     work = tempfile.mkdtemp(prefix="doskutsu-cs-pxt-")
+    # When an extractor failure exits with a "tempdir preserved" message,
+    # this flag tells the finally-block to skip cleanup. sys.exit() raises
+    # SystemExit, which propagates THROUGH finally -- so the cleanup runs
+    # during the unwind unless we explicitly opt out here.
+    preserve_workdir = False
     try:
         # 1. Fetch the zip into memory + SHA-256-verify.
         zip_bytes = _download(
@@ -224,6 +229,7 @@ def fetch_and_extract_pxt(out_dir: str, verbose: bool = True) -> int:
                 stdout=sys.stdout, stderr=sys.stderr,
             )
         except subprocess.CalledProcessError as e:
+            preserve_workdir = True
             sys.exit(
                 f"extract-pxt.py failed (exit {e.returncode}). "
                 f"The tempdir at {work} has been preserved for diagnosis; "
@@ -252,10 +258,15 @@ def fetch_and_extract_pxt(out_dir: str, verbose: bool = True) -> int:
         return len(pxt_files)
 
     finally:
-        # Tempdir is removed unconditionally (Doukutsu.exe + zip-in-memory
-        # gone). On the extract-pxt.py failure path we sys.exit() before
-        # reaching here, leaving the tempdir for diagnosis.
-        shutil.rmtree(work, ignore_errors=True)
+        # Normally the tempdir is removed (Doukutsu.exe + zip-in-memory
+        # gone). On the extract-pxt.py failure path preserve_workdir is set
+        # so the tempdir survives for diagnosis, matching the message that
+        # path prints. (finally runs during SystemExit unwind, so the skip
+        # must be explicit.)
+        if preserve_workdir:
+            print(f"  tempdir preserved at {work} (extractor failure)")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def print_sha_manifest(out_dir: str) -> None:

@@ -462,7 +462,7 @@ Step 4, either:
 
 ```bash
 make                                                     # build DOSKUTSU.EXE
-tools/dosbox-launch.sh --fast --exe build/doskutsu.exe   # DOSBox-X, fast config
+tools/dosbox-launch.sh --stage --fast --exe DOSKUTSU.EXE  # DOSBox-X, fast config
 ```
 
 Expected behavior:

@@ -260,7 +260,7 @@ README.TXT            DOS-readable quick-start + how to obtain Cave Story data
 make install CF=/mnt/cf
 ```
 
-Copies the same payload to `$CF/DOSKUTSU/`. If Cave Story data is present at `data/base/` at install time, the Makefile also copies it to `$CF/DOSKUTSU/DATA/BASE/` -- for convenience only, not legal redistribution (the copy is happening on your own CF card, not being uploaded anywhere).
+Copies the same payload to `$CF/DOSKUTSU/`. If Cave Story data is present in the repo `data/` tree at install time, the Makefile also copies it directly to `$CF/DOSKUTSU/DATA/` -- for convenience only, not legal redistribution (the copy is happening on your own CF card, not being uploaded anywhere).
 
 ---
 
@@ -300,7 +300,7 @@ Organya synth CPU cost at 22050 stereo is the likely culprit. Fallback is `Mix_O
 
 ### `make distclean` removed my Cave Story data
 
-`distclean` only wipes `build/` and cloned `vendor/` subdirectories. `data/base/` is yours -- it is gitignored but never touched by the Makefile. If it's gone, re-extract per `ASSETS.md`.
+`distclean` only wipes `build/` and cloned `vendor/` subdirectories. The repo `data/` tree is yours -- it is gitignored but never touched by the Makefile. If it's gone, re-extract per `ASSETS.md`.
 
 ---
 
