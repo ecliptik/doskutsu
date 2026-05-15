@@ -1,0 +1,758 @@
+From 3c776501103e0db1a5a8c3ca700ad07a83d13a78 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 15 May 2026 11:30:22 -0700
+Subject: [PATCH] perf phase 11 patch 0147 -- wave-52 mode_draw_scene decomp
+ instrumentation
+
+Per flush-instr's docs/internal/WAVE-52-DECOMP-DESIGN.md sec.3 contract.
+Instrumentation-ONLY cycle-0 iter (no lever, no single-lever conflict)
+that decomposes the ~9 ms un-instrumented scrolling-frame slice on the
+canonical KPI scene. Env gate SDL_HINT_DOSKUTSU_MDS_DECOMP (strict "1",
+cached-at-boot; default OFF). Design doc draft-named the patch
+"-mds-scroll-decomp"; team-lead's task name "-mds-decomp-instr" is
+canonical.
+
+n=70/100 COVERAGE-GAP ROOT-CAUSE -- CAUSE (a), structurally proven:
+The [mode-draw-scene-stat] n=70/100 vs [mode-tick-stat] n=100 gap is
+NOT escaped brackets (cause b). Proof: ModeTickTimer wraps
+tickfunctions[game.mode].OnTick() once per Game::tick(), ALL modes ->
+n=100. The W22.5 MdsClear/MdsTilemapBg/... sub-brackets fire ONLY
+inside DrawScene(), which is called ONLY from game_tick_normal()
+(GM_NORMAL's OnTick) unconditionally, and DrawScene()'s first statement
+(MdsClearTimer) is unconditionally placed with no early-return above
+it. Therefore n<100 is ONLY possible when fewer than 100 ticks ran
+game_tick_normal -- i.e. ticks where game.mode != GM_NORMAL
+(GM_INVENTORY / GM_MAP_SYSTEM / GM_NONE during switchstage) or
+game.paused. n=70 = exactly 70 GM_NORMAL scene-draws; it is COMPLETE
+coverage of every scene-draw that happened. The ~9 ms is entirely
+inside those scene-draws, not hiding behind the gap. Fix: patch 0147
+emits per 100 SCENE-DRAWS (a consistent denominator), not per 100
+flips. No bracket-placement change needed.
+
+WHAT IT EMITS (per 100-scene-draws block, engine <TAG>.LOG, LOG_INFO):
+- [mds-decomp-stat n=N phase=<...> min/med/mean/p95/max ms] x12 --
+  the full mode_draw_scene decomposition re-reported self-sufficiently
+  (mode_draw_scene parent, mds_clear, mds_tilemap_bg, mdt_bg_backdrop,
+  mdt_bg_tilelayer, mds_object_loop, mds_player, mds_tilemap_fg,
+  mds_carets_water_floats, mds_residual, bd_cache_blit, bd_full_redraw).
+  Reuses _compute_flip_phase_stats (wave-20 STAT machinery).
+- [mds-decomp-route ... bd_route_cache/direct/paid_both tm_route_*] --
+  the wave-48 cache-thrash double-pay check. bd_paid_both expected ~0.
+- [mds-decomp-pass ... pass_clear_bytes / pass_backdrop_bytes /
+  pass_bg_tile_scan_bytes / pass_fg_sprite_scan_bytes /
+  avg_passes_per_scene_x10] -- per-layer framebuffer-write bytes for
+  the MODEX-PLAN sec.5.7 redundant-pass premise.
+- [mds-decomp-frames ... static_frames / scroll_frames] -- per-block
+  camera-delta cluster split.
+
+DESIGN DECISIONS (flush-instr-acked):
+- (i+) self-contained: 0147 emits the full decomposition on its OWN
+  gate; the existing [mode-draw-scene-stat] (MODE_DRAW_SCENE_INSTR) is
+  NOT retrofitted -- no cross-gate behavior change, no audit-flush
+  desync. PLAY1 = MDS_DECOMP=1 only.
+- Option A (acked) -- instead of a parallel set of 0147 timers, the
+  ~10 existing W22A/W22.5/W29 timer-destructor gates in
+  diagnostic_timers.h are WIDENED from `if (!INSTR) return;` to
+  `if (!INSTR && !mds_decomp_active()) return;`, with each timer's
+  sample-array write kept INSTR-only (`if (INSTR && idx<N)`). The
+  per-tick `g_*_dt_this_tick` VALUES are thus published under
+  MDS_DECOMP; 0147 re-reads them. ZERO double-instrumentation -- there
+  is only ever one timer per region. This is the wave-25
+  g_mds_tfg_loop_active gate-widening pattern generalized.
+- bd_*/tm_* (acked narrowing) -- instead of threading 3 fragile RAII
+  timers through map_draw_backdrop()'s ~600 lines / ~7 scrolltype
+  branches: bd_cache_blit is timed at the Renderer::drawCachedBackdrop
+  + drawCachedBackdropClipped chokepoint; bd_full_redraw is DERIVED
+  (W29 MdtBgBackdropTimer total - bd_cache_blit); the bd_route_* +
+  bd_paid_both counters are DERIVED at record time from
+  (bd_cache_blit, mdt_bg_backdrop_dt) -- so map.cpp needs ZERO
+  instrumentation. tm_* counters derived from the tilemap-cache
+  killswitch state (cache is default-OFF -> route=direct).
+
+VERIFY-POINT 1 (flush-instr self-check) -- REGRESSION SAFETY: the
+widened gate `if (!INSTR && !mds_decomp_active()) return;` + the
+sample-array write kept `if (INSTR && ...)` makes existing
+W22A/W22.5/W29 instrumented-iter output BYTE-IDENTICAL when MDS_DECOMP
+is off: when INSTR is on / MDS_DECOMP off the dt write + sample write
+both execute exactly as before; when both off the destructor early-
+returns exactly as before. Only new behavior is the MDS_DECOMP-on dt
+publish.
+
+VERIFY-POINT 2 -- dt READ/RESET ordering: 0147's record hook
+(NXE::Diag::mds_decomp_on_scene_draw) is called from game_tick_normal()
+AFTER the W22.5 + W29 residual blocks -- i.e. after every Mds*Timer /
+Mdt*Timer destructor has fired at its DrawScene() sub-bracket scope
+exit and written its g_*_dt_this_tick, and BEFORE Game::tick()'s
+next-tick reset cluster. The hook reads fresh per-tick values, never
+stale or doubled.
+
+PER-LAYER BYTE NAMING (flush-instr-specified): clear + backdrop are
+full opaque writes -> rect-area == bytes WRITTEN, exact
+(pass_clear_bytes / pass_backdrop_bytes). bg + fg are colorkey blits
+-> rect-area == bytes SCANNED/addressed, an upper bound -> named
+pass_bg_tile_scan_bytes / pass_fg_sprite_scan_bytes. Accounting is one
+`+= cols*rows` per blit CALL in _blit_indexed / _blit_indexed_mirrored
+(tag-attributed via g_mds_decomp_pass set by DrawScene at each layer
+boundary), + clearScreen + drawCachedBackdrop[/Clipped]. ZERO
+per-pixel work (the wave-51 patch-0146 cost-overrun lesson).
+
+COST: ~12 array stores + a handful of ops per scene-draw + one
+`+= cols*rows` per blit call. Budget < 0.1 ms/flip; PLAY2 (clean)
+confirms the Heisenberg cost. When MDS_DECOMP is off every counter /
+timer / array is untouched (cached-bool gate).
+
+FILES: src/Utils/diagnostic_timers.h (mds_decomp_active +
+mds_decomp_on_scene_draw decls + MdsDecompPass enum + g_mds_decomp_pass
+extern; 10 timer-gate widenings), src/graphics/Renderer.cpp (gate def,
+0147 storage + record/emit, blit + clearScreen + cached-backdrop byte
+hooks, banner, NXE::Diag wrappers), src/game.cpp (per-scene-draw record
+hook + 4 pass-tag sets in DrawScene).
+
+Banner regex for tests/run-gameplay-smoke.sh BANNERS:
+"Renderer::initVideo: mds-scroll-decomp instrumentation (ENABLED|DISABLED)"
+---
+ src/Utils/diagnostic_timers.h |  95 ++++++++---
+ src/game.cpp                  |  19 +++
+ src/graphics/Renderer.cpp     | 297 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 391 insertions(+), 20 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 3f90ac9..33d2a80 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -249,6 +249,39 @@ struct DebugOverlayTimer
+ // mirrors the W20B `engine_tick_fine_instr_active()` precedent.
+ bool mode_tick_instr_active();
+ 
++// DOS-PORT (patch 0147, Phase 11 wave-52): mds-decomp instrumentation
++// gate. Strict "1" SDL_HINT_DOSKUTSU_MDS_DECOMP, cached-at-boot;
++// definition lives in Renderer.cpp's ablation-flag cluster. When true,
++// the W22A/W22.5/W29 mode_draw_scene timer destructors below ALSO
++// populate their `g_*_dt_this_tick` per-tick values, so patch 0147 can
++// re-read the full mode_draw_scene decomposition self-sufficiently on
++// its own gate. Their INSTR-gated sample arrays + [mode-draw-scene-stat]
++// emit are NOT touched -- existing instrumented-iter output stays
++// byte-identical when MDS_DECOMP is off.
++bool mds_decomp_active();
++
++// patch 0147 (wave-52): per-100-SCENE-DRAWS record+emit hook. Called
++// once per DrawScene() from game_tick_normal() AFTER the
++// ModeDrawSceneTimer scope closes (so every g_*_dt_this_tick is fresh).
++// No-op unless mds_decomp_active(). Definition in Renderer.cpp.
++void mds_decomp_on_scene_draw();
++
++// patch 0147 (wave-52): current framebuffer-write PASS tag. Set by
++// DrawScene() at each layer boundary; read by the INDEX8 blit
++// primitives to attribute scan/write bytes to the right layer. Only
++// meaningful while mds_decomp_active(). Cross-TU (game.cpp writes,
++// Renderer.cpp reads); defined in Renderer.cpp.
++enum MdsDecompPass
++{
++  MDS_PASS_OTHER    = 0,  // HUD / textbox / non-scene -- not one of the 4
++  MDS_PASS_CLEAR    = 1,
++  MDS_PASS_BACKDROP = 2,
++  MDS_PASS_BG       = 3,
++  MDS_PASS_FG       = 4,  // FG tilelayer + object/sprite draws
++  MDS_PASS_COUNT    = 5
++};
++extern int g_mds_decomp_pass;
++
+ // Sample-array storage (extern; defined in Renderer.cpp). Sized at
+ // `g_eng_tick_block_size` (= 100), shared with W20B per contract § 3.
+ extern std::uint64_t g_mt_sim_samples[g_eng_tick_block_size];
+@@ -297,10 +330,14 @@ struct ModeDrawSceneTimer
+   ModeDrawSceneTimer() : t0(SDL_GetTicksNS()) {}
+   ~ModeDrawSceneTimer()
+   {
+-    if (!mode_tick_instr_active()) return;
++    // patch 0147 (wave-52): widened gate -- the per-tick dt value is
++    // also published under MDS_DECOMP; the sample-array write stays
++    // INSTR-only so existing output is byte-identical when off.
++    const bool _instr = mode_tick_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mt_draw_scene_dt_this_tick = dt;
+-    if (g_mt_draw_scene_idx < g_eng_tick_block_size)
++    if (_instr && g_mt_draw_scene_idx < g_eng_tick_block_size)
+       g_mt_draw_scene_samples[g_mt_draw_scene_idx++] = dt;
+   }
+ };
+@@ -440,10 +477,12 @@ struct MdsClearTimer
+   MdsClearTimer() : t0(SDL_GetTicksNS()) {}
+   ~MdsClearTimer()
+   {
+-    if (!mode_draw_scene_instr_active()) return;
++    // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
++    const bool _instr = mode_draw_scene_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mds_clear_dt_this_tick = dt;
+-    if (g_mds_clear_idx < g_eng_tick_block_size)
++    if (_instr && g_mds_clear_idx < g_eng_tick_block_size)
+       g_mds_clear_samples[g_mds_clear_idx++] = dt;
+   }
+ };
+@@ -454,10 +493,12 @@ struct MdsTilemapBgTimer
+   MdsTilemapBgTimer() : t0(SDL_GetTicksNS()) {}
+   ~MdsTilemapBgTimer()
+   {
+-    if (!mode_draw_scene_instr_active()) return;
++    // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
++    const bool _instr = mode_draw_scene_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mds_tilemap_bg_dt_this_tick = dt;
+-    if (g_mds_tilemap_bg_idx < g_eng_tick_block_size)
++    if (_instr && g_mds_tilemap_bg_idx < g_eng_tick_block_size)
+       g_mds_tilemap_bg_samples[g_mds_tilemap_bg_idx++] = dt;
+   }
+ };
+@@ -468,10 +509,12 @@ struct MdsObjectLoopTimer
+   MdsObjectLoopTimer() : t0(SDL_GetTicksNS()) {}
+   ~MdsObjectLoopTimer()
+   {
+-    if (!mode_draw_scene_instr_active()) return;
++    // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
++    const bool _instr = mode_draw_scene_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mds_object_loop_dt_this_tick = dt;
+-    if (g_mds_object_loop_idx < g_eng_tick_block_size)
++    if (_instr && g_mds_object_loop_idx < g_eng_tick_block_size)
+       g_mds_object_loop_samples[g_mds_object_loop_idx++] = dt;
+   }
+ };
+@@ -482,10 +525,12 @@ struct MdsPlayerTimer
+   MdsPlayerTimer() : t0(SDL_GetTicksNS()) {}
+   ~MdsPlayerTimer()
+   {
+-    if (!mode_draw_scene_instr_active()) return;
++    // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
++    const bool _instr = mode_draw_scene_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mds_player_dt_this_tick = dt;
+-    if (g_mds_player_idx < g_eng_tick_block_size)
++    if (_instr && g_mds_player_idx < g_eng_tick_block_size)
+       g_mds_player_samples[g_mds_player_idx++] = dt;
+   }
+ };
+@@ -496,10 +541,12 @@ struct MdsTilemapFgTimer
+   MdsTilemapFgTimer() : t0(SDL_GetTicksNS()) {}
+   ~MdsTilemapFgTimer()
+   {
+-    if (!mode_draw_scene_instr_active()) return;
++    // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
++    const bool _instr = mode_draw_scene_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mds_tilemap_fg_dt_this_tick = dt;
+-    if (g_mds_tilemap_fg_idx < g_eng_tick_block_size)
++    if (_instr && g_mds_tilemap_fg_idx < g_eng_tick_block_size)
+       g_mds_tilemap_fg_samples[g_mds_tilemap_fg_idx++] = dt;
+   }
+ };
+@@ -510,10 +557,12 @@ struct MdsCaretsWaterFloatsTimer
+   MdsCaretsWaterFloatsTimer() : t0(SDL_GetTicksNS()) {}
+   ~MdsCaretsWaterFloatsTimer()
+   {
+-    if (!mode_draw_scene_instr_active()) return;
++    // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
++    const bool _instr = mode_draw_scene_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mds_carets_water_floats_dt_this_tick = dt;
+-    if (g_mds_carets_water_floats_idx < g_eng_tick_block_size)
++    if (_instr && g_mds_carets_water_floats_idx < g_eng_tick_block_size)
+       g_mds_carets_water_floats_samples[g_mds_carets_water_floats_idx++] = dt;
+   }
+ };
+@@ -624,10 +673,12 @@ struct MdtBgBackdropTimer
+   MdtBgBackdropTimer() : t0(SDL_GetTicksNS()) {}
+   ~MdtBgBackdropTimer()
+   {
+-    if (!mds_bg_instr_active()) return;
++    // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
++    const bool _instr = mds_bg_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mdt_bg_backdrop_dt_this_tick = dt;
+-    if (g_mdt_bg_backdrop_idx < g_eng_tick_block_size)
++    if (_instr && g_mdt_bg_backdrop_idx < g_eng_tick_block_size)
+       g_mdt_bg_backdrop_samples[g_mdt_bg_backdrop_idx++] = dt;
+   }
+ };
+@@ -638,10 +689,12 @@ struct MdtBgTilelayerTimer
+   MdtBgTilelayerTimer() : t0(SDL_GetTicksNS()) {}
+   ~MdtBgTilelayerTimer()
+   {
+-    if (!mds_bg_instr_active()) return;
++    // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
++    const bool _instr = mds_bg_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mdt_bg_tilelayer_dt_this_tick = dt;
+-    if (g_mdt_bg_tilelayer_idx < g_eng_tick_block_size)
++    if (_instr && g_mdt_bg_tilelayer_idx < g_eng_tick_block_size)
+       g_mdt_bg_tilelayer_samples[g_mdt_bg_tilelayer_idx++] = dt;
+   }
+ };
+@@ -652,10 +705,12 @@ struct MdtBgTintscreenTimer
+   MdtBgTintscreenTimer() : t0(SDL_GetTicksNS()) {}
+   ~MdtBgTintscreenTimer()
+   {
+-    if (!mds_bg_instr_active()) return;
++    // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
++    const bool _instr = mds_bg_instr_active();
++    if (!_instr && !mds_decomp_active()) return;
+     const std::uint64_t dt = SDL_GetTicksNS() - t0;
+     g_mdt_bg_tintscreen_dt_this_tick = dt;
+-    if (g_mdt_bg_tintscreen_idx < g_eng_tick_block_size)
++    if (_instr && g_mdt_bg_tintscreen_idx < g_eng_tick_block_size)
+       g_mdt_bg_tintscreen_samples[g_mdt_bg_tintscreen_idx++] = dt;
+   }
+ };
+diff --git a/src/game.cpp b/src/game.cpp
+index 55f1a33..6b53ab8 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -586,6 +586,16 @@ void game_tick_normal(void)
+     NXE::Diag::g_mdt_bg_residual_samples[NXE::Diag::g_mdt_bg_residual_idx++] = (Uint64)_mdt_bg_res;
+   }
+ 
++  // DOS-PORT (patch 0147, Phase 11 wave-52): mds-decomp per-scene-draw
++  // record hook. Placed AFTER the W22.5 + W29 residual blocks above so
++  // every g_*_dt_this_tick value this scene-draw produced has been
++  // written by its timer destructor (which fired at the DrawScene()
++  // sub-bracket scope exits) and not yet reset for the next tick.
++  // No-op unless SDL_HINT_DOSKUTSU_MDS_DECOMP=1. Emits a self-contained
++  // decomposition block every 100 scene-draws.
++  if (NXE::Diag::mds_decomp_active())
++    NXE::Diag::mds_decomp_on_scene_draw();
++
+   {
+     NXE::Diag::ModeDrawHudTimer _mdht;
+     DrawStatusBar();
+@@ -679,6 +689,10 @@ void DrawScene(void)
+   // map_draw_backdrop or further-down render code (none today, but
+   // defensive) also defaults to legacy.
+   map_mds_clear_lut_set_dispatch_eligible(true);
++  // patch 0147 (wave-52): tag the framebuffer-write PASS for the
++  // mds-decomp per-layer byte accounting. Plain int stores -- harmless
++  // when MDS_DECOMP is off (the blit primitives gate their reads).
++  NXE::Diag::g_mds_decomp_pass = NXE::Diag::MDS_PASS_CLEAR;
+   {
+     NXE::Diag::MdsClearTimer _mc;
+     if (!bg_skip_unchanged)
+@@ -699,6 +713,7 @@ void DrawScene(void)
+       // map_draw_backdrop() (BK_FASTLEFT_LAYERS parallax, BK_FOLLOW,
+       // BK_FIXED, etc.). H-A hypothesis (per contract § 0.3).
+       // patch 0143: gated on bg_skip_unchanged; empty scope on skip.
++      NXE::Diag::g_mds_decomp_pass = NXE::Diag::MDS_PASS_BACKDROP; // patch 0147
+       {
+         NXE::Diag::MdtBgBackdropTimer _mtbg_bd;
+         if (!bg_skip_unchanged)
+@@ -710,6 +725,7 @@ void DrawScene(void)
+       // map_draw(false), the BG tile-layer render via
+       // _tilemap_render_uncached_full_loop (slot 0117's call site).
+       // H-B hypothesis (per contract § 0.3).
++      NXE::Diag::g_mds_decomp_pass = NXE::Diag::MDS_PASS_BG; // patch 0147
+       {
+         NXE::Diag::MdtBgTilelayerTimer _mtbg_tl;
+         map_draw(false);
+@@ -731,6 +747,9 @@ void DrawScene(void)
+   }
+ 
+   // draw all objects following their z-order
++  // patch 0147 (wave-52): from here on -- object loop, DrawPlayer,
++  // FG tilelayer, carets/water/floats -- all write the FG/sprite pass.
++  NXE::Diag::g_mds_decomp_pass = NXE::Diag::MDS_PASS_FG;
+   nOnscreenObjects = 0;
+ 
+   {
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index bac36b4..c1f4071 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -168,6 +168,12 @@ std::uint64_t g_mds_player_dt_this_tick               = 0;
+ std::uint64_t g_mds_tilemap_fg_dt_this_tick           = 0;
+ std::uint64_t g_mds_carets_water_floats_dt_this_tick  = 0;
+ 
++// patch 0147 (Phase 11 wave-52): current framebuffer-write PASS tag.
++// Set by DrawScene() at each layer boundary; read by the INDEX8 blit
++// primitives to attribute scan/write bytes. extern-declared in
++// diagnostic_timers.h. MDS_PASS_OTHER (0) until DrawScene sets it.
++int g_mds_decomp_pass = 0;
++
+ // DOS-PORT (patch 0125, Phase 11 wave-29 mds_tilemap_bg sub-decomposition
+ // per docs/PHASE11-WAVE-29-CONTRACT.md): 3 sub-bracket sample arrays +
+ // 3 idxes + 3 per-tick dt locals + 1 residual array + 1 residual idx.
+@@ -571,6 +577,20 @@ inline bool _abl_mode_draw_scene_instr()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0147, Phase 11 wave-52): mds-decomp instrumentation
++// gate. Strict "1" SDL_HINT_DOSKUTSU_MDS_DECOMP; default OFF. When ON,
++// the wave-52 scrolling-block decomposition emits a self-contained
++// per-100-SCENE-DRAWS block (full mode_draw_scene sub-bucket re-report
++// + backdrop-cache route/timing + per-layer framebuffer-write bytes +
++// static/scroll camera tag). Cached static-const-bool -- never a per-
++// call getenv. Independent of MODE_DRAW_SCENE_INSTR: see the timer-
++// gate widening in diagnostic_timers.h (patch 0147).
++inline bool _abl_mds_decomp()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_MDS_DECOMP");
++  return v;
++}
++
+ // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): tilemap-cache
+ // killswitch. Originally strict-"0" match (default-ON cache, opt-OUT
+ // via "0") per wave-23 contract § 3.2.
+@@ -1661,6 +1681,211 @@ inline void _compute_flip_phase_stats(const Uint64 *samples, int n,
+   out.max_ms  = (double)buf[n - 1] / 1000000.0;
+ }
+ 
++// ===================================================================
++// DOS-PORT (patch 0147, Phase 11 wave-52): mode_draw_scene scrolling-
++// block decomposition instrumentation. Gated on _abl_mds_decomp()
++// (SDL_HINT_DOSKUTSU_MDS_DECOMP). Self-contained: one block emitted per
++// 100 SCENE-DRAWS (not per 100 flips -- the wave-52 sec.2 coverage fix;
++// the n=70/100 gap is cause (a), non-GM_NORMAL ticks running no
++// DrawScene, so a scene-draw denominator is the consistent one).
++// ALL counting here is per-layer / per-blit-call -- ZERO per-pixel work
++// (the wave-51 patch-0146 cost-overrun lesson).
++// ===================================================================
++
++// 12 timed sub-buckets, one sample per scene-draw, 100/block. Values
++// are re-read from the W22A/W22.5/W29 g_*_dt_this_tick accumulators,
++// which the widened timer gates (diagnostic_timers.h, patch 0147)
++// populate under MDS_DECOMP.
++Uint64 _mdsd_samples_draw_scene[_flip_phase_block_size]    = {};
++Uint64 _mdsd_samples_clear[_flip_phase_block_size]         = {};
++Uint64 _mdsd_samples_tilemap_bg[_flip_phase_block_size]    = {};
++Uint64 _mdsd_samples_bg_backdrop[_flip_phase_block_size]   = {};
++Uint64 _mdsd_samples_bg_tilelayer[_flip_phase_block_size]  = {};
++Uint64 _mdsd_samples_object_loop[_flip_phase_block_size]   = {};
++Uint64 _mdsd_samples_player[_flip_phase_block_size]        = {};
++Uint64 _mdsd_samples_tilemap_fg[_flip_phase_block_size]    = {};
++Uint64 _mdsd_samples_carets[_flip_phase_block_size]        = {};
++Uint64 _mdsd_samples_residual[_flip_phase_block_size]      = {};
++Uint64 _mdsd_samples_bd_cache_blit[_flip_phase_block_size] = {};
++Uint64 _mdsd_samples_bd_full_redraw[_flip_phase_block_size]= {};
++int    _mdsd_sample_idx = 0;
++// per-block derived backdrop-route counters (sec.3.2 -- the double-pay
++// check). Derived at record time from bd_cache_blit vs backdrop total;
++// no map.cpp instrumentation needed.
++Uint32 _mdsd_bd_route_cache = 0, _mdsd_bd_route_direct = 0, _mdsd_bd_paid_both = 0;
++// per-block scroll-frame classification (sec.3.5)
++Uint32 _mdsd_static_frames = 0, _mdsd_scroll_frames = 0;
++// per-block per-layer framebuffer-write byte sums (sec.3.4). clear +
++// backdrop are full opaque writes (exact bytes WRITTEN); bg + fg are
++// colorkey blits (rect-area = bytes SCANNED/addressed, upper bound on
++// written -- named "_scan_" per flush-instr's contract).
++Uint64 _mdsd_pass_clear_bytes = 0, _mdsd_pass_backdrop_bytes = 0;
++Uint64 _mdsd_pass_bg_scan_bytes = 0, _mdsd_pass_fg_scan_bytes = 0;
++// per-SCENE-DRAW accumulators (snapshotted into per-block sums + zeroed
++// each scene-draw). Indexed by NXE::Diag::MdsDecompPass.
++Uint64 _mdsd_pass_bytes_this_scene[NXE::Diag::MDS_PASS_COUNT] = {};
++Uint64 _mdsd_bd_cache_blit_ns_this_scene = 0;
++// scroll-tag: previous scene-draw's camera scroll, for delta classify.
++int _mdsd_last_xscroll = INT_MIN, _mdsd_last_yscroll = INT_MIN;
++
++// Emit one per-100-scene-draws block to the engine <TAG>.LOG, then
++// reset all per-block accumulators. Reuses _compute_flip_phase_stats.
++void _mds_decomp_emit_block()
++{
++  const int n = _mdsd_sample_idx;
++  if (n <= 0) return;
++  // Block header -- honest labelling for the analysis side. n is in
++  // SCENE-DRAWS (not flips). bd_full_redraw is derived per-tick as
++  // (mdt_bg_backdrop_dt - bd_cache_blit) so it is a real per-frame
++  // STAT, and it ABSORBS the dropped sub-us bd_cache_decision residual
++  // -- it is redraw+decision-residual, not a pure-redraw bracket.
++  // pass_bg/fg are SCAN bytes (colorkey-blit rect area), not written.
++  LOG_INFO("[mds-decomp-block n={} unit=scene-draws "
++           "bd_full_redraw=redraw_plus_decision_residual]", n);
++  _FlipPhaseStats st;
++#define MDSD_STAT(arr, nm)                                                    \
++  _compute_flip_phase_stats(arr, n, st);                                      \
++  LOG_INFO("[mds-decomp-stat n={} phase=" nm " min={:.2f} med={:.2f} "        \
++           "mean={:.2f} p95={:.2f} max={:.2f} ms]",                           \
++           n, st.min_ms, st.med_ms, st.mean_ms, st.p95_ms, st.max_ms)
++  MDSD_STAT(_mdsd_samples_draw_scene,    "mode_draw_scene");
++  MDSD_STAT(_mdsd_samples_clear,         "mds_clear");
++  MDSD_STAT(_mdsd_samples_tilemap_bg,    "mds_tilemap_bg");
++  MDSD_STAT(_mdsd_samples_bg_backdrop,   "mdt_bg_backdrop");
++  MDSD_STAT(_mdsd_samples_bg_tilelayer,  "mdt_bg_tilelayer");
++  MDSD_STAT(_mdsd_samples_object_loop,   "mds_object_loop");
++  MDSD_STAT(_mdsd_samples_player,        "mds_player");
++  MDSD_STAT(_mdsd_samples_tilemap_fg,    "mds_tilemap_fg");
++  MDSD_STAT(_mdsd_samples_carets,        "mds_carets_water_floats");
++  MDSD_STAT(_mdsd_samples_residual,      "mds_residual");
++  MDSD_STAT(_mdsd_samples_bd_cache_blit, "bd_cache_blit");
++  MDSD_STAT(_mdsd_samples_bd_full_redraw,"bd_full_redraw");
++#undef MDSD_STAT
++  // backdrop + tilemap route counters. tm_* derived: the tilemap cache
++  // is killswitch-default-OFF, so route=direct for every scene-draw
++  // when the killswitch is active.
++  const bool tm_off = NXE::Diag::tilemap_cache_killswitch_active();
++  LOG_INFO("[mds-decomp-route n={} bd_route_cache={} bd_route_direct={} "
++           "bd_paid_both={} tm_route_cache={} tm_route_direct={} tm_cache_miss={}]",
++           n, (unsigned long)_mdsd_bd_route_cache,
++           (unsigned long)_mdsd_bd_route_direct,
++           (unsigned long)_mdsd_bd_paid_both,
++           (unsigned long)0,
++           (unsigned long)(tm_off ? (Uint32)n : 0),
++           (unsigned long)0);
++  // per-layer framebuffer-write bytes. clear/backdrop = bytes WRITTEN
++  // (full opaque); bg/fg = bytes SCANNED (colorkey-blit rect area,
++  // upper bound). total_passes_x10 = derived full-screen-pass count.
++  const Uint64 total_bytes = _mdsd_pass_clear_bytes + _mdsd_pass_backdrop_bytes
++                           + _mdsd_pass_bg_scan_bytes + _mdsd_pass_fg_scan_bytes;
++  const unsigned long passes_x10 = (n > 0)
++      ? (unsigned long)((total_bytes * 10ull) / (76800ull * (Uint64)n))
++      : 0;
++  LOG_INFO("[mds-decomp-pass n={} pass_clear_bytes={} pass_backdrop_bytes={} "
++           "pass_bg_tile_scan_bytes={} pass_fg_sprite_scan_bytes={} "
++           "avg_passes_per_scene_x10={}]",
++           n, (unsigned long long)_mdsd_pass_clear_bytes,
++           (unsigned long long)_mdsd_pass_backdrop_bytes,
++           (unsigned long long)_mdsd_pass_bg_scan_bytes,
++           (unsigned long long)_mdsd_pass_fg_scan_bytes,
++           passes_x10);
++  LOG_INFO("[mds-decomp-frames n={} static_frames={} scroll_frames={}]",
++           n, (unsigned long)_mdsd_static_frames,
++           (unsigned long)_mdsd_scroll_frames);
++  // reset per-block state (sample arrays are overwritten next block).
++  _mdsd_sample_idx = 0;
++  _mdsd_bd_route_cache = _mdsd_bd_route_direct = _mdsd_bd_paid_both = 0;
++  _mdsd_static_frames = _mdsd_scroll_frames = 0;
++  _mdsd_pass_clear_bytes = _mdsd_pass_backdrop_bytes = 0;
++  _mdsd_pass_bg_scan_bytes = _mdsd_pass_fg_scan_bytes = 0;
++}
++
++// Called once per DrawScene() from game_tick_normal(), AFTER the
++// ModeDrawSceneTimer scope closes (every g_*_dt_this_tick is fresh).
++// Snapshots this scene-draw, derives the route + residual, and emits
++// every 100 scene-draws. Cost: ~12 array stores + a handful of ops --
++// no pixel loop.
++void _mds_decomp_on_scene_draw()
++{
++  using namespace NXE::Diag;
++  // scroll-frame classification from the camera delta.
++  const int xs = map.displayed_xscroll;
++  const int ys = map.displayed_yscroll;
++  const bool is_scroll = (_mdsd_last_xscroll != INT_MIN) &&
++                         ((xs != _mdsd_last_xscroll) || (ys != _mdsd_last_yscroll));
++  _mdsd_last_xscroll = xs;
++  _mdsd_last_yscroll = ys;
++  if (is_scroll) ++_mdsd_scroll_frames; else ++_mdsd_static_frames;
++
++  // re-read this scene-draw's W22A/W22.5/W29 per-tick dt values.
++  const Uint64 dt_draw_scene  = g_mt_draw_scene_dt_this_tick;
++  const Uint64 dt_clear       = g_mds_clear_dt_this_tick;
++  const Uint64 dt_tilemap_bg  = g_mds_tilemap_bg_dt_this_tick;
++  const Uint64 dt_bg_backdrop = g_mdt_bg_backdrop_dt_this_tick;
++  const Uint64 dt_bg_tilelyr  = g_mdt_bg_tilelayer_dt_this_tick;
++  const Uint64 dt_object_loop = g_mds_object_loop_dt_this_tick;
++  const Uint64 dt_player      = g_mds_player_dt_this_tick;
++  const Uint64 dt_tilemap_fg  = g_mds_tilemap_fg_dt_this_tick;
++  const Uint64 dt_carets      = g_mds_carets_water_floats_dt_this_tick;
++  // mds_residual = parent - sum(6 W22.5 sub-buckets); same math as the
++  // existing W22.5 residual block at game.cpp.
++  Sint64 mds_res = (Sint64)dt_draw_scene - (Sint64)dt_clear
++                 - (Sint64)dt_tilemap_bg - (Sint64)dt_object_loop
++                 - (Sint64)dt_player - (Sint64)dt_tilemap_fg
++                 - (Sint64)dt_carets;
++  if (mds_res < 0) mds_res = 0;
++  // bd_cache_blit accumulated by drawCachedBackdrop[/Clipped] during
++  // this scene-draw; bd_full_redraw derived = backdrop total - blit.
++  const Uint64 bd_cache_blit = _mdsd_bd_cache_blit_ns_this_scene;
++  Sint64 bd_full = (Sint64)dt_bg_backdrop - (Sint64)bd_cache_blit;
++  if (bd_full < 0) bd_full = 0;
++
++  const int i = _mdsd_sample_idx;
++  if (i < _flip_phase_block_size)
++  {
++    _mdsd_samples_draw_scene[i]     = dt_draw_scene;
++    _mdsd_samples_clear[i]          = dt_clear;
++    _mdsd_samples_tilemap_bg[i]     = dt_tilemap_bg;
++    _mdsd_samples_bg_backdrop[i]    = dt_bg_backdrop;
++    _mdsd_samples_bg_tilelayer[i]   = dt_bg_tilelyr;
++    _mdsd_samples_object_loop[i]    = dt_object_loop;
++    _mdsd_samples_player[i]         = dt_player;
++    _mdsd_samples_tilemap_fg[i]     = dt_tilemap_fg;
++    _mdsd_samples_carets[i]         = dt_carets;
++    _mdsd_samples_residual[i]       = (Uint64)mds_res;
++    _mdsd_samples_bd_cache_blit[i]  = bd_cache_blit;
++    _mdsd_samples_bd_full_redraw[i] = (Uint64)bd_full;
++    ++_mdsd_sample_idx;
++  }
++
++  // derive the backdrop route (sec.3.2 double-pay check) -- no map.cpp
++  // instrumentation. route_cache: a cache->window blit served this
++  // frame. route_direct: backdrop drawn with no cache blit. paid_both:
++  // a cache blit AND a substantial fresh redraw in the same frame.
++  const Uint64 BD_REDRAW_EPS = 100000;  // 0.1 ms noise floor
++  if (bd_cache_blit > 0)
++  {
++    ++_mdsd_bd_route_cache;
++    if ((Uint64)bd_full > BD_REDRAW_EPS) ++_mdsd_bd_paid_both;
++  }
++  else if (dt_bg_backdrop > 0)
++  {
++    ++_mdsd_bd_route_direct;
++  }
++
++  // snapshot per-scene pass bytes into per-block sums, then zero.
++  _mdsd_pass_clear_bytes    += _mdsd_pass_bytes_this_scene[MDS_PASS_CLEAR];
++  _mdsd_pass_backdrop_bytes += _mdsd_pass_bytes_this_scene[MDS_PASS_BACKDROP];
++  _mdsd_pass_bg_scan_bytes  += _mdsd_pass_bytes_this_scene[MDS_PASS_BG];
++  _mdsd_pass_fg_scan_bytes  += _mdsd_pass_bytes_this_scene[MDS_PASS_FG];
++  for (int p = 0; p < MDS_PASS_COUNT; ++p) _mdsd_pass_bytes_this_scene[p] = 0;
++  _mdsd_bd_cache_blit_ns_this_scene = 0;
++  g_mds_decomp_pass = MDS_PASS_OTHER;
++
++  if (_mdsd_sample_idx >= _flip_phase_block_size)
++    _mds_decomp_emit_block();
++}
++
+ // RAII helper — captures SDL_GetTicksNS at construction, accumulates
+ // elapsed ns to the file-scope counters at destruction. Place at top of
+ // each drawcall method to cover all return paths cleanly.
+@@ -3383,6 +3608,22 @@ bool Renderer::initVideo()
+              "(default; set SDL_HINT_DOSKUTSU_BLIT_DECOMP=1 to opt in -- "
+              "wave-51 _blit_indexed sub-decomp sizing)");
+   }
++  // DOS-PORT (patch 0147, Phase 11 wave-52): mds-decomp instrumentation
++  // engagement banner -- greppable witness for build-qa's BANNERS array.
++  if (_abl_mds_decomp())
++  {
++    LOG_INFO("Renderer::initVideo: mds-scroll-decomp instrumentation "
++             "ENABLED via SDL_HINT_DOSKUTSU_MDS_DECOMP=1 -- per-100-"
++             "scene-draws [mds-decomp-stat]/[mds-decomp-route]/"
++             "[mds-decomp-pass]/[mds-decomp-frames] emitted (wave-52 "
++             "scrolling-block decomposition; per-layer/per-call cost)");
++  }
++  else
++  {
++    LOG_INFO("Renderer::initVideo: mds-scroll-decomp instrumentation "
++             "DISABLED (default; set SDL_HINT_DOSKUTSU_MDS_DECOMP=1 to "
++             "opt in -- wave-52 mode_draw_scene scrolling-block decomp)");
++  }
+   // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
+   // PumpEvents yield-skip is active. Default ON (skip); env-var override
+   // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
+@@ -5408,6 +5649,15 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+   const Uint8 *sp = (const Uint8 *)src->pixels + sy * src_pitch + sx;
+   Uint8 *dp = (Uint8 *)dst->pixels + dst_y * dst_pitch + dst_x;
+ 
++  // patch 0147 (wave-52): per-layer framebuffer-write byte accounting.
++  // One += of the clipped blit-rect area per call (cols*rows) -- per-
++  // blit-CALL, never per-pixel. For colorkey blits this is bytes
++  // SCANNED/addressed (upper bound on bytes written); the emit names
++  // bg/fg "_scan_" accordingly. g_mds_decomp_pass is set by DrawScene.
++  if (_abl_mds_decomp())
++    _mdsd_pass_bytes_this_scene[NXE::Diag::g_mds_decomp_pass]
++        += (Uint64)cols * (Uint64)rows;
++
+   // patch 0146 (wave-51): clip-done boundary -- bi_dispatch ends here,
+   // bi_innerloop covers the blit branch below. Early-out (zero-pixel)
+   // calls returned above before this read and are intentionally not
+@@ -5552,6 +5802,12 @@ static inline bool _blit_indexed_mirrored(SDL_Surface *dst, SDL_Surface *src,
+   if (dst_y + rows > dst->h) rows = dst->h - dst_y;
+   if (rows <= 0 || cols <= 0) return true;
+ 
++  // patch 0147 (wave-52): per-layer write-byte accounting (see
++  // _blit_indexed) -- mirrored sprites count toward their pass too.
++  if (_abl_mds_decomp())
++    _mdsd_pass_bytes_this_scene[NXE::Diag::g_mds_decomp_pass]
++        += (Uint64)cols * (Uint64)rows;
++
+   const int src_pitch = src->pitch;
+   const int dst_pitch = dst->pitch;
+   const Uint8 *sp = (const Uint8 *)src->pixels + sy * src_pitch + srcrect.x;
+@@ -6848,12 +7104,22 @@ bool Renderer::drawCachedBackdrop(SDL_Surface *src)
+   // resolves to a per-row memcpy. Source has no colorkey on the cache
+   // path (caller pre-cleared the cache surface and rendered tiles into
+   // it; the result is opaque coverage).
++  // patch 0147 (wave-52): time the cache->window blit (bd_cache_blit)
++  // + account the full-screen backdrop write bytes. This is the single
++  // chokepoint every full cache-blit flows through.
++  const Uint64 _mdsd_bd_t0 = _abl_mds_decomp() ? SDL_GetTicksNS() : 0;
+   if (!SDL_BlitSurface(src, NULL, _cached_window_surface, NULL))
+   {
+     LOG_ERROR("Renderer::drawCachedBackdrop: SDL_BlitSurface failed: {}",
+               SDL_GetError());
+     return false;
+   }
++  if (_abl_mds_decomp())
++  {
++    _mdsd_bd_cache_blit_ns_this_scene += SDL_GetTicksNS() - _mdsd_bd_t0;
++    _mdsd_pass_bytes_this_scene[NXE::Diag::MDS_PASS_BACKDROP]
++        += (Uint64)src->w * (Uint64)src->h;
++  }
+ 
+   _bump_drawcall();
+   _record_dirty_rect(0, 0, screenWidth * scale, screenHeight * scale);
+@@ -6921,12 +7187,21 @@ bool Renderer::drawCachedBackdropClipped(SDL_Surface *src, int y_start, int y_en
+   drect.w = _cached_window_surface->w;
+   drect.h = rows * scale;
+ 
++  // patch 0147 (wave-52): time the clipped cache->window blit
++  // (bd_cache_blit) + account the sub-region backdrop write bytes.
++  const Uint64 _mdsd_bd_t0 = _abl_mds_decomp() ? SDL_GetTicksNS() : 0;
+   if (!SDL_BlitSurface(src, &srect, _cached_window_surface, &drect))
+   {
+     LOG_ERROR("Renderer::drawCachedBackdropClipped: SDL_BlitSurface failed: {}",
+               SDL_GetError());
+     return false;
+   }
++  if (_abl_mds_decomp())
++  {
++    _mdsd_bd_cache_blit_ns_this_scene += SDL_GetTicksNS() - _mdsd_bd_t0;
++    _mdsd_pass_bytes_this_scene[NXE::Diag::MDS_PASS_BACKDROP]
++        += (Uint64)_cached_window_surface->w * (Uint64)rows;
++  }
+ 
+   _bump_drawcall();
+   _record_dirty_rect(0, y_start * scale, screenWidth * scale, rows * scale);
+@@ -7317,6 +7592,18 @@ void Renderer::clearScreen(uint8_t r, uint8_t g, uint8_t b)
+   const int sw = screenWidth * scale;
+   const int sh = screenHeight * scale;
+ 
++  // patch 0147 (wave-52): per-layer write-byte accounting for the
++  // CLEAR pass. Gated additionally on map_mds_clear_lut_dispatch_
++  // eligible() so ONLY the DrawScene clearScreen call counts (title /
++  // menu / screen-effect clears are not scene-draw passes). Counts the
++  // full-screen target area (the clear layer's screen coverage); the
++  // wave-49 per-row LUT may skip rows -- the actual reduced cost is
++  // captured by the mds_clear timing bucket, this is the nominal
++  // pass volume.
++  if (_abl_mds_decomp() && map_mds_clear_lut_dispatch_eligible())
++    _mdsd_pass_bytes_this_scene[NXE::Diag::MDS_PASS_CLEAR]
++        += (Uint64)sw * (Uint64)sh;
++
+   // DOS-PORT (patch 0058, Phase 9 wave 12.4 Lever B): hand-rolled fast
+   // path. memset16 the entire 320x240 RGB565 surface to the packed
+   // color. Falls through to SDL_RenderFillRect on Mach64 / 640x480 or
+@@ -7700,6 +7987,16 @@ namespace NXE { namespace Diag {
+ bool mds_bg_instr_active() { return ::NXE::Graphics::_abl_mds_bg_instr(); }
+ }}
+ 
++// DOS-PORT (patch 0147, Phase 11 wave-52): mds-decomp env-helper +
++// per-scene-draw record hook. Same file-scope-after-both-namespace-
++// closes pattern as the W20B/W22A/W22.5/W23 accessor family (avoids
++// the nested NXE::Graphics::NXE::Diag trap). mds_decomp_on_scene_draw
++// forwards into the anonymous-namespace record function.
++namespace NXE { namespace Diag {
++bool mds_decomp_active() { return ::NXE::Graphics::_abl_mds_decomp(); }
++void mds_decomp_on_scene_draw() { ::NXE::Graphics::_mds_decomp_on_scene_draw(); }
++}}
++
+ // DOS-PORT (patch 0128, Phase 11 wave-33 H3 visit-loop simplification —
+ // slot 0113 extension): tile_bounds_skip_active() env-helper accessor.
+ // Same file-scope-after-both-namespace-closes definition pattern
+-- 
+2.47.3
+

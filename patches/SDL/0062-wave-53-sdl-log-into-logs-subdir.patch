@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 15 May 2026 12:36:28 -0700
+Subject: [PATCH 62/62] dos: Phase 11 patch 0062 -- wave-53 relocate SDL log
+ into LOGS/ subdir
+
+Hygiene companion to the wave-53 engine-side Logger change. NXEngine's
+engine log moves into a "LOGS" subdirectory of the game directory
+(/DOSKUTSU/LOGS/); this patch moves the SDL3-DOS backend's diagnostic
+log there too so a real-HW iter's two logs co-locate in one directory
+the operator can scp as a unit.
+
+doskutsu_dbg_resolve_path() now:
+  - composes a basename ("sdldbg.log" default, or "<TAG>SDL.LOG" when
+    DOSKUTSU_LOG_TAG is set);
+  - mkdir()s "/DOSKUTSU/LOGS" at runtime (DJGPP accepts '/'); on success
+    or EEXIST the log goes to /DOSKUTSU/LOGS/<basename>;
+  - on any other mkdir() failure (read-only volume, etc.) falls back to
+    the pre-patch /DOSKUTSU/<basename> location so logging never dies.
+
+The mkdir is defensive and independent of the engine-side mkdir -- no
+ordering dependency between the two backends.
+
+Finding-#5 tidy (SESSION-SNAPSHOT-2026-05-15): DOSKUTSU_LOG_TAG is now
+capped at 5 chars when composing "<TAG>SDL.LOG", so the basename
+"<TAG>SDL" is deterministically inside DOS 8.3. Previously an over-long
+tag was silently truncated by the filesystem, which could collide the
+SDL log onto the engine's "<TAG>.LOG" basename. The "SDL" infix keeps
+the SDL and engine logs distinct inside LOGS/.
+
+No fps effect, no killswitch -- this is a log-path change only.
+
+Workspace-local patch; never upstreamed (per sdl_ai_policy memory).
+---
+ src/video/dos/SDL_dosdbg.c | 66 +++++++++++++++++++++++++++-----------
+ 1 file changed, 48 insertions(+), 18 deletions(-)
+
+diff --git a/src/video/dos/SDL_dosdbg.c b/src/video/dos/SDL_dosdbg.c
+index 26e38484a..3944c5cf4 100644
+--- a/src/video/dos/SDL_dosdbg.c
++++ b/src/video/dos/SDL_dosdbg.c
+@@ -27,6 +27,8 @@
+ #include <stdio.h>
+ #include <stdarg.h>
+ #include <unistd.h>
++#include <sys/stat.h>   // DOSKUTSU patch SDL/0062: mkdir() for the LOGS/ subdir
++#include <errno.h>      // DOSKUTSU patch SDL/0062: EEXIST check on mkdir()
+ 
+ // DOSKUTSU shared diagnostic logger (patches/SDL/0009).
+ //
+@@ -44,27 +46,55 @@
+ static FILE *g_dbg_log = NULL;
+ static char g_dbg_log_path[64];
+ 
+-// DOSKUTSU patch (Phase 9 wave 13.6.1): the log-file path is overridable via
+-// the DOSKUTSU_LOG_TAG env var so a multi-config bisect can write each run's
+-// SDL trace to a unique filename without renames between runs. The log lives
+-// in the doskutsu game directory alongside DEBUG.LOG (rather than at the CF
+-// root) — single dir to scp from after a real-HW iter. When unset
+-// (empty/null), default "/DOSKUTSU/sdldbg.log" is used. When set to e.g.
+-// "R1", the SDL trace goes to "/DOSKUTSU/R1SDL.LOG". Tag should be short
+-// enough that "<TAG>SDL.LOG" fits DOS 8.3 (so max 5 chars). Strict match:
+-// any non-empty value is used as-is; we don't try to validate.
++// DOSKUTSU patch SDL/0062 (Phase 11 wave-53): the SDL backend log is
++// relocated into a "LOGS" subdirectory of the game directory so the SDL
++// trace co-locates with NXEngine's engine-side log, which the wave-53
++// Logger change moves to "/DOSKUTSU/LOGS/" as well. The LOGS directory
++// is created at runtime; if mkdir() fails for any reason other than
++// "already exists" the path falls back to the un-prefixed "/DOSKUTSU/"
++// location so logging never dies on an unwritable volume.
++//
++// The path is still overridable via the DOSKUTSU_LOG_TAG env var so a
++// multi-config bisect can write each run's SDL trace to a unique
++// filename without renames. When unset (empty/null), the default
++// basename "sdldbg.log" is used; when set to e.g. "R1", the basename
++// is "R1SDL.LOG". The tag is capped at 5 chars when composing the
++// "<TAG>SDL.LOG" basename so "<TAG>SDL" stays deterministically inside
++// DOS 8.3 -- previously an over-long tag was silently truncated by the
++// filesystem, which could collide the SDL log onto the engine's
++// "<TAG>.LOG" basename (SESSION-SNAPSHOT-2026-05-15 finding #5). The
++// "SDL" infix keeps the SDL and engine logs distinct inside LOGS/.
+ static const char *doskutsu_dbg_resolve_path(void)
+ {
+-    if (g_dbg_log_path[0] == '\0') {
+-        const char *tag = SDL_getenv("DOSKUTSU_LOG_TAG");
+-        if (tag && tag[0] != '\0') {
+-            SDL_snprintf(g_dbg_log_path, sizeof(g_dbg_log_path),
+-                         "/DOSKUTSU/%sSDL.LOG", tag);
+-        } else {
+-            SDL_strlcpy(g_dbg_log_path, "/DOSKUTSU/sdldbg.log",
+-                        sizeof(g_dbg_log_path));
+-        }
++    if (g_dbg_log_path[0] != '\0') {
++        return g_dbg_log_path;
++    }
++
++    // Compose the per-run basename: "<TAG>SDL.LOG" when DOSKUTSU_LOG_TAG
++    // is set (tag capped at 5 chars so "<TAG>SDL" fits DOS 8.3), else
++    // the default "sdldbg.log".
++    char log_basename[16];
++    const char *tag = SDL_getenv("DOSKUTSU_LOG_TAG");
++    if (tag && tag[0] != '\0') {
++        char shorttag[6]; // 5 tag chars + NUL; SDL_strlcpy truncates to fit
++        SDL_strlcpy(shorttag, tag, sizeof(shorttag));
++        SDL_snprintf(log_basename, sizeof(log_basename), "%sSDL.LOG", shorttag);
++    } else {
++        SDL_strlcpy(log_basename, "sdldbg.log", sizeof(log_basename));
+     }
++
++    // Place the log in the "LOGS" subdir. mkdir() defensively; an EEXIST
++    // failure is success for our purposes. Any other failure (read-only
++    // volume, etc.) -> fall back to the un-prefixed dir so the trace is
++    // never lost. DJGPP/DOS accept '/' as the path separator.
++    int logs_dir_ok = 0;
++    if (mkdir("/DOSKUTSU/LOGS", 0777) == 0 || errno == EEXIST) {
++        logs_dir_ok = 1;
++    }
++
++    SDL_snprintf(g_dbg_log_path, sizeof(g_dbg_log_path), "%s/%s",
++                 logs_dir_ok ? "/DOSKUTSU/LOGS" : "/DOSKUTSU",
++                 log_basename);
+     return g_dbg_log_path;
+ }
+ 

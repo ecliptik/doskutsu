@@ -122,7 +122,14 @@ else
 fi
 
 # Clear prior logs so debug.log/sdldbg.log only contain this run's output.
-rm -f "$REPO_ROOT/build/stage/debug.log" "$REPO_ROOT/build/stage/sdldbg.log"
+# wave-53 (patch 0148 + SDL/0062) relocated both logs into a LOGS/ subdir;
+# clear the old root locations too so a stale pre-wave-53 file at the root
+# cannot be mistaken for fresh output if the runtime mkdir ever falls back.
+rm -f "$REPO_ROOT/build/stage/LOGS/DEBUG.LOG" \
+      "$REPO_ROOT/build/stage/DOSKUTSU/LOGS/SDLDBG.LOG" \
+      "$REPO_ROOT/build/stage/DEBUG.LOG" \
+      "$REPO_ROOT/build/stage/DOSKUTSU/SDLDBG.LOG" \
+      "$REPO_ROOT/build/stage/debug.log" "$REPO_ROOT/build/stage/sdldbg.log"
 
 log "launching DOSBox-X (flags: ${LAUNCHER_FLAGS[*]})"
 "$LAUNCHER" "${LAUNCHER_FLAGS[@]}" >"$OUT_DIR/launcher.log" 2>&1 &
@@ -195,18 +202,28 @@ sleep 2
 shoot "08-final"
 
 # Capture engine-side logs before killing DOSBox-X. DJGPP fopen writes uppercase
-# 8.3 names; the staged Linux tree is case-sensitive, so the engine's DEBUG.LOG
-# lands at build/stage/DEBUG.LOG and SDL/0024's SDLDBG.LOG lands inside the
-# DOSKUTSU subdir per its hard-coded "/DOSKUTSU/sdldbg.log" path. Patch 0036
-# (nxengine) + SDL/0024 fsync-per-line make these readable without waiting for
-# DOSBox-X to exit, but we still kill the process first so the gate runs on a
-# fully-flushed log without a race window.
+# 8.3 names; the staged Linux tree is case-sensitive. wave-53 patch 0148
+# relocates the engine log to build/stage/LOGS/DEBUG.LOG and SDL/0062 relocates
+# the SDL log to build/stage/DOSKUTSU/LOGS/SDLDBG.LOG. Both sides mkdir LOGS/ at
+# runtime and fall back to the pre-wave-53 root path if mkdir fails, so the cp
+# below tries LOGS/ first then the legacy root location. Patch 0036 (nxengine)
+# + SDL/0024 fsync-per-line make these readable without waiting for DOSBox-X to
+# exit, but we still kill the process first so the gate runs on a fully-flushed
+# log without a race window.
 if [[ "$KEEP_RUNNING" == "0" ]]; then
   log "killing DOSBox-X..."
   pkill -x dosbox-x || true
   sleep 2
-  cp "$REPO_ROOT/build/stage/DEBUG.LOG" "$OUT_DIR/debug.log" 2>/dev/null || log "no debug.log captured (looked at build/stage/DEBUG.LOG)"
-  cp "$REPO_ROOT/build/stage/DOSKUTSU/SDLDBG.LOG" "$OUT_DIR/sdldbg.log" 2>/dev/null || log "no sdldbg.log captured (looked at build/stage/DOSKUTSU/SDLDBG.LOG)"
+  if ! cp "$REPO_ROOT/build/stage/LOGS/DEBUG.LOG" "$OUT_DIR/debug.log" 2>/dev/null; then
+    cp "$REPO_ROOT/build/stage/DEBUG.LOG" "$OUT_DIR/debug.log" 2>/dev/null \
+      && log "note: engine log found at legacy root path (LOGS/ mkdir fell back)" \
+      || log "no debug.log captured (looked at build/stage/LOGS/DEBUG.LOG + root)"
+  fi
+  if ! cp "$REPO_ROOT/build/stage/DOSKUTSU/LOGS/SDLDBG.LOG" "$OUT_DIR/sdldbg.log" 2>/dev/null; then
+    cp "$REPO_ROOT/build/stage/DOSKUTSU/SDLDBG.LOG" "$OUT_DIR/sdldbg.log" 2>/dev/null \
+      && log "note: SDL log found at legacy root path (LOGS/ mkdir fell back)" \
+      || log "no sdldbg.log captured (looked at build/stage/DOSKUTSU/LOGS/SDLDBG.LOG + root)"
+  fi
 fi
 
 # Quick error-count summary so a human reviewer can spot regressions fast.
@@ -269,6 +286,9 @@ BANNER_REGEX=(
   "sdl: wave-50 VRAM-resident page-flip first swap"
   "Renderer::initVideo: asm opaque-span blit lever (ENABLED|DISABLED)"
   "Renderer::initVideo: blit-decomp .*instrumentation (ENABLED|DISABLED)"
+  "Renderer::initVideo: mds-scroll-decomp instrumentation (ENABLED|DISABLED)"
+  "map: skip-redundant-clear lever (ENABLED|DISABLED)"
+  "Logger::init: wave-53 log level=(INFO|WARN)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -278,6 +298,9 @@ BANNER_SEVERITY=(
   "forbidden"
   "forbidden"
   "forbidden"
+  "optional"
+  "optional"
+  "optional"
   "optional"
   "optional"
   "optional"
@@ -335,6 +358,9 @@ BANNER_LABEL=(
   "wave-50 VRAM-resident page-flip first swap (patch SDL/0061; optional -- one banner per process emitted on the FIRST successful divert + CRTC swap, narrating back_page_byte_offset + new visible_page index; the runtime-witness side of the two-witness pattern complementing strings|grep \"wave-50 VRAM-resident\"; absence (with ENABLED banner present) means the divert engaged but SDL_DOSVesaDirectPresentFull was never called in the smoke window (engine on legacy SDL_UpdateWindowSurface path or smoke killed before first present); absence (with DISABLED banner) is expected -- no swap issued)"
   "wave-51 asm opaque-span blit lever (patch 0145; optional -- one banner per process emitted in Renderer::initVideo, narrating ENABLED via SDL_HINT_DOSKUTSU_ASM_BLIT=1 vs DISABLED (default-OFF for wave-51); fires deterministically at video init so emits under DOSBox-X smoke; default smoke leaves the hint unset so DISABLED is the expected smoke verdict)"
   "wave-51 blit-decomp instrumentation (patch 0146; optional -- one banner per process emitted in Renderer::initVideo, narrating ENABLED via SDL_HINT_DOSKUTSU_BLIT_DECOMP=1 vs DISABLED (default-OFF); the .* in the regex spans the ENABLED variant's extra '_blit_indexed sub-decomp' words; default smoke leaves the hint unset so DISABLED is expected; the two INSTR PLAY cells in the wave-51 matrix exercise the ENABLED path)"
+  "wave-52 mds-scroll-decomp instrumentation (patch 0147; optional -- one banner per process emitted in Renderer::initVideo, narrating ENABLED via SDL_HINT_DOSKUTSU_MDS_DECOMP=1 vs DISABLED (default-OFF); fires deterministically at video init; default smoke leaves the hint unset so DISABLED is expected; the wave-52 PLAY1 cell exercises the ENABLED path -- per-100-scene-draws [mds-decomp-stat]/[mds-decomp-route]/[mds-decomp-pass]/[mds-decomp-frames] emit lines)"
+  "wave-53 skip-redundant-clear lever (patch 0149; optional -- LOG_INFO banner narrating ENABLED via SDL_HINT_DOSKUTSU_SKIP_REDUNDANT_CLEAR=1 vs DISABLED (default-OFF); INFO-level so it only appears when the run logs at INFO -- tagged runs, or untagged with DOSKUTSU_LOG_VERBOSE=1; absent on a plain untagged WARN-level run, which is expected, not a failure)"
+  "wave-53 Logger log-level banner (patch 0148; optional -- emitted directly by Logger::init regardless of level, narrating INFO vs WARN; untagged production runs default to WARN, tagged runs and DOSKUTSU_LOG_VERBOSE=1 force INFO; the runtime witness that the wave-53 WARN-when-untagged default engaged)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

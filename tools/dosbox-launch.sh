@@ -123,7 +123,14 @@ DBX_ARGS=(-conf "$CONF" -nopromptfolder
           -c 'SET BLASTER=A220 I5 D1 H5 T6'
           -c 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1'
           -c 'SET SDL_INVALID_PARAM_CHECKS=0'
+          -c 'SET DOSKUTSU_LOG_VERBOSE=1'
           -c "C:")
+# DOSKUTSU_LOG_VERBOSE=1: wave-53 patch 0148 made untagged runs log at WARN,
+# which would silence every INFO-level boot banner. This is the testing
+# launcher (run-gameplay-smoke.sh + manual A/B) -- force INFO so the smoke
+# gate's banner-emit check (the runtime-log half of the two-witness pattern)
+# can still witness INFO banners. Production real-HW runs do not use this
+# launcher, so the WARN-when-untagged default is unaffected there.
 
 if [[ -n "$EXE" ]]; then
   EXE_DOS="$(echo "$EXE" | tr '/' '\\' | tr '[:lower:]' '[:upper:]')"

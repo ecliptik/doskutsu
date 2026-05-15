@@ -1,0 +1,184 @@
+From ca6fe765d663e382323a7e2121ac5100327808c8 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 15 May 2026 12:35:52 -0700
+Subject: [PATCH] perf phase 11 patch 0148 -- wave-53 Logger WARN-when-untagged
+ + LOGS/ subdir
+
+Two coordinated changes to Logger.cpp's DJGPP branch, authored as one
+patch to avoid a duplicate-Logger.cpp patch cascade. Per team-lead
+task #20 + flush-instr docs/internal/INSTRUMENTATION-OVERHEAD-AUDIT.md.
+Wave-53 HYGIENE RIDE-ALONG -- the wave-53 perf lever is patch 0149
+(clear-into-backdrop); this patch rides along in the same binary,
+present in all PLAY cells, sub-noise so it does not contaminate the
+lever-3 A/B.
+
+PART A -- production log-level lever. WHY DOS NEEDS THIS: in the
+default operator config (DOSKUTSU_LOG_TAG unset) the engine logs at
+INFO, and every LOG_INFO pays the patch-0036 per-line fsync (DOS INT
+21h Commit-File -- a CF-card metadata commit) plus time()/localtime()/
+fmt-format/fwrite/fflush/stderr. The dominant emitter is the ungated
+flip-probe LOG_INFO (Renderer.cpp, every 10 flips). FIX: in
+Logger::init, when DOSKUTSU_LOG_TAG is unset, set djgpp_log_level to
+WARN instead of INFO. LOG_INFO then short-circuits at the macro's
+`if (_lvl >= djgpp_log_level)` test before any of that work. LOG_WARN
+/ LOG_ERROR still fire (crash + flip-failure forensics -- patch 0036's
+actual purpose). Tagged diagnostic iters (every instrumented iter sets
+DOSKUTSU_LOG_TAG) keep full INFO -- all [*-stat] / banner / smoke-gate
+output unaffected.
+
+KILLSWITCH: DOSKUTSU_LOG_VERBOSE=1 (strict "1") forces INFO even on an
+untagged run -- restores the pre-wave-53 default-INFO behavior.
+
+HONEST FRAMING (flush-instr audit sec. 2.5a): the CF fsync is
+sub-millisecond on the g2k card (wave-52 inter_flip was rock-steady at
+20 ms including 5-fsync block-boundary flips), so the fps gain is
+~+0.1-0.3 fps -- sub-noise-floor. This is hygiene + forecloses any
+future per-frame LOG_INFO silently costing fps; it is NOT a headline
+lever and does not get its own iter.
+
+PART B -- LOGS/ subdirectory relocation (user request 2026-05-15;
+hygiene, zero fps effect). The engine log (debug.log, or <TAG>.LOG)
+now lands in a LOGS/ subdirectory of the engine pref/working dir
+instead of polluting the game root. Logger::init receives the full
+pref-path filename, splits off the basename, mkdir's <prefdir>LOGS,
+and targets <prefdir>LOGS/<basename>. If mkdir fails for any reason
+other than already-exists (read-only media etc.), logpath stays the
+original root path -- logging must never silently die. "LOGS" is 4
+chars, 8.3-safe; forward slash is accepted by DJGPP + DOS. The
+SDL-side backend log lands in the same LOGS/ subdir via the companion
+patch SDL/0062 (sdl-engine) -- path convention coordinated: literal
+dirname "LOGS", subdir of each side's current log dir, each side
+mkdir's + falls back independently (no ordering dependency).
+
+SCOPE: both parts are inside the `#ifdef __DJGPP__` Logger branch
+ONLY. Part A's rationale (CF fsync cost) is DOS-specific; the
+non-DJGPP Linux dev build (spdlog path) is untouched -- minimal blast
+radius.
+
+ENGAGEMENT BANNER: Logger::init writes `Logger::init: wave-53 log
+level=<INFO|WARN> path='<logpath>'` directly to the log fp (level-
+independent fprintf) so it is visible for forensics AND the build-qa
+smoke BANNERS grep regardless of the resolved level.
+
+CORRECTNESS: the only behavior change when DOSKUTSU_LOG_TAG is set
+(every diagnostic iter, the smoke gate, every instrumented PLAY cell)
+is the LOGS/ path -- the level stays INFO exactly as before. Untagged
+production runs: level WARN + LOGS/ path. Killswitch restores untagged
+INFO. fopen-failure fallback (stderr-only) preserved.
+
+FILES: src/Utils/Logger.cpp (~50 LOC; the DJGPP init branch +
+3 DJGPP-guarded includes: cstdlib / cerrno / sys/stat.h).
+
+Banner regex for tests/run-gameplay-smoke.sh BANNERS:
+"Logger::init: wave-53 log level=(INFO|WARN)"
+---
+ src/Utils/Logger.cpp | 70 ++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 67 insertions(+), 3 deletions(-)
+
+diff --git a/src/Utils/Logger.cpp b/src/Utils/Logger.cpp
+index 269a8b4..eb99ced 100644
+--- a/src/Utils/Logger.cpp
++++ b/src/Utils/Logger.cpp
+@@ -11,6 +11,14 @@
+ #include <memory>
+ #include <string>
+ 
++#ifdef __DJGPP__
++// DOS-PORT (patch 0148, Phase 11 wave-53): getenv for the production
++// log-level lever + mkdir/errno for the LOGS/ subdir relocation.
++#  include <cstdlib>     // std::getenv
++#  include <cerrno>      // errno / EEXIST
++#  include <sys/stat.h>  // mkdir
++#endif
++
+ namespace NXE
+ {
+ namespace Utils
+@@ -32,6 +40,32 @@ namespace Logger
+   void init(std::string filename)
+   {
+ #ifdef __DJGPP__
++    // DOS-PORT (patch 0148, Phase 11 wave-53 Part B): relocate the
++    // engine log into a LOGS/ subdirectory so it stops polluting the
++    // game root / DOSKUTSU dir. `filename` arrives as
++    // <prefpath><basename> (the SDL_GetPrefPath dir + "debug.log" or
++    // "<TAG>.LOG"). Split off the basename, mkdir <prefpath>LOGS, and
++    // target <prefpath>LOGS/<basename>. If the mkdir fails for any
++    // reason other than already-exists (read-only media, etc.), fall
++    // back to the original root path -- logging must never silently
++    // die. "LOGS" is 4 chars, 8.3-safe; forward slash is accepted by
++    // DJGPP + DOS. The SDL-side log lands in the same LOGS/ subdir via
++    // the companion SDL patch (wave-53 Part B, sdl-engine).
++    std::string logpath = filename;
++    {
++      const std::size_t _sep = filename.find_last_of("/\\");
++      const std::string _dir  = (_sep == std::string::npos)
++                                    ? std::string()
++                                    : filename.substr(0, _sep + 1);
++      const std::string _base = (_sep == std::string::npos)
++                                    ? filename
++                                    : filename.substr(_sep + 1);
++      const std::string _logsdir = _dir + "LOGS";
++      if (mkdir(_logsdir.c_str(), 0777) == 0 || errno == EEXIST)
++        logpath = _logsdir + "/" + _base;
++      // else: mkdir failed -> logpath stays the original root path.
++    }
++
+     // DOS-PORT: open the log file in text mode ("w", not "wb"). This is the
+     // legitimate exception to CLAUDE.md's "always 'rb' on DOS" rule — log
+     // output is line-oriented text where DOS's CRLF translation is desirable
+@@ -40,18 +74,48 @@ namespace Logger
+     // djgpp_log_fp == nullptr and the macros silently fall back to stderr-
+     // only — log noise stays visible even when the configured path can't
+     // be written.
+-    djgpp_log_fp = std::fopen(filename.c_str(), "w");
++    djgpp_log_fp = std::fopen(logpath.c_str(), "w");
+     if (!djgpp_log_fp)
+     {
+       std::fprintf(stderr,
+                    "Logger::init: could not open '%s' for writing; logging to stderr only\n",
+-                   filename.c_str());
++                   logpath.c_str());
+     }
+ #  if defined(DEBUG)
+     djgpp_log_level = DJGPP_LOG_LEVEL_TRACE;
+ #  else
+-    djgpp_log_level = DJGPP_LOG_LEVEL_INFO;
++    // DOS-PORT (patch 0148, Phase 11 wave-53 Part A): production
++    // log-level lever. Every LOG_INFO pays the patch-0036 per-line
++    // fsync (a CF-card commit). In the default operator config
++    // (DOSKUTSU_LOG_TAG unset) drop the level to WARN: LOG_INFO then
++    // short-circuits at the macro's `if (_lvl >= djgpp_log_level)`
++    // BEFORE time()/localtime()/format/fwrite/fflush/fsync/stderr.
++    // LOG_WARN + LOG_ERROR still fire (crash forensics -- patch 0036's
++    // actual purpose). Tagged diagnostic iters (every instrumented iter
++    // sets DOSKUTSU_LOG_TAG) keep full INFO, so smoke-gate banner
++    // visibility is unaffected. Killswitch DOSKUTSU_LOG_VERBOSE=1
++    // forces INFO even when untagged.
++    {
++      const char *_tag     = std::getenv("DOSKUTSU_LOG_TAG");
++      const char *_verbose = std::getenv("DOSKUTSU_LOG_VERBOSE");
++      const bool _tagged = (_tag && _tag[0] != '\0');
++      const bool _force  = (_verbose && _verbose[0] == '1' && _verbose[1] == '\0');
++      djgpp_log_level = (_tagged || _force) ? DJGPP_LOG_LEVEL_INFO
++                                            : DJGPP_LOG_LEVEL_WARN;
++    }
+ #  endif
++
++    // Engagement banner -- written directly to the log fp (level-
++    // independent) so it is visible for forensics AND the build-qa
++    // smoke BANNERS grep regardless of the resolved level.
++    if (djgpp_log_fp)
++    {
++      std::fprintf(djgpp_log_fp,
++                   "Logger::init: wave-53 log level=%s path='%s'\n",
++                   (djgpp_log_level == DJGPP_LOG_LEVEL_WARN) ? "WARN" : "INFO",
++                   logpath.c_str());
++      std::fflush(djgpp_log_fp);
++    }
+ #else
+     sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+     sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(widen(filename), true));
+-- 
+2.47.3
+

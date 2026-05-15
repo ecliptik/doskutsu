@@ -965,6 +965,21 @@ PROBE_WBMIDI_EXE := $(PROBES_DIR)/wbmidi.exe
 PROBE_CRTCSWAP_SRC := tests/probes/crtcswap.c
 PROBE_CRTCSWAP_EXE := $(PROBES_DIR)/crtcswap.exe
 
+# P23 -- Phase 11 wave-52/53: banded L1-resident composition gate probe.
+#   Gates the last remaining structural render lever -- banded layer-major
+#   -> band-major composition (MODEX-PLAN sec.5.7 lever 1). Standalone
+#   DJGPP probe; no SDL, no engine, no C++. 3 kernels (T_L1 / T_pressure /
+#   T_cold) x 2 band sizes (8-row / 16-row); computes resid_frac =
+#   (T_pressure - T_cold) / (T_L1 - T_cold). Per the contract in
+#   docs/internal/BANDCOMP-PROBE-DESIGN.md (flush-instr, contract owner).
+#   Pure DJGPP, deterministic, ~3 sec real-HW run. Real-HW iter: bundle
+#   alongside CWSDPMI.EXE + tests/probes/bandcomp.bat. Output ->
+#   BANDCOMP.LOG. HAZARD: none -- malloc'd sysmem only, no chip I/O.
+#   Source basename = binary basename = bandcomp (8.3-clean) -> the
+#   generic %.exe pattern rule applies; no explicit rule needed.
+PROBE_BANDCOMP_SRC := tests/probes/bandcomp.c
+PROBE_BANDCOMP_EXE := $(PROBES_DIR)/bandcomp.exe
+
 # P21 -- Phase 11 wave-41 task #10 + wave-43 task #16: comprehensive HW-
 #   inventory snapshot + RUNMANIFEST schema v1 emit.
 #
@@ -1166,7 +1181,7 @@ $(PROBE_WBMIDI_EXE): $(PROBE_WBMIDI_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke crtcswap sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke crtcswap bandcomp sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -1479,7 +1494,19 @@ crtcswap: $(PROBE_CRTCSWAP_EXE)
 probes-p22: $(PROBE_CRTCSWAP_EXE)
 	@echo "Built P22 probe set: crtcswap.exe (wave-50 cycle 1 -- Cirrus CRTC encoding probe)"
 
-probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22
+# P23 -- Phase 11 wave-52/53: banded L1-resident composition gate probe.
+bandcomp: $(PROBE_BANDCOMP_EXE)
+	@echo "Built $(PROBE_BANDCOMP_EXE) -- wave-52/53 banded-composition gate probe."
+	@echo "  Gates MODEX-PLAN sec.5.7 lever 1 (banded composition) per the"
+	@echo "  contract docs/internal/BANDCOMP-PROBE-DESIGN.md (flush-instr)."
+	@echo "  Pure DJGPP. Real-HW iter: bundle alongside CWSDPMI.EXE +"
+	@echo "  tests/probes/bandcomp.bat. Output -> BANDCOMP.LOG. Runtime ~3 sec."
+	@echo "  HAZARD: none -- malloc'd sysmem only, no chip I/O."
+
+probes-p23: $(PROBE_BANDCOMP_EXE)
+	@echo "Built P23 probe set: bandcomp.exe (wave-52/53 -- banded-composition resid_frac gate)"
+
+probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
 	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (BAT redirect)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"

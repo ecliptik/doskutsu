@@ -1,0 +1,263 @@
+From c335eef472a1e22437e983cd28a5ef211bcd64fa Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 15 May 2026 12:45:42 -0700
+Subject: [PATCH] perf phase 11 patch 0149 -- wave-53
+ skip-redundant-clearScreen lever
+
+Per flush-instr's docs/internal/WAVE-53-CLEAR-INTO-BACKDROP-DESIGN.md
+(MODEX-DECISION-AND-FPS-LEVER-PLAN.md sec.5.7 lever 3). The wave-53
+PERF lever; ships in the wave-53 binary alongside the 0148 Logger+LOGS
+hygiene ride-along (0149 applies after 0148; different code, no
+conflict).
+
+WHY DOS NEEDS THIS: per the wave-52 log analysis, on scrolling frames
+DrawScene() memsets the full 76800-byte framebuffer
+(clearScreen(BLACK), ~2.40 ms median on the scrolling cluster) and
+then redraws a full-screen opaque backdrop over it -- the clear is
+pure redundant bandwidth. On the canonical Mimiga BK_PARALLAX KPI
+scene ~67% of frames are scrolling.
+
+LEVER: skip DrawScene's clearScreen(BLACK) when the backdrop pass will
+provably repaint EVERY screen row this frame.
+
+THE LOAD-BEARING CORRECTNESS RULE (design sec.1): map_draw_backdrop
+for FIXED/PARALLAX/FOLLOWFG has a default-ON sub-region partial-blit
+mode (patch 0130, BG_SUBREGION_BLIT) -- the backdrop does NOT always
+cover the full screen. The skip predicate must NEVER trust patch
+0130's FG-occlusion table for clear-coverage; it skips the clear ONLY
+when the BACKDROP itself paints every row. A false-positive in the
+FG-occlusion table therefore can never produce stale-frame garbage --
+worst case the lever fires too rarely, never wrongly.
+
+IMPLEMENTATION:
+- New helper map_clear_is_redundant() in map.cpp. Returns true iff
+  ALL of: (1) map.scrolltype in {BK_FIXED, BK_PARALLAX, BK_FOLLOWFG,
+  BK_HIDE, BK_HIDE2, BK_HIDE3} -- the full-screen-coverage scrolltypes;
+  BK_FASTLEFT / BK_FASTLEFT_LAYERS / NOFALLLEFT excluded (coverage not
+  guaranteed). (2) !flipacceltime -- the backdrop pass is gated on
+  !flipacceltime in DrawScene; if set, the backdrop does not draw, so
+  the clear is required. (3) backdrop[map.backdrop] loaded -- the
+  backdrop pass early-returns on a missing asset; N/A for BK_HIDE*
+  (the HIDE handler self-does a full clearScreen regardless, so HIDE*
+  is allowed through on (1)+(2) alone). (4) the backdrop covers the
+  FULL screen -- BG_SUBREGION_BLIT disabled OR its computed
+  [bg_top,bg_bot] range == whole screen. Clause 4 calls
+  _compute_bg_visible_yrange() -- the same pre-draw computation patch
+  0130 runs inside map_draw_backdrop; calling it from the predicate
+  warms its (curmap,mapy_tile) cache so the subsequent
+  map_draw_backdrop call hits it -- one computation per frame, no
+  added cost. The bool return is not used; whole-screen vs
+  proper-subset vs degenerate-empty are all distinguished by the
+  (bg_top,bg_bot) out-params.
+- Call-site change in game.cpp DrawScene: the existing clear guard
+  `if (!bg_skip_unchanged)` becomes
+  `if (!bg_skip_unchanged && !(skip_redundant_clear_enabled() &&
+  map_clear_is_redundant()))`. The existing bg_skip_unchanged
+  (static-frame, patch 0143) path is untouched -- this adds only the
+  scrolling-frame skip. The MdsClearTimer scope is kept intact so
+  [mds-decomp-stat phase=mds_clear] keeps sample-count parity.
+- Killswitch SDL_HINT_DOSKUTSU_SKIP_REDUNDANT_CLEAR (strict "1"
+  opt-in). Cycle-1 ships DEFAULT-OFF for the 4-cell A/B (single-lever
+  -per-binary discipline -- prove it on the matrix first); promote to
+  default-ON strict-"0" post-validation per the wave-48/49 lever-
+  promotion pattern. Sentinel-cached on first call (the
+  _backdrop_cache_is_disabled() idiom) -- never a per-flip getenv.
+  When the killswitch is off the && short-circuits before
+  map_clear_is_redundant() is even evaluated -- zero added per-frame
+  cost on the default path (one int compare).
+
+CORRECTNESS: when the killswitch is off (cycle-1 default) behavior is
+byte-identical to pre-0149. When on, the only frames affected are
+scrolling frames where map_clear_is_redundant() proves full backdrop
+coverage; the backdrop (or, for BK_HIDE*, the HIDE handler's own
+clearScreen) repaints every row, so no stale pixels can surface. The
+predicate's clause 4 is the conservative form -- it never trusts the
+FG-occlusion table, only the backdrop's own coverage.
+
+BK_HIDE* note: skipping DrawScene's clear for HIDE* is a bonus -- the
+HIDE handler self-clears, so this eliminates a genuinely redundant
+FIRST clear (two full clears -> one), net positive, zero risk.
+
+FILES: src/map.h (2 decls), src/map.cpp (skip_redundant_clear_enabled
++ map_clear_is_redundant, ~75 LOC incl. comments, after
+_compute_bg_visible_yrange), src/game.cpp (the DrawScene clear-guard
+term).
+
+PREDICTED BAND (per design sec.3; HYPOTHESIS per
+[[perf_measurement_discipline]]): +1.0 to +1.6 fps -- clearScreen
+2.40 ms x ~67% scrolling x predicate-pass-rate (~all scrolling frames
+on canonical Mimiga BK_PARALLAX, which has 0 bg_subregion-skipped rows
+per wave-49). Clears the +/-2 fps noise floor; best single render
+lever since the OPL3 era. The 4-cell PLAY matrix's PLAY1
+[mds-decomp-stat phase=mds_clear] is the built-in firing check (should
+fall 2.40 -> ~0 ms on scrolling blocks).
+
+Single-mechanism per [[single_lever_per_binary_or_else_attribution_
+impossible]]: the lever is "skip the redundant scrolling-frame clear".
+The 0148 Logger+LOGS hygiene patch rides in the same wave-53 binary
+but is sub-noise and present in all 4 PLAY cells, so it does not
+contaminate the lever-3 A/B.
+
+Banner regex for tests/run-gameplay-smoke.sh BANNERS:
+"map: skip-redundant-clear lever (ENABLED|DISABLED)"
+---
+ src/game.cpp | 15 +++++++--
+ src/map.cpp  | 91 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/map.h    | 10 ++++++
+ 3 files changed, 113 insertions(+), 3 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index 6b53ab8..d8b7a2d 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -695,12 +695,21 @@ void DrawScene(void)
+   NXE::Diag::g_mds_decomp_pass = NXE::Diag::MDS_PASS_CLEAR;
+   {
+     NXE::Diag::MdsClearTimer _mc;
+-    if (!bg_skip_unchanged)
++    // patch 0149 (wave-53 lever 3 -- MODEX sec.5.7): skip the full-
++    // screen clearScreen(BLACK) when an opaque backdrop will provably
++    // repaint every screen row this frame -- the memset is redundant.
++    // Killswitch + predicate live in map.cpp; skip_redundant_clear_
++    // enabled() short-circuits so map_clear_is_redundant() is not even
++    // evaluated when the lever is off (cycle-1 default). The existing
++    // bg_skip_unchanged (static-frame) path is untouched -- this adds
++    // the scrolling-frame skip. MdsClearTimer scope kept intact so
++    // [mds-decomp-stat phase=mds_clear] keeps sample-count parity
++    // (empty scope, ~0 us, when the clear is skipped).
++    if (!bg_skip_unchanged &&
++        !(skip_redundant_clear_enabled() && map_clear_is_redundant()))
+     {
+       Renderer::getInstance()->clearScreen(BLACK);
+     }
+-    // else: empty timer scope; ~0 us cost; preserves [mds-clear-stat]
+-    // sample count parity with the legacy code path.
+   }
+   map_mds_clear_lut_set_dispatch_eligible(false);
+ 
+diff --git a/src/map.cpp b/src/map.cpp
+index da2029f..5ddf9e4 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -750,6 +750,97 @@ static bool _compute_bg_visible_yrange(int *out_top, int *out_bot_inclusive)
+   return range_proper_subset;
+ }
+ 
++// DOS-PORT (patch 0149, Phase 11 wave-53 lever 3 -- MODEX sec.5.7):
++// cached killswitch for the skip-redundant-clearScreen lever.
++// SDL_HINT_DOSKUTSU_SKIP_REDUNDANT_CLEAR, strict "1" opt-in,
++// default-OFF for the cycle-1 4-cell A/B (single-lever discipline;
++// promote to default-ON strict-"0" post-validation, per the
++// wave-48/49 lever-promotion pattern). Sentinel-cached on first call
++// (the `_backdrop_cache_is_disabled()` idiom) -- never a per-flip
++// getenv. First call emits the build-qa BANNERS-grep banner.
++static int g_skip_redundant_clear = -1;  // -1 undecided / 0 off / 1 on
++bool skip_redundant_clear_enabled()
++{
++  if (g_skip_redundant_clear < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_SKIP_REDUNDANT_CLEAR");
++    g_skip_redundant_clear = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    LOG_INFO("map: skip-redundant-clear lever {}",
++             g_skip_redundant_clear
++                 ? "ENABLED (SDL_HINT_DOSKUTSU_SKIP_REDUNDANT_CLEAR=1)"
++                 : "DISABLED (default)");
++  }
++  return g_skip_redundant_clear == 1;
++}
++
++// DOS-PORT (patch 0149, Phase 11 wave-53 lever 3): skip-clear predicate.
++// Returns true (DrawScene's clearScreen(BLACK) may be skipped) iff the
++// backdrop pass will provably repaint EVERY screen row this frame, so
++// the full-screen memset is pure redundant work. THE load-bearing
++// correctness rule (design sec.1): never trust patch 0130's
++// FG-occlusion table for clear-coverage -- skip only when the BACKDROP
++// itself covers all rows. See WAVE-53-CLEAR-INTO-BACKDROP-DESIGN.md
++// sec.2.1. Called from game.cpp DrawScene, only when the killswitch is
++// on (short-circuited by skip_redundant_clear_enabled()).
++bool map_clear_is_redundant()
++{
++  switch (map.scrolltype)
++  {
++    case BK_HIDE:
++    case BK_HIDE2:
++    case BK_HIDE3:
++      // The HIDE* handler inside map_draw_backdrop self-does a full
++      // clearScreen, so clauses (3) backdrop-asset / (4) coverage are
++      // N/A -- allow through on (1)+(2) alone. Clause (2): the backdrop
++      // pass only runs when !flipacceltime; if set, no self-clear
++      // happens this frame -> DrawScene's clear is required.
++      return (flipacceltime == 0);
++
++    case BK_FIXED:
++    case BK_PARALLAX:
++    case BK_FOLLOWFG:
++      break;  // full-screen-image scrolltypes -- check clauses 2,3,4
++
++    default:
++      // BK_FASTLEFT / BK_FASTLEFT_LAYERS / NOFALLLEFT / anything else:
++      // full-screen backdrop coverage is not guaranteed (design sec.0)
++      // -- never skip the clear.
++      return false;
++  }
++
++  // Clause 2: the backdrop pass is gated on !flipacceltime in
++  // DrawScene; if set, the backdrop does not draw -> clear required.
++  if (flipacceltime != 0)
++    return false;
++
++  // Clause 3: the backdrop pass early-returns without drawing if the
++  // backdrop asset is not loaded -> on that path the clear is required.
++  if (!backdrop[map.backdrop])
++    return false;
++
++  // Clause 4: the backdrop must cover the FULL screen this frame. With
++  // patch 0130's sub-region partial-blit active (default-ON) the
++  // backdrop may blit only rows [bg_top, bg_bot]. Skip the clear only
++  // when that range is the whole screen. bg_subregion disabled ->
++  // backdrop always blits full-screen -> clause passes.
++  if (NXE::Diag::bg_subregion_active())
++  {
++    int bg_top = 0, bg_bot = 0;
++    // Same pre-draw computation patch 0130 runs inside
++    // map_draw_backdrop; this call warms its (curmap, mapy_tile) cache
++    // so the subsequent map_draw_backdrop call hits it -- one compute
++    // per frame, no added cost. The bool return is not used: whole-
++    // screen vs proper-subset vs degenerate-empty are all distinguished
++    // by the (bg_top,bg_bot) out-params directly.
++    _compute_bg_visible_yrange(&bg_top, &bg_bot);
++    const int sh = Renderer::getInstance()->screenHeight;
++    if (!(bg_top == 0 && bg_bot == sh - 1))
++      return false;  // backdrop blits only a sub-region -> keep clear
++  }
++
++  return true;
++}
++
+ // for FindObject--finding NPC's by ID2
+ Object *ID2Lookup[65536];
+ 
+diff --git a/src/map.h b/src/map.h
+index 335a2fd..fe4113f 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -142,6 +142,16 @@ bool map_backdrop_should_skip_clear_and_draw();
+ void map_backdrop_record_present_success();
+ void map_backdrop_invalidate_skip_state();
+ 
++// DOS-PORT (patch 0149, Phase 11 wave-53 lever 3 -- MODEX sec.5.7):
++// skip-redundant-clearScreen lever. map_clear_is_redundant() returns
++// true when the backdrop pass will provably repaint every screen row
++// this frame, so DrawScene's full-screen clearScreen(BLACK) is
++// redundant work that can be skipped. skip_redundant_clear_enabled()
++// is the cached killswitch (SDL_HINT_DOSKUTSU_SKIP_REDUNDANT_CLEAR,
++// strict-"1", default-OFF for the cycle-1 4-cell A/B).
++bool map_clear_is_redundant();
++bool skip_redundant_clear_enabled();
++
+ // DOS-PORT (patch 0144, Phase 11 wave 49 H-A mds_clear LUT swap):
+ // per-row coverage LUT that skips the SDL_memset for rows guaranteed
+ // to be fully BG-covered. The lever attacks bandwidth-bound bytes-
+-- 
+2.47.3
+
