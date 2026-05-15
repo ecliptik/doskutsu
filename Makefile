@@ -137,7 +137,7 @@ all: verify-patches-applied nxengine
 
 .PHONY: help
 help:
-	@echo "doskutsu -- five-stage DOS cross-build"
+	@echo "doskutsu -- four-stage DOS cross-build"
 	@echo
 	@echo "One-time setup:"
 	@echo "  ./scripts/setup-symlinks.sh      link tools/djgpp to ~/emulators/tools/djgpp"
@@ -147,11 +147,10 @@ help:
 	@echo
 	@echo "Build stages:"
 	@echo "  make sdl3                        stage 1: SDL3 (+ DOS backend)"
-	@echo "  make sdl2-compat                 stage 2: SDL2 API shim"
-	@echo "  make sdl2-mixer                  stage 3: SDL_mixer (WAV + OGG)"
-	@echo "  make sdl2-image                  stage 4: SDL_image (PNG)"
-	@echo "  make nxengine                    stage 5: NXEngine-evo -> build/doskutsu.exe"
-	@echo "  make all                         stages 1-5 end to end (default)"
+	@echo "  make sdl3-mixer                  stage 2: SDL3_mixer (WAV + OGG)"
+	@echo "  make sdl3-image                  stage 3: SDL3_image (PNG)"
+	@echo "  make nxengine                    stage 4: NXEngine-evo -> build/doskutsu.exe"
+	@echo "  make all                         stages 1-4 end to end (default)"
 	@echo
 	@echo "Test:"
 	@echo "  make hello                       build tests/smoketest/hello.exe"
@@ -179,6 +178,7 @@ help:
 	@echo "Diagnostics:"
 	@echo "  make djgpp-check                 verify DJGPP is installed + on PATH"
 	@echo "  make vendor-check                verify vendored sources are present"
+	@echo "  make repo-health                 fast static checks (no DJGPP/DOSBox/network/vendor)"
 
 # --- Diagnostics --------------------------------------------------------------
 
@@ -213,6 +213,29 @@ vendor-check:
 	if [ "$$missing" = "1" ]; then exit 1; fi
 	@echo "vendor tree OK."
 
+# repo-health: fast static checks that need NO DJGPP toolchain, NO DOSBox-X,
+# NO network, and NO vendored source trees -- so they run clean on a fresh
+# public checkout. Shell-parse every tracked script, byte-compile every
+# tracked Python tool, and dry-run the two toolchain-free Makefile targets.
+.PHONY: repo-health
+repo-health:
+	@rc=0; \
+	echo "[repo-health] bash -n -- scripts/ tests/ tools/"; \
+	for f in scripts/*.sh tests/run*.sh tools/*.sh; do \
+	    [ -e "$$f" ] || continue; \
+	    bash -n "$$f" || { echo "  FAIL: $$f"; rc=1; }; \
+	done; \
+	echo "[repo-health] py_compile -- scripts/ tools/"; \
+	for f in scripts/*.py tools/*.py; do \
+	    [ -e "$$f" ] || continue; \
+	    python3 -m py_compile "$$f" || { echo "  FAIL: $$f"; rc=1; }; \
+	done; \
+	echo "[repo-health] make -n help / dist-list"; \
+	$(MAKE) -n help      >/dev/null 2>&1 || { echo "  FAIL: make -n help"; rc=1; }; \
+	$(MAKE) -n dist-list >/dev/null 2>&1 || { echo "  FAIL: make -n dist-list"; rc=1; }; \
+	if [ "$$rc" = "0" ]; then echo "[repo-health] OK"; else echo "[repo-health] FAILED"; fi; \
+	exit $$rc
+
 # --- Vendored DOS binaries (CWSDPMI + LFNDOS + DOSLFN) ------------------------
 #
 # As of 2026-04-30 these binaries are no longer tracked in git. The
@@ -220,12 +243,19 @@ vendor-check:
 # sha256 pins in vendor/binaries.manifest. Idempotent: re-running is a no-op
 # when files already exist with the manifest-pinned hash.
 #
-# Targets that need the binaries (stage, dist, install, dpmi-lfn-smoke) take
-# fetch-binaries as an order-only prerequisite -- runs once on first build,
-# subsequent rebuilds short-circuit on the sha check.
+# Scope: stage / dist / install only ever ship CWSDPMI.EXE, so they depend on
+# `fetch-binaries`, which fetches just the cwsdpmi entry. LFNDOS + DOSLFN are
+# needed only by the Phase-8 dpmi-lfn-smoke workflow, which depends on
+# `fetch-binaries-lfn` (all entries). This keeps the common build path from
+# pulling two TSRs it never installs. Both are order-only prerequisites --
+# they run once on first build; subsequent rebuilds short-circuit on the sha
+# check. fetch-vendor-binaries.sh takes name filters (substring of the
+# manifest <path>); with none it fetches every entry.
 
-.PHONY: fetch-binaries
+.PHONY: fetch-binaries fetch-binaries-lfn
 fetch-binaries:
+	@scripts/fetch-vendor-binaries.sh cwsdpmi
+fetch-binaries-lfn:
 	@scripts/fetch-vendor-binaries.sh
 
 # --- Patch orchestration ------------------------------------------------------
@@ -492,7 +522,7 @@ $(DPMI_LFN_SMOKE_EXE): $(DPMI_LFN_SMOKE_SRC) | djgpp-check
 	$(STUBEDIT) $@ minstack=256k
 
 .PHONY: dpmi-lfn-smoke
-dpmi-lfn-smoke: $(DPMI_LFN_SMOKE_EXE) | fetch-binaries
+dpmi-lfn-smoke: $(DPMI_LFN_SMOKE_EXE) | fetch-binaries-lfn
 	tests/run-dpmi-lfn-smoke.sh
 
 # --- Phase 2d smoke: SDL3 DOS-backend probe -----------------------------------
@@ -753,6 +783,18 @@ hwinv-86box-smoke:
 #   HWLOG.EXE    -- VBE info + CRTC + chip ID + PCI config-space dump
 #
 # P1 / P2 probes will land here when authored.
+
+# repo-health guard: `make probes` (and any probes-pNN) need the maintainer-
+# local probe sources under tests/probes/, which are gitignored. On a fresh
+# public checkout they are absent and the generic `%.exe: tests/probes/%.c`
+# pattern rule yields a cryptic "No rule to make target". Fail early with a
+# clear message instead. A public build never needs probes -- `make all`
+# produces the game binary without them.
+ifneq ($(filter probes probes-p%,$(MAKECMDGOALS)),)
+  ifeq ($(wildcard tests/probes/*.c),)
+    $(error 'make probes' is maintainer-only -- probe sources under tests/probes/ are gitignored and absent in this checkout. A public build does not need them; run 'make all' for the game binary.)
+  endif
+endif
 
 PROBES_DIR     := $(BUILD_DIR)/probes
 PROBES_INC     := $(REPO_ROOT)/include

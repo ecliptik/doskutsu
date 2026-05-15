@@ -11,6 +11,9 @@
 # Usage:
 #   ./scripts/fetch-vendor-binaries.sh            # fetch all entries
 #   ./scripts/fetch-vendor-binaries.sh --check    # verify sha256 only, no fetch
+#   ./scripts/fetch-vendor-binaries.sh cwsdpmi    # fetch only entries whose
+#                                                 # manifest path matches a
+#                                                 # name filter (substring)
 #
 # Run this once after fetch-sources.sh on a fresh clone (the bootstrap script
 # calls it for you). The Makefile's stage / dist / install / dpmi-lfn-smoke
@@ -23,12 +26,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 MANIFEST="$REPO_ROOT/vendor/binaries.manifest"
 
 mode=fetch
-case "${1:-}" in
-    --check)  mode=check ;;
-    --help|-h) sed -n '/^# /,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
-    "")       ;;
-    *)        echo "fetch-vendor-binaries: unknown arg '$1'" >&2; exit 2 ;;
-esac
+filters=()   # name filters (substring match against the manifest <path>)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check)   mode=check ;;
+        --help|-h) sed -n '/^# /,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -*)        echo "fetch-vendor-binaries: unknown option '$1'" >&2; exit 2 ;;
+        *)         filters+=("$1") ;;
+    esac
+    shift
+done
 
 log()  { printf '[fetch-vendor-binaries] %s\n' "$*" >&2; }
 fail() { log "error: $*"; exit 1; }
@@ -105,6 +112,15 @@ while read -r line; do
     # shellcheck disable=SC2086  # word-split is intentional here
     set -- $line
     [[ $# -eq 3 ]] || fail "manifest line malformed (expected 3 fields): $line"
+    # Name-filter: when filters were given, fetch only entries whose manifest
+    # <path> ($1) contains one of the filter substrings (e.g. 'cwsdpmi').
+    if [[ ${#filters[@]} -gt 0 ]]; then
+        keep=0
+        for f in "${filters[@]}"; do
+            [[ "$1" == *"$f"* ]] && keep=1
+        done
+        [[ $keep -eq 1 ]] || continue
+    fi
     fetch_one "$1" "$2" "$3" || rc=1
 done < "$MANIFEST"
 

@@ -288,7 +288,7 @@ any indexed sprite falls below 28 dB (or 30 dB for `Face*.pbm` portraits) so
 you'll know immediately if a mod's assets broke the gate. Truecolor
 backgrounds (`bkHellsh.pbm` / `bkLight.pbm` / `bkSunset.pbm`) take the slow
 per-pixel nearest-color path at boot and have no PSNR floor (they dither by
-design -- see `docs/PHASE9-PALETTE-AUDIT.md`).
+design).
 
 These two files are **derivative works of Cave Story freeware data**; they
 are NOT redistributed via this repo or `dist/doskutsu-cf.zip`. Re-run the
@@ -444,8 +444,7 @@ hardware-MIDI route trades that wall-clock cost for offloaded rendering
 on the audio device, with the aesthetic trade-off that the GM patches
 in your audio device's onboard bank don't sound like Organya waveforms.
 
-**Provenance + license posture:** see `docs/PHASE10-DESIGN.md` sec. 3 for
-the full mapping table + license-posture audit. Same redistribution
+**Provenance + license posture:** same redistribution
 posture throughout: user-fetches-locally; sources never in our repo or
 dist zip. ORGMID source archive's license is unspecified on the
 upstream page; we use the user-fetches-locally pattern (download +

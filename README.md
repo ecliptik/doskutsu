@@ -45,7 +45,7 @@ MIDI source-file selection is independent of backend choice and is controlled by
 
 **DOSKUTSU does not include any Cave Story game data.** The binary you build from this repository plays nothing on its own. Users supply their own copy of Pixel's 2004 EN freeware assets, extracted from the canonical `Doukutsu.exe`.
 
-The canonical extraction procedure and expected directory layout are documented in [docs/ASSETS.md](./docs/ASSETS.md). Two scripts in this repository handle the source-acquisition and extraction:
+[docs/ASSETS.md](./docs/ASSETS.md) is the canonical, complete asset procedure -- follow it start to finish; it covers fetching the freeware bundle and extracting the full data tree (maps, sprites, music, SFX) plus the expected directory layout. The two scripts below automate only the Pixtone-SFX slice of that workflow; running them alone does not produce a playable `DATA\` tree:
 
 - `scripts/fetch-cs-pxt.py` is the one-shot orchestrator. It fetches the 2004 EN freeware bundle from [cavestory.one](https://www.cavestory.one/downloads/cavestoryen.zip) (SHA-256-pinned), extracts `Doukutsu.exe` to a tempdir, runs the Pixtone parameter extractor, and cleans up. Pixel's freeware archive does not persist on the user's machine after the script completes.
 - `scripts/extract-pxt.py` is the canonical extractor, transcribed from NXEngine-evo's own `extract/extractpxt.cpp`. It operates on file offsets in `Doukutsu.exe` and emits ASCII Pixtone parameter files.
@@ -93,7 +93,16 @@ Hard floors below Tier 3 are non-negotiable: no 486SX without a 487 coprocessor 
 C:\DOSKUTSU>DOSKUTSU
 ```
 
-Title screen should appear within a few seconds. Controls follow NXEngine-evo's defaults:
+`DOSKUTSU.EXE` expects its DPMI host and game data co-located in one directory:
+
+```
+C:\DOSKUTSU\
+  DOSKUTSU.EXE      the game binary
+  CWSDPMI.EXE       the DPMI host -- must sit beside DOSKUTSU.EXE
+  DATA\             user-extracted Cave Story assets (see Game Assets)
+```
+
+`make install CF=...` and `make dist` lay the directory out this way for you. Title screen should appear within a few seconds. Controls follow NXEngine-evo's defaults:
 
 | Key | Action |
 |---|---|
@@ -170,7 +179,9 @@ Full attribution matrix: [THIRD-PARTY.md](./THIRD-PARTY.md).
 
 ## License
 
-The source code in this repository (build system, scripts, port patches, and documentation) is licensed under the **MIT License**. See [LICENSE](./LICENSE).
+The repository-original source -- the build system, scripts, agent-team orchestration, and documentation -- is licensed under the **MIT License**. See [LICENSE](./LICENSE).
+
+The DOS-port patches under `patches/` are derivative works of their upstreams and inherit those upstreams' licenses, not MIT: patches against NXEngine-evo are **GPLv3**, and patches against SDL3 / SDL3_mixer / SDL3_image are **zlib**.
 
 The `DOSKUTSU.EXE` binary is GPLv3 as a combined work because it statically links [NXEngine-evo](https://github.com/nxengine/nxengine-evo), which is GPLv3. Redistributed binary bundles include a copy of the GPLv3 license text and a pointer back to this repository's source.
 
