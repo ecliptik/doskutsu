@@ -1,0 +1,559 @@
+From 3a12615f5f95fdcd775f7222a732d6cbb223497e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 16 May 2026 10:53:43 -0700
+Subject: [PATCH] perf phase 11 patch 0152 -- wave-56 Track B B1: tick_state /
+ tick_render_submit split
+
+Per flush-instr's docs/internal/PHASE11-WAVE-56-CONTRACT.md. Wave-56 is
+Track B's first wave (B1 in FIXED-TIMESTEP-DESIGN.md sec.4): a pure
+behavior-preserving refactor that splits the engine tick into a logic
+half (tick_state) and a drawcall half (tick_render_submit). No flag, no
+fps lever, no behavior change. It sets up wave-57 (B2, the
+FIXED_TIMESTEP accumulator).
+
+WHY DOS NEEDS THIS: Cave Story is authored at GAME_FPS=50 but doskutsu
+runs game logic 1:1-coupled to render -- at ~30 fps render the game
+plays at ~60% speed. Wave-57's fixed-timestep accumulator fixes that by
+multi-running game LOGIC to catch up to wall-clock 50 Hz while
+rendering once per displayed frame. That is only safe if logic and
+drawcalls are cleanly separable: wave-36 slot 0135 put an accumulator
+over game.tick() -- which submits drawcalls -- so the catch-up loop ran
+N x ~17 ms of drawcall work and lost 28 fps
+([[mechanism_a_drawcall_coupling_bug]]). B1 is the structural
+foreclosure of that trap: after the split, wave-57's accumulator
+multi-runs tick_state() ONLY (~1 ms of logic), never the drawcall half.
+
+THE SPLIT (contract sec.1, FIXED-TIMESTEP-DESIGN.md sec.2 -- the seam
+is the existing W22A ModeSim / ModeDrawScene bracket boundary):
+- Game::tick() becomes the 1:1 composition { tick_state();
+  tick_render_submit(); } -- run_tick() is unchanged, still calls
+  game.tick() once per iteration.
+- Game::tick_state() -- LOGIC, drawcall-free on the GM_NORMAL path:
+  debug_clear + TSC RunScripts + the esc-pause check + (GM_NORMAL)
+  game_tick_normal_state() + niku_run.
+- Game::tick_render_submit() -- DRAWCALLS: clearScreen + the per-mode
+  render + DrawDebug/console.
+- game_tick_normal() is split at the ModeSim/ModeDrawScene seam into
+  game_tick_normal_state() (the ModeSim block + niku_run) and
+  game_tick_normal_render() (DrawScene + the W22.5/W29 residual blocks
+  + the mds-decomp hook + the HUD + Post passes). game_tick_normal()
+  is retained as the 1:1 wrapper for the tickfunctions[] table.
+- GM_NORMAL only: title / inventory / map / credits keep their single
+  OnTick, run whole in the render half (contract sec.1.2).
+
+THE ONE REORDER (contract sec.1.3): clearScreen(BLACK) moves from the
+top of Game::tick() into tick_render_submit(), after the logic.
+Behavior-preserving -- logic never reads the framebuffer; clearScreen
+need only stay before DrawScene within the render half. niku_run
+likewise moves earlier (into the state half) -- it is the speedrun-
+timer advance (logic); it runs before niku_draw which still reads the
+counter in the render half. Both are byte-identity-verified by the
+build-qa gate.
+
+THE DISPATCH LATCH (contract sec.1.6, nx-engine refinement A -- byte-
+identity load-bearing): Game::tick() today makes ONE dispatch decision
+(paused? GM_NORMAL? other-mode?) and one OnTick call. The esc-pause
+check mutates game.paused, and RunScripts/sim can change game.mode --
+so if tick_state() and tick_render_submit() each independently re-read
+those globals they diverge on an ESC-press / mode-transition frame
+(state half ran one mode, render half would run another). tick_state()
+makes the decision ONCE and latches it in Game::_tick_dispatch
+(TD_PAUSED / TD_GM_NORMAL_SPLIT / TD_OTHER) + _tick_dispatch_mode;
+tick_render_submit() switches on the latch, never re-reads the mutated
+globals. This is also exactly the structure wave-57's accumulator
+needs (it calls tick_state N times -> the latch holds the last logic
+tick's decision -> render matches).
+
+INSTRUMENTATION PRESERVATION (contract sec.1.5 + refinement B):
+- The W22A ModeSim/ModeDrawScene/ModeDrawHud/ModePost brackets move
+  verbatim with their code; they emit unchanged.
+- The W22.5/W29 mds/mdt residual computations move verbatim into
+  game_tick_normal_render() right after DrawScene -- their dt locals
+  are NXE::Diag file-scope globals, so the "parent total written
+  before residual computed" ordering holds.
+- The W20B ModeTickTimer wrapped one OnTick call; post-split the
+  GM_NORMAL OnTick is two calls in two functions. Per refinement B
+  option (iv) the mode_tick bucket SPLITS into mode_tick_state +
+  mode_tick_render -- new ModeTickStateTimer / ModeTickRenderTimer RAII
+  timers + storage. g_eng_mode_tick_dt_this_tick is retained as the
+  PARENT total, assigned = state + render at Game::tick tail, so the
+  W20B engine-tick residual and the W22A mode_tick residual read an
+  unchanged parent (no residual-math edit). The W20B emit gains
+  phase=mode_tick_state + phase=mode_tick_render lines. All W20B is
+  FINE_INSTR-gated (default-off) -- it does not touch the byte-identity
+  gate.
+
+DEFERRED -- the 3 screen-effect warts (contract sec.3, team-lead
+ruling): SE_FlashScreen / SE_Starflash / SE_Fade each advance
+animation state inside Draw(). [NX?-A] audit confirmed exactly 3 such
+warts -- the ScreenEffect base has exactly 3 concrete subclasses, no
+4th. B1 moves all 3 Draw() bodies WHOLESALE and UNTOUCHED into the
+render half (trivially byte-identical in the 1:1 path); the prev-
+snapshot fix belongs in wave-57/B2 where the flag-gated accumulator
+runs the halves at different rates.
+
+CORRECTNESS: B1 changes no work and no behavior. The proof is byte-
+identity -- with the refactor applied, a TAS-deterministic replay must
+render bit-identical to the pre-wave-56 binary (build-qa dense
+every-rendered-frame AE=0 across the full PLAY.TAS run). No flag, no
+banner, no env var, no BOOT.md edit -- B1 is a refactor, not a lever.
+No real-HW iter: B1 has no fps delta and no behavior delta by
+construction; it closes at the build-qa byte-identity gate.
+
+FILES: src/game.h (tick_state/tick_render_submit decls + the
+TickDispatch latch; game_tick_normal_state/render decls), src/game.cpp
+(Game::tick split + the two new methods + game_tick_normal split),
+src/Utils/diagnostic_timers.h (ModeTickStateTimer/ModeTickRenderTimer
++ storage decls), src/graphics/Renderer.cpp (storage defs + the two
+W20B emit lines + idx resets).
+---
+ src/Utils/diagnostic_timers.h |  52 +++++++++
+ src/game.cpp                  | 199 +++++++++++++++++++++++++++-------
+ src/game.h                    |  36 ++++++
+ src/graphics/Renderer.cpp     |  45 ++++++++
+ 4 files changed, 294 insertions(+), 38 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 33d2a80..2347994 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -130,6 +130,23 @@ extern std::uint64_t g_eng_tsc_interp_dt_this_tick;
+ extern std::uint64_t g_eng_mode_tick_dt_this_tick;
+ extern std::uint64_t g_eng_debug_overlay_dt_this_tick;
+ 
++// DOS-PORT (patch 0152, Phase 11 wave-56 B1 -- mode_tick split,
++// refinement B option iv): the W20B mode_tick bucket splits into a
++// state slice + a render slice when game_tick_normal() splits across
++// the tick_state / tick_render_submit boundary. ModeTickStateTimer
++// writes the state slice (the OnTick logic half -- what wave-57's
++// accumulator multi-runs), ModeTickRenderTimer the render slice.
++// g_eng_mode_tick_dt_this_tick (above) is retained as the PARENT
++// total, assigned = state + render at Game::tick tail, so the W20B
++// engine-tick residual and the W22A mode_tick residual are unchanged
++// (they read the parent). FINE_INSTR-gated, default-off.
++extern std::uint64_t g_eng_mode_tick_state_samples[g_eng_tick_block_size];
++extern std::uint64_t g_eng_mode_tick_render_samples[g_eng_tick_block_size];
++extern int g_eng_mode_tick_state_idx;
++extern int g_eng_mode_tick_render_idx;
++extern std::uint64_t g_eng_mode_tick_state_dt_this_tick;
++extern std::uint64_t g_eng_mode_tick_render_dt_this_tick;
++
+ // Sub-bucket RAII timers. Destructor pattern: capture dt, write to
+ // per-tick local, push to sample array (with bounds-check + env gate).
+ // Cost when env unset: 1 SDL_GetTicksNS at construction (always) +
+@@ -177,6 +194,41 @@ struct ModeTickTimer
+   }
+ };
+ 
++// DOS-PORT (patch 0152, Phase 11 wave-56 B1): the two mode_tick
++// slices. Same destructor pattern as ModeTickTimer -- write the
++// per-tick dt local + push to the slice's sample array. The parent
++// g_eng_mode_tick_dt_this_tick + g_eng_mode_tick_samples[] are filled
++// from state+render at Game::tick tail (NOT by these destructors), so
++// ModeTickTimer above is retired from the GM_NORMAL path. FINE_INSTR
++// gate identical to ModeTickTimer.
++struct ModeTickStateTimer
++{
++  std::uint64_t t0;
++  ModeTickStateTimer() : t0(SDL_GetTicksNS()) {}
++  ~ModeTickStateTimer()
++  {
++    if (!engine_tick_fine_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_eng_mode_tick_state_dt_this_tick = dt;
++    if (g_eng_mode_tick_state_idx < g_eng_tick_block_size)
++      g_eng_mode_tick_state_samples[g_eng_mode_tick_state_idx++] = dt;
++  }
++};
++
++struct ModeTickRenderTimer
++{
++  std::uint64_t t0;
++  ModeTickRenderTimer() : t0(SDL_GetTicksNS()) {}
++  ~ModeTickRenderTimer()
++  {
++    if (!engine_tick_fine_instr_active()) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_eng_mode_tick_render_dt_this_tick = dt;
++    if (g_eng_mode_tick_render_idx < g_eng_tick_block_size)
++      g_eng_mode_tick_render_samples[g_eng_mode_tick_render_idx++] = dt;
++  }
++};
++
+ struct DebugOverlayTimer
+ {
+   std::uint64_t t0;
+diff --git a/src/game.cpp b/src/game.cpp
+index fbc9048..565d922 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -245,6 +245,9 @@ void Game::tick(void)
+   NXE::Diag::g_eng_tsc_interp_dt_this_tick     = 0;
+   NXE::Diag::g_eng_mode_tick_dt_this_tick      = 0;
+   NXE::Diag::g_eng_debug_overlay_dt_this_tick  = 0;
++  // patch 0152 (wave-56 B1): mode_tick split slice dt locals.
++  NXE::Diag::g_eng_mode_tick_state_dt_this_tick   = 0;
++  NXE::Diag::g_eng_mode_tick_render_dt_this_tick  = 0;
+ 
+   // patch 0095 (wave 22 W22A): mode_tick sub-bracket per-tick dt locals.
+   // Same reset rationale as W20B's cluster above — leftover-from-prior-
+@@ -301,43 +304,30 @@ void Game::tick(void)
+   // value here to read once more BEFORE that destructor runs.
+   const Uint64 _engine_tick_t0 = SDL_GetTicksNS();
+ 
+-  {
+-    NXE::Diag::ClearScreenTimer _cst;
+-    Renderer::getInstance()->clearScreen(BLACK);
+-  }
+-  debug_clear();
+-
+-  if (game.paused)
+-  {
+-    NXE::Diag::ModeTickTimer _mtt;
+-    tickfunctions[game.paused].OnTick();
+-  }
+-  else
+-  {
+-    // run scripts
+-    {
+-      NXE::Diag::TscInterpTimer _tit;
+-      tsc->RunScripts();
+-    }
+-
+-    if (justpushed(ESCKEY)
+-        && (game.mode == GM_NORMAL || game.mode == GM_INVENTORY || game.mode == GM_MAP_SYSTEM || game.mode == GM_ISLAND
+-            || game.mode == GM_CREDITS))
+-    {
+-      game.pause(GP_PAUSED);
+-    }
+-    // call the tick function for the current game mode
+-    {
+-      NXE::Diag::ModeTickTimer _mtt;
+-      tickfunctions[game.mode].OnTick();
+-    }
+-  }
+-
+-  {
+-    NXE::Diag::DebugOverlayTimer _dot;
+-    DrawDebug();
+-    console.Draw();
+-  }
++  // DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): the
++  // tick_state / tick_render_submit split. Game::tick() is now the
++  // 1:1 composition of the logic half and the drawcall half. The
++  // refactor is behavior-preserving -- the only reorder is clearScreen
++  // (was here at top-of-tick, now inside tick_render_submit after the
++  // logic; behavior-preserving because logic never reads the
++  // framebuffer). See PHASE11-WAVE-56-CONTRACT.md.
++  tick_state();
++  tick_render_submit();
++
++  // patch 0152 (wave-56 B1 -- mode_tick split, refinement B opt iv):
++  // the W20B mode_tick parent total = the state slice + the render
++  // slice. Assigned here, AFTER both halves have run and BEFORE the
++  // residual blocks below, so the W20B engine-tick residual and the
++  // W22A mode_tick residual read an unchanged parent. The push to the
++  // parent sample array (which the now-retired ModeTickTimer
++  // destructor used to do) also happens here.
++  NXE::Diag::g_eng_mode_tick_dt_this_tick =
++      NXE::Diag::g_eng_mode_tick_state_dt_this_tick
++      + NXE::Diag::g_eng_mode_tick_render_dt_this_tick;
++  if (NXE::Diag::engine_tick_fine_instr_active()
++      && NXE::Diag::g_eng_mode_tick_idx < NXE::Diag::g_eng_tick_block_size)
++    NXE::Diag::g_eng_mode_tick_samples[NXE::Diag::g_eng_mode_tick_idx++] =
++        NXE::Diag::g_eng_mode_tick_dt_this_tick;
+ 
+   // patch 0090 (wave 20 W20B): compute engine-tick residual. Read total
+   // dt by sampling SDL_GetTicksNS once more here (cheap; same call site
+@@ -414,6 +404,106 @@ void Game::tick(void)
+   ++NXE::Diag::g_w237_total_frames_block;
+ }
+ 
++// DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): the logic
++// half of the tick. debug_clear + (when not paused) TSC RunScripts +
++// the esc-pause check + the per-mode logic. For GM_NORMAL the ModeSim
++// block runs via game_tick_normal_state(); paused / non-GM_NORMAL
++// modes defer their whole OnTick to the render half (wave-57's
++// accumulator never multi-runs those). The dispatch decision is made
++// ONCE here and latched in _tick_dispatch so tick_render_submit()
++// honors the SAME decision even though the esc-pause check (sets
++// game.paused) or RunScripts/sim (can change game.mode) may mutate the
++// globals between the two halves -- contract sec.1.6, refinement A.
++// tick_state() is drawcall-free on the GM_NORMAL path: the structural
++// foreclosure of the wave-36 -28 fps drawcall-coupling trap.
++void Game::tick_state(void)
++{
++  debug_clear();
++
++  if (game.paused)
++  {
++    _tick_dispatch      = TD_PAUSED;
++    _tick_dispatch_mode = game.paused;
++  }
++  else
++  {
++    // run scripts
++    {
++      NXE::Diag::TscInterpTimer _tit;
++      tsc->RunScripts();
++    }
++
++    if (justpushed(ESCKEY)
++        && (game.mode == GM_NORMAL || game.mode == GM_INVENTORY || game.mode == GM_MAP_SYSTEM || game.mode == GM_ISLAND
++            || game.mode == GM_CREDITS))
++    {
++      game.pause(GP_PAUSED);
++    }
++
++    // Latch the dispatch decision (refinement A): made once, here,
++    // AFTER RunScripts + the esc-pause check -- exactly where the
++    // legacy single OnTick dispatch read game.mode. tick_render_submit
++    // honors this latch, never re-reads game.paused/game.mode.
++    if (game.mode == GM_NORMAL)
++    {
++      _tick_dispatch = TD_GM_NORMAL_SPLIT;
++      NXE::Diag::ModeTickStateTimer _mtst;
++      game_tick_normal_state();
++    }
++    else
++    {
++      _tick_dispatch      = TD_OTHER;
++      _tick_dispatch_mode = game.mode;
++    }
++  }
++}
++
++// DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): the drawcall
++// half of the tick. clearScreen + the per-mode render (dispatched off
++// the _tick_dispatch latch set by tick_state(), NOT a re-read of
++// game.paused/game.mode) + the debug overlay. For GM_NORMAL the
++// DrawScene / HUD / Post passes run via game_tick_normal_render();
++// paused and non-GM_NORMAL modes run their whole OnTick here, after
++// clearScreen (so the legacy clearScreen-before-any-draw ordering
++// holds -- contract sec.1.3).
++void Game::tick_render_submit(void)
++{
++  {
++    NXE::Diag::ClearScreenTimer _cst;
++    Renderer::getInstance()->clearScreen(BLACK);
++  }
++
++  switch (_tick_dispatch)
++  {
++    case TD_PAUSED:
++    {
++      NXE::Diag::ModeTickRenderTimer _mtrt;
++      tickfunctions[_tick_dispatch_mode].OnTick();
++    }
++    break;
++
++    case TD_GM_NORMAL_SPLIT:
++    {
++      NXE::Diag::ModeTickRenderTimer _mtrt;
++      game_tick_normal_render();
++    }
++    break;
++
++    case TD_OTHER:
++    {
++      NXE::Diag::ModeTickRenderTimer _mtrt;
++      tickfunctions[_tick_dispatch_mode].OnTick();
++    }
++    break;
++  }
++
++  {
++    NXE::Diag::DebugOverlayTimer _dot;
++    DrawDebug();
++    console.Draw();
++  }
++}
++
+ void Game::switchmap(int mapno, int scriptno, int px, int py)
+ {
+   game.switchstage.mapno        = mapno;
+@@ -445,7 +535,22 @@ void c------------------------------() {}
+ */
+ 
+ // standard in-game tick (as opposed to title-screen, inventory etc)
++// DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): game_tick_-
++// normal() split at the W22A ModeSim / ModeDrawScene seam. Retained as
++// the 1:1 wrapper so the tickfunctions[] table entry stays valid; the
++// GM_NORMAL path is dispatched through the two halves directly by
++// Game::tick_state / tick_render_submit, so this wrapper is not
++// invoked at runtime (kept for the table + as the behavior-of-record).
+ void game_tick_normal(void)
++{
++  game_tick_normal_state();
++  game_tick_normal_render();
++}
++
++// The logic half: the ModeSim block (UpdateBlockStates + AI +
++// CullDeleted) + niku_run. Drawcall-free -- the wave-36-trap
++// foreclosure (build-qa witness 3 greps this path).
++void game_tick_normal_state(void)
+ {
+   player->riding        = NULL;
+   player->bopped_object = NULL;
+@@ -495,7 +600,24 @@ void game_tick_normal(void)
+     Objects::CullDeleted();
+   }
+ 
++  // patch 0152 (wave-56 B1): niku_run() -- the speedrun-timer advance
++  // -- is LOGIC. It moves into the state half so wave-57's accumulator
++  // advances the timer at the 50 Hz logic rate, not the render rate.
++  // It was a bare statement inside the ModeDrawHud bracket (sub-us);
++  // it runs before niku_draw(), which still reads the counter in the
++  // render half.
++  niku_run();
++}
+ 
++// The drawcall half: DrawScene + the W22.5/W29 mds/mdt residual
++// computations (which read dt locals written by RAII destructors that
++// fired inside DrawScene) + the mds-decomp hook + the HUD pass + the
++// Post pass. Moved verbatim with their code -- the residual blocks
++// keep their "parent total written before residual computed" ordering
++// because DrawScene has returned by the time they run (contract
++// sec.1.5).
++void game_tick_normal_render(void)
++{
+   {
+     NXE::Diag::ModeDrawSceneTimer _mdst;
+     DrawScene();
+@@ -601,7 +723,8 @@ void game_tick_normal(void)
+     DrawStatusBar();
+     fade.Draw();
+ 
+-    niku_run();
++    // patch 0152 (wave-56 B1): niku_run() relocated to
++    // game_tick_normal_state (the logic half). niku_draw stays here.
+     if (player->equipmask & EQUIP_NIKUMARU)
+       niku_draw(game.counter);
+   }
+diff --git a/src/game.h b/src/game.h
+index d3408d1..de953ce 100644
+--- a/src/game.h
++++ b/src/game.h
+@@ -129,6 +129,33 @@ struct Game
+   bool pause(int pausemode, int param = 0);
+   void tick();
+ 
++  // DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): the
++  // tick_state / tick_render_submit split. tick() is now the 1:1
++  // composition { tick_state(); tick_render_submit(); }. tick_state()
++  // is the logic half (drawcall-free for the GM_NORMAL path);
++  // tick_render_submit() is the drawcall half. Exposed as separate
++  // methods so wave-57's fixed-timestep accumulator can multi-run
++  // tick_state() alone. See PHASE11-WAVE-56-CONTRACT.md.
++  void tick_state();
++  void tick_render_submit();
++
++  // DOS-PORT (patch 0152, wave-56 -- contract sec.1.6, refinement A):
++  // per-tick dispatch latch. game.paused / game.mode can mutate
++  // between the two halves (tick_state()'s esc-pause check sets
++  // game.paused; RunScripts() / sim can change game.mode). tick_state()
++  // makes the ONE dispatch decision and latches it here; tick_render_-
++  // submit() honors the SAME decision rather than re-reading the
++  // mutated globals -- without this the split is not byte-identical on
++  // an ESC-press / mode-transition frame.
++  enum TickDispatch
++  {
++    TD_PAUSED,           // run tickfunctions[_tick_dispatch_mode].OnTick whole
++    TD_GM_NORMAL_SPLIT,  // GM_NORMAL: state half ran; run the render half
++    TD_OTHER             // non-GM_NORMAL mode: run its OnTick whole
++  };
++  TickDispatch _tick_dispatch;
++  int _tick_dispatch_mode;  // mode index for TD_PAUSED / TD_OTHER
++
+   void close();
+ };
+ 
+@@ -182,6 +209,15 @@ bool game_save(Profile *p);
+ void DrawScene(void);
+ 
+ void game_tick_normal(void);
++// DOS-PORT (patch 0152, wave-56 B1): game_tick_normal() split at the
++// W22A ModeSim / ModeDrawScene seam. _state = the ModeSim logic half
++// (drawcall-free); _render = DrawScene + HUD + ScreenEffects + Post.
++// game_tick_normal() is retained as the 1:1 { _state(); _render(); }
++// wrapper (the tickfunctions[] table entry); the GM_NORMAL path is
++// dispatched through the two halves directly by Game::tick_state /
++// tick_render_submit, so the wrapper is not invoked at runtime.
++void game_tick_normal_state(void);
++void game_tick_normal_render(void);
+ void AssignExtraSprites(void);
+ 
+ #endif
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index c1f4071..a421e09 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -116,6 +116,18 @@ std::uint64_t g_eng_tsc_interp_dt_this_tick     = 0;
+ std::uint64_t g_eng_mode_tick_dt_this_tick      = 0;
+ std::uint64_t g_eng_debug_overlay_dt_this_tick  = 0;
+ 
++// DOS-PORT (patch 0152, Phase 11 wave-56 B1): mode_tick split storage
++// (refinement B option iv). state/render slice sample arrays + idxes +
++// per-tick dt locals. The parent g_eng_mode_tick_* storage above is
++// retained and filled from state+render at Game::tick tail. Defs here
++// alongside the W20B storage so audit-flush emits from one TU.
++std::uint64_t g_eng_mode_tick_state_samples[g_eng_tick_block_size]  = {};
++std::uint64_t g_eng_mode_tick_render_samples[g_eng_tick_block_size] = {};
++int g_eng_mode_tick_state_idx   = 0;
++int g_eng_mode_tick_render_idx  = 0;
++std::uint64_t g_eng_mode_tick_state_dt_this_tick   = 0;
++std::uint64_t g_eng_mode_tick_render_dt_this_tick  = 0;
++
+ // DOS-PORT (patch 0095, Phase 9 wave 22 W22A): mode_tick decomposition
+ // storage. 4 sub-bracket sample arrays + idxes + per-tick dt locals + 1
+ // residual array + idx. Decls in vendor/nxengine-evo/src/Utils/
+@@ -2436,6 +2448,37 @@ void _maybe_flush_phase_timing_audit()
+     {
+       LOG_INFO("[engine-tick-stat n=0 phase=mode_tick             min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
+     }
++    // patch 0152 (wave-56 B1): mode_tick split slices. mode_tick_state
++    // is the OnTick logic half wave-57's accumulator multi-runs;
++    // mode_tick_render the drawcall half. Parent phase=mode_tick above
++    // = their sum.
++    {
++      using NXE::Diag::g_eng_mode_tick_state_samples;
++      using NXE::Diag::g_eng_mode_tick_render_samples;
++      const int n_mts = NXE::Diag::g_eng_mode_tick_state_idx;
++      const int n_mtr = NXE::Diag::g_eng_mode_tick_render_idx;
++      _FlipPhaseStats st_mts, st_mtr;
++      if (n_mts > 0)
++      {
++        _compute_flip_phase_stats(g_eng_mode_tick_state_samples, n_mts, st_mts);
++        LOG_INFO("[engine-tick-stat n={} phase=mode_tick_state       min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++                 n_mts, st_mts.min_ms, st_mts.med_ms, st_mts.mean_ms, st_mts.p95_ms, st_mts.max_ms);
++      }
++      else
++      {
++        LOG_INFO("[engine-tick-stat n=0 phase=mode_tick_state       min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++      }
++      if (n_mtr > 0)
++      {
++        _compute_flip_phase_stats(g_eng_mode_tick_render_samples, n_mtr, st_mtr);
++        LOG_INFO("[engine-tick-stat n={} phase=mode_tick_render      min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++                 n_mtr, st_mtr.min_ms, st_mtr.med_ms, st_mtr.mean_ms, st_mtr.p95_ms, st_mtr.max_ms);
++      }
++      else
++      {
++        LOG_INFO("[engine-tick-stat n=0 phase=mode_tick_render      min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++      }
++    }
+     if (n_do > 0)
+     {
+       _compute_flip_phase_stats(g_eng_debug_overlay_samples, n_do, st_do);
+@@ -2457,6 +2500,8 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_eng_mode_tick_idx     = 0;
+   NXE::Diag::g_eng_debug_overlay_idx = 0;
+   NXE::Diag::g_eng_residual_idx      = 0;
++  NXE::Diag::g_eng_mode_tick_state_idx  = 0;  // patch 0152 (wave-56 B1)
++  NXE::Diag::g_eng_mode_tick_render_idx = 0;  // patch 0152 (wave-56 B1)
+ 
+   // patch 0095 (wave 22 W22A): mode-tick decomposition emit + reset.
+   // Gated on MODE_TICK_INSTR (separate from FLIP_INSTR / FINE_INSTR
+-- 
+2.47.3
+

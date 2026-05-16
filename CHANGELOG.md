@@ -15,7 +15,7 @@ internal docs and git history; this file keeps the user-facing summary.
   scene), `organya` (the original 2004 `.org` software synthesizer -- faithful
   timbre), and `wb` (WaveBlaster header daughterboard). MIDI source files select
   independently via `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` (`wiimidi` / `orgmid`).
-- **Render + audio optimization (waves 18-54).** Real-HW median climbed from the
+- **Render + audio optimization (waves 18-55).** Real-HW median climbed from the
   0.1.0 ~25 fps title to a ~30 fps production floor at the canonical Mimiga Village
   heavy-music scene. Headline wins: OPL3 audio offload, the backdrop render cache +
   skip-when-unchanged, INDEX8 fast-path tile blits, the `mds_clear` coverage LUT,
@@ -25,9 +25,18 @@ internal docs and git history; this file keeps the user-facing summary.
   documented failed experiments.
 - **The render path is measured-closed at ~30 fps.** Every CPU and Cirrus-chip
   render lever has been measured to conclusion; the remaining gap to Cave Story's
-  50 fps design rate is bounded by the reference PC's memory bandwidth. The 50 fps
-  push continues via an opt-in **Performance Mode** (`SDL_HINT_DOSKUTSU_PERF_MODE`,
-  graduated fidelity reduction; the faithful render stays the default).
+  50 fps design rate is bounded by the reference PC's memory bandwidth and is not
+  recoverable in software on the faithful render path. An opt-in **Performance
+  Mode** (`SDL_HINT_DOSKUTSU_PERF_MODE`, graduated fidelity reduction) trades
+  visual detail for fps; its faithful-tier cuts measured flat on real hardware.
+- **Fixed-Timestep mode** (`SDL_HINT_DOSKUTSU_FIXED_TIMESTEP`, default-OFF) is the
+  50 fps program's deliverable. NXEngine couples game logic 1:1 to render, so at a
+  ~30 fps render the game plays at ~60% of its authored 50 Hz speed ("sluggish").
+  Fixed-Timestep advances logic on a fixed 50 Hz accumulator decoupled from render,
+  so the game plays at near-correct speed (~82% of authored measured whole-run,
+  near-correct in steady-state play) at full fidelity -- no visual cost, no render-
+  fps regression. Default-OFF keeps the 1:1-coupled render byte-identical to prior
+  production; enable with `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1`.
 - **Diagnostic probes + emulation harnesses.** `make probes` builds standalone
   DJGPP diagnostic binaries under `tests/probes/` (memory bandwidth, DPMI thunk
   cost, cache behavior, Cirrus BLT throughput, and more; gitignored). `tools/86box-*.sh`

@@ -291,6 +291,7 @@ BANNER_REGEX=(
   "Logger::init: wave-53 log level=(INFO|WARN)"
   "perf-mode: level=[0-2]"
   "perf-mode B2: decorative FG detail dropped"
+  "fixed-timestep: (ENABLED|DISABLED)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -300,6 +301,7 @@ BANNER_SEVERITY=(
   "forbidden"
   "forbidden"
   "forbidden"
+  "optional"
   "optional"
   "optional"
   "optional"
@@ -367,6 +369,7 @@ BANNER_LABEL=(
   "wave-53 Logger log-level banner (patch 0148; optional -- emitted directly by Logger::init regardless of level, narrating INFO vs WARN; untagged production runs default to WARN, tagged runs and DOSKUTSU_LOG_VERBOSE=1 force INFO; the runtime witness that the wave-53 WARN-when-untagged default engaged)"
   "wave-54 PERF_MODE level banner (patch 0150; optional -- LOG_INFO emitted on the first perf_mode_level() call, which is the first map_draw_backdrop call, narrating level=0 faithful (default) / 1 smooth / 2 fast; INFO-level so it appears only on tagged runs or DOSKUTSU_LOG_VERBOSE=1, absent on a plain untagged WARN-level run which is expected not a failure; the runtime witness that the SDL_HINT_DOSKUTSU_PERF_MODE infra was reached)"
   "wave-55 cut B2 decorative-FG-detail first-fire (patch 0151; optional -- LOG_INFO emitted once on the first frame B2 actually filters a purely-decorative foreground tile (attribute word == TA_FOREGROUND exactly); the two-witness runtime side complementing strings|grep \"perf-mode B2\" which proves embed only; fires ONLY when the smoke run boots with SDL_HINT_DOSKUTSU_PERF_MODE>=1 AND reaches a map that has at least one decorative FG tile -- a level-0 boot, or a scene whose FG layer is all collision/slope tiles, never fires it, which is expected not a failure. NOTE the wave-54 A2 banner was removed: A2 gain-collapsed on real HW and its hunk was reverted by patch 0151)"
+  "wave-57 FIXED_TIMESTEP killswitch decision (patch 0153; optional -- LOG_INFO emitted on the first fixed_timestep_active() call (the first gameloop iteration), narrating ENABLED (SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1; logic 50 Hz decoupled from render) vs DISABLED (default; 1:1 logic/render); INFO-level so it appears only on tagged runs or DOSKUTSU_LOG_VERBOSE=1, absent on a plain untagged WARN-level run which is expected not a failure; the runtime witness that the Track B B2 accumulator infra was reached -- on a FIXED_TIMESTEP=1 boot the ENABLED variant confirms the opt-in 50 Hz fixed-timestep mode engaged)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

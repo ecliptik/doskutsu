@@ -27,7 +27,7 @@ This project exists for preservation, for the historical-computing community, an
 
 DOSKUTSU runs at **~30 fps median** on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP) with music on the default OPL3 FM-synth backend. The original organya software synthesizer is selectable, but runs lower -- its per-tick software mixing is the single heaviest cost on a Pentium-class CPU.
 
-Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Cave Story is authored for 50 fps; closing the remaining gap on this hardware is ongoing work. Per-wave performance history is in [CHANGELOG.md](./CHANGELOG.md).
+Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Cave Story is authored for 50 fps; the reference PC's memory bus caps the faithful render near 30 fps, and because NXEngine couples game logic 1:1 to render the game then plays slightly slow. The opt-in **Fixed-Timestep mode** (`SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1`) decouples game logic onto a fixed 50 Hz accumulator so the game plays at near-correct speed at full fidelity with no visual cost; it is default-OFF pending a full-play validation pass. Per-wave performance history is in [CHANGELOG.md](./CHANGELOG.md).
 
 ### Audio backends
 

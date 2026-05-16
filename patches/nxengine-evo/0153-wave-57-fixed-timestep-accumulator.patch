@@ -1,0 +1,640 @@
+From 38e4480d8596a1da7949a390ca3a005ce3b46de4 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 16 May 2026 12:43:03 -0700
+Subject: [PATCH] perf phase 11 patch 0153 -- wave-57 Track B B2:
+ FIXED_TIMESTEP accumulator + 3 screen-effect wart fixes
+
+Per flush-instr's docs/internal/PHASE11-WAVE-57-CONTRACT.md. Wave-57 is
+Track B's second wave (B2 in FIXED-TIMESTEP-DESIGN.md sec.3-4): the
+fixed-timestep accumulator behind SDL_HINT_DOSKUTSU_FIXED_TIMESTEP,
+built on the wave-56 tick_state() / tick_render_submit() split. Opt-in,
+default-OFF; FIXED_TIMESTEP=0 is byte-identical to wave-56 (production).
+
+WHY DOS NEEDS THIS: Cave Story logic is authored for GAME_FPS=50.
+DOSKUTSU couples logic 1:1 to render, so at the faithful ~30 fps render
+on g2k the game runs at ~60% speed -- it feels slow. The accumulator
+runs game logic at a fixed 50 Hz off a wall-clock accumulator,
+decoupled from render fps, so the game plays at correct authored speed
+even at 30 fps render. This is a game-SPEED fix, NOT a render-fps lever
+-- the fps counter still reads ~30; what changes is that logic,
+animation and timers advance at the intended rate.
+
+THE ACCUMULATOR (main.cpp run_tick_fixed, contract sec.1.1): when
+FIXED_TIMESTEP=1 AND mode==GM_NORMAL, gameloop() calls run_tick_fixed()
+instead of the 1:1 run_tick(). It accumulates wall-clock elapsed and
+runs a catch-up while-loop of tick_state() ONLY (+ input_poll + the TAS
+hook per logic tick); tick_render_submit() + flip() run exactly ONCE
+per displayed frame after the loop. MAX_CATCHUP=5 clamps the
+spiral-of-death; an accumulator>MAX*TICK_NS resync drops stale backlog
+(and absorbs re-entry from the 1:1 path). run_tick() is left UNTOUCHED
+(it aliases the now file-scope g_tick_count via a reference, the only
+1-line change) so the FIXED_TIMESTEP=0 path stays byte-identical;
+run_tick_fixed() replicates run_tick()'s per-frame machinery rather
+than refactoring it.
+
+THE wave-36 FORECLOSURE (contract sec.2): wave-36 ran a fixed-timestep
+over game.tick() (which submits drawcalls) -> N x ~17 ms drawcall work
+-> -28 fps. Wave-57's catch-up loop body is tick_state() and nothing
+that draws or flips -- tick_render_submit()/flip() are outside the
+loop. The catch-up loop re-pays only ~1 ms of logic per extra tick.
+Triple-gated: the wave-56 split (tick_state drawcall-free), the
+loop-body structure, and the effect Tick()s being drawcall-free.
+
+STOP-1 -- THE LATCH-FRESHNESS INVARIANT (contract sec.1.3, flush-instr
+counter): the catch-up while-loop guards on game.mode==GM_NORMAL &&
+!game.paused directly (NOT just the wave-56 dispatch latch -- a
+sim-triggered setmode inside game_tick_normal_state mutates game.mode
+AFTER the latch is set, so a latch-only check misses it). AND: a paused
+frame MUST still run exactly one tick_state() so _tick_dispatch is
+latched fresh to TD_PAUSED -- otherwise it stays stale at
+TD_GM_NORMAL_SPLIT and tick_render_submit() runs game_tick_normal_render
+instead of the pause OnTick (pause screen never appears, unpause never
+processed, hang). run_tick_fixed() therefore: if paused -> exactly one
+tick_state(), no catch-up; else -> the catch-up loop.
+
+tick_count is the LOGIC-tick counter (contract sec.5 measurement
+basis): incremented once per tick_state() in run_tick_fixed, so the
+canonical PLAY.TAS auto-exits at logic-tick 2593 regardless of render
+rate. Promoted from a run_tick() function-local static to file scope
+(g_tick_count) so the 1:1 and accumulator paths share one monotonic
+stream across mode transitions -- behavior-preserving for the 1:1 path
+(a function-local and a file-scope static hold the identical value).
+
+THE 3 SCREEN-EFFECT WART FIXES (contract sec.1.5): SE_FlashScreen,
+SE_Starflash, SE_Fade each advanced animation state inside Draw().
+Draw() runs in tick_render_submit() = render rate; under the
+accumulator that would animate the effects ~1.67x slow at 30 fps.
+SE_Fade is load-bearing, not cosmetic: game logic polls
+fade.getstate() to sequence stage transitions (TRA) -- a render-rate
+fade desyncs the transition logic. Fix: each effect's drawcall-free
+state-advance is extracted to a Tick() method; under FIXED_TIMESTEP=1
+Tick() runs in tick_state() (50 Hz, via the new block at the end of
+Game::tick_state -- fade unconditional, flashscreen/starflash gated on
+.enabled) and Draw() skips its embedded advance. Under FIXED_TIMESTEP=0
+the advance stays in Draw() exactly as wave-56, behind an
+if(!fixed_timestep_active()) guard -- so the OFF path is byte-identical
+and needs NO prev-state snapshot (this supersedes the wave-56-contract
+sec.3 prev-snapshot concern; the flag-gating avoids it).
+
+STOP-2 -- SE_Starflash straddle (contract sec.1.5): SE_Starflash's
+advance straddles its draw (speed/size advance before the fillRects,
+state transition after). SE_Starflash::Tick() lifts the WHOLE advance
+-- pre-advance then post-transition back-to-back (the fillRects touch
+no speed/size/state, so back-to-back is state-math-equivalent to the
+straddled order). Draw() keeps the original straddled code, each part
+if(!fixed_timestep_active())-guarded, so FIXED_TIMESTEP=0 is
+byte-identical (the else-branch early return included). On =1 the
+one-tick phase shift is accepted per contract.
+
+CORRECTNESS: FIXED_TIMESTEP=0 / unset -> run_tick_fixed() is never
+called (the gameloop branch is false), run_tick() is untouched, and the
+3 effects' Draw() advances run exactly as wave-56 -> byte-identical to
+the wave-56 binary (build-qa tear-robust shared-subsequence AE=0 gate
+vs sha c693499b). FIXED_TIMESTEP=1 is NOT byte-identity gated -- the
+decoupled logic cadence IS the feature; it is verified by the wave-57
+real-HW iter (the fixed-2593-logic-tick TAS run's wall-clock duration
+~52 s at =1 vs ~86 s at =0, + render-fps non-regression = the wave-36
+check).
+
+BANNER for tests/run-gameplay-smoke.sh BANNERS:
+"fixed-timestep: (ENABLED|DISABLED)" -- emitted on the first
+fixed_timestep_active() call.
+
+FILES: src/main.cpp (run_tick_fixed accumulator + the gameloop branch +
+g_tick_count file-scope promotion + the run_tick alias), src/game.cpp
+(fixed_timestep_active cached hint + the effect Tick() calls in
+Game::tick_state), src/game.h (the decl), src/screeneffect.cpp + .h
+(the 3 effect Tick()/Draw() splits with if(!ft) guards).
+---
+ src/game.cpp         |  45 ++++++++++++
+ src/game.h           |  12 ++++
+ src/main.cpp         | 162 ++++++++++++++++++++++++++++++++++++++++++-
+ src/screeneffect.cpp | 142 +++++++++++++++++++++++++++++++------
+ src/screeneffect.h   |   3 +
+ 5 files changed, 341 insertions(+), 23 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index 565d922..bd4966e 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -404,6 +404,27 @@ void Game::tick(void)
+   ++NXE::Diag::g_w237_total_frames_block;
+ }
+ 
++// DOS-PORT (patch 0153, Phase 11 wave-57 -- Track B B2): cached
++// killswitch for the fixed-timestep accumulator.
++// SDL_HINT_DOSKUTSU_FIXED_TIMESTEP -- strict "1" enables; 0 / unset /
++// anything else -> OFF (the wave-56 1:1 path). Sentinel-cached on the
++// first call (the wave-54 PERF_MODE idiom -- NO per-iteration getenv).
++// First call emits the build-qa BANNERS-grep banner.
++static int g_fixed_timestep = -1;  // -1 undecided / 0 off / 1 on
++bool fixed_timestep_active()
++{
++  if (g_fixed_timestep < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_FIXED_TIMESTEP");
++    g_fixed_timestep = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    LOG_INFO("fixed-timestep: {}",
++             g_fixed_timestep
++                 ? "ENABLED (logic 50 Hz, decoupled from render)"
++                 : "DISABLED (default; 1:1 logic/render)");
++  }
++  return g_fixed_timestep == 1;
++}
++
+ // DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): the logic
+ // half of the tick. debug_clear + (when not paused) TSC RunScripts +
+ // the esc-pause check + the per-mode logic. For GM_NORMAL the ModeSim
+@@ -456,6 +477,30 @@ void Game::tick_state(void)
+       _tick_dispatch_mode = game.mode;
+     }
+   }
++
++  // DOS-PORT (patch 0153, Phase 11 wave-57 -- Track B B2): under
++  // FIXED_TIMESTEP the 3 screen effects advance their animation state
++  // HERE -- in tick_state(), at the 50 Hz logic rate -- instead of
++  // inside Draw() (which runs in tick_render_submit at the render
++  // rate). This is required, not cosmetic: game logic polls
++  // fade.getstate() to sequence stage transitions, so the fade MUST
++  // advance at the logic rate or the transition desyncs. The effect
++  // Tick() functions are pure state mutations -- drawcall-free, safe
++  // for the accumulator to multi-run. flashscreen/starflash Tick only
++  // when enabled (ScreenEffects::Draw gates their Draw on .enabled, so
++  // their Draw-embedded advance only ran when enabled); fade.Tick is
++  // unconditional (SE_Fade::Draw is called unconditionally and self-
++  // gates internally on its state). When FIXED_TIMESTEP is off this
++  // block is skipped and each effect advances inside Draw() exactly as
++  // in wave-56 (the if(!fixed_timestep_active()) guard in each Draw).
++  if (fixed_timestep_active())
++  {
++    fade.Tick();
++    if (starflash.enabled)
++      starflash.Tick();
++    if (flashscreen.enabled)
++      flashscreen.Tick();
++  }
+ }
+ 
+ // DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): the drawcall
+diff --git a/src/game.h b/src/game.h
+index de953ce..2f027bf 100644
+--- a/src/game.h
++++ b/src/game.h
+@@ -218,6 +218,18 @@ void game_tick_normal(void);
+ // tick_render_submit, so the wrapper is not invoked at runtime.
+ void game_tick_normal_state(void);
+ void game_tick_normal_render(void);
++
++// DOS-PORT (patch 0153, Phase 11 wave-57 -- Track B B2): cached
++// killswitch for the fixed-timestep accumulator.
++// SDL_HINT_DOSKUTSU_FIXED_TIMESTEP -- 0/1, default-OFF, strict "1" to
++// enable; read + cached once at boot (the wave-54 PERF_MODE idiom, no
++// per-iteration getenv). When true the gameloop runs game logic at a
++// fixed 50 Hz off a wall-clock accumulator, decoupled from render fps,
++// and the 3 screen effects advance their state in tick_state() (Tick)
++// instead of Draw(). Default-OFF -> the wave-56 1:1 path, byte-
++// identical to production.
++bool fixed_timestep_active();
++
+ void AssignExtraSprites(void);
+ 
+ #endif
+diff --git a/src/main.cpp b/src/main.cpp
+index 0608ac2..7afcb24 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -115,6 +115,18 @@ void update_fps()
+   Renderer::getInstance()->font.draw(x, 4, fpstext, 0x00FF00, true);
+ }
+ 
++// DOS-PORT (patch 0153, Phase 11 wave-57 -- Track B B2): the
++// logic-tick counter, promoted from a run_tick() function-local static
++// to file scope so run_tick() (the 1:1 path) and run_tick_fixed() (the
++// fixed-timestep accumulator) share ONE monotonic stream. Required for
++// correct TAS indexing + auto-exit when a session crosses between the
++// two paths (title 1:1 -> GM_NORMAL fixed -> inventory 1:1 -> ...).
++// Behavior-preserving for the 1:1 path: a function-local static and a
++// file-scope static hold the identical counter value; run_tick()
++// aliases this via `int &tick_count = g_tick_count;` so every other
++// run_tick() line is byte-unchanged.
++static int g_tick_count = 0;
++
+ static inline void run_tick()
+ {
+   static bool can_tick       = true;
+@@ -132,7 +144,7 @@ static inline void run_tick()
+   // 60 Hz = ~5s, but at the observed 0.3 fps that's once every 16 minutes,
+   // which is fine: if we're hung we want SILENCE in the log, and if we're
+   // alive the per-flip flip-probe in Renderer.cpp tells us the rate.
+-  static int tick_count = 0;
++  int &tick_count = g_tick_count;  // patch 0153 (wave-57): shared logic-tick counter
+   ++tick_count;
+   const bool log_beat = ((tick_count % 300) == 0);
+ 
+@@ -242,6 +254,138 @@ static inline void run_tick()
+   }
+ }
+ 
++// DOS-PORT (patch 0153, Phase 11 wave-57 -- Track B B2): the
++// fixed-timestep accumulator path. Called from gameloop() in place of
++// run_tick() when SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1 and the current
++// mode is GM_NORMAL. Per PHASE11-WAVE-57-CONTRACT.md sec.1 +
++// FIXED-TIMESTEP-DESIGN.md sec.3.
++//
++// Game logic (tick_state) advances at a fixed 50 Hz off a wall-clock
++// accumulator; render (tick_render_submit + flip) runs ONCE per
++// displayed frame. At ~30 fps render the game then plays at its
++// correct authored 50 Hz speed instead of ~60% slow-motion.
++//
++// THE wave-36 FORECLOSURE: the catch-up while-loop body is
++// tick_state() (+ input_poll + TAS hook) and NOTHING that draws or
++// flips -- tick_render_submit()/flip() are OUTSIDE the loop. The
++// catch-up loop re-pays only ~1 ms of logic per extra tick, never
++// N x ~17 ms of drawcalls (the wave-36 -28 fps trap).
++//
++// run_tick() (the 1:1 path) is deliberately left untouched so the
++// FIXED_TIMESTEP=0 default path stays byte-identical to wave-56; this
++// function replicates run_tick()'s load-bearing per-frame machinery
++// (update_fps / the flipacceltime flip path / runFade / heartbeat /
++// TAS auto-exit) rather than refactoring run_tick().
++static void run_tick_fixed(void)
++{
++  static int frameskip      = 0;
++  static Uint64 accum_ns    = 0;
++  static Uint64 last_ns     = 0;
++  static bool   ft_inited   = false;
++
++  // 1e9 / GAME_FPS -- the fixed logic tick interval (20 ms at 50 Hz).
++  const Uint64 TICK_NS     = (Uint64)1000000000 / GAME_FPS;
++  const int    MAX_CATCHUP = 5;  // spiral-of-death clamp
++
++  const Uint64 now_ns = SDL_GetTicksNS();
++  if (!ft_inited)
++  {
++    ft_inited = true;
++    last_ns   = now_ns;  // first entry: start with no backlog
++  }
++
++  // --- LOGIC: tick_state() at a fixed 50 Hz ---
++  if (game.paused)
++  {
++    // STOP-1 latch-freshness invariant (contract sec.1.3): a paused
++    // frame MUST still run exactly one tick_state() so _tick_dispatch
++    // is latched TD_PAUSED -- otherwise it stays stale and
++    // tick_render_submit() runs the wrong half (the pause screen never
++    // appears -> unpause never processed -> hang). No catch-up while
++    // paused; reset the accumulator so the unpause frame does not see
++    // the paused interval as a backlog.
++    //
++    // lastinputs is snapshotted at the START of the epoch (before
++    // input_poll), NOT after tick_state(): the pause-mode OnTick runs
++    // in tick_render_submit() below and uses justpushed() for menu
++    // navigation / unpause -- it needs lastinputs to still hold the
++    // PRIOR frame's inputs. A memcpy after tick_state() would make
++    // lastinputs == inputs, zero every justpushed() edge, and hang the
++    // pause menu (same latent-bug class as the STOP-1 stale latch).
++    memcpy(lastinputs, inputs, sizeof(lastinputs));
++    input_poll();
++    TAS::apply_input((uint32_t)++g_tick_count, inputs, INPUT_COUNT);
++    game.tick_state();
++    accum_ns = 0;
++    last_ns  = now_ns;
++  }
++  else
++  {
++    accum_ns += (now_ns - last_ns);
++    last_ns = now_ns;
++
++    int n = 0;
++    // Catch-up loop: tick_state() ONLY. The guard leaves the loop the
++    // moment a tick_state() transitions out of GM_NORMAL (via RunScripts
++    // OR a sim-triggered setmode -- the wave-56 latch alone misses the
++    // latter, so the loop checks game.mode/paused directly) or pauses
++    // -- other modes run 1:1 (FIXED-TIMESTEP-DESIGN sec.2.2).
++    //
++    // lastinputs is snapshotted at the START of each iteration (before
++    // input_poll) -- so it holds the PRIOR logic tick's inputs while
++    // this tick's tick_state() runs, giving game_tick_normal_state()'s
++    // sim correct per-logic-tick justpushed() edges (load-bearing under
++    // TAS replay, which rewrites inputs[] per tick_count). It also
++    // still holds the prior tick's inputs through tick_render_submit()
++    // below -- so a TD_OTHER OnTick reached when a catch-up tick_state
++    // transitioned mode still sees real justpushed() edges (not the
++    // all-false a post-tick_state memcpy would produce).
++    while (accum_ns >= TICK_NS && n < MAX_CATCHUP
++           && game.mode == GM_NORMAL && !game.paused)
++    {
++      memcpy(lastinputs, inputs, sizeof(lastinputs));
++      input_poll();
++      TAS::apply_input((uint32_t)++g_tick_count, inputs, INPUT_COUNT);
++      game.tick_state();
++      accum_ns -= TICK_NS;
++      ++n;
++    }
++    // Spiral-of-death clamp + re-entry resync: drop stale backlog. Also
++    // catches re-entry from the 1:1 path (where now_ns - last_ns was a
++    // large gap) -- the backlog is dropped after a <=MAX_CATCHUP burst.
++    if (accum_ns > (Uint64)MAX_CATCHUP * TICK_NS)
++      accum_ns = 0;
++  }
++
++  // --- RENDER: ONCE per displayed frame ---
++  game.tick_render_submit();
++
++  if (settings->show_fps)
++    update_fps();
++
++  if (!flipacceltime)
++  {
++    Renderer::getInstance()->flip();
++  }
++  else
++  {
++    flipacceltime--;
++    if (--frameskip < 0)
++    {
++      Renderer::getInstance()->flip();
++      frameskip = 256;
++    }
++  }
++
++  SoundManager::getInstance()->runFade();
++
++  if ((g_tick_count % 300) == 0)
++    LOG_INFO("run_tick_fixed #{}: heartbeat (loop alive)", g_tick_count);
++
++  if (TAS::should_exit((uint32_t)g_tick_count))
++    game.running = false;
++}
++
+ // === RUNMANIFEST schema-v1 emit (patch 0138, wave 43) ==================
+ //
+ // Single-mechanism instrumentation: at clean engine exit, emit a
+@@ -452,6 +596,22 @@ void gameloop(void)
+                loop_iter, (int32_t)SDL_GetTicks(), (int)game.switchstage.mapno);
+     }
+ 
++    // DOS-PORT (patch 0153, Phase 11 wave-57 -- Track B B2): the
++    // fixed-timestep accumulator path. Engaged only when
++    // FIXED_TIMESTEP=1 AND the mode is GM_NORMAL. run_tick_fixed() does
++    // its own wall-clock pacing (paced naturally by the once-per-frame
++    // flip()), so the nexttick / timeRemaining pacing below is bypassed
++    // for these iterations. Any other mode -- or FIXED_TIMESTEP=0 --
++    // falls through to the UNCHANGED wave-56 1:1 path. nexttick is
++    // reset so the first non-fixed iteration after leaving GM_NORMAL
++    // runs run_tick() immediately rather than against a stale deadline.
++    if (fixed_timestep_active() && game.mode == GM_NORMAL)
++    {
++      run_tick_fixed();
++      nexttick = 0;
++      continue;
++    }
++
+     // get time until next tick
+     int32_t curtime       = SDL_GetTicks();
+     int32_t timeRemaining = nexttick - curtime;
+diff --git a/src/screeneffect.cpp b/src/screeneffect.cpp
+index b73a69a..6b2b524 100644
+--- a/src/screeneffect.cpp
++++ b/src/screeneffect.cpp
+@@ -6,6 +6,7 @@
+ #include "sound/SoundManager.h"
+ using namespace NXE::Graphics;
+ #include "map.h"
++#include "game.h"  // patch 0153 (wave-57 B2): fixed_timestep_active()
+ 
+ SE_FlashScreen flashscreen;
+ SE_Starflash starflash;
+@@ -26,7 +27,10 @@ void SE_FlashScreen::Start(void)
+   enabled = true;
+ }
+ 
+-void SE_FlashScreen::Draw(void)
++// patch 0153 (wave-57 B2): the Draw()-embedded animation advance,
++// extracted so it can run as Tick() in tick_state() under
++// FIXED_TIMESTEP. Pure state mutation -- drawcall-free.
++void SE_FlashScreen::Tick(void)
+ {
+   if (++timer >= 2)
+   {
+@@ -39,6 +43,17 @@ void SE_FlashScreen::Draw(void)
+         enabled = false;
+     }
+   }
++}
++
++void SE_FlashScreen::Draw(void)
++{
++  // patch 0153 (wave-57 B2): under FIXED_TIMESTEP the advance runs in
++  // tick_state() via Tick() (50 Hz logic rate). Otherwise it runs here,
++  // once per displayed frame -- Draw() calling Tick() on the OFF path
++  // is the identical advance, so the FIXED_TIMESTEP=0 path is
++  // byte-identical to wave-56.
++  if (!fixed_timestep_active())
++    Tick();
+ 
+   if (flashstate)
+     Renderer::getInstance()->clearScreen(0xff, 0xff, 0xff);
+@@ -61,21 +76,26 @@ void SE_Starflash::Start(int x, int y)
+   size = speed = 0;
+ }
+ 
+-void SE_Starflash::Draw(void)
++// patch 0153 (wave-57 B2): SE_Starflash's animation advance STRADDLES
++// its draw -- speed/size advance BEFORE the fillRects, the state
++// transition AFTER them. Tick() lifts the WHOLE advance (both parts,
++// back-to-back). The fillRects between (in Draw()) touch no
++// speed/size/state, so running pre-advance and post-transition
++// back-to-back is state-math-equivalent to the straddled order.
++// Pure state mutation -- drawcall-free.
++void SE_Starflash::Tick(void)
+ {
+   SE_Starflash *const &star = this;
+-  int scr_x1, scr_y1, scr_x2, scr_y2;
+-  int rel_x, rel_y;
+ 
++  // pre-draw advance
+   if (state == 0)
+-  { // flash getting bigger
++  {
+     star->speed += (1 * CSFI);
+     star->size += star->speed;
+   }
+   else
+-  { // flash getting smaller
++  {
+     star->size -= (star->size >> 3);
+-
+     if (star->size < 255)
+     {
+       enabled = false;
+@@ -83,6 +103,42 @@ void SE_Starflash::Draw(void)
+     }
+   }
+ 
++  // post-draw state transition
++  if (star->state == 0 && star->size > (1280 * CSFI))
++  {
++    star->size  = (Renderer::getInstance()->screenHeight * CSFI);
++    star->state = 1;
++  }
++}
++
++void SE_Starflash::Draw(void)
++{
++  SE_Starflash *const &star = this;
++  int scr_x1, scr_y1, scr_x2, scr_y2;
++  int rel_x, rel_y;
++
++  // patch 0153 (wave-57 B2): the pre-draw advance. Under FIXED_TIMESTEP
++  // it runs in Tick() (tick_state); otherwise here -- byte-identical to
++  // wave-56, the else-branch early return included.
++  if (!fixed_timestep_active())
++  {
++    if (state == 0)
++    { // flash getting bigger
++      star->speed += (1 * CSFI);
++      star->size += star->speed;
++    }
++    else
++    { // flash getting smaller
++      star->size -= (star->size >> 3);
++
++      if (star->size < 255)
++      {
++        enabled = false;
++        return;
++      }
++    }
++  }
++
+   // draw the flash
+   rel_x = (star->centerx - map.displayed_xscroll);
+   rel_y = (star->centery - map.displayed_yscroll);
+@@ -99,11 +155,16 @@ void SE_Starflash::Draw(void)
+     scr_x2 = (rel_x + starflash.size) / CSFI;
+     Renderer::getInstance()->fillRect(scr_x1, 0, scr_x2, Renderer::getInstance()->screenHeight, 255, 255, 255);
+ 
+-    // once it's big enough, switch to making it smaller
+-    if (star->size > (1280 * CSFI))
++    // patch 0153 (wave-57 B2): the post-draw state transition. Under
++    // FIXED_TIMESTEP it runs in Tick(); otherwise here -- byte-identical.
++    if (!fixed_timestep_active())
+     {
+-      star->size  = (Renderer::getInstance()->screenHeight * CSFI);
+-      star->state = 1;
++      // once it's big enough, switch to making it smaller
++      if (star->size > (1280 * CSFI))
++      {
++        star->size  = (Renderer::getInstance()->screenHeight * CSFI);
++        star->state = 1;
++      }
+     }
+   }
+ }
+@@ -160,6 +221,36 @@ void SE_Fade::Start(int fadedir, int sweepdir, int spr)
+   fade.curframe = (fadedir == FADE_OUT) ? -FADE_LAST_FRAME : FADE_LAST_FRAME;
+ }
+ 
++// patch 0153 (wave-57 B2): the Draw()-embedded fade advance, extracted
++// for tick_state(). SE_Fade is the load-bearing wart fix: game logic
++// polls fade.getstate() to sequence stage transitions (TRA), so under
++// FIXED_TIMESTEP the fade MUST advance at the 50 Hz logic rate or the
++// transition logic and the fade desync. SE_Fade::Draw() early-returns
++// for FS_NO_FADE / FS_FADED_OUT before reaching the advance -- only
++// FS_FADING reaches it; this mirrors that guard. Pure state mutation
++// -- drawcall-free.
++void SE_Fade::Tick(void)
++{
++  if (state != FS_FADING)
++    return;
++
++  if (fade.fadedir == FADE_OUT)
++  {
++    fade.curframe++;
++    if (fade.curframe > FADE_LAST_FRAME)
++      state = FS_FADED_OUT;
++  }
++  else
++  { // fading in--terminate fade when done
++    fade.curframe--;
++    if (fade.curframe < -20)
++    {
++      state   = FS_NO_FADE;
++      enabled = false;
++    }
++  }
++}
++
+ void SE_Fade::Draw(void)
+ {
+   int x, y;
+@@ -269,19 +360,26 @@ void SE_Fade::Draw(void)
+     break;
+   }
+ 
+-  if (fade.fadedir == FADE_OUT)
++  // patch 0153 (wave-57 B2): the fade advance. Under FIXED_TIMESTEP it
++  // runs in Tick() (tick_state, 50 Hz) so the fade stays in sync with
++  // the stage-transition logic that polls fade.getstate(). Otherwise it
++  // runs here -- byte-identical to wave-56.
++  if (!fixed_timestep_active())
+   {
+-    fade.curframe++;
+-    if (fade.curframe > FADE_LAST_FRAME)
+-      state = FS_FADED_OUT;
+-  }
+-  else
+-  { // fading in--terminate fade when done
+-    fade.curframe--;
+-    if (fade.curframe < -20)
++    if (fade.fadedir == FADE_OUT)
+     {
+-      state   = FS_NO_FADE;
+-      enabled = false;
++      fade.curframe++;
++      if (fade.curframe > FADE_LAST_FRAME)
++        state = FS_FADED_OUT;
++    }
++    else
++    { // fading in--terminate fade when done
++      fade.curframe--;
++      if (fade.curframe < -20)
++      {
++        state   = FS_NO_FADE;
++        enabled = false;
++      }
+     }
+   }
+ }
+diff --git a/src/screeneffect.h b/src/screeneffect.h
+index ea1424f..c86a368 100644
+--- a/src/screeneffect.h
++++ b/src/screeneffect.h
+@@ -27,6 +27,7 @@ struct SE_FlashScreen : public ScreenEffect
+ {
+   void Start();
+   void Draw();
++  void Tick();  // patch 0153 (wave-57 B2): the Draw()-embedded advance, for tick_state()
+ 
+   int flashes_left;
+   bool flashstate;
+@@ -38,6 +39,7 @@ struct SE_Starflash : public ScreenEffect
+ {
+   void Start(int x, int y);
+   void Draw();
++  void Tick();  // patch 0153 (wave-57 B2): the Draw()-embedded advance, for tick_state()
+ 
+   int centerx, centery;
+   int size, speed;
+@@ -50,6 +52,7 @@ struct SE_Fade : public ScreenEffect
+ 
+   void Start(int fadedir, int dir, int spr = SPR_FADE_DIAMOND);
+   void Draw(void);
++  void Tick(void);  // patch 0153 (wave-57 B2): the Draw()-embedded advance, for tick_state()
+   void set_full(int dir);
+   int getstate(void);
+ 
+-- 
+2.47.3
+
