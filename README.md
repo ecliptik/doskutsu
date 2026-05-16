@@ -7,7 +7,7 @@ The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's o
 This project exists for preservation, for the historical-computing community, and as an engineering artifact: running Cave Story on hardware that became obsolete eight years before Pixel released it. The reference PC is a 1995-era desktop with an Intel Pentium OverDrive 83 MHz CPU upgrade.
 
 <p align="center">
-<a href="#status">Status</a> * <a href="#game-assets">Game Assets</a> * <a href="#requirements">Requirements</a> * <a href="#usage">Usage</a> * <a href="#building">Building</a> * <a href="#boot-profile">Boot Profile</a> * <a href="#how-this-project-is-developed">How It's Developed</a> * <a href="#acknowledgments">Acknowledgments</a> * <a href="#license">License</a>
+<a href="#status">Status</a> | <a href="#game-assets">Game Assets</a> | <a href="#requirements">Requirements</a> | <a href="#usage">Usage</a> | <a href="#building">Building</a> | <a href="#boot-profile">Boot Profile</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#acknowledgments">Acknowledgments</a> | <a href="#license">License</a>
 </p>
 
 ### DOSBox-X
@@ -25,19 +25,19 @@ This project exists for preservation, for the historical-computing community, an
 
 ## Status
 
-DOSKUTSU runs at ~20 fps median on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP) with the original Cave Story organya synthesizer, and at ~30 fps median when MIDI music is offloaded to dedicated synth hardware (the SB16 OPL3 FM synth or a WaveBlaster header daughterboard). Ongoing work targets Cave Story's original 50fps at 50hz design.
+DOSKUTSU runs at **~30 fps median** on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP) with music on the default OPL3 FM-synth backend. The original organya software synthesizer is selectable, but runs lower -- its per-tick software mixing is the single heaviest cost on a Pentium-class CPU.
 
-Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Per-wave performance history and release notes are in [CHANGELOG.md](./CHANGELOG.md).
+Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Cave Story is authored for 50 fps; closing the remaining gap on this hardware is ongoing work. Per-wave performance history is in [CHANGELOG.md](./CHANGELOG.md).
 
 ### Audio backends
 
-`DOSKUTSU.EXE` ships three MIDI music backends, selected via the `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` environment variable:
+`DOSKUTSU.EXE` ships three music backends, selected via the `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` environment variable:
 
-- **organya** (default): the original Cave Story `.org` synthesizer, software-mixed inside the engine. Faithful timbre; the per-tick mixer cost dominates the audio path on Pentium-class CPUs.
-- **opl3**: dispatches converted MIDI files to the SB16 / Sound Blaster Pro 2 OPL3 FM synthesizer. Frees the CPU from per-frame mixer work and measures **+8.77 fps** over organya at the canonical scene on the reference PC. The bundled WiiWare-arrangement MIDIs sound closest to the original soundtrack.
-- **wb** (WaveBlaster): dispatches converted MIDI files to a WaveBlaster header daughterboard (e.g. Serdaco DreamBlaster S2) via the SB16 DSP-mediated path. Same architectural-lever class as OPL3; wavetable timbre depends on the specific daughterboard's firmware.
+- **opl3** (default): dispatches converted MIDI to the SB16 / Sound Blaster Pro 2 OPL3 FM synthesizer. Moving music off the CPU's software mixer is worth **~+8.77 fps** over organya at the canonical scene on the reference PC -- which is why it is the default. The bundled WiiWare-arrangement MIDIs track the original soundtrack closely.
+- **organya**: the original Cave Story `.org` synthesizer, software-mixed inside the engine -- the faithful 2004 timbre. Opt in with `SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya`; its per-tick mixing is the heaviest single cost on the audio path on Pentium-class CPUs.
+- **wb** (WaveBlaster): dispatches converted MIDI to a WaveBlaster header daughterboard (e.g. Serdaco DreamBlaster S2) over the SB16 DSP-mediated path. Same CPU-offload class as OPL3; wavetable timbre depends on the daughterboard firmware.
 
-MIDI source-file selection is independent of backend choice and is controlled by `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` (`wiimidi` for the WiiWare arrangement, `orgmid` for the Hart legacy `.mid` set, with optional `DOSKUTSU_GM_VARIANT=v1` or `v2` to select an `org2mid`-converted variant).
+MIDI source-file selection is independent of backend choice and is set by `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` (`wiimidi` for the WiiWare arrangement, `orgmid` for the Hart legacy `.mid` set; optional `DOSKUTSU_GM_VARIANT=v1` or `v2` picks an `org2mid`-converted variant).
 
 ---
 
@@ -60,30 +60,25 @@ NICALIS published Cave Story+ as a commercial product across multiple platforms.
 
 ## Requirements
 
-DOSKUTSU defines three named hardware tiers.
+DOSKUTSU targets two hardware tiers.
 
-**Tier 1: Reference (tested)**
+**Tier 1: Reference (tested)** -- the PC every real-hardware measurement is taken on:
 
-- CPU: Pentium 75 MHz or faster (reference PC uses Pentium OverDrive 83)
+- CPU: Pentium 75 MHz or faster (reference PC uses a Pentium OverDrive 83)
 - RAM: 16 MB or more
-- Video: VESA 1.2+ with chip-level 320x240 support (Cirrus CL-GD5434, Tseng, Trident, S3, etc.; [UniVBE](https://en.wikipedia.org/wiki/UniVBE) 6.70 acceptable as a VESA fallback driver)
+- Video: VESA 1.2+ with chip-level 320x240 support (Cirrus CL-GD5434, Tseng, Trident, S3, etc.; [UniVBE](https://en.wikipedia.org/wiki/UniVBE) 6.70 works as a VESA fallback driver)
 - Sound: Sound Blaster 16 or compatible
 - OS: MS-DOS 6.22 or compatible
 - Disk: ~10 MB free
 
-**Tier 2: Achievable Minimum (expected fallback)**
+**Tier 2: Minimum (designed for, not yet tested on hardware)**:
 
 - CPU: 486DX2-66 with FPU
 - RAM: 8 MB or more
-- Video: VESA 1.2+ (UNIVBE loadable if firmware lacks it)
+- Video: VESA 1.2+ (UniVBE loadable if firmware lacks it)
 - Sound: any SB16-compatible
-- Audio mode: 11025 Hz mono fallback (default)
 
-**Tier 3: Absolute Minimum (research target)**
-
-The lowest spec DOSKUTSU is designed for. Untested on real hardware.
-
-Hard floors below Tier 3 are non-negotiable: no 486SX without a 487 coprocessor (DJGPP emits x87 instructions); no pre-VESA video (the SDL3 DOS backend requires VESA 1.2+ LFB); no DOS variant that can't host CWSDPMI's DPMI 0.9 service.
+Hard floors are non-negotiable: no 486SX without a 487 coprocessor (DJGPP emits x87 instructions); no pre-VESA video (the SDL3 DOS backend requires VESA 1.2+ with a linear framebuffer); no DOS variant that cannot host CWSDPMI's DPMI 0.9 service.
 
 ---
 
@@ -162,7 +157,7 @@ DOSKUTSU is developed agentically through [Claude Code](https://claude.com/code)
 
 ## Acknowledgments
 
-- **[Cave Story / Doukutsu Monogatari](https://www.cavestory.org/)** by Daisuke "Pixel" Amaya (2004), freeware, redistributed per Pixel's original terms
+- **[Cave Story / Doukutsu Monogatari](https://www.cavestory.org/)** by Daisuke "Pixel" Amaya (2004), available under Pixel's original freeware terms; game data is not redistributed here
 - **[NXEngine-evo](https://github.com/nxengine/nxengine-evo)**, the open-source C++11 re-implementation of the Cave Story engine; GPLv3 plus third-party licenses
 - **[SDL3](https://www.libsdl.org/)** by Sam Lantinga and the SDL team
 - **[SDL3 DOS backend](https://github.com/libsdl-org/SDL/pull/15377)** by the PR #15377 author, the piece that makes this port possible
