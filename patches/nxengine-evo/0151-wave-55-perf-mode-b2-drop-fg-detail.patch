@@ -1,0 +1,270 @@
+From 33213963309a86ec342f8dfa9c1c1c7cc46f5c6e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 15 May 2026 19:22:32 -0700
+Subject: [PATCH] perf phase 11 patch 0151 -- wave-55 PERF_MODE cut B2 (drop
+ decorative FG detail) + A2 revert
+
+Per flush-instr's docs/internal/PHASE11-WAVE-55-CONTRACT.md. Wave-55 is
+the Track A Performance Mode Tier 1 cut B2, built on the PERF_MODE
+env-var infrastructure banked in wave-54 patch 0150. ONE active
+mechanism toggled by PERF_MODE: cut B2. The wave-55 patch also reverts
+the wave-54 cut A2 (gain-collapsed on real HW); the A2 revert is dead-
+code cleanup, not a second lever, so it rides in this one patch.
+
+WHY DOS NEEDS THIS: Cave Story is authored at GAME_FPS=50 but the
+faithful render is measured-closed at ~30 fps on g2k. The 50 Hz
+program's Track A trades render fidelity for raw fps behind the opt-in
+PERF_MODE toggle; the faithful path stays the untouched production
+default (PERF_MODE=0 -> byte-identical to wave-53 production).
+
+CUT B2 -- DROP THE PURELY-DECORATIVE FG-OVER-SPRITE TILES:
+The foreground tile pass (map_draw(TA_FOREGROUND)) draws the ~5.2 ms/
+flip detail layer that renders OVER sprites (overhanging foliage,
+foreground rocks the player walks behind). Under PERF_MODE>=1, B2
+filters out the purely-decorative FG tiles.
+
+B2 IS THE NARROWED CUT (NX?-2 resolution -- contract sec.3, nx-engine
+STOP-and-ack audit 2026-05-16). B2 is NOT a full skip of the FG pass.
+The vanilla tile-attribute table (tilekey.dat) freely OR's
+TA_FOREGROUND with TA_SLOPE_* on real tilecodes, and map_draw()
+strictly partitions tiles -- a TA_FOREGROUND tile draws ONLY in the FG
+pass. A full FG-pass skip would therefore make every slope-FG tile
+invisible-but-still-solid: the player would collide with slope geometry
+they cannot see -- a gameplay defect, not a fidelity reduction. The
+prior consolidated-plan "B2 confirmed safe" memo was UNDER-STATED -- it
+verified collision .pxa DATA is untouched (true) but missed that an
+FG-pass tile can itself BE visible collision geometry.
+
+So B2 is a per-tile filter: new file-static helper _perf_b2_skip_fg_tile
+drops a FG tile iff PERF_MODE>=1 AND the tile's attribute word is
+EXACTLY TA_FOREGROUND (foreground is its SOLE attribute -> purely
+decorative). ANY other bit set -- slope, solid, spikes, hurts, water,
+current, destroyable -> attr != TA_FOREGROUND -> the tile is still
+drawn. Exact equality is maximally conservative AND bit-value-agnostic
+(no need to enumerate the TA_SLOPE_* sub-bits); it cannot create
+invisible collision/hazard geometry by construction. The filter is
+added at all 3 FG render partition sites in map.cpp
+(_tilemap_render_plain_tiles_into_cache, _tilemap_render_special_tiles_
+to_window, the _tilemap_render_tile_loop_impl template), each already
+gating on (tileattr[t] & TA_FOREGROUND) == foreground. map_draw_oob()
+is NOT gated -- it is a separate structural OOB-border edge-fill, not
+decorative detail. The game.cpp MdsTilemapFgTimer scope is untouched so
+[mds-decomp-stat phase=mds_tilemap_fg] keeps sample parity; on a B2
+frame the bucket drops PARTIALLY (decorative tiles no longer drawn),
+not to ~0 -- the residual is the collision-FG tiles + map_draw_oob.
+The FG tilemap cache stays coherent: PERF_MODE is boot-constant so the
+filtered FG layer caches deterministically per map.
+
+Authoring note: the contract sec.1.1 sketched perf_b2_drop_fg() + an
+inline per-tile expression; this consolidates the PERF_MODE check, the
+exact-equality predicate, and the first-fire banner into one file-
+static _perf_b2_skip_fg_tile() -- functionally identical to the
+contract expression, one named function instead of an inline term
+repeated 3x.
+
+A2 REVERT: wave-54 cut A2 (backdrop-pinning) gain-collapsed on real HW
+(-0.34 fps clean; the scrolling backdrop cost is the cache->window
+blit, not the parallax re-render) and carried a black-valley visual
+defect. This patch reverts the A2 hunk patch 0150 added to
+map_draw_backdrop() -- the eff_scrolltype -> BK_FIXED routing block and
+the A2 first-fire banner are removed; map_draw_backdrop() is byte-back
+to its wave-53 production form. The PERF_MODE env-var infra patch 0150
+added (perf_mode_level(), the sentinel cache, the perf-mode: level=N
+boot banner) is RETAINED -- it is correct, measured-clean in wave-54,
+and B2 depends on it.
+
+CORRECTNESS: at PERF_MODE=0, perf_mode_level() is 0, _perf_b2_skip_fg_
+tile() returns false for every tile, and the A2 code is gone -> the FG
+pass and map_draw_backdrop() are bit-identical to the wave-53 / wave-54-
+PERF_MODE=0 production render. build-qa ImageMagick AE=0 vs the wave-54
+PERF_MODE=0 reference frames is the gate. PERF_MODE=1's missing
+decorative FG detail IS the feature.
+
+BANNERS for tests/run-gameplay-smoke.sh: SWAP -- remove the wave-54
+"perf-mode A2: backdrop pinned" regex (banner deleted with the A2
+revert), add the B2 first-fire regex:
+"perf-mode B2: decorative FG detail dropped (collision tiles kept)"
+KEEP "perf-mode: level=[0-2]" (the infra banner, unchanged).
+
+Slot 0151, append-only: patch 0150 stays committed/historical (shipped
+in the wave-54 iter); 0151 reverts the 0150 A2 hunk + adds B2 + retains
+the 0150 perf_mode_level infra.
+
+FILES: src/map.cpp (A2 hunk reverted in map_draw_backdrop;
+_perf_b2_skip_fg_tile helper added; B2 filter at 3 FG render sites;
+perf_mode_level comment updated for wave-55).
+---
+ src/map.cpp | 120 +++++++++++++++++++++++++++++-----------------------
+ 1 file changed, 67 insertions(+), 53 deletions(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index dfc8b86..53304e2 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -789,10 +789,15 @@ bool skip_redundant_clear_enabled()
+ //
+ // Sentinel-cached on first call (the wave-53 skip_redundant_clear_
+ // enabled() / wave-46 OPL3 idiom) -- NO per-flip getenv (wave-38
+-// hazard). Wave-54 wires level>=1 to cut A2 (pin-backdrop); level 2
+-// parses + clamps but gates nothing until wave-55+ (B2 / D). Unknown
++// hazard). Wave-55 wires level>=1 to cut B2 (drop the purely-decorative
++// FG-over-sprite tiles -- see _perf_b2_skip_fg_tile below); level 2
++// parses + clamps but gates nothing until later waves (cut D). Unknown
+ // or malformed env -> atoi yields 0 -> faithful. First call emits the
+ // build-qa BANNERS-grep banner.
++//
++// (Wave-54 wired level>=1 to cut A2 (backdrop-pinning); A2 gain-
++// collapsed on real HW -0.34 fps and was reverted in patch 0151 --
++// this PERF_MODE infra is retained, A2's map_draw_backdrop hunk is not.)
+ static int g_perf_mode = -1;  // -1 undecided / 0 faithful / 1 / 2
+ int perf_mode_level()
+ {
+@@ -813,6 +818,53 @@ int perf_mode_level()
+   return g_perf_mode;
+ }
+ 
++// DOS-PORT (patch 0151, Phase 11 wave-55 -- Track A cut B2, drop the
++// FG-over-sprite detail layer; PHASE11-WAVE-55-CONTRACT.md sec.1.1 +
++// sec.3): per-tile filter for the foreground tile pass. Returns true
++// (the tile is dropped this frame) iff PERF_MODE>=1, this is the FG
++// pass, AND the tile's attribute word is EXACTLY TA_FOREGROUND --
++// i.e. "foreground" is its SOLE attribute, so it is purely decorative
++// over-sprite detail.
++//
++// THE NX?-2 LOAD-BEARING RULE (contract sec.3, nx-engine STOP-and-ack
++// audit): the exact-equality test `attr == TA_FOREGROUND` is what
++// makes B2 safe. The vanilla tile-attribute table (tilekey.dat; the
++// in-source mirror is the commented ta[] above) freely OR's
++// TA_FOREGROUND with TA_SLOPE_* on real tilecodes, and map_draw()
++// strictly partitions tiles -- a TA_FOREGROUND tile draws ONLY in the
++// FG pass. A FULL skip of the FG pass would therefore make every
++// slope-FG tile invisible-but-still-solid (the player walks a slope
++// they cannot see -- a gameplay defect). Exact equality drops a tile
++// ONLY when foreground is its lone attribute: ANY collision / hazard /
++// water / current / destroyable bit set -> attr != TA_FOREGROUND ->
++// the tile is still drawn. The cut cannot create invisible collision
++// geometry by construction, and it is bit-value-agnostic (no need to
++// enumerate the TA_SLOPE_* sub-bits).
++//
++// `foreground` is the map_draw() pass selector (TA_FOREGROUND for the
++// FG pass, 0 for BG). The call sites already gate on
++// `(tileattr[t] & TA_FOREGROUND) == foreground`, so on the BG pass a
++// passing tile has the FOREGROUND bit clear and `attr == TA_FOREGROUND`
++// is already false -- the explicit `foreground == TA_FOREGROUND` guard
++// is kept anyway for intent. perf_mode_level() is the wave-54 boot-
++// cached value -- no per-flip getenv. The first frame B2 actually
++// filters a tile, one banner is emitted (the runtime witness the cut
++// is REACHED, not merely embedded).
++static bool _perf_b2_skip_fg_tile(uint32_t attr, uint8_t foreground)
++{
++  if (perf_mode_level() < 1)
++    return false;
++  if (foreground != TA_FOREGROUND || attr != TA_FOREGROUND)
++    return false;
++  static bool s_b2_banner_done = false;
++  if (!s_b2_banner_done)
++  {
++    s_b2_banner_done = true;
++    LOG_INFO("perf-mode B2: decorative FG detail dropped (collision tiles kept)");
++  }
++  return true;
++}
++
+ // DOS-PORT (patch 0149, Phase 11 wave-53 lever 3): skip-clear predicate.
+ // Returns true (DrawScene's clearScreen(BLACK) may be skipped) iff the
+ // backdrop pass will provably repaint EVERY screen row this frame, so
+@@ -1463,54 +1515,7 @@ void map_draw_backdrop(void)
+   // map_backdrop_invalidate_skip_state() instead.
+   map_backdrop_record_present_success();
+ 
+-  // DOS-PORT (patch 0150, Phase 11 wave-54 -- Track A cut A2,
+-  // pin-backdrop; PHASE11-WAVE-54-CONTRACT.md sec.1.2): when
+-  // PERF_MODE>=1, treat a scrolling full-screen backdrop (BK_PARALLAX
+-  // / BK_FOLLOWFG) as BK_FIXED for THIS draw. The BK_FIXED case body
+-  // pins parscroll to 0,0; that pins the only frame-varying component
+-  // of the 0080/0126 backdrop-tile-loop cache key, so the key goes
+-  // frame-invariant and the cache HITS every scrolling frame -- the
+-  // per-frame parallax RE-RENDER is elided (the cache->window blit
+-  // floor remains). On static frames wave-48 bg-skip (patch 0143)
+-  // already elides the backdrop entirely; A2's addressable cost is the
+-  // scrolling frames only.
+-  //
+-  // NX-AUTHOR-1 (contract sec.1.2, contract-of-record version, ack'd
+-  // by flush-instr): the effective scrolltype is a LOCAL that drives
+-  // ONLY the switch below -- never a persistent map.scrolltype
+-  // mutation. Other code reads map.scrolltype (map_clear_is_redundant()
+-  // switches on it; save/load; map reload). The cache-key store AND
+-  // compare are deliberately left reading map.scrolltype / map.parscroll_*
+-  // unchanged: map.scrolltype is per-map invariant so store==compare
+-  // holds, and the pin reaches the key through the parscroll component
+-  // alone. Swapping only the compare side to the effective value would
+-  // create a permanent store/compare mismatch -> permanent cache miss
+-  // -> A2 collapse; this is why the literal value is NOT touched.
+-  //
+-  // BK_FASTLEFT / BK_FASTLEFT_LAYERS / NOFALLLEFT are NOT pinned --
+-  // their scroll is an intentional gameplay effect (Ironhead
+-  // auto-scroll); pinning would freeze it (visual breakage, not a
+-  // fidelity trade). BK_FIXED / BK_HIDE* are already fixed / self-
+-  // clearing -- untouched. PERF_MODE=0 -> eff == map.scrolltype -> this
+-  // function is bit-identical to the patch-0149 original.
+-  int eff_scrolltype = map.scrolltype;
+-  if (perf_mode_level() >= 1 &&
+-      (map.scrolltype == BK_PARALLAX || map.scrolltype == BK_FOLLOWFG))
+-  {
+-    eff_scrolltype = BK_FIXED;
+-    // One banner per process, on the first frame A2 actually converts
+-    // a draw -- the runtime witness that the cut is REACHED, not just
+-    // embedded (strings|grep proves embed only).
+-    static bool s_a2_banner_done = false;
+-    if (!s_a2_banner_done)
+-    {
+-      s_a2_banner_done = true;
+-      LOG_INFO("perf-mode A2: backdrop pinned (BK_PARALLAX/FOLLOWFG -> "
+-               "BK_FIXED; parscroll 0,0 -- parallax re-render elided)");
+-    }
+-  }
+-
+-  switch (eff_scrolltype)
++  switch (map.scrolltype)
+   {
+     case BK_FIXED:
+       map.parscroll_x = 0;
+@@ -2287,7 +2292,10 @@ void _tilemap_render_plain_tiles_into_cache(SDL_Surface *cache, uint8_t foregrou
+         if (((game.curmap == 71) && (tilecode[t] == 0x41)) || ((game.curmap == 31)))
+         {
+         }
+-        else if ((tileattr[t] & TA_FOREGROUND) == foreground)
++        // patch 0151 (wave-55 cut B2): drop purely-decorative FG tiles
++        // when PERF_MODE>=1; collision-bearing FG tiles still draw.
++        else if ((tileattr[t] & TA_FOREGROUND) == foreground &&
++                 !_perf_b2_skip_fg_tile(tileattr[t], foreground))
+         {
+           // Skip TA_CURRENT (animated water) and 0x43 (destroyable) —
+           // those render live, not cached.
+@@ -2339,7 +2347,10 @@ void _tilemap_render_special_tiles_to_window(uint8_t foreground)
+         if (((game.curmap == 71) && (tilecode[t] == 0x41)) || ((game.curmap == 31)))
+         {
+         }
+-        else if ((tileattr[t] & TA_FOREGROUND) == foreground)
++        // patch 0151 (wave-55 cut B2): drop purely-decorative FG tiles
++        // when PERF_MODE>=1; collision-bearing FG tiles still draw.
++        else if ((tileattr[t] & TA_FOREGROUND) == foreground &&
++                 !_perf_b2_skip_fg_tile(tileattr[t], foreground))
+         {
+           if (tileattr[t] & TA_CURRENT)
+           {
+@@ -2447,7 +2458,10 @@ inline void _tilemap_inner_render_dispatch(
+             ++NXE::Diag::g_mds_tfg_tiles_skipped_attr;
+           }
+         }
+-        else if ((tileattr[t] & TA_FOREGROUND) == foreground)
++        // patch 0151 (wave-55 cut B2): drop purely-decorative FG tiles
++        // when PERF_MODE>=1; collision-bearing FG tiles still draw.
++        else if ((tileattr[t] & TA_FOREGROUND) == foreground &&
++                 !_perf_b2_skip_fg_tile(tileattr[t], foreground))
+         {
+           if (tileattr[t] & TA_CURRENT)
+           {
+-- 
+2.47.3
+
