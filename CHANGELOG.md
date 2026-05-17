@@ -33,10 +33,14 @@ internal docs and git history; this file keeps the user-facing summary.
   50 fps program's deliverable. NXEngine couples game logic 1:1 to render, so at a
   ~30 fps render the game plays at ~60% of its authored 50 Hz speed ("sluggish").
   Fixed-Timestep advances logic on a fixed 50 Hz accumulator decoupled from render,
-  so the game plays at near-correct speed (~82% of authored measured whole-run,
-  near-correct in steady-state play) at full fidelity -- no visual cost, no render-
-  fps regression. Default-OFF keeps the 1:1-coupled render byte-identical to prior
-  production; enable with `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1`.
+  so the game plays at correct speed -- real-HW instrumentation confirms
+  steady-state gameplay logic at ~50 Hz -- at full fidelity, no visual cost, no
+  render-fps regression. The mode is still maturing: decoupling logic from render
+  exposes engine state the 1:1 coupling had assumed was rebuilt every frame -- a
+  use-after-free crash on the `FIXED_TIMESTEP=1` path was found and fixed, and a
+  backdrop-flicker issue under `FIXED_TIMESTEP=1` remains open. It stays default-OFF
+  until that work completes; `FIXED_TIMESTEP=0` (the default) keeps the 1:1-coupled
+  render byte-identical to prior production.
 - **Diagnostic probes + emulation harnesses.** `make probes` builds standalone
   DJGPP diagnostic binaries under `tests/probes/` (memory bandwidth, DPMI thunk
   cost, cache behavior, Cirrus BLT throughput, and more; gitignored). `tools/86box-*.sh`

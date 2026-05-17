@@ -1,0 +1,289 @@
+From 8700dcd8c63e5d296e42fe0ff2858aa250754e4b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 16 May 2026 15:26:31 -0700
+Subject: [PATCH] perf phase 11 patch 0154 -- wave-58 FIXED_TIMESTEP
+ steady-state diagnostic instrumentation
+
+Per flush-instr's docs/internal/PHASE11-WAVE-58-CONTRACT.md. Wave-58 is
+a MEASURE-FIRST wave -- instrumentation only, NO lever, no behavior
+change. It answers the question wave-57 left open: under
+FIXED_TIMESTEP=1, is STEADY-STATE gameplay logic already ~50 Hz (the
+whole-TAS 41 Hz being pure map-load-hitch drag) or is steady-state
+itself capped below 50? The wave-57 per-frame catch-up instrumentation
+was never emitted (witness-6 gap); wave-58 closes it.
+
+WHY DOS NEEDS THIS: the wave-59 default-ON-promotion decision forks on
+this number. measure-before-you-tune ([[perf_measurement_discipline]])
+-- the histogram decides, not a prediction; wave-58 deliberately
+authors NO accumulator change.
+
+INSTRUMENTATION (all in main.cpp run_tick_fixed(), the wave-57
+accumulator): per-frame counters + a per-100-frame [ft-accum-stat]
+emit line:
+- Catch-up-N histogram: count of frames with N (= tick_state calls in
+  the catch-up while loop) = 0,1,2,3,4,5. The DISTRIBUTION is the
+  diagnosis -- for 50 Hz logic at ~29 fps render, N must average
+  ~1.7 (a mix of N=1 and N=2); N pinned at 5 -> the MAX_CATCHUP clamp
+  is the cap.
+- Resync / backlog counters: resync_events (the accum_ns >
+  MAX_CATCHUP*TICK_NS branch firing), resync_ticks_discarded (the
+  dropped backlog, summed), clamp_events (while exited on
+  n==MAX_CATCHUP with backlog pending but NO resync). Separates rare
+  large load-hitch discards from steady-state behavior.
+- Windowed steady_logic_hz: logic ticks / wall-time over the block's
+  NON-hitch frames only -- the load-bearing number ("is the
+  accumulator holding 50 Hz when the machine is not hitching").
+  raw_logic_hz (all frames) emitted alongside for contrast.
+
+HITCH-FRAME EXCLUSION PREDICATE (wave-58 STOP-2, nx-engine's call): a
+frame is excluded from the steady_logic_hz window iff it resynced, OR
+it was paused (advances 0 game logic), OR its inter_flip exceeds 2x
+the block median. 2x (not the contract's suggested 3x): at g2k's
+~29 fps render the steady frame is ~34 ms, so 3x-median (~102 ms) is
+essentially the resync threshold (MAX_CATCHUP*TICK_NS = 100 ms) and
+would NOT catch a sub-resync map-load slow-tail frame -- exactly the
+leak the contract sec.8 warns about. 2x-median (~68 ms) catches the
+slow-tail while staying well clear of ordinary steady jitter. The
+block median is a tiny local insertion sort, once per 100 frames (no
+STL dependency).
+
+inter_flip per frame = `now_ns - last_ns` -- run_tick_fixed already
+computes that delta to feed accum_ns; captured into a frame local
+before either branch updates last_ns.
+
+GATE: the existing FINE_INSTR fine-instrumentation env gate (the W20B
+gate -- NO new env var, NO new log file, NO boot banner -- it is
+instrumentation, not a lever). The cached gate value is read ONCE per
+frame into `ftd_on`; EVERY slot-0154 hook -- the per-frame captures
+AND the record/emit -- is `if (ftd_on)`-guarded. With FINE_INSTR=0
+the counters never accumulate, the [ft-accum-stat] line never emits,
+and run_tick_fixed is byte-identical to wave-57 (build-qa gates that
+via the tear-robust shared-subsequence method vs patch 0153 sha
+f95f8929). The per-frame cost when on is a cached-bool branch + int
+increments; the median + emit is once per 100 frames -- load-bearing
+that it stay cheap, since a per-frame cost would perturb the very
+timing this wave measures.
+
+EMIT (one line per 100-frame block, the existing LOG channel):
+[ft-accum-stat block=N n_hist=0:a,1:b,2:c,3:d,4:e,5:f
+ resync_events=R resync_ticks_discarded=D clamp_events=C
+ steady_logic_hz=NN.N raw_logic_hz=NN.N hitch_frames=H]
+
+FILES: src/main.cpp (run_tick_fixed -- the per-100-frame block
+accumulators, the per-frame gated capture hooks, the median + emit).
+---
+ src/main.cpp | 165 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 165 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 7afcb24..acdac90 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -13,6 +13,7 @@
+ //#include "main.h"
+ #include "game.h"
+ #include "graphics/Renderer.h"
++#include "Utils/diagnostic_timers.h"  // patch 0154 (wave-58): engine_tick_fine_instr_active()
+ #include "input.h"
+ #include "map.h"
+ #include "profile.h"
+@@ -283,6 +284,25 @@ static void run_tick_fixed(void)
+   static Uint64 last_ns     = 0;
+   static bool   ft_inited   = false;
+ 
++  // DOS-PORT (patch 0154, Phase 11 wave-58 -- FIXED_TIMESTEP steady-state
++  // diagnostic; PHASE11-WAVE-58-CONTRACT.md sec.2). Per-100-frame block
++  // accumulators for the [ft-accum-stat] emit: the catch-up-N histogram,
++  // the resync / backlog-discard counters, and the per-frame arrays for
++  // the windowed steady_logic_hz two-pass. Instrumentation ONLY -- every
++  // hook is gated on the cached FINE_INSTR bool; FINE_INSTR=0 -> these
++  // never accumulate and the line never emits (byte-identical to
++  // wave-57). NOT a lever -- wave-58 measures the wave-57 accumulator,
++  // it does not change it.
++  static int    ftd_blk_no            = 0;
++  static int    ftd_blk_frames        = 0;
++  static int    ftd_n_hist[6]         = {0, 0, 0, 0, 0, 0};
++  static int    ftd_resync_events     = 0;
++  static Uint64 ftd_resync_discarded  = 0;
++  static int    ftd_clamp_events      = 0;
++  static Uint64 ftd_elapsed[100]      = {0};
++  static int    ftd_N[100]            = {0};
++  static bool   ftd_hard_hitch[100]   = {false};
++
+   // 1e9 / GAME_FPS -- the fixed logic tick interval (20 ms at 50 Hz).
+   const Uint64 TICK_NS     = (Uint64)1000000000 / GAME_FPS;
+   const int    MAX_CATCHUP = 5;  // spiral-of-death clamp
+@@ -294,6 +314,29 @@ static void run_tick_fixed(void)
+     last_ns   = now_ns;  // first entry: start with no backlog
+   }
+ 
++  // patch 0154 (wave-58): the cached FINE_INSTR gate, read ONCE per
++  // frame into ftd_on. EVERY slot-0154 hook below is `if (ftd_on)`-
++  // guarded -- so with FINE_INSTR=0 the instrumentation does no
++  // accumulate, no emit, no capture: a provable no-op, run_tick_fixed
++  // byte-identical to wave-57. The per-frame diagnostic capture locals
++  // are filled (gated) by the logic below and consumed by the
++  // record+emit block at end-of-function. The inter-frame wall delta
++  // is `now_ns - last_ns` (run_tick_fixed computes the same delta to
++  // feed accum_ns) -- captured here, before either branch updates
++  // last_ns, so it is the clean per-frame inter_flip for both branches.
++  const bool ftd_on = NXE::Diag::engine_tick_fine_instr_active();
++  Uint64 frame_elapsed_ns       = 0;      // inter-frame wall delta
++  int    frame_N                = 0;      // catch-up tick_state count
++  bool   frame_resync           = false;  // resync branch fired
++  Uint64 frame_resync_discarded = 0;      // ticks dropped by the resync
++  bool   frame_clamp            = false;  // while exited on n==MAX_CATCHUP
++  bool   frame_paused           = false;  // this was a paused frame
++  if (ftd_on)
++  {
++    frame_elapsed_ns = now_ns - last_ns;
++    frame_paused     = game.paused;
++  }
++
+   // --- LOGIC: tick_state() at a fixed 50 Hz ---
+   if (game.paused)
+   {
+@@ -350,11 +393,31 @@ static void run_tick_fixed(void)
+       accum_ns -= TICK_NS;
+       ++n;
+     }
++    // patch 0154 (wave-58 diagnostic, gated): capture N + the clamp
++    // flag. clamp = the while exited on n==MAX_CATCHUP with backlog
++    // still pending (a clamp WITHOUT a resync is computed at record
++    // time as frame_clamp && !frame_resync).
++    if (ftd_on)
++    {
++      frame_N     = n;
++      frame_clamp = (n == MAX_CATCHUP && accum_ns >= TICK_NS);
++    }
++
+     // Spiral-of-death clamp + re-entry resync: drop stale backlog. Also
+     // catches re-entry from the 1:1 path (where now_ns - last_ns was a
+     // large gap) -- the backlog is dropped after a <=MAX_CATCHUP burst.
+     if (accum_ns > (Uint64)MAX_CATCHUP * TICK_NS)
++    {
++      // patch 0154 (wave-58 diagnostic, gated): record the discard
++      // BEFORE zeroing -- resync_ticks_discarded is the backlog this
++      // resync drops.
++      if (ftd_on)
++      {
++        frame_resync           = true;
++        frame_resync_discarded = accum_ns / TICK_NS;
++      }
+       accum_ns = 0;
++    }
+   }
+ 
+   // --- RENDER: ONCE per displayed frame ---
+@@ -384,6 +447,108 @@ static void run_tick_fixed(void)
+ 
+   if (TAS::should_exit((uint32_t)g_tick_count))
+     game.running = false;
++
++  // DOS-PORT (patch 0154, Phase 11 wave-58 -- FIXED_TIMESTEP steady-state
++  // diagnostic). Record this frame into the per-100-frame block and, on
++  // the block boundary, emit one [ft-accum-stat] line. Gated on the
++  // cached FINE_INSTR bool (the existing W20B fine-instrumentation gate
++  // -- NO new env var, NO new log file); when FINE_INSTR=0 nothing here
++  // runs, so run_tick_fixed is byte-identical to wave-57. Per-frame cost
++  // when on: a cached-bool branch + a few int increments; the median +
++  // emit is once per 100 frames -- negligible, and load-bearing that it
++  // stay so (a per-frame cost would perturb the timing this measures).
++  if (ftd_on)
++  {
++    int bucket = frame_N;
++    if (bucket < 0) bucket = 0;
++    if (bucket > 5) bucket = 5;
++    ftd_n_hist[bucket]++;
++
++    if (frame_resync)
++    {
++      ftd_resync_events++;
++      ftd_resync_discarded += frame_resync_discarded;
++    }
++    if (frame_clamp && !frame_resync)
++      ftd_clamp_events++;
++
++    if (ftd_blk_frames < 100)
++    {
++      ftd_elapsed[ftd_blk_frames]    = frame_elapsed_ns;
++      ftd_N[ftd_blk_frames]          = frame_N;
++      // hard hitch = resync (load-hitch backlog discard) OR paused
++      // (advances 0 game logic) -- excluded from the steady window
++      // unconditionally; the inter_flip > 2x-median catch is applied
++      // at block end (sec.2.3 + the wave-58 STOP-2 predicate).
++      ftd_hard_hitch[ftd_blk_frames] = (frame_resync || frame_paused);
++    }
++    ftd_blk_frames++;
++
++    if (ftd_blk_frames >= 100)
++    {
++      // Block median of inter_flip (tiny local insertion sort -- once
++      // per 100 frames; no STL dependency). The hitch threshold is
++      // 2x the median: tight enough to catch a sub-resync map-load
++      // slow-tail frame, well clear of ordinary steady jitter.
++      Uint64 sorted[100];
++      for (int i = 0; i < 100; i++)
++        sorted[i] = ftd_elapsed[i];
++      for (int i = 1; i < 100; i++)
++      {
++        Uint64 v = sorted[i];
++        int j = i - 1;
++        while (j >= 0 && sorted[j] > v)
++        {
++          sorted[j + 1] = sorted[j];
++          --j;
++        }
++        sorted[j + 1] = v;
++      }
++      const Uint64 median       = sorted[50];
++      const Uint64 hitch_thresh = median * 2;
++
++      Uint64 steady_N = 0, steady_ns = 0, raw_N = 0, raw_ns = 0;
++      int    hitch_frames = 0;
++      for (int i = 0; i < 100; i++)
++      {
++        raw_N  += (Uint64)ftd_N[i];
++        raw_ns += ftd_elapsed[i];
++        const bool hitch = ftd_hard_hitch[i] || (ftd_elapsed[i] > hitch_thresh);
++        if (hitch)
++        {
++          hitch_frames++;
++        }
++        else
++        {
++          steady_N  += (Uint64)ftd_N[i];
++          steady_ns += ftd_elapsed[i];
++        }
++      }
++      const double steady_hz =
++          (steady_ns > 0) ? ((double)steady_N * 1e9 / (double)steady_ns) : 0.0;
++      const double raw_hz =
++          (raw_ns > 0) ? ((double)raw_N * 1e9 / (double)raw_ns) : 0.0;
++
++      LOG_INFO("[ft-accum-stat block={} n_hist=0:{},1:{},2:{},3:{},4:{},5:{} "
++               "resync_events={} resync_ticks_discarded={} clamp_events={} "
++               "steady_logic_hz={:.1f} raw_logic_hz={:.1f} hitch_frames={}]",
++               ftd_blk_no,
++               ftd_n_hist[0], ftd_n_hist[1], ftd_n_hist[2],
++               ftd_n_hist[3], ftd_n_hist[4], ftd_n_hist[5],
++               ftd_resync_events,
++               (unsigned long long)ftd_resync_discarded,
++               ftd_clamp_events,
++               steady_hz, raw_hz, hitch_frames);
++
++      ftd_blk_no++;
++      ftd_blk_frames       = 0;
++      ftd_resync_events    = 0;
++      ftd_resync_discarded = 0;
++      ftd_clamp_events     = 0;
++      for (int i = 0; i < 6; i++)
++        ftd_n_hist[i] = 0;
++    }
++  }
+ }
+ 
+ // === RUNMANIFEST schema-v1 emit (patch 0138, wave 43) ==================
+-- 
+2.47.3
+

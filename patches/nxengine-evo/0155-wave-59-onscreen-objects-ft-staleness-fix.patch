@@ -1,0 +1,187 @@
+From 0bdd3385f17999a254277391c92c1e03015d0e82 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 16 May 2026 23:08:04 -0700
+Subject: [PATCH] perf phase 11 patch 0155 -- wave-59 fix FT=1 onscreen_objects
+ use-after-free crash
+
+Per flush-instr's docs/internal/PHASE11-WAVE-59-CONTRACT.md. Wave-59 is
+the fix for the wave-58 Phase-7 crash-to-DOS that nx-engine's static
+review root-caused. A correctness FIX, not a lever; FIXED_TIMESTEP=1-
+only; the FT=0 production default is left byte-identical.
+
+THE BUG (FT=1-only, patch-0153 accumulator): onscreen_objects[] is the
+visibility-culled object list. It is BUILT in DrawScene (the wave-56
+render half) and READ + dereferenced by the player sim
+(PHandleSolidBrickObjects / PHandleSolidMushyObjects, via HandlePlayer,
+in the state half). game_tick_normal_state ends with
+Objects::CullDeleted() which FREES deleted objects -- the engine's own
+comment there warns stale onscreen_objects entries "blow up the
+program on the next tick." The wave-57 FT=1 accumulator
+(run_tick_fixed) runs the state half N times then DrawScene ONCE: on
+catch-up ticks 2..N, HandlePlayer reads an onscreen_objects[] not
+rebuilt since the prior render frame, now holding pointers an earlier
+catch-up tick's CullDeleted freed -> use-after-free -> the DJGPP page
+fault the operator hit while shooting (First Cave / Polar Star) and
+walking (Yamashita Farm). FT=0 is 1:1 -- DrawScene rebuilds
+onscreen_objects every tick, so the list is never older than the last
+CullDeleted; FT=0 has no bug.
+
+THE FIX: a new file-static _build_onscreen_objects_list() -- the
+cull-ONLY half of DrawScene's object loop (the same scr_x/scr_y
+onscreen test + the same onscreen_objects[]/nOnscreenObjects/
+o->onscreen writes), with NO drawing and none of DrawScene's
+per-object render bookkeeping. It is drawcall-free (only READS sprite
+metadata: drawpoint/w/h) -- safe for the state half that the
+accumulator multi-runs (witness-3 verified: zero drawcall tokens).
+game_tick_normal_state calls it at the top of the ModeSim block,
+BEFORE HandlePlayer -- so every FT=1 catch-up tick reads a freshly
+rebuilt list (live objects only); a prior tick's CullDeleted can no
+longer leave a freed pointer in it.
+
+FT=1-GATED -- the load-bearing constraint (contract sec.2.1): the call
+is `if (fixed_timestep_active()) _build_onscreen_objects_list();`. On
+FT=0 the call never fires; DrawScene remains the sole builder and
+game_tick_normal_state runs exactly as wave-58 -> FT=0 renders
+byte-identical to production (build-qa Gate 1). An UNCONDITIONAL hoist
+would make FT=0's HandlePlayer read this-tick's list instead of the
+legacy one-frame-stale list -- a production behavior change; the
+gating forecloses that.
+
+DrawScene IS LEFT 100% UNTOUCHED. DrawScene is the FT=0 byte-identity-
+critical path; restructuring it to share the cull with the new helper
+would risk Gate 1 for no FT=0 benefit. The cull math is therefore
+DUPLICATED (the helper + DrawScene's loop) by deliberate choice --
+both sites carry a "keep in sync" comment. Under FT=1 DrawScene still
+rebuilds onscreen_objects at render time; that is harmless-redundant
+(nothing reads it between DrawScene and the next state tick's
+rebuild).
+
+SECOND COUPLING CLOSED FOR FREE: the wave-59 process-note sweep (the
+[NX?-A] audit gap -- "does the state half READ render-half-built
+state") found o->onscreen, a per-object bool also written only by
+DrawScene's loop and read by ~6 AI routines (ironhead / sand / sym /
+labyrinth_m / last_cave) in the state half -- stale under FT=1 (a
+behavior desync, not a crash: it is a live-object bool). Because
+_build_onscreen_objects_list() sets o->onscreen in the same loop, the
+per-logic-tick rebuild closes that desync too, no extra code.
+
+SWEEP -- other couplings (wave-59 findings, no fix here): game.
+showmapnametime is decremented in map_draw_map_name (render half) but
+read by NO sim/AI code -- a pure render-rate visual wart (the
+stage-name overlay lingers under FT=1), not a sim coupling, benign.
+textbox.Tick() IS a render-rate-advanced / TSC-sim-polled coupling,
+but TextBox::Tick() is not drawcall-free (it ends with Draw()), so
+fixing it needs a TextBox-subsystem Tick/Draw split -- deferred to a
+wave-60 follow-up per the team-lead scope ruling; documented as a
+known FT=1 dialogue-timing desync, NOT a crash.
+
+No new env var, no banner, no BOOT.md, no BANNERS change -- wave-59 is
+a fix to the existing FIXED_TIMESTEP path, not a new lever.
+
+FILES: src/game.cpp (_build_onscreen_objects_list helper + the
+FT=1-gated call in game_tick_normal_state).
+---
+ src/game.cpp | 80 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 80 insertions(+)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index bd4966e..fe8eb87 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -580,6 +580,71 @@ void c------------------------------() {}
+ */
+ 
+ // standard in-game tick (as opposed to title-screen, inventory etc)
++// DOS-PORT (patch 0155, Phase 11 wave-59 -- FT=1 onscreen_objects
++// use-after-free fix). Rebuilds the visibility-culled onscreen_objects[]
++// list from the LIVE object list. This is the cull-ONLY half of
++// DrawScene's object-draw loop -- the same scr_x/scr_y onscreen test
++// and the same onscreen_objects[] / nOnscreenObjects / o->onscreen
++// writes -- with NO drawing and none of DrawScene's per-object render
++// bookkeeping (DamageText / shaketime / display_xoff). Drawcall-free:
++// it only READS sprite metadata (drawpoint / w / h), so it is safe to
++// run in the state half, which the FT=1 accumulator multi-runs.
++//
++// WHY: onscreen_objects[] is BUILT in DrawScene (the render half) and
++// READ + dereferenced by the player sim (PHandleSolidBrickObjects /
++// PHandleSolidMushyObjects, via HandlePlayer, in the state half). The
++// wave-57 accumulator runs the state half N times per render frame;
++// each game_tick_normal_state ends with Objects::CullDeleted() which
++// FREES deleted objects -- so on catch-up ticks 2..N HandlePlayer
++// dereferences freed pointers still in the un-rebuilt onscreen_objects[]
++// -> use-after-free / crash-to-DOS (exactly the CullDeleted comment
++// below: "blow up the program on the next tick"). Calling this at the
++// top of game_tick_normal_state under FT=1 rebuilds the list fresh
++// (live objects only) before every HandlePlayer. It also re-sets
++// o->onscreen per logic tick, closing the parallel AI-reads-stale-
++// o->onscreen desync (wave-59 sweep coupling 2).
++//
++// FT=0 NEVER calls this (the gate is in game_tick_normal_state) -- on
++// FT=0 DrawScene remains the sole builder and the legacy one-frame-
++// stale behavior is preserved byte-identically (wave-59 contract
++// sec.2.1).
++//
++// KEEP IN SYNC with DrawScene's object-loop cull test (the
++// MdsObjectLoopTimer loop) -- the scr_x/scr_y math + the 4-way bounds
++// check are duplicated here DELIBERATELY: DrawScene is the FT=0
++// byte-identity-critical path and is left 100% untouched.
++static void _build_onscreen_objects_list(void)
++{
++  Renderer *r      = Renderer::getInstance();
++  nOnscreenObjects = 0;
++
++  for (Object *o = lowestobject; o != NULL; o = o->higher)
++  {
++    if (o == player)
++      continue;  // player is handled specially, never in onscreen_objects
++
++    int scr_x = (o->x / CSFI) - (map.displayed_xscroll / CSFI);
++    int scr_y = (o->y / CSFI) - (map.displayed_yscroll / CSFI);
++    scr_x -= r->sprites.sprites[o->sprite].frame[o->frame].dir[o->dir].drawpoint.x;
++    scr_y -= r->sprites.sprites[o->sprite].frame[o->frame].dir[o->dir].drawpoint.y;
++
++    if (scr_x <= r->screenWidth && scr_y <= r->screenHeight + 26
++        && scr_x >= -r->sprites.sprites[o->sprite].w
++        && scr_y >= -r->sprites.sprites[o->sprite].h)
++    {
++      if (nOnscreenObjects < MAX_OBJECTS - 1)
++      {
++        onscreen_objects[nOnscreenObjects++] = o;
++        o->onscreen                          = true;
++      }
++    }
++    else
++    {
++      o->onscreen = false;
++    }
++  }
++}
++
+ // DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): game_tick_-
+ // normal() split at the W22A ModeSim / ModeDrawScene seam. Retained as
+ // the 1:1 wrapper so the tickfunctions[] table entry stays valid; the
+@@ -618,6 +683,21 @@ void game_tick_normal_state(void)
+   // residual stays small).
+   {
+     NXE::Diag::ModeSimTimer _mst;
++
++    // patch 0155 (wave-59 -- FT=1 onscreen_objects use-after-free fix):
++    // under FIXED_TIMESTEP the accumulator multi-runs this state half N
++    // times per render frame. Rebuild the render-half-built
++    // onscreen_objects[] HERE, per logic tick, BEFORE HandlePlayer reads
++    // it (via PHandleSolidBrickObjects/MushyObjects) -- otherwise
++    // catch-up ticks 2..N dereference pointers a prior tick's
++    // CullDeleted freed. FT=1-GATED: on FT=0 DrawScene stays the sole
++    // builder and game_tick_normal_state is byte-identical to wave-58
++    // (the contract sec.2.1 non-negotiable). Placed inside the
++    // ModeSimTimer scope so the rebuild cost is honestly accounted as
++    // mode_sim.
++    if (fixed_timestep_active())
++      _build_onscreen_objects_list();
++
+     Objects::UpdateBlockStates();
+ 
+     if (!game.frozen)
+-- 
+2.47.3
+
