@@ -2,12 +2,12 @@
 
 DOSKUTSU is a faithful port of Cave Story (Doukutsu Monogatari) to MS-DOS 6.22 on vintage Pentium-class hardware. It plays Daisuke "Pixel" Amaya's 2004 freeware classic on real 1990s-era PCs via [SDL3](https://www.libsdl.org/)'s [DOS backend](https://github.com/libsdl-org/SDL/pull/15377), [DJGPP](https://www.delorie.com/djgpp/), and [CWSDPMI](https://en.wikipedia.org/wiki/DOS_Protected_Mode_Interface).
 
-The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's original Japanese title); it also fits the DOS 8.3 filename convention as `DOSKUTSU.EXE`.
+The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's original Japanese title).
 
-This project exists for preservation, for the historical-computing community, and as an engineering artifact: running Cave Story on hardware that became obsolete eight years before Pixel released it. The reference PC is a 1995-era desktop with an Intel Pentium OverDrive 83 MHz CPU upgrade.
+It exists for preservation and for the engineering challenge of running a 2004 game on a 1995-era Pentium that predates it by nearly a decade.
 
 <p align="center">
-<a href="#status">Status</a> | <a href="#game-assets">Game Assets</a> | <a href="#requirements">Requirements</a> | <a href="#usage">Usage</a> | <a href="#building">Building</a> | <a href="#boot-profile">Boot Profile</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#acknowledgments">Acknowledgments</a> | <a href="#license">License</a>
+<a href="#status">Status</a> | <a href="#game-assets">Game Assets</a> | <a href="#requirements">Requirements</a> | <a href="#usage">Usage</a> | <a href="#building">Building</a> | <a href="#boot-profile">Boot Profile</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
 </p>
 
 ### DOSBox-X
@@ -25,19 +25,27 @@ This project exists for preservation, for the historical-computing community, an
 
 ## Status
 
-DOSKUTSU runs at **~30 fps median** on the reference PC (Intel Pentium OverDrive 83 MHz / Cirrus Logic CL-GD5434 / Creative SB16 PnP) with music on the default OPL3 FM-synth backend. The original organya software synthesizer is selectable, but runs lower -- its per-tick software mixing is the single heaviest cost on a Pentium-class CPU.
+DOSKUTSU plays the full game start to finish -- title screen, cutscenes, Mimiga Village, the caves, combat, save/load, menus. On the reference PC it holds a **~30 fps median** through the heaviest music-and-parallax scenes, with music on the default OPL3 backend.
 
-Music, parallax backgrounds, menus, combat, save/load, and the full gameplay path render correctly. Cave Story is authored for 50 fps; the reference PC's memory bus caps the faithful render near 30 fps, and because NXEngine couples game logic 1:1 to render the game then plays slightly slow. The opt-in **Fixed-Timestep mode** (`SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1`) decouples game logic onto a fixed 50 Hz accumulator so the game plays at near-correct speed at full fidelity with no visual cost; it is default-OFF pending a full-play validation pass. Per-wave performance history is in [CHANGELOG.md](./CHANGELOG.md).
+Cave Story is authored to run at 50 fps. The reference PC's memory bandwidth caps a faithful, full-detail render near 30, and no amount of renderer work closes that gap on this hardware. The game still plays at the right speed -- see [50 Hz without 50 fps](#50-hz-without-50-fps). Per-wave performance history is in [CHANGELOG.md](./CHANGELOG.md).
+
+### 50 Hz without 50 fps
+
+Cave Story's engine advances game logic once per rendered frame. At 30 fps that runs the game at about 60% of its intended speed -- visibly sluggish. Fixed-Timestep mode breaks the coupling: game logic advances on a fixed 50 Hz clock no matter how fast the renderer keeps up, so the game plays at its designed speed while the screen refreshes around 30 times a second. Full visual detail, no renderer changes.
+
+Set `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1` to enable it. It is default-OFF for now, while one background-rendering glitch is resolved; `=0` keeps the original frame-coupled behavior.
 
 ### Audio backends
 
-`DOSKUTSU.EXE` ships three music backends, selected via the `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` environment variable:
+Music plays through one of three backends, chosen with the `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` environment variable:
 
-- **opl3** (default): dispatches converted MIDI to the SB16 / Sound Blaster Pro 2 OPL3 FM synthesizer. Moving music off the CPU's software mixer is worth **~+8.77 fps** over organya at the canonical scene on the reference PC -- which is why it is the default. The bundled WiiWare-arrangement MIDIs track the original soundtrack closely.
-- **organya**: the original Cave Story `.org` synthesizer, software-mixed inside the engine -- the faithful 2004 timbre. Opt in with `SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya`; its per-tick mixing is the heaviest single cost on the audio path on Pentium-class CPUs.
-- **wb** (WaveBlaster): dispatches converted MIDI to a WaveBlaster header daughterboard (e.g. Serdaco DreamBlaster S2) over the SB16 DSP-mediated path. Same CPU-offload class as OPL3; wavetable timbre depends on the daughterboard firmware.
+| Backend | Value | Synthesis | Performance | Trade-off |
+|---|---|---|---|---|
+| OPL3 | `opl3` (default) | SB16 / Sound Blaster Pro 2 OPL3 FM chip plays converted MIDI | Fastest -- synthesis runs on the sound chip; ~+8.77 fps over organya at the canonical scene | FM timbre, not the exact 2004 samples; the bundled WiiWare-arrangement MIDIs track the original closely |
+| Organya | `organya` | The original `.org` synthesizer, mixed on the CPU | Slowest -- per-tick CPU mixing is the heaviest cost on the audio path | The exact, faithful 2004 sound |
+| WaveBlaster | `wb` | Converted MIDI sent to a WaveBlaster daughterboard through the SB16 | Off-CPU, same class as OPL3 | Wavetable timbre; sound depends on the daughterboard firmware, and the hardware is required |
 
-MIDI source-file selection is independent of backend choice and is set by `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` (`wiimidi` for the WiiWare arrangement, `orgmid` for the Hart legacy `.mid` set; optional `DOSKUTSU_GM_VARIANT=v1` or `v2` picks an `org2mid`-converted variant).
+MIDI source files are chosen separately with `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` -- `wiimidi` for the WiiWare arrangement, `orgmid` for the Hart legacy `.mid` set. `DOSKUTSU_GM_VARIANT=v1` or `v2` picks an `org2mid`-converted variant.
 
 ---
 
@@ -62,42 +70,53 @@ NICALIS published Cave Story+ as a commercial product across multiple platforms.
 
 DOSKUTSU targets two hardware tiers.
 
-**Tier 1: Reference (tested)** -- the PC every real-hardware measurement is taken on:
+**Tier 1 -- Reference (tested).** The configuration every real-hardware measurement is taken on:
 
-- CPU: Pentium 75 MHz or faster (reference PC uses a Pentium OverDrive 83)
+- CPU: Pentium 75 MHz or faster
 - RAM: 16 MB or more
-- Video: VESA 1.2+ with chip-level 320x240 support (Cirrus CL-GD5434, Tseng, Trident, S3, etc.; [UniVBE](https://en.wikipedia.org/wiki/UniVBE) 6.70 works as a VESA fallback driver)
+- Video: VESA 1.2+ with 320x240 support (a software VESA driver such as [UniVBE](https://en.wikipedia.org/wiki/UniVBE) covers cards whose firmware lacks it)
 - Sound: Sound Blaster 16 or compatible
 - OS: MS-DOS 6.22 or compatible
 - Disk: ~10 MB free
 
-**Tier 2: Minimum (designed for, not yet tested on hardware)**:
+**Tier 2 -- Minimum (designed for, not yet tested on hardware):**
 
 - CPU: 486DX2-66 with FPU
 - RAM: 8 MB or more
-- Video: VESA 1.2+ (UniVBE loadable if firmware lacks it)
+- Video: VESA 1.2+
 - Sound: any SB16-compatible
 
-Hard floors are non-negotiable: no 486SX without a 487 coprocessor (DJGPP emits x87 instructions); no pre-VESA video (the SDL3 DOS backend requires VESA 1.2+ with a linear framebuffer); no DOS variant that cannot host CWSDPMI's DPMI 0.9 service.
+Three hard floors: an FPU is required (DJGPP emits x87 instructions, so a 486SX needs a 487 coprocessor); video must be VESA 1.2+ with a linear framebuffer, which the SDL3 DOS backend depends on; and the DOS environment must host CWSDPMI's DPMI 0.9 service.
 
 ---
 
 ## Usage
 
-```
-C:\DOSKUTSU>DOSKUTSU
-```
-
-`DOSKUTSU.EXE` expects its DPMI host and game data co-located in one directory:
+`DOSKUTSU.EXE`, the CWSDPMI host, and the Cave Story data all live together in one directory:
 
 ```
 C:\DOSKUTSU\
-  DOSKUTSU.EXE      the game binary
-  CWSDPMI.EXE       the DPMI host -- must sit beside DOSKUTSU.EXE
-  DATA\             user-extracted Cave Story assets (see Game Assets)
+  DOSKUTSU.EXE     the game
+  CWSDPMI.EXE      the DPMI host -- must sit beside DOSKUTSU.EXE
+  DATA\            Cave Story assets, extracted by you (see Game Assets)
 ```
 
-`make install CF=...` and `make dist` lay the directory out this way for you. Title screen should appear within a few seconds. Controls follow NXEngine-evo's defaults:
+Quick setup:
+
+1. Get `DOSKUTSU.EXE` -- build it ([Building](#building)) or take it from a release bundle.
+2. Put `CWSDPMI.EXE` next to it. Release bundles include it; a build leaves it in `build/`.
+3. Extract the Cave Story data into `DATA\` ([Game Assets](#game-assets)).
+4. Copy the whole directory to the DOS machine.
+
+`make install CF=...` writes this layout straight to a mounted card, and `make dist` packages it as a zip.
+
+Run it from the game directory:
+
+```
+C:\DOSKUTSU> DOSKUTSU
+```
+
+The title screen appears within a few seconds. Controls follow NXEngine-evo's defaults:
 
 | Key | Action |
 |---|---|
@@ -155,41 +174,26 @@ DOSKUTSU is developed agentically through [Claude Code](https://claude.com/code)
 
 ---
 
-## Acknowledgments
+## Components and License
 
-- **[Cave Story / Doukutsu Monogatari](https://www.cavestory.org/)** by Daisuke "Pixel" Amaya (2004), available under Pixel's original freeware terms; game data is not redistributed here
-- **[NXEngine-evo](https://github.com/nxengine/nxengine-evo)**, the open-source C++11 re-implementation of the Cave Story engine; GPLv3 plus third-party licenses
-- **[SDL3](https://www.libsdl.org/)** by Sam Lantinga and the SDL team
-- **[SDL3 DOS backend](https://github.com/libsdl-org/SDL/pull/15377)** by the PR #15377 author, the piece that makes this port possible
-- **[DJGPP](https://www.delorie.com/djgpp/)** by DJ Delorie, the 32-bit DOS GCC port
-- **[CWSDPMI](https://www.delorie.com/pub/djgpp/current/v2misc/)** by Charles W. Sandmann, DOS DPMI host
-- **[DOSBox-X](https://dosbox-x.com/)**, DOS emulator for pre-hardware testing
-- **[build-djgpp](https://github.com/andrewwutw/build-djgpp)** by Andrew Wu, installer wrapper
-- **[Geomys](https://codeberg.org/ecliptik/geomys)**, sibling retro-port project, documentation and team-structure reference
-- **[Claude Code](https://claude.com/code)** by [Anthropic](https://www.anthropic.com/)
+DOSKUTSU's own source -- the build system, scripts, agent-team orchestration, and documentation -- is **MIT-licensed** ([LICENSE](./LICENSE)). The shipped `DOSKUTSU.EXE` is **GPLv3**: it statically links NXEngine-evo, which is GPLv3, and that license governs the combined binary. The DOS-port patches under `patches/` are derivative works of their upstreams and carry those upstreams' licenses -- GPLv3 for the NXEngine-evo patches, zlib for the SDL3 patches. Redistributed bundles carry the GPLv3 license text and a pointer back to this repository.
 
-Full attribution matrix: [THIRD-PARTY.md](./THIRD-PARTY.md).
+Each component below is listed with its purpose, license, and whether it links into `DOSKUTSU.EXE`:
 
----
+| Component | Purpose | License | In `DOSKUTSU.EXE` |
+|---|---|---|---|
+| [DOSKUTSU port source](./LICENSE) (this repo) | Build system, patches, scripts, docs | MIT | n/a -- source, not the binary |
+| [NXEngine-evo](https://github.com/nxengine/nxengine-evo) | The C++11 re-implementation of the Cave Story engine | [GPLv3](https://github.com/nxengine/nxengine-evo/blob/master/LICENSE) | **Yes -- governs the binary** |
+| [SDL3](https://www.libsdl.org/) | Platform layer; its [DOS backend](https://github.com/libsdl-org/SDL/pull/15377) is what makes the port possible | [zlib](https://github.com/libsdl-org/SDL/blob/main/LICENSE.txt) | Yes |
+| [SDL3_mixer](https://github.com/libsdl-org/SDL_mixer) | Audio mixing | [zlib](https://github.com/libsdl-org/SDL_mixer/blob/main/LICENSE.txt) | Yes |
+| [SDL3_image](https://github.com/libsdl-org/SDL_image) | Image loading | [zlib](https://github.com/libsdl-org/SDL_image/blob/main/LICENSE.txt) | Yes |
+| [DJGPP](https://www.delorie.com/djgpp/) libc | 32-bit DOS C runtime, by DJ Delorie | [GPL + runtime exception](https://www.delorie.com/djgpp/v2faq/faq11_2.html) | Yes -- the exception permits static linking |
+| [CWSDPMI](https://www.delorie.com/pub/djgpp/current/v2misc/) | DPMI host, by Charles W. Sandmann | [freeware, redistributable](./vendor/cwsdpmi/cwsdpmi.doc) | No -- ships alongside as a separate program |
+| [LFNDOS](./vendor/lfndos/COPYING) | Long-filename TSR | GPLv2 | No -- ships alongside |
+| [DOSLFN](./vendor/doslfn/doslfn.txt) | Long-filename TSR | freeware with sources | No -- ships alongside |
+| [Cave Story](https://www.cavestory.org/) game data | Maps, sprites, music, and SFX, by Daisuke "Pixel" Amaya (2004) | [freeware, Pixel's 2004 terms](https://www.cavestory.org/) | No -- you extract it yourself; not redistributed here |
+| Cave Story+ assets | NICALIS's commercial re-release samples | proprietary | No -- not GPLv3-compatible; cannot be bundled |
 
-## License
+Built with the [DJGPP](https://www.delorie.com/djgpp/) toolchain (installed via [build-djgpp](https://github.com/andrewwutw/build-djgpp) by Andrew Wu), tested with [DOSBox-X](https://dosbox-x.com/) before real hardware, and developed with [Claude Code](https://claude.com/code) by [Anthropic](https://www.anthropic.com/) (see [How It's Developed](#how-this-project-is-developed)). Team structure and documentation take cues from the sibling retro-port [Geomys](https://codeberg.org/ecliptik/geomys).
 
-The repository-original source -- the build system, scripts, agent-team orchestration, and documentation -- is licensed under the **MIT License**. See [LICENSE](./LICENSE).
-
-The DOS-port patches under `patches/` are derivative works of their upstreams and inherit those upstreams' licenses, not MIT: patches against NXEngine-evo are **GPLv3**, and patches against SDL3 / SDL3_mixer / SDL3_image are **zlib**.
-
-The `DOSKUTSU.EXE` binary is GPLv3 as a combined work because it statically links [NXEngine-evo](https://github.com/nxengine/nxengine-evo), which is GPLv3. Redistributed binary bundles include a copy of the GPLv3 license text and a pointer back to this repository's source.
-
-| Component | License | Linked into `DOSKUTSU.EXE`? |
-|---|---|---|
-| DOSKUTSU port source (this repo) | [MIT](./LICENSE) | n/a (source, not binary) |
-| **NXEngine-evo** | **[GPLv3](https://github.com/nxengine/nxengine-evo/blob/master/LICENSE)** | **Yes; dominant license of the binary** |
-| SDL3 | [zlib](https://github.com/libsdl-org/SDL/blob/main/LICENSE.txt) | Yes (zlib is GPLv3-compatible) |
-| SDL3_mixer | [zlib](https://github.com/libsdl-org/SDL_mixer/blob/main/LICENSE.txt) | Yes |
-| SDL3_image | [zlib](https://github.com/libsdl-org/SDL_image/blob/main/LICENSE.txt) | Yes |
-| DJGPP libc | [GPL with runtime-library exception](https://www.delorie.com/djgpp/v2faq/faq11_2.html) | Yes (the exception explicitly permits static linking) |
-| CWSDPMI | [freeware, redistribution permitted](./vendor/cwsdpmi/cwsdpmi.doc) | No; separate executable shipped alongside |
-| LFNDOS | [GPLv2](./vendor/lfndos/COPYING) | No; separate TSR shipped alongside |
-| DOSLFN | [Freeware with sources](./vendor/doslfn/doslfn.txt) | No; separate TSR shipped alongside |
-| Cave Story game data | [freeware per Pixel's 2004 terms](https://www.cavestory.org/) | No; user-extracted, not redistributed in this repo |
-| Cave Story+ assets | NICALIS commercial / proprietary | **No; not GPLv3-compatible; cannot bundle** |
+Full attribution detail: [THIRD-PARTY.md](./THIRD-PARTY.md).
