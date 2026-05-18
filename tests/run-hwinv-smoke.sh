@@ -7,7 +7,7 @@
 #   - Every section's BEGIN sentinel ([HWINV-<CAT>-BEGIN])
 #   - Every section's DONE sentinel ([HWINV-<CAT>-DONE])
 #   - The final [HWINV-EXIT_OK] marker
-#   - DOSBOX_DETECTED=<0|1> emit line (build-qa load-bearing per
+#   - DOSBOX_DETECTED=<0|1> emit line (build-qa essential per
 #     WAVE-41-HW-INVENTORY-PROBE-PLAN.md sec. 5.2)
 #
 # NUMBERS ARE EMULATOR-FICTITIOUS. DOSBox-X's CPUID / DPMI / PCI /
@@ -140,9 +140,9 @@ fi
 # DOSBOX_DETECTED line MUST emit (value-agnostic; build-qa keys on absence
 # to verify 86Box runs were not silently routed to DOSBox-X). Note: v2
 # AND-gate may emit =0 under DOSBox-X if hypervisor leaf is not exposed
-# in conf; the ENVIRONMENT= line is the load-bearing 3-state classifier.
+# in conf; the ENVIRONMENT= line is the essential 3-state classifier.
 if ! grep -q "DOSBOX_DETECTED=" "$LOG_DIR/HWINV.LOG"; then
-    echo "[hwinv-smoke] FAIL: missing DOSBOX_DETECTED= emit (build-qa load-bearing)"
+    echo "[hwinv-smoke] FAIL: missing DOSBOX_DETECTED= emit (build-qa essential)"
     rc=1
 fi
 

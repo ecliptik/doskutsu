@@ -207,7 +207,7 @@ run_variant() {
         tsr|tsr-doslfn)
             # The honest test: did the TSR install AND does the LFN function
             # code propagate via DPMI? short_baseline should always pass;
-            # long_int21_716c is the load-bearing assertion.
+            # long_int21_716c is the essential assertion.
             if [[ "$short_pass" != "1" ]]; then
                 echo "  UNEXPECTED: short_baseline did not PASS (control)"; rc=1
             fi

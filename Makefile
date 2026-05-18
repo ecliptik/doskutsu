@@ -621,7 +621,7 @@ sdl3-image-smoke: $(SDL3_IMAGE_SMOKE_EXE)
 #
 #   1. All 9 HWINV-<TAG>-BEGIN + HWINV-<TAG>-DONE sentinel PAIRS emit
 #      (TAG in {ENV, CPU, MEM, VID, AUD, DSK, IRQ, PORT, PCI} per probe-
-#      engineer's emit shape; sentinel format is the load-bearing match).
+#      engineer's emit shape; sentinel format is the essential match).
 #   2. The final [HWINV-EXIT_OK] marker emits (proves clean exit).
 #   3. The DOSBOX_DETECTED=1 line is ABSENT (proves 86Box, not silent
 #      mis-routing to DOSBox-X via xvfb-run failure cascade). Per probe-
@@ -778,7 +778,7 @@ hwinv-86box-smoke:
 # 8.3 DOS filename rule: basename <= 8 chars, .ext <= 3 chars
 # (memory/dos_filename_8_3.md). All probe binaries pass.
 #
-# P0 (load-bearing for Lever C go/no-go + every future iter):
+# P0 (essential for Lever C go/no-go + every future iter):
 #   DACPROG.EXE  -- VGA DAC programming-cost ablation (FULL/PART64/SINGLE)
 #   HWLOG.EXE    -- VBE info + CRTC + chip ID + PCI config-space dump
 #

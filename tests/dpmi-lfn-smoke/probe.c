@@ -37,7 +37,7 @@
  *   Tests 2/3 on g2k with no LFN TSR loaded must FAIL (control: confirms
  *     real-HW behaves as theorized).
  *   Tests 2/3 on g2k with LFNDOS.COM (or DOSLFN.COM) loaded -- answers the
- *     load-bearing question. If they pass: ship the LFN TSR per option A
+ *     essential question. If they pass: ship the LFN TSR per option A
  *     of docs/PHASE8-LFN-DECISION.md. If they fail: source-rename per
  *     option B is mandatory.
  *

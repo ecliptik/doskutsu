@@ -80,7 +80,7 @@ extern "C" {
 /* ===== Schema version ===== */
 #define RUNMANIFEST_SCHEMA_VERSION 1
 
-/* ===== Sentinel literals (load-bearing grep targets) ===== */
+/* ===== Sentinel literals (essential grep targets) ===== */
 #define RUNMANIFEST_BEGIN_MARKER "[RUNMANIFEST-BEGIN]"
 #define RUNMANIFEST_END_MARKER   "[RUNMANIFEST-END]"
 
@@ -310,7 +310,7 @@ static inline runmanifest_env_t runmanifest_detect_environment(unsigned *out_sig
 /* ===== env_block_sha12 helper =====
  *
  * Computes a 12-hex-char fingerprint over a canonical-form rendering of the
- * load-bearing env-var k=v pairs at runtime. Used to populate the schema-v1
+ * essential env-var k=v pairs at runtime. Used to populate the schema-v1
  * `env_block_sha` field so cross-iter analysis can detect "two PLAYs with
  * different env blocks emit different shas" without grep'ing each env var.
  *
