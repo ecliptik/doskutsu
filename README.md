@@ -1,13 +1,13 @@
 # DOSKUTSU
 
-DOSKUTSU is a faithful port of Cave Story (Doukutsu Monogatari) to MS-DOS 6.22 on vintage Pentium-class hardware. It plays Daisuke "Pixel" Amaya's 2004 freeware classic on real 1990s-era PCs via [SDL3](https://www.libsdl.org/)'s [DOS backend](https://github.com/libsdl-org/SDL/pull/15377), [DJGPP](https://www.delorie.com/djgpp/), and [CWSDPMI](https://en.wikipedia.org/wiki/DOS_Protected_Mode_Interface).
+DOSKUTSU is a faithful port of [Cave Story](https://www.cavestory.org/) (Doukutsu Monogatari) to MS-DOS 6.22 on retro Pentium-class hardware. It plays Daisuke "Pixel" Amaya's 2004 freeware classic on real 1990s-era PCs via [SDL3](https://www.libsdl.org/)'s [DOS backend](https://github.com/libsdl-org/SDL/pull/15377), [DJGPP](https://www.delorie.com/djgpp/), and [CWSDPMI](https://en.wikipedia.org/wiki/DOS_Protected_Mode_Interface).
 
 The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's original Japanese title).
 
-It exists for preservation and for the engineering challenge of running a 2004 game on a 1995-era Pentium that predates it by nearly a decade.
+DOSKUTSU exists for preservation and the engineering challenge of running Cave Story on a 1990s MS-DOS PC.
 
 <p align="center">
-<a href="#status">Status</a> | <a href="#game-assets">Game Assets</a> | <a href="#requirements">Requirements</a> | <a href="#usage">Usage</a> | <a href="#building">Building</a> | <a href="#boot-profile">Boot Profile</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
+<a href="#status">Status</a> | <a href="#game-assets">Game Assets</a> | <a href="#requirements">Requirements</a> | <a href="#usage">Usage</a> | <a href="#configuration">Configuration</a> | <a href="#building">Building</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
 </p>
 
 ### Screenshots
@@ -25,7 +25,7 @@ It exists for preservation and for the engineering challenge of running a 2004 g
 
 ## Status
 
-DOSKUTSU plays the full game start to finish: title screen, cutscenes, Mimiga Village, the caves, combat, save/load, menus.
+DOSKUTSU plays the full game, start to finish.
 
 Frame rate depends on the hardware and how music is played:
 
@@ -35,23 +35,19 @@ Frame rate depends on the hardware and how music is played:
 | Pentium-class (reference PC) | Organya software synth | ~21 fps |
 | 486-class | any | designed for; not yet measured on hardware |
 
-Audio, game speed, and hardware-compatibility options are all set with environment variables - [docs/CONFIG.md](./docs/CONFIG.md) is the full reference.
+Cave Story runs at 50 fps; the reference PC's hardware limits fully-detailed rendering to about 30 fps. It still plays at the correct 50 Hz speed through [Fixed-Timestep mode](#fixed-timestep-mode), which advances game logic on a fixed 50 Hz clock independent of the render rate.
 
-Cave Story is authored to run at 50 fps. The reference PC's memory bandwidth caps a faithful, full-detail render near 30, and no renderer work closes that gap on this hardware. The game still plays at the correct speed - see [50 Hz without 50 fps](#50-hz-without-50-fps). Per-wave performance history is in [CHANGELOG.md](./CHANGELOG.md).
+### Fixed-Timestep mode
 
-### 50 Hz without 50 fps
+Cave Story's engine advances game logic once per rendered frame, so at 30 fps the game also runs at about 60% speed - sluggish. Fixed-Timestep mode decouples the two: logic advances on a fixed 50 Hz clock regardless of frame rate, so the game plays at its intended speed even though the screen draws fewer frames. The motion is less smooth; the speed is correct.
 
-DOSKUTSU renders at roughly 30 fps; the reference PC cannot reach the 50 fps the original runs at. Cave Story's engine normally ties game logic to the frame rate, so 30 fps also means the game advances at about 60% speed - it feels sluggish.
-
-Fixed-Timestep mode (`SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1`) separates the two. Game logic advances on a fixed 50 Hz clock regardless of frame rate, so the game *plays* at the speed Pixel intended even though it *draws* fewer frames than the original. The motion is less smooth; the speed is correct.
-
-It is default-OFF for now, while one background-rendering glitch is resolved; `=0` keeps the original frame-coupled behavior.
+Enable it with `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1`. It is default-OFF while a background-rendering glitch is resolved.
 
 ### Audio backends
 
-The soundtrack plays one of two ways. **Organya** is Cave Story's original `.org` software synthesizer - the exact 2004 sound - but it mixes every audio tick on the CPU, which costs roughly 9 fps on a Pentium (the ~21 fps row above). Enable it with `SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya`.
+The soundtrack plays with either Cave Story's original Organya synthesizer or with MIDI. Organya is more faithful to the original, but has a significant performance impact; MIDI is recommended and the default for playing on DOS.
 
-**MIDI is the default and the recommended choice**: the soundtrack plays as converted MIDI on a hardware synthesizer, off the CPU, for the full frame rate. Two settings shape it:
+MIDI plays through a hardware synthesizer, off the CPU. Two settings shape it:
 
 | Setting | Environment variable | Options | Picks |
 |---|---|---|---|
@@ -63,11 +59,11 @@ The soundtrack plays one of two ways. **Organya** is Cave Story's original `.org
 
 ## Game Assets
 
-**DOSKUTSU does not include any Cave Story game data.** The binary you build from this repository plays nothing on its own. Users supply their own copy of Pixel's 2004 EN freeware assets, extracted from the canonical `Doukutsu.exe`.
+**DOSKUTSU does not include any Cave Story game data.** The binary you build from this repository plays nothing on its own. Users supply their own copy of the 2004 EN freeware assets, extracted from the canonical `Doukutsu.exe`.
 
 [docs/ASSETS.md](./docs/ASSETS.md) is the canonical, complete asset procedure - follow it start to finish; it covers fetching the freeware bundle and extracting the full data tree (maps, sprites, music, SFX) plus the expected directory layout. The two scripts below automate only the Pixtone-SFX slice of that workflow; running them alone does not produce a playable `DATA\` tree:
 
-- `scripts/fetch-cs-pxt.py` is the one-shot orchestrator. It fetches the 2004 EN freeware bundle from [cavestory.one](https://www.cavestory.one/downloads/cavestoryen.zip) (SHA-256-pinned), extracts `Doukutsu.exe` to a tempdir, runs the Pixtone parameter extractor, and cleans up. Pixel's freeware archive does not persist on the user's machine after the script completes.
+- `scripts/fetch-cs-pxt.py` is the one-shot orchestrator. It fetches the 2004 EN freeware bundle from [cavestory.one](https://www.cavestory.one/downloads/cavestoryen.zip) (SHA-256-pinned), extracts `Doukutsu.exe` to a tempdir, runs the Pixtone parameter extractor, and cleans up. The freeware archive does not persist on the user's machine after the script completes.
 - `scripts/extract-pxt.py` is the canonical extractor, transcribed from NXEngine-evo's own `extract/extractpxt.cpp`. It operates on file offsets in `Doukutsu.exe` and emits ASCII Pixtone parameter files.
 
 The same posture applies as the broader Cave Story port community ([NXEngine-evo](https://github.com/nxengine/nxengine-evo), [doukutsu-rs](https://github.com/doukutsu-rs/doukutsu-rs)): the engine code is open source; the game data is user-supplied freeware.
@@ -115,6 +111,7 @@ Quick setup:
 2. Get `CWSDPMI.EXE`. You do not download this yourself: the build tooling fetches it (from its upstream, at a pinned checksum) via `make fetch-binaries`, which `make install` and `make dist` run automatically. Release bundles already include it.
 3. Extract the Cave Story data into `DATA\` ([Game Assets](#game-assets)).
 4. Copy the whole directory to the DOS machine.
+5. The DOS machine needs a standard DJGPP-compatible boot environment: `HIMEM.SYS` loaded, `NOEMS`, a SB16-compatible `BLASTER` variable set, and a VESA 1.2+ video BIOS (a software VESA driver works as a fallback).
 
 `make install CF=...` writes this layout straight to a mounted card, and `make dist` packages it as a zip.
 
@@ -141,6 +138,14 @@ Save files live in `DATA\Profile.dat` alongside the binary.
 
 ---
 
+## Configuration
+
+DOSKUTSU is configured through DOS environment variables - the music backend, the Fixed-Timestep game-speed mode, audio quality, and hardware-compatibility fallbacks. Set them with `SET` in `AUTOEXEC.BAT` or at the DOS prompt.
+
+[docs/CONFIG.md](./docs/CONFIG.md) is the complete reference: every option with its values, defaults, usage examples, and performance impact.
+
+---
+
 ## Building
 
 Full build documentation in [docs/BUILDING.md](./docs/BUILDING.md): prerequisites, DJGPP cross-compiler install, the four-stage build (SDL3, SDL3_mixer, SDL3_image, NXEngine-evo), DOSBox-X testing, common errors.
@@ -156,17 +161,6 @@ cd doskutsu
 make                            # orchestrate all four build stages
 make smoke-fast                 # headless DOSBox-X smoke (fast config)
 ```
-
----
-
-## Boot Profile
-
-DOSKUTSU runs under any DJGPP-compatible DOS boot profile with:
-
-- `HIMEM.SYS` loaded
-- `NOEMS` (DJGPP uses DPMI, not EMS; an EMS page frame just wastes UMB space)
-- SB16-compatible `BLASTER` environment variable set
-- VESA 1.2+ video BIOS (UniVBE works as a fallback)
 
 ---
 
@@ -195,7 +189,7 @@ Each component below is listed with its purpose, license, and whether it links i
 | [SDL3_image](https://github.com/libsdl-org/SDL_image) | Image loading | [zlib](https://github.com/libsdl-org/SDL_image/blob/main/LICENSE.txt) | Yes |
 | [DJGPP](https://www.delorie.com/djgpp/) libc | 32-bit DOS C runtime, by DJ Delorie | [GPL + runtime exception](https://www.delorie.com/djgpp/v2faq/faq11_2.html) | Yes - the exception permits static linking |
 | [CWSDPMI](https://www.delorie.com/pub/djgpp/current/v2misc/) | DPMI host, by Charles W. Sandmann | [freeware, redistributable](./vendor/cwsdpmi/cwsdpmi.doc) | No - ships alongside as a separate program |
-| [Cave Story](https://www.cavestory.org/) game data | Maps, sprites, music, and SFX, by Daisuke "Pixel" Amaya (2004) | [freeware, Pixel's 2004 terms](https://www.cavestory.org/) | No - you extract it yourself; not redistributed here |
+| [Cave Story](https://www.cavestory.org/) game data | Maps, sprites, music, and SFX, by Daisuke Amaya (2004) | [freeware, 2004 terms](https://www.cavestory.org/) | User extracted, not redistributed |
 
 Built with the [DJGPP](https://www.delorie.com/djgpp/) toolchain (installed via [build-djgpp](https://github.com/andrewwutw/build-djgpp) by Andrew Wu), tested with [DOSBox-X](https://dosbox-x.com/) and real hardware.
 
