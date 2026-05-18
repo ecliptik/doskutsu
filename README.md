@@ -41,7 +41,7 @@ Cave Story runs at 50 fps; the reference PC's hardware limits fully-detailed ren
 
 Cave Story's engine advances game logic once per rendered frame, so at 30 fps the game also runs at about 60% speed - sluggish. Fixed-Timestep mode decouples the two: logic advances on a fixed 50 Hz clock regardless of frame rate, so the game plays at its intended speed even though the screen draws fewer frames. The motion is less smooth; the speed is correct.
 
-Enable it with `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1`. It is default-OFF while a background-rendering glitch is resolved.
+It is on by default as of 1.0; set `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0` to use the legacy frame-coupled loop.
 
 ### Audio backends
 

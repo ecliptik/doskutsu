@@ -3,7 +3,7 @@
 DOSKUTSU reads its options from DOS environment variables at startup. Set them with `SET` - either in `AUTOEXEC.BAT`, or at the DOS prompt before running `DOSKUTSU.EXE`:
 
 ```
-SET SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1
+SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya
 DOSKUTSU
 ```
 
@@ -24,15 +24,15 @@ The defaults are tuned for the reference PC. This file matters only for changing
 
 | Variable | Values | Default | Effect | FPS impact |
 |---|---|---|---|---|
-| `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP` | `0`, `1` | `0` | `1` runs game logic at a fixed 50 Hz, decoupled from the frame rate, so the game plays at its authored speed instead of slowing down with the frame rate. See [Fixed-Timestep mode](../README.md#fixed-timestep-mode). | None - changes game speed, not frame rate |
+| `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP` | `0`, `1` | `1` | On by default: game logic runs at a fixed 50 Hz, decoupled from the frame rate, so the game plays at its authored speed. `0` reverts to the legacy 1:1 logic/render loop. See [Fixed-Timestep mode](../README.md#fixed-timestep-mode). | None - changes game speed, not frame rate |
 | `SDL_HINT_DOSKUTSU_PERF_MODE` | `0`, `1`, `2` | `0` | Performance Mode - trades render detail for frame rate. `1` drops decorative foreground detail (collision and slope tiles are always kept); `2` is currently the same as `1`. | Minimal - the level-1 cuts measured flat on the reference PC |
 
 ```
-SET SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1   REM play at the correct 50 Hz game speed
+SET SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0   REM legacy frame-coupled loop (slow at ~30 fps)
 SET SDL_HINT_DOSKUTSU_PERF_MODE=1        REM drop decorative foreground detail
 ```
 
-`FIXED_TIMESTEP` does not change the frame rate - it changes game *speed*, so movement and timers run correctly at ~30 fps instead of in slow motion. `PERF_MODE=1`'s cuts measured flat on the reference PC; the visible change is a flatter depth look. Both are default-OFF and leave the faithful render untouched when off.
+`FIXED_TIMESTEP` does not change the frame rate - it changes game *speed*, so movement and timers run correctly at ~30 fps instead of in slow motion. It is on by default; `=0` restores the legacy frame-coupled loop. `PERF_MODE` is default-OFF; its level-1 cuts measured flat on the reference PC, the visible change being a flatter depth look.
 
 ---
 

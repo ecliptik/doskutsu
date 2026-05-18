@@ -5,7 +5,13 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
-## [Unreleased]
+## [1.0.0] -- 2026-05-18 -- correct game speed by default
+
+The milestone release: Cave Story plays at its intended speed on the reference
+PC. The render rate is hardware-bound near 30 fps, but game logic now advances
+on a fixed 50 Hz clock, so movement, animation, and timing run at the speed the
+game was authored for -- it no longer feels sluggish. Built on the 0.1.0
+foundation across the wave 18-63 arc.
 
 ### Added
 
@@ -29,18 +35,17 @@ internal docs and git history; this file keeps the user-facing summary.
   recoverable in software on the faithful render path. An opt-in **Performance
   Mode** (`SDL_HINT_DOSKUTSU_PERF_MODE`, graduated fidelity reduction) trades
   visual detail for fps; its faithful-tier cuts measured flat on real hardware.
-- **Fixed-Timestep mode** (`SDL_HINT_DOSKUTSU_FIXED_TIMESTEP`, default-OFF) is the
-  50 fps program's deliverable. NXEngine couples game logic 1:1 to render, so at a
-  ~30 fps render the game plays at ~60% of its authored 50 Hz speed ("sluggish").
-  Fixed-Timestep advances logic on a fixed 50 Hz accumulator decoupled from render,
-  so the game plays at correct speed -- real-HW instrumentation confirms
-  steady-state gameplay logic at ~50 Hz -- at full fidelity, no visual cost, no
-  render-fps regression. The mode is still maturing: decoupling logic from render
-  exposes engine state the 1:1 coupling had assumed was rebuilt every frame -- a
-  use-after-free crash on the `FIXED_TIMESTEP=1` path was found and fixed, and a
-  backdrop-flicker issue under `FIXED_TIMESTEP=1` remains open. It stays default-OFF
-  until that work completes; `FIXED_TIMESTEP=0` (the default) keeps the 1:1-coupled
-  render byte-identical to prior production.
+- **Fixed-Timestep mode -- now the default** (`SDL_HINT_DOSKUTSU_FIXED_TIMESTEP`).
+  NXEngine couples game logic 1:1 to render, so at a ~30 fps render the game played
+  at ~60% of its authored 50 Hz speed ("sluggish"). Fixed-Timestep advances logic
+  on a fixed 50 Hz accumulator decoupled from render, so the game plays at correct
+  speed at full fidelity, with no visual cost and no render-fps regression --
+  real-HW instrumentation confirms steady-state gameplay logic at ~50 Hz. Reaching
+  default-ON took fixing a use-after-free crash on the `FIXED_TIMESTEP=1` path, a
+  backdrop-rendering flicker, and a textbox/screen-effect timing desync, each found
+  and resolved during the wave 56-63 arc. `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0`
+  reverts to the legacy 1:1-coupled loop, which stays byte-identical to prior
+  production.
 - **Diagnostic probes + emulation harnesses.** `make probes` builds standalone
   DJGPP diagnostic binaries under `tests/probes/` (memory bandwidth, DPMI thunk
   cost, cache behavior, Cirrus BLT throughput, and more; gitignored). `tools/86box-*.sh`
@@ -54,8 +59,9 @@ internal docs and git history; this file keeps the user-facing summary.
 
 ### Changed
 
-- **KPI: 50 fps median**, matching Cave Story's `GAME_FPS=50` design rate. Below
-  it the game runs slightly slow because NXEngine couples logic 1:1 to render.
+- **KPI: 50 fps median**, matching Cave Story's `GAME_FPS=50` design rate. The
+  reference PC is render-bound near 30 fps; Fixed-Timestep mode (now the default)
+  closes the *speed* gap so the game plays correctly regardless of the render rate.
 - **Default music backend is now OPL3** (was organya). The FM-synth offload is the
   single largest fps win; `SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya` restores the
   original 2004 synthesizer.
@@ -74,6 +80,15 @@ internal docs and git history; this file keeps the user-facing summary.
 - Git history was rewritten once (2026-04-30, `git filter-repo`) to purge the
   now-untracked binary artifacts and internal docs; all commit SHAs from the
   project's earliest history forward are new.
+
+### Known issues
+
+- With Fixed-Timestep mode (the default), the save-select and stage-select menu
+  slide-in animations play at about half speed. Cosmetic;
+  `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0` restores their original pace.
+- A faint background noise is audible on the OPL3 music backend.
+- Small patches of a cave's parallax backdrop briefly flicker to black in some
+  "valley" terrain. Intermittent and cosmetic.
 
 ---
 

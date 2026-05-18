@@ -1,0 +1,113 @@
+From 96dc90e408fd6c0f007c0c10bb160d0886b17aee Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 18 May 2026 10:59:14 -0700
+Subject: [PATCH] perf phase 11 patch 0157 -- wave-61 flip
+ BG_SKIP_WHEN_UNCHANGED to default-OFF (abandon bg-skip)
+
+Per flush-instr's PHASE11-WAVE-60-REDIAGNOSIS.md sec.6 proposal,
+operator-approved 2026-05-18. Wave-61 abandons the bg-skip
+optimization by flipping SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED from
+default-ON to default-OFF. A one-line default flip; no code removed.
+
+WHY DOS NEEDS THIS: bg-skip (patch 0143, wave-48) skipped the
+parallax-backdrop redraw on no-scroll-change frames. It shipped a
+latent rendering bug from wave-48 onward -- the per-frame full-window
+clearScreen (Game::tick_render_submit) runs upstream of the backdrop
+draw unconditionally, so a bg-skip frame left the backdrop region
+black: the "black backdrop flicker" the wave-58/59 operator hit. The
+wave-60 fix attempt (patch 0156, suppress the upstream clear for
+GM_NORMAL) regressed -- that clear is also the sole erase of moving
+sprites on a skip frame, so suppressing it caused sprite trails; 0156
+was abandoned. The wave-60 re-diagnosis frame-class matrix
+(PHASE11-WAVE-60-REDIAGNOSIS.md) then proved structurally: a correct
+per-frame framebuffer and bg-skip's saving are in direct conflict with
+NO contained patch keeping both -- bg-skip's entire benefit is
+skipping the ~5.4 ms warm-cache-hit blit, and any fix that keeps the
+framebuffer correct gives that blit back. And the benefit is only
+~+0.87 fps -- below the +/-2 fps measurement noise floor. So the lever
+is not worth a structural rework; abandon it.
+
+THE CHANGE: `_bg_skip_killswitch_engaged()` in map.cpp -- the env
+parse flips from "ON unless the value is the literal 0" to "OFF unless
+the value is the literal 1". bg-skip is now disabled by default;
+SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED=1 re-enables it (and
+re-introduces the flicker) for diagnostics / A-B testing only. The
+lever, its skip machinery, and patch 0143 are all RETAINED -- only the
+default flips; no code removal (an optional later cleanup wave can
+remove the dead lever if desired). The boot banner text is updated to
+match the new default: "ENABLED (opt-in)" / "DISABLED (default)" (was
+"ENABLED (default)" / "DISABLED (killswitch)").
+
+CORRECTNESS: with bg-skip OFF the backdrop is redrawn every frame --
+warm-cache-hit blit, ~5.4 ms/stationary-frame -- so the backdrop
+region is always correct; the flicker is gone. This is the wave-59f
+FSKIP cell config, which the operator already played and reported
+"smooth, an acceptable release." wave-61 deliberately changes
+stationary-frame rendered output (black -> correct backdrop) -- there
+is intentionally NO byte-identity gate (a byte-identity-vs-production
+gate would fail the correct fix).
+
+Killswitch / opt-in: SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED=1 is the
+opt-in to restore the old (buggy, +0.87 fps) behavior. No new env var.
+
+BANNERS / docs (companion edits, not in this vendored patch): the
+tests/run-gameplay-smoke.sh BANNERS regex for this banner is updated
+to the new wording `(ENABLED \(opt-in\)|DISABLED \(default\))`;
+docs/internal/BOOT.md gains a SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED
+entry documenting the abandoned-lever / default-OFF state.
+
+FILES: src/map.cpp (_bg_skip_killswitch_engaged -- the default flip +
+the banner text).
+---
+ src/map.cpp | 29 +++++++++++++++++++++--------
+ 1 file changed, 21 insertions(+), 8 deletions(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 53304e2..5608ada 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -210,20 +210,33 @@ extern int flipacceltime;  // global; also re-declared at the bottom of
+                             // cache machinery (multiple extern decls are
+                             // harmless in C++ as long as they agree).
+ 
+-// Strict-0 killswitch match. Mirrors Renderer.cpp's _strict_falsy_env
+-// helper signature; consolidated locally to avoid pulling in
+-// graphics/Renderer.h's helper namespace.
++// DOS-PORT (patch 0157, Phase 11 wave-61): the bg-skip lever default is
++// flipped ON -> OFF. bg-skip (patch 0143) skipped the backdrop redraw
++// on no-scroll-change frames -- but the per-frame full-window
++// clearScreen runs upstream regardless, so a skip frame left the
++// backdrop region black: the backdrop-black flicker the operator hit,
++// latent since wave-48. The wave-60 re-diagnosis (PHASE11-WAVE-60-
++// REDIAGNOSIS.md) proved there is no contained fix that keeps both a
++// correct framebuffer and bg-skip's saving -- and that saving is only
++// +0.87 fps, below the +/-2 fps noise floor. Operator-approved
++// (2026-05-18) to abandon it.
++//
++// The lever is RETAINED as an env opt-in, now OFF by default:
++// enabled ONLY by an explicit SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED
++// =1; unset / "0" / anything else -> disabled (the new default).
++// `g_bg_skip_killswitch_decided`: 0 = bg-skip enabled, 1 = disabled.
+ static bool _bg_skip_killswitch_engaged()
+ {
+   if (g_bg_skip_killswitch_decided < 0)
+   {
+     const char *e = std::getenv("SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED");
+-    g_bg_skip_killswitch_decided = (e && e[0] == '0' && e[1] == 0) ? 1 : 0;
++    g_bg_skip_killswitch_decided = (e && e[0] == '1' && e[1] == 0) ? 0 : 1;
+     LOG_INFO("map: BG skip-when-unchanged {} (set SDL_HINT_DOSKUTSU_"
+-             "BG_SKIP_WHEN_UNCHANGED=0 to disable; default ON; "
+-             "patch 0143 supersedes partial-skip behavior of 0080/0126)",
+-             g_bg_skip_killswitch_decided ? "DISABLED (killswitch)"
+-                                          : "ENABLED (default)");
++             "BG_SKIP_WHEN_UNCHANGED=1 to enable; default OFF since "
++             "wave-61 -- abandoned, it shipped a backdrop-black flicker "
++             "and its +0.87 fps was below the noise floor)",
++             g_bg_skip_killswitch_decided ? "DISABLED (default)"
++                                          : "ENABLED (opt-in)");
+   }
+   return g_bg_skip_killswitch_decided == 1;
+ }
+-- 
+2.47.3
+

@@ -1,0 +1,305 @@
+From 8608881febc73009bae002cab56b4ac5dcef82cd Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 18 May 2026 12:16:58 -0700
+Subject: [PATCH] perf phase 11 patch 0158 -- wave-62 textbox FT=1 state/draw
+ split (4-way)
+
+Under SDL_HINT_DOSKUTSU_FIXED_TIMESTEP (patch 0153, wave-57) the
+accumulator multi-runs Game::tick_state() N times per displayed frame
+while tick_render_submit() / flip() run once. For that to be correct,
+everything tick_state() reaches must be drawcall-free game-state work
+-- the wave-36 trap is putting drawcalls in the multi-run path.
+
+The textbox subsystem advanced its state inside game_tick_normal_render
+via textbox.Tick() (game.cpp:859), i.e. at the render rate. Under FT=1
+that desyncs the textbox from the 50 Hz logic clock: text scroll-in and
+the yes/no / stage-select / save-select prompt state machines tick at
+whatever the display manages, not the fixed rate the rest of the sim
+runs at.
+
+This splits the textbox state from its draw so the state half can move
+into tick_state. TextBox::Tick() interleaves a trailing Draw(), and so
+do all three menu sub-Ticks (TB_YNJPrompt / TB_StageSelect /
+TB_SaveSelect each end with Draw()) -- so a single split is not enough;
+moving TextBox::Tick() wholesale into tick_state would pull three sub-
+prompt Draw() calls into the multi-run path. Hence a 4-way split: each
+of the 4 classes gains a drawcall-free TickState() (its state work with
+the trailing Draw() removed). TextBox::TickState() calls the 3 sub-
+TickState()s + TickTextBox.
+
+FT=0 byte-identity: TextBox::Tick(), TB_StageSelect::Tick() and
+TB_SaveSelect::Tick() are left verbatim -- the FT=0 path and the title /
+inventory callers keep calling them unchanged. TextBox::Tick() MUST
+stay verbatim specifically: it calls each sub-prompt's .Tick() (which
+draws) AND TextBox::Draw() draws them again, so each sub-prompt is
+drawn twice per frame -- and TB_StageSelect::Draw() / TB_SaveSelect::
+Draw() are NOT idempotent (they mutate fWarpY / fPicXOffset, the menu
+slide-in animations). De-dupping TextBox::Tick() would drop one draw
+and halve those animation rates -- an FT=0 render difference. So only
+TB_YNJPrompt::Tick() is reduced to { TickState(); Draw(); }: its Draw()
+is pure drawSprite calls (idempotent), and its Tick() still calls
+Draw() exactly once itself, so the reduction is behavior-identical and
+removes the otherwise-duplicated ~33-line YN state machine. TickState()
+is new code invoked only on the FT=1 path.
+
+FT=1 wiring: Game::tick_state() calls textbox.TickState() alongside the
+wave-57 screen-effect Tick relocations, gated to TD_GM_NORMAL_SPLIT so
+it runs only on GM_NORMAL ticks (paused / mode-transition ticks skip
+it, as the render-half textbox.Tick() would not have run; other modes
+tick the textbox via their own unchanged Tick() calls). The
+game.cpp:859 site becomes FT-gated: textbox.Draw() on FT=1 (state
+already advanced in tick_state -- a textbox.Tick() there would tick the
+state twice per frame), textbox.Tick() unchanged on FT=0.
+
+On FT=1 the sub-prompts are drawn once (via TextBox::Draw) instead of
+twice; YNJPrompt draw is idempotent, and the StageSelect warp-text /
+SaveSelect pic-slide run at 1x instead of 2x -- a known minor FT=1-only
+cosmetic delta (FT=1 is not byte-identity-gated), deferred per the
+wave-62 contract rather than fixed in-wave.
+
+The YNJPrompt accept-consume (lastinputs[ACCEPT_BUTTON] /
+lastpinputs[ACCEPT_BUTTON] writes) is multi-run-safe: run_tick_fixed
+re-snapshots lastinputs[] at the start of every catch-up iteration so
+justpushed() edges de-dup, and SetVisible(false) on accept makes
+iterations 2..N early-return. No new env var (reuses FIXED_TIMESTEP).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/TextBox/SaveSelect.cpp  | 16 ++++++++++++++++
+ src/TextBox/SaveSelect.h    |  1 +
+ src/TextBox/StageSelect.cpp | 16 ++++++++++++++++
+ src/TextBox/StageSelect.h   |  1 +
+ src/TextBox/TextBox.cpp     | 24 ++++++++++++++++++++++++
+ src/TextBox/TextBox.h       |  1 +
+ src/TextBox/YesNoPrompt.cpp | 26 +++++++++++++++++++++++++-
+ src/TextBox/YesNoPrompt.h   |  1 +
+ src/game.cpp                | 27 ++++++++++++++++++++++++++-
+ 9 files changed, 111 insertions(+), 2 deletions(-)
+
+diff --git a/src/TextBox/SaveSelect.cpp b/src/TextBox/SaveSelect.cpp
+index 3218ee1..af74ac1 100644
+--- a/src/TextBox/SaveSelect.cpp
++++ b/src/TextBox/SaveSelect.cpp
+@@ -381,3 +381,19 @@ void TB_SaveSelect::Tick(void)
+ 
+   Draw();
+ }
++
++// DOS-PORT (patch 0158, Phase 11 wave-62): drawcall-free state half of
++// Tick() -- Run_Input() with the trailing Draw() removed. Tick() above
++// is left verbatim (FT=0 byte-identity). The !fVisible guard is kept
++// here: it lives in Tick(), not Run_Input(). Render half draws via
++// TextBox::Draw() -> SaveSelect.Draw(). Multi-run-safe: Run_Input() is
++// pure justpushed() reads, and accept (game_save) self-guards via
++// SetVisible(false) (wave-62 STOP-confirm-2: CLEAN).
++void TB_SaveSelect::TickState(void)
++{
++  if (!fVisible)
++    return;
++
++  // handle user input
++  Run_Input();
++}
+diff --git a/src/TextBox/SaveSelect.h b/src/TextBox/SaveSelect.h
+index 954e8de..7ee33ee 100644
+--- a/src/TextBox/SaveSelect.h
++++ b/src/TextBox/SaveSelect.h
+@@ -18,6 +18,7 @@ public:
+   bool Aborted();
+   void Draw();
+   void Tick();
++  void TickState(); // patch 0158 (wave-62): drawcall-free state half of Tick(); FT=1 tick_state
+ 
+ private:
+   void Run_Input();
+diff --git a/src/TextBox/StageSelect.cpp b/src/TextBox/StageSelect.cpp
+index a5a6dcd..fd8b411 100644
+--- a/src/TextBox/StageSelect.cpp
++++ b/src/TextBox/StageSelect.cpp
+@@ -79,6 +79,22 @@ void TB_StageSelect::Tick(void)
+   Draw();
+ }
+ 
++// DOS-PORT (patch 0158, Phase 11 wave-62): drawcall-free state half of
++// Tick() -- HandleInput() with the trailing Draw() removed. Tick() above
++// is left verbatim (FT=0 byte-identity). The !fVisible guard is kept
++// here: it lives in Tick(), not HandleInput(). Render half draws via
++// TextBox::Draw() -> StageSelect.Draw(). Multi-run-safe: HandleInput()
++// is pure justpushed() reads, and selection is guarded by fMadeSelection
++// (wave-62 STOP-confirm-2: CLEAN).
++void TB_StageSelect::TickState(void)
++{
++  if (!fVisible)
++    return;
++
++  // handle user input
++  HandleInput();
++}
++
+ void TB_StageSelect::Draw(void)
+ {
+   if (!fVisible)
+diff --git a/src/TextBox/StageSelect.h b/src/TextBox/StageSelect.h
+index 29688f8..bbb6fac 100644
+--- a/src/TextBox/StageSelect.h
++++ b/src/TextBox/StageSelect.h
+@@ -28,6 +28,7 @@ public:
+   bool IsVisible();
+   void Draw();
+   void Tick();
++  void TickState(); // patch 0158 (wave-62): drawcall-free state half of Tick(); FT=1 tick_state
+ 
+ private:
+   void HandleInput();
+diff --git a/src/TextBox/TextBox.cpp b/src/TextBox/TextBox.cpp
+index 0ef8f01..d3d1d8d 100644
+--- a/src/TextBox/TextBox.cpp
++++ b/src/TextBox/TextBox.cpp
+@@ -252,6 +252,30 @@ void TextBox::Tick(void)
+   Draw();
+ }
+ 
++// DOS-PORT (patch 0158, Phase 11 wave-62): the drawcall-free state half
++// of Tick(). Under SDL_HINT_DOSKUTSU_FIXED_TIMESTEP the wave-57
++// accumulator multi-runs Game::tick_state() N times per displayed
++// frame; the textbox state (text scroll-in, the 3 menu sub-prompt
++// state machines) must advance at the fixed 50 Hz logic rate, so its
++// state work moves into tick_state via this method. It is the 4-way
++// split: TickState() calls each sub-prompt's TickState() (state only)
++// -- the trailing Draw() each sub-Tick() does is dropped here because
++// TextBox::Draw() (the render half) already draws all four sub-prompts.
++// Tick() above is left UNCHANGED so the FT=0 path and the title /
++// inventory callers stay byte-identical to wave-61.
++void TextBox::TickState(void)
++{
++  if (fVisible)
++  {
++    TickTextBox();
++
++//    ItemImage.Tick();
++    YesNoPrompt.TickState();
++    StageSelect.TickState();
++    SaveSelect.TickState();
++  }
++}
++
+ void TextBox::TickTextBox()
+ {
+   // allow player to speed up text by holding the button
+diff --git a/src/TextBox/TextBox.h b/src/TextBox/TextBox.h
+index d104514..9b9d525 100644
+--- a/src/TextBox/TextBox.h
++++ b/src/TextBox/TextBox.h
+@@ -59,6 +59,7 @@ public:
+ 
+   void Draw();
+   void Tick();
++  void TickState(); // patch 0158 (wave-62): drawcall-free state half of Tick(); FT=1 tick_state
+   static void DrawFrame(int x, int y, int w, int h);
+ 
+   uint8_t GetFlags()
+diff --git a/src/TextBox/YesNoPrompt.cpp b/src/TextBox/YesNoPrompt.cpp
+index 7dccc40..23f2cb1 100644
+--- a/src/TextBox/YesNoPrompt.cpp
++++ b/src/TextBox/YesNoPrompt.cpp
+@@ -48,7 +48,32 @@ void TB_YNJPrompt::SetVisible(bool enable)
+ void c------------------------------() {}
+ */
+ 
++// DOS-PORT (patch 0158, Phase 11 wave-62): Tick() is now a pure
++// { TickState(); Draw(); }. The YN state machine lives ONLY in
++// TickState() below -- no duplicate copy. This is behavior-identical to
++// the pre-0158 switch-then-Draw() Tick(): Tick() still runs the state
++// machine once (via TickState) and calls Draw() exactly once itself, so
++// FT=0 is byte-identical. (TextBox::Tick() / StageSelect::Tick() /
++// SaveSelect::Tick() are left verbatim -- de-dupping TextBox::Tick()
++// would drop one of the two per-frame sub-prompt Draw() calls, and
++// StageSelect/SaveSelect Draw() are non-idempotent: G2-unsafe. Only
++// YNJPrompt is de-dupped here because only its Tick() had an inline
++// duplicate and only its Draw() is pure / idempotent.)
+ void TB_YNJPrompt::Tick()
++{
++  TickState();
++  Draw();
++}
++
++// DOS-PORT (patch 0158, Phase 11 wave-62): the drawcall-free state half
++// of Tick() -- holds the YN state machine (the sole copy; Tick() above
++// is { TickState(); Draw(); }). The render half draws via
++// TextBox::Draw() -> YesNoPrompt.Draw(). Multi-run-safe under
++// FIXED_TIMESTEP: run_tick_fixed re-snapshots lastinputs[] each catch-up
++// iteration so the justpushed() edges de-dup, and SetVisible(false) on
++// accept makes iterations 2..N early-return at the !fVisible guard
++// (wave-62 STOP-confirm-2: CLEAN).
++void TB_YNJPrompt::TickState()
+ {
+   if (!fVisible)
+     return;
+@@ -106,7 +131,6 @@ void TB_YNJPrompt::Tick()
+     }
+     break;
+   }
+-  Draw();
+ }
+ 
+ void TB_YNJPrompt::Draw()
+diff --git a/src/TextBox/YesNoPrompt.h b/src/TextBox/YesNoPrompt.h
+index 651e932..3b5d7a9 100644
+--- a/src/TextBox/YesNoPrompt.h
++++ b/src/TextBox/YesNoPrompt.h
+@@ -16,6 +16,7 @@ public:
+ 
+   void Draw();
+   void Tick();
++  void TickState(); // patch 0158 (wave-62): drawcall-free state half of Tick(); FT=1 tick_state
+ 
+   bool IsVisible()
+   {
+diff --git a/src/game.cpp b/src/game.cpp
+index fe8eb87..463891f 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -495,6 +495,22 @@ void Game::tick_state(void)
+   // in wave-56 (the if(!fixed_timestep_active()) guard in each Draw).
+   if (fixed_timestep_active())
+   {
++    // DOS-PORT (patch 0158, Phase 11 wave-62): the textbox subsystem
++    // state half. Under FIXED_TIMESTEP the textbox state (text scroll-in
++    // + the 3 menu sub-prompt state machines) must advance at the 50 Hz
++    // logic rate -- like the screen effects below -- instead of at the
++    // render rate inside game_tick_normal_render's textbox.Tick(). The
++    // render half (textbox.Draw) stays in game_tick_normal_render, now
++    // FT-gated to draw-only there. Gated to TD_GM_NORMAL_SPLIT: this is
++    // the relocation of the GM_NORMAL textbox tick ONLY -- a paused tick
++    // (TD_PAUSED) or a mode-transition tick (TD_OTHER) skips it, exactly
++    // as game_tick_normal_render's textbox.Tick() would not have run.
++    // Other modes (inventory/title) tick the textbox via their own
++    // unchanged textbox.Tick() calls. TickState() is drawcall-free
++    // (wave-62 4-way split), so the accumulator multi-running it is safe.
++    if (_tick_dispatch == TD_GM_NORMAL_SPLIT)
++      textbox.TickState();
++
+     fade.Tick();
+     if (starflash.enabled)
+       starflash.Tick();
+@@ -856,7 +872,16 @@ void game_tick_normal_render(void)
+ 
+   {
+     NXE::Diag::ModePostTimer _mpt;
+-    textbox.Tick();
++    // DOS-PORT (patch 0158, Phase 11 wave-62): under FIXED_TIMESTEP the
++    // textbox STATE half already ran in Game::tick_state() (via
++    // textbox.TickState()) at the 50 Hz logic rate -- so here, the
++    // render half, draw ONLY. A textbox.Tick() would advance the state
++    // a second time per displayed frame. FT=0: unchanged -- textbox.Tick()
++    // does state + draw exactly as in wave-61 (byte-identical).
++    if (fixed_timestep_active())
++      textbox.Draw();
++    else
++      textbox.Tick();
+ 
+     ScreenEffects::Draw();
+     map_draw_map_name(); // stage name overlay as on entry
+-- 
+2.47.3
+

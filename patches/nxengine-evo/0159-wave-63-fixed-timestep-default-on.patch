@@ -1,0 +1,147 @@
+From aad22f0314a5ada58867a3b40791d23ebb7bf1f1 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 18 May 2026 13:28:22 -0700
+Subject: [PATCH] perf phase 11 patch 0159 -- wave-63 flip FIXED_TIMESTEP to
+ default-ON (1.0 release)
+
+The fixed-timestep accumulator (patch 0153, wave-57; the wave-58..62
+diagnostic + crash-fix + state/draw-split waves that hardened it)
+advances game logic at a fixed 50 Hz off a wall-clock accumulator,
+decoupled from render fps. Cave Story's logic is authored for 50 Hz;
+the legacy 1:1 render-coupled loop runs the game at roughly 60% speed
+on the g2k reference machine (~30 fps render -> ~30 Hz logic). Until
+now fixed-timestep was opt-in behind SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1,
+so a default boot played slow-motion unless the user set the hint.
+
+This flips the default for the 1.0 release: a default boot now runs
+fixed-timestep, so the shipped game plays at its correct authored speed
+with no env var. The hint-parse changes from the opt-in form
+(`e[0]=='1' ? 1 : 0` -- OFF unless literal "1") to the killswitch form
+(`e[0]=='0' ? 0 : 1` -- ON unless literal "0"). The wave-54 PERF_MODE
+sentinel-cache idiom is unchanged.
+
+The =0 killswitch is preserved: SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0
+reverts to the legacy 1:1 render-coupled loop, byte-identical to
+wave-37 production. The default-ON decision rests on that reversibility.
+
+The FT=0 and FT=1 code paths are themselves unchanged -- the flip only
+selects which path a default boot takes. An explicit-FT=0 run remains
+byte-identical to wave-62 (patch 0158); the boot banner default text
+moves accordingly ("ENABLED (default; ...)" / "DISABLED (killswitch;
+...)"). game.h / game.cpp hint-doc comments are updated for the new
+default, and the run_tick_fixed header comment in main.cpp is corrected
+the same way (the FIXED_TIMESTEP=0 path is now the killswitch, not the
+default; activation is fixed_timestep_active(), default true). No new
+env var.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/game.cpp | 20 +++++++++++---------
+ src/game.h   | 19 ++++++++++---------
+ src/main.cpp | 14 ++++++++------
+ 3 files changed, 29 insertions(+), 24 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index 463891f..61e3a93 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -404,23 +404,25 @@ void Game::tick(void)
+   ++NXE::Diag::g_w237_total_frames_block;
+ }
+ 
+-// DOS-PORT (patch 0153, Phase 11 wave-57 -- Track B B2): cached
+-// killswitch for the fixed-timestep accumulator.
+-// SDL_HINT_DOSKUTSU_FIXED_TIMESTEP -- strict "1" enables; 0 / unset /
+-// anything else -> OFF (the wave-56 1:1 path). Sentinel-cached on the
+-// first call (the wave-54 PERF_MODE idiom -- NO per-iteration getenv).
+-// First call emits the build-qa BANNERS-grep banner.
++// DOS-PORT (patch 0153 wave-57 -- Track B B2; default flipped ON by
++// patch 0159 wave-63, the 1.0 release): cached killswitch for the
++// fixed-timestep accumulator. SDL_HINT_DOSKUTSU_FIXED_TIMESTEP --
++// default-ON. Strict "0" disables it (reverts to the wave-56 1:1
++// render-coupled path); unset or any value other than "0" -> ON.
++// Sentinel-cached on the first call (the wave-54 PERF_MODE idiom --
++// NO per-iteration getenv). First call emits the build-qa BANNERS-grep
++// banner.
+ static int g_fixed_timestep = -1;  // -1 undecided / 0 off / 1 on
+ bool fixed_timestep_active()
+ {
+   if (g_fixed_timestep < 0)
+   {
+     const char *e = std::getenv("SDL_HINT_DOSKUTSU_FIXED_TIMESTEP");
+-    g_fixed_timestep = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    g_fixed_timestep = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+     LOG_INFO("fixed-timestep: {}",
+              g_fixed_timestep
+-                 ? "ENABLED (logic 50 Hz, decoupled from render)"
+-                 : "DISABLED (default; 1:1 logic/render)");
++                 ? "ENABLED (default; logic 50 Hz, decoupled from render)"
++                 : "DISABLED (killswitch; 1:1 logic/render)");
+   }
+   return g_fixed_timestep == 1;
+ }
+diff --git a/src/game.h b/src/game.h
+index 2f027bf..31f57fc 100644
+--- a/src/game.h
++++ b/src/game.h
+@@ -219,15 +219,16 @@ void game_tick_normal(void);
+ void game_tick_normal_state(void);
+ void game_tick_normal_render(void);
+ 
+-// DOS-PORT (patch 0153, Phase 11 wave-57 -- Track B B2): cached
+-// killswitch for the fixed-timestep accumulator.
+-// SDL_HINT_DOSKUTSU_FIXED_TIMESTEP -- 0/1, default-OFF, strict "1" to
+-// enable; read + cached once at boot (the wave-54 PERF_MODE idiom, no
+-// per-iteration getenv). When true the gameloop runs game logic at a
+-// fixed 50 Hz off a wall-clock accumulator, decoupled from render fps,
+-// and the 3 screen effects advance their state in tick_state() (Tick)
+-// instead of Draw(). Default-OFF -> the wave-56 1:1 path, byte-
+-// identical to production.
++// DOS-PORT (patch 0153 wave-57 -- Track B B2; default flipped ON by
++// patch 0159 wave-63): cached killswitch for the fixed-timestep
++// accumulator. SDL_HINT_DOSKUTSU_FIXED_TIMESTEP -- 0/1, default-ON as
++// of the 1.0 release, strict "0" to disable; read + cached once at
++// boot (the wave-54 PERF_MODE idiom, no per-iteration getenv). When
++// true the gameloop runs game logic at a fixed 50 Hz off a wall-clock
++// accumulator, decoupled from render fps, and the 3 screen effects
++// advance their state in tick_state() (Tick) instead of Draw(). The
++// "=0" killswitch reverts to the wave-56 1:1 path, byte-identical to
++// wave-37 production.
+ bool fixed_timestep_active();
+ 
+ void AssignExtraSprites(void);
+diff --git a/src/main.cpp b/src/main.cpp
+index 8c167af..fa5c9be 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -255,11 +255,13 @@ static inline void run_tick()
+   }
+ }
+ 
+-// DOS-PORT (patch 0153, Phase 11 wave-57 -- Track B B2): the
+-// fixed-timestep accumulator path. Called from gameloop() in place of
+-// run_tick() when SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1 and the current
+-// mode is GM_NORMAL. Per PHASE11-WAVE-57-CONTRACT.md sec.1 +
+-// FIXED-TIMESTEP-DESIGN.md sec.3.
++// DOS-PORT (patch 0153 wave-57 -- Track B B2; default flipped ON by
++// patch 0159 wave-63): the fixed-timestep accumulator path. Called from
++// gameloop() in place of run_tick() when fixed_timestep_active() and
++// the current mode is GM_NORMAL. As of patch 0159 fixed-timestep is
++// default-ON, so this is the default GM_NORMAL path;
++// SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0 reverts to run_tick(). Per
++// PHASE11-WAVE-57-CONTRACT.md sec.1 + FIXED-TIMESTEP-DESIGN.md sec.3.
+ //
+ // Game logic (tick_state) advances at a fixed 50 Hz off a wall-clock
+ // accumulator; render (tick_render_submit + flip) runs ONCE per
+@@ -273,7 +275,7 @@ static inline void run_tick()
+ // N x ~17 ms of drawcalls (the wave-36 -28 fps trap).
+ //
+ // run_tick() (the 1:1 path) is deliberately left untouched so the
+-// FIXED_TIMESTEP=0 default path stays byte-identical to wave-56; this
++// FIXED_TIMESTEP=0 killswitch path stays byte-identical to wave-56; this
+ // function replicates run_tick()'s essential per-frame machinery
+ // (update_fps / the flipacceltime flip path / runFade / heartbeat /
+ // TAS auto-exit) rather than refactoring run_tick().
+-- 
+2.47.3
+
