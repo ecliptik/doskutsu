@@ -16,35 +16,35 @@ A few rules apply to all of them:
   SHELL=C:\DOS\COMMAND.COM /E:1024 /P
   ```
 
-The defaults are tuned for the reference PC. You only need this file if you want to change the music, fix the game speed, or work around a hardware quirk.
+The defaults are tuned for the reference PC. This file matters only for changing the music, fixing the game speed, or working around a hardware quirk.
 
 ---
 
 ## Game speed and fidelity
 
-| Variable | Values | Default | Effect |
-|---|---|---|---|
-| `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP` | `0`, `1` | `0` | `1` runs game logic at a fixed 50 Hz, decoupled from the frame rate, so the game plays at its authored speed instead of slowing down with the frame rate. See [50 Hz without 50 fps](../README.md#50-hz-without-50-fps). |
-| `SDL_HINT_DOSKUTSU_PERF_MODE` | `0`, `1`, `2` | `0` | Performance Mode - trades render detail for frame rate. `1` drops decorative foreground detail (collision and slope tiles are always kept); `2` is currently the same as `1`. |
+| Variable | Values | Default | Effect | FPS impact |
+|---|---|---|---|---|
+| `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP` | `0`, `1` | `0` | `1` runs game logic at a fixed 50 Hz, decoupled from the frame rate, so the game plays at its authored speed instead of slowing down with the frame rate. See [Fixed-Timestep mode](../README.md#fixed-timestep-mode). | None - changes game speed, not frame rate |
+| `SDL_HINT_DOSKUTSU_PERF_MODE` | `0`, `1`, `2` | `0` | Performance Mode - trades render detail for frame rate. `1` drops decorative foreground detail (collision and slope tiles are always kept); `2` is currently the same as `1`. | Minimal - the level-1 cuts measured flat on the reference PC |
 
 ```
 SET SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=1   REM play at the correct 50 Hz game speed
 SET SDL_HINT_DOSKUTSU_PERF_MODE=1        REM drop decorative foreground detail
 ```
 
-**Performance:** `FIXED_TIMESTEP` does not change the frame rate - it changes game *speed*, so movement and timers run correctly at ~30 fps instead of in slow motion. `PERF_MODE=1`'s cuts measured flat on the reference PC; the visible change is a flatter depth look, with little measurable fps gain there. Both default-OFF; both leave the faithful render untouched when off.
+`FIXED_TIMESTEP` does not change the frame rate - it changes game *speed*, so movement and timers run correctly at ~30 fps instead of in slow motion. `PERF_MODE=1`'s cuts measured flat on the reference PC; the visible change is a flatter depth look. Both are default-OFF and leave the faithful render untouched when off.
 
 ---
 
 ## Audio
 
-| Variable | Values | Default | Effect |
-|---|---|---|---|
-| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `opl3`, `organya`, `wb` | `opl3` | Music synthesizer. `opl3`: the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: a WaveBlaster daughterboard. |
-| `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi`, `orgmid` | `wiimidi` | Which MIDI set the `opl3` / `wb` backends play. `wiimidi`: the WiiWare arrangement. `orgmid`: the Hart legacy `.mid` set. |
-| `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | unset | Picks an `org2mid`-converted General MIDI variant. |
-| `SDL_HINT_DOSKUTSU_AUDIO_TIER2` | `0` (to disable) | on | On (default): 11025 Hz mono audio. `=0`: 22050 Hz stereo, the original 2004 audio quality. |
-| `SDL_AUDIO_DEVICE_SAMPLE_FRAMES` | frame count | `1024` | Audio chunk size. Larger values cost less CPU but add SFX latency; smaller values do the reverse. |
+| Variable | Values | Default | Effect | FPS impact |
+|---|---|---|---|---|
+| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `opl3`, `organya`, `wb` | `opl3` | Music synthesizer. `opl3`: the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: a WaveBlaster daughterboard. | `organya` is ~9 fps slower than MIDI; `opl3` / `wb` run music off the CPU |
+| `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi`, `orgmid` | `wiimidi` | Which MIDI set the `opl3` / `wb` backends play. `wiimidi`: the WiiWare arrangement. `orgmid`: the Hart legacy `.mid` set. | None |
+| `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | unset | Picks an `org2mid`-converted General MIDI variant. | None |
+| `SDL_HINT_DOSKUTSU_AUDIO_TIER2` | `0` (to disable) | on | On (default): 11025 Hz mono audio. `=0`: 22050 Hz stereo, the original 2004 audio quality. | `=0` costs ~11 fps in music-heavy scenes |
+| `SDL_AUDIO_DEVICE_SAMPLE_FRAMES` | frame count | `1024` | Audio chunk size. Larger values cost less CPU but add SFX latency; smaller values do the reverse. | Minor - larger values cost slightly less CPU |
 
 ```
 SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya   REM the original software synth (slower)
@@ -52,40 +52,40 @@ SET SDL_HINT_DOSKUTSU_AUDIO_TIER2=0           REM full 22050 Hz stereo audio
 SET SDL_AUDIO_DEVICE_SAMPLE_FRAMES=2048       REM larger ring; saves CPU on slow hardware
 ```
 
-**Performance:** the `opl3` and `wb` backends play music on dedicated sound hardware, off the CPU. `organya` mixes every audio tick on the CPU and runs roughly 9 fps slower on a Pentium - it is the exact 2004 sound, at a cost. `AUDIO_TIER2=0` restores full-quality audio but costs about 11 fps in music-heavy scenes. Raising `SDL_AUDIO_DEVICE_SAMPLE_FRAMES` (try `2048`) helps if you hear audio stutter on slow hardware.
+The `opl3` and `wb` backends play music on dedicated sound hardware, off the CPU. `organya` mixes every audio tick on the CPU - it is the exact 2004 sound, at a cost. `AUDIO_TIER2=0` restores full-quality audio but costs frame rate in music-heavy scenes. Raising `SDL_AUDIO_DEVICE_SAMPLE_FRAMES` (try `2048`) helps with audio stutter on slow hardware.
 
 ---
 
 ## Input
 
-| Variable | Values | Default | Effect |
-|---|---|---|---|
-| `DOSKUTSU_USE_JOYSTICK` | `0`, `1` | `0` | `1` opens the joystick / gamepad subsystem. |
+| Variable | Values | Default | Effect | FPS impact |
+|---|---|---|---|---|
+| `DOSKUTSU_USE_JOYSTICK` | `0`, `1` | `0` | `1` opens the joystick / gamepad subsystem. | `=1` costs ~80 ms per frame on Sound Blaster gameports - severe |
 
 ```
-SET DOSKUTSU_USE_JOYSTICK=1   REM only if a real joystick is plugged into the gameport
+SET DOSKUTSU_USE_JOYSTICK=1   REM only when a real joystick is on the gameport
 ```
 
-**Performance:** leave this off unless you have a physical joystick. On Sound Blaster cards the gameport is detected even with nothing plugged in, and polling it through the BIOS costs about 80 ms per frame on the reference PC - a severe frame-rate hit. Keyboard-only play is fully supported and is the default.
+Leave this off unless a physical joystick is connected. On Sound Blaster cards the gameport is detected even with nothing plugged in, and polling it through the BIOS costs about 80 ms per frame on the reference PC - a severe frame-rate hit. Keyboard-only play is fully supported and is the default.
 
 ---
 
 ## Compatibility fallbacks
 
-These restore older code paths. The default behavior is correct on the tested hardware; set one of these to `0` only if you see a visual artifact or hear audio trouble on your own hardware.
+These restore older code paths. The default behavior is correct on the tested hardware; set one of these only to work around a visual artifact or audio trouble on a specific machine.
 
-| Variable | Set to | Effect when set |
-|---|---|---|
-| `SDL_HINT_DOSKUTSU_DIRTY_RECTS` | `0` | Disables dirty-rectangle rendering. |
-| `SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8` | `0` | Disables indexed (8bpp) rendering; falls back to RGB565. |
-| `SDL_HINT_DOSKUTSU_DIRECT_VESA` | `0` | Disables the direct-to-VRAM present path. |
-| `SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD` | `1` | Restores the original per-pump thread yield; try this if you hear audio stutter. |
+| Variable | Set to | Effect when set | FPS impact |
+|---|---|---|---|
+| `SDL_HINT_DOSKUTSU_DIRTY_RECTS` | `0` | Disables dirty-rectangle rendering. | Costs frame rate - disables a default optimization |
+| `SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8` | `0` | Disables indexed (8bpp) rendering; falls back to RGB565. | Costs frame rate - disables a default optimization |
+| `SDL_HINT_DOSKUTSU_DIRECT_VESA` | `0` | Disables the direct-to-VRAM present path. | About -0.27 fps |
+| `SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD` | `1` | Restores the original per-pump thread yield; use it if audio stutters. | Costs frame rate - restores a per-frame thread yield |
 
 ```
-SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0   REM only if colors look wrong on your card
+SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0   REM only if colors render wrong on a specific card
 ```
 
-**Performance:** each of these turns *off* an optimization that is on by default, so setting one costs frame rate. They exist for hardware that the optimization does not suit, not for tuning - on the reference PC the defaults are the fast path.
+Each of these turns *off* an optimization that is on by default, so setting one costs frame rate. They exist for hardware that the optimization does not suit, not for tuning - on the reference PC the defaults are the fast path.
 
 ---
 

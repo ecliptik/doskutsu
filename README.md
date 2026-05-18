@@ -59,7 +59,7 @@ MIDI plays through a hardware synthesizer, off the CPU. Two settings shape it:
 
 ## Game Assets
 
-**DOSKUTSU does not include any Cave Story game data.** The binary you build from this repository plays nothing on its own. Users supply their own copy of the 2004 EN freeware assets, extracted from the canonical `Doukutsu.exe`.
+**DOSKUTSU does not include any Cave Story game data.** The binary built from this repository plays nothing on its own. Users supply their own copy of the 2004 EN freeware assets, extracted from the canonical `Doukutsu.exe`.
 
 [docs/ASSETS.md](./docs/ASSETS.md) is the canonical, complete asset procedure - follow it start to finish; it covers fetching the freeware bundle and extracting the full data tree (maps, sprites, music, SFX) plus the expected directory layout. The two scripts below automate only the Pixtone-SFX slice of that workflow; running them alone does not produce a playable `DATA\` tree:
 
@@ -72,25 +72,23 @@ The same posture applies as the broader Cave Story port community ([NXEngine-evo
 
 ## Requirements
 
-DOSKUTSU targets two hardware tiers.
-
-**Tier 1 - Reference (tested).** The configuration every real-hardware measurement is taken on:
+**Recommended**
 
 - CPU: Pentium 75 MHz or faster
-- RAM: 16 MB or more
-- Video: VESA 1.2+ with 320x240 support (a software VESA driver such as [UniVBE](https://en.wikipedia.org/wiki/UniVBE) covers cards whose firmware lacks it)
+- RAM: 16 MB
+- Video: VESA 1.2+ with 320x240 support
 - Sound: Sound Blaster 16 or compatible
 - OS: MS-DOS 6.22 or compatible
-- Disk: ~10 MB free
+- Disk: 10 MB free
 
-**Tier 2 - Minimum (designed for, not yet tested on hardware):**
+**Minimum**
 
 - CPU: 486DX2-66 with FPU
-- RAM: 8 MB or more
+- RAM: 8 MB
 - Video: VESA 1.2+
-- Sound: any SB16-compatible
-
-Three hard floors: an FPU is required (DJGPP emits x87 instructions, so a 486SX needs a 487 coprocessor); video must be VESA 1.2+ with a linear framebuffer, which the SDL3 DOS backend depends on; and the DOS environment must host CWSDPMI's DPMI 0.9 service.
+- Sound: Sound Blaster 16 or compatible
+- OS: MS-DOS 6.22 or compatible
+- Disk: 10 MB free
 
 ---
 
@@ -102,18 +100,16 @@ Three hard floors: an FPU is required (DJGPP emits x87 instructions, so a 486SX 
 C:\DOSKUTSU\
   DOSKUTSU.EXE     the game
   CWSDPMI.EXE      the DPMI host - must sit beside DOSKUTSU.EXE
-  DATA\            Cave Story assets, extracted by you (see Game Assets)
+  DATA\            Cave Story assets, user-extracted (see Game Assets)
 ```
 
 Quick setup:
 
 1. Get `DOSKUTSU.EXE` - build it ([Building](#building)) or take it from a release bundle.
-2. Get `CWSDPMI.EXE`. You do not download this yourself: the build tooling fetches it (from its upstream, at a pinned checksum) via `make fetch-binaries`, which `make install` and `make dist` run automatically. Release bundles already include it.
+2. Get `CWSDPMI.EXE`. The build tooling fetches it automatically (from its upstream, at a pinned checksum) via `make fetch-binaries`, which `make install` and `make dist` run; it is not a manual download. Release bundles already include it.
 3. Extract the Cave Story data into `DATA\` ([Game Assets](#game-assets)).
 4. Copy the whole directory to the DOS machine.
 5. The DOS machine needs a standard DJGPP-compatible boot environment: `HIMEM.SYS` loaded, `NOEMS`, a SB16-compatible `BLASTER` variable set, and a VESA 1.2+ video BIOS (a software VESA driver works as a fallback).
-
-`make install CF=...` writes this layout straight to a mounted card, and `make dist` packages it as a zip.
 
 Run it from the game directory:
 
@@ -133,8 +129,6 @@ The title screen appears within a few seconds. Controls follow NXEngine-evo's de
 | W | Map |
 | Escape | Pause menu |
 | F11 | Toggle fullscreen (no-op on DOS; always fullscreen) |
-
-Save files live in `DATA\Profile.dat` alongside the binary.
 
 ---
 
