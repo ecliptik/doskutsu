@@ -195,8 +195,6 @@ Each component below is listed with its purpose, license, and whether it links i
 | [SDL3_image](https://github.com/libsdl-org/SDL_image) | Image loading | [zlib](https://github.com/libsdl-org/SDL_image/blob/main/LICENSE.txt) | Yes |
 | [DJGPP](https://www.delorie.com/djgpp/) libc | 32-bit DOS C runtime, by DJ Delorie | [GPL + runtime exception](https://www.delorie.com/djgpp/v2faq/faq11_2.html) | Yes - the exception permits static linking |
 | [CWSDPMI](https://www.delorie.com/pub/djgpp/current/v2misc/) | DPMI host, by Charles W. Sandmann | [freeware, redistributable](./vendor/cwsdpmi/cwsdpmi.doc) | No - ships alongside as a separate program |
-| [LFNDOS](./vendor/lfndos/COPYING) | Long-filename TSR | GPLv2 | No - ships alongside |
-| [DOSLFN](./vendor/doslfn/doslfn.txt) | Long-filename TSR | freeware with sources | No - ships alongside |
 | [Cave Story](https://www.cavestory.org/) game data | Maps, sprites, music, and SFX, by Daisuke "Pixel" Amaya (2004) | [freeware, Pixel's 2004 terms](https://www.cavestory.org/) | No - you extract it yourself; not redistributed here |
 
 Built with the [DJGPP](https://www.delorie.com/djgpp/) toolchain (installed via [build-djgpp](https://github.com/andrewwutw/build-djgpp) by Andrew Wu), tested with [DOSBox-X](https://dosbox-x.com/) and real hardware.
