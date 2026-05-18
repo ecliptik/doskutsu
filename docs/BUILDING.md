@@ -211,7 +211,7 @@ Both configs are otherwise identical: 48 MB RAM, SB16 on IRQ 5 / DMA 1/5 / base 
 
 ### Smoke-gate banner-emit verification
 
-`tests/run-gameplay-smoke.sh` runs DOSBox-X at parity cycles, captures the engine + SDL runtime logs, and asserts that each patch's boot banner string was actually emitted at runtime -- not just that the string is embedded in the binary. This is the canonical pre-ship gate for any cross-build.
+`tests/run-gameplay-smoke.sh` runs DOSBox-X at parity cycles, captures the engine + SDL runtime logs, and asserts that each patch's boot banner string was actually emitted at runtime. A string embedded in the binary does not prove its code path ran; emission into the runtime log does. This is the canonical pre-ship gate for any cross-build.
 
 **Why two gates instead of one.** `strings build/doskutsu.exe | grep <banner>` proves the literal compiled into the binary; it does not prove the code path that emits the banner runs. Wave-38 shipped a binary where `patches/nxengine-evo/0138-*.patch` was silently dropped during the cross-build (stale `.obj` linked against post-patch source); the strings-grep gate false-passed because patch 0138 happened to share an env-var name with patch SDL/0059, which DID apply. The runtime banner-emit gate is the direct detector for that failure mode: if the consumer code path is missing or never invoked, the banner doesn't fire, and the gate fails.
 

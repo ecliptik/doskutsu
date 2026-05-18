@@ -73,8 +73,8 @@ WRONG for filtered backports.
 - `strings build/doskutsu.exe | grep -c <patch-specific-string>` for
   two-witness verification of the backport-target patch.
 - `make tas-smoke` (or equivalent functional smoke for the patch
-  under test) confirms the backport is functionally green, not just
-  built.
+  under test) confirms the backport is functionally green -- the
+  patched code path runs correctly, beyond a clean compile.
 
 **Cross-incident learning** (wave-43 archaeology, 2026-05-14):
 patch 0135's hooks (input_poll, run_tick tick_count static, SoundManager::
