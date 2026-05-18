@@ -10,7 +10,7 @@ It exists for preservation and for the engineering challenge of running a 2004 g
 <a href="#status">Status</a> | <a href="#game-assets">Game Assets</a> | <a href="#requirements">Requirements</a> | <a href="#usage">Usage</a> | <a href="#building">Building</a> | <a href="#boot-profile">Boot Profile</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
 </p>
 
-### DOSBox-X
+### Screenshots
 
 | | |
 |:---:|:---:|
