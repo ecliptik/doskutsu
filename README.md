@@ -33,7 +33,9 @@ Frame rate depends on the hardware and how music is played:
 |---|---|---|
 | Pentium-class (reference PC) | MIDI (OPL3 or WaveBlaster) | ~30 fps |
 | Pentium-class (reference PC) | Organya software synth | ~21 fps |
-| 486-class | any | designed for; not yet measured on hardware |
+| 486-class (Am5x86-133) | MIDI (OPL3) | ~23 fps, playable |
+| 486-class (486DX2-66) | MIDI (OPL3) | ~12 fps, playable but choppy |
+| 486-class (486DX2-50) | MIDI (OPL3) | ~8 fps, marginal - runs slightly slow |
 
 Cave Story runs at 50 fps; the reference PC's hardware limits fully-detailed rendering to about 30 fps. It still plays at the correct 50 Hz speed through [Fixed-Timestep mode](#fixed-timestep-mode), which advances game logic on a fixed 50 Hz clock independent of the render rate.
 

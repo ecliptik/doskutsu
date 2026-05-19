@@ -95,7 +95,7 @@ foundation across the wave 18-63 arc.
 ## [0.1.0] -- 2026-04-30 -- first playable release
 
 **Cave Story running on vintage Pentium-class DOS hardware.** Real-HW title screen
-at **25.6 fps** on the reference PC (Pentium OverDrive 83 MHz / Cirrus CL-GD5434 /
+at **25.6 fps** on the reference PC (Pentium OverDrive 83 MHz / Cirrus CL-GD5430 /
 SB16) -- a 54x improvement over the 0.47 fps first-boot baseline. Music, audio,
 keyboard input, the title screen, and the opening cutscene render correctly.
 
