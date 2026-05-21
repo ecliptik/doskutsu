@@ -1,0 +1,365 @@
+From 876a2e7e1dfd901d34517749513b8b9d01083a07 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 18 May 2026 22:03:55 -0700
+Subject: [PATCH] perf phase 11 patch 0160 -- SFX-stall instrumentation
+ (486-campaign Bug 1, parts A + B-1)
+
+486-class campaign Bug 1: every sound-effect trigger causes a
+~0.3-0.45 s flip hitch, on all three 486 configs including the fastest
+(Am5x86) -- the long-standing 0.1.0 "audio chop in effect-heavy scenes"
+issue. The campaign could quantify the hitch but not place it: the
+phase-timing had no per-SFX-trigger marker, and the engine-thread
+audio-servicing call (runFade) fell into the un-bracketed "misc"
+remainder of the audio/engine split. This patch adds the engine-side
+instrumentation to localize the stall on the next real-HW run, per
+docs/internal/SFX-STALL-INSTRUMENTATION-CONTRACT.md. Instrumentation
+only -- no behavior change.
+
+Part A -- per-SFX-trigger marker. SfxTriggerTimer (diagnostic_timers.h)
+brackets SoundManager::playSfx / playSfxResampled, recording each
+trigger's wall-clock call duration, the SFX id, and the flip it fired
+on. Records accumulate in a per-100-flip block (a 256-entry call_us
+sample array + the worst trigger's flip/id); _maybe_flush_sfx_stat_audit
+emits one [sfx-stat block=N triggers=T call_us min/med/p95/max
+busiest_flip=F max_sfx_id=ID] line per block. A large call_us places
+the hitch inside the trigger call (Pixtone::play's synchronous
+SDL_AudioStream create + resample); a small call_us with a slow
+same/next flip places it downstream.
+
+Part B-1 -- the audio-service bucket. AudioServiceTimer brackets
+SoundManager::runFade() at its run_tick / run_tick_fixed call sites and
+accumulates audio_service_*; _maybe_flush_audio_engine_split_audit emits
+audio_service_ms_x10 alongside the existing audio_mixer / engine_tick
+fields. This carves the last engine-thread audio call out of the
+derived "misc" remainder. Every pre-0160 field keeps its name and
+relative order, so the existing parse is preserved.
+
+Part B-2 -- no engine hunk. The contract asked to bracket a Pixtone/SFX
+stream callback if one exists engine-side. It does not: Pixtone drives
+SFX through SDL3_mixer's MIX_* track pool; the only Pixtone-side
+callback is a MIX_TrackStoppedCallback (fires on track completion, not
+per-mix). The SFX mix runs inside SDL3_mixer + the SDL-DOS audio
+callback -- SDL-side. Part C (sdl-engine) covers it.
+
+All hooks gate on the existing cached FINE_INSTR bool
+(engine_tick_fine_instr_active(), SDL_HINT_DOSKUTSU_FINE_INSTR). No new
+env var. No boot banner. With FINE_INSTR=0 the SfxTriggerTimer /
+AudioServiceTimer constructors take no SDL_GetTicksNS reading and record
+nothing, the block counts stay 0, and the emits early-return -- the
+FINE_INSTR=0 path is a behavioral no-op, byte-identical in behavior to
+v1.0.0. Aggregation is once per 100-flip block (no per-trigger fsync,
+no per-trigger getenv), matching the wave-58 [ft-accum-stat] pattern.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h |  67 ++++++++++++++++++
+ src/graphics/Renderer.cpp     | 127 ++++++++++++++++++++++++++++++++--
+ src/main.cpp                  |  14 +++-
+ src/sound/SoundManager.cpp    |   6 ++
+ 4 files changed, 208 insertions(+), 6 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 9593bb8..73487e4 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -35,4 +35,11 @@ extern std::uint64_t g_engine_tick_accum_ns_global;
+ extern int g_engine_tick_count_block;
+ extern int g_engine_tick_count_global;
++// patch 0160 (SFX-stall instrumentation, part B-1): the audio-service
++// (SoundManager::runFade) bucket -- same storage shape as audio_mix /
++// engine_tick. Bumped by AudioServiceTimer; defined in Renderer.cpp.
++extern std::uint64_t g_audio_service_accum_ns_block;
++extern std::uint64_t g_audio_service_accum_ns_global;
++extern int g_audio_service_count_block;
++extern int g_audio_service_count_global;
+ 
+ // RAII helper for the Organya stream callback (called by SDL3 audio
+@@ -109,4 +116,64 @@ struct EngineTickTimer
+ bool engine_tick_fine_instr_active();
+ 
++// DOS-PORT (patch 0160, SFX-stall instrumentation contract -- part A):
++// per-SFX-trigger marker. sfx_trigger_record() is the NXE::Diag-facing
++// forwarder (defined at the end of Renderer.cpp, mirroring the
++// engine_tick_fine_instr_active wrapper) into the per-100-flip
++// [sfx-stat] storage in Renderer.cpp's NXE::Graphics audit cluster.
++void sfx_trigger_record(int sfx_id, std::uint64_t call_ns);
++
++// RAII bracket for SoundManager::playSfx / playSfxResampled -- place at
++// the top of the call body. FINE_INSTR-gated: the constructor reads the
++// cached engine_tick_fine_instr_active() static-const bool; with
++// FINE_INSTR=0 it takes no SDL_GetTicksNS reading and the destructor
++// records nothing -- a behavioral no-op, no per-trigger cost. When on,
++// the destructor hands (sfx_id, call_ns) to sfx_trigger_record().
++struct SfxTriggerTimer
++{
++  std::uint64_t t0;
++  int           sfx_id;
++  bool          on;
++  SfxTriggerTimer(int id)
++      : t0(0), sfx_id(id), on(engine_tick_fine_instr_active())
++  {
++    if (on)
++      t0 = SDL_GetTicksNS();
++  }
++  ~SfxTriggerTimer()
++  {
++    if (on)
++      sfx_trigger_record(sfx_id, SDL_GetTicksNS() - t0);
++  }
++};
++
++// DOS-PORT (patch 0160, SFX-stall instrumentation contract -- part B-1):
++// RAII bracket for the engine-thread audio-servicing call
++// (SoundManager::runFade) at its run_tick / run_tick_fixed call sites.
++// runFade was unbracketed -- it fell into the derived "misc" remainder
++// of the audio/engine split. This carves it into a named audio_service
++// bucket. FINE_INSTR-gated like SfxTriggerTimer; the audio/engine split
++// block emits audio_service_ms_x10 from the counters below (0 when
++// FINE_INSTR=0).
++struct AudioServiceTimer
++{
++  std::uint64_t t0;
++  bool          on;
++  AudioServiceTimer() : t0(0), on(engine_tick_fine_instr_active())
++  {
++    if (on)
++      t0 = SDL_GetTicksNS();
++  }
++  ~AudioServiceTimer()
++  {
++    if (!on)
++      return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_audio_service_accum_ns_block += dt;
++    g_audio_service_accum_ns_global += dt;
++    ++g_audio_service_count_block;
++    ++g_audio_service_count_global;
++  }
++};
++
+ // Sample-array storage (extern; defined in Renderer.cpp). Sized at 100
+ // to match the existing _flip_phase_block_size cadence.
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index f03689c..8ccf548 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -94,4 +94,11 @@ std::uint64_t g_engine_tick_accum_ns_global = 0;
+ int g_engine_tick_count_block = 0;
+ int g_engine_tick_count_global = 0;
++// patch 0160 (SFX-stall instrumentation, part B-1): audio-service
++// (runFade) bucket storage. Same shape as audio_mix / engine_tick;
++// extern-declared in Utils/diagnostic_timers.h, bumped by AudioServiceTimer.
++std::uint64_t g_audio_service_accum_ns_block = 0;
++std::uint64_t g_audio_service_accum_ns_global = 0;
++int g_audio_service_count_block = 0;
++int g_audio_service_count_global = 0;
+ 
+ // DOS-PORT (patch 0090, Phase 9 wave 20 W20B): engine-tick decomposition
+@@ -3277,4 +3284,86 @@ void _maybe_flush_phase_timing_audit()
+ }
+ 
++// DOS-PORT (patch 0160, SFX-stall instrumentation contract -- part A):
++// per-SFX-trigger marker. The SfxTriggerTimer bracket (diagnostic_-
++// timers.h) on SoundManager::playSfx / playSfxResampled hands each
++// trigger's wall-clock call cost to NXE::Diag::sfx_trigger_record (the
++// end-of-file forwarder), which calls _sfx_record_impl below.
++// _maybe_flush_sfx_stat_audit() emits one [sfx-stat] line per 100-flip
++// block. FINE_INSTR-gated at the SfxTriggerTimer constructor: with
++// SDL_HINT_DOSKUTSU_FINE_INSTR=0 nothing records, _sfx_trigger_count_-
++// block stays 0, and the emit early-returns -- a behavioral no-op.
++//
++// SFX_SAMPLE_CAP bounds the per-block call_us sample array. Triggers
++// past the cap still count toward _sfx_trigger_count_block (the
++// triggers= field stays exact) but are not sampled for the percentiles;
++// the emit appends " capped" when that happens.
++static const int SFX_SAMPLE_CAP = 256;
++static std::uint32_t _sfx_call_us_block[SFX_SAMPLE_CAP] = {0};
++static int           _sfx_sample_count_block  = 0;
++static int           _sfx_trigger_count_block = 0;
++static std::uint32_t _sfx_worst_call_us_block = 0;
++static int           _sfx_worst_flip_block    = 0;
++static int           _sfx_worst_id_block      = 0;
++
++// Record one SFX trigger. Reached on the game thread via the
++// NXE::Diag::sfx_trigger_record forwarder from the SfxTriggerTimer
++// destructor. call_ns is wall-clock time inside the playSfx call body.
++void _sfx_record_impl(int sfx_id, std::uint64_t call_ns)
++{
++  const std::uint32_t call_us = (std::uint32_t)(call_ns / 1000ull);
++  ++_sfx_trigger_count_block;
++  if (_sfx_sample_count_block < SFX_SAMPLE_CAP)
++    _sfx_call_us_block[_sfx_sample_count_block++] = call_us;
++  if (call_us >= _sfx_worst_call_us_block)
++  {
++    _sfx_worst_call_us_block = call_us;
++    _sfx_worst_flip_block    = _flip_total;
++    _sfx_worst_id_block      = sfx_id;
++  }
++}
++
++// Per-100-flip [sfx-stat] emit. Sibling of the other _maybe_flush_*
++// audits; called from flip(). min/med/p95/max of the block's per-trigger
++// call_us -- a tail-revealing distribution, since the stall is the tail
++// and a mean would hide it -- plus the single worst trigger's flip + SFX
++// id for cross-referencing against the per-flip timing.
++void _maybe_flush_sfx_stat_audit()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0) return;
++  if (_sfx_trigger_count_block == 0) return;
++
++  // Insertion-sort the captured samples (<= SFX_SAMPLE_CAP; once per
++  // 100 flips -- no STL dependency, matches the [ft-accum-stat] pattern).
++  const int n = _sfx_sample_count_block;
++  for (int i = 1; i < n; i++)
++  {
++    const std::uint32_t v = _sfx_call_us_block[i];
++    int j = i - 1;
++    while (j >= 0 && _sfx_call_us_block[j] > v)
++    {
++      _sfx_call_us_block[j + 1] = _sfx_call_us_block[j];
++      --j;
++    }
++    _sfx_call_us_block[j + 1] = v;
++  }
++  const std::uint32_t us_min = (n > 0) ? _sfx_call_us_block[0]              : 0;
++  const std::uint32_t us_med = (n > 0) ? _sfx_call_us_block[n / 2]          : 0;
++  const std::uint32_t us_p95 = (n > 0) ? _sfx_call_us_block[(n * 95) / 100] : 0;
++  const std::uint32_t us_max = (n > 0) ? _sfx_call_us_block[n - 1]          : 0;
++
++  LOG_INFO("[sfx-stat block={} triggers={} call_us min={} med={} p95={} "
++           "max={} busiest_flip={} max_sfx_id={}{}]",
++           _dc_block_idx, _sfx_trigger_count_block,
++           us_min, us_med, us_p95, us_max,
++           _sfx_worst_flip_block, _sfx_worst_id_block,
++           (_sfx_trigger_count_block > SFX_SAMPLE_CAP) ? " capped" : "");
++
++  _sfx_sample_count_block  = 0;
++  _sfx_trigger_count_block = 0;
++  _sfx_worst_call_us_block = 0;
++  _sfx_worst_flip_block    = 0;
++  _sfx_worst_id_block      = 0;
++}
++
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
+ // split audit. Reads counters bumped by AudioMixerTimer (Organya stream
+@@ -3303,4 +3392,10 @@ void _maybe_flush_audio_engine_split_audit()
+                     / ((std::uint64_t)_dc_tally_every_flips * 1000000ull))
+       : 0;
++  // patch 0160 (SFX-stall instrumentation, part B-1): the audio-service
++  // (runFade) per-flip average -- carved out of the derived "misc".
++  const long long as_avg_ms_x10 = _dc_tally_every_flips
++      ? (long long)((NXE::Diag::g_audio_service_accum_ns_block * 10ull)
++                    / ((std::uint64_t)_dc_tally_every_flips * 1000000ull))
++      : 0;
+   // Per-call averages in microseconds (x10 = one-decimal).
+   const long long am_per_call_us_x10 = (NXE::Diag::g_audio_mix_count_block > 0)
+@@ -3312,15 +3407,26 @@ void _maybe_flush_audio_engine_split_audit()
+                     / ((std::uint64_t)NXE::Diag::g_engine_tick_count_block * 1000ull))
+       : 0;
++  const long long as_per_call_us_x10 = (NXE::Diag::g_audio_service_count_block > 0)
++      ? (long long)((NXE::Diag::g_audio_service_accum_ns_block * 10ull)
++                    / ((std::uint64_t)NXE::Diag::g_audio_service_count_block * 1000ull))
++      : 0;
+ 
++  // patch 0160 (part B-1): audio_service_* fields appended -- every
++  // pre-0160 field keeps its name + relative order so the W20B parse is
++  // not broken; audio_service_ms_x10 reads 0 on a FINE_INSTR=0 run.
+   LOG_INFO("audio/engine split block {}: audio_mixer_calls={} "
+            "audio_mixer_ms_x10={} engine_tick_calls={} engine_tick_ms_x10={} "
+-           "(per-flip avg; per-call us_x10: audio_mix={} engine_tick={}; "
+-           "global ns: audio_mix={} engine_tick={})",
++           "audio_service_calls={} audio_service_ms_x10={} "
++           "(per-flip avg; per-call us_x10: audio_mix={} engine_tick={} "
++           "audio_service={}; global ns: audio_mix={} engine_tick={} "
++           "audio_service={})",
+            _dc_block_idx,
+            NXE::Diag::g_audio_mix_count_block, am_avg_ms_x10,
+            NXE::Diag::g_engine_tick_count_block, et_avg_ms_x10,
+-           am_per_call_us_x10, et_per_call_us_x10,
++           NXE::Diag::g_audio_service_count_block, as_avg_ms_x10,
++           am_per_call_us_x10, et_per_call_us_x10, as_per_call_us_x10,
+            (long long)NXE::Diag::g_audio_mix_accum_ns_global,
+-           (long long)NXE::Diag::g_engine_tick_accum_ns_global);
++           (long long)NXE::Diag::g_engine_tick_accum_ns_global,
++           (long long)NXE::Diag::g_audio_service_accum_ns_global);
+ 
+   NXE::Diag::g_audio_mix_accum_ns_block = 0;
+@@ -3328,4 +3434,6 @@ void _maybe_flush_audio_engine_split_audit()
+   NXE::Diag::g_engine_tick_accum_ns_block = 0;
+   NXE::Diag::g_engine_tick_count_block = 0;
++  NXE::Diag::g_audio_service_accum_ns_block = 0;
++  NXE::Diag::g_audio_service_count_block = 0;
+ }
+ 
+@@ -5252,4 +5360,7 @@ void Renderer::flip()
+   // helpers in Organya.cpp + game.cpp).
+   _maybe_flush_audio_engine_split_audit();
++  // patch 0160 (SFX-stall instrumentation, part A): per-100-flip
++  // [sfx-stat] block (per-trigger playSfx call-cost distribution).
++  _maybe_flush_sfx_stat_audit();
+ 
+   // DOS-PORT (patch 0071, Phase 9 wave 15): per-frame bookkeeping +
+@@ -7933,4 +8044,12 @@ void Renderer::drawSpotLight(int x, int y, Object* o, int r, int g, int b, int u
+ namespace NXE { namespace Diag {
+ bool engine_tick_fine_instr_active() { return ::NXE::Graphics::_abl_fine_instr(); }
++// patch 0160 (SFX-stall instrumentation, part A): NXE::Diag forwarder
++// into the NXE::Graphics [sfx-stat] recorder -- mirrors the
++// engine_tick_fine_instr_active wrapper directly above, keeping the
++// SfxTriggerTimer in diagnostic_timers.h decoupled from NXE::Graphics.
++void sfx_trigger_record(int sfx_id, std::uint64_t call_ns)
++{
++  ::NXE::Graphics::_sfx_record_impl(sfx_id, call_ns);
++}
+ }}
+ 
+diff --git a/src/main.cpp b/src/main.cpp
+index fa5c9be..e968fbf 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -241,5 +241,10 @@ static inline void run_tick()
+   }
+ 
+-  SoundManager::getInstance()->runFade();
++  {
++    // patch 0160 (SFX-stall instrumentation, part B-1): bracket the
++    // engine-thread audio-servicing call. FINE_INSTR-gated.
++    NXE::Diag::AudioServiceTimer _ast;
++    SoundManager::getInstance()->runFade();
++  }
+   if (log_beat) LOG_INFO("run_tick #{}: heartbeat (loop alive)", tick_count);
+ 
+@@ -443,5 +448,10 @@ static void run_tick_fixed(void)
+   }
+ 
+-  SoundManager::getInstance()->runFade();
++  {
++    // patch 0160 (SFX-stall instrumentation, part B-1): bracket the
++    // engine-thread audio-servicing call. FINE_INSTR-gated.
++    NXE::Diag::AudioServiceTimer _ast;
++    SoundManager::getInstance()->runFade();
++  }
+ 
+   if ((g_tick_count % 300) == 0)
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 8604e47..925712b 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -874,4 +874,7 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+     return;
+ 
++  // patch 0160 (SFX-stall instrumentation, part A): per-trigger marker.
++  // FINE_INSTR-gated; a no-op when SDL_HINT_DOSKUTSU_FINE_INSTR=0.
++  NXE::Diag::SfxTriggerTimer _stt((int)snd);
+   Pixtone::getInstance()->stop((int32_t)snd);
+   Pixtone::getInstance()->play(-1, (int32_t)snd, loop);
+@@ -883,4 +886,7 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
+     return;
+ 
++  // patch 0160 (SFX-stall instrumentation, part A): per-trigger marker.
++  // FINE_INSTR-gated; a no-op when SDL_HINT_DOSKUTSU_FINE_INSTR=0.
++  NXE::Diag::SfxTriggerTimer _stt((int)snd);
+   Pixtone::getInstance()->playResampled(-1, (int32_t)snd, -1, percent);
+ }
+-- 
+2.47.3
+

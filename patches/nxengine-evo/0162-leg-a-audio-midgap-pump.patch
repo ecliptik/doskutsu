@@ -1,0 +1,286 @@
+From ceb0b81aab7120b5fb6bf960c1b24fb1dd009cf8 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 19 May 2026 14:44:29 -0700
+Subject: [PATCH] perf phase 11 patch 0162-v2 -- Leg A audio mid-gap pump v2
+ (486-campaign Bug 1; v1-iter response)
+
+486-campaign Bug 1 -- the operator's "~1-second freeze" with audio
+cutout when entering a stage on a DX2-66. flush-instr #75 root-caused
+it as gap-driven: during a stage load the main thread is blocked in
+fread (tileset, map, entities, script), the SB16 IRQ-5 ISR keeps
+draining the audio ring at ~43 Hz throughout, and the cooperative
+audio thread cannot refill -- it runs only when the main thread
+yields, which fread does not do. A stage load longer than the ring
+depth (~372 ms) underruns the ring and audio cuts out.
+
+v1 (the prior cut of this patch) inserted six MIDGAP_PUMP() calls in
+load_stage between sub-loaders to top up the ring on otherwise-idle
+CPU. The v1 iter (per 486-CLASS-CAMPAIGN-FINDINGS sec.17) showed two
+regressions: (a) freeze elimination failed -- v1's once-per-seam pump
+did not eliminate the >500 ms Mimiga curmap=1005 entry spike; (b) TAS
+desync -- PLAY1 (pumps active) missed Shack while PLAY0 (killswitch=0,
+no pumps) reached all 5 stages, because the pumps' wall-clock cost
+during stage loads cascaded through the FIXED_TIMESTEP accumulator:
+now_ns - last_ns grew, accum_ns gained extra ticks, and the catch-up
+loop ran more tick_state ticks than the TAS recording expected.
+
+v2 ships three changes, combined into a single amended 0162:
+
+FIX 1 -- pump until ring-full. The MIDGAP_PUMP macro wraps the pump
+in `while (SDL_DOSAudioPump()) { }`. SDL_DOSAudioPump (SDL/0067-v2's
+amended bool-return ABI) returns true while there is room for another
+chunk and false when the ring is full or no-op. Each seam now tops up
+to FULL instead of one chunk. Addresses v1's regression (a).
+
+FIX 2 -- FIXED_TIMESTEP accumulator freeze/thaw across load_stage.
+Promotes the run_tick_fixed function-local statics accum_ns, last_ns,
+ft_inited to file-scope in main.cpp (collision-clean per grep -- those
+identifiers are referenced only inside run_tick_fixed; no other src/
+TU uses them); adds ft_accumulator_freeze() and ft_accumulator_thaw()
+helpers at file scope (freeze records accum_ns to a snapshot slot;
+thaw restores accum_ns and resets last_ns to SDL_GetTicksNS() so the
+load wall-clock is invisible to the next delta). map.cpp's load_stage
+declares an FtAccumulatorGuard RAII struct at function entry; its
+destructor fires on every return path (5 error early-returns + 1
+success-path final return), so the accumulator is never left frozen.
+Both freeze and thaw are gated on midgap_pump_active() -- when the
+killswitch is off (the v2 default; see FIX 3), the guard is a no-op
+pair and the FT=1 path is byte-identical to v1.0.0 / pre-Leg-A
+(matches the v1 iter's PLAY0-clean baseline per 486-CLASS-CAMPAIGN-
+FINDINGS sec.17 asymmetry). Addresses v1's regression (b).
+
+FIX 3 -- killswitch default flip ON -> OFF. The killswitch parse
+becomes (e[0]=='1')?1:0 (opt-in form; was (e[0]=='0')?0:1). Banner
+text flips to "ENABLED (opt-in)" / "DISABLED (default)". Per flush-
+instr's safer-landing recommendation: the lever ships opt-in until
+the v2 iter validates that FIX 1 + FIX 2 eliminate both regressions;
+v3 will promote back to default-ON if so. While default-OFF, the
+FT=1 default path runs the v1.0.0 behavior exactly (no pumps, no
+freeze/thaw) -- preserving the operator's TAS-replay baseline.
+
+The 6 MIDGAP_PUMP() insertion sites in load_stage (line 970, after-
+971, after-980, after-984, after-988, after-992) are unchanged from
+v1; the macro semantics are what changed (FIX 1). The FtAccumulatorGuard
+is added once at the top of load_stage.
+
+SDL_DOSAudioPump's safety properties (no SDL renderer touch, no
+SDL_PumpEvents, no engine-callback re-entry beyond Pixtone's scalar
+slot bookkeeping) are unchanged. load_stage runs once per stage entry
+(no multi-run amplification, no wave-36 trap risk).
+
+Two-file edit: vendor/nxengine-evo/src/main.cpp (file-scope promotion
+of accum_ns / last_ns / ft_inited + ft_accumulator_freeze/thaw
+helpers) and vendor/nxengine-evo/src/map.cpp (the v2 helper-block
+rewrite + MIDGAP_PUMP macro change + FtAccumulatorGuard RAII struct +
+the FtAccumulatorGuard declaration at load_stage entry).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/main.cpp |  38 ++++++++++++++++++--
+ src/map.cpp  | 100 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 135 insertions(+), 3 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index e968fbf..1e77ee0 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -284,12 +284,44 @@ static inline void run_tick()
+ // function replicates run_tick()'s essential per-frame machinery
+ // (update_fps / the flipacceltime flip path / runFade / heartbeat /
+ // TAS auto-exit) rather than refactoring run_tick().
++// DOS-PORT (patch 0162-v2, Leg A FIX 2 -- FIXED_TIMESTEP accumulator
++// snapshot/restore across load_stage). The three state variables that
++// were function-local statics inside run_tick_fixed (accum_ns, last_ns,
++// ft_inited) are promoted to file scope here so nxengine-evo/0162-v2's
++// load_stage RAII guard can snapshot/restore them around the stage load.
++// Without the freeze/thaw, the Leg A pumps' wall-clock cost during
++// stage loads cascades through the accumulator: now_ns - last_ns grows,
++// accum_ns gains extra ticks, and the catch-up loop runs more
++// tick_state ticks than the TAS recording expected -- the v1 iter's
++// PLAY1 symptom (missed Shack while PLAY0 reached all 5 stages). See
++// docs/internal/486-CLASS-CAMPAIGN-FINDINGS.md sec.17. The promotion is
++// collision-clean (verified: only run_tick_fixed references these
++// identifiers; no other src/ TU does).
++static Uint64 accum_ns  = 0;
++static Uint64 last_ns   = 0;
++static bool   ft_inited = false;
++
++// Snapshot slot for ft_accumulator_freeze() / ft_accumulator_thaw().
++// load_stage is non-reentrant so a single slot suffices.
++static Uint64 s_ft_accum_saved = 0;
++
++// Engine hooks for nxengine-evo/0162-v2's load_stage freeze/thaw. The
++// caller (map.cpp's FtAccumulatorGuard RAII struct) gates both on
++// midgap_pump_active() -- when the Leg A killswitch is off (the v2
++// default), neither fires and the FT=1 path matches v1.0.0 / pre-Leg-A.
++extern "C" void ft_accumulator_freeze(void)
++{
++  s_ft_accum_saved = accum_ns;
++}
++extern "C" void ft_accumulator_thaw(void)
++{
++  accum_ns = s_ft_accum_saved;
++  last_ns  = SDL_GetTicksNS();  // exclude load_stage wall-clock from the next delta
++}
++
+ static void run_tick_fixed(void)
+ {
+   static int frameskip      = 0;
+-  static Uint64 accum_ns    = 0;
+-  static Uint64 last_ns     = 0;
+-  static bool   ft_inited   = false;
+ 
+   // DOS-PORT (patch 0154, Phase 11 wave-58 -- FIXED_TIMESTEP steady-state
+   // diagnostic; PHASE11-WAVE-58-CONTRACT.md sec.2). Per-100-frame block
+diff --git a/src/map.cpp b/src/map.cpp
+index 27ab106..187a6c1 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -23,6 +23,7 @@ using namespace NXE::Graphics;
+ #include <fstream>
+ #include <climits>
+ #include <cstdlib>  // getenv
++#include <SDL3/SDL_dosaudio_pump.h>  // patch 0162: SDL_DOSAudioPump for the audio mid-gap pump
+ 
+ stMap map;
+ 
+@@ -958,18 +959,113 @@ uint32_t oob_tiles[4];
+ 
+ // load stage "stage_no", this entails loading the map (pxm), enemies (pxe), tileset (pbm),
+ // tile attributes (pxa), and script (tsc).
++// DOS-PORT (patch 0162-v2, Leg A audio mid-gap pump v2 -- the 486-class
++// SFX-stutter fix during stage loads, second iteration). v2 replaces
++// v1's once-per-seam pump with a pump-until-ring-full loop, adds the
++// FIXED_TIMESTEP accumulator freeze/thaw around load_stage to prevent
++// TAS desync (the v1 iter's PLAY1 missed Shack because the pumps'
++// wall-clock cascaded into the catch-up tick_state count), and flips
++// the killswitch default from ON to OFF per flush-instr's safer-
++// landing recommendation. See docs/internal/AUDIO-MID-GAP-SERVICE
++// -DESIGN.md + 486-CLASS-CAMPAIGN-FINDINGS.md sec.17.
++//
++// During a stage load the engine blocks in fread for tileset / map /
++// entities / script; the IRQ-5 ISR keeps draining the audio ring at
++// ~43 Hz throughout, and the cooperative audio thread cannot refill
++// while the main thread is blocked in disk I/O. A stage load longer
++// than the ring depth (~372 ms) underruns the ring -- the operator-
++// named ~1-second freeze with audio cutout. v2 calls SDL_DOSAudioPump()
++// in a `while (SDL_DOSAudioPump()) { }` loop between sub-loaders so
++// each seam tops up the ring to FULL (SDL_DOSAudioPump returns false
++// when there is no room for another chunk; v2 SDL/0067 export ABI).
++//
++// Killswitch: SDL_HINT_DOSKUTSU_AUDIO_MIDGAP_PUMP. **v2 default OFF;
++// strict "1" enables.** The lever is opt-in until validated; team-lead
++// will flip back to default-ON in v3 if the v2 iter shows freeze
++// elimination + TAS sync both hold. Sentinel-cached (wave-54 PERF_MODE
++// / 0093 / 0153 / 0159 idiom) -- one SDL_GetHint on first call, cached
++// thereafter, NO per-pump getenv. First call emits the build-qa
++// BANNERS banner.
++//
++// FIXED_TIMESTEP freeze/thaw: ft_accumulator_freeze() (defined in
++// main.cpp) at load_stage entry records accum_ns; ft_accumulator_thaw()
++// at every load_stage exit (success or failure) restores accum_ns and
++// resets last_ns to SDL_GetTicksNS() -- so the wall-clock spent in
++// load_stage (including the pumps' time) is invisible to the
++// FIXED_TIMESTEP accumulator's next delta. The exit-path coverage uses
++// the FtAccumulatorGuard RAII struct below, declared at load_stage
++// entry; its destructor fires on every return path. Both freeze and
++// thaw are gated on midgap_pump_active() -- when the killswitch is off
++// (the v2 default), neither fires and the FT=1 path matches v1.0.0 /
++// pre-Leg-A (matches the v1 iter's PLAY0-clean baseline per
++// 486-CLASS-CAMPAIGN-FINDINGS.md sec.17 asymmetry).
++//
++// SDL_DOSAudioPump is exported from sdl-engine's SDL/0067-v2 -- a thin
++// SDL_PlaybackAudioThreadIterate cycle with no SDL_PumpEvents, no
++// renderer-state touch, no engine-callback re-entry. load_stage runs
++// once per stage entry, not in any multi-run path, so the wave-36
++// drawcall-coupling trap does not apply here.
++extern "C" void ft_accumulator_freeze(void);
++extern "C" void ft_accumulator_thaw(void);
++
++static int g_midgap_pump_decided = -1;
++static bool midgap_pump_active()
++{
++  if (g_midgap_pump_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_MIDGAP_PUMP");
++    g_midgap_pump_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    LOG_INFO("audio mid-gap pump: {}",
++             g_midgap_pump_decided ? "ENABLED (opt-in)" : "DISABLED (default)");
++  }
++  return g_midgap_pump_decided == 1;
++}
++#define MIDGAP_PUMP() do { if (midgap_pump_active()) while (SDL_DOSAudioPump()) { } } while (0)
++
++// RAII guard for the FIXED_TIMESTEP accumulator across load_stage. The
++// constructor snapshots accum_ns at entry; the destructor restores it
++// and resets last_ns to NOW at every return path -- so wall-clock spent
++// in load_stage is invisible to the accumulator's next delta and the
++// catch-up loop does not amplify-then-desync the TAS replay. Both
++// freeze and thaw are gated on midgap_pump_active(): when the Leg A
++// killswitch is off (the v2 default), the guard is a no-op pair
++// (constructor + destructor each read the cached bool and return).
++struct FtAccumulatorGuard
++{
++  FtAccumulatorGuard()
++  {
++    if (midgap_pump_active())
++      ft_accumulator_freeze();
++  }
++  ~FtAccumulatorGuard()
++  {
++    if (midgap_pump_active())
++      ft_accumulator_thaw();
++  }
++};
++
+ bool load_stage(int stage_no)
+ {
+   char fname[MAXPATHLEN];
++  // patch 0162-v2 FIX 2: snapshot/restore the FIXED_TIMESTEP accumulator
++  // across the entire stage load so the wall-clock spent here (including
++  // the Leg A audio pumps below) is invisible to the catch-up tick_state
++  // count. Destructor fires on every return path -- the 5 error
++  // early-returns and the success-path final return -- so the accumulator
++  // is never left frozen. Gated on midgap_pump_active() inside the
++  // ctor/dtor; killswitch off (v2 default) makes the guard a no-op pair.
++  FtAccumulatorGuard _ftg;
+ 
+   LOG_INFO(" >> Entering stage {}: '{}'.", stage_no, stages[stage_no].stagename);
+   game.curmap = stage_no; // do it now so onspawn events will have it
+ 
+   Renderer::getInstance()->sprites.flushSheets();
+   map_flush_graphics();
++  MIDGAP_PUMP(); // patch 0162 Leg A seam 1: post-graphics-drop, pre-tileset.load
+ 
+   if (!Renderer::getInstance()->tileset.load(stages[stage_no].tileset))
+     return 1;
++  MIDGAP_PUMP(); // patch 0162 Leg A seam 2: post-tileset.load (.pbm; the heavy sub-loader)
+ 
+   // get the base name of the stage without extension
+   const char *mapname = stages[stage_no].filename;
+@@ -979,18 +1075,22 @@ bool load_stage(int stage_no)
+   sprintf(fname, "Stage/%s.pxm", mapname);
+   if (load_map(ResourceManager::getInstance()->getPath(fname, false)))
+     return 1;
++  MIDGAP_PUMP(); // patch 0162 Leg A seam 3: post-load_map (.pxm)
+ 
+   sprintf(fname, "Stage/%s.pxa", tileset_names[stages[stage_no].tileset]);
+   if (load_tileattr(ResourceManager::getInstance()->getPath(fname, false)))
+     return 1;
++  MIDGAP_PUMP(); // patch 0162 Leg A seam 4: post-load_tileattr (.pxa)
+ 
+   sprintf(fname, "Stage/%s.pxe", mapname);
+   if (load_entities(ResourceManager::getInstance()->getPath(fname, false)))
+     return 1;
++  MIDGAP_PUMP(); // patch 0162 Leg A seam 5: post-load_entities (.pxe)
+ 
+   sprintf(fname, "Stage/%s.tsc", mapname);
+   if (!game.tsc->Load(ResourceManager::getInstance()->getPath(fname), TSC::ScriptPages::SP_MAP))
+     return 1;
++  MIDGAP_PUMP(); // patch 0162 Leg A seam 6: post-tsc->Load (.tsc)
+   map_set_backdrop(stages[stage_no].bg_no);
+   map.scrolltype = stages[stage_no].scroll_type;
+   map.motionpos  = 0;
+-- 
+2.47.3
+

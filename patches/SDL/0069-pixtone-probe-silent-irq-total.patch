@@ -1,0 +1,150 @@
+From a6b2ccaf1627d84084c3526126df2a0c11bc6c8d Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Wed, 20 May 2026 14:33:53 -0700
+Subject: [PATCH] dos: Phase 11 patch 0069 -- Pixtone probe cumulative
+ silent-IRQ counter export
+
+Why DOS needs this:
+
+The Pixtone multi-source probe (docs/internal/PIXTONE-MULTISOURCE-DESIGN.md
+hypothesis C: cooperative-scheduler audio-thread starvation during
+rapid-fire SFX) needs the cumulative-over-time silent-IRQ rate. The
+existing isr_consecutive_silent_irqs counter gives current consecutive-
+depth only.
+
+The existing isr_consecutive_silent_irqs counter (patch 0038, sb.c line
+621) resets to zero on every non-silent IRQ (sb.c:750) AND on every
+DSP-resume service (sb.c:814 via MaybeServiceIdlePauseRequests).
+Block-over-block deltas on that counter therefore lose any depth peak that
+resolves within a block -- exactly the rapid-fire short-burst shape the
+probe is trying to capture.
+
+This patch adds a sibling doskutsu_audio_silent_irq_count counter:
+
+  - volatile uint32_t, defined in SDL_dos_audio_synth.c alongside the
+    existing doskutsu_audio_irq_count / sfx_active_count / irq_wall_us
+    extern family.
+  - extern-declared in SDL_dos_audio_synth.h.
+  - incremented in SoundBlasterIRQHandler at the silent-IRQ branch
+    (sb.c:760), immediately after the existing isr_consecutive_silent_irqs++
+    -- single additional 32-bit volatile increment, same atomicity
+    precedent as patches 0023+0025+0037+0038 (single-bus-cycle inc on x86;
+    one extra instruction inside the IRQ handler).
+  - DPMI memory-locked at OpenDevice (sb.c:1442 block) so the IRQ-context
+    increment cannot page-fault.
+  - NEVER reset. Engine reads via extern at the audit-flush boundary and
+    computes block-over-block deltas.
+
+Pure-data instrumentation; no behavior change, no killswitch, no env var.
+Banner emitted unconditionally at OpenDevice time so the smoke gate can
+verify the export is wired: "audio: SDL/0069 cumulative silent-IRQ counter
+export: ENABLED".
+
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c    | 26 ++++++++++++++++++++++++++
+ src/core/dos/SDL_dos_audio_synth.c | 15 +++++++++++++++
+ src/core/dos/SDL_dos_audio_synth.h |  8 ++++++++
+ 3 files changed, 49 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index d8a4a73dd..0d11dafec 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -758,6 +758,14 @@ static void SoundBlasterIRQHandler(void)
+            via single increment + atomic flag set; service path handles
+            the actual DSP command. */
+         isr_consecutive_silent_irqs++;
++        /* DOSKUTSU patch (Phase 11 patch 0069): cumulative silent-IRQ
++           counter for the Pixtone multi-source probe. Single 32-bit
++           volatile increment alongside the existing consecutive-depth
++           gauge; same atomicity precedent as patches 0023+0025+0037+
++           0038 (single-bus-cycle inc on x86). Never reset; engine reads
++           at audit-flush boundary and computes block-over-block delta.
++           See docs/internal/PIXTONE-MULTISOURCE-DESIGN.md sec.2.1 #2. */
++        doskutsu_audio_silent_irq_count++;
+         if (isr_consecutive_silent_irqs >= IDLE_PAUSE_THRESHOLD &&
+             g_dos_audio_idle_pause_enabled && !isr_dsp_paused) {
+             g_dos_audio_pause_request = true;
+@@ -1040,6 +1048,19 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0069): banner for the cumulative
++       silent-IRQ counter export. Pure-data instrumentation -- no
++       killswitch, no env var; the counter (defined in
++       SDL_dos_audio_synth.c, incremented in the IRQ silent-branch
++       above) is always live. Banner is emitted unconditionally so the
++       smoke gate can verify the export is wired and the engine-side
++       Pixtone probe can read doskutsu_audio_silent_irq_count via
++       extern. See docs/internal/PIXTONE-MULTISOURCE-DESIGN.md sec.2.1
++       #2 + sec.4 #4. */
++    doskutsu_dbg_log("audio: SDL/0069 cumulative silent-IRQ counter export: ENABLED "
++                     "(doskutsu_audio_silent_irq_count; monotonic; Pixtone "
++                     "multi-source probe hypothesis-C signal)");
++
+     /* DOSKUTSU patch (Phase 11 patch 0050): resolve quiescence-gate
+        killswitch once at OpenDevice time. Strict-"0" match per CLAUDE.md
+        env-var convention. Cached at module scope; read by
+@@ -1442,6 +1463,11 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+     DOS_LockVariable(doskutsu_audio_irq_count);
+     DOS_LockVariable(doskutsu_audio_irq_wall_us);
+     DOS_LockVariable(doskutsu_audio_sfx_active_count);
++    /* DOSKUTSU patch (Phase 11 patch 0069): cumulative silent-IRQ
++       counter is incremented from IRQ context (sb.c silent-IRQ branch),
++       so its storage must be DPMI-locked alongside the other audio
++       extern counters; otherwise the increment can page-fault. */
++    DOS_LockVariable(doskutsu_audio_silent_irq_count);
+     /* DOSKUTSU patch (Phase 10 patch 0039): lock timer-mode + TSC mhz
+        so IRQ-context reads in SDL_DOSAudioReadTimer / DeltaUs (inlined
+        at the IRQ handler call site) don't page-fault. Both are written
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 765f8eec7..211e3cdac 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -593,6 +593,21 @@ volatile uint32_t doskutsu_audio_irq_wall_us = 0;
+ volatile uint32_t doskutsu_audio_irq_count = 0;
+ volatile uint32_t doskutsu_audio_sfx_active_count = 0;
+ 
++/* DOSKUTSU patch (Phase 11 patch 0069): cumulative silent-IRQ counter
++   for the Pixtone multi-source probe (hypothesis C: cooperative-
++   scheduler audio-thread starvation during rapid-fire SFX). The
++   existing isr_consecutive_silent_irqs (sb.c:621) is a depth gauge
++   that resets on any non-silent IRQ (sb.c:750) and on DSP-resume
++   service (sb.c:814), losing intra-block peaks. This sibling counter
++   is incremented monotonically at the silent-IRQ branch (sb.c:760
++   alongside isr_consecutive_silent_irqs++) and never reset; the
++   engine reads it at audit-flush boundaries and computes block-over-
++   block deltas to measure cumulative silent-IRQ rate during rapid-
++   fire moments.
++
++   Per docs/internal/PIXTONE-MULTISOURCE-DESIGN.md sec.2.1 #2. */
++volatile uint32_t doskutsu_audio_silent_irq_count = 0;
++
+ /* Force-pause / force-resume request flags. Set by ForcePause/Resume;
+    serviced by the SB16 backend's audio writer / WaitDevice loop in
+    patch 0038. The actual DSP pause/resume command issuing lives in
+diff --git a/src/core/dos/SDL_dos_audio_synth.h b/src/core/dos/SDL_dos_audio_synth.h
+index 596b8a028..f602051df 100644
+--- a/src/core/dos/SDL_dos_audio_synth.h
++++ b/src/core/dos/SDL_dos_audio_synth.h
+@@ -356,6 +356,14 @@ extern volatile uint32_t doskutsu_audio_irq_wall_us;
+ extern volatile uint32_t doskutsu_audio_irq_count;
+ extern volatile uint32_t doskutsu_audio_sfx_active_count;
+ 
++/* Phase 11 patch 0069: cumulative silent-IRQ counter for the Pixtone
++   multi-source probe (hypothesis C). Monotonic; never reset. Engine
++   reads via this extern at audit-flush boundary and computes block-
++   over-block delta. See SDL_dos_audio_synth.c for the rationale and
++   docs/internal/PIXTONE-MULTISOURCE-DESIGN.md sec.2.1 #2 for the
++   probe contract. */
++extern volatile uint32_t doskutsu_audio_silent_irq_count;
++
+ #ifdef __cplusplus
+ }
+ #endif
+-- 
+2.47.3
+

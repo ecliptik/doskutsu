@@ -1,0 +1,106 @@
+From 3885384304f233951036c822e41c3563e75e8713 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 19 May 2026 12:33:39 -0700
+Subject: [PATCH] perf phase 11 patch 0161 -- Approach-A enabler: selectable
+ device-frames hint
+
+The 486-class SFX-stutter fix ("Approach A") enlarges the SDL audio
+device buffer (SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES 256 -> 1024), which
+drops the IRQ-5 drain rate from ~43 to ~11 chunks/sec so a once-per-flip
+ring refill keeps up. It cannot be tested as a BAT `SET` cell today:
+under Tier-2 (the shipping default) SoundManager force-pins the hint to
+"256" with SDL_HINT_OVERRIDE priority, deliberately, so a stray stock
+SDL_AUDIO_DEVICE_SAMPLE_FRAMES env var cannot un-pin the Tier-2 IRQ-rate
+lever. SDL_HINT_OVERRIDE beats the environment, so a `SET
+SDL_AUDIO_DEVICE_SAMPLE_FRAMES=1024` is silently reverted to 256 -- the
+Approach-A A/B is unreachable.
+
+This makes the pinned VALUE selectable via a doskutsu-namespaced hint,
+SDL_HINT_DOSKUTSU_AUDIO_DEVICE_FRAMES (matching the existing
+SDL_HINT_DOSKUTSU_AUDIO_TIER2 / _RING_CHUNKS namespace). The Tier-2
+branch resolves it by exact-string match against "256" / "512" / "1024"
+/ "2048"; unset, malformed, or unrecognized -> "256". The resolved
+value feeds the same SDL_SetHintWithPriority(..., SDL_HINT_OVERRIDE)
+call, so the OVERRIDE pin is kept intact -- a stray stock
+SDL_AUDIO_DEVICE_SAMPLE_FRAMES still cannot move the value; only this
+doskutsu hint does.
+
+Default (unset / unrecognized -> "256") is byte-identical in behavior to
+prior production: the device-frames pin keeps its current value and no
+new code path is taken. This is an enabling patch, not a lever in
+itself -- the single new mechanism the A/B exercises is device-frames
+selection. The Tier-1 branch is untouched (it does not pin device
+frames; the stock SDL hint already works there).
+
+A conditional banner ("Sound system: Approach-A device-frames lever
+ACTIVE -- ...") emits ONLY when the resolved value is non-256, so the
+Approach-A iter A-cell log unambiguously shows the lever engaged
+(two-witness with the strings embed). The default path emits nothing
+new, so smoke runs see unchanged output -- the banner is intentionally
+NOT added to the smoke BANNERS array.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 45 +++++++++++++++++++++++++++++++++-----
+ 1 file changed, 40 insertions(+), 5 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 925712b..52327f5 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -239,12 +239,47 @@ bool SoundManager::init()
+     {
+       ::SAMPLE_RATE    = 11025;
+       ::AUDIO_CHANNELS = 1;
+-      // Pin buffer size to 256 frames so the IRQ rate halves (43 Hz vs
+-      // Tier-1's 86 Hz). SDL_SetHintWithPriority OVERRIDE so a user-
+-      // set SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES doesn't accidentally
+-      // un-pin and collapse the lever's mechanism.
++      // Pin buffer size so the IRQ rate is held low (256 frames =>
++      // ~43 Hz vs Tier-1's 86 Hz). SDL_SetHintWithPriority OVERRIDE so a
++      // stray stock SDL_AUDIO_DEVICE_SAMPLE_FRAMES env var cannot
++      // accidentally un-pin and collapse the lever's mechanism.
++      //
++      // DOS-PORT (patch 0161, Approach-A enabler): the pinned VALUE is
++      // selectable via SDL_HINT_DOSKUTSU_AUDIO_DEVICE_FRAMES so the
++      // 486-class SFX-stutter audio-buffer A/B (256 -> 1024 device
++      // frames) can run as a deliberate one-binary cell. Exact-string
++      // match against the useful power-of-two range; unset, malformed,
++      // or unrecognized -> "256", so the default path stays
++      // byte-identical to prior production. The SDL_HINT_OVERRIDE pin is
++      // kept -- only this doskutsu-namespaced hint moves the value,
++      // never a stray stock SDL_AUDIO_DEVICE_SAMPLE_FRAMES env var.
++      const char *df     = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_DEVICE_FRAMES");
++      const char *df_val = "256";
++      if (df)
++      {
++        if (!SDL_strcmp(df, "512"))
++          df_val = "512";
++        else if (!SDL_strcmp(df, "1024"))
++          df_val = "1024";
++        else if (!SDL_strcmp(df, "2048"))
++          df_val = "2048";
++        // "256" and any other / malformed value -> df_val stays "256"
++      }
+       SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES,
+-                              "256", SDL_HINT_OVERRIDE);
++                              df_val, SDL_HINT_OVERRIDE);
++      // Conditional banner: emitted ONLY when the lever is engaged (a
++      // non-256 value), so the Approach-A iter A-cell log unambiguously
++      // shows it active (two-witness: strings in the binary + this line).
++      // The default (unset / 256) path emits nothing here, so smoke runs
++      // see unchanged output -- this banner is NOT in the smoke BANNERS
++      // array (it is verified in the A-cell iter log, not in smoke).
++      if (SDL_strcmp(df_val, "256"))
++      {
++        LOG_INFO("Sound system: Approach-A device-frames lever ACTIVE -- "
++                 "SDL_HINT_DOSKUTSU_AUDIO_DEVICE_FRAMES={}, device sample "
++                 "frames pinned to {} (default 256).",
++                 df, df_val);
++      }
+       LOG_INFO("Sound system: Tier-2 audio config (default since wave 21 "
+                "patch 0093; {} Hz, {} channel{}, buffer pinned to 256 "
+                "frames). Measured savings on g2k Pentium OverDrive 83 MHz "
+-- 
+2.47.3
+

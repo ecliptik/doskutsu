@@ -1,0 +1,206 @@
+From cf181a795f11c830434de0c5e11ecb473753b44a Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 18 May 2026 22:19:08 -0700
+Subject: [PATCH] dos: Phase 11 patch 0064 -- SFX-stall instrumentation part C
+ (SDL-DOS audio-callback counter)
+
+486-class campaign Bug 1: every sound-effect trigger causes a
+~0.3-0.45 s flip hitch on all three 486 configs. Per
+docs/internal/SFX-STALL-INSTRUMENTATION-CONTRACT.md, the stall has
+three candidate locations. nx-engine's patch 0160 instruments parts A
+(the per-SFX-trigger call) and B (the engine-thread runFade bucket).
+B-2 source-traced that Pixtone SFX has NO engine-side mix callback --
+SFX runs through SDL3_mixer's MIX_* track pool, serviced by the
+SDL-DOS audio callback on the cooperative audio thread. No engine-side
+timer reaches it. Part C is that missing SDL-side bucket.
+
+C times one SDL-DOS audio-callback invocation: the span from
+DOSSOUNDBLASTER_GetDeviceBuf entry (the start of one
+SDL_PlaybackAudioThreadIterate's DOS-backend work) through
+DOSSOUNDBLASTER_PlayDevice exit. That span brackets the SDL3 core mix
+loop, which fires SDL3_mixer's MixerCallback -> per-track pulls --
+where the Pixtone/SFX mix happens. The span is closed on both
+PlayDevice return paths (normal ring-write + silence-skip) so every
+audio-thread iteration is counted. Every 100 invocations a
+[sdl-audiocb block~N invocations=I total_ms=M max_ms=X] line emits on
+the SDL debug-log channel (<TAG>SDL.LOG). max_ms is the discriminator:
+a single callback spiking into the hundreds of ms places the ~0.4 s
+stall in the SFX mix. block~N uses the tilde because the SDL side
+counts audio-callback invocations, which approximate (not exactly
+equal) the engine's 100-flip phase blocks.
+
+Instrumentation only. All hooks ride the existing FINE_INSTR env var
+(SDL_HINT_DOSKUTSU_FINE_INSTR, strict-"1") -- the same var the
+engine-side A/B hooks use; no new env var, no docs/BOOT.md edit, no
+boot banner (matches parts A/B). The gate is resolved once at
+OpenDevice and cached; with FINE_INSTR=0 the GetDeviceBuf / PlayDevice
+hooks are one cached-bool test and nothing else -- byte-identical in
+behavior to pre-0064. Aggregation is per-100-invocation block, no
+per-callback fsync, matching the wave-58 [ft-accum-stat] pattern.
+
+Rides the combined 486 follow-up iter binary alongside patch 0063
+(quit-hang fix) and nxengine-evo/0160 (parts A + B). One TU touched
+(src/audio/dos/SDL_dosaudio_sb.c). Workspace-local per the SDL AI
+policy; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 107 ++++++++++++++++++++++++++++++++
+ 1 file changed, 107 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 33a7e7bd7..3d74628cc 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -173,6 +173,35 @@ static bool g_dos_audio_waitdevice_timeout_disabled = false;
+    and the quit-to-DOS teardown join can proceed. */
+ #define DOS_AUDIO_WAITDEVICE_TIMEOUT_NS  SDL_MS_TO_NS(1000)
+ 
++/* DOSKUTSU patch (Phase 11 patch 0064): SFX-stall instrumentation
++   part C -- the SDL-DOS audio-callback counter. Per
++   docs/internal/SFX-STALL-INSTRUMENTATION-CONTRACT.md sec.2.3: the
++   486-campaign Bug 1 SFX-trigger stall (~0.3-0.45 s) has three
++   candidate locations; nx-engine's A/B (patch nxengine-evo/0160)
++   bracket the engine-thread trigger call + runFade, and B-2
++   established the SFX mix has no engine-side callback -- it runs
++   inside SDL3_mixer's MIX_* machinery, serviced by the SDL-DOS audio
++   callback on the cooperative audio thread. C times that callback:
++   the span from DOSSOUNDBLASTER_GetDeviceBuf (start of one
++   SDL_PlaybackAudioThreadIterate's DOS-backend work) through
++   DOSSOUNDBLASTER_PlayDevice exit (which brackets the SDL3 core mix
++   loop -> SDL3_mixer MixerCallback -> Pixtone/SFX track pulls). Every
++   100 invocations a [sdl-audiocb block~N invocations=I total_ms=M
++   max_ms=X] line emits on the SDL debug-log channel (<TAG>SDL.LOG).
++
++   All four counters + the gate ride the existing FINE_INSTR env var
++   (SDL_HINT_DOSKUTSU_FINE_INSTR=1, strict-"1" -- the same var the
++   engine-side A/B hooks use; no new env var). When the gate is off
++   the GetDeviceBuf / PlayDevice hooks are one cached-bool test and
++   nothing else; FINE_INSTR=0 is byte-identical to pre-0064. Resolved
++   once at OpenDevice; no boot banner (matches parts A/B). */
++static bool g_c_sfx_audiocb_instr_active = false;
++static Uint64 g_c_audiocb_t0 = 0;          /* GetDeviceBuf-entry timestamp, ns */
++static Uint32 g_c_audiocb_invocations = 0; /* invocations in the current block */
++static Uint64 g_c_audiocb_total_ns = 0;    /* summed callback wall-clock, current block */
++static Uint64 g_c_audiocb_max_ns = 0;      /* worst single callback, current block */
++static Uint32 g_c_audiocb_block = 0;       /* emitted-block counter */
++
+ /* DOSKUTSU patch (Phase 11 patch 0058): Shape A mechanism-histogram
+    instrumentation state. Diagnostic backstop for wave-36 PLAY6 Shape
+    D fps lever per `pressure_test_tidy_narratives.md` discipline: if
+@@ -960,6 +989,20 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0064): resolve the SFX-stall
++       instrumentation part-C gate once at OpenDevice time. Reuses the
++       existing FINE_INSTR env var (SDL_HINT_DOSKUTSU_FINE_INSTR,
++       strict-"1") that the engine-side A/B hooks ride -- no new env
++       var. No boot banner: part C matches parts A/B (patch
++       nxengine-evo/0160); the [sdl-audiocb] block line is the only
++       output and it emits only under FINE_INSTR=1, so the FINE_INSTR=0
++       path stays byte-identical to pre-0064. */
++    {
++        const char *fi_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_FINE_INSTR");
++        g_c_sfx_audiocb_instr_active =
++            (fi_hint && fi_hint[0] == '1' && fi_hint[1] == 0);
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0055): resolve P12 SDL-side audio
+        instrumentation gates once at OpenDevice time. BOTH FLIP_INSTR
+        AND P12_AUDIO_INSTR must be set to "1" (strict-"1" match) for
+@@ -1447,6 +1490,18 @@ static Uint8 *DOSSOUNDBLASTER_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_
+        SDL/0053 (BeginShutdown semantic preserved). */
+     (void)buffer_size; /* unchanged; ring writes happen in PlayDevice */
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0064, SFX-stall instrumentation
++       part C): open the per-invocation SDL-DOS audio-callback timing
++       span. GetDeviceBuf is the first DOS-backend entry of one
++       SDL_PlaybackAudioThreadIterate; the SDL3 core mix loop (firing
++       SDL3_mixer's MixerCallback -> Pixtone/SFX track pulls) runs
++       between this return and the PlayDevice call that closes the
++       span via _c_audiocb_record(). FINE_INSTR-gated -- one cached-
++       bool test when off. */
++    if (g_c_sfx_audiocb_instr_active) {
++        g_c_audiocb_t0 = SDL_GetTicksNS();
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0055): P12 SDL-side audio bracket
+        for GetDeviceBuf. Records t_gdb_exit just before returning so the
+        next PlayDevice entry can compute the mix_mixer span across the
+@@ -1465,6 +1520,46 @@ static Uint8 *DOSSOUNDBLASTER_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_
+     return device->hidden->staging_buffer;
+ }
+ 
++/* DOSKUTSU patch (Phase 11 patch 0064): close one SDL-DOS audio-
++   callback timing span (opened at GetDeviceBuf) and, every 100
++   invocations, emit the part-C [sdl-audiocb] block line. Called from
++   both DOSSOUNDBLASTER_PlayDevice return paths (normal ring-write +
++   silence-skip) so every audio-thread iteration is counted. The
++   caller gates on g_c_sfx_audiocb_instr_active, so this runs only
++   under FINE_INSTR=1. total_ms / max_ms derive from ns accumulators
++   (truncated to ms at emit); max_ms is the key field -- it discloses
++   whether a single callback spiked into the hundreds of ms the
++   486-campaign Bug 1 SFX stall would produce. The block~N counter
++   uses the tilde because the SDL side counts audio-callback
++   invocations, which approximate -- not exactly equal -- the engine's
++   100-flip phase blocks (the audio-callback rate runs near the flip
++   rate). */
++static void _c_audiocb_record(void)
++{
++    const Uint64 now = SDL_GetTicksNS();
++    const Uint64 span =
++        (g_c_audiocb_t0 != 0 && now > g_c_audiocb_t0) ? (now - g_c_audiocb_t0) : 0;
++    g_c_audiocb_t0 = 0;
++
++    g_c_audiocb_total_ns += span;
++    if (span > g_c_audiocb_max_ns) {
++        g_c_audiocb_max_ns = span;
++    }
++
++    if (++g_c_audiocb_invocations >= 100) {
++        g_c_audiocb_block++;
++        doskutsu_dbg_log("[sdl-audiocb block~%lu invocations=%lu "
++                         "total_ms=%lu max_ms=%lu]",
++                         (unsigned long)g_c_audiocb_block,
++                         (unsigned long)g_c_audiocb_invocations,
++                         (unsigned long)(g_c_audiocb_total_ns / 1000000ULL),
++                         (unsigned long)(g_c_audiocb_max_ns / 1000000ULL));
++        g_c_audiocb_invocations = 0;
++        g_c_audiocb_total_ns = 0;
++        g_c_audiocb_max_ns = 0;
++    }
++}
++
+ // Commit the staging buffer into the ring buffer.
+ // Called by SDL's audio thread after it has written a full chunk.
+ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buffer, int buffer_size)
+@@ -1693,6 +1788,12 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+                     g_p12_sdl_playdev_calls = 0;
+                 }
+             }
++            /* patch 0064: close the part-C audio-callback span on the
++               silence-skip path so quiescent iterations are counted
++               too (the mix loop still ran -- it produced silence). */
++            if (g_c_sfx_audiocb_instr_active) {
++                _c_audiocb_record();
++            }
+             return true;
+         }
+     }
+@@ -1776,6 +1877,12 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+         }
+     }
+ 
++    /* patch 0064: close the part-C audio-callback span on the normal
++       ring-write path. Paired with the GetDeviceBuf-entry open; the
++       span brackets the SDL3 core mix loop + this PlayDevice. */
++    if (g_c_sfx_audiocb_instr_active) {
++        _c_audiocb_record();
++    }
+     return true;
+ }
+ 
+-- 
+2.47.3
+

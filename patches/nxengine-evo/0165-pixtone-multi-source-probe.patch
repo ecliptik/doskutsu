@@ -1,0 +1,536 @@
+From 2d1d91bcebc8fb645c2d0259b7efe4290e742234 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 20 May 2026 14:42:55 -0700
+Subject: [PATCH] perf phase 11 patch 0165 -- Pixtone multi-source probe
+ (486-campaign Bug 2 continuous-SFX-stutter probe)
+
+486-campaign Bug 2 -- continuous SFX stutter on slow CPUs during
+steady-state gameplay. flush-instr's #101 pre-flight grep refuted
+the brief's headline candidate (pre-synthesize Pixtone SFX into
+PCM): Pixtone::init() already pre-synthesizes each slot's chunk at
+boot, and polar-star routes through the non-resampled Pixtone::play
+path (p_arms.cpp:35-58) with no per-shot synthesis cost. So the
+real cause is one of 5 hypotheses per docs/internal/PIXTONE-
+MULTISOURCE-DESIGN.md sec.2 -- (A) per-callback mix CPU, (B)
+track-state transition, (C) scheduler starvation, (D) IRQ jitter,
+(E) re-diagnose -- and this patch is the probe that discriminates
+them before we commit to another wrong-variable fix.
+
+Probe-first iter (2-cell, DX2-66-only per [[486_iteration_workflow]]):
+- PLAY0 baseline -- no SET, probe DISABLED, normal cell.
+- PLAY1 SET SDL_HINT_DOSKUTSU_PIXTONE_PROBE=1 -- probe ENABLED;
+  one [pixtone-multi] LOG_INFO line per 100-flip block lands in
+  DEBUG.LOG with the hypothesis-discrimination signals.
+
+After the iter, flush-instr's sec.20 findings name which hypothesis
+matches the operator's reported stutter regime; the contingent v2
+fix is authored against that.
+
+Probe shape (one new audit line):
+  [pixtone-multi block=N samples=N active min=X med=X p90=X max=X
+   live=N stoptrack=N polarstar=N silent_irq=N]
+
+Fields:
+- block, samples -- block index + total samples collected this
+  block (~140 expected at 30 fps Tier-2 over a 100-flip block, the
+  audio-buffer-fill rate ~43 Hz drives sample rate).
+- active min/med/p90/max -- g_pixtone_active_count distribution
+  via 6 fixed buckets [0]/[1]/[2]/[3-5]/[6-10]/[11+] sampled in
+  organyaStreamCallback at audio-buffer-fill cadence. Percentile
+  values are bucket midpoints (0/1/2/4/8/12) via cumulative-count
+  lookup -- coarse but sufficient at probe resolution. Captures
+  SFX-storm bursts that collapse within one render frame.
+- live -- instantaneous read of g_pixtone_active_count at the
+  audit-flush boundary; ground-truth cross-check vs the histogram
+  max bucket when SFX channels are mid-play at emit time.
+- stoptrack delta -- block-over-block diff of
+  g_pixtone_stoptrack_count (incremented at the 2 preempt-and-
+  replay sites in Pixtone.cpp: play() at :454, playResampled() at
+  :611). NOT incremented at the explicit-stop site (Pixtone::stop's
+  MIX_StopTrack at :716) -- different mechanism per flush-instr's
+  #104 sign-off. Channel-pressure indicator -- discriminates
+  hypothesis B (track-state transition).
+- polarstar delta -- block-over-block diff of
+  g_pixtone_polar_star_count (combined counter for
+  SND_POLAR_STAR_L1_2 (id 32) AND SND_POLAR_STAR_L3 (id 49);
+  per-level disambiguation deferred to v2 if needed).
+  Incremented in SoundManager::playSfx + playSfxResampled (where
+  the SFX enum is in hand; Pixtone.cpp has only the slot-index
+  abstraction). SFX-storm-rate indicator.
+- silent_irq delta -- block-over-block diff of
+  doskutsu_audio_silent_irq_count (SDL-side monotonic sibling of
+  isr_consecutive_silent_irqs which resets on every non-silent
+  IRQ; the monotonic version never resets). Read via extern from
+  patches/SDL/0069. Scheduler-starvation + IRQ-jitter indicator.
+
+Counter increments unconditional (volatile uint32_t, no atomics,
+no fences; matches existing g_pixtone_active_count pattern). The
+probe killswitch SDL_HINT_DOSKUTSU_PIXTONE_PROBE gates only the
+LOG_INFO emit + the histogram bucket-inc -- both PLAY0 (probe off)
+and PLAY1 (probe on) cells have valid counter snapshots
+regardless of state.
+
+Default-OFF byte-identical-at-rendered-frame to pre-0165:
+- Counter incs are volatile uint32_t at file scope; no game-state
+  mutation. ~10-50 Hz playSfx rate; negligible cost.
+- The histogram-sample call site in organyaStreamCallback gates
+  on pixtone_probe_active() and short-circuits when off (1 cached-
+  int compare per audio buffer fill, ~43 Hz).
+- The audit body in _maybe_flush_pixtone_multi_audit gates on
+  pixtone_probe_active(); when off, resets the histogram (so a
+  mid-run SET starts clean) and returns without emit.
+- pixtone_probe_active itself emits one LOG_INFO banner line on
+  first call regardless of state (banner-only-no-state-change
+  pattern, matches 0162-v2 / 0163 / 0164).
+
+Killswitch: SDL_HINT_DOSKUTSU_PIXTONE_PROBE, strict-"1" opt-in,
+default OFF. Same hygiene as nxengine/0162-v2 + 0163 + 0164.
+Sentinel-cached on first pixtone_probe_active() call -- single
+_strict_truthy_env (std::getenv-backed) then cached int; banner
+emit "pixtone multi-source probe: ENABLED (opt-in)" /
+"pixtone multi-source probe: DISABLED (default)" on the decision.
+
+Cross-TU layout (mirrors the existing [audio-block] reader pattern):
+- Pixtone.h: +2 extern decls (g_pixtone_stoptrack_count +
+  g_pixtone_polar_star_count) next to existing
+  g_pixtone_active_count.
+- Pixtone.cpp: +2 file-scope counter defs in the existing
+  extern "C" {} block; +2 inc sites (one at the preempt path in
+  play() at :454, one at the resampled preempt path in
+  playResampled() at :611).
+- SoundManager.cpp: +1 cmp+inc in playSfx (after the Pixtone
+  dispatch); +1 cmp+inc in playSfxResampled (defensive mirror for
+  any future mod / patch routing polar-star resampled). Both
+  count toward g_pixtone_polar_star_count.
+- Organya.cpp: +1 NXE::Diag::SamplePixtoneActiveBucket call at the
+  top of organyaStreamCallback (after AudioMixerTimer, before the
+  additional_amount<=0 fast-skip -- the sampler runs even on
+  zero-work callback wakeups since those still represent audio-
+  thread cadence ticks worth measuring).
+- diagnostic_timers.h: +1 forward-decl for
+  NXE::Diag::SamplePixtoneActiveBucket (decl in NXE::Diag
+  namespace; defn at file-scope-after-both-namespace-closes in
+  Renderer.cpp per the W20B/W22A wrapper pattern).
+- Renderer.cpp: +5 extern decls in the existing extern "C" {}
+  block (doskutsu_audio_silent_irq_count from SDL/0069 + 3 Pixtone
+  counters); +1 6-bucket histogram array (volatile uint32_t at
+  NXE::Diag scope, line ~129); +1 pixtone_probe_active() helper
+  next to the existing _abl_p10_audio_instr ablation flag
+  (sentinel-cached int + banner LOG_INFO, mirrors Leg A/B idiom);
+  +1 _maybe_flush_pixtone_multi_audit() ~110 LOC sibling of
+  _maybe_flush_sfx_stat_audit (block-snapshot pattern matching the
+  existing [audio-block] reader); +1 audit call in flip() right
+  after _maybe_flush_sfx_stat_audit; +1 SamplePixtoneActiveBucket
+  defn at file-scope-after-both-namespace-closes (forwards into
+  NXE::Graphics::pixtone_probe_active + NXE::Diag's bucket array).
+
+Working-tree edits (not in the .patch -- per HARD BUILD-
+SERIALIZATION, working-tree-only):
+- docs/internal/BOOT.md: new SDL_HINT_DOSKUTSU_PIXTONE_PROBE entry
+  inserted between SDL_HINT_DOSKUTSU_AUDIO_TICKPUMP and
+  SDL_HINT_DOSKUTSU_DATA_CACHE. Covers: opt-in semantics, line-
+  shape with field meanings, hypothesis-discrimination targets,
+  counter-unconditional + emit-gated invariant, cache-OFF byte-
+  identity property.
+- tests/run-gameplay-smoke.sh: BANNER_REGEX +1 entry for the
+  probe boot banner; BANNER_SEVERITY +1 "optional"; BANNER_LABEL
+  +1 long-form description following the 0163/0164 label pattern.
+  Three array sizes stay aligned.
+
+Single-lever-per-binary: the probe is THE operator-visible
+mechanism this binary's new patch introduces. SDL-side
+patches/SDL/0069 (the monotonic silent-IRQ counter export) lands
+in parallel; both load into the same binary but their
+killswitches are independent (SDL/0069 unconditional + always
+exported; nxengine/0165 opt-in via the probe hint).
+
+Files in this patch:
+- src/sound/Pixtone.h           +28 LOC (2 extern decls + comments).
+- src/sound/Pixtone.cpp         +18 LOC (2 file-scope decls + 2 incs + comments).
+- src/sound/SoundManager.cpp    +18 LOC (2 cmp+inc blocks + comments).
+- src/sound/Organya.cpp         +11 LOC (1 sampler call + comment).
+- src/Utils/diagnostic_timers.h +15 LOC (1 forward-decl + comment).
+- src/graphics/Renderer.cpp     +207 LOC (extern decls + bucket
+  storage + helper + audit + call site + defn).
+
+Total ~297 LOC engine-side. No new TU; no CMakeLists.txt change
+(file(GLOB) covers all touched .cpp/.h).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h |  15 +++
+ src/graphics/Renderer.cpp     | 207 ++++++++++++++++++++++++++++++++++
+ src/sound/Organya.cpp         |  11 ++
+ src/sound/Pixtone.cpp         |  18 +++
+ src/sound/Pixtone.h           |  28 +++++
+ src/sound/SoundManager.cpp    |  18 +++
+ 6 files changed, 297 insertions(+)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 73487e4..b8fac59 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -1315,2 +1315,17 @@ bool drawtile_fast_bg_active();
+ 
++// patch 0165 (Pixtone multi-source probe). Audio-thread-callback
++// histogram sampler -- called from Organya.cpp's organyaStreamCallback
++// at audio-buffer-fill cadence (~43 Hz Tier-2). Reads
++// g_pixtone_active_count (extern "C" volatile uint32_t from
++// Pixtone.h) and increments the appropriate fixed bucket
++// (0/1/2/3-5/6-10/11+). Single volatile read + bucket inc per call;
++// race-tolerant (single-writer audio thread, single-reader render
++// thread at audit-flush boundary in _maybe_flush_pixtone_multi_audit).
++// Probe-gated internally -- the body short-circuits when the
++// killswitch is unset, so cache-OFF byte-identical to pre-0165. The
++// 6 bucket counters are file-scope volatile uint32_t in Renderer.cpp;
++// they're read + reset at each per-100-flip audit-flush boundary.
++// See PIXTONE-MULTISOURCE-DESIGN.md sec.3.
++void SamplePixtoneActiveBucket();
++
+ }  // namespace Diag
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 8ccf548..558d8f6 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -75,2 +75,18 @@ extern "C" {
+   extern volatile std::uint32_t doskutsu_audio_sfx_active_count;
++
++  // patch 0165 (Pixtone multi-source probe). SDL-side monotonic silent-
++  // IRQ counter from patches/SDL/0069 (sibling of isr_consecutive_silent_irqs
++  // which resets on every non-silent IRQ for the auto-pause logic; this
++  // monotonic version never resets so the audit can compute block-over-
++  // block delta). Read by _maybe_flush_pixtone_multi_audit via the
++  // delta-snapshot pattern.
++  extern volatile std::uint32_t doskutsu_audio_silent_irq_count;
++
++  // patch 0165 (Pixtone multi-source probe). Engine-side counters from
++  // Pixtone.cpp + SoundManager.cpp -- channel-pressure indicator
++  // (preempt-and-replay events) + polar-star fire counter (storm-rate
++  // indicator). Decls in vendor/nxengine-evo/src/sound/Pixtone.h.
++  extern volatile std::uint32_t g_pixtone_active_count;
++  extern volatile std::uint32_t g_pixtone_stoptrack_count;
++  extern volatile std::uint32_t g_pixtone_polar_star_count;
+ }
+@@ -103,2 +119,13 @@ int g_audio_service_count_global = 0;
+ 
++// patch 0165 (Pixtone multi-source probe). 6-bucket histogram for
++// g_pixtone_active_count sampled at audio-buffer-fill cadence (~43 Hz
++// Tier-2). Bucket boundaries: [0], [1], [2], [3-5], [6-10], [11+].
++// Single-writer audio thread (organyaStreamCallback via
++// SamplePixtoneActiveBucket), single-reader render thread (audit-flush
++// in _maybe_flush_pixtone_multi_audit). Race-tolerant -- worst case is
++// one stale sample at percentile-compute time, acceptable for a per-
++// 100-flip block snapshot. Volatile std::uint32_t per bucket; reset to
++// 0 at each audit-flush after the percentile read + emit.
++volatile std::uint32_t g_pix_hist_bucket[6] = {0, 0, 0, 0, 0, 0};
++
+ // DOS-PORT (patch 0090, Phase 9 wave 20 W20B): engine-tick decomposition
+@@ -447,2 +474,12 @@ bool drawtile_fast_bg_active();
+ bool mds_bg_instr_active();
++// patch 0165 (Pixtone multi-source probe): SamplePixtoneActiveBucket
++// forward-decl. Definition lives at file-scope-after-both-namespace-
++// closes alongside the engine_tick_fine_instr_active wrapper (heeds
++// the W20B build-fix amendment about avoiding the nested
++// NXE::Graphics::NXE::Diag trap). Called from Organya.cpp's
++// organyaStreamCallback at audio-buffer-fill cadence; reads the
++// extern "C" g_pixtone_active_count from Pixtone.cpp, gates on
++// ::NXE::Graphics::pixtone_probe_active(), buckets into
++// ::NXE::Diag::g_pix_hist_bucket[0..5].
++void SamplePixtoneActiveBucket();
+ }}
+@@ -672,2 +709,29 @@ inline bool _abl_p10_audio_instr()
+ 
++// DOS-PORT (patch 0165, Pixtone multi-source probe). Cached-int 3-state
++// helper -- mirrors the Leg A / Leg B / DATA_CACHE sentinel-cache idiom
++// from nxengine/0162-v2 / 0164 / 0163. First call reads SDL_HINT_DOSKUTSU_-
++// PIXTONE_PROBE via _strict_truthy_env (std::getenv-backed; same path
++// SDL3-DOS hint reads use for env var fallback) and emits the LOG_INFO
++// banner naming the active state. Subsequent calls return the cached
++// int without an env read. Gates only:
++//   - _maybe_flush_pixtone_multi_audit's LOG_INFO emit
++//   - SamplePixtoneActiveBucket's histogram bucket-inc (no-op when off)
++// Does NOT gate the counter increments themselves (g_pixtone_stoptrack_-
++// count + g_pixtone_polar_star_count) -- those run unconditionally so
++// both PLAY0 + PLAY1 cells have valid counter snapshots regardless of
++// the probe killswitch state. Cache-OFF byte-identical-at-rendered-
++// frame to pre-0165 (banner LOG_INFO line is the only side-effect on
++// first call when off; one line per process).
++inline bool pixtone_probe_active()
++{
++  static int decided = -1;
++  if (decided < 0)
++  {
++    decided = _strict_truthy_env("SDL_HINT_DOSKUTSU_PIXTONE_PROBE") ? 1 : 0;
++    LOG_INFO("pixtone multi-source probe: {}",
++             decided ? "ENABLED (opt-in)" : "DISABLED (default)");
++  }
++  return decided == 1;
++}
++
+ // DOS-PORT (patch 0111, Phase 11 wave-25 mds_tilemap_fg sub-decomposition
+@@ -3367,2 +3431,104 @@ void _maybe_flush_sfx_stat_audit()
+ 
++// DOS-PORT (patch 0165, Pixtone multi-source probe). Per-100-flip
++// [pixtone-multi] emit. Sibling of _maybe_flush_sfx_stat_audit above.
++// Reads the 6-bucket g_pixtone_active_count histogram (single-writer
++// audio thread via SamplePixtoneActiveBucket; single-reader render
++// thread here) + the block-over-block deltas for g_pixtone_stoptrack_-
++// count + g_pixtone_polar_star_count (engine-thread counters) +
++// doskutsu_audio_silent_irq_count (SDL-side IRQ-thread counter from
++// patches/SDL/0069). Emit gated on pixtone_probe_active(). One
++// LOG_INFO line per block; counters / histogram reset after emit.
++//
++// Hypothesis discrimination targets from PIXTONE-MULTISOURCE-DESIGN.md:
++// - A (per-callback mix CPU): active_count p90 + stoptrack delta tell
++//   us the channel load during the block.
++// - B (track-state transition): stoptrack delta directly measures the
++//   preempt-and-replay rate (the suspected mechanism).
++// - C (scheduler starvation): silent_irq delta + active_count max tell
++//   us whether IRQs are firing into a drained ring.
++// - D (IRQ jitter): silent_irq delta combined with the existing
++//   [audio-block] irq_count delta narrates the IRQ cadence.
++// - E (re-diagnose): if none of A-D match the operator's reported
++//   stutter, the deltas constrain the next hypothesis.
++//
++// Block snapshot pattern matches the existing [audio-block] reader at
++// line ~3089 (delta = now - last; modular wrap-safe per C99 unsigned).
++void _maybe_flush_pixtone_multi_audit()
++{
++  if ((_flip_total % _dc_tally_every_flips) != 0) return;
++  if (!pixtone_probe_active())
++  {
++    // Reset histogram + counter snapshots even when emit is gated, so
++    // a mid-run SET of the killswitch starts from a clean slate at the
++    // next emit boundary (matches the [audio-block] anti-pattern #2
++    // discipline: counters always update, emit gates only).
++    for (int i = 0; i < 6; ++i) NXE::Diag::g_pix_hist_bucket[i] = 0;
++    return;
++  }
++
++  // Snapshot the 6 buckets atomically-as-32-bit (volatile read);
++  // race-tolerant against the single audio-thread writer.
++  std::uint32_t bk[6];
++  for (int i = 0; i < 6; ++i)
++    bk[i] = NXE::Diag::g_pix_hist_bucket[i];
++
++  // Percentile compute via cumulative bucket counts. Bucket midpoints
++  // used for the percentile value -- coarse but sufficient at probe
++  // resolution: 0/1/2/4/8/12. min = first non-empty bucket midpoint;
++  // max = last non-empty; med + p90 by cumulative threshold.
++  std::uint32_t total = 0;
++  for (int i = 0; i < 6; ++i) total += bk[i];
++
++  static const std::uint32_t bucket_mid[6] = {0, 1, 2, 4, 8, 12};
++  std::uint32_t mn = 0, md = 0, p90 = 0, mx = 0;
++  if (total > 0)
++  {
++    for (int i = 0; i < 6; ++i) if (bk[i]) { mn = bucket_mid[i]; break; }
++    for (int i = 5; i >= 0; --i) if (bk[i]) { mx = bucket_mid[i]; break; }
++    const std::uint32_t thr_med = total / 2;
++    const std::uint32_t thr_p90 = (total * 90) / 100;
++    std::uint32_t acc = 0;
++    bool set_md = false, set_p90 = false;
++    for (int i = 0; i < 6; ++i)
++    {
++      acc += bk[i];
++      if (!set_md  && acc >= thr_med) { md  = bucket_mid[i]; set_md  = true; }
++      if (!set_p90 && acc >= thr_p90) { p90 = bucket_mid[i]; set_p90 = true; }
++    }
++  }
++
++  // Block-over-block deltas via snapshot pattern (matches [audio-block]
++  // at line ~3089). Unsigned subtraction is wrap-safe per C99.
++  static std::uint32_t _last_stoptrack  = 0;
++  static std::uint32_t _last_polar_star = 0;
++  static std::uint32_t _last_silent_irq = 0;
++
++  const std::uint32_t now_stoptrack  = g_pixtone_stoptrack_count;
++  const std::uint32_t now_polar_star = g_pixtone_polar_star_count;
++  const std::uint32_t now_silent_irq = doskutsu_audio_silent_irq_count;
++
++  const std::uint32_t d_stoptrack  = now_stoptrack  - _last_stoptrack;
++  const std::uint32_t d_polar_star = now_polar_star - _last_polar_star;
++  const std::uint32_t d_silent_irq = now_silent_irq - _last_silent_irq;
++
++  _last_stoptrack  = now_stoptrack;
++  _last_polar_star = now_polar_star;
++  _last_silent_irq = now_silent_irq;
++
++  // Snapshot of the live g_pixtone_active_count (instantaneous, not
++  // delta) -- useful for ground-truth cross-check against the
++  // histogram's max bucket when SFX channels are mid-play at emit time.
++  const std::uint32_t live_active = g_pixtone_active_count;
++
++  LOG_INFO("[pixtone-multi block={} samples={} active min={} med={} p90={} "
++           "max={} live={} stoptrack={} polarstar={} silent_irq={}]",
++           _dc_block_idx, total,
++           mn, md, p90, mx, live_active,
++           d_stoptrack, d_polar_star, d_silent_irq);
++
++  // Reset histogram for the next block. Counter cumulative values are
++  // preserved (the next block reads delta vs the snapshot above).
++  for (int i = 0; i < 6; ++i) NXE::Diag::g_pix_hist_bucket[i] = 0;
++}
++
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
+@@ -5364,2 +5530,8 @@ void Renderer::flip()
+   _maybe_flush_sfx_stat_audit();
++  // patch 0165 (Pixtone multi-source probe): per-100-flip [pixtone-multi]
++  // block (active-count histogram + stoptrack/polar-star/silent-irq
++  // deltas). Probe-gated -- the audit body short-circuits when the
++  // killswitch is unset, so cache-OFF cost is one cached-int compare
++  // per call + the every-100-flip cadence check.
++  _maybe_flush_pixtone_multi_audit();
+ 
+@@ -8192 +8364,36 @@ bool drawtile_fast_bg_active() { return ::NXE::Graphics::_abl_drawtile_fast_bg()
+ }}
++
++// DOS-PORT (patch 0165, Pixtone multi-source probe): SamplePixtoneActiveBucket
++// definition. Same file-scope-after-both-namespace-closes placement as the
++// other NXE::Diag accessors. Forwards into NXE::Graphics for the probe
++// killswitch + bucket array. Reads g_pixtone_active_count via the extern
++// "C" decl in NXE::Graphics's extern block.
++//
++// Bucket boundaries: [0], [1], [2], [3-5], [6-10], [11+]. The five
++// comparisons form a single-pass if/else-if cascade (no loop, no
++// std::lower_bound -- DJGPP libstdc++ paths are heavier than the manual
++// cascade at this site). Cost when probe ON: 1 volatile read + up to 5
++// cmps + 1 volatile inc. Cost when probe OFF: 1 cached-int compare
++// (pixtone_probe_active short-circuits), early return.
++//
++// Called from Organya.cpp's organyaStreamCallback at audio-buffer-fill
++// cadence (~43 Hz Tier-2). The audio thread is the single writer; the
++// render thread reads the buckets at audit-flush. Volatile semantics
++// + 32-bit aligned single-word writes are race-tolerant per CLAUDE.md
++// threading-zero invariant.
++namespace NXE { namespace Diag {
++void SamplePixtoneActiveBucket()
++{
++  if (!::NXE::Graphics::pixtone_probe_active())
++    return;
++  const std::uint32_t n = g_pixtone_active_count;
++  int b;
++  if      (n == 0)  b = 0;
++  else if (n == 1)  b = 1;
++  else if (n == 2)  b = 2;
++  else if (n <= 5)  b = 3;
++  else if (n <= 10) b = 4;
++  else              b = 5;
++  ++g_pix_hist_bucket[b];  // same-namespace lookup; defined at line ~129
++}
++}}
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index bca66f9..8be96e7 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -391,2 +391,13 @@ void SDLCALL organyaStreamCallback(void *userdata, SDL_AudioStream *stream,
+   NXE::Diag::AudioMixerTimer _amt;
++
++  // patch 0165 (Pixtone multi-source probe): sample g_pixtone_active_count
++  // into a 6-bucket histogram at audio-buffer-fill cadence (~43 Hz Tier-2).
++  // Single volatile read + bucket inc; race-tolerant (single-writer audio
++  // thread, single-reader render thread at audit-flush boundary). Probe-
++  // gated internally so the sample is a no-op when killswitch is unset --
++  // cache-OFF byte-identical to pre-0165. Captures SFX-storm bursts that
++  // collapse within one render frame, which a coarser (every-10-flips)
++  // cadence would miss by definition.
++  NXE::Diag::SamplePixtoneActiveBucket();
++
+   if (additional_amount <= 0) return;
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index ead8f2a..5407538 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -46,2 +46,11 @@ extern "C" {
+   volatile std::uint32_t g_pixtone_active_count = 0;
++
++  // patch 0165 (Phase 11 -- Pixtone multi-source probe). Counter defs;
++  // extern decls in Pixtone.h. Same C-linkage + extern "C" {} block
++  // pattern as g_pixtone_active_count (avoids the GCC extern-with-init
++  // warning). Unconditional volatile inc at the call sites; the probe
++  // killswitch gates only the [pixtone-multi] block-emit + histogram
++  // sample reads, not the counter increments.
++  volatile std::uint32_t g_pixtone_stoptrack_count  = 0;
++  volatile std::uint32_t g_pixtone_polar_star_count = 0;
+ }
+@@ -454,2 +463,7 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+       MIX_StopTrack(track, 0);
++      // patch 0165 (Pixtone multi-source probe): channel-pressure
++      // indicator -- counts every preempt-and-replay where a new
++      // play() takes over an already-active channel. Not counted at
++      // the explicit-stop site in Pixtone::stop (a different mechanism).
++      ++g_pixtone_stoptrack_count;
+       MIX_SetTrackAudio(track, _sound_fx[slot].chunk);
+@@ -611,2 +625,6 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+       MIX_StopTrack(track, 0);
++      // patch 0165 (Pixtone multi-source probe): channel-pressure
++      // indicator -- mirror of the play() site above. Counts every
++      // preempt-and-replay event from the resampled play path.
++      ++g_pixtone_stoptrack_count;
+       MIX_SetTrackAudio(track, _sound_fx[slot].resampled[idx]);
+diff --git a/src/sound/Pixtone.h b/src/sound/Pixtone.h
+index d593229..d70e4ea 100644
+--- a/src/sound/Pixtone.h
++++ b/src/sound/Pixtone.h
+@@ -38,2 +38,30 @@ extern "C" volatile std::uint32_t g_pixtone_active_count;
+ 
++// patch 0165 (Phase 11 -- Pixtone multi-source probe). Two new counters
++// for the [pixtone-multi] block audit + hypothesis A/B discrimination:
++//
++// g_pixtone_stoptrack_count -- # of MIX_StopTrack-on-active-channel
++// events (the preempt-and-replay path). Incremented at the two play
++// dispatch sites in Pixtone.cpp (play + playResampled) -- channel-
++// pressure indicator. NOT incremented at the explicit-stop site
++// (Pixtone::stop's MIX_StopTrack) because that's a different mechanism
++// (caller-explicit stop, not preempt-on-play).
++//
++// g_pixtone_polar_star_count -- # of polar-star fire events. Both
++// SND_POLAR_STAR_L1_2 (id 32) and SND_POLAR_STAR_L3 (id 49) increment
++// the same counter (storm-rate indicator; per-level disambiguation
++// deferred to v2 if needed). Incremented in SoundManager::playSfx +
++// playSfxResampled where the SFX enum is in hand (Pixtone.cpp has
++// only the slot-index abstraction, enum identity is lost there).
++//
++// Same single-volatile-uint write-by-engine + read-by-audit pattern
++// as g_pixtone_active_count; no atomics; no memory barriers; cache-
++// OFF byte-identical at game state (volatile inc is not a game-state
++// mutation). The probe killswitch SDL_HINT_DOSKUTSU_PIXTONE_PROBE
++// gates only the [pixtone-multi] block-emit + the histogram-sample
++// bucket reads; the counters themselves increment unconditionally so
++// both PLAY0 (probe off) and PLAY1 (probe on) cells have valid
++// counter snapshots across the binary.
++extern "C" volatile std::uint32_t g_pixtone_stoptrack_count;
++extern "C" volatile std::uint32_t g_pixtone_polar_star_count;
++
+ #define PXT_NO_CHANNELS 4
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 52327f5..40da0ca 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -915,2 +915,12 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+   Pixtone::getInstance()->play(-1, (int32_t)snd, loop);
++
++  // patch 0165 (Pixtone multi-source probe): polar-star fire counter.
++  // Both L1+L2 (id 32) and L3 (id 49) increment a single combined
++  // counter -- storm-rate indicator; per-level disambiguation
++  // deferred to v2 if needed. Sited here because the SFX enum is in
++  // hand (Pixtone.cpp's play() has only the slot-index abstraction).
++  // Unconditional inc per the design (volatile uint32_t, no atomics,
++  // no game-state mutation, ~10-50 Hz playSfx rate -> negligible cost).
++  if (snd == SFX::SND_POLAR_STAR_L1_2 || snd == SFX::SND_POLAR_STAR_L3)
++    ++g_pixtone_polar_star_count;
+ }
+@@ -926,2 +936,10 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
+   Pixtone::getInstance()->playResampled(-1, (int32_t)snd, -1, percent);
++
++  // patch 0165 (Pixtone multi-source probe): polar-star fire counter
++  // (defensive mirror -- polar-star currently routes through the
++  // non-resampled path only, so this site is dormant today, but a
++  // future weapon-mod or patch routing polar-star resampled would
++  // also be counted without further author work).
++  if (snd == SFX::SND_POLAR_STAR_L1_2 || snd == SFX::SND_POLAR_STAR_L3)
++    ++g_pixtone_polar_star_count;
+ }
+-- 
+2.47.3
+

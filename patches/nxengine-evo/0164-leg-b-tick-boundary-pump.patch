@@ -1,0 +1,190 @@
+From 46fffc6c714098b08fbbbaae5258ac750ce6f2ac Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 20 May 2026 13:18:08 -0700
+Subject: [PATCH] perf phase 11 patch 0164 -- Leg B audio tick-boundary pump
+ (486-campaign Bug 2 continuous-SFX-stutter fix)
+
+486-campaign Bug 2 -- continuous SFX stutter on slow CPUs during
+steady-state gameplay (independent of stage-load freezes, which are
+covered by 0162-v2 Leg A + 0163 data cache). Per flush-instr's
+docs/internal/AUDIO-PIPELINE-CAMPAIGN-DESIGN.md sec.1.2: the
+cooperative-scheduler audio thread only runs when the engine
+yields, so during heavy render frames the engine can defer the
+yield past the SB16 ring depth (~372 ms Tier-2), draining the ring
+below underrun threshold. Once-per-frame supplementary pumping
+from the render thread keeps the ring topped up across consecutive
+heavy frames -- the audible stutter resolves.
+
+Wave-38 cooperative-scheduler starvation pattern (per
+wave_38_cooperative_scheduler_starvation_is_real) is the
+mechanism: this patch addresses it at the render-thread side
+(while patches SDL/0067-v2 + 0068 add the audio-thread-side
+export + backstop the SDL/0067 path needs to be safely callable
+from main).
+
+Lever shape -- single TICKPUMP() call in run_tick_fixed:
+
+Sentinel-cached killswitch helper `tickpump_active()` + `TICKPUMP()`
+macro at file scope in src/main.cpp (mirrors 0162-v2's
+midgap_pump_active / MIDGAP_PUMP idiom, which lives in map.cpp
+because all 6 Leg A call sites are inside load_stage). One
+TICKPUMP() call site in run_tick_fixed, placed immediately before
+`game.tick_render_submit()`. Both the 1:1-mode FIXED_TIMESTEP path
+(line 401 `game.tick_state()`) and the catch-up `else`-block path
+(lines 405-461, with the catch-up while-loop + ftd_on diagnostic +
+spiral-of-death resync) converge at this point, so the pump fires
+exactly once per displayed frame regardless of FT mode.
+
+Macro body: `do { if (tickpump_active()) while (SDL_DOSAudioPump()) { } } while (0)`.
+The while-loop tops up the ring to FULL on each tick boundary;
+bounded by ring depth (~372 ms Tier-2 / ~23 ms per buffer-frame ->
+~16 iterations worst-case from empty, 1-2 in steady-state at 30 fps
+real-HW render rate). In the silent case (no SFX, no Organya, no
+MIDI) SDL_DOSAudioPump returns false on the first call and the loop
+body executes zero times -- auto-degenerates to no-op at zero CPU
+cost.
+
+Killswitch: SDL_HINT_DOSKUTSU_AUDIO_TICKPUMP. **v1 default OFF**
+(opt-in via "=1"). Same hygiene as nxengine/0162-v2 + 0163 --
+ship opt-in; flip to default-ON in a release patch after iter
+validation confirms stutter elimination + no per-flip cost
+regression in cells that don't need it. Sentinel-cached on first
+tickpump_active() call -- single SDL_GetHint then cached int;
+banner emit "audio tick-boundary pump: ENABLED (opt-in)" /
+"audio tick-boundary pump: DISABLED (default)" on the decision.
+
+Placement rationale (per the #97 STOP-and-ack):
+- Line 463 (immediately before tick_render_submit), NOT line 435
+  (immediately after catch-up while-close): line 435 would skip
+  the 1:1-mode path entirely (line 401 bypasses the else block),
+  AND would shift the spiral-of-death resync trigger boundary at
+  lines 446-461 by adding pump latency before the accum_ns
+  mutation. Line 463 sits after all logic-state mutation has
+  stabilized and before render-submit reads drawcalls.
+- The design doc's "main.cpp:~428-431" was a line-number drift
+  (those lines are inside the catch-up while-body in the current
+  tree); line 463 is the correct mapping of the prose intent
+  ("between catch-up close and tick_render_submit").
+
+Wave-36 trap clearance: the pump invokes SDL_DOSAudioPump() (the
+SDL/0067-v2 export). It does NOT call game.tick_state, does NOT
+submit drawcalls, does NOT re-enter the catch-up loop. Same safety
+profile as 0162-v2's MIDGAP_PUMP. The wave-36 mechanism (-28 fps in
+slot 0135 / mechanism_a_drawcall_coupling_bug) was catch-up
+applied OVER game.tick (which submitted drawcalls); this is
+post-catch-up, drawcall-side-effect-free.
+
+Default-OFF byte-identical-at-rendered-frame to pre-0164:
+- TICKPUMP() with active=false evaluates only the cached int
+  compare per frame -- no SDL_DOSAudioPump call, no audio thread
+  interaction.
+- The only side-effect in the cache-OFF path is the banner
+  LOG_INFO line on first call (one line per process), which
+  matches the 0162-v2 / 0163 banner-only-no-state-change pattern.
+
+Coexists with SDL_HINT_DOSKUTSU_AUDIO_MIDGAP_PUMP (independent
+killswitches; Leg A covers stage-load freads, Leg B covers
+steady-state tick boundaries). Both share the same SDL_DOSAudioPump
+export from SDL/0067-v2 and the same SDL/0068 TryLock+timeout
+backstop.
+
+Single-lever-per-binary: the tick-boundary pump is THE
+operator-visible mechanism this binary's new patch introduces.
+SDL-side patches (SDL/0063+0064+0065+0066+0067-v2+0068+SDL_mixer/0001+0002)
+and prior nxengine patches (...+0160+0161+0162-v2+0163-v2) are
+unchanged carriers from the iter rotation. The 3-cell iter
+attribution remains clean:
+- PLAY0: baseline (both new killswitches unset).
+- PLAY1: SET SDL_HINT_DOSKUTSU_AUDIO_TICKPUMP=1 -- Leg B only.
+- PLAY2: SET SDL_HINT_DOSKUTSU_PRELOAD_MIDI=1 -- existing
+  patches/nxengine-evo/0112+0114 MIDI parse cache only.
+
+Files in this patch:
+- src/main.cpp -- one new SDL3/SDL_dosaudio_pump.h include + one
+  new helper block (~50 LOC including DOS-PORT comment) at file
+  scope between ft_accumulator_thaw and run_tick_fixed + one new
+  TICKPUMP() call + comment at the tick boundary (~10 LOC).
+
+No CMakeLists.txt change needed; no new TU.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/main.cpp | 60 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 01856fb..1fca25f 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -42,2 +42,3 @@ extern "C" {
+ #include <SDL3_image/SDL_image.h>
++#include <SDL3/SDL_dosaudio_pump.h>  // patch 0164: SDL_DOSAudioPump for the tick-boundary audio pump
+ using namespace NXE::Graphics;
+@@ -322,2 +323,54 @@ extern "C" void ft_accumulator_thaw(void)
+ 
++// DOS-PORT (patch 0164, Leg B audio tick-boundary pump -- 486-class
++// campaign Bug 2 fix for continuous SFX stutter). Sentinel-cached
++// killswitch helper + TICKPUMP macro. Mirrors nxengine/0162-v2's
++// MIDGAP_PUMP idiom (whose helper lives in map.cpp because all 6
++// Leg A call sites are inside load_stage's sub-loaders). Leg B fires
++// at the once-per-displayed-frame tick boundary instead, so the
++// helper + macro live here at file scope in main.cpp -- the single
++// TICKPUMP() call site sits in run_tick_fixed right before
++// game.tick_render_submit() (the boundary between logic-tick state
++// mutation and render-submit drawcall gather; both the 1:1-mode
++// path and the catch-up else-block path converge here, so the pump
++// fires exactly once per displayed frame).
++//
++// Killswitch: SDL_HINT_DOSKUTSU_AUDIO_TICKPUMP. v1 default OFF
++// (opt-in via "=1"); same hygiene as nxengine/0162-v2 + 0163.
++// Sentinel-cached on first tickpump_active() call -- single
++// SDL_GetHint then cached int; banner emit on the decision.
++//
++// SDL_DOSAudioPump is exported from sdl-engine's SDL/0067-v2 -- a
++// thin wrapper around the SDL3-DOS backend's audio servicing path
++// (no renderer call, no SDL_PumpEvents, no engine callback path
++// beyond Pixtone scalar slot bookkeeping internal to SDL_mixer)
++// that moves one buffer-frame of audio from the bound streams into
++// the ring and returns 1 if more work could be done, 0 if the ring
++// is full or no work is queued. The while-loop tops the ring up to
++// FULL on each tick boundary; bounded by ring depth (~372 ms Tier-2
++// / ~23 ms per buffer-frame -> ~16 iterations worst-case from
++// empty; 1-2 in steady-state at 30 fps real-HW render rate). With
++// the killswitch off (the v1 default), zero pump calls execute;
++// only the cached int compare runs per frame, so the v1 default
++// path is byte-identical-at-rendered-frame to pre-0164.
++//
++// Wave-36 trap clearance: the pump does NOT call game.tick_state,
++// does NOT submit drawcalls, does NOT re-enter the catch-up loop.
++// Same safety profile as 0162-v2's MIDGAP_PUMP (which ships clean
++// at 6 sites inside load_stage). The wave-36 mechanism (-28 fps in
++// slot 0135) was catch-up applied OVER game.tick(), which submitted
++// drawcalls; this is post-catch-up, drawcall-side-effect-free.
++static int  g_tickpump_decided = -1;
++static bool tickpump_active()
++{
++  if (g_tickpump_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_TICKPUMP");
++    g_tickpump_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    LOG_INFO("audio tick-boundary pump: {}",
++             g_tickpump_decided ? "ENABLED (opt-in)" : "DISABLED (default)");
++  }
++  return g_tickpump_decided == 1;
++}
++#define TICKPUMP() do { if (tickpump_active()) while (SDL_DOSAudioPump()) { } } while (0)
++
+ static void run_tick_fixed(void)
+@@ -463,2 +516,9 @@ static void run_tick_fixed(void)
+   // --- RENDER: ONCE per displayed frame ---
++  // patch 0164 (Leg B audio tick-boundary pump): top up the SB16 ring
++  // via SDL_DOSAudioPump at the tick boundary, before the render-submit
++  // gather. Fires once per displayed frame (both 1:1-mode and catch-up
++  // paths converge here); gated on tickpump_active() (default OFF). No-op
++  // when the killswitch is unset -- byte-identical-at-rendered-frame to
++  // pre-0164.
++  TICKPUMP();
+   game.tick_render_submit();
+-- 
+2.47.3
+

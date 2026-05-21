@@ -1,0 +1,188 @@
+From d06f7adecb2a3dc5fa67ed0cf8f5be919d5d5f66 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 19 May 2026 12:06:31 -0700
+Subject: [PATCH] mixer: Phase 11 patch 0002 -- MIX_DestroyMixer sub-step
+ teardown markers
+
+The 486-class campaign quit-to-DOS hang (Bug 2) wedges the main thread
+inside MIX_DestroyMixer on the Intel 486DX2-50/66 (the Am5x86-133 and
+the Pentium OverDrive quit cleanly). sdl-engine's #61 re-root-cause
+established: the audio playback thread runs free throughout the hang
+(its [sdl-audiocb] counter keeps emitting), main is wedged inside
+MIX_DestroyMixer not holding device->lock or output_stream->lock, and
+the DX2-deterministic CPU-dependence indicates a timing-sensitive
+livelock -- not an unconditional loop. The exact wedged sub-step
+cannot be pinned from static source: every concrete deadlock is
+disproved by SDL's own locking discipline.
+
+This patch adds the finer instrumentation to localize it. It narrates
+each MIX_DestroyMixer sub-step -- and each MIX_DestroyTrack sub-step --
+to the SDL3-DOS debug log (<TAG>SDL.LOG via doskutsu_dbg_log,
+per-line fsync'd), so the LAST marker in a hung DX2-66 log names the
+wedged sub-step exactly. Markers:
+
+  mix-destroy[1] pre-MIX_StopAllTracks
+  mix-destroy[2] pre-track-destroy-loop
+  mix-destroy[2.track] pre-MIX_DestroyTrack (one per track)
+  mix-destroy[2.trk] pre-LockMixer/unlink
+  mix-destroy[2.trk] pre-SDL_DestroyAudioStream(output_stream)
+  mix-destroy[2.trk] pre-decoder-quit_track
+  mix-destroy[2.trk] pre-SDL_DestroyAudioStream(internal_stream)
+  mix-destroy[2.trk] pre-track-property-teardown
+  mix-destroy[3] pre-group-destroy-loop
+  mix-destroy[3.group] pre-MIX_DestroyGroup (one per group)
+  mix-destroy[4] pre-SDL_RemoveEventWatch
+  mix-destroy[5] pre-SDL_DestroyAudioStream(output_stream)
+  mix-destroy[6] pre-SDL_DestroyProperties
+  mix-destroy[7] pre-SDL_QuitSubSystem(AUDIO)
+  mix-destroy[8] post-QuitSubSystem; body complete
+
+Instrumentation only -- no logic change. Always-on (no env-var gate),
+matching the engine's existing snd-shutdown[N/6] / "audio close:"
+teardown narration; MIX_DestroyMixer runs once per process at quit so
+the cost is teardown-frequency only. The MIX_DestroyTrack markers gate
+on g_mix_destroy_tracing (set by MIX_DestroyMixer) so they fire only
+during the teardown walk, not if MIX_DestroyTrack runs via the public
+API or the MixerCallback destroy_requested path during gameplay.
+
+doskutsu_dbg_log is defined in the SDL3-DOS backend
+(vendor/SDL/src/video/dos/SDL_dosdbg.c); SDL3 links before SDL3_mixer
+and the SDL-DOS backend references it heavily, so the symbol is
+already in the link image and a plain extern resolves. The markers
+are guarded on SDL_PLATFORM_DOS so a non-DOS SDL_mixer build (no
+doskutsu_dbg_log) compiles them out.
+
+The next DX2-66-only iter carries this; the marker iter's hung log
+pins the sub-step, then sdl-engine authors the actual quit-hang fix.
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/SDL_mixer.c | 59 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 59 insertions(+)
+
+diff --git a/src/SDL_mixer.c b/src/SDL_mixer.c
+index 21b10e78..40dee1fe 100644
+--- a/src/SDL_mixer.c
++++ b/src/SDL_mixer.c
+@@ -924,6 +924,42 @@ MIX_Mixer *MIX_CreateMixerDevice(SDL_AudioDeviceID devid, const SDL_AudioSpec *s
+     return mixer;
+ }
+ 
++/* DOSKUTSU patch (Phase 11 patch 0002): MIX_DestroyMixer sub-step
++   teardown markers. The 486-class campaign quit-to-DOS hang (Bug 2)
++   wedges the main thread inside MIX_DestroyMixer on the Intel 486DX2;
++   sdl-engine's #61 re-root-cause narrowed it to a CPU-timing-sensitive
++   livelock in one of MIX_DestroyMixer's sub-steps but could not pin
++   the exact step from static source. These markers narrate each
++   sub-step to the SDL3-DOS debug log (<TAG>SDL.LOG via doskutsu_dbg_log,
++   per-line fsync'd) so the LAST marker in a hung DX2-66 log names the
++   wedged sub-step exactly. Same pattern as the engine's existing
++   snd-shutdown[N/6] / "audio close:" teardown narration: always-on (no
++   env-var gate), teardown-frequency only (MIX_DestroyMixer runs once
++   per process at quit), no logic change.
++
++   doskutsu_dbg_log is defined in the SDL3-DOS backend
++   (vendor/SDL/src/video/dos/SDL_dosdbg.c). SDL3 links before
++   SDL3_mixer and the SDL-DOS backend references doskutsu_dbg_log
++   heavily, so the symbol is already in the link image -- a plain
++   extern here resolves (same cross-module direction is safe; only the
++   reverse, SDL referencing a mixer symbol, needed the patch-0001
++   care). Guarded on SDL_PLATFORM_DOS so a non-DOS build of SDL_mixer
++   (no doskutsu_dbg_log) compiles the markers out to nothing.
++   Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
++
++   The MIX_DestroyTrack sub-step markers gate on g_mix_destroy_tracing
++   so they fire only during the MIX_DestroyMixer teardown walk -- not
++   if MIX_DestroyTrack runs via the public API or the MixerCallback
++   destroy_requested path during normal gameplay. */
++#ifdef SDL_PLATFORM_DOS
++extern void doskutsu_dbg_log(const char *fmt, ...);
++#define MIX_DESTROY_MARK(s) doskutsu_dbg_log(s)
++#else
++#define MIX_DESTROY_MARK(s) ((void)0)
++#endif
++#define MIX_DESTROY_TRK_MARK(s) do { if (g_mix_destroy_tracing) { MIX_DESTROY_MARK(s); } } while (0)
++static bool g_mix_destroy_tracing = false;
++
+ void MIX_DestroyMixer(MIX_Mixer *mixer)
+ {
+     if (!mixer) {
+@@ -941,29 +977,43 @@ void MIX_DestroyMixer(MIX_Mixer *mixer)
+     }
+     UnlockGlobal();
+ 
++    /* DOSKUTSU patch 0002: sub-step teardown markers (see block above). */
++    g_mix_destroy_tracing = true;
++
++    MIX_DESTROY_MARK("mix-destroy[1]: pre-MIX_StopAllTracks");
+     MIX_StopAllTracks(mixer, 0);
+ 
++    MIX_DESTROY_MARK("mix-destroy[2]: pre-track-destroy-loop");
+     while (mixer->all_tracks) {
++        MIX_DESTROY_MARK("mix-destroy[2.track]: pre-MIX_DestroyTrack (Nth line == Nth track)");
+         MIX_DestroyTrack(mixer->all_tracks);
+     }
+ 
++    MIX_DESTROY_MARK("mix-destroy[3]: pre-group-destroy-loop");
+     while (mixer->all_groups) {
++        MIX_DESTROY_MARK("mix-destroy[3.group]: pre-MIX_DestroyGroup (Nth line == Nth group)");
+         MIX_DestroyGroup(mixer->all_groups);
+     }
+ 
++    MIX_DESTROY_MARK("mix-destroy[4]: pre-SDL_RemoveEventWatch");
+     if (mixer->device_id) {
+         SDL_RemoveEventWatch(AudioDeviceChangeEventWatcher, mixer);
+     }
+ 
++    MIX_DESTROY_MARK("mix-destroy[5]: pre-SDL_DestroyAudioStream(output_stream)");
+     SDL_DestroyAudioStream(mixer->output_stream);
++    MIX_DESTROY_MARK("mix-destroy[6]: pre-SDL_DestroyProperties");
+     SDL_DestroyProperties(mixer->track_tags);
+     SDL_DestroyProperties(mixer->props);
+     SDL_free(mixer->mix_buffer);
+ 
++    MIX_DESTROY_MARK("mix-destroy[7]: pre-SDL_QuitSubSystem(AUDIO)");
+     if (mixer->device_id) {
+         SDL_QuitSubSystem(SDL_INIT_AUDIO);
+     }
+ 
++    MIX_DESTROY_MARK("mix-destroy[8]: post-QuitSubSystem; MIX_DestroyMixer body complete");
++    g_mix_destroy_tracing = false;
+     SDL_free(mixer);
+ }
+ 
+@@ -1568,6 +1618,11 @@ void MIX_DestroyTrack(MIX_Track *track)
+ 
+     MIX_Mixer *mixer = track->mixer;
+ 
++    /* DOSKUTSU patch 0002: MIX_DestroyTrack sub-step markers (gated on
++       g_mix_destroy_tracing -- emit only during the MIX_DestroyMixer
++       teardown walk). */
++    MIX_DESTROY_TRK_MARK("mix-destroy[2.trk]: pre-LockMixer/unlink");
++
+     LockMixer(mixer);
+ 
+     // handle the case where someone destroys a track during a mixer callback.  :O
+@@ -1603,14 +1658,18 @@ void MIX_DestroyTrack(MIX_Track *track)
+     track->group = NULL;
+     UnlockMixer(mixer);
+ 
++    MIX_DESTROY_TRK_MARK("mix-destroy[2.trk]: pre-SDL_DestroyAudioStream(output_stream)");
+     SDL_DestroyAudioStream(track->output_stream);
+ 
++    MIX_DESTROY_TRK_MARK("mix-destroy[2.trk]: pre-decoder-quit_track");
+     if (track->input_audio) {
+         track->input_audio->decoder->quit_track(track->decoder_userdata);
+     }
+ 
++    MIX_DESTROY_TRK_MARK("mix-destroy[2.trk]: pre-SDL_DestroyAudioStream(internal_stream)");
+     SDL_DestroyAudioStream(track->internal_stream);
+ 
++    MIX_DESTROY_TRK_MARK("mix-destroy[2.trk]: pre-track-property-teardown");
+     UnrefAudio(track->input_audio);
+     SDL_EnumerateProperties(track->tags, RemoveTrackFromAllMixerTagLists, track);
+     SDL_DestroyProperties(track->tags);
+-- 
+2.47.3
+

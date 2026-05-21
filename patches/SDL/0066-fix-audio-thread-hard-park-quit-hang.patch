@@ -1,0 +1,254 @@
+From 552306a015aede9e50218ddc6f97e4aaeae3dc3e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 19 May 2026 14:23:42 -0700
+Subject: [PATCH] dos: Phase 11 patch 0066 -- audio-thread hard-park (486
+ quit-hang fix proper)
+
+486-class campaign Bug 2 final fix. The marker iters (SDL_mixer/0002 +
+SDL/0065, flush-instr #75, 486-CLASS-CAMPAIGN-FINDINGS.md sec.16)
+pinned the quit-to-DOS hang to a lock/scheduler race INSIDE
+ObtainLogicalAudioDevice (SDL_audio.c) during the simplified-stream
+device close that SDL_DestroyAudioStream(mixer->output_stream)
+triggers via SDL_CloseAudioDevice during MIX_DestroyMixer teardown.
+Both DX2-66 cells wedge there; the audio playback thread is alive
+throughout, cycling device->lock + output_stream->lock each Iterate.
+Deterministic on the Intel 486DX2; the Am5x86 and Pentium dodge it.
+
+A focused source read of ObtainLogicalAudioDevice does not pin the
+exact stuck line -- each lock resolves in the static model; the bug
+is a cooperative-scheduler / lock-race timing pattern not visible
+statically. So this is a targeted defensive fix at the precisely-named
+stage (defensive_rewrite_requires_identified_failure_stage), not a
+line-level repair.
+
+Fix: remove the cross-thread race entirely by parking the SDL audio
+playback thread OUT of the lock-contention window during the
+teardown. The engine already calls SDL_DOSAudioBeginShutdown() at
+snd-shutdown[3.5/6] -- BEFORE MIX_DestroyMixer, on main, single-
+threaded, no race -- the right hook. Patch 0066 makes that call
+flip a new module-scope flag g_dos_audio_hard_park = true. Then
+DOSSOUNDBLASTER_WaitDevice, at the top of its loop (right after the
+existing SDL/0046 device->shutdown bail), sees the flag and
+SDL_Delay(5)+continues. So the audio thread parks INSIDE WaitDevice,
+which runs OUTSIDE device->lock per SDL_audio.c's
+while(Iterate()){WaitDevice();} structure -- holding NO contended
+locks, never re-entering Iterate. Main's SDL_DestroyAudioStream
+(mixer->output_stream) -> SDL_CloseAudioDevice -> ObtainLogicalAudioDevice
+then runs with zero audio-thread lock contention; the race is gone.
+When main's ClosePhysicalAudioDevice eventually sets device->shutdown
+= 1, WaitDevice's existing SDL/0046 bail (checked at the top of every
+loop iteration, before the park check) fires, the Iterate loop
+observes shutdown, the thread exits, the join completes, CloseDevice
+runs ("audio close:" lines emit), MIX_DestroyMixer returns, quit
+completes.
+
+Crucially the fix does NOT set device->shutdown early -- that would
+create a SerializePhysicalDeviceClose deadlock (its
+while(shutdown)WaitCondition spin waits for a close_cond broadcast
+that only ClosePhysicalAudioDevice itself issues; setting shutdown
+early wedges main's own teardown). Park bypasses that trap by leaving
+shutdown alone and instead removing the audio thread from the
+lock-contention window via the WaitDevice loop. It also does not
+touch any SDL-core lock (subsystem_rwlock, device->lock,
+output_stream->lock, close_cond) -- entirely SDL-DOS-backend lane.
+
+Audio is already silenced at SDL_DOSAudioBeginShutdown time (Organya
+shutdown ran at snd-shutdown[2/6], Pixtone at [3/6]), so parking the
+audio thread is lossless behaviorally. SDL_Delay(5) in the park loop
+yields cooperatively, so main runs freely during the park.
+
+The earlier SDL/0063 WaitDevice ring-drain backstop guards a different
+(latent) deadlock and stays as is. Patch 0066 sits at WaitDevice's
+top, before SDL/0063's part-1/part-2; under park, the loop returns
+from SDL_Delay+continue before reaching SDL/0063's code.
+
+Killswitch: SDL_HINT_DOSKUTSU_DOS_AUDIO_SHUTDOWN_PARK (default-ON,
+strict-"0"). =0 makes SDL_DOSAudioBeginShutdown skip the flag flip,
+so WaitDevice never parks -- pre-0066 behavior, used for the
+operator's DX2 A/B reproducer cell. Resolved once at OpenDevice;
+cached. Boot banner emits the active state. Documented in
+docs/internal/BOOT.md; banner regex added to
+tests/run-gameplay-smoke.sh BANNERS.
+
+One TU touched (vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c); minor
+edits (~70 lines): two new statics, an OpenDevice killswitch resolve
+block, the SDL_DOSAudioBeginShutdown setter, and the WaitDevice park
+check. Rides the next combined DX2-66 iter (DX2-66-only per
+486_iteration_workflow). Independent of nx 0161.
+
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 134 ++++++++++++++++++++++++++++++++
+ 1 file changed, 134 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 3d74628cc..04a1b266d 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -202,6 +202,63 @@ static Uint64 g_c_audiocb_total_ns = 0;    /* summed callback wall-clock, curren
+ static Uint64 g_c_audiocb_max_ns = 0;      /* worst single callback, current block */
+ static Uint32 g_c_audiocb_block = 0;       /* emitted-block counter */
+ 
++/* DOSKUTSU patch (Phase 11 patch 0066): audio-thread hard-park
++   coordination for the quit-to-DOS teardown.
++
++   486-class campaign Bug 2 was pinned by patches SDL_mixer/0002 +
++   SDL/0065 to a lock/scheduler race INSIDE ObtainLogicalAudioDevice
++   (SDL_audio.c) during the simplified-output_stream device close that
++   SDL_DestroyAudioStream(mixer->output_stream) triggers via
++   SDL_CloseAudioDevice -- main wedges there while the cooperative
++   audio playback thread is alive and cycling device->lock /
++   output_stream->lock each Iterate. Deterministic on the Intel
++   486DX2; the Am5x86-133 and the Pentium OverDrive dodge it (flush-
++   instr #75, 486-CLASS-CAMPAIGN-FINDINGS.md sec.16).
++
++   This patch removes the race rather than patching SDL-core locks.
++   `g_dos_audio_hard_park` is flipped true by `SDL_DOSAudioBeginShutdown`
++   (already engine-called at snd-shutdown[3.5/6], BEFORE
++   MIX_DestroyMixer, on the main thread, single-threaded -- no race).
++   `DOSSOUNDBLASTER_WaitDevice`, at the top of its loop, sees the flag
++   and SDL_Delay(5)+continues -- parking the audio thread in WaitDevice
++   (which runs OUTSIDE device->lock per SDL_audio.c's
++   `while(Iterate()){WaitDevice();}` structure), holding NO contended
++   locks, never re-entering Iterate. main's SDL_DestroyAudioStream
++   -> SDL_CloseAudioDevice -> ObtainLogicalAudioDevice then runs with
++   zero audio-thread lock contention; the race is gone. When main's
++   ClosePhysicalAudioDevice sets device->shutdown=1, WaitDevice's
++   existing SDL/0046 bail (checked at the top of every loop iteration,
++   before the park check) fires immediately, the Iterate loop observes
++   shutdown=1, the thread exits, the join completes, CloseDevice runs
++   ("audio close:" lines emit), MIX_DestroyMixer returns, quit completes.
++
++   Audio is already silenced at SDL_DOSAudioBeginShutdown time (Organya
++   shutdown ran at snd-shutdown[2/6], Pixtone at [3/6]), so parking the
++   audio thread loses nothing behaviorally.
++
++   Critically, this does NOT set device->shutdown early -- that would
++   create a SerializePhysicalDeviceClose deadlock (its `while(shutdown)
++   WaitCondition` spin waits for a close_cond broadcast that only
++   ClosePhysicalAudioDevice itself issues; setting shutdown early
++   wedges main's own teardown). Park bypasses that trap by leaving
++   shutdown alone and instead removing the audio thread from the
++   lock-contention window via the WaitDevice loop.
++
++   Killswitch: SDL_HINT_DOSKUTSU_DOS_AUDIO_SHUTDOWN_PARK=0 disables the
++   park (g_dos_audio_shutdown_park_disabled true). With the killswitch
++   set, SDL_DOSAudioBeginShutdown does NOT flip g_dos_audio_hard_park,
++   so WaitDevice never parks -- pre-0066 behavior, used for the
++   operator's DX2 A/B to reproduce the original hang. Default ON.
++   Strict-"0" match per CLAUDE.md env-var convention. Resolved once
++   at OpenDevice; cached.
++
++   g_dos_audio_hard_park is volatile -- main thread (SDL_DOSAudioBeginShutdown)
++   writes it; audio thread (WaitDevice) reads it. Aligned bool stores
++   are atomic on x86 (DJGPP target), matching the existing audio-flag
++   pattern (g_dos_audio_resume_request, g_dos_audio_pause_request). */
++static bool g_dos_audio_shutdown_park_disabled = false;
++static volatile bool g_dos_audio_hard_park = false;
++
+ /* DOSKUTSU patch (Phase 11 patch 0058): Shape A mechanism-histogram
+    instrumentation state. Diagnostic backstop for wave-36 PLAY6 Shape
+    D fps lever per `pressure_test_tidy_narratives.md` discipline: if
+@@ -762,6 +819,35 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+             return true;
+         }
+ 
++        /* DOSKUTSU patch (Phase 11 patch 0066): hard-park gate.
++           SDL_DOSAudioBeginShutdown flips g_dos_audio_hard_park=true on
++           the main thread at snd-shutdown[3.5/6], BEFORE
++           MIX_DestroyMixer, single-threaded -- no race. When parked,
++           the audio thread SDL_Delay-loops here at the top of
++           WaitDevice -- OUTSIDE the Iterate's device->lock per
++           SDL_audio.c's `while(Iterate()){WaitDevice();}` structure --
++           holding NO contended locks, never re-entering Iterate. main's
++           SDL_DestroyAudioStream(mixer->output_stream) ->
++           SDL_CloseAudioDevice -> ObtainLogicalAudioDevice then runs
++           with zero audio-thread lock contention, removing the
++           486DX2 quit-hang race (486-class campaign Bug 2 / flush-instr
++           #75, 486-CLASS-CAMPAIGN-FINDINGS.md sec.16). The park exits
++           via the SDL/0046 shutdown bail above on the next loop
++           iteration once main's ClosePhysicalAudioDevice sets
++           device->shutdown=1. SDL_Delay(5) yields cooperatively, so
++           main runs freely during the park (the DOS_Yield baked into
++           SDL_Delay schedules main once per 5 ms wall-clock).
++           Killswitched at OpenDevice via
++           SDL_HINT_DOSKUTSU_DOS_AUDIO_SHUTDOWN_PARK=0 -- the setter in
++           SDL_DOSAudioBeginShutdown is gated on the killswitch, so
++           with =0 the flag never flips true and this check stays
++           false; pre-0066 behavior preserved for the operator's DX2
++           A/B reproducer cell. */
++        if (g_dos_audio_hard_park) {
++            SDL_Delay(5);
++            continue;
++        }
++
+         /* DOSKUTSU patch (Phase 10 patch 0038): service pause/resume
+            requests on each WaitDevice loop iteration. Pause requests
+            come from the IRQ handler (consecutive-silent-IRQ threshold
+@@ -989,6 +1075,31 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0066): resolve the audio-thread
++       hard-park killswitch once at OpenDevice time. Strict-"0" match
++       per CLAUDE.md env-var convention. Cached at module scope; read
++       by SDL_DOSAudioBeginShutdown (which gates the
++       g_dos_audio_hard_park flag flip on it). Default ON: it removes
++       the cross-thread lock/scheduler race in ObtainLogicalAudioDevice
++       the 486-class campaign surfaced on the Intel 486DX2 configs
++       (docs/internal/486-CLASS-CAMPAIGN-FINDINGS.md sec.16, Bug 2). */
++    {
++        const char *park_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_DOS_AUDIO_SHUTDOWN_PARK");
++        g_dos_audio_shutdown_park_disabled =
++            (park_hint && park_hint[0] == '0' && park_hint[1] == 0);
++        if (g_dos_audio_shutdown_park_disabled) {
++            doskutsu_dbg_log("audio: SDL_HINT_DOSKUTSU_DOS_AUDIO_SHUTDOWN_PARK=0 "
++                             "(SDL/0066 audio-thread hard-park DISABLED; "
++                             "SDL_DOSAudioBeginShutdown will not park; A/B-only -- "
++                             "reproduces pre-0066 quit hang on real DX2)");
++        } else {
++            doskutsu_dbg_log("audio: SDL/0066 audio-thread hard-park active "
++                             "(default; teardown lock-handoff guard; "
++                             "SDL_DOSAudioBeginShutdown will park audio thread "
++                             "in WaitDevice before MIX_DestroyMixer device close)");
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0064): resolve the SFX-stall
+        instrumentation part-C gate once at OpenDevice time. Reuses the
+        existing FINE_INSTR env var (SDL_HINT_DOSKUTSU_FINE_INSTR,
+@@ -1417,6 +1528,29 @@ void SDL_DOSAudioBeginShutdown(void)
+         doskutsu_dbg_log("audio: SDL_DOSAudioBeginShutdown — gate already "
+                          "disabled (killswitch or repeat call); no-op");
+     }
++
++    /* DOSKUTSU patch (Phase 11 patch 0066): set the hard-park flag so
++       DOSSOUNDBLASTER_WaitDevice parks the audio thread OUT of the
++       lock-contention window during the MIX_DestroyMixer teardown
++       that follows. Gated on the killswitch resolved at OpenDevice
++       via SDL_HINT_DOSKUTSU_DOS_AUDIO_SHUTDOWN_PARK. Without this
++       park, ObtainLogicalAudioDevice -- reached via SDL_DestroyAudioStream
++       (mixer->output_stream)'s simplified-stream device close --
++       wedges on real Intel 486DX2 hardware (486-class campaign Bug 2,
++       486-CLASS-CAMPAIGN-FINDINGS.md sec.16). This is the actual
++       quit-hang fix; the earlier SDL/0063 WaitDevice ring-drain
++       backstop guards a different (latent) deadlock and stays as is.
++       Same caller, single-threaded -- this runs on main BEFORE
++       MIX_DestroyMixer, so flipping the flag here cannot race the
++       audio thread's read. */
++    if (!g_dos_audio_shutdown_park_disabled && !g_dos_audio_hard_park) {
++        g_dos_audio_hard_park = true;
++        doskutsu_dbg_log("audio: SDL/0066 hard-park ENGAGED -- "
++                         "DOSSOUNDBLASTER_WaitDevice will SDL_Delay-loop "
++                         "outside device->lock until device->shutdown is set, "
++                         "removing the audio-thread race with main's "
++                         "SDL_DestroyAudioStream(output_stream) teardown");
++    }
+ }
+ 
+ // Return the staging buffer. The SDL audio pipeline writes the mixed audio
+-- 
+2.47.3
+

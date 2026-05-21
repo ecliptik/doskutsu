@@ -1,0 +1,481 @@
+From 7eac5ea5bff5893c7097fbe01dfa9ea87a32fac6 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 20 May 2026 09:36:52 -0700
+Subject: [PATCH] perf phase 11 patch 0163 -- engine data cache (486-campaign
+ Bug 1 structural fix)
+
+486-campaign Bug 1 -- the stage-load freeze with audio cutout on
+DX2-66. flush-instr #93 sec.18 verdict: Leg A v2's audio mid-gap
+pump was structurally insufficient -- a single uninterruptible fread
+on a .pbm tileset (~64-100 KB, ~400-1400 ms on CompactFlash) exceeds
+the audio ring depth (~372 ms), so no in-engine pump can bridge a
+single fread. The cache approach eliminates the disk wait at the
+source by preloading .pbm bitmap assets into RAM at boot and
+intercepting Surface::loadImage to consume the cached blob.
+
+Cached read at ~5-20 ms < 372 ms ring depth -> the ring does not
+underrun during stage loads -> the audible freeze goes away.
+
+v2 (revise vs v1 -- build-qa #94 link gate caught funopen + fmemopen
+both absent from DJGPP libc; revise drops the myfopen intercept
+entirely): scope narrowed to .pbm files only. All .pbm reads in the
+engine route through Surface::loadImage -> SDL_LoadBMP, so a single
+intercept point (Intercept B) covers the dominant freeze cause
+(Tileset::load .pbm reads). The other small engine assets
+(.pxm / .pxe / .pxa / .tsc / .pxt routed via fopen/myfopen) are NOT
+cached: each individual fread is sub-ring-depth so they do not
+cause audible underrun on their own. v2 scoping; v3 may widen if
+iter shows residual misses.
+
+v2 cache scope: Stage/*.pbm (tilesets, the dominant freeze cause) +
+Npc/*.pbm (NPC sprite sheets) + top-level *.pbm (UI/HUD: Face*,
+Arms, Bullet, Caret, casts, ArmImg, ...), ~2.6 MB total, ~5-10 s
+additional boot wall-clock on CF. The operator's machine (48 MB RAM,
+~30 MB free heap) has ample headroom for the v2 budget.
+
+Single interception point -- Surface::loadImage in
+graphics/Surface.cpp. This is the surgical fix for Tileset::load's
+.pbm path (the dominant freeze cause). Surface::loadImage was using
+SDL_LoadBMP directly (NOT IMG_Load -- verified against source; the
+two IMG_Load sites in src/ are Font.cpp's font atlas PNG and
+Renderer.cpp's spotlight PNG, both one-time at boot, not on the
+freeze critical path -- v2 leaves them alone). The intercept checks
+the cache by absolute path; on hit, uses SDL_LoadBMP_IO on an
+SDL_IOFromConstMem-backed SDL_IOStream; on miss or with cache
+disabled, falls through to plain SDL_LoadBMP. The post-load
+colorkey + INDEX8 + paletteRemap path is byte-source-agnostic
+(operates on the resulting SDL_Surface), so colorkey handling is
+byte-identical between the two paths -- the cache only changes
+WHERE the bytes come from.
+
+SDL_LoadBMP_IO + SDL_IOFromConstMem are SDL3-provided -- no libc
+dependency, which is why v2 sidesteps the v1 link failure
+(funopen + fmemopen both absent from DJGPP).
+
+Killswitch: SDL_HINT_DOSKUTSU_DATA_CACHE. v2 default OFF (opt-in
+via "=1"). Same hygiene as nxengine/0162-v2 -- ship opt-in; flip to
+default-ON in a release patch after iter validation confirms
+freeze elimination + no memory issues + no broken-render-frame
+regressions. Sentinel-cached on first nxe::cache::enabled() call --
+single SDL_GetHint then cached int; banner emit
+"data cache: ENABLED (opt-in)" / "data cache: DISABLED (default)"
+on the decision.
+
+Boot-time preload in nxe::cache::init(), called from main.cpp right
+after SDL_Init (SDL_GetHint needs SDL_Init; Logger needs to be up
+for LOG_INFO; this precedes settings_load / Renderer init / Sound
+init). Preload order is access-pattern: Stage -> Npc -> top-level
+.pbm. The highest-stakes asset class (Stage/ -- the dominant freeze
+cause) loads first so the operator's first stage transition is
+RAM-fast even if a later phase is interrupted (e.g. malloc failure
+descopes top-level but Stage/ is already resident).
+
+Defensive fallbacks (per the #94 STOP-and-ack):
+- D1 cache-miss fallback: Surface::loadImage falls through to
+  plain SDL_LoadBMP if the blob is not found OR cache is disabled.
+  Modded assets, optional files, and the cache-disabled path all
+  use stdio.
+- D2 malloc-failure resilience: per-file try-allocate; on NULL the
+  file is skipped + logged + preload continues. Partial cache is
+  still better than none; the lookup miss falls through to disk
+  (D1). Final log line at preload end reports
+  "N files / M bytes resident / S skipped (X bytes malloc-failed)".
+- D3 no eviction in v2: everything preloaded stays resident for the
+  process lifetime. Defer LRU / budget cap until iter surfaces a
+  need.
+
+CACHE-OFF path (the v2 default): byte-identical rendered frames to
+pre-0163 -- Surface::loadImage's cache lookup miss-of-empty-cache
+falls through to plain SDL_LoadBMP, no preload runs (init()
+sentinel-checks enabled() and returns). The build-qa byte-identity
+gate verifies this property against the v2 binary (c8dd7737) via
+the W92-DEF-style A/B (CACHE-OFF rendered frames == pre-0163 rendered
+frames).
+
+CACHE-ON path: tested in the iter against the freeze-elimination
+acceptance criterion (PLAY1 max inter_flip < 250 ms AND operator-
+perceptual "freezes are gone", AND'd).
+
+Single-lever-per-binary: the cache is THE operator-visible
+mechanism this binary introduces. SDL-side patches (0066/0067/0068)
+are unchanged ride-alongs from prior binaries.
+
+Files in this patch:
+- src/nxe_cache.{cpp,h} -- new TU; sibling module to ResourceManager
+  (singleton boundary kept clean), ~280 LOC total.
+- src/graphics/Surface.cpp -- loadImage intercept B at SDL_LoadBMP.
+- src/main.cpp -- nxe::cache::init() call site + #include
+  "nxe_cache.h".
+
+(v1 included src/nxe_fmemopen.{cpp,h} + src/common/misc.h myfopen
+edit; v2 drops both -- DJGPP libc has neither funopen nor
+fmemopen, and the SDL_LoadBMP_IO route covers the dominant freeze
+cause without a libc workaround.)
+
+CMake picks up the new top-level src/*.cpp files automatically via
+the existing file(GLOB) -- no CMakeLists.txt change needed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/graphics/Surface.cpp |  23 ++++-
+ src/main.cpp             |  19 ++++
+ src/nxe_cache.cpp        | 208 +++++++++++++++++++++++++++++++++++++++
+ src/nxe_cache.h          |  69 +++++++++++++
+ 4 files changed, 318 insertions(+), 1 deletion(-)
+ create mode 100644 src/nxe_cache.cpp
+ create mode 100644 src/nxe_cache.h
+
+diff --git a/src/graphics/Surface.cpp b/src/graphics/Surface.cpp
+index 0b9ffba..185cf42 100644
+--- a/src/graphics/Surface.cpp
++++ b/src/graphics/Surface.cpp
+@@ -3,2 +3,3 @@
+ #include "../Utils/Logger.h"
++#include "../nxe_cache.h"  // patch 0163 (data cache, intercept B): loadImage cache-hit path
+ #include "zoom.h"
+@@ -177,3 +178,23 @@ bool Surface::loadImage(const std::string &pbm_name, bool use_colorkey)
+ 
+-  SDL_Surface *image = SDL_LoadBMP(pbm_name.c_str());
++  // patch 0163 (data cache, intercept B): if SDL_HINT_DOSKUTSU_DATA_CACHE
++  // is enabled AND pbm_name is in the cache, load the BMP from the
++  // cached memory blob via SDL3's SDL_LoadBMP_IO + SDL_IOFromConstMem.
++  // The resulting SDL_Surface is structurally-identical to SDL_LoadBMP's
++  // (same pixel data, same palette, same dimensions), so the colorkey +
++  // INDEX8 + paletteRemap path below runs against an identical surface
++  // regardless of byte source. On cache miss OR with cache disabled,
++  // fall through to plain SDL_LoadBMP -- the v1 default (cache off)
++  // gives byte-identical rendered frames to pre-0163.
++  SDL_Surface *image = nullptr;
++  {
++    const nxe::cache::Blob *blob = nxe::cache::find(pbm_name);
++    if (blob)
++    {
++      SDL_IOStream *io = SDL_IOFromConstMem(blob->data, blob->size);
++      if (io)
++        image = SDL_LoadBMP_IO(io, true);  // closeio=true: SDL closes the IOStream
++    }
++  }
++  if (!image)
++    image = SDL_LoadBMP(pbm_name.c_str());
+   if (!image)
+diff --git a/src/main.cpp b/src/main.cpp
+index 1e77ee0..01856fb 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -47,2 +47,3 @@ using namespace NXE::Graphics;
+ #include "console.h"
++#include "nxe_cache.h"  // patch 0163 (data cache): boot-time preload + cache-hit lookup
+ #include "screeneffect.h"
+@@ -1131,2 +1132,20 @@ int main(int argc, char *argv[])
+ 
++  // DOS-PORT (patch 0163, data cache): boot-time preload of heavy data
++  // files into RAM, behind SDL_HINT_DOSKUTSU_DATA_CACHE. Placed here
++  // because (a) SDL_Init must have run for SDL_GetHint to work, (b)
++  // ResourceManager::getInstance has run (line ~921), (c) Logger::init
++  // has run (line ~956) so the cache's decision + per-dir progress
++  // banners reach the log, (d) this precedes the engine's first asset
++  // load (settings_load below, Renderer init, SoundManager init).
++  // With the hint unset (the v1 default-OFF), nxe::cache::init() is a
++  // sentinel-cached no-op that emits the DISABLED (default) banner and
++  // returns; later Surface::loadImage hits fall through to disk --
++  // byte-identical rendered frames to pre-0163. With the hint set to
++  // "1", the cache preloads Stage/*.pbm + Npc/*.pbm + top-level *.pbm
++  // (~2.6 MB total, ~5-10s on CF) and subsequent Surface::loadImage
++  // calls consume the cached blob via SDL_LoadBMP_IO on a
++  // SDL_IOFromConstMem-backed IOStream. See
++  // docs/internal/DATA-CACHE-DESIGN.md.
++  nxe::cache::init();
++
+   // SDL3_image: IMG_Init / IMG_Quit / IMG_INIT_* / IMG_GetError are gone.
+diff --git a/src/nxe_cache.cpp b/src/nxe_cache.cpp
+new file mode 100644
+index 0000000..36a33f3
+--- /dev/null
++++ b/src/nxe_cache.cpp
+@@ -0,0 +1,208 @@
++// DOS-PORT (patch 0163, data cache): implementation. See nxe_cache.h
++// for the design rationale + the public API contract.
++
++#include "nxe_cache.h"
++#include "ResourceManager.h"
++#include "Utils/Logger.h"
++
++#include <SDL3/SDL.h>
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <unordered_map>
++
++#include <dirent.h>
++#include <sys/stat.h>
++
++namespace {
++
++bool                                              g_inited           = false;
++int                                               g_enabled_cached   = -1;
++std::unordered_map<std::string, nxe::cache::Blob> g_blobs;
++int                                               g_total_files      = 0;
++std::size_t                                       g_total_bytes      = 0;
++int                                               g_total_skipped    = 0;
++std::size_t                                       g_skipped_bytes    = 0;
++
++void preload_file(const std::string &abs_path)
++{
++  std::FILE *fp = std::fopen(abs_path.c_str(), "rb");
++  if (!fp)
++    return;  // not present on disk -- silent skip (mod overlays, optional files)
++
++  if (std::fseek(fp, 0, SEEK_END) != 0)
++  {
++    std::fclose(fp);
++    return;
++  }
++  long len = std::ftell(fp);
++  if (len <= 0)
++  {
++    std::fclose(fp);
++    return;
++  }
++  std::rewind(fp);
++
++  unsigned char *buf = static_cast<unsigned char *>(std::malloc(static_cast<std::size_t>(len)));
++  if (!buf)
++  {
++    ++g_total_skipped;
++    g_skipped_bytes += static_cast<std::size_t>(len);
++    LOG_WARN("data cache: malloc({}) failed for '{}'; skipped (cache lookup will miss, "
++             "falls through to disk -- partial cache is still better than none)",
++             len, abs_path);
++    std::fclose(fp);
++    return;
++  }
++  std::size_t got = std::fread(buf, 1, static_cast<std::size_t>(len), fp);
++  std::fclose(fp);
++  if (got != static_cast<std::size_t>(len))
++  {
++    std::free(buf);
++    LOG_WARN("data cache: short read of '{}' ({} of {} bytes); skipped", abs_path, got, len);
++    return;
++  }
++
++  nxe::cache::Blob blob;
++  blob.data = buf;
++  blob.size = static_cast<std::size_t>(len);
++  g_blobs[abs_path] = blob;
++  ++g_total_files;
++  g_total_bytes += static_cast<std::size_t>(len);
++}
++
++// Enumerate abs_dir's regular files; for each, optionally filter by
++// suffix (case-insensitive); preload matches. Silent skip on opendir
++// failure (logs once) -- not all directories are present in all mods.
++void preload_dir(const std::string &abs_dir, const char *ext_filter)
++{
++  DIR *d = ::opendir(abs_dir.c_str());
++  if (!d)
++  {
++    LOG_WARN("data cache: opendir('{}') failed; dir skipped", abs_dir);
++    return;
++  }
++  struct ::dirent *ent;
++  while ((ent = ::readdir(d)) != nullptr)
++  {
++    if (ent->d_name[0] == '.')
++      continue;  // skip "." and ".."
++
++    if (ext_filter)
++    {
++      std::size_t nlen = std::strlen(ent->d_name);
++      std::size_t elen = std::strlen(ext_filter);
++      if (nlen <= elen)
++        continue;
++      bool ok = true;
++      for (std::size_t i = 0; i < elen; ++i)
++      {
++        char a = ent->d_name[nlen - elen + i];
++        char b = ext_filter[i];
++        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
++        if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
++        if (a != b) { ok = false; break; }
++      }
++      if (!ok)
++        continue;
++    }
++
++    std::string full = abs_dir;
++    if (!full.empty() && full.back() != '/')
++      full += '/';
++    full += ent->d_name;
++
++    struct ::stat st;
++    if (::stat(full.c_str(), &st) != 0)
++      continue;
++    if (!S_ISREG(st.st_mode))
++      continue;
++
++    preload_file(full);
++  }
++  ::closedir(d);
++}
++
++// Preload a named subdirectory (relative to the base data dir). The
++// extension filter is optional (NULL = preload all regular files).
++void preload_subdir(const char *reldir, const char *ext_filter)
++{
++  std::string abs_dir = ResourceManager::getInstance()->getPathForDir(reldir);
++  while (!abs_dir.empty() && abs_dir.back() == '/')
++    abs_dir.pop_back();
++  LOG_INFO("data cache: preloading {}/ ...", reldir);
++  preload_dir(abs_dir, ext_filter);
++}
++
++}  // anonymous namespace
++
++namespace nxe {
++namespace cache {
++
++bool enabled()
++{
++  if (g_enabled_cached < 0)
++  {
++    const char *e    = SDL_GetHint("SDL_HINT_DOSKUTSU_DATA_CACHE");
++    g_enabled_cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    LOG_INFO("data cache: {}",
++             g_enabled_cached ? "ENABLED (opt-in)" : "DISABLED (default)");
++  }
++  return g_enabled_cached == 1;
++}
++
++void init()
++{
++  if (g_inited)
++    return;
++  g_inited = true;
++  if (!enabled())
++    return;
++
++  // Access-pattern preload order: Stage/*.pbm -> Npc/*.pbm -> top-level
++  // *.pbm. .pbm files only -- the dominant freeze cause (Tileset::load
++  // .pbm reads on real DX2-66 CF exceed the audio ring depth, while
++  // the smaller engine reads .pxm / .pxe / .pxa / .tsc / .pxt each fit
++  // under the ring depth and route through myfopen which is uncached).
++  // Stage/ loads first (the heaviest single class, ~600 KB of Prt*.pbm
++  // tilesets) so the first stage transition is RAM-fast even if a
++  // later phase is interrupted (e.g. malloc failure descopes top-level
++  // but Stage/ is already resident).
++
++  preload_subdir("Stage", ".pbm");
++  preload_subdir("Npc",   ".pbm");
++
++  // Top-level .pbm scan: enumerate the base data dir directly with a
++  // ".pbm" extension filter to pick up Face*, Arms, Bullet, Caret,
++  // casts, ArmImg, etc. without sweeping .dat / .tbl / other top-level
++  // files. The base dir is from ResourceManager::getBasePath().
++  LOG_INFO("data cache: preloading top-level *.pbm ...");
++  std::string base = ResourceManager::getInstance()->getBasePath();
++  while (!base.empty() && base.back() == '/')
++    base.pop_back();
++  preload_dir(base, ".pbm");
++
++  LOG_INFO("data cache: preload complete -- {} files / {} bytes resident / "
++           "{} skipped ({} bytes malloc-failed)",
++           g_total_files, g_total_bytes, g_total_skipped, g_skipped_bytes);
++}
++
++const Blob *find(const std::string &path)
++{
++  if (!enabled())
++    return nullptr;
++  auto it = g_blobs.find(path);
++  return (it != g_blobs.end()) ? &it->second : nullptr;
++}
++
++const Blob *find(const char *path)
++{
++  if (!path)
++    return nullptr;
++  return find(std::string(path));
++}
++
++}  // namespace cache
++}  // namespace nxe
+diff --git a/src/nxe_cache.h b/src/nxe_cache.h
+new file mode 100644
+index 0000000..199c786
+--- /dev/null
++++ b/src/nxe_cache.h
+@@ -0,0 +1,69 @@
++// DOS-PORT (patch 0163, data cache): boot-time preload of .pbm
++// bitmap assets into RAM, with cache-hit interception in
++// Surface::loadImage. Targets the 486-class campaign Bug 1 stage-load
++// freezes (Tileset::load's single uninterruptible fread on .pbm
++// tileset bitmaps -- ~64-100 KB each, ~400-1400 ms on CompactFlash --
++// exceeds the audio ring depth of ~372 ms, so no in-engine pump can
++// bridge it; cached reads at ~5-20 ms stay well inside the ring).
++// Sibling module to ResourceManager (path resolver) -- keeps the
++// Singleton boundary clean. See docs/internal/DATA-CACHE-DESIGN.md.
++//
++// Scope is .pbm files ONLY (the dominant freeze cause -- all .pbm
++// reads in the engine go through Surface::loadImage -> SDL_LoadBMP,
++// the single intercept point). The other small engine assets
++// (.pxm / .pxe / .pxa / .tsc / .pxt) read via fopen/myfopen are NOT
++// cached: each individual fread is sub-ring-depth so they do not
++// cause audible underrun. v1 scoping; v2 may widen if iter shows
++// residual misses.
++//
++// Killswitch: SDL_HINT_DOSKUTSU_DATA_CACHE. v1 default OFF (opt-in
++// via "=1"); same hygiene as nxengine/0162-v2. Sentinel-cached at
++// the first nxe::cache::enabled() call -- single SDL_GetHint then
++// cached int; banner emit on the decision.
++
++#ifndef _NXE_CACHE_H
++#define _NXE_CACHE_H
++
++#include <cstddef>
++#include <cstdio>
++#include <string>
++
++namespace nxe {
++namespace cache {
++
++// One cached file. data is malloc'd at preload, owned by the cache
++// (lifetime = process lifetime; no eviction in v1). size is the byte
++// length. Lookups return a const Blob* into the cache's internal map;
++// the pointer is stable until process exit.
++struct Blob
++{
++  unsigned char *data;
++  std::size_t    size;
++};
++
++// Returns true if SDL_HINT_DOSKUTSU_DATA_CACHE is set to "1". Reads
++// the hint once (sentinel-cached) and emits the build-qa BANNERS
++// banner on the decision. Safe to call before init().
++bool enabled();
++
++// Boot-time preload. Call once at engine init AFTER SDL_Init (for
++// SDL_GetHint) and AFTER ResourceManager init. Idempotent. With
++// enabled() == false, returns immediately (the hint decision banner
++// fires regardless). Otherwise enumerates Stage / Npc / top-level
++// .pbm / pxt in access-pattern order (highest-stakes first), reads
++// each file into a malloc'd buffer, and stores by absolute path
++// (matching what ResourceManager::getPath returns at lookup time).
++// On per-file malloc failure: skip + log + continue (partial cache
++// is still better than none; the lookup miss falls through to disk).
++void init();
++
++// Lookup by absolute path. Returns nullptr on miss or when disabled.
++// Lookup is O(1) (unordered_map). Safe from any thread (the cache is
++// initialized once at boot and never mutated thereafter).
++const Blob *find(const std::string &path);
++const Blob *find(const char *path);
++
++}  // namespace cache
++}  // namespace nxe
++
++#endif  // _NXE_CACHE_H
+-- 
+2.47.3
+

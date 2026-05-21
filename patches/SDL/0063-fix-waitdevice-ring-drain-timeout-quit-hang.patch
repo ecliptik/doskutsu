@@ -1,0 +1,223 @@
+From d5a06d3dc53266bdcc3613462402542f64683d24 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 18 May 2026 22:18:51 -0700
+Subject: [PATCH] dos: Phase 11 patch 0063 -- WaitDevice ring-drain timeout +
+ resume (486 quit-hang fix)
+
+486-class hardware-coverage campaign Bug 2: doskutsu v1.0.0 hangs on
+quit-to-DOS on the Intel 486DX2-50 and 486DX2-66 (all six M2/M3 cells;
+the Am5x86-133 and the Pentium OverDrive quit cleanly). crashcap
+captured no fault -- it is a hang, not a DJGPP crash. The hung SDL logs
+stop dead at snd-shutdown[4/6] pre-MIX_DestroyMixer, with no "audio
+close:" line -- so DOSSOUNDBLASTER_CloseDevice is never entered; the
+hang is upstream of it, in the SDL3 audio-playback-thread teardown
+join that MIX_DestroyMixer -> SDL_QuitSubSystem(SDL_INIT_AUDIO) runs.
+
+Root cause: DOSSOUNDBLASTER_WaitDevice is an unbounded for(;;) spin.
+Its only two exits are (1) the ring has space, or (2) device->shutdown
+is set (the patch-0046 bail). When the DSP idle-pause has engaged
+(isr_dsp_paused -> IRQ-5 stopped -> the ring never drains), exit (1)
+is dead. Exit (2) depends on the engine winning device->lock during
+MIX_DestroyMixer to set device->shutdown -- a cross-thread wait that,
+on the slower-bus DX2 configs, wedges. The audio thread then never
+leaves its SDL_PlaybackAudioThreadIterate body and the teardown join
+never completes.
+
+Structural finding: the DSP-resume request that would un-stick the
+ring is originated ONLY in DOSSOUNDBLASTER_PlayDevice -- which runs
+AFTER WaitDevice within one Iterate, so it is unreachable while
+WaitDevice spins. WaitDevice calls MaybeServiceIdlePauseRequests()
+every iteration but only ever SERVICES a request, never ORIGINATES
+one. So a "ring full + DSP paused" state is unrecoverable.
+
+Fix, both in DOSSOUNDBLASTER_WaitDevice, both under one killswitch:
+- Part 1: when the loop sees the ring full AND isr_dsp_paused, set
+  g_dos_audio_resume_request = true. The next iteration's
+  MaybeServiceIdlePauseRequests() issues the 0xD6/0xD4 resume, IRQ-5
+  restarts, the ring drains. This is the real fix -- quit completes
+  cleanly with no stall. Gated !g_dos_audio_force_dsp_pause to mirror
+  PlayDevice's resume gate.
+- Part 2: a 1000 ms wall-clock backstop on the spin. If the ring
+  still has not drained (IRQ-5 wedged by a HW-IO-timing variant that
+  part 1 did not lift -- DOSBox-X never reproduced this per the
+  dosbox-not-proxy rule), WaitDevice returns true anyway so the
+  Iterate completes, the audio thread re-checks device->shutdown, and
+  the join proceeds. Wall-clock timed (SDL_GetTicksNS), so it is
+  CPU/bus-speed independent; the ~1000 ms vs ~23 ms IRQ-period margin
+  (~43x) means it cannot false-trigger in normal play.
+
+Both parts sit under one killswitch so the off path is a true revert:
+correctness fix -> ships default-ON with a strict-"0" killswitch
+SDL_HINT_DOSKUTSU_DOS_AUDIO_WAITDEVICE_TIMEOUT. With =0 NOTHING 0063
+added runs -- WaitDevice is the verbatim pre-0063 unbounded spin --
+so the operator's 486DX2 A/B run can reproduce the pre-fix hang
+cleanly. OpenDevice resolves the hint once and emits a boot banner.
+One TU touched (src/audio/dos/SDL_dosaudio_sb.c).
+
+In-game behavior: WaitDevice is a hot-path function, but the 0063
+additions are inert during normal play -- part 1 only fires on "ring
+full AND DSP idle-paused" (a state that does not arise in normal
+gameplay; the DSP is idle-paused only when the ring is drained, not
+full), and part 2 cannot fire because the ring drains every ~23 ms
+via IRQ-5, three orders of magnitude under the 1000 ms bound. The
+only in-game effect is a few extra SDL_GetTicksNS reads during the
+brief ring-full spin windows. The genuine behavior change is confined
+to the quit/teardown path.
+
+Real-HW verification is the operator's 486DX2 in the 486 follow-up
+iter; DOSBox-X cannot reproduce the hang. Workspace-local per the
+SDL AI policy; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 113 ++++++++++++++++++++++++++++++++
+ 1 file changed, 113 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 4dbc05f54..33a7e7bd7 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -153,6 +153,26 @@ static bool g_dos_silence_detect_enabled = true;
+                        fps lever; predicted +3 to +5 fps vs PLAY1) */
+ static bool g_dos_silence_shape_d_active = false;
+ 
++/* DOSKUTSU patch (Phase 11 patch 0063): killswitch state for the
++   DOSSOUNDBLASTER_WaitDevice ring-drain timeout backstop. Default ON
++   (false = backstop active). Set
++   SDL_HINT_DOSKUTSU_DOS_AUDIO_WAITDEVICE_TIMEOUT=0 to flip true and
++   disable -- WaitDevice then reverts to the pre-0063 unbounded ring-
++   drain spin. Per CLAUDE.md strict-"0" env-var convention: only the
++   literal "0" disables. Resolved once at OpenDevice time; read by
++   DOSSOUNDBLASTER_WaitDevice. Correctness fix -- ships default-ON with
++   this killswitch per [[iter_discipline]] (correctness with
++   killswitch). */
++static bool g_dos_audio_waitdevice_timeout_disabled = false;
++
++/* Wall-clock bound for the WaitDevice ring-drain spin. The IRQ-5 ISR
++   drains one chunk per ~23 ms at the configured rate; 1000 ms is a
++   ~43x margin, so a normal-play stall can never reach it. If the spin
++   does reach it, IRQ-5 is wedged (the DSP idle-pause did not lift) and
++   WaitDevice must return anyway so the audio-thread Iterate completes
++   and the quit-to-DOS teardown join can proceed. */
++#define DOS_AUDIO_WAITDEVICE_TIMEOUT_NS  SDL_MS_TO_NS(1000)
++
+ /* DOSKUTSU patch (Phase 11 patch 0058): Shape A mechanism-histogram
+    instrumentation state. Diagnostic backstop for wave-36 PLAY6 Shape
+    D fps lever per `pressure_test_tidy_narratives.md` discipline: if
+@@ -686,6 +706,13 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+     const Uint64 _p12_wait_t0 =
+         g_p12_sdl_audio_instr_active ? SDL_GetTicksNS() : 0;
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0063): wall-clock anchor for the
++       ring-drain timeout backstop. 0 == not yet waiting; set on the
++       first full-ring iteration so the off-path (ring has room -- the
++       common case in steady-state playback) pays no SDL_GetTicksNS
++       read. */
++    Uint64 _wd_wait_start_ns = 0;
++
+     for (;;) {
+         /* DOSKUTSU patch (Phase 10 patch 0046): bail out early when the
+            audio device is shutting down. SDL3 audio core sets
+@@ -726,6 +753,70 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+             }
+             return true; // room for at least one chunk
+         }
++
++        /* DOSKUTSU patch (Phase 11 patch 0063): the ring is full. Both
++           the part-1 DSP-resume kick and the part-2 wall-clock backstop
++           sit under one killswitch so SDL_HINT_DOSKUTSU_DOS_AUDIO_
++           WAITDEVICE_TIMEOUT=0 is a TRUE revert to the pre-0063
++           unbounded ring-drain spin -- nothing 0063 added runs in that
++           mode. That clean revert is what the operator's 486DX2 A/B
++           run needs to reproduce the pre-fix quit hang. Default
++           (killswitch unset) runs both parts. */
++        if (!g_dos_audio_waitdevice_timeout_disabled) {
++            /* Part 1 -- originate a DSP resume from WaitDevice. The
++               ring is full; the only thing that drains it is the IRQ-5
++               ISR. If the idle-pause has engaged (isr_dsp_paused) the
++               ISR is not running, so this wait can never end on its
++               own. The resume request is normally originated by
++               DOSSOUNDBLASTER_PlayDevice (line ~1628) -- but PlayDevice
++               runs AFTER WaitDevice within one
++               SDL_PlaybackAudioThreadIterate, so it is structurally
++               unreachable while we spin here. WaitDevice is the only
++               point that can break the wedge. Set the request; the
++               MaybeServiceIdlePauseRequests() at the top of the next
++               loop iteration issues the 0xD6/0xD4 resume, IRQ-5
++               restarts, and the ring drains. Gated on
++               !g_dos_audio_force_dsp_pause to mirror PlayDevice's
++               resume gate (do not auto-resume in the force-pause
++               fps-measurement mode). This is the real fix for
++               486-campaign Bug 2 (the quit-to-DOS hang): see
++               docs/internal/486-CLASS-CAMPAIGN-FINDINGS.md sec.9. */
++            if (isr_dsp_paused && !g_dos_audio_force_dsp_pause) {
++                g_dos_audio_resume_request = true;
++            }
++
++            /* Part 2 -- wall-clock backstop. If the ring still has not
++               drained after DOS_AUDIO_WAITDEVICE_TIMEOUT_NS, IRQ-5 is
++               wedged (part 1's resume did not lift it -- a HW-IO-timing
++               variant the 486-class campaign surfaced on the Intel DX2
++               configs, where DOSBox-X never reproduced it per
++               [[dosbox_not_proxy]]). An unbounded spin here holds the
++               audio thread inside its SDL_PlaybackAudioThreadIterate
++               body; SDL/0046's device->shutdown bail cannot fire
++               because the engine sets device->shutdown only after
++               winning device->lock during the MIX_DestroyMixer
++               teardown -- so quit-to-DOS hangs hard. Returning true
++               ends the spin: the Iterate completes, the audio thread
++               re-checks device->shutdown on its next loop, and the
++               teardown join proceeds. Wall-clock timed (SDL_GetTicksNS),
++               so it is CPU/bus-speed independent -- an iteration count
++               would scale with the slower DX2 bus and is wrong here. */
++            const Uint64 _wd_now = SDL_GetTicksNS();
++            if (_wd_wait_start_ns == 0) {
++                _wd_wait_start_ns = _wd_now;
++            } else if ((_wd_now - _wd_wait_start_ns) >= DOS_AUDIO_WAITDEVICE_TIMEOUT_NS) {
++                doskutsu_dbg_log("audio: SDL/0063 WaitDevice ring-drain timeout "
++                                 "(%d ms) -- IRQ-5 wedged; returning to unblock "
++                                 "audio-thread teardown",
++                                 (int)(DOS_AUDIO_WAITDEVICE_TIMEOUT_NS / 1000000ULL));
++                /* patch 0055: P12 bracket exit (timeout path). */
++                if (g_p12_sdl_audio_instr_active) {
++                    g_p12_sdl_audio_thread_ns += SDL_GetTicksNS() - _p12_wait_t0;
++                }
++                return true;
++            }
++        }
++
+         DOS_Yield();
+     }
+ }
+@@ -847,6 +938,28 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0063): resolve the WaitDevice
++       ring-drain timeout killswitch once at OpenDevice time. Strict-"0"
++       match per CLAUDE.md env-var convention. Cached at module scope;
++       read by DOSSOUNDBLASTER_WaitDevice. Default ON: it guards the
++       quit-to-DOS teardown deadlock the 486-class campaign surfaced on
++       the Intel 486DX2 configs (docs/internal/486-CLASS-CAMPAIGN-
++       FINDINGS.md sec.9, Bug 2). */
++    {
++        const char *wdt_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_DOS_AUDIO_WAITDEVICE_TIMEOUT");
++        g_dos_audio_waitdevice_timeout_disabled =
++            (wdt_hint && wdt_hint[0] == '0' && wdt_hint[1] == 0);
++        if (g_dos_audio_waitdevice_timeout_disabled) {
++            doskutsu_dbg_log("audio: SDL_HINT_DOSKUTSU_DOS_AUDIO_WAITDEVICE_TIMEOUT=0 "
++                             "(SDL/0063 ring-drain backstop DISABLED; WaitDevice "
++                             "reverts to pre-0063 unbounded spin)");
++        } else {
++            doskutsu_dbg_log("audio: SDL/0063 WaitDevice ring-drain timeout active "
++                             "(default; ~1000 ms backstop; quit-to-DOS teardown "
++                             "deadlock guard + WaitDevice-originated DSP resume)");
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0055): resolve P12 SDL-side audio
+        instrumentation gates once at OpenDevice time. BOTH FLIP_INSTR
+        AND P12_AUDIO_INSTR must be set to "1" (strict-"1" match) for
+-- 
+2.47.3
+

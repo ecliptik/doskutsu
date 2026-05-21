@@ -1,0 +1,214 @@
+From e4f78b059f6751ea283518e345cbbe5be2b6c32b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 19 May 2026 17:10:57 -0700
+Subject: [PATCH] dos: Phase 11 patch 0068 (v2) -- TryLock+timeout backstop,
+ ripple of 0067 v2
+
+Ripple amendment of SDL/0068 to thread the bool return through the
+SDL/0067 v2 signature change (void -> bool). Same TryLock+timeout
+mechanism v1 introduced; same killswitch
+SDL_HINT_DOSKUTSU_DOS_AUDIO_PUMP_TIMEOUT (integer ms; default 100;
+"0" disables; sanity-capped 10000 ms); same OpenDevice resolve +
+banner; same 86Box-corroborated need for the backstop (the wedge is
+not DOSBox-X-only).
+
+What changed vs v1:
+- The backstop now wraps SDL/0067 v2's OUTER SDL_LockMutex acquisition
+  (introduced by 0067 v2 to enable the ring-room snapshot inside the
+  lock for predicate-boundary consistency with WaitDevice). v1 wrapped
+  Iterate's implicit blocking lock; v2 wraps the explicit outer
+  blocking lock. Same lock, same starvation regime, same fix.
+- On TryLock timeout: instead of returning void as v1 did, returns
+  false (per the 0067 v2 bool contract: no-op iter -> false). Per
+  team-lead's semantic note, the cap counter is reset on timeout
+  (the iterate did not run, so it does not count toward the cap;
+  the caller's next call-sequence starts fresh).
+- Static `g_dos_audio_pump_timeout_ms` definition + the OpenDevice
+  resolve block are unchanged from v1.
+
+The SDL/0068 v2 sits in SDL_DOSAudioPump's body between the cap
+check (owned by 0067 v2) and the SDL_PlaybackAudioThreadIterate call:
+
+  bool SDL_DOSAudioPump(void) {
+    static Uint32 calls_since_false_return = 0;
+    if (!device) { reset; return false; }                 // 0067 v2
+    if (calls_since_false_return >= 32) { log; reset; return false; }  // 0067 v2
+    if (g_dos_audio_pump_timeout_ms == 0) {                // <-- 0068 v2
+        SDL_LockMutex(device->lock);                       //     killswitched
+    } else {                                               //     backstop:
+        while (!SDL_TryLockMutex(device->lock)) {          //     retry with
+            if (deadline) { reset; return false; }         //     timeout
+            SDL_Delay(1);
+        }
+    }
+    bool iter_ok = SDL_PlaybackAudioThreadIterate(device); // 0067 v2
+    /* ring-room snapshot inside lock */                   // 0067 v2
+    SDL_UnlockMutex(device->lock);                         // 0067 v2
+    /* return has_room ? true : false, manage counter */   // 0067 v2
+  }
+
+One TU touched (vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c):
+- New module static g_dos_audio_pump_timeout_ms (unchanged from v1).
+- OpenDevice resolve block (unchanged from v1) including the active-
+  config banner `audio: SDL/0068 SDL_DOSAudioPump TryLock+timeout
+  backstop active (N ms cap; cooperative-scheduler starvation guard)`.
+- SDL_DOSAudioPump body: the SDL_LockMutex acquisition introduced by
+  0067 v2 is wrapped with the if/else above.
+
+Banner regex `audio: SDL/0068 SDL_DOSAudioPump TryLock\\+timeout
+backstop active` was already added to tests/run-gameplay-smoke.sh
+BANNER_REGEX (severity "optional", parallel SEVERITY + LABEL) in
+v1; that entry is unchanged.
+
+BOOT.md entry for SDL_HINT_DOSKUTSU_DOS_AUDIO_PUMP_TIMEOUT was added
+in v1 and is unchanged (the killswitch semantics and cap value are
+identical between v1 and v2; only the surrounding 0067 body shape
+changed).
+
+Rides the re-gated combined DX2-66 iter alongside SDL/0067 v2 and
+nxengine-evo/0162 v2.
+
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 109 +++++++++++++++++++++++++++++---
+ 1 file changed, 101 insertions(+), 8 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index d94af1c42..d8a4a73dd 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -277,6 +277,43 @@ static volatile bool g_dos_audio_hard_park = false;
+    a time anyway. */
+ static SDL_AudioDevice * volatile g_dos_audio_device = NULL;
+ 
++/* DOSKUTSU patch (Phase 11 patch 0068, v2): cooperative-scheduler-
++   starvation backstop for SDL_DOSAudioPump (the 0067 v2 export). v2
++   wraps the outer SDL_LockMutex(device->lock) acquisition introduced
++   by 0067 v2 with an SDL_TryLockMutex-with-timeout retry loop; the
++   killswitch (timeout==0) reverts to the blocking acquire that v1's
++   build-qa #84 / wave-84 combined-iter binary wedged on under
++   DOSBox-X and 86Box SB16 emulation (cooperative-scheduler starvation
++   on device->lock; the SDL playback thread's WaitDevice never
++   DOS_Yields when the ring has room, so main's blocking lock never
++   gets in). The 86Box reproduction proved the wedge is not DOSBox-X-
++   only; per [[dosbox_not_proxy]] this backstop is a critical fix
++   protecting against the same regime on any cooperative-scheduler
++   timing variant including real DX2-66 hardware.
++
++   The backstop: SDL_DOSAudioPump's outer-lock acquisition (post-cap-
++   check, pre-iterate) uses SDL_TryLockMutex(device->lock) in a wall-
++   clock-bounded retry loop. On contention, brief SDL_Delay(1)
++   cooperative yield + retry. On total timeout, return without
++   iterating (skip this invocation; the cap counter is reset so the
++   caller's next call-sequence starts fresh; the iterate did not run
++   so this does not count toward the cap).
++
++   Wall-clock cap configurable via SDL_HINT_DOSKUTSU_DOS_AUDIO_PUMP_TIMEOUT
++   (integer ms; default 100; "0" disables the backstop entirely,
++   reverting to the pre-0068 blocking SDL_LockMutex that wedges
++   under the starvation regime -- A/B-only). Resolved at OpenDevice;
++   cached. Sanity-capped at 10000 ms inside the OpenDevice resolve
++   so a typo cannot create an effectively-unbounded wait.
++
++   Default 100 ms picked as the SDL/0063-style margin: much longer
++   than expected lock-hold time (Iterate body is ~microseconds in
++   normal operation) but much shorter than a frame (~23 ms minimum
++   at 43 fps on slow CPUs); 100 ms = ~5 frames worst-case skipped
++   pump, acceptable -- a one-shot skip per seam is dwarfed by the
++   while-loop's per-seam top-up coverage. */
++static Uint32 g_dos_audio_pump_timeout_ms = 100;
++
+ /* DOSKUTSU patch (Phase 11 patch 0058): Shape A mechanism-histogram
+    instrumentation state. Diagnostic backstop for wave-36 PLAY6 Shape
+    D fps lever per `pressure_test_tidy_narratives.md` discipline: if
+@@ -968,6 +1005,41 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+                      "the audio ring; safety: no renderer / no SDL_PumpEvents / "
+                      "engine-callback re-entry bounded to scalar slot bookkeeping)");
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0068, v2): resolve the
++       SDL_DOSAudioPump TryLock+timeout backstop wall-clock cap at
++       OpenDevice time. Read SDL_HINT_DOSKUTSU_DOS_AUDIO_PUMP_TIMEOUT
++       (integer ms; default 100; "0" disables the backstop entirely,
++       reverting to the pre-0068 blocking SDL_LockMutex path that wedges
++       under cooperative-scheduler starvation -- A/B-only). Sanity-
++       capped at 10000 ms. Per CLAUDE.md hint resolution discipline. */
++    {
++        const char *pto_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_DOS_AUDIO_PUMP_TIMEOUT");
++        g_dos_audio_pump_timeout_ms = 100;  /* default */
++        if (pto_hint && pto_hint[0]) {
++            if (pto_hint[0] == '0' && pto_hint[1] == '\0') {
++                g_dos_audio_pump_timeout_ms = 0;  /* explicit disable */
++            } else {
++                int v = SDL_atoi(pto_hint);
++                if (v > 0 && v <= 10000) {
++                    g_dos_audio_pump_timeout_ms = (Uint32)v;
++                }
++                /* else (malformed / out-of-range): keep default 100. */
++            }
++        }
++        if (g_dos_audio_pump_timeout_ms == 0) {
++            doskutsu_dbg_log("audio: SDL_HINT_DOSKUTSU_DOS_AUDIO_PUMP_TIMEOUT=0 "
++                             "(SDL/0068 TryLock+timeout backstop DISABLED; "
++                             "SDL_DOSAudioPump reverts to pre-0068 blocking "
++                             "SDL_LockMutex behavior; A/B-only -- expect "
++                             "cooperative-scheduler-starvation wedge under "
++                             "DOSBox-X / 86Box / any equivalent regime)");
++        } else {
++            doskutsu_dbg_log("audio: SDL/0068 SDL_DOSAudioPump TryLock+timeout backstop "
++                             "active (%lu ms cap; cooperative-scheduler starvation guard)",
++                             (unsigned long)g_dos_audio_pump_timeout_ms);
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0050): resolve quiescence-gate
+        killswitch once at OpenDevice time. Strict-"0" match per CLAUDE.md
+        env-var convention. Cached at module scope; read by
+@@ -1691,14 +1763,35 @@ bool SDL_DOSAudioPump(void)
+         return false;
+     }
+ 
+-    /* Acquire outer device->lock. This 0067 patch uses a blocking
+-       SDL_LockMutex -- which under DOSBox-X / 86Box SB16 emulation is
+-       wedge-prone via cooperative-scheduler starvation (build-qa #84
+-       bisect). The SDL/0068 hunk above amends this acquisition to a
+-       TryLock+timeout backstop with a strict-"0" killswitch
+-       (SDL_HINT_DOSKUTSU_DOS_AUDIO_PUMP_TIMEOUT) that reverts to this
+-       blocking path for the operator's A/B reproducer cell. */
+-    SDL_LockMutex(device->lock);
++    /* SDL/0068 v2 backstop: TryLock+timeout retry loop on the outer
++       device->lock acquisition, with a strict-"0" killswitch
++       (SDL_HINT_DOSKUTSU_DOS_AUDIO_PUMP_TIMEOUT) reverting to the
++       pre-0068 blocking SDL_LockMutex path. See the
++       g_dos_audio_pump_timeout_ms static and the OpenDevice resolve
++       block above for the cap semantics. */
++    if (g_dos_audio_pump_timeout_ms == 0) {
++        /* Killswitched: pre-0068 blocking-lock path. Wedge-prone under
++           cooperative-scheduler starvation (build-qa #84 bisect; 86Box
++           reproduction proved the wedge is not DOSBox-X-only). Used by
++           the operator's A/B reproducer cell that exercises the
++           pre-0068 behavior on real DX2-66. */
++        SDL_LockMutex(device->lock);
++    } else {
++        const Uint64 deadline_ns = SDL_GetTicksNS()
++            + SDL_MS_TO_NS((Uint64)g_dos_audio_pump_timeout_ms);
++        while (!SDL_TryLockMutex(device->lock)) {
++            if (SDL_GetTicksNS() >= deadline_ns) {
++                /* TryLock timeout: iterate did not run; per team-lead's
++                   semantic note, do not count this call toward the
++                   cap. Reset the counter so the caller's next
++                   call-sequence starts fresh, and return false (caller
++                   exits the while-loop). */
++                calls_since_false_return = 0;
++                return false;
++            }
++            SDL_Delay(1);  /* brief cooperative yield */
++        }
++    }
+ 
+     /* Iterate runs with the outer lock held. Iterate's own SDL_LockMutex
+        recurses (same tid; SDL mutexes are recursive on DOS); its matching
+-- 
+2.47.3
+

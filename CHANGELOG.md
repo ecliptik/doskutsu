@@ -5,6 +5,107 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [Unreleased]
+
+The post-v1.0.0 486-class hardware campaign. First release cycle specifically
+targeting the slower Pentium-class machine reports -- 486DX2-66, Pentium-OD-83,
+486DX-50 / Am5x86 -- where v1.0.0 surfaced three bugs that didn't reproduce at
+higher CPU rates: a quit-to-DOS hang during audio teardown, ~1-second stage-load
+freezes, and continuous SFX stutter on rapid-fire weapons.
+
+### Fixed
+
+- **Quit-to-DOS hang during audio teardown (Bug 1)** -- the SDL3 audio thread
+  could deadlock or wedge during `SDL_AudioQuit` on slow CPUs when the ring
+  buffer hadn't drained in time. Fixed across three patches in the
+  `patches/SDL/` slot 0066-0068 series: audio-thread hard-park during quit
+  + `SDL_DOSAudioPump` mid-gap pump API export + `TryLock` + 100 ms timeout
+  backstop on the device close path. Validated across 5 real-HW iters on the
+  486DX2-66 reference machine.
+
+- **Stage-load freezes mechanically closed (Bug 3)** -- ~1-second freezes
+  on stage transitions traced to CPU-bound MIDI parse work (`curly.mid`'s
+  5684-event parse at ~480 PPQ tempo resolution). The existing
+  `SDL_HINT_DOSKUTSU_PRELOAD_MIDI=1` killswitch (`patches/nxengine-evo/0112`
+  + `0114` from the wave 18-63 arc) eliminates the spike class on real HW
+  (count > 500 ms went 4 -> 0; max went 1095 -> 414 ms). Scheduled to flip
+  default-ON in v1.0.1.
+
+### Investigated -- continuing
+
+- **Continuous SFX stutter on rapid-fire (Bug 2)** -- two probe iters (v1 +
+  v2) confirmed hypothesis C: cooperative-scheduler audio-thread starvation.
+  The v2 probe's `[sdl-audiocb]` block emit captured a max single-callback
+  latency of 1701 ms during heavy SFX activity, while concurrent Pixtone-
+  track active-count stayed at 1-4 (ruling out mix-CPU saturation). The
+  main thread spends nearly two seconds in `playSfx` chains before yielding
+  back to the audio thread; ring buffer drains during the gap; audio thread
+  runs in burst when the scheduler finally yields. Operator perception
+  report ("audio drops/pauses during rapid action") cross-confirmed via the
+  discriminator table in `docs/internal/PIXTONE-MULTISOURCE-DESIGN.md`
+  sec.8. Structural fix authored next: Lever 3, Pixtone PCM mix in the
+  SB16 IRQ-5 ISR, bypassing the cooperative scheduler entirely for SFX
+  (DOOM DMX-style architecture).
+
+- **Music tempo wobble on slow CPU (Bug 4)** -- same mechanism class as
+  Bug 2: MIDI events dispatched in burst when the audio thread runs after
+  starvation, warping note timing. Operator report ("music gets out of
+  sync"). Closed structurally by the same Lever 3 path that fixes Bug 2,
+  or independently via Lever 2b (MidiScheduler tick from timer ISR; design
+  authored alongside Lever 3).
+
+### Changed
+
+- **Build infrastructure** -- the Makefile's sdl3 cmake configure step
+  adds `-DSDL_TESTS=OFF` to skip SDL3 test executables (loopwave, surround,
+  resample, chkkeys). These are not shipped or used in the doskutsu.exe
+  link path, and they fail to link against engine-side externs
+  (`g_pixtone_active_count`) introduced for the Pixtone probe. Build-config-
+  only change; doskutsu.exe behavior unaffected.
+
+- **Smoke gate banner-emit array** -- `tests/run-gameplay-smoke.sh`
+  BANNERS array updated to track the new audio-thread + probe mechanisms
+  shipped this cycle (47/47/47 parity across REGEX/SEVERITY/LABEL).
+
+### Diagnostic infrastructure
+
+The 486-class campaign added a stack of diagnostic and instrumentation
+patches that stay default-OFF in the production binary, available behind
+killswitch env-vars for future investigation:
+
+- `patches/SDL/0063-0065` -- WaitDevice ring-drain timeout quit-hang fix,
+  SFX-stall instrumentation, DestroyAudioStream quit-hang markers.
+- `patches/SDL/0066-0068` -- Bug 1 fix series (audio-thread hard-park +
+  pump export + TryLock + timeout backstop).
+- `patches/SDL/0069` -- cumulative silent-IRQ counter export
+  (`doskutsu_audio_silent_irq_count`); part of the Pixtone probe wiring.
+- `patches/SDL/0070` -- v2 Pixtone probe `pix_active` histogram +
+  `irq_count` delta fold-in to `[sdl-audiocb]` emit; closes the
+  Organya-callback-vs-OPL3-backend wiring gap from v1.
+- `patches/SDL_mixer/0002` -- DestroyMixer substep teardown markers.
+- `patches/nxengine-evo/0160-0164` -- SFX-stall instrumentation, Approach-A
+  device-frames hint plumbing, Leg A audio mid-gap pump, engine data
+  cache, Leg B tick-boundary pump.
+- `patches/nxengine-evo/0165` -- engine-side Pixtone multi-source probe
+  (v1; the SDL-side v2 re-wire in 0070 closes the wiring gap).
+
+All diagnostic patches stay default-OFF unless their killswitch env-var is
+set; production binary behavior unchanged from v1.0.0.
+
+### Next
+
+v1.0.1 ship matrix pending the Lever 3 structural fix for Bug 2:
+
+- Bug 1 quit-hang fix: carry forward.
+- Bug 3 `PRELOAD_MIDI`: flip to default-ON.
+- Bug 2 Lever 3 (Pixtone PCM mix in IRQ-5 ISR): author + gate + operator
+  iter; ~2-week scope.
+- Bug 4 Lever 2b (MidiScheduler tick from timer ISR): independently
+  designed; ships parallel to Lever 3 if operator authorizes the work.
+- Lever 1 (DOOM-style channel-priority preemption) + Lever 4 (audio ring
+  depth + drain rate): designed and tested; ship dormant as killswitched
+  future infrastructure.
+
 ## [1.0.0] -- 2026-05-18 -- correct game speed by default
 
 The milestone release: Cave Story plays at its intended speed on the reference

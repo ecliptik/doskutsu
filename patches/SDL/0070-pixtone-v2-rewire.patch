@@ -1,0 +1,257 @@
+From e7ce5eb4cf8514b3314c973dc6fa8c6c87c5145c Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Wed, 20 May 2026 18:37:07 -0700
+Subject: [PATCH] dos: Phase 11 patch 0070 -- v2 Pixtone probe pix_active
+ histogram + irq_delta fold-in
+
+Why DOS needs this:
+
+The v1 Pixtone multi-source probe iter (nxengine-evo/0165, 2026-05-20)
+returned hypothesis-E (instrumentation gap) per
+docs/internal/486-CLASS-CAMPAIGN-FINDINGS.md sec.21.5. Root cause: the
+v1 engine-side histogram sampler (SamplePixtoneActiveBucket at
+Renderer.cpp) was hooked to organyaStreamCallback, which fires only
+under the Organya music backend. OPL3 has been the wave-46 default
+since 2026-05-14, so the sampler never fired in the production
+configuration -> samples=0 across all 13 v1 probe blocks ->
+discriminator-pillar table unable to compute hypotheses A vs C.
+
+This patch re-wires the histogram sampling to the SDL-side audio
+backend: g_pixtone_active_count is sampled once per audio-thread
+iterate (top of DOSSOUNDBLASTER_PlayDevice), bucketed into the same 6
+bins as the v1 engine-side histogram ([0] / [1] / [2] / [3-5] /
+[6-10] / [11+] -- boundaries match Renderer.cpp:122). PlayDevice is
+the unified-cadence point that fires regardless of music backend
+(Organya / OPL3 / WaveBlaster all funnel through SDL3_mixer ->
+PlayDevice). Hypothesis-E instrumentation gap closes.
+
+Secondary resolution -- v1 sec.21.4.1 silent_irq numeric anomaly:
+
+The v1 iter also surfaced an arithmetic anomaly: silent_irq delta
+~750 per 100-flip block. Design-assumed 43 Hz IRQ rate predicts
+~190 IRQs/block over a 4.4-second block -- so silent_irq is 4x the
+total IRQ count, which is impossible (silent_irq counts a subset of
+total IRQs). Source-verified investigation #116 cleared the SDL/0069
+wiring (single increment per silent IRQ; engine-side delta arithmetic
+correct), leaving the IRQ rate hypothesis: real DX2-66 SB16 may fire
+IRQ-5 at a higher rate than the design assumption.
+
+This patch folds the existing doskutsu_audio_irq_count delta into the
+same [sdl-audiocb] block emit as `irq_delta=N`. The existing counter
+already increments unconditionally per IRQ at sb.c:778; no new symbol
+needed (per #117 STOP-and-ack Q2 narrowing -- pre-flight grep caught
+the existing counter). The block-emit delta exposes the real-HW IRQ
+rate as a per-block witness, resolving the sec.21.4.1 anomaly.
+Snapshot pattern matches Renderer.cpp:3157 (modular wrap-safe per
+C99 unsigned overflow semantics).
+
+Patch shape:
+
+  - extern volatile uint32_t g_pixtone_active_count -- engine -> SDL
+    extern direction. Novel for this codebase but linkage-clean: the
+    engine-side symbol is in an extern "C" block at Pixtone.h:37.
+  - static Uint32 g_c_pix_hist[6] -- file-scope histogram, touched
+    only from the cooperative audio thread (PlayDevice + record).
+    No DPMI lock needed -- never read or written from IRQ context.
+  - static Uint32 g_c_audiocb_last_irq_count -- previous-block-emit
+    snapshot for irq_count delta computation.
+  - _c_pix_hist_sample helper: single volatile read + branched
+    bucket-inc, negligible cost.
+  - PlayDevice top-of-body sample call, gated on the existing
+    g_c_sfx_audiocb_instr_active cached bool (FINE_INSTR=1 from
+    SDL/0064). No new env var; rides on the existing gate.
+  - _c_audiocb_record extends the existing [sdl-audiocb] emit with
+    `pix_active min=X med=Y p90=Z max=W samples=N irq_delta=M` fields.
+    Per-100-PlayDevice-call cadence unchanged. Histogram + irq snapshot
+    reset on emit alongside the existing reset block.
+  - OpenDevice banner: "audio: SDL/0070 v2 Pixtone probe pix_active
+    histogram + irq_delta fold-in: rides on FINE_INSTR=1" -- the
+    smoke gate's runtime-invocation witness; banner is unconditional
+    so embed-vs-runtime is observable.
+
+Total: 135 lines in vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c
+(comment density per the file's existing convention). Zero new env
+var. Zero new counter symbol. Zero engine LOC. Zero new patches for
+the Lever 4 ride-along (PLAY2 sets existing DEVICE_FRAMES + RING_CHUNKS
+env vars per #115 design).
+
+Banner regex added to tests/run-gameplay-smoke.sh BANNERS array;
+parity 46 -> 47 across BANNER_REGEX / BANNER_SEVERITY / BANNER_LABEL.
+
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+See docs/internal/PIXTONE-PROBE-V2-DESIGN.md sec.2 + sec.5 for the
+contract this patch implements + #117 STOP-and-ack closure (Q2
+narrowing accepted).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 137 +++++++++++++++++++++++++++++++-
+ 1 file changed, 135 insertions(+), 2 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 0d11dafec..d37139cfa 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -205,2 +205,44 @@ static Uint32 g_c_audiocb_block = 0;       /* emitted-block counter */
+ 
++/* DOSKUTSU patch (Phase 11 patch 0070): v2 Pixtone multi-source probe.
++   Sibling of nxengine 0165's engine-side histogram at
++   `vendor/nxengine-evo/src/graphics/Renderer.cpp:129` (g_pix_hist_bucket).
++   The v1 engine-side site (SamplePixtoneActiveBucket called from
++   organyaStreamCallback) fires only under the Organya backend, which
++   produced hypothesis-E in the v1 probe iter because OPL3 has been the
++   wave-46 default since 2026-05-14. This SDL-side site samples at the
++   top of DOSSOUNDBLASTER_PlayDevice -- the unified-cadence point that
++   fires regardless of music backend (Organya / OPL3 / WaveBlaster all
++   funnel through SDL3_mixer -> SB16 device path).
++
++   Bucket boundaries match nxengine 0165 (Renderer.cpp:122): [0] / [1]
++   / [2] / [3-5] / [6-10] / [11+]. Sampling rate = once per audio-thread
++   iterate (one PlayDevice call). Cross-comparable with the v1 engine-
++   side histogram if both engage in a Tier-1 / Organya cell.
++
++   Gate: rides on the existing FINE_INSTR=1 cached bool from patch
++   SDL/0064 (g_c_sfx_audiocb_instr_active). No new env var, no new
++   cached-bool. FINE_INSTR=0 cost is one cached-bool test (already paid).
++
++   Storage: file-scope static array (no DPMI lock needed -- touched
++   only from the cooperative audio thread, never from IRQ context;
++   matches the existing g_c_audiocb_* counter pattern).
++
++   Per docs/internal/PIXTONE-PROBE-V2-DESIGN.md sec.2 + flush-instr's
++   #117 contract review. */
++extern volatile uint32_t g_pixtone_active_count; /* engine -> SDL extern */
++static Uint32 g_c_pix_hist[6] = {0, 0, 0, 0, 0, 0};
++
++/* DOSKUTSU patch (Phase 11 patch 0070): irq_count delta fold-in.
++   Snapshot of doskutsu_audio_irq_count at the previous block emit;
++   current block's delta `irq_delta` exposes the real-HW SB16 IRQ-5
++   firing rate as a per-block witness. Sibling of silent_irq delta
++   (engine reads doskutsu_audio_silent_irq_count via patch 0069). The
++   ratio silent_irq / irq_delta gives the silent fraction; irq_delta
++   per wall-second gives the actual IRQ rate. Resolves the v1 sec.21.4.1
++   anomaly (silent_irq ~750/block vs design-assumed 43 Hz IRQ predicting
++   ~190 IRQs/block over 4.4 s). Snapshot-pattern matches the engine-side
++   reader at `vendor/nxengine-evo/src/graphics/Renderer.cpp:3157`.
++   Modular wrap-safe per C99 unsigned overflow semantics. */
++static Uint32 g_c_audiocb_last_irq_count = 0;
++
+ /* DOSKUTSU patch (Phase 11 patch 0066): audio-thread hard-park
+@@ -1063,2 +1105,14 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0070): banner for the v2 Pixtone
++       probe re-wire. The pix_active histogram + irq_delta fold-in
++       engage when FINE_INSTR=1 turns on the [sdl-audiocb] block emit
++       gate (see SDL/0064 banner above for the FINE_INSTR variant).
++       Resolves the v1 probe hypothesis-E instrumentation gap (nxengine
++       0165's organyaStreamCallback sampler missed the OPL3 default
++       since wave-46). Pure-data instrumentation; no behavior change.
++       Per docs/internal/PIXTONE-PROBE-V2-DESIGN.md sec.2 + sec.5. */
++    doskutsu_dbg_log("audio: SDL/0070 v2 Pixtone probe pix_active histogram "
++                     "+ irq_delta fold-in: rides on FINE_INSTR=1 (extends "
++                     "[sdl-audiocb] block emit; no new env var)");
++
+     /* DOSKUTSU patch (Phase 11 patch 0050): resolve quiescence-gate
+@@ -1950,2 +2004,21 @@ static Uint8 *DOSSOUNDBLASTER_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_
+ 
++/* DOSKUTSU patch (Phase 11 patch 0070): bucket the current
++   g_pixtone_active_count into the 6-bucket histogram. Boundaries match
++   nxengine 0165 (Renderer.cpp:122): [0] / [1] / [2] / [3-5] / [6-10] /
++   [11+]. Called from the top of DOSSOUNDBLASTER_PlayDevice under
++   FINE_INSTR=1; one single-volatile-read + one branched bucket-inc;
++   negligible cost. */
++static void _c_pix_hist_sample(void)
++{
++    const Uint32 n = g_pixtone_active_count;
++    int b;
++    if (n == 0)       b = 0;
++    else if (n == 1)  b = 1;
++    else if (n == 2)  b = 2;
++    else if (n <= 5)  b = 3;
++    else if (n <= 10) b = 4;
++    else              b = 5;
++    g_c_pix_hist[b]++;
++}
++
+ /* DOSKUTSU patch (Phase 11 patch 0064): close one SDL-DOS audio-
+@@ -1978,4 +2051,46 @@ static void _c_audiocb_record(void)
+         g_c_audiocb_block++;
++
++        /* DOSKUTSU patch (Phase 11 patch 0070): compute pix_active
++           percentiles (min / med / p90 / max) from the 6-bucket
++           histogram. Bucket midpoints match nxengine 0165 design
++           for cross-comparison: 0 / 1 / 2 / 4 / 8 / 12. Cumulative
++           threshold scan; coarse but sufficient at probe resolution. */
++        static const Uint32 _bucket_mid[6] = {0, 1, 2, 4, 8, 12};
++        Uint32 _pix_total = 0;
++        for (int i = 0; i < 6; ++i) _pix_total += g_c_pix_hist[i];
++        Uint32 _pix_min = 0, _pix_med = 0, _pix_p90 = 0, _pix_max = 0;
++        if (_pix_total > 0) {
++            for (int i = 0; i < 6; ++i) {
++                if (g_c_pix_hist[i]) { _pix_min = _bucket_mid[i]; break; }
++            }
++            for (int i = 5; i >= 0; --i) {
++                if (g_c_pix_hist[i]) { _pix_max = _bucket_mid[i]; break; }
++            }
++            const Uint32 _thr_med = _pix_total / 2;
++            const Uint32 _thr_p90 = (_pix_total * 90) / 100;
++            Uint32 _acc = 0;
++            int _set_med = 0, _set_p90 = 0;
++            for (int i = 0; i < 6; ++i) {
++                _acc += g_c_pix_hist[i];
++                if (!_set_med && _acc >= _thr_med) {
++                    _pix_med = _bucket_mid[i]; _set_med = 1;
++                }
++                if (!_set_p90 && _acc >= _thr_p90) {
++                    _pix_p90 = _bucket_mid[i]; _set_p90 = 1;
++                }
++            }
++        }
++
++        /* DOSKUTSU patch (Phase 11 patch 0070): irq_count delta vs the
++           previous block-emit snapshot. The witness for real-HW IRQ
++           rate (sec.21.4.1 anomaly resolver). Modular wrap-safe per
++           C99 unsigned overflow semantics. */
++        const Uint32 _now_irq = doskutsu_audio_irq_count;
++        const Uint32 _d_irq = _now_irq - g_c_audiocb_last_irq_count;
++        g_c_audiocb_last_irq_count = _now_irq;
++
+         doskutsu_dbg_log("[sdl-audiocb block~%lu invocations=%lu "
+-                         "total_ms=%lu max_ms=%lu]",
++                         "total_ms=%lu max_ms=%lu "
++                         "pix_active min=%lu med=%lu p90=%lu max=%lu "
++                         "samples=%lu irq_delta=%lu]",
+                          (unsigned long)g_c_audiocb_block,
+@@ -1983,3 +2098,9 @@ static void _c_audiocb_record(void)
+                          (unsigned long)(g_c_audiocb_total_ns / 1000000ULL),
+-                         (unsigned long)(g_c_audiocb_max_ns / 1000000ULL));
++                         (unsigned long)(g_c_audiocb_max_ns / 1000000ULL),
++                         (unsigned long)_pix_min,
++                         (unsigned long)_pix_med,
++                         (unsigned long)_pix_p90,
++                         (unsigned long)_pix_max,
++                         (unsigned long)_pix_total,
++                         (unsigned long)_d_irq);
+         g_c_audiocb_invocations = 0;
+@@ -1987,2 +2108,3 @@ static void _c_audiocb_record(void)
+         g_c_audiocb_max_ns = 0;
++        for (int i = 0; i < 6; ++i) g_c_pix_hist[i] = 0;
+     }
+@@ -1996,2 +2118,13 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0070): v2 Pixtone probe -- sample
++       g_pixtone_active_count once per PlayDevice invocation (= once per
++       audio-thread iterate). Buckets into g_c_pix_hist[6] for the
++       per-block emit in _c_audiocb_record. PlayDevice fires regardless
++       of music backend -- closes the v1 hypothesis-E instrumentation
++       gap (Organya-only sampler missed the OPL3 default since wave-46).
++       Cached-bool gate; FINE_INSTR=0 cost is the one test. */
++    if (g_c_sfx_audiocb_instr_active) {
++        _c_pix_hist_sample();
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0055): P12 SDL-side audio bracket
+-- 
+2.47.3
+

@@ -299,8 +299,19 @@ SDL_REVISION_PIN := SDL-3.5.0-74a746281+doskutsu
 $(SYSROOT)/lib/libSDL3.a: | djgpp-check
 	@test -d "$(SDL3_SRC)" || (echo "error: $(SDL3_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
 	@test -f "$(TOOLCHAIN_FILE)" || (echo "error: $(TOOLCHAIN_FILE) not found -- PR #15377 not in this SDL checkout?" >&2; exit 1)
+	# SDL_TESTS=OFF -- skip SDL3's upstream test executables (loopwave /
+	# surround / resample / chkkeys / etc.) which link libSDL3.a alone.
+	# We rely on patches that have SDL <-> engine cross-link-unit symbols
+	# (e.g. SDL/0070's extern reference to g_pixtone_active_count, which
+	# is engine-side-owned in Pixtone.cpp). Those test exes don't link the
+	# engine, so they fail to resolve such externs and the build halts at
+	# the sdl3 stage before doskutsu.exe ever gets built. We never ship
+	# or run those test exes -- our smoke gate runs doskutsu.exe + the
+	# gameplay TAS. Skip them so the build proceeds. (Added 2026-05-21
+	# per build-qa #118 link-chain catch on SDL/0070.)
 	cmake -S $(SDL3_SRC) -B $(SDL3_BUILD) $(CMAKE_COMMON) \
 	    -DSDL_SHARED=OFF -DSDL_STATIC=ON \
+	    -DSDL_TESTS=OFF \
 	    -DSDL_REVISION="$(SDL_REVISION_PIN)"
 	cmake --build $(SDL3_BUILD) -j$(NPROC)
 	cmake --install $(SDL3_BUILD)
@@ -1239,7 +1250,7 @@ $(PROBE_WBMIDI_EXE): $(PROBE_WBMIDI_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -1268,6 +1279,14 @@ membw: $(PROBE_MEMBW_EXE)
 	@echo "Built $(PROBE_MEMBW_EXE) -- phase11 wave-22.5 path-B decision probe."
 	@echo "  Real-HW iter: bundle MEMBW.EXE + CWSDPMI.EXE + tests/probes/membw.bat;"
 	@echo "  operator runs MEMBW.BAT once; output -> MEMBW.OUT (logback collects)."
+
+# DOSBox-X correctness-only smoke for MEMBW.EXE (486-class campaign
+# Phase-1 probe). Verifies MEMBW.OUT has the "[membw] done" clean-exit
+# tag, a "[membw] test=LFB_" line, and the LFB_sentinel=0xA5/0x5A
+# correctness witness. Companion to hwinv-dosbox-smoke; MB/s figures are
+# emulator-fictitious -- gate is structure + sentinel only.
+membw-dosbox-smoke: $(PROBE_MEMBW_EXE) $(CWSDPMI_EXE)
+	@tests/run-membw-smoke.sh
 
 mpuwbprobe: $(PROBE_MPUWB_EXE)
 	@echo "Built $(PROBE_MPUWB_EXE) -- phase10 wave-22-WB-E MPU-401 / WaveBlaster"

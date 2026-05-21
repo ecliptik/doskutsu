@@ -1,0 +1,563 @@
+From d498123cf0e558f3d4b0a909f37bdcd534de74d7 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 19 May 2026 17:08:56 -0700
+Subject: [PATCH] dos: Phase 11 patch 0067 (v2) -- SDL_DOSAudioPump bool return
+ + iter cap
+
+flush-instr's Leg A v1 iter verdict (486-CLASS-CAMPAIGN-FINDINGS.md
+sec.17): Leg A failed freeze elimination + caused TAS desync. Root
+cause -- per-pump bandwidth too low: ONE iterate per call = ~23 ms
+audio = 138 ms coverage over 400-1400 ms load_stage windows = ~10%
+coverage. The ring underruns mid-load even with six seam-pumps.
+
+v2 fix specced by flush-instr: nxengine-evo/0162's MIDGAP_PUMP wraps
+the call in `while (SDL_DOSAudioPump()) { }` per seam -- top up the
+ring to full per seam. That requires this signature change:
+SDL_DOSAudioPump void -> bool.
+
+CONTRACT for the bool return:
+- true  = the iterate did meaningful work AND the ring is not yet
+          full. The caller MAY call again to top up further.
+- false = either the iterate was a no-op (TryLock+timeout backstop
+          tripped per SDL/0068; device->shutdown observed; NULL
+          device), or the defense-in-depth iter cap fired, or the
+          ring is now full (audio thread drains naturally;
+          further pumps waste CPU). The caller's `while`-loop exits.
+
+Implementation in SDL_DOSAudioPump (vendor/SDL/src/audio/dos/
+SDL_dosaudio_sb.c):
+- NULL device -> reset counter, return false.
+- Cap check: if calls_since_false_return >= 32, log diagnostic, reset
+  counter, return false. (Defense-in-depth against caller-side
+  `while`-loop bugs -- lost return check, off-by-one. 32 chunks ~=
+  750 ms audio, ~ 2x typical 16-chunk ring depth; cannot false-
+  trigger in normal play since a 16-chunk fill needs ~16 iterates.)
+- Acquire outer device->lock via SDL_LockMutex (blocking; the
+  SDL/0068 amendment wraps this with a TryLock+timeout backstop).
+- Run SDL_PlaybackAudioThreadIterate (recursive lock; we hold the
+  outer).
+- Read ring-room snapshot INSIDE the outer lock for consistency with
+  WaitDevice's own room check (DOSSOUNDBLASTER_WaitDevice line 720-
+  721 of this file): `(ring_size - (ring_write - isr_ring_read)) >=
+  chunk_size`. Same predicate boundary = same definition of "room".
+- Release outer lock.
+- If has_room: increment counter, return true.
+- Else: reset counter, return false.
+
+Counter semantic: "consecutive true-returns within this call-
+sequence." Resets on every false-return path so the next call-
+sequence (next load_stage seam) starts fresh.
+
+THE THREE SAFETY PROPERTIES STILL HOLD. The v2 while-loop pattern
+repeats the Iterate path N times serially; each individual iteration
+honors all three properties; the loop introduces no new touch points.
+The function-head comment and the file-head comment in
+SDL3/SDL_dosaudio_pump.h are updated to document the bool contract +
+cap + while-loop pattern explicitly.
+
+Doc-polish landed in this amendment (team-lead approved post-iter):
+dropped the "predates nxengine-evo/0162" / "phased-rollout" framing
+that became inaccurate when 0067+0162 ship in the same combined iter;
+adopted the "6 load_stage seams" specificity + the "A/B-confirm the
+Leg A pump against the pre-0162 freeze on real DX2-66 hardware"
+rationale for the killswitch.
+
+Two TUs touched: src/audio/dos/SDL_dosaudio_sb.c (function-body
+rewrite + the cap counter static + the updated function-head comment)
+and include/SDL3/SDL_dosaudio_pump.h (signature `void` -> `bool`
+on the prototype + the file-head "Engine-side gate" doc-polish +
+the function-declaration doc-comment updated for the bool contract).
+
+Rides the re-gated combined DX2-66 iter alongside SDL/0068 v2
+(TryLock+timeout backstop, signature ripple) and nxengine-evo/0162-v2
+(while-loop caller pattern). build-qa re-gates #84.
+
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dosaudio_pump.h | 252 +++++++++++++++++++++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c  | 180 ++++++++++++++++++++++
+ 2 files changed, 432 insertions(+)
+ create mode 100644 include/SDL3/SDL_dosaudio_pump.h
+
+diff --git a/include/SDL3/SDL_dosaudio_pump.h b/include/SDL3/SDL_dosaudio_pump.h
+new file mode 100644
+index 000000000..207c553f6
+--- /dev/null
++++ b/include/SDL3/SDL_dosaudio_pump.h
+@@ -0,0 +1,252 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/**
++ * # CategoryDOSAudioPump
++ *
++ * **DOSKUTSU local addition (patches/SDL/0067, never upstreamed).** This
++ * header exports a single SDL3-DOS audio-backend helper: an engine-callable
++ * "audio-mid-gap pump" that runs one `SDL_PlaybackAudioThreadIterate` cycle
++ * from the calling (engine main) thread, refilling the SB16 audio ring
++ * ahead of the cooperative-scheduler audio thread's normal cadence.
++ *
++ * ## Why this exists
++ *
++ * The 486-class campaign showed that the SFX stutter on the slow Intel
++ * DX2-66 / DX2-50 cells is gap-driven, not rate-driven (flush-instr #75,
++ * 486-CLASS-CAMPAIGN-FINDINGS.md sec.16.3): individual render gaps in the
++ * engine's per-flip wall-clock occasionally exceed the audio ring depth
++ * (~372 ms in the production config), and the cooperative scheduler only
++ * runs the audio thread when the engine yields. During one long render
++ * flip the ring drains and underruns regardless of average rate.
++ *
++ * The audio-render-decoupling design (`docs/internal/AUDIO-MID-GAP-SERVICE-
++ * DESIGN.md`) calls for engine call-sites that mid-gap-service the audio
++ * ring -- the engine calls `SDL_DOSAudioPump()` at strategic points (Leg A:
++ * stage-load freads; Leg B: mid-Renderer-phase seams) so the audio thread
++ * gets serviced even during a long single-flip render gap.
++ *
++ * The pump is an SDL3 audio-backend helper rather than an engine-internal
++ * mechanism because the audio iterate sequence (GetDeviceBuf -> SDL3 core
++ * mix loop -> SDL3_mixer MixerCallback -> per-track pull -> PlayDevice ->
++ * SB16 ring write) lives on the SDL side, not in the engine.
++ *
++ * ## How it works
++ *
++ * `SDL_DOSAudioPump()` runs ONE `SDL_PlaybackAudioThreadIterate` cycle
++ * on the currently-open DOS audio device and returns a bool indicating
++ * whether the caller may call again to top up the ring further. That
++ * one Iterate runs exactly what the audio thread's own loop runs each
++ * cycle: it grabs the device lock, the mixer produces one staging
++ * buffer's worth of mixed audio (firing SDL3_mixer's MixerCallback
++ * and the per-track get-callbacks synchronously),
++ * `DOSSOUNDBLASTER_PlayDevice` writes the buffer into the SB16 ring
++ * (with the SDL/0054 Shape A silence-detect skip if applicable), and
++ * the lock is released. After Iterate returns, the pump reads the
++ * ring's room snapshot (same formula as WaitDevice's own room check)
++ * and returns true iff the ring is not yet full.
++ *
++ * Caller pattern: `while (SDL_DOSAudioPump()) { }`. The engine wraps
++ * each Leg A `load_stage` seam in this loop, topping up the audio ring
++ * to full per seam. v1 (one-iterate-per-call, void) gave ~10% coverage
++ * over 400-1400 ms load_stage windows -- inadequate for the gap-driven
++ * underrun. v2 (while-loop, bool) tops up the ring to its full depth
++ * per seam, eliminating the single-seam coverage gap.
++ *
++ * The audio thread, when it next runs, finds the ring partially or
++ * fully refilled and either waits less in WaitDevice or skips the
++ * mix entirely on that cycle.
++ *
++ * Net effect: the engine pre-emptively services the audio ring during
++ * what would otherwise be a single-yield-point gap, so the ring does
++ * not drain to underrun during long render flips.
++ *
++ * ## Safety properties (REQUIRED -- the engine call-sites depend on these)
++ *
++ * Three properties hold and MUST keep holding for the engine's mid-
++ * Renderer-phase call-sites to remain safe (flush-instr design doc sec.3.1):
++ *
++ * 1. **Does NOT touch the SDL renderer.** No `SDL_Render*` calls, no
++ *    surface lifecycle, no DAC programming, no framebuffer flip, no
++ *    palette / cursor mutation, no drawcall queue access. The entire
++ *    Iterate path stays in `vendor/SDL/src/audio/` and the DOS audio
++ *    backend (`vendor/SDL/src/audio/dos/`).
++ *
++ * 2. **Does NOT run any SDL event handlers.** No internal `SDL_PumpEvents`
++ *    call. No event-watch dispatch from the audio thread (the one event-
++ *    adjacent path, `SDL_AudioDeviceDisconnected`, fires only on failure
++ *    and defers via `SDL_RunOnMainThread`; it never synchronously
++ *    dispatches event handlers, and under the DOS backend's normal
++ *    returns it does not fire at all).
++ *
++ * 3. **Does NOT re-enter engine code via callback (beyond scalar slot
++ *    bookkeeping).** The one synchronous engine-callback re-entry that
++ *    can fire inside the iterate is SDL3_mixer's
++ *    `MIX_SetTrackStoppedCallback` chain, which lands in Pixtone's
++ *    `mySfxCallback` -> `pxtSoundDone`. `pxtSoundDone` is two scalar
++ *    writes (`_sound_fx[slot].channel = -1` + `--g_pixtone_active_count`)
++ *    -- the "marks a slot free" carve-out that the safety surface
++ *    explicitly allows. No other engine state is touched, no renderer
++ *    is reached, no event pump is run, no `SDL_LockMutex` is taken on
++ *    any engine-managed mutex.
++ *
++ * If any of (1)/(2)/(3) ever changes (e.g. a future SDL3_mixer change
++ * adds a synchronous callback that touches more), this header must be
++ * updated and the engine call-sites re-audited.
++ *
++ * ## Lifecycle + idempotence
++ *
++ * - Safe to call at any time. If the audio device has not been opened
++ *   (or has been closed), the call is a harmless no-op (early return).
++ * - Idempotent in the sense that calling it twice in quick succession
++ *   simply runs two iterate cycles -- the audio thread's own loop
++ *   tolerates the ring being refilled ahead of its schedule (it waits
++ *   in WaitDevice for ring space when full; the mix-skip silence-detect
++ *   path also handles double-fill safely).
++ * - Must NOT be called from an interrupt context (the iterate path
++ *   takes locks and may yield via the cooperative scheduler).
++ * - Callable from the engine main thread; not designed to be called
++ *   from the audio thread itself (that would self-deadlock on the
++ *   device lock).
++ *
++ * ## Engine-side gate
++ *
++ * The pump export itself is **unconditional** -- the export always
++ * attempts one iterate when called. The decision whether to call it
++ * lives engine-side and is gated by the engine's reading of
++ * `SDL_HINT_DOSKUTSU_AUDIO_MIDGAP_PUMP` -- **default-ON, strict-"0"
++ * disables** (killswitch shape, same as SDL/0066's SHUTDOWN_PARK).
++ * The engine reads this hint on its first `SDL_DOSAudioPump()`
++ * invocation and caches the decision; absent the killswitch, the
++ * engine calls `SDL_DOSAudioPump` in a top-up loop at each of the 6
++ * `load_stage` seams (per nxengine-evo/0162), iterating until the
++ * ring is full (the v2 `while (SDL_DOSAudioPump()) { }` caller
++ * pattern -- see the function's return-value contract below). With
++ * the killswitch set to "0", the engine short-circuits before
++ * `SDL_DOSAudioPump` -- the SDL-side export is unaffected (it stays
++ * unconditional) but no engine call-site invokes it. Set "0" only to
++ * A/B-confirm the Leg A pump against the pre-0162 freeze on real
++ * DX2-66 hardware.
++ *
++ * ## Real-HW gate
++ *
++ * Per `memory/dosbox_not_behavioral_proxy_for_io.md`, DOSBox-X cannot
++ * reliably reproduce the cooperative-scheduler timing that the gap-
++ * driven SFX stutter depends on. A DOSBox-X smoke gate can verify
++ * structural correctness (the export is present, the engine call-sites
++ * compile, the game still hits title) but only a real-DX2-66 iter
++ * confirms whether the pump materially closes underrun gaps. The
++ * matching Leg A real-HW iter contract carries the cells.
++ *
++ * Like `SDL_dosvesa_directaccess.h` and `SDL_dosaudio_shutdown.h`, this
++ * header is a workspace-local doskutsu addition. SDL/0067 hunks and
++ * these declarations are not contributed back to libsdl-org/SDL.
++ */
++
++#ifndef SDL_dosaudio_pump_h_
++#define SDL_dosaudio_pump_h_
++
++#include <SDL3/SDL_stdinc.h>
++
++#include <SDL3/SDL_begin_code.h>
++/* Set up for C function definitions, even when using C++ */
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Run one SDL_PlaybackAudioThreadIterate cycle on the currently-open
++ * SDL3-DOS audio device, from the calling (engine main) thread, and
++ * return whether the caller should call again to top up the ring
++ * further.
++ *
++ * This refills the SB16 audio ring ahead of the cooperative-scheduler
++ * audio thread's normal cadence -- pre-empts a potential underrun
++ * during a long single-flip render gap. The engine calls this from
++ * Leg A (stage-load freads; v2 wraps the call in
++ * `while (SDL_DOSAudioPump()) { }` per nxengine-evo/0162, iterating
++ * until the ring is full per seam) and, later, Leg B (mid-Renderer-
++ * phase seams) per the audio-render-decoupling design.
++ *
++ * Return value:
++ * - `true`  = the iterate did meaningful work AND the ring is not
++ *             yet full. The caller MAY call again to top up further.
++ * - `false` = either the iterate was a no-op (TryLock+timeout
++ *             backstop tripped per SDL/0068; device->shutdown
++ *             observed; NULL device), or the defense-in-depth iter
++ *             cap fired (32 consecutive true-returns in one
++ *             call-sequence), or the ring is now full (the audio
++ *             thread will drain naturally; further pumps waste CPU).
++ *             The caller's `while`-loop exits.
++ *
++ * Safety: this call honors the three properties documented in the
++ * file-head comment above -- it does NOT touch the SDL renderer, does
++ * NOT run any SDL event handlers, and does NOT re-enter engine code
++ * beyond scalar slot bookkeeping. The v2 while-loop pattern repeats
++ * the Iterate path N times serially; each individual iteration
++ * honors all three properties; the loop introduces no new touch
++ * points. The engine call-sites depend on these properties.
++ *
++ * Behavior:
++ * - NULL device (not opened or already closed) -> returns false; the
++ *   internal cap counter resets so the next call-sequence (after the
++ *   caller's `while`-loop exits) starts fresh.
++ * - Cap exceeded (>32 consecutive true-returns in one call-sequence
++ *   -- defense-in-depth against caller-side bugs) -> log a one-line
++ *   "cap tripped" diagnostic on the SDL log channel, reset counter,
++ *   return false.
++ * - Otherwise: acquire `device->lock` (via the SDL/0068 TryLock+
++ *   timeout backstop when active, or via blocking `SDL_LockMutex`
++ *   when the SDL/0068 killswitch is set), run one
++ *   `SDL_PlaybackAudioThreadIterate` cycle (recursive lock; we hold
++ *   the outer), read the ring's room snapshot inside the outer lock
++ *   (same formula as WaitDevice's own room check for predicate-
++ *   boundary consistency), release the outer lock, and return true
++ *   iff Iterate ran AND the ring has room for another chunk.
++ * - Must be called from the engine main thread, not from an interrupt
++ *   context, not from the audio thread itself.
++ *
++ * \returns true if the caller may call again to top up further; false
++ *          if the caller's `while`-loop should exit (no work was done,
++ *          or the ring is full, or the iter cap tripped).
++ *
++ * \threadsafety The call grabs and releases the SDL audio device lock;
++ *               it serializes with the audio thread's own iterate
++ *               cycles via that lock. Safe to call from the engine
++ *               main thread at any point that does not already hold
++ *               the device lock.
++ *
++ * \since This function is available since SDL/0067 (doskutsu
++ *        workspace-local; never upstreamed). v2 (this signature)
++ *        ships in the SDL/0067 amendment alongside SDL/0068's
++ *        TryLock+timeout backstop and nxengine-evo/0162's
++ *        `while (SDL_DOSAudioPump()) { }` call-site pattern.
++ *
++ * \sa SDL_DOSAudioBeginShutdown
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSAudioPump(void);
++
++#ifdef __cplusplus
++}
++#endif
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_dosaudio_pump_h_ */
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 04a1b266d..d94af1c42 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -28,6 +28,7 @@
+ #include "../../video/dos/SDL_dosdbg.h" /* DOSKUTSU patch 0041: doskutsu_dbg_log routing */
+ #include "SDL_dosaudio_sb.h"
+ #include <SDL3/SDL_dosaudio_shutdown.h> /* DOSKUTSU patch 0053: engine-callable SDL_DOSAudioBeginShutdown export */
++#include <SDL3/SDL_dosaudio_pump.h>     /* DOSKUTSU patch 0067: engine-callable SDL_DOSAudioPump export (audio mid-gap-service) */
+ 
+ /* DOSKUTSU patch (Phase 10 patch 0038): IRQ-5 instrumentation +
+    idle-pause coordination state. The public-API state vars are defined
+@@ -259,6 +260,23 @@ static Uint32 g_c_audiocb_block = 0;       /* emitted-block counter */
+ static bool g_dos_audio_shutdown_park_disabled = false;
+ static volatile bool g_dos_audio_hard_park = false;
+ 
++/* DOSKUTSU patch (Phase 11 patch 0067): captured SDL_AudioDevice pointer
++   for the engine-callable SDL_DOSAudioPump() export. Set at
++   DOSSOUNDBLASTER_OpenDevice entry; cleared to NULL at the end of
++   DOSSOUNDBLASTER_CloseDevice. SDL_DOSAudioPump reads this pointer to
++   know which device's SDL_PlaybackAudioThreadIterate cycle to run from
++   the calling (engine main) thread. NULL == device not open ==
++   SDL_DOSAudioPump returns harmlessly without iterating (no-op).
++
++   Volatile so the audio thread's view of NULL/non-NULL is not
++   compiler-reordered relative to the device's own open/close lifecycle
++   (aligned pointer stores on x86 are atomic; no barrier needed beyond
++   the volatile-prevents-reorder semantics, matching the existing
++   g_dos_audio_hard_park pattern). Same-process single audio device
++   (no per-thread captures); SDL3-DOS only supports one device open at
++   a time anyway. */
++static SDL_AudioDevice * volatile g_dos_audio_device = NULL;
++
+ /* DOSKUTSU patch (Phase 11 patch 0058): Shape A mechanism-histogram
+    instrumentation state. Diagnostic backstop for wave-36 PLAY6 Shape
+    D fps lever per `pressure_test_tidy_narratives.md` discipline: if
+@@ -940,6 +958,16 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+ {
+     const bool is_sb16 = soundblaster_is_sb16;
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0067): capture the device pointer
++       so the engine-callable SDL_DOSAudioPump() (declared in
++       SDL3/SDL_dosaudio_pump.h) knows which device to iterate. Cleared
++       at the end of DOSSOUNDBLASTER_CloseDevice. */
++    g_dos_audio_device = device;
++    doskutsu_dbg_log("audio: SDL/0067 SDL_DOSAudioPump export available "
++                     "(engine may call from main thread to mid-gap-service "
++                     "the audio ring; safety: no renderer / no SDL_PumpEvents / "
++                     "engine-callback re-entry bounded to scalar slot bookkeeping)");
++
+     /* DOSKUTSU patch (Phase 11 patch 0050): resolve quiescence-gate
+        killswitch once at OpenDevice time. Strict-"0" match per CLAUDE.md
+        env-var convention. Cached at module scope; read by
+@@ -1553,6 +1581,153 @@ void SDL_DOSAudioBeginShutdown(void)
+     }
+ }
+ 
++/* DOSKUTSU patch (Phase 11 patch 0067, v2): engine-callable audio-
++   mid-gap pump. Runs ONE SDL_PlaybackAudioThreadIterate cycle on the
++   open SDL3-DOS audio device, from the calling (engine main) thread,
++   and returns a bool indicating whether the caller may call again to
++   top up further. The engine calls this from Leg A (stage-load freads;
++   v2 wraps the call in `while (SDL_DOSAudioPump()) { }` per
++   nxengine-evo/0162) and, later, Leg B (mid-Renderer-phase seams)
++   per docs/internal/AUDIO-MID-GAP-SERVICE-DESIGN.md, to pre-empt SB16
++   ring underruns during long single-flip render gaps on slow CPUs
++   (486-class campaign Bug 1 / flush-instr #75 sec.16.3 -- the SFX
++   stutter is gap-driven, not rate-driven; v1's one-iterate-per-call
++   gave ~10% coverage over 400-1400 ms load_stage windows, so v2 tops
++   up the ring to full per seam).
++
++   Return contract:
++   - true  = the iterate did meaningful work AND the ring is not yet
++             full. The caller MAY call again to top up further.
++   - false = either the iterate was a no-op (TryLock+timeout backstop
++             tripped per SDL/0068; device->shutdown observed; NULL
++             device), or the cap-trip defense-in-depth fired, or the
++             ring is now full (audio thread will drain naturally;
++             further pumps waste CPU). The caller's `while`-loop exits.
++
++   The three safety properties (see SDL3/SDL_dosaudio_pump.h for the
++   full design rationale + the engine call-site dependence):
++
++   (1) Does NOT touch the SDL renderer. SDL_PlaybackAudioThreadIterate
++       (SDL_audio.c:1175) -> DOSSOUNDBLASTER_GetDeviceBuf -> SDL3 core
++       mix loop -> SDL3_mixer MixerCallback (SDL_mixer.c:533) -> per-
++       track get-callback (SDL_mixer.c:~340-470) -> DOSSOUNDBLASTER_
++       PlayDevice -- nothing in this chain touches video / surface /
++       palette / cursor / drawcall state.
++
++   (2) Does NOT run any SDL event handlers. The iterate path does not
++       call SDL_PumpEvents and does not synchronously dispatch event-
++       watch callbacks. The one event-adjacent path,
++       SDL_AudioDeviceDisconnected (SDL_audio.c:823), defers via
++       SDL_RunOnMainThread and only fires on failure (the DOS backend
++       returns true on every Iterate/WaitDevice path so it does not
++       fire in normal operation).
++
++   (3) Does NOT re-enter engine code via callback beyond scalar slot
++       bookkeeping. The one synchronous engine-callback re-entry is the
++       MIX_TrackStoppedCallback chain (SDL_mixer.c:466 -> :228) ->
++       Pixtone's mySfxCallback (Pixtone.cpp:279) -> Pixtone::pxtSoundDone
++       (Pixtone.cpp:725-743), which is two scalar writes
++       (`_sound_fx[slot].channel = -1` + `--g_pixtone_active_count`)
++       -- no renderer, no events, no engine-state mutation. This is
++       the "marks a slot free" carve-out the design's sec.3.1
++       explicitly allows.
++
++   The v2 while-loop pattern (caller-side `while (SDL_DOSAudioPump()) { }`)
++   repeats the Iterate path N times serially; each individual iteration
++   honors all three safety properties; the loop introduces no new
++   touch points.
++
++   The pump is unconditional from SDL's side -- the export always
++   attempts one iterate when called. The decision whether to call it
++   lives engine-side and is gated by the engine's reading of
++   SDL_HINT_DOSKUTSU_AUDIO_MIDGAP_PUMP -- default-ON, strict-"0"
++   disables (killswitch shape, same as SDL/0066's SHUTDOWN_PARK).
++   Absent the killswitch, the engine calls SDL_DOSAudioPump in a
++   top-up loop at each of the 6 load_stage seams (per
++   nxengine-evo/0162), iterating until the ring is full. With the
++   killswitch set to "0", the engine short-circuits before
++   SDL_DOSAudioPump -- this export is unaffected (it stays
++   unconditional) but no engine call-site invokes it. Set "0" only
++   to A/B-confirm the Leg A pump against the pre-0162 freeze on real
++   DX2-66 hardware.
++
++   Iter cap (defense-in-depth, v2): a static counter tracks
++   consecutive true-returns within one call-sequence and force-returns
++   false if the count exceeds 32 (~ 750 ms audio, ~ 2x typical 16-
++   chunk ring depth). Catches caller-side `while`-loop bugs (lost
++   return check, off-by-one) before they spin forever. The counter
++   resets on every false-return path so the next call-sequence (next
++   seam) starts fresh. Won't false-trigger in normal play (a 16-chunk
++   ring needs ~16 iterates to fill, well under 32).
++
++   Threading: callable from the engine main thread. Not safe to call
++   from an interrupt context (the iterate takes locks and may yield via
++   the cooperative scheduler). Not safe to call from the SDL audio
++   playback thread itself (would self-deadlock on the device lock --
++   SDL mutexes are recursive only for the same tid; the audio thread's
++   re-entry would not deadlock per se but the semantic is undefined). */
++bool SDL_DOSAudioPump(void)
++{
++    static Uint32 calls_since_false_return = 0;
++
++    SDL_AudioDevice *device = g_dos_audio_device;
++    if (!device) {
++        calls_since_false_return = 0;
++        return false;  /* no-op: device not open or already closed */
++    }
++
++    /* Defense-in-depth iter cap. Caller-side
++       `while (SDL_DOSAudioPump()) { }` bugs (lost return check,
++       off-by-one) could spin forever; this caps cumulative true-
++       returns per call-sequence at 32 (~ 750 ms audio, ~ 2x typical
++       16-chunk ring depth). On trip: log a one-line diagnostic,
++       reset counter, return false (caller's loop exits; next
++       call-sequence starts fresh). */
++    if (calls_since_false_return >= 32) {
++        doskutsu_dbg_log("audio: SDL/0067 SDL_DOSAudioPump cap tripped "
++                         "(>32 calls in one sequence; possible runaway "
++                         "caller); forcing false-return");
++        calls_since_false_return = 0;
++        return false;
++    }
++
++    /* Acquire outer device->lock. This 0067 patch uses a blocking
++       SDL_LockMutex -- which under DOSBox-X / 86Box SB16 emulation is
++       wedge-prone via cooperative-scheduler starvation (build-qa #84
++       bisect). The SDL/0068 hunk above amends this acquisition to a
++       TryLock+timeout backstop with a strict-"0" killswitch
++       (SDL_HINT_DOSKUTSU_DOS_AUDIO_PUMP_TIMEOUT) that reverts to this
++       blocking path for the operator's A/B reproducer cell. */
++    SDL_LockMutex(device->lock);
++
++    /* Iterate runs with the outer lock held. Iterate's own SDL_LockMutex
++       recurses (same tid; SDL mutexes are recursive on DOS); its matching
++       SDL_UnlockMutex inside Iterate decrements the recursion counter
++       back to 1 -- so we still hold the lock when Iterate returns. That
++       lets us read the ring-room snapshot INSIDE the outer lock, for
++       consistency with WaitDevice's own room check (line 720-721 of
++       this file) -- same definition of "room" = same predicate
++       boundary. */
++    bool iter_ok = SDL_PlaybackAudioThreadIterate(device);
++    bool has_room = false;
++
++    if (iter_ok) {
++        struct SDL_PrivateAudioData *hidden = device->hidden;
++        const int used = hidden->ring_write - isr_ring_read;
++        has_room = (hidden->ring_size - used) >= hidden->chunk_size;
++    }
++
++    SDL_UnlockMutex(device->lock);
++
++    if (has_room) {
++        calls_since_false_return++;
++        return true;  /* iterate did work; ring not yet full */
++    }
++
++    calls_since_false_return = 0;
++    return false;  /* iter no-op (shutdown) OR ring full -- caller's loop exits */
++}
++
+ // Return the staging buffer. The SDL audio pipeline writes the mixed audio
+ // here; PlayDevice then copies it into the ring buffer.
+ static Uint8 *DOSSOUNDBLASTER_GetDeviceBuf(SDL_AudioDevice *device, int *buffer_size)
+@@ -2206,6 +2381,11 @@ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
+         isr_dma_halfdma = 0;
+         isr_irq_ack_port = 0;
+ 
++        /* DOSKUTSU patch (Phase 11 patch 0067): clear the captured device
++           pointer so any subsequent SDL_DOSAudioPump() call is a harmless
++           no-op (the device is gone). */
++        g_dos_audio_device = NULL;
++
+         SDL_free(hidden);
+     }
+ }
+-- 
+2.47.3
+

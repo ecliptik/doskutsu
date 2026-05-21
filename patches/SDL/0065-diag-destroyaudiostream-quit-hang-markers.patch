@@ -1,0 +1,207 @@
+From 5e08c065621a7761dcc5a5c61c7159dcbc01da9c Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 19 May 2026 13:04:31 -0700
+Subject: [PATCH] dos: Phase 11 patch 0065 -- SDL_DestroyAudioStream quit-hang
+ sub-step markers
+
+The 486-class campaign quit-to-DOS hang (Bug 2) was pinned by patch
+SDL_mixer/0002's marker iter: both DX2-66 cells wedge at
+`mix-destroy[5]: pre-SDL_DestroyAudioStream(output_stream)`. So the
+hang is inside SDL_DestroyAudioStream destroying the SDL3_mixer output
+stream.
+
+Key fact: the mixer is created via SDL_OpenAudioDeviceStream
+(SDL_mixer.c:915), so mixer->output_stream is a SIMPLIFIED stream.
+SDL_DestroyAudioStream on a simplified stream does NOT take the plain
+SDL_UnbindAudioStream path -- it calls SDL_CloseAudioDevice
+(SDL_audiocvt.c), a full physical-audio-device close + playback-thread
+join. So `mix-destroy[5]` is a device-close, not a stream-destroy, and
+the quit-hang is somewhere in that close.
+
+sdl-engine's #69 focused dive could not pin the exact wedged call from
+static source: OnAudioStreamDestroy is ruled out (its subsystem_rwlock
+writer-lock has no contender -- the playback thread never touches that
+lock), but the remaining candidates each conflict with the #58
+[sdl-audiocb] evidence, and a blind defensive fix is unsafe (e.g.
+setting device->shutdown early would itself create a
+SerializePhysicalDeviceClose deadlock). This patch adds the finer
+instrumentation to pin it.
+
+It narrates the SDL_DestroyAudioStream -> SDL_CloseAudioDevice ->
+ClosePhysicalAudioDevice sub-steps to the SDL3-DOS debug log
+(<TAG>SDL.LOG via doskutsu_dbg_log, per-line fsync'd), so the LAST
+marker in a hung DX2-66 log pins the wedge to one call:
+
+  adstream-destroy[1]  pre-SDL_DestroyProperties
+  adstream-destroy[2]  pre-OnAudioStreamDestroy
+  adstream-destroy[3]  pre-SDL_CloseAudioDevice (simplified-stream close)
+  adstream-destroy[4]  pre-ObtainLogicalAudioDevice
+  adstream-destroy[5]  pre-DestroyLogicalAudioDevice
+  adstream-destroy[6]  pre-ClosePhysicalAudioDevice
+  adstream-destroy[7]  pre-SerializePhysicalDeviceClose
+  adstream-destroy[8]  pre-set-device-shutdown=1
+  adstream-destroy[9]  pre-SDL_WaitThread (audio playback-thread join)
+  adstream-destroy[10] pre-impl.CloseDevice (DOSSOUNDBLASTER_CloseDevice)
+  adstream-destroy[11] device close returned; pre-stream-free
+
+Instrumentation only -- no logic change. Always-on (no env-var gate),
+matching the snd-shutdown[N/6] / SDL_mixer/0002 teardown narration.
+The SDL_DestroyAudioStream markers ([1][2][3][11]) gate on
+`stream->simplified` so only the mixer output_stream emits them --
+non-simplified stream destroys during gameplay stay silent. The
+SDL_CloseAudioDevice + ClosePhysicalAudioDevice markers ([4]-[10]) are
+ungated; those functions are teardown-frequency in doskutsu (the
+engine never closes an audio device mid-game).
+
+doskutsu_dbg_log is defined in the SDL3-DOS backend
+(vendor/SDL/src/video/dos/SDL_dosdbg.c) and is already in the link
+image; the markers are guarded on SDL_PLATFORM_DOS so a non-DOS build
+compiles them out. Two TUs touched: src/audio/SDL_audiocvt.c +
+src/audio/SDL_audio.c.
+
+This rides the combined DX2-66 iter (with Approach-A enabler 0161 --
+independent subsystem). The marker iter's hung log pins the sub-step;
+the actual quit-hang fix is the follow-up patch 0066. SDL/0063 stays.
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/audio/SDL_audio.c    | 26 ++++++++++++++++++++++++++
+ src/audio/SDL_audiocvt.c | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 59 insertions(+)
+
+diff --git a/src/audio/SDL_audio.c b/src/audio/SDL_audio.c
+index d64201654..b37258cf0 100644
+--- a/src/audio/SDL_audio.c
++++ b/src/audio/SDL_audio.c
+@@ -1660,22 +1660,43 @@ static void SerializePhysicalDeviceClose(SDL_AudioDevice *device)
+     }
+ }
+ 
++/* DOSKUTSU patch (Phase 11 patch 0065): quit-hang sub-step teardown
++   markers, continued from SDL_DestroyAudioStream (SDL_audiocvt.c). The
++   486-campaign quit-to-DOS hang is inside the SDL_CloseAudioDevice
++   device-close triggered by destroying the SDL3_mixer simplified
++   output_stream; these markers narrate SDL_CloseAudioDevice +
++   ClosePhysicalAudioDevice so the last marker in a hung DX2-66 log pins
++   the wedged call. Always-on, per-line fsync'd, no env-var gate, no
++   logic change -- the SDL_mixer/0002 pattern. doskutsu_dbg_log is the
++   SDL3-DOS debug-log sink; guarded on SDL_PLATFORM_DOS so non-DOS builds
++   compile the markers out. Workspace-local; never upstreamed. */
++#ifdef SDL_PLATFORM_DOS
++extern void doskutsu_dbg_log(const char *fmt, ...);
++#define ADSTREAM_MARK(s) doskutsu_dbg_log(s)
++#else
++#define ADSTREAM_MARK(s) ((void)0)
++#endif
++
+ // this expects the device lock to be held.
+ static void ClosePhysicalAudioDevice(SDL_AudioDevice *device)
+ {
++    ADSTREAM_MARK("adstream-destroy[7]: ClosePhysicalAudioDevice pre-SerializePhysicalDeviceClose");
+     SerializePhysicalDeviceClose(device);
+ 
++    ADSTREAM_MARK("adstream-destroy[8]: pre-set-device-shutdown=1");
+     SDL_SetAtomicInt(&device->shutdown, 1);
+ 
+     // YOU MUST PROTECT KEY POINTS WITH SerializePhysicalDeviceClose() WHILE THE THREAD JOINS
+     SDL_UnlockMutex(device->lock);
+ 
+     if (device->thread) {
++        ADSTREAM_MARK("adstream-destroy[9]: pre-SDL_WaitThread (audio playback-thread join)");
+         SDL_WaitThread(device->thread, NULL);
+         device->thread = NULL;
+     }
+ 
+     if (device->currently_opened) {
++        ADSTREAM_MARK("adstream-destroy[10]: pre-impl.CloseDevice (DOSSOUNDBLASTER_CloseDevice)");
+         current_audio.impl.CloseDevice(device);  // if ProvidesOwnCallbackThread, this must join on any existing device thread before returning!
+         device->currently_opened = false;
+         device->hidden = NULL;  // just in case.
+@@ -1701,14 +1722,19 @@ static void ClosePhysicalAudioDevice(SDL_AudioDevice *device)
+ 
+ void SDL_CloseAudioDevice(SDL_AudioDeviceID devid)
+ {
++    /* DOSKUTSU patch 0065: quit-hang sub-step markers (see the block
++       above ClosePhysicalAudioDevice). */
++    ADSTREAM_MARK("adstream-destroy[4]: SDL_CloseAudioDevice pre-ObtainLogicalAudioDevice");
+     SDL_AudioDevice *device = NULL;
+     SDL_LogicalAudioDevice *logdev = ObtainLogicalAudioDevice(devid, &device);
+     if (logdev) {
++        ADSTREAM_MARK("adstream-destroy[5]: pre-DestroyLogicalAudioDevice");
+         DestroyLogicalAudioDevice(logdev);
+     }
+ 
+     if (device) {
+         if (!device->logical_devices) {  // no more logical devices? Close the physical device, too.
++            ADSTREAM_MARK("adstream-destroy[6]: pre-ClosePhysicalAudioDevice");
+             ClosePhysicalAudioDevice(device);
+         }
+         UnrefPhysicalAudioDevice(device);  // one reference for each logical device.
+diff --git a/src/audio/SDL_audiocvt.c b/src/audio/SDL_audiocvt.c
+index 1fc517ea7..aff50dbc5 100644
+--- a/src/audio/SDL_audiocvt.c
++++ b/src/audio/SDL_audiocvt.c
+@@ -1511,26 +1511,59 @@ bool SDL_ClearAudioStream(SDL_AudioStream *stream)
+     return true;
+ }
+ 
++/* DOSKUTSU patch (Phase 11 patch 0065): SDL_DestroyAudioStream sub-step
++   teardown markers. The 486-class campaign quit-to-DOS hang (Bug 2) was
++   pinned by patch SDL_mixer/0002 to `mix-destroy[5]:
++   pre-SDL_DestroyAudioStream(output_stream)` -- the hang is inside this
++   function destroying the SDL3_mixer output stream. That stream is a
++   SIMPLIFIED stream (the mixer is created via SDL_OpenAudioDeviceStream),
++   so SDL_DestroyAudioStream takes the SDL_CloseAudioDevice branch -- a
++   full physical-audio-device close + playback-thread join. These markers
++   (continued in SDL_CloseAudioDevice + ClosePhysicalAudioDevice in
++   SDL_audio.c) narrate the sub-steps to the SDL3-DOS debug log so the
++   LAST marker in a hung DX2-66 log pins the wedge to one call. Same
++   pattern as patch SDL_mixer/0002: always-on, per-line fsync'd, no
++   env-var gate, no logic change. The SDL_DestroyAudioStream markers fire
++   only when destroying a SIMPLIFIED stream (`stream->simplified`) -- the
++   mixer output_stream -- so non-simplified stream destroys during
++   gameplay emit nothing. doskutsu_dbg_log is defined in the SDL3-DOS
++   backend (vendor/SDL/src/video/dos/SDL_dosdbg.c); guarded on
++   SDL_PLATFORM_DOS so non-DOS builds compile the markers out.
++   Workspace-local per memory/sdl_ai_policy.md; never upstreamed. */
++#ifdef SDL_PLATFORM_DOS
++extern void doskutsu_dbg_log(const char *fmt, ...);
++#define ADSTREAM_MARK(s) doskutsu_dbg_log(s)
++#else
++#define ADSTREAM_MARK(s) ((void)0)
++#endif
++
+ void SDL_DestroyAudioStream(SDL_AudioStream *stream)
+ {
+     if (!stream) {
+         return;
+     }
+ 
++    /* DOSKUTSU patch 0065: sub-step markers, gated on `simplified` (the
++       SDL3_mixer output_stream) so gameplay stream destroys stay silent. */
++    const bool _ds_mark = stream->simplified;
++    if (_ds_mark) { ADSTREAM_MARK("adstream-destroy[1]: pre-SDL_DestroyProperties"); }
+     SDL_DestroyProperties(stream->props);
+ 
++    if (_ds_mark) { ADSTREAM_MARK("adstream-destroy[2]: pre-OnAudioStreamDestroy"); }
+     OnAudioStreamDestroy(stream);
+ 
+     const bool simplified = stream->simplified;
+     if (simplified) {
+         if (stream->bound_device) {
+             SDL_assert(stream->bound_device->simplified);
++            ADSTREAM_MARK("adstream-destroy[3]: pre-SDL_CloseAudioDevice (simplified-stream device close)");
+             SDL_CloseAudioDevice(stream->bound_device->instance_id);  // this will unbind the stream.
+         }
+     } else {
+         SDL_UnbindAudioStream(stream);
+     }
+ 
++    if (_ds_mark) { ADSTREAM_MARK("adstream-destroy[11]: device close returned; pre-stream-free (HANG CLEARED if this logs)"); }
+     SDL_aligned_free(stream->work_buffer);
+     SDL_DestroyAudioQueue(stream->queue);
+     SDL_DestroyMutex(stream->lock);
+-- 
+2.47.3
+
