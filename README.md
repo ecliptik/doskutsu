@@ -39,6 +39,21 @@ Frame rate depends on the hardware and how music is played:
 
 Cave Story runs at 50 fps; the reference PC's hardware limits fully-detailed rendering to about 30 fps. It still plays at the correct 50 Hz speed through [Fixed-Timestep mode](#fixed-timestep-mode), which advances game logic on a fixed 50 Hz clock independent of the render rate.
 
+As of 1.0.1, the 486-class audio bugs are fixed and on by default: SFX no longer stutter on rapid fire, music tempo holds steady, and SFX play at the correct pitch and a balanced level against the music. See the [changelog](CHANGELOG.md) for details; each fix has a killswitch if needed.
+
+### Cross-CPU benchmark (1.0.1, Cirrus CL-GD5430)
+
+The 1.0.1 ship configuration, benchmarked with a fixed input recording across four CPUs on the same board (video card: Cirrus CL-GD5430):
+
+| CPU | fps (median) |
+|---|---|
+| Pentium OverDrive 83 | ~33 |
+| Am5x86-133 | ~32 |
+| 486DX2-66 | ~19 |
+| 486DX2-50 | ~15 |
+
+The audio fixes did not cost frame rate. This benchmark uses a lighter scene than the heavy-music figures in the table above, so the two are not directly comparable; it is recorded as the Cirrus baseline for an upcoming video-card comparison.
+
 ### Fixed-Timestep mode
 
 Cave Story's engine advances game logic once per rendered frame, so at 30 fps the game also runs at about 60% speed - sluggish. Fixed-Timestep mode decouples the two: logic advances on a fixed 50 Hz clock regardless of frame rate, so the game plays at its intended speed even though the screen draws fewer frames. The motion is less smooth; the speed is correct.

@@ -1,0 +1,536 @@
+From 9c849dd864bcbc43058a2572d48726df5ba03937 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Thu, 21 May 2026 09:28:07 -0700
+Subject: [PATCH] dos: Phase 11 patch 0072 -- Lever 2b -- MidiScheduler tick
+ from IRQ-5 ISR
+
+Why DOS needs this:
+
+The 486-class campaign Bug 4 (music-tempo wobble under sub-25 fps
+gameplay) traces to the engine's `MidiScheduler::tick(now_ms)` being
+called from the main loop at the rendered-fps cadence. Under
+FIXED_TIMESTEP (v1.0.0 default-ON), the main loop runs the 50 Hz
+logic tick + an accumulator-based catch-up loop; the
+MidiScheduler::tick fires once per displayed frame (~22-25 Hz on
+DX2-66 heavy-music scenes). At that rate, MIDI events that should
+fire at sub-40-ms granularity land late, producing operator-
+perceptible tempo wobble (`docs/internal/486-CLASS-CAMPAIGN-FINDINGS.md`
+sec.17.3 + sec.20.4).
+
+Lever 2b moves the MidiScheduler tick from the cooperative main-loop
+path INTO the SB16 IRQ-5 ISR. The IRQ already fires at ~43 Hz under
+Tier-2 (11025 Hz / 256 sample-frames), about 2x the rendered fps on
+heavy-music DX2-66 scenes. The MIDI tick gains a render-rate-
+independent cadence; tempo accuracy improves to ~23 ms granularity
+regardless of render-fps. Structural answer to Bug 4 paralleling
+Lever 3's structural answer to Bug 2.
+
+Patch shape:
+
+  - **New public header** `vendor/SDL/include/SDL3/SDL_dosmidi_tick.h`
+    (223 lines): standard SDL3 license + doc-comment block describing
+    the engine-facing contract + the IRQ-context callback discipline
+    + the killswitch shape. Declares:
+      - `typedef void (*SDL_DOSMidiTickCallback)(Uint64 now_ms)` --
+        the engine-implemented ISR-safe callback signature.
+      - `SDL_DOSMidiTickRegister(cb)` -- engine registers / deregisters
+        its callback; called once at engine init from the main thread.
+      - `SDL_DOSMidiIsrTickActive(void)` -- engine-gate accessor;
+        engine checks this to skip the main-loop MidiScheduler::tick
+        callsite when the SDL ISR owns the tick.
+    Mirrors the established public-header pattern from
+    SDL_dosaudio_pump.h (SDL/0067) + SDL_dosaudio_shutdown.h
+    (SDL/0053) + SDL_dosvesa_directaccess.h + SDL_dospixtone.h
+    (SDL/0071). Closes the "missing public header for new exported
+    API" gap-class flush-instr sec.10.6 amended into the L3 design.
+
+  - **sb.c additions** (+140 lines):
+    - **Module-level state**: cached killswitch bool
+      (g_dos_midi_isr_tick_active), engine callback pointer
+      (g_dos_midi_tick_cb), inter-IRQ delta accumulator state
+      (g_dos_midi_us_accum + g_dos_midi_last_entry_timer +
+      g_dos_midi_baseline_seeded).
+    - **SDL_DOSMidiTickRegister / SDL_DOSMidiIsrTickActive impls**:
+      callback-pointer write is single-word aligned-volatile (atomic
+      on x86; no cli/sti needed); accessor returns the cached bool.
+    - **ISR insertion** at sb.c:1183-area (AFTER counter increments
+      including SDL/0071's g_dos_pixtone_active_count and the existing
+      doskutsu_audio_sfx_active_count, BEFORE exit_timer read at
+      sb.c:1191) so the MIDI tick wall-clock cost folds into the
+      existing doskutsu_audio_irq_wall_us instrumentation per
+      LEVER2B sec.8 Q4 + sec.10.
+    - **First-IRQ-baseline-seed**: the inter-IRQ delta math is
+      well-defined from the second IRQ onward; the first IRQ-post-
+      engage captures the entry_timer baseline and skips the
+      callback emit so subsequent emits have a valid delta source.
+    - **OpenDevice hint resolution**: strict-"1" match;
+      sentinel-cached on the existing pattern (matches MIDGAP_PUMP
+      / TICKPUMP / DATA_CACHE / PIXTONE_PROBE / PIXTONE_IRQ_MIX).
+      Two banner variants emit: ENABLED / DISABLED.
+    - **DPMI locks** alongside the existing 0023+0025+0037+0038+0069
+      +0071 block: DOS_LockVariable for the cached killswitch bool,
+      callback pointer, inter-IRQ accumulator + last-timer +
+      baseline-seeded flag.
+
+  - **No backend-gate**. Lever 2b is orthogonal to the music backend
+    choice; the engine simply doesn't register a callback when
+    running under Organya (which doesn't use MidiScheduler). Under
+    OPL3 (wave-46 default) / WaveBlaster / midi-stub, the engine
+    registers the callback when the killswitch is engaged.
+
+  - **OFF-path byte-identity**: when killswitch is OFF (or callback
+    not registered), the new ISR hook is `if (active && cb) { ... }`
+    which short-circuits to one cached-bool test + branch (~few
+    cycles). Sub-microsecond per IRQ; negligible.
+
+Engine-side responsibility (nxengine-evo/0168, not this patch):
+  - Implement `extern "C"` ISR-safe shim that invokes
+    MidiScheduler::tick_isr(now_ms).
+  - Add tick_isr() as the ISR-context-safe variant of tick(now_ms);
+    use fixed-point int64 us_per_tick_x256 (replacing the double
+    `_us_per_tick`); read from a fixed-size DPMI-locked events buffer
+    (replacing std::vector) per LEVER2B sec.2.
+  - DPMI-lock the MidiScheduler singleton + the locked events buffer
+    + the MidiBackend instance per LEVER2B sec.7.
+  - cli/sti around main-thread MidiScheduler::load / start / stop /
+    backend-set per LEVER2B sec.2.5.
+  - Skip main-loop MidiScheduler::tick callsite when
+    SDL_DOSMidiIsrTickActive() returns true.
+  - Pause-coherent stop/start at game-pause transitions per
+    operator choice (b) -- explicit MidiScheduler::stop at pause +
+    MidiScheduler::start at unpause; ~5-10 LOC at the pause-state
+    handler.
+
+DOSBox-X smoke-gate limit per [[dosbox_not_proxy]]: DOSBox-X cannot
+enforce strict DPMI page-locking; ISR-context bugs that hard-freeze
+real HW often pass DOSBox-X. Lever 2b REQUIRES real-HW DX2-66
+operator iter for tempo-perception validation. The banner emits at
+OpenDevice and the structural correctness (callback registration +
+ISR invocation cadence) is testable in DOSBox-X; the actual tempo-
+accuracy improvement is real-HW-only.
+
+Killswitch default-OFF: main-loop MidiScheduler::tick fallback path
+stays alive when off so a real-HW DPMI-fault inside the registered
+callback mitigates to disabled rather than freezing. Operator can
+disable via the env var if any real-HW issue surfaces.
+
+LOC: 363 insertions across 2 files (new header +223 / sb.c +140).
+SDL backend only; zero engine LOC (engine work is nxengine-evo/0168).
+1 new BANNERS regex entry + SEVERITY + LABEL at parity 50/50/50.
+BOOT.md entry per [[env_vars_document_in_user_docs]].
+
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+See `docs/internal/LEVER2B-MIDI-ISR-TICK-DESIGN.md` sec.1-7 + sec.8
+(Contract lock from #117/#125 STOP-and-ack closure) + sec.10.6
+(public-header deliverable amendment) + 486-CLASS-CAMPAIGN-FINDINGS.md
+sec.17.3 + sec.20.4 (Bug 4 characterization) + `DOOM-AUDIO-
+ARCHITECTURE-ANALYSIS.md` sec.5.2b (Lever 2b original spec).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dosmidi_tick.h | 230 ++++++++++++++++++++++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c | 139 +++++++++++++++++++
+ 2 files changed, 369 insertions(+)
+ create mode 100644 include/SDL3/SDL_dosmidi_tick.h
+
+diff --git a/include/SDL3/SDL_dosmidi_tick.h b/include/SDL3/SDL_dosmidi_tick.h
+new file mode 100644
+index 000000000..8e52a114d
+--- /dev/null
++++ b/include/SDL3/SDL_dosmidi_tick.h
+@@ -0,0 +1,230 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/**
++ * # CategoryDOSMidiTick
++ *
++ * **DOSKUTSU local addition (patches/SDL/0072, never upstreamed).** This
++ * header exports the SDL3-DOS Lever 2b MidiScheduler-tick-from-IRQ
++ * registration surface: an engine-callable mechanism that piggybacks
++ * the MIDI event-dispatch tick onto the existing SB16 IRQ-5 ISR,
++ * decoupling MIDI tempo accuracy from the render-rate-coupled engine
++ * main loop.
++ *
++ * ## Why this exists
++ *
++ * The 486-class campaign Bug 4 (music-tempo wobble under sub-25 fps
++ * gameplay) traces to the engine's MidiScheduler::tick being called
++ * from the main loop at the rendered-fps cadence. Under FIXED_TIMESTEP
++ * (v1.0.0 default-ON), the main loop runs the 50 Hz logic tick + an
++ * accumulator-based catch-up loop; the MidiScheduler::tick fires once
++ * per displayed frame (~22-25 Hz on DX2-66 heavy-music scenes). At
++ * that rate, MIDI events that should fire at sub-40-ms granularity
++ * land late, producing operator-perceptible tempo wobble.
++ *
++ * Lever 2b moves the MidiScheduler tick from the cooperative main-loop
++ * path INTO the SB16 IRQ-5 ISR. The IRQ already fires at ~43 Hz under
++ * Tier-2 (11025 Hz / 256 sample-frames), about 2x the rendered fps on
++ * heavy-music DX2-66 scenes. The MIDI tick gains a render-rate-
++ * independent cadence; tempo accuracy improves to ~23 ms granularity
++ * regardless of render-fps.
++ *
++ * Per docs/internal/LEVER2B-MIDI-ISR-TICK-DESIGN.md sec.1 + sec.8
++ * (Contract lock from #117/#125 STOP-and-ack closure).
++ *
++ * ## How the engine uses it
++ *
++ * 1. At engine init (SoundManager::init or equivalent), after the
++ *    SDL audio device opens, the engine calls
++ *    SDL_DOSMidiTickRegister(cb) where cb is an `extern "C"` C-shim
++ *    function that the engine implements. The shim invokes
++ *    MidiScheduler::getInstance().tick_isr(now_ms) -- the new
++ *    ISR-context-safe variant of the existing tick(now_ms) per the
++ *    design sec.2.
++ *
++ * 2. At each SB16 IRQ-5 fire (~43 Hz Tier-2), the SDL backend's
++ *    SoundBlasterIRQHandler invokes the registered callback with the
++ *    monotonic cumulative wall-time in milliseconds (computed via
++ *    inter-IRQ delta accumulation through the existing
++ *    SDL_DOSAudioReadTimer + SDL_DOSAudioTimerDeltaUs primitives).
++ *
++ * 3. The engine's main-loop call to MidiScheduler::tick(now_ms) is
++ *    SKIPPED when SDL_DOSMidiIsrTickActive() returns true (the engine
++ *    queries this once at init to decide); the ISR owns the tick.
++ *
++ * 4. At game-pause / game-unpause transitions (operator-perception
++ *    choice (b) -- "preserve today's halt"), the engine explicitly
++ *    calls MidiScheduler::stop / MidiScheduler::start to halt /
++ *    resume music alongside game state.
++ *
++ * ## IRQ-context discipline (engine callback)
++ *
++ * The registered callback runs in IRQ-5 context. The engine MUST
++ * honor the strict ISR-context constraints in tick_isr() per LEVER2B
++ * sec.2:
++ *
++ * - No malloc/free, no FPU, no SDL API calls inside the callback.
++ * - Use fixed-point int64 arithmetic for tempo math (replace the
++ *   existing double-based _us_per_tick with us_per_tick_x256).
++ * - DPMI-lock the MidiScheduler singleton + events buffer + backend
++ *   pointer (sec.2.3); use a fixed-size locked events array (~16K
++ *   entries; ~100 KB) instead of std::vector to avoid the
++ *   vector-growth-during-ISR-read failure class.
++ * - cli/sti around main-thread MidiScheduler::load / start / stop /
++ *   backend-set so the ISR cannot read partially-written state
++ *   (LEVER2B sec.2.5).
++ *
++ * ## Killswitch
++ *
++ * SDL_HINT_DOSKUTSU_MIDI_ISR_TICK strict-"1" engages; default OFF.
++ * Resolved once at DOSSOUNDBLASTER_OpenDevice; cached. Two banner
++ * variants emit on the SDL log channel: `audio: SDL/0072 midi tick
++ * from ISR: ENABLED (opt-in)` / `audio: SDL/0072 midi tick from ISR:
++ * DISABLED (default)`.
++ *
++ * No backend-gate -- Lever 2b is orthogonal to the music backend
++ * choice. The engine simply doesn't register a callback when running
++ * under Organya (the Organya backend doesn't use MidiScheduler).
++ * Under OPL3 / WB / midi-stub, the engine registers the callback when
++ * the killswitch is engaged.
++ *
++ * ## HW-IO risk
++ *
++ * Per [[dosbox_not_proxy]], ISR-context bugs can hard-freeze real HW
++ * but often pass DOSBox-X smoke gates. Lever 2b REQUIRES real-HW
++ * DX2-66 operator iter for tempo-perception validation. Killswitch
++ * default-OFF + main-loop fallback path stays alive when off so a
++ * real-HW DPMI-fault inside the registered callback mitigates to
++ * "operator disables via env var" rather than hard-freezing.
++ *
++ * ## Wall-clock measurement
++ *
++ * The MIDI tick cost folds into the existing
++ * `doskutsu_audio_irq_wall_us` counter (the ISR insertion sits AFTER
++ * the existing counter increments but BEFORE the exit_timer read per
++ * LEVER2B sec.8 Q4). flush-instr's existing instrumentation sees the
++ * combined cost; per-lever attribution requires separate
++ * instrumentation if needed.
++ *
++ * Like SDL_dosaudio_pump.h / shutdown.h / dospixtone.h /
++ * dosvesa_directaccess.h, this header is a workspace-local doskutsu
++ * addition. SDL/0072 hunks + these declarations are not contributed
++ * back to libsdl-org/SDL.
++ */
++
++#ifndef SDL_dosmidi_tick_h_
++#define SDL_dosmidi_tick_h_
++
++#include <SDL3/SDL_stdinc.h>
++
++#include <SDL3/SDL_begin_code.h>
++/* Set up for C function definitions, even when using C++ */
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Callback signature for the IRQ-5-driven MIDI tick. Invoked from
++ * IRQ context at each SB16 IRQ-5 fire (~43 Hz Tier-2). The callback
++ * receives the monotonic cumulative wall-time in milliseconds since
++ * OpenDevice baseline.
++ *
++ * IRQ-CONTEXT DISCIPLINE: the callback runs in IRQ context. Honor the
++ * strict rules per LEVER2B sec.2:
++ *
++ * - No malloc/free.
++ * - No FPU (no double/float arithmetic; use fixed-point int64).
++ * - No SDL API calls.
++ * - No DPMI thunks; all touched data must be DPMI-locked.
++ * - Bounded execution time (the IRQ-5 is held off other IRQs while
++ *   this runs; long execution blocks keyboard / timer IRQs).
++ *
++ * \param now_ms  monotonic cumulative wall-time in milliseconds since
++ *                the SDL_DOSMidiTickRegister-engagement (NOT since
++ *                process start); the underlying accumulator resets at
++ *                each DOSSOUNDBLASTER_OpenDevice fire. Cave Story
++ *                never re-inits audio so the reset behavior is
++ *                theoretical, but engine-side tick_isr implementations
++ *                should defensively handle the now_ms < last_now_ms
++ *                case as "reset detected; reseed baseline" rather
++ *                than computing a negative delta. Useful as the
++ *                MidiScheduler::tick(now_ms) timestamp argument.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0072, 2026-05-21.
++ */
++typedef void (*SDL_DOSMidiTickCallback)(Uint64 now_ms);
++
++/**
++ * Register the IRQ-5 MIDI tick callback. Called once at engine init
++ * from the main thread; the callback is invoked from the IRQ-5 ISR
++ * at each fire when SDL_HINT_DOSKUTSU_MIDI_ISR_TICK is engaged.
++ *
++ * Pass NULL to deregister (the ISR reverts to no-op for the tick step
++ * even when the killswitch is still engaged).
++ *
++ * Idempotent; safe to call multiple times (last call wins). Safe to
++ * call before / after / regardless of OpenDevice -- the callback is
++ * stored in DPMI-locked module-static state and only invoked from
++ * the ISR when both (a) killswitch ON, (b) callback non-NULL hold.
++ *
++ * \param cb  the engine-side callback function pointer (or NULL to
++ *            deregister). The callback storage is DPMI-locked at
++ *            OpenDevice; the callback body must be ISR-safe per the
++ *            SDL_DOSMidiTickCallback typedef comment.
++ *
++ * \threadsafety Call from the engine main thread. The callback
++ *               pointer write is a single volatile pointer store
++ *               (atomic on aligned x86); the ISR reader sees either
++ *               the old or new value but never a torn pointer.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0072, 2026-05-21.
++ *
++ * \sa SDL_DOSMidiIsrTickActive
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSMidiTickRegister(SDL_DOSMidiTickCallback cb);
++
++/**
++ * Returns true if Lever 2b ISR MIDI tick is active for this process.
++ * Resolved once at DOSSOUNDBLASTER_OpenDevice from
++ * SDL_HINT_DOSKUTSU_MIDI_ISR_TICK (strict-"1"); stable post-init.
++ *
++ * The engine reads this to decide whether to (a) register an ISR
++ * callback via SDL_DOSMidiTickRegister and (b) skip the per-frame
++ * MidiScheduler::tick(now_ms) call from the engine main loop. When
++ * false, the engine retains pre-Lever-2b behavior unchanged.
++ *
++ * \returns true if Lever 2b is engaged (SDL_HINT_DOSKUTSU_MIDI_ISR
++ *          _TICK=1 was observed at OpenDevice); false otherwise.
++ *
++ * \threadsafety Engine main thread; the cached bool is set once at
++ *               OpenDevice and not modified thereafter.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0072, 2026-05-21.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSMidiIsrTickActive(void);
++
++/* Ends C function definitions when using C++ */
++#ifdef __cplusplus
++}
++#endif
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_dosmidi_tick_h_ */
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 8592684e8..cf65f8e9f 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -32,2 +32,3 @@
+ #include <SDL3/SDL_dospixtone.h>        /* DOSKUTSU patch 0071: engine-callable SDL_DOSPixtone* channel-pool API (Lever 3 IRQ-5 ISR mix) */
++#include <SDL3/SDL_dosmidi_tick.h>      /* DOSKUTSU patch 0072: engine-registered IRQ-5 MIDI tick callback (Lever 2b MidiScheduler ISR piggyback) */
+ 
+@@ -814,2 +815,41 @@ static bool g_dos_pixtone_irq_mix_active = false;
+ static volatile Uint8 g_dos_pixtone_irq_mix_shift = 9;
++/* ========================================================================
++ * DOSKUTSU patch (Phase 11 patch 0072): Lever 2b -- MidiScheduler tick
++ * from the SB16 IRQ-5 ISR
++ * ========================================================================
++ *
++ * Lever 2b piggybacks the MIDI event-dispatch tick onto the existing
++ * IRQ-5 handler, decoupling MIDI tempo accuracy from the render-rate-
++ * coupled engine main loop. Structural fix for 486-class campaign
++ * Bug 4 (music-tempo wobble under sub-25 fps gameplay).
++ *
++ * Mechanism: the engine registers a callback (typedef
++ * SDL_DOSMidiTickCallback in vendor/SDL/include/SDL3/SDL_dosmidi_tick.h)
++ * once at engine init. At each IRQ-5 fire, the SDL ISR invokes the
++ * callback with the monotonic cumulative wall-time in milliseconds,
++ * computed via inter-IRQ delta accumulation through the existing
++ * SDL_DOSAudioReadTimer + SDL_DOSAudioTimerDeltaUs primitives (the
++ * same per-IRQ-cost timer used at sb.c:729 / sb.c exit_timer site).
++ * The engine's main-loop MidiScheduler::tick callsite is SKIPPED
++ * when SDL_DOSMidiIsrTickActive() returns true.
++ *
++ * Killswitch: SDL_HINT_DOSKUTSU_MIDI_ISR_TICK strict-"1" engages;
++ * default OFF. No backend-gate -- Lever 2b is orthogonal to the music
++ * backend choice (the engine simply doesn't register a callback when
++ * running under Organya, which doesn't use MidiScheduler).
++ *
++ * Per docs/internal/LEVER2B-MIDI-ISR-TICK-DESIGN.md sec.1-7 + sec.8
++ * (Contract lock from #117/#125 STOP-and-ack closure). */
++static bool g_dos_midi_isr_tick_active = false;
++static SDL_DOSMidiTickCallback g_dos_midi_tick_cb = NULL;
++/* Inter-IRQ delta accumulator: at each IRQ fire we read
++ * SDL_DOSAudioReadTimer() into entry_timer (already done at the top of
++ * SoundBlasterIRQHandler), compute the delta vs the last IRQ's entry,
++ * and add to g_dos_midi_us_accum. The callback receives
++ * (g_dos_midi_us_accum / 1000) as monotonic now_ms. First-IRQ-post-
++ * register seeds last_entry_timer + skips the callback emit so the
++ * delta math is well-defined from the second IRQ on. */
++static volatile uint64_t g_dos_midi_us_accum = 0;
++static volatile Uint64   g_dos_midi_last_entry_timer = 0;
++static volatile bool     g_dos_midi_baseline_seeded = false;
+ 
+@@ -1051,2 +1091,24 @@ void SDL_DOSPixtoneSetGain(int32_t channel_id, int16_t gain_x256)
+ 
++/* DOSKUTSU patch (Phase 11 patch 0072): Lever 2b -- engine-facing
++ * registration API. The engine registers an ISR-safe C callback at
++ * init; subsequent SB16 IRQ-5 fires invoke the callback with the
++ * monotonic cumulative now_ms. Pass NULL to deregister. Idempotent;
++ * last-call-wins.
++ *
++ * The callback pointer is a plain volatile pointer write; aligned on
++ * the i486+ target, atomic. The ISR-side reader observes either the
++ * old or new value but never a torn pointer. cli/sti is NOT needed
++ * for the pointer write (single-word atomic on x86 is sufficient). */
++void SDL_DOSMidiTickRegister(SDL_DOSMidiTickCallback cb)
++{
++    g_dos_midi_tick_cb = cb;
++}
++
++/* Engine-visible accessor. Resolved at OpenDevice (sentinel-cached);
++ * stable post-init. */
++bool SDL_DOSMidiIsrTickActive(void)
++{
++    return g_dos_midi_isr_tick_active;
++}
++
+ // The IRQ handler. Copies one chunk from the ring buffer into the DMA
+@@ -1157,2 +1219,30 @@ static void SoundBlasterIRQHandler(void)
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0072): Lever 2b -- MidiScheduler
++       tick from the IRQ-5 ISR. Cached-bool gated + callback-non-NULL
++       gated; under killswitch OFF or no engine callback registered
++       the cost is two cached reads + early branch (sub-microsecond).
++       When engaged, computes monotonic cumulative now_ms from the
++       inter-IRQ delta of SDL_DOSAudioReadTimer (the same primitive
++       used for entry_timer + exit_timer) and invokes the engine
++       callback. First-IRQ-post-engagement seeds the baseline and
++       skips the emit so the delta math is well-defined.
++
++       NOTE this hook sits AFTER the existing counter increments and
++       BEFORE the exit_timer read at line 1191 so the MIDI tick cost
++       folds into doskutsu_audio_irq_wall_us per LEVER2B-MIDI-ISR-
++       TICK-DESIGN.md sec.8 Q4 + sec.10. */
++    if (g_dos_midi_isr_tick_active && g_dos_midi_tick_cb) {
++        if (!g_dos_midi_baseline_seeded) {
++            g_dos_midi_last_entry_timer = entry_timer;
++            g_dos_midi_baseline_seeded = true;
++        } else {
++            const uint32_t midi_delta_us =
++                SDL_DOSAudioTimerDeltaUs(g_dos_midi_last_entry_timer, entry_timer);
++            g_dos_midi_us_accum += midi_delta_us;
++            g_dos_midi_last_entry_timer = entry_timer;
++            const Uint64 now_ms = g_dos_midi_us_accum / 1000ULL;
++            g_dos_midi_tick_cb(now_ms);
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 10 patch 0039): wall-clock accumulate via
+@@ -1532,2 +1622,37 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0072): Lever 2b -- MidiScheduler
++       tick from IRQ-5 ISR. Resolve killswitch + emit banner. Reset
++       the inter-IRQ delta accumulator state on each OpenDevice so a
++       hypothetical future re-init path starts fresh (Cave Story never
++       re-inits audio, but the reset matches the existing 0071 pattern
++       for symmetry). No backend-gate -- Lever 2b is orthogonal to
++       the music backend choice; the engine simply doesn't register a
++       callback when running under Organya (which doesn't use
++       MidiScheduler). Per LEVER2B sec.3 + sec.6. */
++    {
++        const char *m2b_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_MIDI_ISR_TICK");
++        const bool hint_set =
++            (m2b_hint && m2b_hint[0] == '1' && m2b_hint[1] == 0);
++        g_dos_midi_us_accum = 0;
++        g_dos_midi_last_entry_timer = 0;
++        g_dos_midi_baseline_seeded = false;
++        if (hint_set) {
++            g_dos_midi_isr_tick_active = true;
++            doskutsu_dbg_log("audio: SDL/0072 midi tick from ISR: ENABLED "
++                             "(opt-in via SDL_HINT_DOSKUTSU_MIDI_ISR_TICK=1; "
++                             "MidiScheduler::tick piggybacks the SB16 IRQ-5 "
++                             "at ~43 Hz Tier-2; render-rate decoupling for "
++                             "MIDI tempo; Bug 4 music-tempo-wobble structural "
++                             "fix per LEVER2B-MIDI-ISR-TICK-DESIGN.md; engine "
++                             "registers callback via SDL_DOSMidiTickRegister)");
++        } else {
++            g_dos_midi_isr_tick_active = false;
++            doskutsu_dbg_log("audio: SDL/0072 midi tick from ISR: DISABLED "
++                             "(default; set SDL_HINT_DOSKUTSU_MIDI_ISR_TICK=1 "
++                             "to engage; off-path cost is two cached reads + "
++                             "early branch per IRQ-5; engine main-loop "
++                             "MidiScheduler::tick path unchanged)");
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0050): resolve quiescence-gate
+@@ -1956,2 +2081,16 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+     DOS_LockVariable(g_dos_pixtone_irq_mix_shift);
++    /* DOSKUTSU patch (Phase 11 patch 0072): Lever 2b -- MidiScheduler
++       tick from IRQ-5 ISR. The callback pointer, the active flag, and
++       the inter-IRQ delta accumulator state are all read from IRQ
++       context (the SoundBlasterIRQHandler hook at line ~1192); their
++       storage must be DPMI-locked to prevent page-fault under
++       real-HW CWSDPMI. The engine-side callback target body is
++       engine's responsibility (nxengine-evo/0168 DPMI-locks the
++       MidiScheduler singleton + the locked events buffer + the
++       MidiBackend instance per LEVER2B sec.7.2). */
++    DOS_LockVariable(g_dos_midi_isr_tick_active);
++    DOS_LockVariable(g_dos_midi_tick_cb);
++    DOS_LockVariable(g_dos_midi_us_accum);
++    DOS_LockVariable(g_dos_midi_last_entry_timer);
++    DOS_LockVariable(g_dos_midi_baseline_seeded);
+     /* DOSKUTSU patch (Phase 10 patch 0039): lock timer-mode + TSC mhz
+-- 
+2.47.3
+

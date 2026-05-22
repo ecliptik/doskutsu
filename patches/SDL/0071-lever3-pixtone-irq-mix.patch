@@ -1,0 +1,1125 @@
+From 593f552727c9e9f50d0db264ba6b351f9ba8d3f3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Thu, 21 May 2026 11:18:13 -0700
+Subject: [PATCH] dos: Phase 11 patch 0071 v5 -- Lever 3 -- Pixtone IRQ-5 ISR
+ mix + mix-headroom knob
+
+Why DOS needs this:
+
+The v2 Pixtone multi-source probe iter (#119, 2026-05-21) returned
+hypothesis-C verdict per `docs/internal/486-CLASS-CAMPAIGN-FINDINGS.md`
+sec.22: cooperative-scheduler audio-thread starvation produces up to
+1701 ms max single-callback latency on real DX2-66 hardware. The
+existing SDL3_mixer ring-fill path is fundamentally render-rate-
+coupled (the cooperative audio thread runs only when the engine
+yields), and under heavy CPU + heavy render frames the audio refill
+falls behind the IRQ-5 drain rate -> ring underrun -> audible SFX
+stutter (Bug 2).
+
+Lever 3 is the structural fix: move Pixtone PCM mix from the
+cooperative-thread SDL3_mixer ring path INTO `SoundBlasterIRQHandler`.
+The IRQ that owns the DMA buffer also does the SFX mix; the
+cooperative scheduler is bypassed for the SFX path entirely. Under
+the OPL3 backend (wave-46 default since 2026-05-14), music is direct
+chip writes (no PCM ring touch) + SFX is IRQ-mixed = 100% IRQ-driven
+audio. Under Organya, the ISR adds Pixtone samples on top of whatever
+the cooperative thread filled the ring with = compatible by
+construction, but the backend-gate refuses engagement per
+LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.5.4 (cleaner SFX-vs-music
+separation under OPL3/WB/midi-stub).
+
+v5 amend (this revision): mix-headroom knob for Bug 6.
+
+The v4 ship-version used a hardcoded `>> 8` in the PixtoneISRMix inner
+loop, which corresponds to gain_x256 == 256 == 1.0 amplitude (full
+source amplitude into the SB16 stereo DMA buffer). On the operator's
+DX2-66 real HW the v4 candidate produced "clipped + higher-pitched"
+SFX -- traced by flush-instr (486-CLASS-CAMPAIGN-FINDINGS.md sec.24.6)
+to concurrent-mix-saturation: pre-Lever-3 the cooperative-scheduler
+starvation was DROPPING concurrent SFX events (the Bug 2 stutter
+mechanism); Lever 3 lets them all play -> aggregated int32 sum exceeds
+int16 saturation -> the clamp produces square-wave-shaped clip
+distortion that perceptually reads as "higher pitched." Source-rate
+math was VERIFIED CLEAN per sec.24.6 (Tier-2 11025 Hz mono raw_master_
+buf -> stereo-duplicate to 11025 Hz stereo DMA; no rate mismatch).
+
+v5 replaces the hardcoded shift with a runtime-tunable shift via
+SDL_HINT_DOSKUTSU_PIXTONE_IRQ_HEADROOM (strict-"0"/"1"/"2"/"3" match;
+value is the count of ADDITIONAL shift bits beyond the base 8). The
+v5 default = "1" -> shift = 9 = 50% per-SFX amplitude = -6 dB headroom
+= ~4 concurrent SFX without clip (per the uncorrelated-SFX aggregation
+model in sec.24.6).
+
+  "0" -> shift =  8 (-0 dB, ~2 concurrent; pre-v5 behavior; A-B baseline)
+  "1" -> shift =  9 (-6 dB, ~4 concurrent; v5 default; ~spec target)
+  "2" -> shift = 10 (-12 dB, ~8 concurrent; quieter; high-SFX scenes)
+  "3" -> shift = 11 (-18 dB, ~16 concurrent; very quiet)
+  unset / empty / other -> "1" default
+
+The shift count is resolved at OpenDevice into a single Uint8 volatile
+file-scope (`g_dos_pixtone_irq_mix_shift`); the ISR reads it via one
+cached-byte load each mix iteration -- one extra `sar` cycle vs the
+hardcoded shift, negligible vs the surrounding mul + clamp + store.
+DPMI-locked alongside the other Lever 3 globals so the IRQ-context
+read cannot page-fault on real-HW CWSDPMI. Banner-emit on the ENABLED
+variant extends with `mix-headroom=N bits / -N*6 dB; supports up to M
+concurrent SFX without clip; tune via SDL_HINT_DOSKUTSU_PIXTONE_IRQ_
+HEADROOM=0|1|2|3` so the operator can verify the resolved mode in the
+log.
+
+Operator A/B-knob purpose: the operator's perception baseline for
+"how loud Cave Story SFX should be" is calibrated to the quiet-because-
+broken pre-Lever-3 audio (most concurrent SFX were dropped by the
+starvation mechanism). The env knob lets the operator iterate on
+calibration -- `=0` reproduces today's clip-prone behavior in a single
+binary; `=2` / `=3` give progressively cleaner headroom at the cost of
+perceived loudness. CPU cost identical at all four levels.
+
+Patch shape:
+
+  - **SDL_DOSPixtone* channel-pool API** in
+    `vendor/SDL/src/core/dos/SDL_dos_audio_synth.h`: declarations for
+    `SDL_DOSPixtoneStart` (returns int32 channel id; -1 on no-free),
+    `SDL_DOSPixtoneStop` (no-op on unknown id), `SDL_DOSPixtoneIsActive`
+    (id-match check), `SDL_DOSPixtoneSetGain` (race-tolerant volatile
+    write), `SDL_DOSPixtoneIRQMixActive` (engine-gate accessor).
+    Engine routes `Pixtone::play` through these when Lever 3 engages;
+    SDL backend implements all five. Per L3 sec.3.
+
+  - **g_dos_pixtone_active_count** in `SDL_dos_audio_synth.c`:
+    dual-writer counter (engine ++ in Start; ISR -- at end-of-buffer).
+    Atomicity: `__sync_fetch_and_add` / `__sync_fetch_and_sub` (compile
+    to `lock xadd` / `lock xsub` on i486+ via GCC builtins) for
+    multi-writer safety across engine thread + IRQ context. Engine
+    0165 probe reads SUM of this + `g_pixtone_active_count` under
+    Lever 3 ON (L3-Q5 Shape B contract). Per L3 sec.3 + sec.10.3 Q5.
+
+  - **`SoundBlasterIRQHandler` extension** in `SDL_dosaudio_sb.c`:
+    new `PixtoneISRMix` function (DPMI-locked via DOS_LockCode) +
+    new ISR insertion point between the avail-vs-silence branch end
+    and the counter-increment block, BEFORE the timer-exit measure so
+    the mix wall-clock folds into `doskutsu_audio_irq_wall_us`. The
+    mix is pure int32 add + clamp on int16 samples; gain is fixed-
+    point int16 x256. v5 mix-headroom shift via cached uint8 volatile.
+    Per L3 sec.1.
+
+  - **Stereo-duplicate write in PixtoneISRMix.** Pixtone PCM is mono
+    int16 per Pixtone.cpp:567; SB16 DMA is FORCED stereo S16 per
+    sb.c:1294-1295. Each Pixtone mono sample maps to ONE stereo L+R
+    pair; the mix loop writes the same Pixtone value into dst[2*s]
+    (L) and dst[2*s+1] (R) of the same stereo pair, centered. v2
+    candidate: per-channel pan via differential gain_x256.
+
+  - **Defensive buffer-end guard.** If `pos > buf_len` (shouldn't
+    happen by design), `remaining_bytes` would go negative + the
+    Uint32 pos advance would wrap. The new guard deactivates the
+    slot + decrements the counter defensively. Per flush-instr #123
+    diff-review revision 3.
+
+  - **Channel-pool state** in `SDL_dosaudio_sb.c`:
+    `DOSPixtoneChannel g_dos_pix_chan[DOS_PIXTONE_CHANNELS = 8]` --
+    fixed-size static array (matches Lever 1 N=8 cap); volatile fields
+    for ISR-vs-engine visibility. Storage + the cached killswitch bool
+    + the cached headroom shift + the monotonic channel-id source are
+    all DPMI-locked at `DOSSOUNDBLASTER_OpenDevice` (per L3 sec.7.2).
+
+  - **`cli`/`sti` window** in `SDL_DOSPixtoneStart` / `Stop` via the
+    existing `DOS_DisableInterrupts` / `DOS_EnableInterrupts` inlines.
+    Window strictly bounded to find-first-free + populate-fields +
+    publish-active-flag sequence (no preprocessing inside).
+    Critical ordering: `active = true` is the publishing write AFTER
+    all other slot fields are populated; with volatile + cli/sti the
+    ISR observes the slot only with all fields valid.
+
+  - **Killswitch + backend-gate + headroom knob** at OpenDevice:
+    `SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX` strict-"1" enables; default
+    OFF. Backend-gate refuses engagement when
+    `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` == "organya" (strict match).
+    `SDL_HINT_DOSKUTSU_PIXTONE_IRQ_HEADROOM` strict-"0"/"1"/"2"/"3"
+    resolves the inner-loop shift count (default = "1" -> shift = 9);
+    only relevant when killswitch ENGAGED (DISABLED path skips the
+    headroom resolve since the ISR never reads the shift). Three
+    banner variants emit: ENABLED (with the headroom mode logged) /
+    DISABLED / REQUESTED-but-Organya-active. Per L3 sec.5.4 + sec.6
+    + flush-instr sec.24.6.
+
+  - **DPMI locks** alongside the existing patches 0023+0025+0037+0038
+    + 0069 pattern at OpenDevice: `DOS_LockCode(PixtoneISRMix,
+    PixtoneISRMix_End)`, `DOS_LockData(*g_dos_pix_chan,
+    sizeof(g_dos_pix_chan))`, `DOS_LockVariable(g_dos_pixtone_active
+    _count)`, `DOS_LockVariable(g_dos_pixtone_irq_mix_active)`,
+    `DOS_LockVariable(g_next_pix_channel_id)`,
+    `DOS_LockVariable(g_dos_pixtone_irq_mix_shift)`. Per L3 sec.7.1 +
+    sec.7.2 + v5 amend.
+
+OFF-path byte-identity: when killswitch is OFF (or backend-gated off),
+`SDL_DOSPixtoneStart` is never called by the engine; the ISR mix step's
+`if (g_dos_pixtone_irq_mix_active)` guard fails early; the channel
+pool stays zero'd; Pixtone uses SDL3_mixer unchanged. Cost: one
+cached-bool read per IRQ + early branch. Sub-microsecond per IRQ.
+
+Engine-side responsibility (nxengine-evo/0167-v2, not this patch):
+  - Lock `_sound_fx[slot].raw_master_buf` at Pixtone::init (sec.7.3).
+  - Route Pixtone::play through SDL_DOSPixtoneStart when Lever 3
+    engaged (sec.4).
+  - v1 scope: non-resampled Pixtone::play only. playResampled stays
+    on SDL3_mixer for v1; v2 extension if stream SFX need IRQ-mix.
+
+DOSBox-X smoke-gate limit per [[dosbox_not_proxy]]: DOSBox-X's DPMI
+implementation does not enforce page-locking strictly; ISR-context
+bugs that hard-freeze real HW often pass DOSBox-X. Lever 3 REQUIRES
+real-HW DX2-66 operator iter for behavioral validation. The banner
+emits at OpenDevice and the structural correctness (mix-loop correctness
+on synthetic data) is testable in DOSBox-X; the actual stutter-
+elimination effect + headroom calibration is real-HW-only.
+
+Killswitch default-OFF: SDL3_mixer fallback path stays alive when off
+so a real-HW DPMI-fault inside the ISR mitigates to disabled rather
+than freezing. Operator can disable via the env var if any real-HW
+issue surfaces; or tune the headroom env var if SFX volume calibration
+is off.
+
+LOC: v5 = v4 (456 insertions) + ~25 LOC for the headroom knob
+(cached uint8 + hint parse + banner-emit math + DPMI lock). SDL
+backend only; zero engine LOC. 1 new BANNERS regex entry +
+SEVERITY + LABEL. BOOT.md entry per [[env_vars_document_in_user_docs]].
+
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+See `docs/internal/LEVER3-PIXTONE-IRQ-MIX-DESIGN.md` sec.1-7 + sec.10
+(Contract lock from #117/#123 STOP-and-ack closure) + sec.10.6 (v5
+mix-headroom public-header pattern) + sec.22 + sec.24.6 of
+`486-CLASS-CAMPAIGN-FINDINGS.md` for the hypothesis-C verdict + Bug 6
+root-cause + `DOOM-AUDIO-ARCHITECTURE-ANALYSIS.md` sec.5.3 for the
+Lever 3 original spec.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dospixtone.h      | 316 ++++++++++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c    | 450 +++++++++++++++++++++++++++++
+ src/core/dos/SDL_dos_audio_synth.c |  16 +
+ src/core/dos/SDL_dos_audio_synth.h |  69 +++++
+ 4 files changed, 851 insertions(+)
+ create mode 100644 include/SDL3/SDL_dospixtone.h
+
+diff --git a/include/SDL3/SDL_dospixtone.h b/include/SDL3/SDL_dospixtone.h
+new file mode 100644
+index 000000000..4b4d2ad65
+--- /dev/null
++++ b/include/SDL3/SDL_dospixtone.h
+@@ -0,0 +1,316 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/**
++ * # CategoryDOSPixtone
++ *
++ * **DOSKUTSU local addition (patches/SDL/0071, never upstreamed).** This
++ * header exports the SDL3-DOS Lever 3 Pixtone IRQ-mix channel-pool API:
++ * an engine-callable surface that routes Pixtone PCM SFX through the
++ * SB16 IRQ-5 ISR, bypassing the cooperative-scheduler SDL3_mixer ring
++ * path entirely.
++ *
++ * ## Why this exists
++ *
++ * The 486-class campaign + v2 Pixtone multi-source probe iter (#119,
++ * 2026-05-21) confirmed hypothesis C: cooperative-scheduler audio-thread
++ * starvation produces up to 1701 ms max single-callback latency on real
++ * DX2-66 hardware (`docs/internal/486-CLASS-CAMPAIGN-FINDINGS.md`
++ * sec.22). The existing SDL3_mixer ring-fill path is render-rate-
++ * coupled (the cooperative audio thread runs only when the engine
++ * yields); under heavy CPU + heavy render frames, the audio refill
++ * falls behind the IRQ-5 drain rate -> ring underrun -> audible SFX
++ * stutter (Bug 2).
++ *
++ * Lever 3 is the structural fix: move Pixtone PCM mix from the
++ * cooperative-thread SDL3_mixer ring path INTO `SoundBlasterIRQHandler`.
++ * The IRQ that owns the DMA buffer also does the SFX mix; the
++ * cooperative scheduler is bypassed for the SFX path entirely. Under
++ * the OPL3 backend (wave-46 default since 2026-05-14), music is direct
++ * chip writes (no PCM ring touch) + SFX is IRQ-mixed = 100% IRQ-driven
++ * audio.
++ *
++ * ## How the engine uses it
++ *
++ * 1. At engine init (Pixtone::init), the engine DPMI-locks each
++ *    `_sound_fx[slot].raw_master_buf` so the ISR can read PCM samples
++ *    without page-faulting (engine-side responsibility per LEVER3
++ *    sec.7.3; patches/nxengine-evo/0167).
++ *
++ * 2. At Pixtone::play time, the engine checks `SDL_DOSPixtoneIRQMixActive()`
++ *    (which reflects the cached killswitch + backend-gate decision from
++ *    `DOSSOUNDBLASTER_OpenDevice` time). If active, the engine routes
++ *    through `SDL_DOSPixtoneStart(buf, buf_len, gain_x256, loop_forever)`
++ *    instead of MIX_PlayTrack; the returned channel id is stored in
++ *    `_sound_fx[slot].channel`. If inactive, the engine uses the
++ *    existing SDL3_mixer track-pool path (byte-identical to pre-0071
++ *    behavior).
++ *
++ * 3. At Pixtone::stop time (or end-of-buffer for one-shots), the engine
++ *    calls `SDL_DOSPixtoneStop(channel_id)`. End-of-buffer is also
++ *    detected ISR-side; the ISR atomically decrements the active
++ *    counter and clears the slot.
++ *
++ * 4. The engine 0165 probe reads
++ *    `g_dos_pixtone_active_count + g_pixtone_active_count` under
++ *    Lever 3 ON (the L3-Q5 Shape B contract; ISR-side ATOMIC counter +
++ *    SDL3_mixer-side counter SUMmed to give the logical active SFX
++ *    count regardless of which mix-backend handles each SFX).
++ *
++ * ## Killswitch + backend-gate
++ *
++ * `SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX` strict-`"1"` engages; default OFF.
++ * Backend-gate refuses engagement when
++ * `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` == `"organya"` (Lever 3 + Organya
++ * is compatible by construction per LEVER3 sec.5.2 but the design
++ * prefers OPL3/WB/midi-stub for clean SFX-vs-music separation per
++ * sec.5.4). Resolved once at OpenDevice; cached.
++ *
++ * Three banner variants emit at OpenDevice on the SDL log channel:
++ * `audio: SDL/0071 pixtone IRQ-mix: ENABLED (opt-in via ...)`,
++ * `audio: SDL/0071 pixtone IRQ-mix: DISABLED (default; ...)`, or
++ * `audio: SDL/0071 pixtone IRQ-mix: REQUESTED but Organya backend
++ * active; skipping (...)`.
++ *
++ * ## IRQ-context discipline
++ *
++ * The ISR mix function (`PixtoneISRMix` in `SDL_dosaudio_sb.c`) honors
++ * the strict IRQ-context constraints per LEVER3 sec.2:
++ *
++ * - No `malloc`/`free`: channel pool is a file-scope static array.
++ * - No FPU: int32 accumulator + clamp on int16 source; gain is
++ *   fixed-point int16 x256.
++ * - No SDL API calls inside the ISR.
++ * - No DPMI thunks: all ISR-touched data is DPMI-locked at
++ *   `DOSSOUNDBLASTER_OpenDevice` (LEVER3 sec.7.1 + sec.7.2).
++ *
++ * ## HW-IO risk
++ *
++ * Per `[[dosbox_not_proxy]]`, ISR-context bugs can hard-freeze real HW
++ * but often pass DOSBox-X smoke gates. Lever 3 REQUIRES real-HW
++ * DX2-66 operator iter for behavioral validation. Killswitch
++ * default-OFF + SDL3_mixer fallback path stays alive when off so a
++ * real-HW DPMI-fault inside the ISR mitigates to "operator disables
++ * via env var" rather than hard-freezing.
++ *
++ * ## Stereo-duplicate mix
++ *
++ * Pixtone PCM under Tier-2 is signed 16-bit MONO at 11025 Hz per
++ * `vendor/nxengine-evo/src/sound/Pixtone.cpp:567`. The SB16 DMA stream
++ * is FORCED stereo S16 at `SDL_dosaudio_sb.c:1294-1295`. PixtoneISRMix
++ * stereo-duplicates each Pixtone mono sample into one stereo L+R pair
++ * (centered, no pan; v2 candidate to wire differential gain_x256 for
++ * positional audio). The Pixtone playback rate is self-correcting
++ * regardless of the actual IRQ_Hz / chunk_size product because
++ * `IRQ_Hz * n_stereo_pairs_per_IRQ = spec.freq` (= 11025 Hz consumption
++ * rate matches source rate).
++ *
++ * Per docs/internal/LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.1-7 + sec.10
++ * (Contract lock from #117/#123 STOP-and-ack closure).
++ *
++ * Like SDL_dosaudio_pump.h + SDL_dosaudio_shutdown.h +
++ * SDL_dosvesa_directaccess.h, this header is a workspace-local
++ * doskutsu addition. SDL/0071 hunks + these declarations are not
++ * contributed back to libsdl-org/SDL.
++ */
++
++#ifndef SDL_dospixtone_h_
++#define SDL_dospixtone_h_
++
++#include <SDL3/SDL_stdinc.h>
++
++#include <SDL3/SDL_begin_code.h>
++/* Set up for C function definitions, even when using C++ */
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Start playing a Pixtone PCM SFX on the SDL-side ISR-mixed channel
++ * pool. Allocates a free channel from the fixed pool (DOS_PIXTONE_
++ * CHANNELS = 8 slots in `SDL_dosaudio_sb.c`), populates the slot
++ * fields atomically under `cli`/`sti`, and publishes the slot to the
++ * IRQ-5 ISR via the `active = true` flag.
++ *
++ * Returns the channel id (>= 0) on success; the engine stores it in
++ * `_sound_fx[slot].channel` for later `SDL_DOSPixtoneStop` /
++ * `SDL_DOSPixtoneIsActive` / `SDL_DOSPixtoneSetGain` calls.
++ *
++ * Returns -1 when no free channel is available (pool exhausted). The
++ * engine MAY invoke its own preempt-on-exhaustion policy (Lever 1
++ * channel-priority preemption) before retrying.
++ *
++ * \param buf           pointer to the Pixtone PCM data (int16 samples
++ *                      treated as raw bytes for compatibility with the
++ *                      existing `_sound_fx[slot].raw_master_buf`
++ *                      `uint8_t *` type). The buffer must be DPMI-
++ *                      locked by the caller; Pixtone::init's
++ *                      raw_master_buf lock (extended for Lever 3 in
++ *                      nxengine-evo/0167) covers this.
++ * \param buf_len       length of buf in BYTES (not samples; the ISR
++ *                      computes sample count as buf_len / 2).
++ * \param gain_x256     fixed-point gain (256 = 1.0); engine converts
++ *                      from its existing volume model at the call site.
++ * \param loop_forever  true for SND_STREAM1 / SND_STREAM2 / SND_PROPELLOR
++ *                      (looping SFX); false for one-shots.
++ *
++ * \returns the assigned channel id (>= 0) on success, or -1 if no
++ *          free channel.
++ *
++ * \threadsafety Call from the engine main thread (not from the audio
++ *               thread, not from an interrupt handler). The cli/sti
++ *               window inside is brief (find-free-slot + populate-
++ *               fields + publish); the engine-side counter increment
++ *               uses `__sync_fetch_and_add` for atomic safety with the
++ *               ISR's decrement at end-of-buffer.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0071, 2026-05-21.
++ *
++ * \sa SDL_DOSPixtoneStop
++ * \sa SDL_DOSPixtoneIsActive
++ * \sa SDL_DOSPixtoneSetGain
++ * \sa SDL_DOSPixtoneIRQMixActive
++ */
++extern SDL_DECLSPEC int32_t SDLCALL SDL_DOSPixtoneStart(const Uint8 *buf,
++                                                         Uint32 buf_len,
++                                                         int16_t gain_x256,
++                                                         bool loop_forever);
++
++/**
++ * Stop an active SDL-side Pixtone channel by its id. No-op if the
++ * channel is not active, or if the id doesn't match the slot's
++ * current `channel_id` (the slot may have been reused since the
++ * engine recorded the id; the engine compares channel_id at the slot
++ * to confirm).
++ *
++ * cli/sti window guards the slot's active-flag flip + counter
++ * decrement against the ISR.
++ *
++ * \param channel_id  the id returned from a prior SDL_DOSPixtoneStart
++ *                    call; negative values are no-op.
++ *
++ * \threadsafety Engine main thread.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0071, 2026-05-21.
++ *
++ * \sa SDL_DOSPixtoneStart
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSPixtoneStop(int32_t channel_id);
++
++/**
++ * Check whether an SDL-side Pixtone channel is still playing.
++ * Tolerates id mismatch (slot reused for a different SFX since the
++ * engine recorded the id) -- returns false in that case.
++ *
++ * Read-only; no cli/sti needed since aligned 32-bit volatile reads
++ * are atomic on x86. The engine polls this to implement Pixtone's
++ * `_sound_fx[slot].channel`-state checks.
++ *
++ * \param channel_id  the id to query.
++ *
++ * \returns true if the channel is still active and the id matches;
++ *          false otherwise (channel inactive, id mismatch, or
++ *          negative id).
++ *
++ * \threadsafety Engine main thread.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0071, 2026-05-21.
++ *
++ * \sa SDL_DOSPixtoneStart
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSPixtoneIsActive(int32_t channel_id);
++
++/**
++ * Update the gain on an active SDL-side Pixtone channel. Plain
++ * volatile-write race-tolerant against the ISR: the worst case is
++ * one IRQ uses the old gain for one chunk (~23 ms at Tier-2) before
++ * the new gain takes effect.
++ *
++ * No-op if the channel is not active or the id doesn't match.
++ *
++ * NOTE: under Lever 3 v1, the engine-side Pixtone::setVolume routing
++ * may not call this (parked for v2 wiring per the L3 design). The
++ * SDL-side mechanism is available regardless; the engine chooses
++ * whether to call it. v2 candidate to wire setVolume -> this call.
++ *
++ * \param channel_id  the id to update.
++ * \param gain_x256   new fixed-point gain (256 = 1.0).
++ *
++ * \threadsafety Engine main thread.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0071, 2026-05-21.
++ *
++ * \sa SDL_DOSPixtoneStart
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSPixtoneSetGain(int32_t channel_id,
++                                                       int16_t gain_x256);
++
++/**
++ * Returns true if Lever 3 IRQ-mix is active for this process.
++ * Resolved once at `DOSSOUNDBLASTER_OpenDevice` from
++ * `SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX` (strict-`"1"`) combined with
++ * the `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` backend-gate. Stable
++ * post-init.
++ *
++ * The engine reads this to gate its Pixtone::play routing branch
++ * (sec.4 of the design): when true, route through
++ * SDL_DOSPixtoneStart; when false, use the existing SDL3_mixer
++ * track-pool path unchanged.
++ *
++ * \returns true if Lever 3 is engaged + the backend-gate accepted;
++ *          false otherwise (default-OFF, killswitch unset, or
++ *          backend-gate refused Organya).
++ *
++ * \threadsafety Engine main thread; the cached bool is set once at
++ *               OpenDevice and not modified thereafter.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0071, 2026-05-21.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSPixtoneIRQMixActive(void);
++
++/**
++ * Engine-visible counter: number of currently active ISR-channel
++ * pool slots. Engine 0165 probe reads SUM of this +
++ * `g_pixtone_active_count` under Lever 3 ON (per the L3-Q5 Shape B
++ * contract).
++ *
++ * Dual-writer: atomically incremented in `SDL_DOSPixtoneStart`
++ * (engine context; `__sync_fetch_and_add` -> `lock xadd`) and
++ * decremented in the ISR at end-of-buffer
++ * (`__sync_fetch_and_sub` -> `lock xsub`); both compile to atomic
++ * x86 instructions on i486+. The engine-side reader (the probe SUM)
++ * uses a plain volatile load which is atomic on aligned x86 --
++ * observes a coherent snapshot.
++ *
++ * Storage is DPMI-locked at `DOSSOUNDBLASTER_OpenDevice` for IRQ-
++ * context safety.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0071, 2026-05-21.
++ */
++extern volatile uint32_t g_dos_pixtone_active_count;
++
++/* Ends C function definitions when using C++ */
++#ifdef __cplusplus
++}
++#endif
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_dospixtone_h_ */
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index d37139cfa..91bfcea6f 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -29,6 +29,7 @@
+ #include "SDL_dosaudio_sb.h"
+ #include <SDL3/SDL_dosaudio_shutdown.h> /* DOSKUTSU patch 0053: engine-callable SDL_DOSAudioBeginShutdown export */
+ #include <SDL3/SDL_dosaudio_pump.h>     /* DOSKUTSU patch 0067: engine-callable SDL_DOSAudioPump export (audio mid-gap-service) */
++#include <SDL3/SDL_dospixtone.h>        /* DOSKUTSU patch 0071: engine-callable SDL_DOSPixtone* channel-pool API (Lever 3 IRQ-5 ISR mix) */
+ 
+ /* DOSKUTSU patch (Phase 10 patch 0038): IRQ-5 instrumentation +
+    idle-pause coordination state. The public-API state vars are defined
+@@ -733,6 +734,321 @@ static Uint8 *ISR_GetDMAHalf(void)
+ }
+ static void ISR_GetDMAHalf_End(void) {}
+ 
++// ========================================================================
++// DOSKUTSU patch (Phase 11 patch 0071): Lever 3 -- Pixtone IRQ-5 ISR mix
++// ========================================================================
++//
++// Lever 3 moves Pixtone PCM mix from the SDL3_mixer cooperative-thread
++// path INTO the IRQ-5 ISR. The IRQ that owns the DMA buffer also does the
++// SFX mix; the cooperative scheduler is bypassed for the SFX path.
++// Structural answer to wave-21 sec.21 + #120 hypothesis-C verdict
++// (cooperative-scheduler audio-thread starvation; up to 1701 ms max
++// single-callback latency on real DX2-66).
++//
++// New ISR insertion: AFTER the existing avail-vs-silence branch in
++// SoundBlasterIRQHandler (which fills the DMA half-buffer from the
++// ring OR with silence), BEFORE the counter-increment block. The mix
++// step ADDS Pixtone PCM samples on top of whatever ring/silence content
++// already landed in dma_dst. Under OPL3 backend (the wave-46 default),
++// the ring is mostly silence + ISR mix is the only audible SFX path =
++// 100% IRQ-driven audio. Under Organya, the ring carries Organya music
++// samples + ISR adds Pixtone SFX = compatible co-mix.
++//
++// Killswitch: SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX strict-"1" engages;
++// default OFF. Backend-gated: refuses engagement under
++// AUDIO_BACKEND=organya per LEVER3 sec.5.4 (compatibility is fine but
++// the design prefers OPL3/WB/midi-stub for clean SFX-vs-music
++// separation).
++//
++// Per docs/internal/LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.1-7 +
++// sec.10 (Contract lock from #117/#123 STOP-and-ack closure).
++
++#define DOS_PIXTONE_CHANNELS 8 /* matches Lever 1 N=8 channel cap */
++
++/* Channel-pool slot. All fields volatile for ISR-vs-engine visibility.
++ * Storage DPMI-locked at DOSSOUNDBLASTER_OpenDevice (sec.7.2). */
++typedef struct {
++    volatile bool active;           /* slot busy flag; ISR sets false on EOF */
++    volatile const Uint8 *buf;      /* engine-locked raw_master_buf pointer */
++    volatile Uint32 buf_len;        /* raw_master_len bytes */
++    volatile Uint32 pos;            /* current byte offset in buf */
++    volatile int16_t gain_x256;     /* fixed-point gain; 256 = 1.0 */
++    volatile bool loop_forever;     /* true for SND_STREAM1 / SND_STREAM2 / SND_PROPELLOR */
++    volatile int32_t channel_id;    /* engine-visible id; -1 when free */
++} DOSPixtoneChannel;
++
++static DOSPixtoneChannel g_dos_pix_chan[DOS_PIXTONE_CHANNELS];
++static volatile int32_t  g_next_pix_channel_id = 0; /* monotonic source */
++
++/* Killswitch + backend-gate cached state. Resolved at OpenDevice;
++ * stable post-init. Engine calls SDL_DOSPixtoneIRQMixActive() to read.
++ * ISR reads via the same flag (g_dos_pixtone_irq_mix_active). */
++static bool g_dos_pixtone_irq_mix_active = false;
++
++/* DOSKUTSU patch (Phase 11 patch 0071 v5): mix-headroom shift count for
++ * the PixtoneISRMix inner loop. The base shift of 8 corresponds to
++ * gain_x256 == 256 == 1.0 amplitude (full source); each additional bit
++ * halves the per-SFX amplitude before summation. The v4 ship-version
++ * used a hardcoded `>> 8` which clipped at the 2nd concurrent SFX
++ * (Bug 6: "audible whine / distortion when 2+ SFX overlap on real
++ * DX2-66"; flush-instr 486-CLASS-CAMPAIGN-FINDINGS.md sec.24.6).
++ *
++ * v5 replaces the hardcoded shift with a runtime-tunable shift via
++ * SDL_HINT_DOSKUTSU_PIXTONE_IRQ_HEADROOM (strict-"0"/"1"/"2"/"3" match
++ * -- value is the count of ADDITIONAL shift bits beyond the base 8).
++ * v5 default = "1" -> shift = 9 = 50% amplitude per SFX = ~4 concurrent
++ * SFX without clip. Engine setVolume can amplify if needed via
++ * gain_x256 = 512.
++ *
++ * Strict match table:
++ *   "0" -> shift = 8  (pre-v5 behavior; clip-prone; legacy / A-B)
++ *   "1" -> shift = 9  (50% headroom; v5 default)
++ *   "2" -> shift = 10 (25% headroom; quieter)
++ *   "3" -> shift = 11 (12.5% headroom; very quiet; high-SFX-load scenes)
++ *   unset / other -> 9 (default)
++ *
++ * Resolved once at OpenDevice; cached. The ISR reads the value via a
++ * single Uint8 volatile load each mix iteration. CPU cost vs hardcoded
++ * shift: one extra cached-byte read per source sample -- negligible
++ * vs the surrounding mul + clamp + store. */
++static volatile Uint8 g_dos_pixtone_irq_mix_shift = 9;
++
++/* Forward decls for the DOS_LockCode pair (see DOSSOUNDBLASTER_OpenDevice
++ * lock block). PixtoneISRMix is invoked from SoundBlasterIRQHandler in
++ * IRQ context; its body must be DPMI-locked or a page-fault inside the
++ * IRQ hard-freezes the machine on real HW. */
++static void PixtoneISRMix(Uint8 *dma_dst, int dma_len);
++static void PixtoneISRMix_End(void);
++
++/* The ISR mix loop. Walks DOS_PIXTONE_CHANNELS channel-pool slots; for
++ * each active slot, reads Pixtone mono samples + stereo-duplicates each
++ * into one stereo L+R pair of dma_dst, applying gain (int32 multiply +
++ * shift) and clamping per channel. End-of-buffer: deactivate or
++ * loop-restart.
++ *
++ * Format reconciliation:
++ *   - Pixtone PCM under Tier-2 = signed 16-bit MONO at 11025 Hz per
++ *     `vendor/nxengine-evo/src/sound/Pixtone.cpp:567` SDL_AudioSpec.
++ *   - SB16 DMA stream is FORCED stereo S16 at sb.c:1294-1295 (the
++ *     SB16 branch unconditionally sets device->spec.channels = 2).
++ *   - dma_dst therefore contains interleaved L/R int16 samples: dst[0]
++ *     = L_0, dst[1] = R_0, dst[2] = L_1, dst[3] = R_1, etc.
++ *   - Each Pixtone mono sample maps to ONE stereo L+R pair; mixing
++ *     writes the same sample value into both channels of the pair
++ *     (centered, no panning). v2 candidate: per-channel pan via
++ *     differential gain_x256 for L vs R (positional audio for stereo).
++ *
++ * Loop count: n_samples = dma_len / 2 = total int16 slots in dma_dst.
++ * n_stereo_pairs = n_samples / 2 = number of L+R pairs (= Pixtone mono
++ * samples consumed per IRQ). At Tier-2 (256 sample-frames * 4 bytes =
++ * 1024 bytes / IRQ = 512 int16 slots = 256 stereo pairs), one IRQ
++ * consumes 256 Pixtone mono samples (= 23.2 ms at 11025 Hz; matches
++ * the 11025 Hz stereo output rate).
++ *
++ * Pre-revision history: an earlier draft of this function wrote each
++ * Pixtone sample to dst[s] (one int16 slot at a time) without stereo
++ * duplication, producing a 2x-speed L/R-split warble for ALL Pixtone
++ * SFX under L3 ON. flush-instr caught the artifact at diff review
++ * (#123 BLOCKING revision 1); this revision implements the
++ * stereo-duplicate write. nx-engine's 0167 routing patch scopes v1
++ * to non-resampled Pixtone::play only per the L3-Q1 contract.
++ *
++ * IRQ-context discipline (LEVER3 sec.2):
++ *   - No malloc/free: g_dos_pix_chan[] is file-scope static.
++ *   - No FPU: int32 accumulator on int16 source, gain is int16 x256.
++ *   - No SDL API calls.
++ *   - No DPMI thunks: all touched data is DPMI-locked at OpenDevice.
++ *
++ * Atomicity: g_dos_pixtone_active_count decrement on end-of-buffer uses
++ * __sync_fetch_and_sub (lock xsub on i486+) for dual-writer safety
++ * with the engine-context ++ in SDL_DOSPixtoneStart. Per L3-Q5 Shape
++ * B contract.
++ *
++ * Defensive guard: if pos > buf_len (shouldn't happen by design --
++ * prior IRQ should have deactivated the slot at end-of-buffer), the
++ * remaining_bytes computation would go negative + the Uint32 pos
++ * advance would wrap. The pos-out-of-bounds branch deactivates
++ * defensively rather than continuing with a corrupted slot. */
++static void PixtoneISRMix(Uint8 *dma_dst, int dma_len)
++{
++    int16_t *dst = (int16_t *)dma_dst;
++    const int n_samples = dma_len / 2;
++    const int n_stereo_pairs = n_samples / 2;
++
++    for (int c = 0; c < DOS_PIXTONE_CHANNELS; ++c) {
++        if (!g_dos_pix_chan[c].active) continue;
++
++        const int remaining_bytes = (int)g_dos_pix_chan[c].buf_len
++                                  - (int)g_dos_pix_chan[c].pos;
++        if (remaining_bytes <= 0) {
++            /* Defensive: pos out-of-bounds (shouldn't happen; prior IRQ
++             * end-of-buffer branch should have deactivated). Guard
++             * against the Uint32 pos-advance wrap-around. */
++            g_dos_pix_chan[c].active = false;
++            g_dos_pix_chan[c].channel_id = -1;
++            __sync_fetch_and_sub(&g_dos_pixtone_active_count, 1u);
++            continue;
++        }
++
++        const int16_t *src = (const int16_t *)
++            ((const Uint8 *)g_dos_pix_chan[c].buf + g_dos_pix_chan[c].pos);
++        const int remaining_samples = remaining_bytes / 2;
++        const int gain_x256 = g_dos_pix_chan[c].gain_x256;
++
++        int to_mix = (remaining_samples < n_stereo_pairs)
++                     ? remaining_samples : n_stereo_pairs;
++
++        /* v5 mix-headroom: shift count cached at OpenDevice from
++         * SDL_HINT_DOSKUTSU_PIXTONE_IRQ_HEADROOM. Default 9 = 50%
++         * amplitude per SFX = ~4 concurrent SFX without clip. The
++         * Uint8 volatile load is one cached byte per loop iteration. */
++        const int shift = (int)g_dos_pixtone_irq_mix_shift;
++        for (int s = 0; s < to_mix; ++s) {
++            const int32_t scaled = ((int32_t)src[s] * gain_x256) >> shift;
++            /* Stereo-duplicate: one Pixtone mono sample -> L + R of
++             * the same stereo pair. Centered (no pan); v2 candidate
++             * to wire differential gain_x256 for positional audio. */
++            const int32_t mixed_L = (int32_t)dst[2 * s    ] + scaled;
++            const int32_t mixed_R = (int32_t)dst[2 * s + 1] + scaled;
++            dst[2 * s    ] = (mixed_L >  32767) ?  32767
++                           : (mixed_L < -32768) ? -32768
++                           : (int16_t)mixed_L;
++            dst[2 * s + 1] = (mixed_R >  32767) ?  32767
++                           : (mixed_R < -32768) ? -32768
++                           : (int16_t)mixed_R;
++        }
++
++        g_dos_pix_chan[c].pos += (Uint32)(to_mix * 2);
++
++        if (g_dos_pix_chan[c].pos >= g_dos_pix_chan[c].buf_len) {
++            if (g_dos_pix_chan[c].loop_forever) {
++                g_dos_pix_chan[c].pos = 0;
++            } else {
++                g_dos_pix_chan[c].active = false;
++                g_dos_pix_chan[c].channel_id = -1;
++                /* Dual-writer-safe decrement: __sync_fetch_and_sub
++                 * compiles to lock xsub on i486+ (atomic across the
++                 * engine-thread ++ in SDL_DOSPixtoneStart). Per L3-Q5
++                 * Shape B contract. */
++                __sync_fetch_and_sub(&g_dos_pixtone_active_count, 1u);
++            }
++        }
++    }
++}
++static void PixtoneISRMix_End(void) {}
++
++/* Engine-visible accessor. Resolved once at OpenDevice; stable post-init. */
++bool SDL_DOSPixtoneIRQMixActive(void)
++{
++    return g_dos_pixtone_irq_mix_active;
++}
++
++/* Start a Pixtone SFX on a channel-pool slot. Returns the channel id
++ * (>= 0) on success, or -1 if no free channel.
++ *
++ * Caller (engine) provides:
++ *   buf, buf_len    -- raw_master_buf / raw_master_len. Caller is
++ *                      responsible for the DPMI lock on the buffer
++ *                      (Pixtone::init extension, nxengine-evo/0167).
++ *   gain_x256       -- fixed-point gain (256 = 1.0).
++ *   loop_forever    -- true for SND_STREAM1 / SND_STREAM2 / SND_PROPELLOR; false for
++ *                      one-shots.
++ *
++ * Atomicity: cli/sti window protects the find-first-free + populate-
++ * fields + publish-active scope from the ISR. The engine-side
++ * g_dos_pixtone_active_count increment uses __sync_fetch_and_add
++ * (lock xadd) for dual-writer safety with the ISR's --. Per L3-Q4 +
++ * L3-Q5 contract.
++ *
++ * Critical ordering: `active = true` is the publishing write AFTER all
++ * other slot fields are populated. With volatile + cli/sti, the ISR
++ * observes the slot only with all fields valid. */
++int32_t SDL_DOSPixtoneStart(const Uint8 *buf, Uint32 buf_len,
++                            int16_t gain_x256, bool loop_forever)
++{
++    if (!buf || buf_len < 2) return -1;
++
++    DOS_DisableInterrupts();
++    int c;
++    for (c = 0; c < DOS_PIXTONE_CHANNELS; ++c) {
++        if (!g_dos_pix_chan[c].active) break;
++    }
++    if (c == DOS_PIXTONE_CHANNELS) {
++        DOS_EnableInterrupts();
++        return -1; /* no free channel; caller may invoke Lever 1 preempt */
++    }
++
++    g_dos_pix_chan[c].buf          = buf;
++    g_dos_pix_chan[c].buf_len      = buf_len;
++    g_dos_pix_chan[c].pos          = 0;
++    g_dos_pix_chan[c].gain_x256    = gain_x256;
++    g_dos_pix_chan[c].loop_forever = loop_forever;
++    g_dos_pix_chan[c].channel_id   = ++g_next_pix_channel_id;
++    g_dos_pix_chan[c].active       = true; /* publishing write -- LAST */
++
++    const int32_t out_id = g_dos_pix_chan[c].channel_id;
++    DOS_EnableInterrupts();
++
++    __sync_fetch_and_add(&g_dos_pixtone_active_count, 1u);
++
++    return out_id;
++}
++
++/* Stop a channel by id. No-op if the channel is not active or the id
++ * doesn't match (the slot may have been reused since the engine
++ * recorded the id; the engine compares channel_id at the slot to
++ * confirm). cli/sti guards the active-flag flip + counter decrement. */
++void SDL_DOSPixtoneStop(int32_t channel_id)
++{
++    if (channel_id < 0) return;
++
++    bool deactivated = false;
++    DOS_DisableInterrupts();
++    for (int c = 0; c < DOS_PIXTONE_CHANNELS; ++c) {
++        if (g_dos_pix_chan[c].active &&
++            g_dos_pix_chan[c].channel_id == channel_id) {
++            g_dos_pix_chan[c].active = false;
++            g_dos_pix_chan[c].channel_id = -1;
++            deactivated = true;
++            break;
++        }
++    }
++    DOS_EnableInterrupts();
++
++    if (deactivated) {
++        __sync_fetch_and_sub(&g_dos_pixtone_active_count, 1u);
++    }
++}
++
++/* Check if a channel id is still playing. Tolerates id mismatch (slot
++ * reused). Read-only -- no cli/sti needed; volatile reads are atomic. */
++bool SDL_DOSPixtoneIsActive(int32_t channel_id)
++{
++    if (channel_id < 0) return false;
++    for (int c = 0; c < DOS_PIXTONE_CHANNELS; ++c) {
++        if (g_dos_pix_chan[c].active &&
++            g_dos_pix_chan[c].channel_id == channel_id) {
++            return true;
++        }
++    }
++    return false;
++}
++
++/* Update gain on an active channel. Plain volatile-write race-tolerant
++ * vs the ISR -- the worst case is one IRQ uses the old gain for one
++ * 256-sample chunk (~23 ms) before the new gain takes effect. */
++void SDL_DOSPixtoneSetGain(int32_t channel_id, int16_t gain_x256)
++{
++    if (channel_id < 0) return;
++    for (int c = 0; c < DOS_PIXTONE_CHANNELS; ++c) {
++        if (g_dos_pix_chan[c].active &&
++            g_dos_pix_chan[c].channel_id == channel_id) {
++            g_dos_pix_chan[c].gain_x256 = gain_x256;
++            return;
++        }
++    }
++}
++
+ // The IRQ handler. Copies one chunk from the ring buffer into the DMA
+ // half-buffer that the hardware isn't currently playing. If the ring is
+ // empty it fills with silence (no stutter, just a brief gap).
+@@ -814,6 +1130,23 @@ static void SoundBlasterIRQHandler(void)
+         }
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0071): Lever 3 -- Pixtone IRQ-5
++       ISR mix step. AFTER the avail-vs-silence branch fills dma_dst
++       (from ring OR with silence), the ISR walks the channel pool and
++       ADDS active Pixtone PCM into dma_dst via int32 add + clamp.
++       Cached-bool gated; under killswitch OFF (or backend-gate-refused
++       Organya) the call is one cached-bool test + branch (no mix
++       work). PixtoneISRMix body is DPMI-locked (DOS_LockCode at
++       OpenDevice) so a page-fault inside the ISR cannot freeze the
++       machine. See LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.1.1 + sec.7.1.
++
++       NOTE the mix happens BEFORE the timer-exit measure (sb.c:828)
++       so the new wall-clock cost folds into doskutsu_audio_irq_wall_us
++       and is visible to flush-instr instrumentation. */
++    if (g_dos_pixtone_irq_mix_active) {
++        PixtoneISRMix(dma_dst, isr_chunk_size);
++    }
++
+     /* DOSKUTSU patch (Phase 10): bump per-block extern counters. Single
+        32-bit volatile increment is atomic on x86 per kbd-counter
+        precedent (patches 0023+0025); engine reads via extern. */
+@@ -1115,6 +1448,106 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+                      "+ irq_delta fold-in: rides on FINE_INSTR=1 (extends "
+                      "[sdl-audiocb] block emit; no new env var)");
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0071): Lever 3 hint resolution
++       + backend-gate. Read SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX strict-"1"
++       to engage; backend-gate refuses engagement when
++       SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya (Lever 3 + Organya is
++       compatible by construction per LEVER3 sec.5.2 but the design
++       prefers OPL3/WB/midi-stub for clean SFX-vs-music separation per
++       sec.5.4). Resolved once at OpenDevice; cached for the engine
++       (via SDL_DOSPixtoneIRQMixActive) and the ISR (g_dos_pixtone_
++       irq_mix_active).
++
++       Edge case: SDL_HINT_DOSKUTSU_AUDIO_BACKEND=auto with engine
++       runtime probe resolving to Organya is NOT caught here (SDL
++       backend sees "auto" not "organya"). The engine's Pixtone::play
++       routing can do its own runtime check if needed. v2 refinement;
++       wave-46 production default is explicit AUDIO_BACKEND=opl3 so
++       v1's strict-"organya" check covers the operator-set-organya
++       case which is the relevant safety boundary. */
++    {
++        const char *l3_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX");
++        const bool hint_set =
++            (l3_hint && l3_hint[0] == '1' && l3_hint[1] == 0);
++        const char *backend_hint =
++            SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
++        const bool backend_organya =
++            (backend_hint && SDL_strcmp(backend_hint, "organya") == 0);
++
++        if (hint_set && backend_organya) {
++            g_dos_pixtone_irq_mix_active = false;
++            doskutsu_dbg_log("audio: SDL/0071 pixtone IRQ-mix: REQUESTED but "
++                             "Organya backend active; skipping (Lever 3 "
++                             "requires OPL3/WB/midi-stub backend for clean "
++                             "SFX-vs-music separation; SDL_HINT_DOSKUTSU_"
++                             "AUDIO_BACKEND=organya overrides the killswitch)");
++        } else if (hint_set) {
++            g_dos_pixtone_irq_mix_active = true;
++            /* Initialize channel pool to all-free. Memory is already
++               zero-init via BSS, but the explicit clear makes the
++               post-Init state unambiguous and survives any future
++               OpenDevice re-init path. */
++            for (int c = 0; c < DOS_PIXTONE_CHANNELS; ++c) {
++                g_dos_pix_chan[c].active = false;
++                g_dos_pix_chan[c].channel_id = -1;
++            }
++            g_next_pix_channel_id = 0;
++
++            /* v5 mix-headroom resolution: SDL_HINT_DOSKUTSU_PIXTONE_IRQ
++             * _HEADROOM strict-"0"/"1"/"2"/"3" match. Value is the count
++             * of ADDITIONAL shift bits beyond the base 8. Default = "1"
++             * (50% per-SFX amplitude; ~4 concurrent SFX without clip).
++             * Per flush-instr sec.24.6 + #132. */
++            {
++                const char *hr_hint =
++                    SDL_GetHint("SDL_HINT_DOSKUTSU_PIXTONE_IRQ_HEADROOM");
++                Uint8 add = 1; /* default: shift = 9 */
++                if (hr_hint && hr_hint[0] != '\0' && hr_hint[1] == '\0') {
++                    if (hr_hint[0] == '0') add = 0;
++                    else if (hr_hint[0] == '1') add = 1;
++                    else if (hr_hint[0] == '2') add = 2;
++                    else if (hr_hint[0] == '3') add = 3;
++                }
++                g_dos_pixtone_irq_mix_shift = (Uint8)(8 + add);
++            }
++
++            {
++                /* Banner-emit headroom math: N = additional shift bits beyond
++                 * base 8 (range 0..3); per-SFX amplitude attenuation is
++                 * -6N dB (each bit halves amplitude ~= 6.02 dB step); the
++                 * concurrent-SFX-without-clip estimate is 2^(N+1) per
++                 * flush-instr sec.24.6 (uncorrelated-SFX aggregation model;
++                 * matches the "~4 concurrent at default add=1" spec target).
++                 *
++                 *   add=0 -> -0 dB,  ~2 concurrent (legacy / pre-v5 behavior)
++                 *   add=1 -> -6 dB,  ~4 concurrent (v5 default)
++                 *   add=2 -> -12 dB, ~8 concurrent
++                 *   add=3 -> -18 dB, ~16 concurrent
++                 */
++                const unsigned hr_bits = (unsigned)(g_dos_pixtone_irq_mix_shift - 8u);
++                const unsigned hr_db = hr_bits * 6u;
++                const unsigned hr_concurrent = 2u << hr_bits; /* 2^(N+1) */
++                doskutsu_dbg_log("audio: SDL/0071 pixtone IRQ-mix: ENABLED "
++                                 "(opt-in via SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=1; "
++                                 "Pixtone PCM mixed directly in IRQ-5 ISR; "
++                                 "cooperative-scheduler bypassed for SFX path; "
++                                 "Bug 2 hypothesis-C structural fix per "
++                                 "LEVER3-PIXTONE-IRQ-MIX-DESIGN.md; v5 mix-"
++                                 "headroom=%u bits / -%u dB; supports up to "
++                                 "%u concurrent SFX without clip; tune via "
++                                 "SDL_HINT_DOSKUTSU_PIXTONE_IRQ_HEADROOM="
++                                 "0|1|2|3)",
++                                 hr_bits, hr_db, hr_concurrent);
++            }
++        } else {
++            g_dos_pixtone_irq_mix_active = false;
++            doskutsu_dbg_log("audio: SDL/0071 pixtone IRQ-mix: DISABLED "
++                             "(default; set SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX"
++                             "=1 to engage; off-path cost is one cached-bool "
++                             "test per IRQ-5; SDL3_mixer SFX path unchanged)");
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0050): resolve quiescence-gate
+        killswitch once at OpenDevice time. Strict-"0" match per CLAUDE.md
+        env-var convention. Cached at module scope; read by
+@@ -1522,6 +1955,23 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+        so its storage must be DPMI-locked alongside the other audio
+        extern counters; otherwise the increment can page-fault. */
+     DOS_LockVariable(doskutsu_audio_silent_irq_count);
++    /* DOSKUTSU patch (Phase 11 patch 0071): Lever 3 lock primitives.
++       The PixtoneISRMix code body must be DPMI-locked since it executes
++       in IRQ-5 context (per LEVER3 sec.7.1). The channel-pool data
++       array g_dos_pix_chan, the active counter, the killswitch cached
++       bool, and the monotonic channel-id source are all touched from
++       IRQ context (sec.7.2). raw_master_buf is engine-side; nxengine-
++       evo/0167 locks each _sound_fx[slot].raw_master_buf at
++       Pixtone::init (sec.7.3 -- not this patch's responsibility). */
++    DOS_LockCode(PixtoneISRMix, PixtoneISRMix_End);
++    DOS_LockData(*g_dos_pix_chan, sizeof(g_dos_pix_chan));
++    DOS_LockVariable(g_dos_pixtone_active_count);
++    DOS_LockVariable(g_dos_pixtone_irq_mix_active);
++    DOS_LockVariable(g_next_pix_channel_id);
++    /* v5 mix-headroom: ISR reads g_dos_pixtone_irq_mix_shift each mix
++     * iteration; the byte must be DPMI-locked so the read cannot
++     * page-fault under real-HW CWSDPMI. */
++    DOS_LockVariable(g_dos_pixtone_irq_mix_shift);
+     /* DOSKUTSU patch (Phase 10 patch 0039): lock timer-mode + TSC mhz
+        so IRQ-context reads in SDL_DOSAudioReadTimer / DeltaUs (inlined
+        at the IRQ handler call site) don't page-fault. Both are written
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 211e3cdac..f181de11f 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -608,6 +608,22 @@ volatile uint32_t doskutsu_audio_sfx_active_count = 0;
+    Per docs/internal/PIXTONE-MULTISOURCE-DESIGN.md sec.2.1 #2. */
+ volatile uint32_t doskutsu_audio_silent_irq_count = 0;
+ 
++/* DOSKUTSU patch (Phase 11 patch 0071): Lever 3 ISR-channel-pool
++   active counter. Dual-writer (engine ++ in SDL_DOSPixtoneStart, ISR
++   -- at end-of-buffer). Atomicity required: both writers use
++   __sync_fetch_and_add / __sync_fetch_and_sub (lock xadd on i486+
++   per GCC builtin). Engine-side reader is a single 32-bit volatile
++   load which is atomic on aligned x86; reader observes a coherent
++   snapshot.
++
++   Engine 0165 probe reads SUM of this + g_pixtone_active_count under
++   Lever 3 ON (per L3-Q5 Shape B contract; lazy-poll Shape A had a
++   one-shot-SFX-never-decrements counter-accuracy hole).
++
++   Per docs/internal/LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.3 +
++   sec.10.3 Q5 + sec.10.5 (atomicity pattern lock). */
++volatile uint32_t g_dos_pixtone_active_count = 0;
++
+ /* Force-pause / force-resume request flags. Set by ForcePause/Resume;
+    serviced by the SB16 backend's audio writer / WaitDevice loop in
+    patch 0038. The actual DSP pause/resume command issuing lives in
+diff --git a/src/core/dos/SDL_dos_audio_synth.h b/src/core/dos/SDL_dos_audio_synth.h
+index f602051df..dbd727b0c 100644
+--- a/src/core/dos/SDL_dos_audio_synth.h
++++ b/src/core/dos/SDL_dos_audio_synth.h
+@@ -364,6 +364,75 @@ extern volatile uint32_t doskutsu_audio_sfx_active_count;
+    probe contract. */
+ extern volatile uint32_t doskutsu_audio_silent_irq_count;
+ 
++/* ------------------------------------------------------------------------
++ * Phase 11 patch 0071 -- SDL_DOSPixtone* channel-pool API for Lever 3
++ * ------------------------------------------------------------------------
++ *
++ * Lever 3 (Pixtone IRQ-5 ISR mix): moves Pixtone PCM mixing from the
++ * cooperative-thread-filled SDL ring into the IRQ-5 ISR. The IRQ that
++ * owns the DMA buffer also does the SFX mix; the cooperative scheduler
++ * is bypassed for the SFX path. Structural answer to the wave-21 +
++ * sec.21 + #120 hypothesis-C verdict (cooperative-scheduler audio-
++ * thread starvation; up to 1701 ms max single-callback latency on
++ * real DX2-66).
++ *
++ * Engine routes Pixtone::play through SDL_DOSPixtoneStart when
++ * SDL_DOSPixtoneIRQMixActive() returns true; the SDL backend's
++ * SoundBlasterIRQHandler walks the channel pool and mixes each active
++ * channel's PCM data into the DMA half-buffer using int32 add + clamp
++ * on int16 samples (Pixtone PCM under Tier-2 is signed 16-bit mono at
++ * 11025 Hz per Pixtone.cpp:567's SDL_AudioSpec).
++ *
++ * Killswitch: SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX strict-"1" engages.
++ * Default OFF. Backend-gated: refuses engagement when
++ * SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya (Lever 3 + Organya is
++ * compatible by construction but the design prefers OPL3/WB/midi-stub
++ * for clean SFX-vs-music separation per LEVER3 sec.5.4).
++ *
++ * IDs are monotonic int32_t; -1 indicates failure (no free channel on
++ * Start; unknown id on Stop / IsActive / SetGain). Engine stores
++ * returned id in _sound_fx[slot].channel.
++ *
++ * gain_x256 is fixed-point (256 = 1.0); the engine converts from its
++ * existing volume/gain model at the call site. loop_forever = true is
++ * for SND_STREAM1/SND_STREAM2/SND_PROPELLOR; one-shot SFX pass false.
++ *
++ * IRQ-context constraints honored: no malloc/free, no FPU, no SDL
++ * API calls, no DPMI thunks inside the ISR. The mix loop is pure
++ * integer arithmetic on DPMI-locked pool storage; raw_master_buf
++ * lock is engine-side responsibility (Pixtone::init extension per
++ * LEVER3 sec.7.3, patch nxengine-evo/0167).
++ *
++ * Per docs/internal/LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.3 +
++ * sec.10 (Contract lock).
++ */
++
++extern SDL_DECLSPEC int32_t SDLCALL SDL_DOSPixtoneStart(const Uint8 *buf,
++                                                          Uint32 buf_len,
++                                                          int16_t gain_x256,
++                                                          bool loop_forever);
++extern SDL_DECLSPEC void SDLCALL SDL_DOSPixtoneStop(int32_t channel_id);
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSPixtoneIsActive(int32_t channel_id);
++extern SDL_DECLSPEC void SDLCALL SDL_DOSPixtoneSetGain(int32_t channel_id,
++                                                       int16_t gain_x256);
++
++/* Engine-visible accessor: is Lever 3 IRQ-mix active for this
++ * process? Resolved once at DOSSOUNDBLASTER_OpenDevice from
++ * SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX (strict-"1") combined with the
++ * AUDIO_BACKEND backend-gate. Stable post-init; the engine reads it
++ * to gate its Pixtone::play routing branch (sec.4 of the design). */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSPixtoneIRQMixActive(void);
++
++/* Engine-visible counter: number of currently active ISR-channel
++ * pool slots. Engine 0165 probe reads SUM of this +
++ * g_pixtone_active_count under Lever 3 ON (per the L3-Q5 Shape B
++ * contract). Atomically incremented in SDL_DOSPixtoneStart and
++ * decremented in the ISR at end-of-buffer via __sync_fetch_and_*
++ * (lock xadd on i486+); dual-writer-safe across engine thread + IRQ
++ * context. Engine-side reader is a single 32-bit volatile read --
++ * atomic on aligned x86. */
++extern volatile uint32_t g_dos_pixtone_active_count;
++
+ #ifdef __cplusplus
+ }
+ #endif
+-- 
+2.47.3
+

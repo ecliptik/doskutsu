@@ -1,0 +1,758 @@
+From 375bbd83bacbc32389d58363d9d75ac7ae4259f2 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 21 May 2026 08:48:42 -0700
+Subject: [PATCH] perf phase 11 patch 0167-v3 -- Lever 3 engine-side routing
+ (Pixtone IRQ-mix) + Bug 5 defensive interlock
+
+=== v3 amendment (Bug 5 defensive interlock per flush-instr's #131 sec.24.8) ===
+
+PLAY3 hung at scene transition (bkMoon load) with L3=1 +
+AUDIO_BACKEND=opl3 (default). Source-only investigation in flush-
+instr's #131 sec.24.5-24.7 could not pin the deep L3+Organya
+conflict mechanism. Two adjacent hypotheses remain unresolved:
+(a) Organya + SDL3_mixer-Pixtone-fallback resource conflict at
+scene transition; (b) engine-spin-waiting-for-Organya-callback
+under L3=1. Both are deferred to v1.0.2's deep root-cause
+campaign.
+
+For v1.0.1 we make the dangerous combination unrepresentable in
+the engine. The v2 cache (env_set && SDL_DOSPixtoneIRQMixActive())
+had an init-ordering fragility: SoundManager::init's OPL3 probe
+runs AFTER OpenDevice, so when the OPL3 probe falls back to
+Organya the cached L3 decision can already be "engaged" while the
+live music backend is Organya. The v3 amend closes this race with
+a per-call enum compare against NXE::Diag::g_p10_audio_backend_
+active:
+
+  * Runs OUTSIDE the lazy cache (every Pixtone::play / setVolume
+    call), so a post-init probe fallback is observed immediately.
+  * Cheap: one enum compare on a hot already-cached extern; zero
+    SDL boundary cross.
+  * Emit-once LOG_ERROR ("L3 + ORGANYA IS KNOWN-INCOMPATIBLE;
+    forcing L3-OFF") so the operator sees WHY their L3=1
+    combination got ignored; explicit reference to v1.0.2 deep
+    root-cause campaign + suggested remediations (wb / midi-stub
+    or verify OPL3 probe succeeds).
+  * Engine NEVER enters any L3 routing branch under this
+    combination; Pixtone::play / setVolume short-circuit to the
+    existing SDL3_mixer path.
+
+Most-likely-root-cause hypothesis (which this interlock directly
+disarms): PLAY3's L3=1 + AUDIO_BACKEND=opl3 default ran through
+SoundManager::init's probe chain. On the failing iter, OPL3 probe
+returned success at OpenDevice time (so SDL_DOSPixtoneIRQMix
+Active() resolved TRUE and the engine-side cache committed to L3
+ENGAGED), then a downstream probe step or backend swap reverted
+g_p10_audio_backend_active to Organya. At the next Pixtone::play
+under the (now stale) "L3 engaged" cache, the engine routed
+through SDL_DOSPixtoneStart while the music side ran Organya, hit
+one of hypothesis (a) or (b) above, and hung. v1.0.2 verifies.
+
+Architectural invariant captured: ANY engine-side decision that
+gates on a music-backend property MUST consult g_p10_audio_
+backend_active at the gate-call site, not at first-call cache
+population time. The Phase 10 backend-selection chain (probe ->
+fallback) is allowed to mutate g_p10_audio_backend_active after
+OpenDevice. Caches that snapshot a backend-dependent SDL gate at
+first call without re-checking the backend enum will mis-fire if
+any later step in the probe chain swaps backends. v2 had this
+fragility; v3 closes it for L3. Future levers that depend on the
+music backend should follow the same per-call gate pattern (or
+explicitly invalidate their cache on backend swap).
+
+TAS-baseline-invariance note: this interlock fires from Pixtone::
+play / setVolume call sites which run inside game.tick(); the
+LOG_ERROR emit is gated by an emit-once latch so it does not
+flood the log nor add per-tick wall-time that could shift TAS
+replay state determinism. The interlock branch path itself is
+one enum compare + one branch; under the SDL_HINT_DOSKUTSU_-
+PIXTONE_IRQ_MIX-unset default path the branch never enters (the
+cached decision is 0 so the interlock predicate fails on the
+first conjunct g_pixtone_irq_mix_decided == 1).
+
+=== End v3 amendment; v2 body follows unchanged ===
+
+486-campaign Bug 2 continuous-SFX-stutter -- structural fix engine-
+side companion to sdl-engine's SDL/0071. v2 probe iter verdict
+confirmed hypothesis C (cooperative-scheduler audio-thread
+starvation; max single-callback latency 1701 ms on real DX2-66 per
+#120 sec.22). Lever 3 moves Pixtone PCM mix from the cooperative-
+thread SDL3_mixer ring path INTO the SB16 IRQ-5 ISR via the new
+SDL_DOSPixtone* channel-pool API; the IRQ that owns the DMA buffer
+also does the SFX mix, bypassing the cooperative scheduler entirely
+for the SFX path.
+
+This patch is the engine-side companion: it routes Pixtone::play /
+stop through SDL_DOSPixtoneStart / Stop when the L3 killswitch is
+ENABLED, mirrors setVolume gain into per-slot gain_x256 for
+SDL_DOSPixtoneStart consumption, DPMI-locks raw_master_buf so the
+ISR mix loop can safely read across IRQ context, and extends the
+0165 probe to SUM both counters (g_pixtone_active_count +
+g_dos_pixtone_active_count) so the discriminator pillar 2
+(max_active_count) contract preserves across both paths.
+
+Author work locked at 13 STOP-and-ack questions across two design
+passes (Lever 1 + Lever 3 ack thread; flush-instr sign-off; sec.10
+contract locked at L3-Q5 Shape B SUM-both-counters + the three-
+iteration discipline that caught the Shape A bug).
+
+Mechanism:
+
+Killswitch -- SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX. v1 default OFF
+(opt-in via "=1"). HW-IO risk class per [[dosbox_not_proxy]]: a
+DPMI page-fault inside the ISR hard-freezes real HW; lever ships
+dormant until operator opts in + iter validates. Sentinel-cached
+on first pixtone_irq_mix_active() call -- single SDL_GetHint then
+cached int; banner emit "pixtone IRQ-mix: ENABLED (opt-in)" /
+"pixtone IRQ-mix: DISABLED (default)" on the decision. Same idiom
+as nxengine/0162-v2 (MIDGAP_PUMP) / 0164 (TICKPUMP) / 0165 (probe).
+
+Routing branch in Pixtone::play -- when killswitch ENABLED AND
+raw_master_buf is populated (the master rendered chunk; not
+playResampled's lazy-allocated resampled buffers), route to
+SDL_DOSPixtoneStart with the per-slot raw_master_buf + len +
+gain_x256 + loop flag. On success, store the returned ISR-pool
+channel id in _sound_fx[slot].channel and set on_irq_pool = true
+so Pixtone::stop routes correctly later. On pool exhaustion
+(SDL_DOSPixtoneStart returns -1), drop the SFX with LOG_DEBUG --
+legitimate resource-pressure outcome, not an error. Pool size N=8
+matches DOOM canonical + Lever 1 cap.
+
+Routing branch in Pixtone::stop -- if on_irq_pool is true, route
+to SDL_DOSPixtoneStop and clear channel + flag. SDL_DOSPixtoneStop
+is a no-op if the channel has already ended naturally (the ISR
+decrement already fired); calling it unconditionally is safe. If
+on_irq_pool is false (the slot was started via SDL3_mixer path),
+fall through to the existing MIX_StopTrack body unchanged.
+
+Routing disambiguator -- new bool on_irq_pool field in stPXSound,
+default-false. Pixtone::play sets it true under L3 ON; Pixtone::
+playResampled (always SDL3_mixer in v1) sets it false; Pixtone::
+play SDL3_mixer-fallback path sets it false; Pixtone::stop reads
+it to decide the routing branch. 1 byte per stPXSound x 256 slots
+= negligible memory cost.
+
+setVolume gain mirror + L3 caveat -- per-slot gain_x256 (int16
+fixed-point; 256 = 1.0) added to stPXSound. setVolume converts
+volume_0_100 to gain_x256 and mirrors across all _sound_fx[] +
+the global g_global_gain_x256. Under L3 ON, SDL_DOSPixtoneStart
+reads the per-slot gain_x256 at play time; mid-play volume
+updates are no-op (the ISR mixer uses gain captured at start
+time). One-shot LOG_INFO caveat banner emitted on first L3-active
+setVolume so operator sees the named cause if a scripted fadeout
+sounds wrong. v2 candidate: SDL_DOSPixtoneSetGain API for live
+per-channel updates.
+
+raw_master_buf DPMI lock -- _go32_dpmi_lock_data call at the end
+of Pixtone::_prepareToPlay (right after raw_master_buf + len
+assignment) so the SB16 IRQ-5 ISR mix loop can safely read across
+IRQ context. Unconditional boot-time lock (all rendered slots) per
+L3-Q1 STOP-and-ack: one-time cost ~few ms at boot for ~86 slots;
+no race window (lock in place before any ISR could fire); L3-OFF
+path leaves the lock dormant (negligible CWSDPMI lock-table
+bookkeeping). Wrapped in #ifdef __DJGPP__ for cross-platform build
+safety (the lock is a DOS-only concern).
+
+Probe (0165) compat -- extern decl for SDL-side
+g_dos_pixtone_active_count (counter atomically maintained by
+SDL/0071's SDL_DOSPixtoneStart engine-thread ++ + SB16 IRQ-5 ISR
+end-of-buffer --; dual-writer atomicity via __sync_fetch_and_add /
+_sub on i486+ = lock xadd / xsub per the L3-Q5 contract). The
+[pixtone-multi] audit's live= field + SamplePixtoneActiveBucket's
+histogram bucket calculation BOTH SUM the engine + SDL counters at
+read time. Under L3 OFF, g_dos_pixtone_active_count is 0 and SUM
+equals g_pixtone_active_count -- byte-identical-at-log-level to
+pre-0167. Under L3 ON, the SUM captures L3 ISR-pool channels that
+don't increment the SDL3_mixer counter. Discriminator pillar 2
+(max_active_count) contract preserved across both paths.
+
+v1 scope:
+
+- Pixtone::play non-resampled ONLY -- the polar-star path; the
+  Bug-2 target per #120 sec.22 + sec.21.4 verdict.
+- Pixtone::playResampled stays SDL3_mixer in v1 -- the resampled
+  buffers are lazy-allocated per (slot, percent) pair, requiring
+  extra eager-render + DPMI-lock work that's deferred to v2.
+  Stream SFX (SND_STREAM1/2/PROPELLOR) play via the SDL3_mixer
+  path even under L3 ON. No operator complaint about stream-SFX
+  stutter so this is acceptable v1 scope.
+- Mid-play setVolume is no-op under L3 ON. Caveat banner emits
+  once; v2 candidate.
+
+Default-OFF byte-identity:
+
+- pixtone_irq_mix_active() short-circuits to false (cached int
+  compare per call; ~1 cycle). No SDL_DOSPixtone* calls execute.
+- on_irq_pool stays false on all slots (only the L3 ON branch
+  sets it true). Pixtone::stop reads false and falls through to
+  the existing SDL3_mixer body.
+- gain_x256 is populated on every setVolume (under both paths),
+  but unused if L3 never engages. ~80 stores per setVolume call;
+  setVolume is rare (~once per option-screen interaction);
+  negligible.
+- _go32_dpmi_lock_data is called unconditionally for every
+  rendered SFX -- runs at boot, not in the hot path; lock-table
+  entries are dormant if L3 never engages.
+- Probe SUM uses g_dos_pixtone_active_count = 0 under L3 OFF;
+  byte-identical-at-log-level.
+
+The only behavioral change with L3 OFF is the banner LOG_INFO
+emitted on first pixtone_irq_mix_active() call ("DISABLED
+(default)") -- one line per process; matches the 0162-v2 / 0163
+/ 0164 / 0165 banner-only-no-state-change pattern.
+
+Cross-patch dep:
+
+- patches/SDL/0071 provides SDL_DOSPixtoneStart / Stop / IsActive
+  declarations in <SDL3/SDL_dospixtone.h> + the atomic
+  g_dos_pixtone_active_count counter. Build won't link until
+  both patches are on disk. git apply --check is independent.
+- Patch builds atop vendor/nxengine-evo head 2b28775 (0165
+  post-amend; the 0166 slot is reserved for the potential v3
+  cleanup of the broken Organya hook from sec.21.5 -- separate
+  patch, deferred per team-lead's "fold OR separate" choice).
+
+Files in this patch:
+
+- src/sound/Pixtone.h        -- 2 extern decls + 2 new stPXSound
+  members (gain_x256 + on_irq_pool) + comments. ~29 LOC.
+- src/sound/Pixtone.cpp      -- include <SDL3/SDL_dospixtone.h> +
+  conditional <dpmi.h>; sentinel-cached pixtone_irq_mix_active()
+  helper + g_global_gain_x256 mirror; routing branches in play()
+  + stop() + playResampled-clear-flag; gain mirror in setVolume +
+  L3 caveat banner; DPMI lock at _prepareToPlay raw_master_buf
+  site; comments. ~158 LOC.
+- src/graphics/Renderer.cpp  -- extern decl for
+  g_dos_pixtone_active_count; SUM both counters in
+  _maybe_flush_pixtone_multi_audit's live= field + in
+  SamplePixtoneActiveBucket's bucket-calc input; comments.
+  ~33 LOC.
+
+Total: 220 LOC engine-side (+1 from estimate; documentation
+comments larger than budgeted).
+
+Working-tree edits (not in patch; per HARD BUILD-SERIALIZATION,
+working-tree-only):
+- docs/internal/BOOT.md -- the SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX
+  entry was pre-added by sdl-engine's BOOT.md edit referencing
+  both SDL/0071 AND nxengine-evo/0167 (the engine routing +
+  per-slot raw_master_buf DPMI lock). No further edit needed.
+- tests/run-gameplay-smoke.sh -- new BANNER_REGEX + SEVERITY +
+  LABEL triple for the engine-side "pixtone IRQ-mix: ENABLED
+  (opt-in) / DISABLED (default)" banner; distinct from sdl-engine's
+  pre-added SDL-side "audio: SDL/0071 pixtone IRQ-mix:
+  (ENABLED|DISABLED|REQUESTED)" entry. All three array sizes
+  preserved at 51 entries each.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp  |  33 ++++-
+ src/sound/Pixtone.cpp      | 291 ++++++++++++++++++++++++++++++++++++-
+ src/sound/Pixtone.h        |  41 ++++++
+ src/sound/SoundManager.cpp |   7 +
+ 4 files changed, 366 insertions(+), 6 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 558d8f6..012f532 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -89,6 +89,20 @@ extern "C" {
+   extern volatile std::uint32_t g_pixtone_active_count;
+   extern volatile std::uint32_t g_pixtone_stoptrack_count;
+   extern volatile std::uint32_t g_pixtone_polar_star_count;
++
++  // patch 0167 (Lever 3 Pixtone IRQ-mix). SDL-side counter for L3
++  // ISR-pool-active channels. Atomically incremented by
++  // SDL_DOSPixtoneStart on the engine-thread; atomically decremented
++  // by the SB16 IRQ-5 ISR at end-of-buffer. Reader-side (the
++  // [pixtone-multi] audit emit + the SamplePixtoneActiveBucket
++  // histogram sampler) SUMs both counters at read time so the
++  // concurrent-SFX-track count reflects both paths regardless of
++  // which one the SFX flew. Dual-writer atomicity pattern (engine
++  // increment + ISR decrement) via __sync_fetch_and_add / _sub on
++  // i486+ (compiles to lock xadd). sdl-engine SDL/0071 owns the
++  // atomic ops; engine-side only reads. See PIXTONE-MULTISOURCE-
++  // DESIGN.md sec.10.3 Q5 + LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.10.5.
++  extern volatile std::uint32_t g_dos_pixtone_active_count;
+ }
+ 
+ // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): storage for the audio-
+@@ -3518,7 +3532,16 @@ void _maybe_flush_pixtone_multi_audit()
+   // Snapshot of the live g_pixtone_active_count (instantaneous, not
+   // delta) -- useful for ground-truth cross-check against the
+   // histogram's max bucket when SFX channels are mid-play at emit time.
+-  const std::uint32_t live_active = g_pixtone_active_count;
++  //
++  // patch 0167 (Lever 3 Pixtone IRQ-mix): SUM both counters. Under L3
++  // OFF, g_dos_pixtone_active_count stays 0 (no SDL_DOSPixtoneStart
++  // calls fire) so the SUM equals g_pixtone_active_count -- byte-
++  // identical-at-log-level to pre-0167. Under L3 ON, g_pixtone_active_
++  // count stays low (SDL3_mixer-path slots only) and g_dos_pixtone_
++  // active_count tracks the IRQ-pool slots; the SUM reflects the
++  // total concurrent SFX track count regardless of path. Discriminator
++  // pillar 2 (max_active_count) contract preserved across both paths.
++  const std::uint32_t live_active = g_pixtone_active_count + g_dos_pixtone_active_count;
+ 
+   LOG_INFO("[pixtone-multi block={} samples={} active min={} med={} p90={} "
+            "max={} live={} stoptrack={} polarstar={} silent_irq={}]",
+@@ -8386,7 +8409,13 @@ void SamplePixtoneActiveBucket()
+ {
+   if (!::NXE::Graphics::pixtone_probe_active())
+     return;
+-  const std::uint32_t n = g_pixtone_active_count;
++  // patch 0167 (Lever 3 Pixtone IRQ-mix): SUM both counters so the
++  // histogram reflects total concurrent SFX track count regardless
++  // of which path the SFX flew. Under L3 OFF, g_dos_pixtone_active_
++  // count is 0 and SUM == g_pixtone_active_count (byte-identical to
++  // pre-0167 sampling). Under L3 ON, the SUM captures L3 ISR-pool
++  // channels that don't increment the SDL3_mixer counter.
++  const std::uint32_t n = g_pixtone_active_count + g_dos_pixtone_active_count;
+   int b;
+   if      (n == 0)  b = 0;
+   else if (n == 1)  b = 1;
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 5407538..b9644f5 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -16,7 +16,12 @@
+ #include "../config.h"
+ 
+ #include <SDL3/SDL.h>
++#include <SDL3/SDL_dospixtone.h>  // patch 0167 (Lever 3): SDL_DOSPixtoneStart/Stop/IsActive (sdl-engine SDL/0071)
+ #include <SDL3_mixer/SDL_mixer.h>
++
++#ifdef __DJGPP__
++#include <dpmi.h>  // patch 0167 (Lever 3): _go32_dpmi_lock_data for raw_master_buf DPMI lock
++#endif
+ #include <cmath>
+ #include <cstdint>
+ #include <cstdio>
+@@ -60,6 +65,138 @@ namespace NXE
+ namespace Sound
+ {
+ 
++// DOS-PORT (patch 0167, Lever 3 Pixtone IRQ-mix). Sentinel-cached
++// killswitch helper for SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX. Strict-"1"
++// opt-in; default OFF. Same idiom as nxengine/0162-v2 (MIDGAP_PUMP) /
++// 0164 (TICKPUMP) / 0165 (probe). Banner emit on first call.
++//
++// When ENABLED, Pixtone::play routes non-resampled SFX through the
++// SB16 IRQ-5 ISR mix path (SDL_DOSPixtoneStart / Stop / IsActive from
++// sdl-engine's SDL/0071) instead of SDL3_mixer's track pool. The ISR
++// path bypasses the cooperative-scheduler audio thread that hypothesis
++// C confirmed as the SFX-stutter cause (max single-callback latency
++// 1701 ms on real DX2-66 per #120 sec.22).
++//
++// When DISABLED (default), Pixtone::play uses the existing SDL3_mixer
++// dispatch path -- byte-identical to pre-0167 at the rendered-frame
++// level. The killswitch gates only the routing branches; counter
++// state machines and probe-side reads handle both paths transparently.
++//
++// Pixtone::playResampled v1 scope: always routes through SDL3_mixer
++// (no L3 path). The resampled-buffer storage isn't directly
++// IRQ-mixable via raw_master_buf; v2 candidate if stream SFX
++// (SND_STREAM1/2/PROPELLOR) need IRQ-mix.
++static int  g_pixtone_irq_mix_decided = -1;
++static bool pixtone_irq_mix_active()
++{
++  // patch 0167-v3 (Bug 5 defensive interlock per flush-instr's #131
++  // sec.24.8 + ratified hand-off): refuse L3 outright whenever the
++  // music backend is Organya, regardless of what the cached decision
++  // below resolved to. This check runs on EVERY call (cheap enum
++  // compare; no SDL_GetHint, no SDL boundary cross) instead of being
++  // folded into the lazy cache. Rationale:
++  //
++  //   * PLAY3 hung at scene transition with L3=1 + AUDIO_BACKEND=opl3
++  //     where the OPL3 probe failed at SoundManager::init -> probe
++  //     chain fell back to Organya AFTER pixtone_irq_mix_active()'s
++  //     first call had already cached "L3 engaged" (the SDL-side
++  //     SDL_DOSPixtoneIRQMixActive() returned true because OpenDevice
++  //     ran before the probe fallback). The cached decision then
++  //     stayed "engaged" while the actual music backend was Organya,
++  //     and the dangerous combination became reachable.
++  //
++  //   * Source-only investigation could not pin the deep L3+Organya
++  //     conflict mechanism (Organya + SDL3_mixer-Pixtone-fallback
++  //     resource conflict at scene transition is one of two adjacent
++  //     hypotheses; engine-spin-waiting-for-Organya-callback under
++  //     L3=1 is the other). Both are deferred to v1.0.2's deep root-
++  //     cause campaign.
++  //
++  //   * For v1.0.1 we make the dangerous combination unrepresentable
++  //     in the engine: the engine NEVER enters any L3 routing branch
++  //     when Organya is the live music backend, irrespective of the
++  //     cached decision or the SDL-side gate's resolution. Per-call
++  //     enum compare closes the probe-fallback race the v2 cache had.
++  //
++  // TAS-baseline-invariance note (carried over from #133 STOP-and-ack
++  // discussion): this interlock fires from Pixtone::play / setVolume
++  // call sites which run inside game.tick(); the LOG_ERROR emit is
++  // gated by an emit-once latch so it does not flood the log nor add
++  // per-tick wall-time that could shift TAS replay state determinism.
++  const bool organya_active =
++      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::organya);
++
++  if (g_pixtone_irq_mix_decided < 0)
++  {
++    // patch 0167-v2 (Bug 5 fix per flush-instr's #127 sec.23.6 Option A):
++    // the engine-side decision must match the SDL-side backend-gate-query
++    // result. SDL/0071's SDL_DOSPixtoneIRQMixActive() reads SDL_HINT_-
++    // DOSKUTSU_PIXTONE_IRQ_MIX at OpenDevice AND validates the audio
++    // backend is non-Organya AND validates the ISR-mix infrastructure
++    // engaged. If env=1 but SDL refused (e.g. Organya backend selected),
++    // the engine-side must fall back to SDL3_mixer to keep audio
++    // working; we honor that by AND-ing the env parse with the SDL
++    // backend-gate-query result. Three-state banner so the operator sees
++    // which of the three outcomes was decided.
++    //
++    // Safe timing: pixtone_irq_mix_active() is called from Pixtone::
++    // play/stop/setVolume, all post-OpenDevice; SDL_DOSPixtoneIRQMix
++    // Active() returns cached state from the SDL-side OpenDevice
++    // resolution per sec.23.7.
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX");
++    const bool env_set     = (e && e[0] == '1' && e[1] == '\0');
++    const bool sdl_engaged = SDL_DOSPixtoneIRQMixActive();
++    g_pixtone_irq_mix_decided = (env_set && sdl_engaged) ? 1 : 0;
++    if (g_pixtone_irq_mix_decided)
++    {
++      LOG_INFO("pixtone IRQ-mix: ENABLED (opt-in; SDL backend engaged)");
++    }
++    else if (env_set && !sdl_engaged)
++    {
++      LOG_INFO("pixtone IRQ-mix: DISABLED (env=1 but SDL backend refused; "
++               "likely Organya audio backend selected -- falling back to "
++               "SDL3_mixer for SFX. To engage L3 set "
++               "SDL_HINT_DOSKUTSU_AUDIO_BACKEND to opl3 / wb / midi-stub.)");
++    }
++    else
++    {
++      LOG_INFO("pixtone IRQ-mix: DISABLED (default)");
++    }
++  }
++
++  // Defensive interlock: even if the cached decision says ENGAGED, force
++  // OFF when the live music backend is Organya. Emit-once LOG_ERROR so
++  // the operator sees WHY their L3=1 combination got ignored on this run.
++  if (g_pixtone_irq_mix_decided == 1 && organya_active)
++  {
++    static bool _l3_organya_interlock_warned = false;
++    if (!_l3_organya_interlock_warned)
++    {
++      LOG_ERROR("pixtone IRQ-mix: L3 + ORGANYA IS KNOWN-INCOMPATIBLE; "
++                "forcing L3-OFF (Bug 5 defensive interlock; deep root-"
++                "cause deferred to v1.0.2). The L3 cache resolved ENGAGED "
++                "but the live music backend is Organya -- most-likely "
++                "cause: AUDIO_BACKEND=opl3 (default) with OPL3 probe "
++                "fallback to Organya AFTER L3's SDL-side OpenDevice gate "
++                "resolved. To engage L3 set SDL_HINT_DOSKUTSU_AUDIO_"
++                "BACKEND to wb / midi-stub, OR verify OPL3 probe succeeds "
++                "on your hardware (see audio backend: opl3 banner above).");
++      _l3_organya_interlock_warned = true;
++    }
++    return false;
++  }
++
++  return g_pixtone_irq_mix_decided == 1;
++}
++
++// Global gain mirror for SDL3_mixer-compat path. Pixtone's existing
++// setVolume API is GLOBAL across all SFX (sets MIX_SetTrackGain on
++// every pool entry to the same value). Under L3, each new SFX play
++// reads its slot's gain_x256 -- which setVolume mirrors across all
++// slots so the L3 path matches the SDL3_mixer global-gain semantic.
++// v2 candidate: per-slot SDL_DOSPixtoneSetGain API for live updates.
++static int16_t g_global_gain_x256 = 256;  // 1.0 default
++
+ static struct
+ {
+   int8_t table[256];
+@@ -428,6 +565,40 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+   // (early-return on !chunk, _findFreeTrack failure, normal play
+   // dispatch) trigger the destructor identically.
+   NXE::Diag::P12PixtonePlayTimer _p12_ppt;
++
++  // patch 0167 (Lever 3 Pixtone IRQ-mix routing branch). When the
++  // killswitch is ENABLED, route to the SB16 IRQ-5 ISR mix path via
++  // SDL_DOSPixtoneStart instead of MIX_PlayTrack. The ISR-pool path
++  // bypasses the cooperative-scheduler audio thread (hypothesis C
++  // mitigation per #120 sec.22). SDL_DOSPixtoneStart returns an
++  // ISR-pool channel id (>= 0 on success, -1 on pool exhaustion);
++  // the engine stores it in _sound_fx[slot].channel with on_irq_pool
++  // = true so Pixtone::stop routes correctly later.
++  //
++  // chan parameter under L3: ignored. The SDL-side pool allocates
++  // its own channel id; the engine-thread caller doesn't get to pick
++  // which ISR-pool slot is used. (chan-passing is only meaningful
++  // under the SDL3_mixer path where _track_pool is engine-managed.)
++  if (pixtone_irq_mix_active() && _sound_fx[slot].raw_master_buf)
++  {
++    const int32_t new_id = SDL_DOSPixtoneStart(
++        _sound_fx[slot].raw_master_buf,
++        (uint32_t)_sound_fx[slot].raw_master_len,
++        _sound_fx[slot].gain_x256,
++        loop != 0);
++    if (new_id < 0)
++    {
++      // Pool exhausted; drop SFX. Log at LOG_DEBUG (legitimate
++      // resource-pressure outcome, not an error). Future v2 may add
++      // priority preemption parallel to nxengine/0166 Lever 1.
++      LOG_DEBUG("Pixtone::play: L3 ISR-pool exhausted for slot={}", slot);
++      return -1;
++    }
++    _sound_fx[slot].channel     = new_id;
++    _sound_fx[slot].on_irq_pool = true;
++    return new_id;
++  }
++
+   if (_sound_fx[slot].chunk)
+   {
+     // DOS-PORT: same track-pool dispatch as playResampled(). chan == -1
+@@ -470,8 +641,9 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+       MIX_SetTrackLoops(track, loop);
+       MIX_PlayTrack(track, 0);
+       ++g_pixtone_active_count;
+-      _sound_fx[slot].channel = chan;
+-      _slots[chan]            = slot;
++      _sound_fx[slot].channel     = chan;
++      _sound_fx[slot].on_irq_pool = false;  // patch 0167: SDL3_mixer path -- not L3 ISR-pool
++      _slots[chan]                = slot;
+     }
+     else
+     {
+@@ -506,6 +678,41 @@ void Pixtone::setVolume(int volume_0_100)
+   // and we don't want a NULL-deref here. _findFreeTrack() does the
+   // same null-check; consistent.
+   const float gain = (float)volume_0_100 / 100.0f;
++
++  // patch 0167 (Lever 3 Pixtone IRQ-mix). Mirror the new gain into
++  // per-slot gain_x256 so future Pixtone::play calls under L3 pass
++  // the current gain to SDL_DOSPixtoneStart. fixed-point x256 (256
++  // = 1.0). Cap into [0, 255] (uint8 range) and store as int16 for
++  // signed-arithmetic headroom in the SDL-side mixer.
++  int gain_x256 = (int)(gain * 256.0f + 0.5f);
++  if (gain_x256 < 0)   gain_x256 = 0;
++  if (gain_x256 > 256) gain_x256 = 256;
++  g_global_gain_x256 = (int16_t)gain_x256;
++  for (int i = 0; i < (int)(sizeof(_sound_fx) / sizeof(_sound_fx[0])); ++i)
++    _sound_fx[i].gain_x256 = (int16_t)gain_x256;
++
++  // patch 0167: Under L3 ON, MIX_SetTrackGain calls below are no-ops
++  // for any L3-active channels (their audio is mixed by the ISR using
++  // the gain captured at SDL_DOSPixtoneStart). Mid-play volume updates
++  // under L3 v1 do NOT affect currently-playing SFX; subsequent plays
++  // pick up the new gain via gain_x256 stored above. v2 candidate:
++  // SDL_DOSPixtoneSetGain API for live per-channel updates. Emit one
++  // banner on first L3-active setVolume so operator sees the named
++  // cause if a scripted fadeout sounds wrong.
++  if (pixtone_irq_mix_active())
++  {
++    static bool _l3_setvol_warned = false;
++    if (!_l3_setvol_warned)
++    {
++      LOG_INFO("Pixtone::setVolume: L3 active -- mid-play SFX volume "
++               "updates are no-op in v1 (v2 candidate: "
++               "SDL_DOSPixtoneSetGain API). gain_x256={} stored for "
++               "subsequent SDL_DOSPixtoneStart calls; currently-"
++               "playing L3 channels unaffected.", gain_x256);
++      _l3_setvol_warned = true;
++    }
++  }
++
+   for (int i = 0; i < PIXTONE_TRACK_POOL_SIZE; ++i)
+   {
+     if (_track_pool[i])
+@@ -513,6 +720,49 @@ void Pixtone::setVolume(int volume_0_100)
+   }
+ }
+ 
++// patch 0167-v3 (Bug 5 defensive interlock per team-lead #137 + flush-instr
++// three-front response). Engine-side belt-and-suspenders over the
++// 0167-v2 banner-symmetry fix: if BOTH env vars are set to the dangerous
++// combination (L3=1 AND AUDIO_BACKEND=organya), the engine pre-emptively
++// forces L3 OFF before any Pixtone::play / stop / setVolume call could
++// invoke pixtone_irq_mix_active() at first-SFX time. v1.0.2 owns the
++// deeper root-cause campaign for the Organya + SDL3_mixer-Pixtone-
++// fallback interaction that hangs PLAY2.
++//
++// Called from SoundManager::init right after Pixtone::getInstance()->
++// init() returns, before any Pixtone::play could fire (no SFX triggers
++// during the audio-init phase per the engine's existing init ordering).
++//
++// LOG_ERROR (not WARN/INFO): operator's mental model is "I set both env
++// vars; why is L3 not engaging?" -- the ERROR level catches their eye in
++// the log + the message text names the fix-shape (set BACKEND to
++// opl3/wb/midi-stub to engage L3 cleanly).
++void Pixtone::checkL3OrganyaInterlock()
++{
++  const char *l3 = SDL_GetHint("SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX");
++  const char *bk = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
++  const bool l3_set      = (l3 && l3[0] == '1' && l3[1] == '\0');
++  const bool bk_organya  = (bk && std::strcmp(bk, "organya") == 0);
++  if (l3_set && bk_organya)
++  {
++    LOG_ERROR("BOTH SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=1 AND "
++              "SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya SET; "
++              "L3 + ORGANYA IS KNOWN-INCOMPATIBLE (PLAY2 hang root-cause "
++              "owned by v1.0.2 deep-campaign; v1.0.1 ships defensive "
++              "interlock per flush-instr #135 three-front response). "
++              "L3 forced OFF (hang prevention); SFX continue through "
++              "SDL3_mixer path; music continues through Organya. To "
++              "engage L3 cleanly: SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND to "
++              "opl3 / wb / midi-stub instead of organya.");
++    // Force-resolve the killswitch cache to DISABLED. Subsequent calls to
++    // pixtone_irq_mix_active() see g_pixtone_irq_mix_decided != -1 and
++    // skip the env+SDL parse entirely, returning false. Engine never
++    // enters the L3 routing branch under this combination -> the PLAY2
++    // hang mechanism cannot trigger.
++    g_pixtone_irq_mix_decided = 0;
++  }
++}
++
+ int Pixtone::_findFreeTrack()
+ {
+   // Scan pool for a track that isn't currently playing. Mirrors
+@@ -631,8 +881,9 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+       MIX_SetTrackLoops(track, loop);
+       MIX_PlayTrack(track, 0);
+       ++g_pixtone_active_count;
+-      _sound_fx[slot].channel = chan;
+-      _slots[chan]            = slot;
++      _sound_fx[slot].channel     = chan;
++      _sound_fx[slot].on_irq_pool = false;  // patch 0167: playResampled v1 stays SDL3_mixer (not L3 ISR-pool)
++      _slots[chan]                = slot;
+     }
+     else
+     {
+@@ -724,6 +975,22 @@ void Pixtone::stop(int32_t slot)
+   // bracket the entire stop() body. Captures MIX_StopTrack call
+   // cost + per-SFX bookkeeping. Per-SFX-event; not per-frame.
+   NXE::Diag::P12PixtoneStopTimer _p12_pst;
++
++  // patch 0167 (Lever 3 Pixtone IRQ-mix routing branch). When the
++  // slot was started via SDL_DOSPixtoneStart (on_irq_pool=true),
++  // route stop through SDL_DOSPixtoneStop. The channel value is an
++  // ISR-pool id (not a _track_pool index); indexing _track_pool[chan]
++  // here would be out-of-bounds or wrong-target. SDL_DOSPixtoneStop
++  // is a no-op if the channel has already ended naturally (the ISR
++  // decrement already fired); calling it unconditionally is safe.
++  if (_sound_fx[slot].channel != -1 && _sound_fx[slot].on_irq_pool)
++  {
++    SDL_DOSPixtoneStop(_sound_fx[slot].channel);
++    _sound_fx[slot].channel     = -1;
++    _sound_fx[slot].on_irq_pool = false;
++    return;
++  }
++
+   if (_sound_fx[slot].channel != -1)
+   {
+     int32_t chan = _sound_fx[slot].channel;
+@@ -816,6 +1083,22 @@ void Pixtone::_prepareToPlay(stPXSound *snd, int32_t slot)
+   _sound_fx[slot].chunk           = MIX_LoadRawAudioNoCopy(mixer, sound_buf, converted_len, &audio_spec, false);
+   _sound_fx[slot].raw_master_buf  = sound_buf;
+   _sound_fx[slot].raw_master_len  = converted_len;
++  // patch 0167 (Lever 3 Pixtone IRQ-mix): DPMI-lock raw_master_buf so
++  // it stays resident across IRQ-context reads by the SB16 IRQ-5 ISR
++  // mix loop under L3 ON. Lock is unconditional (boot-time, all rendered
++  // slots) per L3-Q1 STOP-and-ack: one-time cost ~few ms at boot for
++  // ~86 slots; no race window (lock in place before any ISR could fire);
++  // L3-OFF path leaves the lock dormant (negligible CWSDPMI lock-table
++  // bookkeeping). _go32_dpmi_lock_data is DJGPP's INT 31h func 0x0600
++  // primitive; the SDL3-DOS macro DOS_LockData expands to the same
++  // call but lives in vendor/SDL/src/core/dos/SDL_dos.h (an SDL
++  // internal); calling the DJGPP API directly keeps the engine source
++  // free of SDL internals. See LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.7
++  // (DPMI lock + risk management).
++#ifdef __DJGPP__
++  if (sound_buf && converted_len > 0)
++    _go32_dpmi_lock_data(sound_buf, (unsigned long)converted_len);
++#endif
+ }
+ 
+ } // namespace Sound
+diff --git a/src/sound/Pixtone.h b/src/sound/Pixtone.h
+index d70e4ea..50e72a3 100644
+--- a/src/sound/Pixtone.h
++++ b/src/sound/Pixtone.h
+@@ -36,6 +36,19 @@
+ // 32-bit aligned word write. C-linkage symbol; no namespace.
+ extern "C" volatile std::uint32_t g_pixtone_active_count;
+ 
++// patch 0167 (Phase 11 -- Lever 3 Pixtone IRQ-mix). SDL-side
++// counter for IRQ-pool-active channels. Atomically incremented by
++// SDL_DOSPixtoneStart on the engine-thread; atomically decremented
++// by the SB16 IRQ-5 ISR at end-of-buffer. Reader-side (the 0165
++// probe sampler) SUMs both counters at sample time to get the
++// total concurrent SFX track count regardless of which path
++// (SDL3_mixer or L3 IRQ-pool) is active. Dual-writer atomicity
++// pattern via GCC __sync_fetch_and_add / _sub (compiles to
++// lock xadd on i486+); sdl-engine's SDL/0071 owns the atomic
++// sequence. See PIXTONE-MULTISOURCE-DESIGN.md sec.10.3 Q5 +
++// LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.10.5.
++extern "C" volatile std::uint32_t g_dos_pixtone_active_count;
++
+ // patch 0165 (Phase 11 -- Pixtone multi-source probe). Two new counters
+ // for the [pixtone-multi] block audit + hypothesis A/B discrimination:
+ //
+@@ -158,6 +171,18 @@ public:
+   // 0..100 to 0..128 (full SDL2 range).
+   void setVolume(int volume_0_100);
+ 
++  // patch 0167-v3 (Bug 5 defensive interlock per team-lead #137 + flush-instr
++  // three-front response): if BOTH SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=1 AND
++  // SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya are set at SoundManager::init
++  // time, this method emits a LOG_ERROR diagnostic + force-resolves the
++  // L3 killswitch cache to OFF so subsequent Pixtone::play calls never
++  // enter the L3 routing branch (which has a known hang interaction with
++  // the SDL3_mixer-Pixtone-fallback path under Organya; v1.0.2 owns the
++  // deep root-cause campaign). Idempotent: subsequent calls re-check
++  // both env vars but the cache resolution already happened. Safe to
++  // call from SoundManager::init.
++  void checkL3OrganyaInterlock();
++
+   void pxtSoundDone(int channel);
+ 
+ protected:
+@@ -191,6 +216,22 @@ private:
+     // has released the mixer's borrow on it.
+     uint8_t *raw_master_buf  = nullptr;
+     int      raw_master_len  = 0;
++    // patch 0167 (Lever 3 Pixtone IRQ-mix). Per-SFX state that
++    // routing-branch reads need to disambiguate L3 vs SDL3_mixer
++    // path for slots whose channel was set under one or the other.
++    // - gain_x256: gain in fixed-point x256 (256 = 1.0). Read by
++    //   SDL_DOSPixtoneStart at play time under L3. Stored at
++    //   setVolume time for both paths (mirrors the existing global
++    //   volume across all slots; per-slot field matches the L3
++    //   design sketch + lets a future v2 SDL_DOSPixtoneSetGain do
++    //   per-slot live updates).
++    // - on_irq_pool: true if `channel` is an L3 ISR-pool id from
++    //   SDL_DOSPixtoneStart; false if `channel` is a _track_pool
++    //   index from MIX_PlayTrack. Read by Pixtone::stop to decide
++    //   the routing branch. Cleared on play(L3 OFF path) / set on
++    //   play(L3 ON path) / cleared on Pixtone::stop after release.
++    int16_t  gain_x256       = 256;     // 1.0 default
++    bool     on_irq_pool     = false;   // L3 routing disambiguator
+   } _sound_fx[256];
+   int32_t _slots[PIXTONE_TRACK_POOL_SIZE];
+ 
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 40da0ca..1499a33 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -808,6 +808,13 @@ bool SoundManager::init()
+   }
+ 
+   Pixtone::getInstance()->init();
++  // patch 0167-v3 (Bug 5 defensive interlock per team-lead #137 + flush-instr
++  // three-front response): if BOTH SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=1 AND
++  // SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya, force L3 OFF early so no
++  // Pixtone::play can enter the L3 routing branch (which hangs PLAY2 per
++  // sec.23.x; v1.0.2 owns root-cause). One LOG_ERROR diagnostic emitted
++  // on the dangerous combo; otherwise no-op.
++  Pixtone::getInstance()->checkL3OrganyaInterlock();
+   Organya::getInstance()->init();
+ 
+   // prepare resampled stream sounds (Core battle and <SSS in main artery)
+-- 
+2.47.3
+

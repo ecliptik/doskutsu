@@ -5,13 +5,16 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
-## [Unreleased]
+## [1.0.1] - 2026-05-22
 
 The post-v1.0.0 486-class hardware campaign. First release cycle specifically
 targeting the slower Pentium-class machine reports -- 486DX2-66, Pentium-OD-83,
-486DX-50 / Am5x86 -- where v1.0.0 surfaced three bugs that didn't reproduce at
-higher CPU rates: a quit-to-DOS hang during audio teardown, ~1-second stage-load
-freezes, and continuous SFX stutter on rapid-fire weapons.
+486DX-50 / Am5x86 -- where v1.0.0 surfaced bugs that didn't reproduce at higher
+CPU rates: a quit-to-DOS hang during audio teardown, ~1-second stage-load
+freezes, continuous SFX stutter on rapid-fire weapons, and music-tempo wobble.
+This release closes the audio bugs and ships their fixes ON by default, all
+operator-validated on real hardware (486DX2-66) and cross-CPU benchmarked
+(Am5x86-133 / 486DX2-50 / Pentium-OverDrive-83, Cirrus CL-GD5430).
 
 ### Fixed
 
@@ -28,33 +31,46 @@ freezes, and continuous SFX stutter on rapid-fire weapons.
   5684-event parse at ~480 PPQ tempo resolution). The existing
   `SDL_HINT_DOSKUTSU_PRELOAD_MIDI=1` killswitch (`patches/nxengine-evo/0112`
   + `0114` from the wave 18-63 arc) eliminates the spike class on real HW
-  (count > 500 ms went 4 -> 0; max went 1095 -> 414 ms). Scheduled to flip
-  default-ON in v1.0.1.
+  (count > 500 ms went 4 -> 0; max went 1095 -> 414 ms). Available via the
+  killswitch (`=1`); the default-ON flip is deferred to a later release.
 
-### Investigated -- continuing
+- **Continuous SFX stutter on rapid-fire (Bug 2)** -- root-caused to
+  cooperative-scheduler audio-thread starvation (hypothesis C: the main
+  thread spends ~1-2 s in `playSfx` chains before yielding, the ring drains,
+  the audio thread runs in burst). Fixed by **Lever 3** -- Pixtone PCM mixed
+  directly in the SB16 IRQ-5 ISR (`patches/SDL/0071` + `patches/nxengine-evo/
+  0167`), bypassing the cooperative scheduler entirely for the SFX path
+  (DOOM DMX-style). Operator-confirmed "stutter gone" on the 486DX2-66.
 
-- **Continuous SFX stutter on rapid-fire (Bug 2)** -- two probe iters (v1 +
-  v2) confirmed hypothesis C: cooperative-scheduler audio-thread starvation.
-  The v2 probe's `[sdl-audiocb]` block emit captured a max single-callback
-  latency of 1701 ms during heavy SFX activity, while concurrent Pixtone-
-  track active-count stayed at 1-4 (ruling out mix-CPU saturation). The
-  main thread spends nearly two seconds in `playSfx` chains before yielding
-  back to the audio thread; ring buffer drains during the gap; audio thread
-  runs in burst when the scheduler finally yields. Operator perception
-  report ("audio drops/pauses during rapid action") cross-confirmed via the
-  discriminator table in `docs/internal/PIXTONE-MULTISOURCE-DESIGN.md`
-  sec.8. Structural fix authored next: Lever 3, Pixtone PCM mix in the
-  SB16 IRQ-5 ISR, bypassing the cooperative scheduler entirely for SFX
-  (DOOM DMX-style architecture).
+- **Music-tempo wobble on slow CPU (Bug 4)** -- the same starvation class
+  warping MIDI note timing. Fixed by **Lever 2b** -- the MidiScheduler tick
+  runs from the SB16 IRQ-5 ISR at the steady ~43 Hz Tier-2 rate
+  (`patches/SDL/0072` + `patches/nxengine-evo/0168`), decoupling MIDI tempo
+  from the render rate. Operator-confirmed "tempo much improved, no longer
+  stutters when SFX happen."
 
-- **Music tempo wobble on slow CPU (Bug 4)** -- same mechanism class as
-  Bug 2: MIDI events dispatched in burst when the audio thread runs after
-  starvation, warping note timing. Operator report ("music gets out of
-  sync"). Closed structurally by the same Lever 3 path that fixes Bug 2,
-  or independently via Lever 2b (MidiScheduler tick from timer ISR; design
-  authored alongside Lever 3).
+- **SFX pitch + balance under Lever 3 (Bug 6)** -- enabling Lever 3 surfaced
+  two follow-on issues, both root-caused by measurement on real hardware (the
+  predicted causes were wrong both times): (1) SFX played an octave too high
+  because the SB16 device opens at 44100 Hz while the Tier-2 Pixtone master
+  renders at 11025 -- the engine now supplies its master rate and SDL computes
+  a per-tier consumption divider automatically (`patches/SDL/0073` + `0074` +
+  `patches/nxengine-evo/0169`); (2) SFX were too quiet against the OPL3 music
+  because the SB16 CT1745 analog mixer was never programmed -- it is now set at
+  init (PCM/voice 31, FM 28) to balance SFX against music. Operator-confirmed
+  correct pitch + good balance, no stutter.
 
 ### Changed
+
+- **Audio fixes ON by default** -- Lever 3 (Pixtone IRQ-mix), Lever 2b
+  (MIDI tick from ISR), and the auto-RATEDIV + SB16 mixer balance are all
+  default-ON as of `patches/SDL/0075` + `patches/nxengine-evo/0170`, so the
+  fixes apply out of the box. Each is independently disablable as a
+  killswitch (`SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=0`,
+  `SDL_HINT_DOSKUTSU_MIDI_ISR_TICK=0`, `SDL_HINT_DOSKUTSU_SB16_MIXER_PROGRAM=0`);
+  the SFX/music balance is tunable via `SDL_HINT_DOSKUTSU_SB16_FM_VOL` /
+  `SDL_HINT_DOSKUTSU_SB16_VOICE_VOL` (0..31). The operator-validated default
+  balance is FM 28 / voice 31.
 
 - **Build infrastructure** -- the Makefile's sdl3 cmake configure step
   adds `-DSDL_TESTS=OFF` to skip SDL3 test executables (loopwave, surround,
@@ -64,8 +80,31 @@ freezes, and continuous SFX stutter on rapid-fire weapons.
   only change; doskutsu.exe behavior unaffected.
 
 - **Smoke gate banner-emit array** -- `tests/run-gameplay-smoke.sh`
-  BANNERS array updated to track the new audio-thread + probe mechanisms
-  shipped this cycle (47/47/47 parity across REGEX/SEVERITY/LABEL).
+  BANNERS array updated to track the v1.0.1 audio mechanisms + assert the
+  ship config on a zero-env boot (L3 + L2b ENABLED both SDL+engine,
+  auto-RATEDIV master_rate, SB16 balance), 59/59/59 parity across
+  REGEX/SEVERITY/LABEL.
+
+### Performance
+
+- **No fps regression from the audio fixes** -- the v1.0.1 ship config was
+  cross-CPU benchmarked on the LP4IP1 board (CPU-swapped), video = Cirrus
+  CL-GD5430, same TAS on each. fps_p50 (drop-4): 486DX2-50 **15.4**,
+  486DX2-66 **18.9**, Am5x86-133 **32.3**, Pentium-OverDrive-83 **33.3**.
+  All-samples medians match the pre-v1.0.1 run within rounding -- the IRQ-mix
+  offload did not cost frame rate. (This benchmark TAS is a lighter scene than
+  the heavy-music figures in the README Status table; the two are not directly
+  comparable. Recorded as the Cirrus baseline for an upcoming S3 ViRGE/DX
+  video-card comparison.)
+
+### Known issues
+
+- **Lever 3 + Organya hard-freeze (Bug 5)** -- deferred to v1.0.2. Only
+  reachable if a user opts into the legacy Organya synth
+  (`SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya`) AND Lever 3; the default OPL3
+  backend is unaffected, and a defensive interlock forces Lever 3 off under
+  Organya. The underlying Organya-path freeze itself is a separate v1.0.2
+  investigation.
 
 ### Diagnostic infrastructure
 

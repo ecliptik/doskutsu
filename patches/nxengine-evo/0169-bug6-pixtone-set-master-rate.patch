@@ -1,0 +1,91 @@
+From 153f2a7001a7dafa31b457e3398fa050d7b1dd08 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 21 May 2026 20:29:20 -0700
+Subject: [PATCH] perf phase 11 patch 0169 -- Bug 6 RATEDIV bake-in: supply
+ Pixtone master rate to SDL IRQ-mix
+
+The Lever 3 (SDL/0071) Pixtone IRQ-mix ISR consumes raw_master_buf at the
+SB16 physical device rate, which the rate-diag iter measured as 44100 in all
+audio tiers. The Pixtone master renders at {S16, AUDIO_CHANNELS, SAMPLE_RATE}
+-- an int16-element rate of SAMPLE_RATE * AUDIO_CHANNELS (Tier-2 = 11025,
+Tier-1 = 44100). With no rate coupling the ISR drains a Tier-2 master 4x too
+fast, so SFX play two octaves too high (486-campaign Bug 6).
+
+The ISR cannot read the engine's SAMPLE_RATE / AUDIO_CHANNELS globals, so the
+engine hands the master int16 rate to the SDL side via the new
+SDL_DOSPixtoneSetMasterRate export (sdl-engine SDL/0074). SDL caches it and
+at DOSSOUNDBLASTER_OpenDevice computes a tier-aware consumption divider
+(shift_div = log2(round(device->spec.freq / master_rate)) -> RATEDIV 4 for
+Tier-2, 1 for Tier-1), baking the operator-validated RATEDIV=4 as the default.
+The SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV env var stays a debug override.
+
+The call runs in SoundManager::init before MIX_CreateMixerDevice (which
+triggers OpenDevice), after the Tier block finalizes the rate globals.
+Calling unconditionally is safe: SDL only consumes the value when Lever 3
+engages, and a <= 0 rate is a no-op. The setter signature (int arg, declared
+in the public <SDL3/SDL_dospixtone.h>) was locked cross-link-unit with
+sdl-engine before authoring to avoid a link-time symbol mismatch.
+
+Also emits a one-time init LOG_INFO of the handed master_rate (engine-side
+witness to pair with SDL/0074's SDL-side RATEDIV banner; localizes a boundary
+mismatch to engine-vs-SDL). Not a smoke-gated banner.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 66d3678..d32422c 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -7,6 +7,7 @@
+ // SDL_AUDIO_DRIVER_DOS_SOUNDBLASTER outer guard.
+ #include <SDL3/SDL_dosaudio_shutdown.h>
+ #include <SDL3/SDL_dosmidi_tick.h>  // patch 0168 (Lever 2b): SDL_DOSMidiTickRegister + IsrTickActive (sdl-engine SDL/0072)
++#include <SDL3/SDL_dospixtone.h>  // patch 0169 (Bug 6 RATEDIV bake-in): SDL_DOSPixtoneSetMasterRate (sdl-engine SDL/0074)
+ 
+ // patch 0168 (Lever 2b): extern "C" forward-decl for the engine-side
+ // tick_isr thunk defined in MidiScheduler.cpp. Address-of taken at
+@@ -355,6 +356,38 @@ bool SoundManager::init()
+   // (stereo, preserves patch-0061 behavior); Tier-2 flips to 1 (mono)
+   // via the AUDIO_TIER2 env hint logic above. Both vars are file-scope
+   // globals at the top of this TU.
++  //
++  // DOS-PORT (patch 0169, 486-campaign Bug 6 RATEDIV bake-in): hand the
++  // Pixtone master buffer's int16-element rate to the SDL3-DOS audio backend
++  // so the Lever 3 (SDL/0071) IRQ-mix ISR can resolve a tier-aware
++  // consumption divider at device-open time. raw_master_buf renders at
++  // {S16, AUDIO_CHANNELS, SAMPLE_RATE}, so its content rate is
++  // SAMPLE_RATE * AUDIO_CHANNELS int16/sec (Tier-2 = 11025; Tier-1 = 44100).
++  // The SB16 device physically opens at 44100 in all tiers (rate-diag
++  // measured), so without this coupling the ISR drains an 11025 Tier-2
++  // master 4x too fast and SFX play two octaves too high (Bug 6). SDL caches
++  // this value and at OpenDevice computes
++  //   shift_div = log2(round(device->spec.freq / master_rate))
++  // -> RATEDIV 4 for Tier-2, 1 for Tier-1 (the operator-validated default).
++  //
++  // Ordering: this MUST run before MIX_CreateMixerDevice below (which
++  // triggers DOSSOUNDBLASTER_OpenDevice, where shift_div is resolved); the
++  // Tier-2/Tier-1 block above has already finalized ::SAMPLE_RATE /
++  // ::AUDIO_CHANNELS. Calling unconditionally is safe -- SDL only consumes
++  // the value when Lever 3 engages, and a <= 0 rate is a no-op (RATEDIV=1
++  // fallback). The SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV env var stays a
++  // debug override. Setter symbol from sdl-engine SDL/0074.
++  SDL_DOSPixtoneSetMasterRate((int)(::SAMPLE_RATE * ::AUDIO_CHANNELS));
++  // Engine-side witness of the value handed across the boundary, to pair
++  // with sdl-engine SDL/0074's SDL-side "RATEDIV auto" banner (dev_freq /
++  // master_rate / shift_div). If the boundary ever carries a wrong value
++  // these two logs localize it to engine-vs-SDL instantly. One-time init
++  // log; not a smoke-gated banner (sdl-engine owns the RATEDIV smoke banner).
++  LOG_INFO("Pixtone IRQ rate-divider: handed master_rate={} int16/s "
++           "(SAMPLE_RATE={} x AUDIO_CHANNELS={}) to SDL for auto-RATEDIV "
++           "(SDL/0074 computes shift_div from the resolved device freq).",
++           (unsigned long)(::SAMPLE_RATE * ::AUDIO_CHANNELS),
++           (unsigned long)::SAMPLE_RATE, (unsigned long)::AUDIO_CHANNELS);
+   spec.channels = ::AUDIO_CHANNELS;
+   spec.freq     = ::SAMPLE_RATE;
+ 
+-- 
+2.47.3
+

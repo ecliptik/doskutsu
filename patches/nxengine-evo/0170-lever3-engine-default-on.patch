@@ -1,0 +1,190 @@
+From 7fc0db3db2d8483905dbc84fba3ff0018c369fde Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 22 May 2026 12:00:30 -0700
+Subject: [PATCH] perf phase 11 patch 0170 -- v1.0.1 default-flip: Lever 3
+ Pixtone IRQ-mix engine gate default-ON
+
+For the v1.0.1 ship config (Cave Story acceptable on a 486DX2-66), Lever 3
+(Pixtone SFX routed through the SB16 IRQ-5 ISR mix path, bypassing the
+cooperative-scheduler audio thread that caused the Bug 2 SFX stutter) becomes
+the default. This flips the engine-side L3 gate from strict-"1" opt-in
+(default OFF) to killswitch semantics (default ON; only literal "0" disables),
+matching the SoundManager.cpp Tier-2 idiom.
+
+Two PIXTONE_IRQ_MIX reads in the engine now share the killswitch default-ON
+meaning:
+- pixtone_irq_mix_active() env parse (the runtime routing gate). Still AND-ed
+  with SDL_DOSPixtoneIRQMixActive() so the SDL-side default + Organya
+  backend-gate govern; the SDL side flips the same hint in SDL/0075, so both
+  sides flip together (a one-sided flip would leave L3 OFF).
+- checkL3OrganyaInterlock()'s init-time parse, so the early L3+Organya
+  diagnostic LOG_ERROR fires under default-ON too; its message text +
+  comment are reworded to correctly attribute the cause under default-ON
+  (an operator setting only AUDIO_BACKEND=organya, with PIXTONE_IRQ_MIX
+  left unset/default), rather than the stale "BOTH ...=1 AND ...=organya
+  SET" wording.
+(The third reader, SDL-side SDL_DOSPixtoneIRQMixActive(), is sdl-engine
+SDL/0075.)
+
+The per-call organya_active interlock (live-backend-enum based) is unchanged
+-- it forces L3 OFF whenever Organya is the live music backend regardless of
+the cached decision, so the Bug 5 L3+Organya hang stays unreachable under the
+new default. The default music backend is opl3, so the default path is
+L3-on+opl3 = safe.
+
+Banners reworded to default-ON framing: the L3 three-state banner
+(ENABLED-default / DISABLED-refused / DISABLED-killswitch) in Pixtone.cpp, and
+the L2b registration banner in SoundManager.cpp (registered-default /
+skipped-via-0). The L2b banner reword is log-accuracy ONLY: the engine has no
+independent L2b gate (it follows SDL_DOSMidiIsrTickActive() at every site), so
+L2b default-ON is entirely the SDL-side SDL/0072 flip and no engine L2b gate
+logic changes here. Smoke BANNERS regex for the reworded engine banners is
+owned by sdl-engine's single-writer smoke-gate edit.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp      | 67 +++++++++++++++++++++++---------------
+ src/sound/SoundManager.cpp | 10 ++++--
+ 2 files changed, 48 insertions(+), 29 deletions(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index b9644f5..2a758ff 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -66,8 +66,10 @@ namespace Sound
+ {
+ 
+ // DOS-PORT (patch 0167, Lever 3 Pixtone IRQ-mix). Sentinel-cached
+-// killswitch helper for SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX. Strict-"1"
+-// opt-in; default OFF. Same idiom as nxengine/0162-v2 (MIDGAP_PUMP) /
++// killswitch helper for SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX. patch 0170
++// (v1.0.1 default-flip) made this default ON; only literal "0" disables
++// (was strict-"1" opt-in / default OFF in 0167). Same idiom as
++// nxengine/0162-v2 (MIDGAP_PUMP) /
+ // 0164 (TICKPUMP) / 0165 (probe). Banner emit on first call.
+ //
+ // When ENABLED, Pixtone::play routes non-resampled SFX through the
+@@ -77,7 +79,7 @@ namespace Sound
+ // C confirmed as the SFX-stutter cause (max single-callback latency
+ // 1701 ms on real DX2-66 per #120 sec.22).
+ //
+-// When DISABLED (default), Pixtone::play uses the existing SDL3_mixer
++// When DISABLED (killswitch =0), Pixtone::play uses the existing SDL3_mixer
+ // dispatch path -- byte-identical to pre-0167 at the rendered-frame
+ // level. The killswitch gates only the routing branches; counter
+ // state machines and probe-side reads handle both paths transparently.
+@@ -144,23 +146,30 @@ static bool pixtone_irq_mix_active()
+     // Active() returns cached state from the SDL-side OpenDevice
+     // resolution per sec.23.7.
+     const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX");
+-    const bool env_set     = (e && e[0] == '1' && e[1] == '\0');
++    // patch 0170 (v1.0.1 default-flip): killswitch -- default ON; only
++    // literal "0" disables (was strict-"1" opt-in / default OFF in 0167).
++    // Still AND-ed with sdl_engaged so the SDL-side 0075 default + Organya
++    // backend-gate govern; both sides flip together (a one-sided flip
++    // would keep L3 OFF).
++    const bool env_on      = !(e && e[0] == '0' && e[1] == '\0');
+     const bool sdl_engaged = SDL_DOSPixtoneIRQMixActive();
+-    g_pixtone_irq_mix_decided = (env_set && sdl_engaged) ? 1 : 0;
++    g_pixtone_irq_mix_decided = (env_on && sdl_engaged) ? 1 : 0;
+     if (g_pixtone_irq_mix_decided)
+     {
+-      LOG_INFO("pixtone IRQ-mix: ENABLED (opt-in; SDL backend engaged)");
++      LOG_INFO("pixtone IRQ-mix: ENABLED (default; SDL backend engaged; set "
++               "SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=0 to disable)");
+     }
+-    else if (env_set && !sdl_engaged)
++    else if (env_on && !sdl_engaged)
+     {
+-      LOG_INFO("pixtone IRQ-mix: DISABLED (env=1 but SDL backend refused; "
+-               "likely Organya audio backend selected -- falling back to "
+-               "SDL3_mixer for SFX. To engage L3 set "
++      LOG_INFO("pixtone IRQ-mix: DISABLED (L3 requested but SDL backend "
++               "refused; likely Organya audio backend selected -- falling "
++               "back to SDL3_mixer for SFX. To engage L3 set "
+                "SDL_HINT_DOSKUTSU_AUDIO_BACKEND to opl3 / wb / midi-stub.)");
+     }
+     else
+     {
+-      LOG_INFO("pixtone IRQ-mix: DISABLED (default)");
++      LOG_INFO("pixtone IRQ-mix: DISABLED (killswitch; "
++               "SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=0)");
+     }
+   }
+ 
+@@ -733,27 +742,33 @@ void Pixtone::setVolume(int volume_0_100)
+ // init() returns, before any Pixtone::play could fire (no SFX triggers
+ // during the audio-init phase per the engine's existing init ordering).
+ //
+-// LOG_ERROR (not WARN/INFO): operator's mental model is "I set both env
+-// vars; why is L3 not engaging?" -- the ERROR level catches their eye in
+-// the log + the message text names the fix-shape (set BACKEND to
+-// opl3/wb/midi-stub to engage L3 cleanly).
++// LOG_ERROR (not WARN/INFO): with L3 default-ON (v1.0.1), an operator
++// selecting AUDIO_BACKEND=organya hits this WITHOUT setting
++// PIXTONE_IRQ_MIX at all -- the ERROR level catches their eye in the log
++// + the message names the fix-shape (use opl3/wb/midi-stub, or set
++// PIXTONE_IRQ_MIX=0 to silence).
+ void Pixtone::checkL3OrganyaInterlock()
+ {
+   const char *l3 = SDL_GetHint("SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX");
+   const char *bk = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
+-  const bool l3_set      = (l3 && l3[0] == '1' && l3[1] == '\0');
++  // patch 0170 (v1.0.1 default-flip): killswitch -- L3 is on unless the
++  // hint is literal "0", matching pixtone_irq_mix_active() above so the
++  // early L3+Organya diagnostic fires under default-ON too.
++  const bool l3_on       = !(l3 && l3[0] == '0' && l3[1] == '\0');
+   const bool bk_organya  = (bk && std::strcmp(bk, "organya") == 0);
+-  if (l3_set && bk_organya)
++  if (l3_on && bk_organya)
+   {
+-    LOG_ERROR("BOTH SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=1 AND "
+-              "SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya SET; "
+-              "L3 + ORGANYA IS KNOWN-INCOMPATIBLE (PLAY2 hang root-cause "
+-              "owned by v1.0.2 deep-campaign; v1.0.1 ships defensive "
+-              "interlock per flush-instr #135 three-front response). "
+-              "L3 forced OFF (hang prevention); SFX continue through "
+-              "SDL3_mixer path; music continues through Organya. To "
+-              "engage L3 cleanly: SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND to "
+-              "opl3 / wb / midi-stub instead of organya.");
++    LOG_ERROR("Lever 3 (Pixtone IRQ-mix; default ON since v1.0.1, or "
++              "SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=1) is incompatible with "
++              "SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya. L3 + ORGANYA IS "
++              "KNOWN-INCOMPATIBLE (PLAY2 hang root-cause owned by v1.0.2 "
++              "deep-campaign; v1.0.1 ships defensive interlock per "
++              "flush-instr #135 three-front response). L3 forced OFF (hang "
++              "prevention); SFX continue through SDL3_mixer path; music "
++              "continues through Organya. To engage L3 cleanly set "
++              "SDL_HINT_DOSKUTSU_AUDIO_BACKEND to opl3 / wb / midi-stub, or "
++              "set SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=0 to silence this and "
++              "keep Organya.");
+     // Force-resolve the killswitch cache to DISABLED. Subsequent calls to
+     // pixtone_irq_mix_active() see g_pixtone_irq_mix_decided != -1 and
+     // skip the env+SDL parse entirely, returning false. Engine never
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index d32422c..eb28709 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -879,12 +879,16 @@ bool SoundManager::init()
+   if (SDL_DOSMidiIsrTickActive())
+   {
+     SDL_DOSMidiTickRegister(&midi_scheduler_tick_isr_thunk);
+-    LOG_INFO("midi ISR tick: engine registered tick_isr callback (L2b active)");
++    // patch 0170 (v1.0.1 default-flip): banner reworded to default-ON
++    // framing (no gate-logic change -- this branch follows the SDL-side
++    // SDL_DOSMidiIsrTickActive(), whose default flips to ON in SDL/0072).
++    LOG_INFO("midi ISR tick: engine registered tick_isr callback (L2b active; "
++             "default ON; set SDL_HINT_DOSKUTSU_MIDI_ISR_TICK=0 to disable)");
+   }
+   else
+   {
+-    LOG_INFO("midi ISR tick: engine skipped registration (L2b disabled or "
+-             "SDL_HINT_DOSKUTSU_MIDI_ISR_TICK unset; main-loop tick path stays "
++    LOG_INFO("midi ISR tick: engine skipped registration (L2b disabled via "
++             "SDL_HINT_DOSKUTSU_MIDI_ISR_TICK=0; main-loop tick path stays "
+              "authoritative)");
+   }
+ 
+-- 
+2.47.3
+

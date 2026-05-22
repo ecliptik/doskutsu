@@ -1,0 +1,362 @@
+From 5524d18c8918a755cac6d322839197cc028c72c1 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 21 May 2026 16:51:32 -0700
+Subject: [PATCH] dos: Phase 11 patch 0073 -- Bug 6 Tier-2 rate-diag
+ instrumentation + Pixtone IRQ-mix consumption rate-divider
+
+Why DOS needs this:
+
+The bug6-sweep real-HW iter (2026-05-21, operator DX2-66) PROVED Bug 6
+is a RATE bug, not amplitude: under the Tier-2 audio config (11025 Hz)
+the Lever 3 (patch 0071) ISR-mixed Pixtone SFX play ~an octave too HIGH;
+a headroom (amplitude) sweep 0/2/3 left the pitch high on every Tier-2
+cell while the Tier-1 (22050 Hz) cell played at correct pitch.
+22050/11025 = 2x = the octave. The earlier source-only amplitude
+verdict was refuted by real HW. The SDL3_mixer SFX path (Lever 3 OFF)
+plays at correct pitch at Tier-2, so the DSP 0x41 / device->spec.freq
+path is NOT touched.
+
+The resolved SB16 device rate currently prints only via SDL_Log ->
+stdout (sb.c OpenDevice), invisible in the captured iter logs -- so the
+true device rate is unobservable. Leading hypothesis: the ViBRA16 /
+CTL0026 drains 16-bit STEREO frames at ~2x the 0x41-programmed value
+(the SB-Pro-style L/R doubling that the SB16 0x41 path does not account
+for), so the real IRQ-5 fires ~2x faster than (spec.freq / sample_frames)
+predicts, and PixtoneISRMix's 1:1 source consumption (one mono source
+sample per output stereo pair) runs 2x too fast. NOT source-confirmable
+SDL-side -- it must be measured.
+
+Two parts in one patch (Part A always-on, Part B killswitch'd default-OFF
+byte-identical):
+
+  PART A -- rate instrumentation (always-on; doskutsu_dbg_log ->
+  SDLDBG.LOG; read-only at init; no env var):
+
+  - rate-diag static snapshot at OpenDevice (right after the existing
+    SDL_Log): emits req_freq/req_ch (captured BEFORE the SB16 channel-
+    force) + dev_freq/dev_ch + sample_frames + buffer_size + dsp0x41_hz
+    (== device->spec.freq for SB16, the value written to DSP cmd 0x41,
+    unmutated from the snapshot point) + block_size + isr_chunk (the
+    latter two recomputed from device->buffer_size; provably equal to
+    the canonical sites at sb.c chunk_size / DSP-block).
+
+  - rate-meas periodic emit in DOSSOUNDBLASTER_PlayDevice (non-IRQ
+    context -- doskutsu_dbg_log's fopen/fwrite/fsync is illegal in the
+    ISR): derives the TRUE IRQ Hz from the EXISTING per-IRQ counter
+    doskutsu_audio_irq_count over a real SDL_GetTicksNS wall-clock
+    window (NO second counter; three statics are delta-snapshot
+    holders), then irq_hz * sample_frames = hw_frame_rate. If
+    hw_frame_rate ~= 2 * dev_freq, the 2x over-drain is confirmed
+    numerically. Emits every 100 PlayDevice calls (~2.3 s at Tier-2).
+    The decisive Bug-6 measurement.
+
+  PART B -- candidate fix: operator-tunable consumption rate-divider
+  (killswitch SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV, strict "1"/"2"/"4",
+  default "1"; cached as log2 shift_div = 0/1/2 at OpenDevice; DPMI-
+  locked alongside the other 0071 ISR state):
+
+  - In PixtoneISRMix the source index advances at 1/RATEDIV the output-
+    pair rate: idx = p >> shift_div. RATEDIV=2 holds each source sample
+    for 2 output stereo pairs -> half-speed consumption -> down one
+    octave = corrects the Tier-2 2x-fast pitch. out_pairs is bounded
+    (min(n_stereo_pairs, remaining_samples << shift_div)) so the highest
+    idx read stays <= remaining_samples-1. With n_stereo_pairs and
+    RATEDIV both powers of 2, out_pairs >> shift_div is exact -> pos
+    stays an integer byte offset (no fractional phase state; IRQ-safe
+    integer-only; ~one extra sar per source sample). NN sample-hold
+    (sample-doubling; fine for retro SFX; linear interp is v2). The
+    EOF/loop + pos>buf_len defensive guards + the gain/headroom-shift/
+    clamp math are unchanged -- only the source INDEX selection changes.
+
+  - NOT auto-computed: the true HW drain rate is not readable SDL-side
+    (sb.c accepts the requested freq unchanged for SB16, so
+    device->spec.freq stays SDL's belief, not the hardware reality;
+    only rate-meas hw_frame_rate exposes the divergence). The operator
+    supplies the known divider directly.
+
+OFF-path byte-identity: RATEDIV=1 -> shift_div=0 -> idx=p -> out_pairs ==
+min(remaining_samples, n_stereo_pairs) (== the old to_mix) -> reads
+src[0..to_mix-1], pos advances exactly to_mix*2, EOF at the same point =
+bit-identical audio to the pre-0073 0071 loop. Lever 3 OFF skips
+PixtoneISRMix entirely (unchanged). Two-witness: the RATEDIV-engaged
+banner emits ONLY when RATEDIV != 1; default smoke (L3 off) shows
+neither RATEDIV banner.
+
+Banners (SDL-log channel): always-on "audio: SDL/0073 rate-diag: ..." +
+periodic "audio: SDL/0073 rate-meas: ..."; when Lever 3 engaged,
+"audio: SDL/0073 pixtone IRQ rate-divider: ENGAGED RATEDIV=N ..." or the
+"RATEDIV=1 (default; ...)" variant. New banner regexes added to
+tests/run-gameplay-smoke.sh BANNER_REGEX (rate-diag required-but-optional-
+severity; RATEDIV optional, absent under default-L3-off smoke).
+SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV documented in docs/internal/BOOT.md.
+
+DOSBox-X smoke confirms the banner / boot path but NOT the audible pitch
+per [[dosbox_not_proxy]]; the rate-diag/rate-meas numbers + the RATEDIV
+pitch correction validate only on real DX2-66 hardware.
+
+SDL backend only; zero engine LOC; no public-header change; no nx-engine
+coordination (the divider is operator-supplied, so the ISR never needs
+the master source rate).
+
+Workspace-local per memory/sdl_ai_policy.md; never upstreamed.
+
+See docs/internal/BUG6-RATE-CONFIRMED-INSTR-AND-FIX-DESIGN.md (flush-instr
+spec) + bug6_sfx_clip_pitch_mechanism + v1_0_1_rc2_iter_verdict.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 182 ++++++++++++++++++++++++++++++--
+ 1 file changed, 172 insertions(+), 10 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index e16692e58..3cb332d8d 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -813,6 +813,27 @@ static bool g_dos_pixtone_irq_mix_active = false;
+  * shift: one extra cached-byte read per source sample -- negligible
+  * vs the surrounding mul + clamp + store. */
+ static volatile Uint8 g_dos_pixtone_irq_mix_shift = 9;
++
++/* DOSKUTSU patch (Phase 11 patch 0073): Bug 6 -- Pixtone IRQ-mix
++ * consumption rate-divider. Operator-supplied via
++ * SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV (strict "1"/"2"/"4"); cached here
++ * as a log2 shift (0/1/2). The bug6-sweep iter (2026-05-21) PROVED the
++ * Tier-2 (11025) L3 SFX play ~an octave too HIGH on real DX2-66 -- a RATE
++ * symptom, not amplitude (headroom 0/2/3 left the pitch high; Tier-1
++ * 22050 is correct; 22050/11025 = 2x = the octave). The SB16 device
++ * drains 16-bit stereo frames at ~2x the requested rate (the rate-diag /
++ * rate-meas lines confirm numerically), so PixtoneISRMix's 1:1 source
++ * consumption runs 2x too fast. RATEDIV=2 holds each source sample for 2
++ * output stereo pairs (idx = p >> shift_div), halving consumption =
++ * down one octave = correct pitch. NOT auto-computed: the true HW rate
++ * is not readable SDL-side (sb.c:1902 accepts the requested freq
++ * unchanged for SB16, so device->spec.freq stays SDL's belief, not the
++ * hardware reality), so the operator supplies the known divider directly.
++ * RATEDIV=1 (shift_div=0, idx=p) is byte-identical to pre-0073 (default).
++ * The ISR reads this Uint8 via one cached volatile load; DPMI-locked at
++ * OpenDevice. Per docs/internal/BUG6-RATE-CONFIRMED-INSTR-AND-FIX-DESIGN.md
++ * + bug6_sfx_clip_pitch_mechanism. */
++static volatile Uint8 g_dos_pixtone_irq_ratediv_shift = 0;
+ /* ========================================================================
+  * DOSKUTSU patch (Phase 11 patch 0072): Lever 2b -- MidiScheduler tick
+  * from the SB16 IRQ-5 ISR
+@@ -935,30 +956,48 @@ static void PixtoneISRMix(Uint8 *dma_dst, int dma_len)
+         const int remaining_samples = remaining_bytes / 2;
+         const int gain_x256 = g_dos_pix_chan[c].gain_x256;
+ 
+-        int to_mix = (remaining_samples < n_stereo_pairs)
+-                     ? remaining_samples : n_stereo_pairs;
+-
+         /* v5 mix-headroom: shift count cached at OpenDevice from
+          * SDL_HINT_DOSKUTSU_PIXTONE_IRQ_HEADROOM. Default 9 = 50%
+          * amplitude per SFX = ~4 concurrent SFX without clip. The
+          * Uint8 volatile load is one cached byte per loop iteration. */
+         const int shift = (int)g_dos_pixtone_irq_mix_shift;
+-        for (int s = 0; s < to_mix; ++s) {
+-            const int32_t scaled = ((int32_t)src[s] * gain_x256) >> shift;
++
++        /* DOSKUTSU patch (Phase 11 patch 0073): Bug 6 rate-divider.
++         * shift_div = log2(RATEDIV) (0/1/2), cached at OpenDevice. The
++         * source-sample index advances at 1/RATEDIV the output-pair rate
++         * (idx = p >> shift_div), so RATEDIV=2 holds each source sample
++         * for 2 output pairs -> half-speed consumption -> down one octave
++         * (corrects the Tier-2 2x-fast pitch). out_pairs is bounded so the
++         * highest idx read stays <= remaining_samples-1; with n_stereo_pairs
++         * and RATEDIV both powers of 2, out_pairs >> shift_div is exact so
++         * pos stays an integer byte offset (no fractional phase needed).
++         * RATEDIV=1 -> shift_div=0 -> idx=p -> byte-identical to pre-0073:
++         * out_pairs == min(remaining_samples, n_stereo_pairs) == old to_mix,
++         * reads src[0..to_mix-1], pos advances exactly to_mix*2. */
++        const int shift_div = (int)g_dos_pixtone_irq_ratediv_shift;
++        const int avail_pairs = remaining_samples << shift_div;
++        const int out_pairs = (avail_pairs < n_stereo_pairs)
++                              ? avail_pairs : n_stereo_pairs;
++        for (int p = 0; p < out_pairs; ++p) {
++            const int idx = p >> shift_div;
++            const int32_t scaled = ((int32_t)src[idx] * gain_x256) >> shift;
+             /* Stereo-duplicate: one Pixtone mono sample -> L + R of
+              * the same stereo pair. Centered (no pan); v2 candidate
+              * to wire differential gain_x256 for positional audio. */
+-            const int32_t mixed_L = (int32_t)dst[2 * s    ] + scaled;
+-            const int32_t mixed_R = (int32_t)dst[2 * s + 1] + scaled;
+-            dst[2 * s    ] = (mixed_L >  32767) ?  32767
++            const int32_t mixed_L = (int32_t)dst[2 * p    ] + scaled;
++            const int32_t mixed_R = (int32_t)dst[2 * p + 1] + scaled;
++            dst[2 * p    ] = (mixed_L >  32767) ?  32767
+                            : (mixed_L < -32768) ? -32768
+                            : (int16_t)mixed_L;
+-            dst[2 * s + 1] = (mixed_R >  32767) ?  32767
++            dst[2 * p + 1] = (mixed_R >  32767) ?  32767
+                            : (mixed_R < -32768) ? -32768
+                            : (int16_t)mixed_R;
+         }
+ 
+-        g_dos_pix_chan[c].pos += (Uint32)(to_mix * 2);
++        /* Whole source samples consumed this IRQ = out_pairs / RATEDIV
++         * (exact: out_pairs is either n_stereo_pairs or
++         * remaining_samples<<shift_div, both multiples of RATEDIV). */
++        g_dos_pix_chan[c].pos += (Uint32)((out_pairs >> shift_div) * 2);
+ 
+         if (g_dos_pix_chan[c].pos >= g_dos_pix_chan[c].buf_len) {
+             if (g_dos_pix_chan[c].loop_forever) {
+@@ -1601,6 +1640,46 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+                 g_dos_pixtone_irq_mix_shift = (Uint8)(8 + add);
+             }
+ 
++            /* DOSKUTSU patch (Phase 11 patch 0073): Bug 6 rate-divider
++             * resolution. SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV strict
++             * "1"/"2"/"4"; cached as a log2 shift (0/1/2). Default "1"
++             * (shift_div=0) keeps ISR consumption byte-identical to
++             * pre-0073. RATEDIV=2 corrects the Tier-2 octave-high SFX (the
++             * SB16 drains stereo frames at ~2x the requested rate; the
++             * rate-diag / rate-meas lines above confirm numerically). Only
++             * resolved when Lever 3 is engaged (the ISR never reads the
++             * shift otherwise). Per BUG6-RATE-CONFIRMED-INSTR-AND-FIX-
++             * DESIGN.md. */
++            {
++                const char *rd_hint =
++                    SDL_GetHint("SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV");
++                Uint8 rd_shift = 0; /* default: RATEDIV=1, byte-identical */
++                if (rd_hint && rd_hint[0] != '\0' && rd_hint[1] == '\0') {
++                    if (rd_hint[0] == '1') rd_shift = 0;
++                    else if (rd_hint[0] == '2') rd_shift = 1;
++                    else if (rd_hint[0] == '4') rd_shift = 2;
++                }
++                g_dos_pixtone_irq_ratediv_shift = rd_shift;
++                if (rd_shift != 0) {
++                    doskutsu_dbg_log("audio: SDL/0073 pixtone IRQ rate-divider: "
++                                     "ENGAGED RATEDIV=%d (shift_div=%d; each "
++                                     "Pixtone source sample held for %d output "
++                                     "stereo pairs; ISR consumption slowed %dx "
++                                     "= down %d octave(s); Bug 6 Tier-2 pitch "
++                                     "fix; tune via SDL_HINT_DOSKUTSU_PIXTONE_"
++                                     "IRQ_RATEDIV=1|2|4)",
++                                     (1 << rd_shift), (int)rd_shift,
++                                     (1 << rd_shift), (1 << rd_shift),
++                                     (int)rd_shift);
++                } else {
++                    doskutsu_dbg_log("audio: SDL/0073 pixtone IRQ rate-divider: "
++                                     "RATEDIV=1 (default; ISR consumption "
++                                     "byte-identical to pre-0073; set "
++                                     "SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV=2 "
++                                     "to correct the Tier-2 octave-high SFX)");
++                }
++            }
++
+             {
+                 /* Banner-emit headroom math: N = additional shift bits beyond
+                  * base 8 (range 0..3); per-SFX amplitude attenuation is
+@@ -1884,6 +1963,17 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0073): Bug 6 rate-diag -- snapshot the
++       SDL-layer-REQUESTED freq + channels BEFORE the SB16 channel-force
++       below (device->spec.channels is overwritten to 2 in the is_sb16
++       branch). Logged against the resolved device rate at the rate-diag
++       line so the iter log shows any requested-vs-resolved divergence
++       (the leading Bug-6 hypothesis: the ViBRA16 drains stereo frames at
++       ~2x the requested rate). Per BUG6-RATE-CONFIRMED-INSTR-AND-FIX-
++       DESIGN.md. */
++    const int dos_rd_req_freq = device->spec.freq;
++    const int dos_rd_req_ch   = device->spec.channels;
++
+     if (is_sb16) {
+         // SB16 (DSP >= 4): 16-bit stereo signed
+         device->spec.format = SDL_AUDIO_S16LE;
+@@ -1917,6 +2007,30 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+             device->spec.freq, device->spec.channels, device->spec.format, device->sample_frames,
+             soundblaster_version, soundblaster_version_minor, is_sb16 ? "SB16" : "pre-SB16");
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0073): Bug 6 rate-diag static snapshot.
++       The SDL_Log above routes to stdout (invisible in iter logs); this
++       mirrors the resolved rate into SDLDBG.LOG via doskutsu_dbg_log so the
++       confirm-iter can read the TRUE device rate. Always-on (read-only at
++       init; no killswitch). dsp0x41_hz == device->spec.freq for SB16 (the
++       value written to DSP cmd 0x41 at sb.c:~2150, unmutated from here).
++       block_size + isr_chunk are not computed until the DMA-setup block
++       (isr_chunk_size at sb.c:~2039 = hidden->chunk_size = device->buffer_size;
++       block_size at sb.c:~2155 = ((dma_buflen/2)/sizeof(Sint16))-1), but both
++       are deterministic from device->buffer_size (dma_buflen = buffer_size*2),
++       so we recompute them here -- provably equal to the canonical sites. */
++    {
++        const int dos_rd_dma_buflen = (int)device->buffer_size * 2;
++        const int dos_rd_isr_chunk  = dos_rd_dma_buflen / 2;
++        const int dos_rd_block_size = (dos_rd_dma_buflen / 2) / (int)sizeof(Sint16) - 1;
++        doskutsu_dbg_log("audio: SDL/0073 rate-diag: req_freq=%d req_ch=%d "
++                         "dev_freq=%d dev_ch=%d sample_frames=%d buffer_size=%d "
++                         "dsp0x41_hz=%d block_size=%d isr_chunk=%d",
++                         dos_rd_req_freq, dos_rd_req_ch,
++                         device->spec.freq, device->spec.channels,
++                         (int)device->sample_frames, (int)device->buffer_size,
++                         device->spec.freq, dos_rd_block_size, dos_rd_isr_chunk);
++    }
++
+     if (device->buffer_size > (32 * 1024)) {
+         return SDL_SetError("Buffer size is too large (choose smaller audio format and/or fewer sample frames)"); // DMA buffer has to fit in 64K segment, so buffer_size has to be half that, as we double it.
+     }
+@@ -2097,6 +2211,9 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+      * iteration; the byte must be DPMI-locked so the read cannot
+      * page-fault under real-HW CWSDPMI. */
+     DOS_LockVariable(g_dos_pixtone_irq_mix_shift);
++    /* p0073 Bug 6 rate-divider: ISR reads g_dos_pixtone_irq_ratediv_shift
++     * each mix iteration; DPMI-lock so the read cannot page-fault. */
++    DOS_LockVariable(g_dos_pixtone_irq_ratediv_shift);
+     /* DOSKUTSU patch (Phase 11 patch 0072): Lever 2b -- MidiScheduler
+        tick from IRQ-5 ISR. The callback pointer, the active flag, and
+        the inter-IRQ delta accumulator state are all read from IRQ
+@@ -2705,6 +2822,51 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+ {
+     struct SDL_PrivateAudioData *hidden = device->hidden;
+ 
++    /* DOSKUTSU patch (Phase 11 patch 0073): Bug 6 rate-meas. The decisive
++       measurement -- derive the TRUE SB16 IRQ frequency from the EXISTING
++       per-IRQ counter (doskutsu_audio_irq_count, ++ once per IRQ at the
++       handler, sb.c:~1215) over a real wall-clock window, then x
++       sample_frames = hardware frame-drain rate. If hw_frame_rate ~= 2x the
++       resolved dev_freq, the Tier-2 octave-high SFX is confirmed as a 2x
++       device over-drain (the ViBRA16 stereo L/R doubling unaccounted by the
++       SB16 0x41 path). Always-on; emits to SDLDBG.LOG every 100 PlayDevice
++       calls (~2.3 s at Tier-2). NO second IRQ counter -- the three statics
++       are delta-snapshot holders. PlayDevice is non-IRQ context so
++       doskutsu_dbg_log (fopen/fwrite/fsync) is safe here (the ISR is not).
++       Per BUG6-RATE-CONFIRMED-INSTR-AND-FIX-DESIGN.md Part A2. */
++    {
++        static bool   s_rm_seeded   = false;
++        static Uint32 s_rm_calls    = 0;
++        static Uint32 s_rm_last_irq = 0;
++        static Uint64 s_rm_last_ns  = 0;
++        if (!s_rm_seeded) {
++            /* Seed on the FIRST PlayDevice call so the first rate-meas
++             * lands at the first n=100 boundary (~2.3 s at Tier-2), not
++             * the second -- no skipped warmup window. IRQs run
++             * continuously from the DMA auto-init regardless of SFX, so
++             * the reading is valid from the start (flush-instr ask). */
++            s_rm_last_irq = doskutsu_audio_irq_count;
++            s_rm_last_ns  = SDL_GetTicksNS();
++            s_rm_seeded   = true;
++        }
++        if (++s_rm_calls >= 100) {
++            const Uint32 rm_now_irq = doskutsu_audio_irq_count;
++            const Uint64 rm_now_ns  = SDL_GetTicksNS();
++            const Uint32 rm_d_irq   = rm_now_irq - s_rm_last_irq;
++            const Uint64 rm_d_ns    = rm_now_ns - s_rm_last_ns;
++            const Uint32 rm_ms      = (Uint32)(rm_d_ns / 1000000ULL);
++            const int rm_irq_hz     = (rm_d_ns > 0)
++                ? (int)(((Uint64)rm_d_irq * 1000000000ULL) / rm_d_ns) : 0;
++            const int rm_frame_rate = rm_irq_hz * (int)device->sample_frames;
++            doskutsu_dbg_log("audio: SDL/0073 rate-meas: irqs=%u "
++                             "elapsed_ms=%u irq_hz=%d hw_frame_rate=%d",
++                             rm_d_irq, rm_ms, rm_irq_hz, rm_frame_rate);
++            s_rm_last_irq = rm_now_irq;
++            s_rm_last_ns  = rm_now_ns;
++            s_rm_calls    = 0;
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0070): v2 Pixtone probe -- sample
+        g_pixtone_active_count once per PlayDevice invocation (= once per
+        audio-thread iterate). Buckets into g_c_pix_hist[6] for the
+-- 
+2.47.3
+
