@@ -1,0 +1,123 @@
+From feb53aea1f0127bfe179f6b5d31d6cc46f33e808 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 22 May 2026 18:29:46 -0700
+Subject: [PATCH] dos: patch 0076 -- S3 ViRGE/DX SDAC false-fail VGA-detect
+ fallback (additive)
+
+The same doskutsu.exe that boots on the g2k Cirrus CL-GD5430 fails on the
+swapped-in S3 ViRGE/DX (86C375) with SDL_Init "No available video device".
+
+Root cause (verified from source + real-HW log): DOSVESA_CreateDevice ->
+DOSVESA_SupportsVESA -> DetectVGA writes 0xA5 to the DAC pixel-mask
+register (port 0x3C6) and reads it back. On the S3 internal SDAC, 0x3C6
+overlays a hidden DAC command register reached via consecutive 0x3C6
+reads, so once the SDAC read counter is advanced the readback is not 0xA5.
+DetectVGA wrongly concludes "no VGA", SupportsVESA returns false, and
+CreateDevice returns NULL. The Cirrus round-trips 0x3C6 cleanly, which is
+why the identical binary worked there. MEMBW/HWINV probes pass on the S3
+because they bypass SDL's DAC probe (HWINV: VBE 3.0 + 320x240x8 LFB modes,
+LFB at 0x78000000; MEMBW set a VBE LFB mode and wrote to it).
+
+Fix is purely additive and runs ONLY when DetectVGA() returns false:
+  1. Touch the PEL write-index (0x3C8) to reset the SDAC hidden-command
+     read counter, then retry the same 0x3C6 round-trip.
+  2. If that still fails, fall back to a VBE controller-info query
+     (function 0x4F00 "VESA" signature via GetVESAInfo). A card that
+     answers VESA is a usable graphics device regardless of the 0x3C6
+     quirk, so treat it as supported instead of returning NULL.
+  3. If neither succeeds, return the original "No VGA card detected"
+     error (EGA/CGA with no VESA BIOS still correctly rejected).
+
+DetectVGA() and the DetectVGA()==true success path are unchanged
+(byte-identical), so Cirrus / Mach64 / plain-VGA behavior is preserved by
+construction. Each fallback path logs an "s3-vga-detect" line to
+SDLDBG.LOG; a clean pass logs nothing new (inferred by absence). No new
+env var or hint.
+---
+ src/video/dos/SDL_dosmodes.c | 69 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 69 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index c734f8964..904e0984e 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -355,7 +355,76 @@ bool DOSVESA_SupportsVESA(void)
+     // We need at least VGA hardware (for mode 13h). EGA and CGA cards
+     // do not support 256 colors or programmable palettes.
+     if (!DetectVGA()) {
++        // === DOSKUTSU patch SDL/0076 (s3-virge-perf): additive S3
++        // ViRGE/DX SDAC false-fail fallback ==========================
++        //
++        // This whole block runs ONLY when the byte-identical upstream
++        // DetectVGA() 0x3C6 DAC pixel-mask round-trip returns false.
++        // Cirrus / Mach64 / plain VGA pass DetectVGA() and never reach
++        // here, so their detection -> CreateDevice path is unchanged.
++        // (DetectVGA() itself is untouched; the success fall-through at
++        // the bottom of this function is verbatim upstream.)
++        //
++        // Why DetectVGA() FALSE-fails on the S3 ViRGE/DX: its internal
++        // SDAC overlays a hidden DAC command register on port 0x3C6,
++        // reached via consecutive 0x3C6 reads. Once the SDAC's internal
++        // read counter is advanced, a 0x3C6 access lands on the hidden
++        // command register instead of the pixel-mask register, so
++        // writing 0xA5 and reading back does not return 0xA5 -> upstream
++        // wrongly concludes "no VGA" and DOSVESA_CreateDevice returns
++        // NULL -> SDL_Init fails with "No available video device". The
++        // MEMBW / HWINV probes work on the same card because they bypass
++        // this DAC probe entirely (HWINV confirms VBE 3.0 + 320x240x8
++        // LFB modes, LFB at 0x78000000; MEMBW set a VBE LFB mode and
++        // wrote to it). The card is fully usable; only this probe lies.
++        //
++        // NOTE: the "clean pass" case (DetectVGA() == true) is left
++        // log-silent on purpose so the success path stays byte-identical
++        // -- it is still distinguishable in SDLDBG.LOG by the presence of
++        // the GetVESAInfo "DOSVESA-CTRL" lines together with the ABSENCE
++        // of any "s3-vga-detect" line below.
++
++        // Attempt 1: reset the SDAC hidden-command read index by touching
++        // the PEL write-index register (0x3C8), then redo the exact same
++        // 0x3C6 round-trip DetectVGA() does. On the S3 SDAC this resets
++        // the consecutive-0x3C6 read counter so the next 0x3C6 access
++        // hits the real pixel-mask register. If it now round-trips, the
++        // card is a usable VGA whose DAC index was merely mis-positioned.
++        {
++            outportb(VGA_DAC_WRITE_INDEX, 0x00); // reset SDAC read counter
++            (void)inportb(0x80);                 // small I/O delay
++            const Uint8 original = inportb(VGA_DAC_PIXEL_MASK);
++            outportb(VGA_DAC_PIXEL_MASK, 0xA5);
++            (void)inportb(0x80); // small I/O delay
++            const Uint8 readback = inportb(VGA_DAC_PIXEL_MASK);
++            outportb(VGA_DAC_PIXEL_MASK, original);
++            if (readback == 0xA5) {
++                DOSKUTSU_MODES_LOG("s3-vga-detect: 0x3C6 round-trip passed after "
++                                   "SDAC read-index reset (0x3C8 touch) -> usable VGA");
++                (void)GetVESAInfo(); // cache VESA info (matches success path)
++                return true;
++            }
++        }
++
++        // Attempt 2: VBE controller-info fallback. If the BIOS answers
++        // VBE function 0x4F00 with the "VESA" signature (GetVESAInfo()
++        // returns non-NULL), the card is a usable VESA graphics device
++        // regardless of the 0x3C6 quirk. This is exactly the S3 ViRGE/DX
++        // case. Treating it as usable lets DOSVESA_GetDisplayModes
++        // enumerate its VBE LFB modes and the engine run normally.
++        if (GetVESAInfo() != NULL) {
++            DOSKUTSU_MODES_LOG("s3-vga-detect: 0x3C6 round-trip failed (incl. after "
++                               "SDAC reset) but VBE 0x4F00 returned VESA signature "
++                               "-> treating as usable graphics device (VBE fallback)");
++            return true;
++        }
++
++        // Neither path proved a usable device: genuinely no VGA/VESA
++        // (e.g. EGA/CGA with no VESA BIOS). Preserve upstream behavior.
++        DOSKUTSU_MODES_LOG("s3-vga-detect: 0x3C6 round-trip failed AND no VBE "
++                           "controller info -> no usable video device");
+         return SDL_SetError("No VGA card detected");
++        // === end patch SDL/0076 fallback ===========================
+     }
+ 
+     // Cache VESA info if available (NULL mean we only have VGA).
+-- 
+2.47.3
+
