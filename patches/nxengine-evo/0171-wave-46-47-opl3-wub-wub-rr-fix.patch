@@ -1,0 +1,128 @@
+From 44a378ff9b4f978ebf10cc35c62e638a3d94dcd7 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Tue, 26 May 2026 11:22:11 -0700
+Subject: [PATCH] wave-46/47 patch 0171 -- OPL3 wub-wub fix: PATCH_ORGAN +
+ PATCH_MALLET RR=0 -> RR=8
+
+Root cause (source-pinned): the slot-0103 placeholder bank shipped
+PATCH_MALLET and PATCH_ORGAN with RR=0 in their operator release-rate
+fields (patch[3] + patch[9], low nibble of YMF262 reg 0x80+op). Per
+the OPL3 spec, RR=0 means the envelope DOES NOT DECREMENT after
+KEY-OFF -- it freezes at the sustain level forever, audibly. Combined
+with PATCH_ORGAN's FB=7 (max operator self-feedback), the held
+envelope produces the ~3.7 Hz "wub-wub" cadence the operator
+reported wave-44/46 (audible in-background during playback, and
+persistent post-quit until the next OPL3 write or power-down).
+
+Smoking gun for the slot-0103 authoring bug: PATCH_MALLET's inline
+comment claimed "very short release" but the byte 0xC0 actually
+set RR=0 (NO release at all). Comment intent and byte didn't match.
+Wave-47 H6 hypothesis (clear chip-wide reg 0xBD tremolo depth) was
+correctly falsified -- the placeholders don't enable per-operator
+AM (patch[0]/patch[6] bit 7 = 0 across the bank), so chip-wide
+tremolo was never the mechanism.
+
+Fix (4 bytes total):
+  PATCH_MALLET[3]: 0x80 -> 0x88  (SL=8,  RR=0 -> 8; medium release)
+  PATCH_MALLET[9]: 0xC0 -> 0xC8  (SL=12, RR=0 -> 8; medium release)
+  PATCH_ORGAN[3]:  0x00 -> 0x08  (SL=0,  RR=0 -> 8; medium release)
+  PATCH_ORGAN[9]:  0x00 -> 0x08  (SL=0,  RR=0 -> 8; medium release)
+
+Default-ON, no killswitch (per team-lead 2026-05-26 task #15 dispatch):
+within-spec values, no fps cost, no regression risk, correctness fix.
+A/B verification is the v1.0.1 golden binary (wub-wub PRESENT) vs the
+new binary (wub-wub GONE) on the real-HW iter; no env toggle needed.
+The other 5 placeholders (PIANO/GUITAR/BRASS/REED/PAD/DRUM) already
+had RR>=8 and are unchanged.
+
+Adds a smoke-gate banner at MidiBackendOpl3 ctor confirming the build
+pulled the fixed bytes (compile-baked constexpr; banner is
+informational, does not gate runtime behavior). Grep-target:
+"opl3 backend: PATCH_ORGAN \+ PATCH_MALLET RR=8".
+
+Full root-cause writeup: /tmp/audio-offload/TASK14-OPL3-WUBWUB-ROOTCAUSE.md
+(gitignored; co-investigated with sdl-engine).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/sound/MidiBackendOpl3.cpp | 52 +++++++++++++++++++++++++++++++----
+ 1 file changed, 46 insertions(+), 6 deletions(-)
+
+diff --git a/src/sound/MidiBackendOpl3.cpp b/src/sound/MidiBackendOpl3.cpp
+index 00781ba..ea66065 100644
+--- a/src/sound/MidiBackendOpl3.cpp
++++ b/src/sound/MidiBackendOpl3.cpp
+@@ -142,17 +142,45 @@ static constexpr uint8_t PATCH_PIANO[12] = {
+   0x00,
+ };
+ 
++// patch 0171 (wave-46/47 wub-wub correctness fix): PATCH_MALLET +
++// PATCH_ORGAN below originally shipped (slot 0103) with RR=0 in their
++// operator release-rate fields (patch[3] + patch[9], low nibble of
++// OPL3 reg 0x80+op). YMF262 spec: RR=0 means the envelope DOES NOT
++// DECREMENT after KEY-OFF -- it freezes at the sustain level forever,
++// audibly. Combined with PATCH_ORGAN's FB=7 (max operator self-
++// feedback), the stuck envelope produces the ~3.7 Hz "wub-wub" the
++// operator reported wave-44/46 (audible in-background during playback,
++// persists post-quit). Smoking gun for the slot-0103 authoring bug:
++// PATCH_MALLET's inline comment claimed "very short release" but the
++// byte 0xC0 actually set RR=0 (NO release). Comment intent and byte
++// didn't match. Wave-47 H6 (clear chip-wide reg 0xBD) was correctly
++// falsified -- placeholders don't enable per-operator AM, so chip-wide
++// tremolo was never the source.
++//
++// Fix (this patch, 4 bytes total):
++//   PATCH_MALLET[3]: 0x80 -> 0x88  (SL=8,  RR=0 -> 8; medium release)
++//   PATCH_MALLET[9]: 0xC0 -> 0xC8  (SL=12, RR=0 -> 8; medium release)
++//   PATCH_ORGAN[3]:  0x00 -> 0x08  (SL=0,  RR=0 -> 8; medium release)
++//   PATCH_ORGAN[9]:  0x00 -> 0x08  (SL=0,  RR=0 -> 8; medium release)
++//
++// Default-ON, no killswitch (per team-lead 2026-05-26 #15 dispatch):
++// within-spec values; no fps cost; no regression risk; correctness fix.
++// A/B verification = v1.0.1 golden binary (wub-wub PRESENT) vs the new
++// binary (wub-wub GONE) on real-HW iter #17. The other 5 placeholders
++// (PIANO/GUITAR/BRASS/REED/PAD/DRUM) already had RR>=8 and are
++// unchanged. Full root-cause writeup at /tmp/audio-offload/
++// TASK14-OPL3-WUBWUB-ROOTCAUSE.md (gitignored).
+ static constexpr uint8_t PATCH_MALLET[12] = {
+-  0x01, 0x10, 0xF0, 0x80, 0x00,  // op0: very short attack/decay
+-  0xF8,                          // FB/CONN: stereo + FB=4 + AM
+-  0x01, 0x00, 0xF0, 0xC0, 0x00,  // op1: very short release
++  0x01, 0x10, 0xF0, 0x88, 0x00,  // op0: SL=8, RR=8 (medium release; patch 0171: was RR=0)
++  0xF8,                          // FB/CONN: stereo + FB=4 + CON=0 (FM)
++  0x01, 0x00, 0xF0, 0xC8, 0x00,  // op1: SL=12, RR=8 (medium release; patch 0171: was RR=0 -- the smoking-gun comment-vs-byte mismatch)
+   0x00,
+ };
+ 
+ static constexpr uint8_t PATCH_ORGAN[12] = {
+-  0x01, 0x18, 0xF0, 0x00, 0x00,  // op0: sustained env
+-  0xFE,                          // FB/CONN: stereo + FB=7 + CONN=0
+-  0x01, 0x00, 0xF0, 0x00, 0x00,  // op1: sustained
++  0x01, 0x18, 0xF0, 0x08, 0x00,  // op0: SL=0 sustain, RR=8 release (patch 0171: was RR=0)
++  0xFE,                          // FB/CONN: stereo + FB=7 + CON=0 (FM; high self-feedback)
++  0x01, 0x00, 0xF0, 0x08, 0x00,  // op1: SL=0 sustain, RR=8 release (patch 0171: was RR=0)
+   0x00,
+ };
+ 
+@@ -530,6 +558,18 @@ MidiBackendOpl3::MidiBackendOpl3()
+                : "8-patch placeholder ACTIVE (no opl3-patches.dat loaded)",
+            _loaded_patch_bank_count);
+ 
++  // patch 0171 (wave-46/47 wub-wub correctness fix): smoke-gate banner
++  // for build-qa. The four byte changes to PATCH_MALLET + PATCH_ORGAN
++  // above are compile-baked (constexpr), so this banner only confirms
++  // the build pulled the fixed bytes; it does not gate runtime
++  // behavior. Grep-target regex: "opl3 backend: PATCH_ORGAN \+
++  // PATCH_MALLET RR=8".
++  LOG_INFO("opl3 backend: PATCH_ORGAN + PATCH_MALLET RR=8 (medium "
++           "release; wub-wub fix per patch 0171; was RR=0 in slot "
++           "0103 placeholder -- KEY-OFF couldn't silence; H6 reg "
++           "0xBD wave-47 falsified; H1+H5/RR=0 byte-level bug root "
++           "per WAVE-46/47 analysis)");
++
+   // patch 0168 (Lever 2b MIDI-tick-from-IRQ, L2b-Q6 STOP-and-ack
+   // closure): DPMI-lock the entire MidiBackendOpl3 instance so the
+   // SB16 IRQ-5 ISR's tick_isr -> _backend->dispatch_event -> OPL3
+-- 
+2.47.3
+

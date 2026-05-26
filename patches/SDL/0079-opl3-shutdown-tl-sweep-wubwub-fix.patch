@@ -1,0 +1,120 @@
+From b2e367f727e8b0bb356127886d5de72808894085 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 26 May 2026 11:17:29 -0700
+Subject: [PATCH] dos: patch 0079 -- OPL3 wub-wub fix part B: TL=0x3F all
+ voices in SDL_DOSOpl3Shutdown
+
+The OPL3 post-quit "wub-wub-wub" artifact (audible during play + persisting
+post-quit per WAVE-46-LOG-ANALYSIS.md sec.0; H6 reg 0xBD chip-wide tremolo
+hypothesis falsified at wave-47) was root-caused by sdl-engine + nx-engine
+co-design on task #14 to two placeholder bank patches in MidiBackendOpl3.cpp
+shipping RR=0 (release rate = 0 = infinite release time per YMF262 spec):
+PATCH_ORGAN and PATCH_MALLET both have patch[3]/[9] bytes producing RR=0.
+The smoking gun: PATCH_MALLET's comment says "very short release" but the
+byte 0xC0 sets RR=0. Voices playing these patches never silence after
+KEY-OFF -- the existing KEY-OFF triggers envelope RELEASE but RR=0 means
+the release decays at rate 0 = never reaches silence -- so the chip
+continues to emit audibly until power-down. The 3.7 Hz "wub-wub" cadence
+is PATCH_ORGAN's FB=7 (max self-feedback) interacting with the chip's
+hardware-fixed tremolo LFO clock through the stuck envelope.
+
+The PRIMARY fix is engine-side: 4 bytes in MidiBackendOpl3.cpp's
+PATCH_ORGAN and PATCH_MALLET to set RR=8. Companion engine patch ships
+in the same iter.
+
+This patch (SDL/0079) is the BELT-AND-BRACES SDL-side complement,
+hardening the SDL_DOSOpl3Shutdown chip-state-teardown contract. The
+existing contract ("silence all voices" + "restore OPL2 mode") is
+INCOMPLETE: KEY-OFF only triggers envelope RELEASE -- it does not force
+output silence. For any patch shipping RR=0 (the engine-side bug this
+defends against, plus any future user-provided opl3-patches.dat loaded
+via patch 0141 with the same authorship error), the existing contract
+leaves the chip emitting. This patch adds a TL=0x3F (max attenuation,
+-48 dB) sweep across both operators of all 18 voices BEFORE the KEY-OFF
+loop. TL is the operator's amplitude attenuation per YMF262 spec; it
+takes effect immediately on output, not gated by envelope phase. With
+both ops at TL=0x3F across all 18 voices, the chip's audible output is
+-48 dB == effectively silent regardless of envelope state / release
+rate / chip-wide modulation.
+
+Cost: 36 register writes * ~12 us per via the canonical Adlib inter-
+write delay = ~432 us at chip-teardown only; no hot-path impact.
+Default-ON; zero behavioral impact during play (existing NoteOff path
+remains the in-play silence primitive; this only activates at chip-
+teardown).
+
+Per task #14 co-design 2026-05-26 + WAVE-46-LOG-ANALYSIS.md sec.6.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ src/core/dos/SDL_dos_audio_synth.c | 54 +++++++++++++++++++++++++++++-
+ 1 file changed, 53 insertions(+), 1 deletion(-)
+
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index f181de11f..066f78b2b 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -555,7 +555,59 @@ void SDL_DOSOpl3InitChip(void)
+ 
+ void SDL_DOSOpl3Shutdown(void)
+ {
+-    /* Silence all voices first. */
++    /* DOSKUTSU patch (Phase 11 patch 0079, OPL3 wub-wub fix part B):
++       zero TL (total level, reg 0x40+op) on both operators of all 18
++       voices to 0x3F (max attenuation, -48 dB) BEFORE the KEY-OFF-all
++       loop below. This forces the chip's audible output to silence
++       regardless of envelope state / release rate / any chip-wide
++       modulation -- belt-and-braces complement to the engine-side bank
++       fix (PATCH_ORGAN / PATCH_MALLET RR=0 -> RR=8 per task #14 wub-wub
++       co-design root-cause; companion engine patch in patches/nxengine-
++       evo/01NN). The engine fix is the primary mechanism; this SDL
++       sweep hardens the SDL_DOSOpl3Shutdown chip-state-teardown
++       contract so the existing "chip state safe for next process"
++       banner promise is literally true regardless of which patch bank
++       was loaded at runtime. Future-proofs against a user-provided
++       opl3-patches.dat (patch 0141 loader path) with the same RR=0
++       authorship bug.
++
++       Mechanism: KEY-OFF only triggers envelope RELEASE; the carrier
++       output then decays at the operator's RR (release rate). For
++       patches with RR=0 (the engine-side bug this defends against),
++       release time is INFINITE per YMF262 spec -- voices continue
++       emitting at near-pre-KEY-OFF level until power-down. TL=0x3F
++       takes effect immediately on the operator's output amplitude
++       (chip-spec-defined: TL is a direct attenuation, not envelope-
++       gated), so writing 0x3F silences the operator regardless of
++       envelope phase. With both operators of all 18 voices at TL=
++       0x3F, the chip's audible output is at -48 dB (effectively
++       inaudible).
++
++       Universally safe -- 0x3F is the OPL3 spec's max-attenuation
++       value, accepted on any compliant chip. Cost ~432 us at shutdown
++       (36 register writes * ~12 us each via SDL_DOSOpl3WriteRegister's
++       canonical inter-write delay); shutdown path, not on any hot
++       path. Default-ON, no killswitch -- zero behavioral impact during
++       play (the existing NoteOff path remains the in-play silence
++       primitive; this only activates at chip-teardown). Cross-link:
++       see task #14 co-design + WAVE-46-LOG-ANALYSIS.md sec.6. */
++    for (int v = 0; v < 18; v++) {
++        const uint16_t op0 = s_opl3_voice_offsets[v].op0_base;
++        const uint16_t op1 = s_opl3_voice_offsets[v].op1_base;
++        SDL_DOSOpl3WriteRegister((uint16_t)(0x40 + op0), 0x3F);
++        SDL_DOSOpl3WriteRegister((uint16_t)(0x40 + op1), 0x3F);
++    }
++    /* Two-witness banner for build-qa smoke per [[smoke_gate_discipline]]:
++       string in binary (".rodata" via this literal) + runtime emit in
++       <TAG>SDL.LOG when the shutdown path runs. */
++    doskutsu_dbg_log("audio: SDL/0079 TL=0x3F sweep applied (18 voices "
++                     "x 2 ops, max attenuation -48 dB) on OPL3 chip-"
++                     "state teardown -- wub-wub fix part B engaged");
++
++    /* KEY-OFF all voices (clear bit 5 of 0xB0+ch; triggers envelope
++       release). After the TL=0x3F sweep above the audible output is
++       already silent; this returns the chip's per-voice KEY state to
++       "all off" for any next process. */
+     for (int v = 0; v < 18; v++) {
+         SDL_DOSOpl3VoiceNoteOff(v);
+     }
+-- 
+2.47.3
+

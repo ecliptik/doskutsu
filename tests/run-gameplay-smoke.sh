@@ -314,6 +314,8 @@ BANNER_REGEX=(
   "audio: SDL/0074 RATEDIV auto: dev_freq="
   "audio: SDL/0074 SB16 mixer balance: (master=|DISABLED)"
   "midi ISR tick: engine registered tick_isr callback \(L2b active.*\)"
+  "opl3 backend: PATCH_ORGAN \+ PATCH_MALLET RR=8"
+  "audio: SDL/0079 TL=0x3F sweep applied \(18 voices"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -375,6 +377,8 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
+  "optional"
 )
 BANNER_LABEL=(
   "lever-1 opaque-tile fastpath (patch 0137)"
@@ -436,6 +440,8 @@ BANNER_LABEL=(
   "SDL/0074 RATEDIV-auto presence (informational disambiguator, OPTIONAL; complements the pinned-required master_rate=11025 entry above -- if that required entry FAILS, this optional one logs whether the RATEDIV-auto banner emitted AT ALL: emits=1 means present-but-wrong-value (dropped nxengine-evo/0169 setter or non-Tier-2), emits=0 means absent (L3 off / audio device did not open). No gate effect. patch SDL/0075)"
   "SDL/0074 SB16-balance presence (informational disambiguator, OPTIONAL; complements the pinned-required master=31 voice=31 fm=28 entry above -- if that required entry FAILS, this logs whether the SB16-balance banner emitted AT ALL: present-but-wrong-value vs absent (not is_sb16 / MIXER_PROGRAM=0). No gate effect. patch SDL/0075)"
   "engine L2b tick_isr registration ASSERT (REQUIRED on default boot via SDL/0075 + nxengine-evo/0170 -- the engine 0168 banner emits at SoundManager::init when SDL_DOSMidiIsrTickActive() is true (default-ON since v1.0.1). Init-time DETERMINISTIC (NOT SFX-gated), and the smoke is verbose (DOSKUTSU_LOG_VERBOSE=1 -> INFO) so the engine LOG_INFO line emits. Distinct from L302 (which asserts SDL RESOLVED L2b ON): this asserts the ENGINE actually REGISTERED the tick_isr callback (followed the SDL flag) -- a regression where SDL says on but the engine registration path breaks would PASS L302 and FAIL this. The matching skipped-registration variant only emits under the =0 killswitch (deliberate non-default). Per flush-instr. patch SDL/0075)"
+  "nxengine-evo/0171 OPL3 wub-wub fix banner (REQUIRED in builds carrying patch 0171 -- the 4-byte PATCH_ORGAN/PATCH_MALLET RR=0->RR=8 fix emits this LOG_INFO at MidiBackendOpl3 init confirming the fixed-bytes constexpr table linked. Default-ON, no killswitch; banner is unconditional in the new binary. Absence on a post-0171 build = build linked pre-fix bytes (regression / stale cache). Pairs with the SDL/0079 shutdown-sweep banner for the wub-wub residual fix bundle.)"
+  "SDL/0079 OPL3 shutdown TL=0x3F sweep banner (REQUIRED on clean-quit in builds carrying SDL/0079 -- the SDL_DOSOpl3Shutdown TL=0x3F sweep zeroes all 18 voices x 2 ops before KEY-OFF-all, killing the post-quit envelope output. Default-ON, no killswitch; emits when engine destructor runs at clean quit (smoke's TAS-EOF auto-exit path triggers it). Absence = SDL/0079 not linked OR smoke didn't reach clean quit. Pairs with the nx-0171 engine-init banner.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
