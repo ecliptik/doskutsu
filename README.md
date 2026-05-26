@@ -31,7 +31,7 @@ Frame rate depends on the hardware and how music is played:
 
 | Hardware | Music | Frame rate |
 |---|---|---|
-| Pentium-class (reference PC) | MIDI (OPL3 or WaveBlaster) | ~30 fps |
+| Pentium-class (reference PC) | MIDI (OPL3) | ~30 fps |
 | Pentium-class (reference PC) | Organya software synth | ~21 fps |
 | 486-class (Am5x86-133) | MIDI (OPL3) | ~23 fps, playable |
 | 486-class (486DX2-66) | MIDI (OPL3) | ~12 fps, playable but choppy |
@@ -68,7 +68,7 @@ MIDI plays through a hardware synthesizer, off the CPU. Two settings shape it:
 
 | Setting | Environment variable | Options | Picks |
 |---|---|---|---|
-| Synthesizer | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `opl3` (default), `wb` | `opl3`: the SB16 / Sound Blaster Pro 2 OPL3 FM chip. `wb`: a WaveBlaster daughterboard (the hardware is required) |
+| Synthesizer | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `opl3` (default) | `opl3`: the SB16 / Sound Blaster Pro 2 OPL3 FM chip. (A `wb` WaveBlaster-daughterboard option is also documented in `docs/internal/BOOT.md` but is **not currently functional** -- the code exists but does not drive the daughterboard chip; selecting `wb` silently falls back to OPL3. Real WaveBlaster support is planned for v1.0.2.) |
 | MIDI source | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi` (default), `orgmid` | `wiimidi`: the WiiWare arrangement, which tracks the original closely. `orgmid`: the Hart legacy `.mid` set |
 | GM variant | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | an `org2mid`-converted General MIDI variant |
 
