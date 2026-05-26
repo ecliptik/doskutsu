@@ -1,0 +1,385 @@
+From 424e631787adad153e1d135c149eb6ab780f3037 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 26 May 2026 16:13:11 -0700
+Subject: [PATCH] dos: patch 0080 -- MPU-401 bit-6 DRR polling + WB
+ default-flip to direct-port
+
+WBTEST-006 H20 confirmation on g2k Vibra16S CT2490 + DreamBlaster S2
+(2026-05-26): PATH=DOSMID (DOSMID-faithful direct-port MPU-401 with
+bit-6 DRR polling before every byte write) produced audible piano +
+bass drum where every prior path -- including the patch-0047
+DSP-mediated default -- silently dropped non-note MIDI events.
+
+Hypothesis chain in docs/internal/WBTEST-001-FINDINGS.md rev-8; the
+H20 confirmation followed six in-session probe iters across this
+team's wb-midi campaign. V1 polled probe stats on g2k: calls=51
+iters_total=4170 iters_max=238 cap_hits=0 -> avg ~82 us per write,
+max ~238 us on P54C; well within the IRQ-5 ISR service budget under
+Lever 2b context.
+
+DOSMID source provenance for the polled-write contract:
+github.com/Tronix286/DOSMID, MPU401.C. The mpu401_waitwrite +
+mpu401_uart functions poll bit 6 (DRR, mask 0x40) of the MPU status
+register at port_base+1 and break the loop when it clears; bytes are
+written only when the chip is ready to receive. The same bit-7 lie
+identified by W22-WB-F MPUPROBE (TX-READY never clears on SB16 PnP
+CTL0026) does NOT extend to bit 6: DRR is reliable on this hardware
+and is the per-byte gate the chip expects, which the patch-0044 /
+patch-0047 "BLIND write; do not poll status" comment was incorrect
+to extend to ALL status bits.
+
+The CURRENT-STATE.md "WaveBlaster status" correction 2026-05-26 is
+the operator-authoritative context: WaveBlaster has NEVER actually
+driven the DreamBlaster S2 wavetable in any prior release. The
+patch-0047 DSP-mediated default -- which has shipped as the WB MIDI
+production path since 2026-05-07 -- never produced sound through
+the wavetable chip. Every prior "WB working" entry in RESULTS-MATRIX
+was a misattributed silent fallback to OPL3 (the auto-detect chain
+falls back when probe fails, but the W22-WB-F-era DSP-mediated path
+"succeeded" at probe while still dropping all subsequent dispatch).
+
+Patch contents:
+
+1. Add SDL_DOSMpu401WaitDRR(port_base) static helper.
+   - Polls inportb(port_base+1) & 0x40 until clear.
+   - Iter cap = 10000 (~10 ms on P54C, ~40x headroom above the
+     observed iters_max=238 from WBTEST-006).
+   - Returns true on DRR-clear-in-time, false on cap-hit.
+   - One-shot cap-warn via doskutsu_dbg_log naming the killswitch
+     path (SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=0); avoids log
+     spam if a chip variant has stuck-high DRR.
+   - Callers fail-soft (write the byte regardless of cap-hit) so
+     chips that worked unpolled still work.
+
+2. Call SDL_DOSMpu401WaitDRR(port_base) in SDL_DOSMpu401Init_DirectPort
+   before the UART entry write outportb(port_base+1, 0x3F). A
+   capped-out poll at init is a strong "this chip variant does not
+   honor bit 6" signal; the helper logs it once-per-process.
+
+3. Call SDL_DOSMpu401WaitDRR(base) in the direct-port branch of
+   SDL_DOSMpu401WriteByte before each outportb(base, byte). This
+   is the per-byte gate that WBTEST-006 confirmed lets non-note
+   MIDI events (program-change, controller, pitch-bend, etc.)
+   through to the wavetable chip.
+
+4. Flip the default of SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT from
+   OFF to ON. SDL_DOSMpu401Init's dispatch now selects direct-port
+   when the env var is unset (or any value other than strict "0").
+   Strict-"0" killswitch reverts to the patch-0047 DSP-mediated
+   path (kept as opt-in fallback). The dispatch comment block,
+   init banner text, and shutdown reset value all updated to
+   match the new default. The static s_mpu401_use_dsp default
+   value is also flipped to false to match.
+
+5. Init banner text updated from "mpu401: blind init at port_base="
+   to "mpu401: direct-port init at port_base=" so the runtime
+   witness reflects that the write is no longer truly "blind"
+   (bit-6 polling now gates every write).
+
+Cost on real-HW: ~82 us avg / ~238 us max per direct-port write per
+WBTEST-006 probe. With music tempo on Cave Story MIDI ~5-10
+events/sec sustained + bursts up to ~50 events/sec at scene boundaries,
+the per-flip wall-clock impact is well below the 1 ms floor and
+inside the IRQ-5 ISR service budget. Cap-hits=0 in the reference
+probe so the worst-case ~10 ms cap is purely a defensive bound.
+
+DOSBox-X smoke gate: doskutsu.exe + AUDIO_BACKEND=wb boots, hits
+title screen, no crash. DOSBox-X has no DreamBlaster S2 daughterboard
+so no audible MIDI -- the smoke gate is the WB backend init log line
+emit, the chip-state-doesn't-hang condition, and absence of crash.
+The cap-hit log may appear under DOSBox-X if its emulated MPU-401
+keeps bit 6 stuck high; that's expected and fine -- the fail-soft
+write happens regardless.
+
+Workspace-local; never upstreamed per [[sdl_ai_policy]] -- this
+patch and the broader doskutsu vendor/SDL/ tree carry doskutsu-
+specific behavior changes that have no place in libsdl-org/SDL
+master. The vendor/SDL/CLAUDE.md AI restriction scopes to PR
+contributions; this patch series stays local to patches/SDL/.
+
+Docs update in companion: docs/internal/BOOT.md
+SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT entry updated to document
+the new default-ON + strict-"0" killswitch semantics.
+
+See:
+  - docs/internal/WBTEST-001-FINDINGS.md rev-8 (H20 confirmation chain)
+  - docs/internal/CURRENT-STATE.md "WaveBlaster status" correction
+  - github.com/Tronix286/DOSMID MPU401.C (DRR poll provenance)
+  - patches/SDL/0047 (DSP-mediated path; now opt-in fallback)
+  - patches/SDL/0044 (direct-port blind-init body)
+---
+ src/core/dos/SDL_dos_audio_synth.c | 213 ++++++++++++++++++++---------
+ 1 file changed, 152 insertions(+), 61 deletions(-)
+
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 066f78b2b..587aaf8af 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -60,60 +60,79 @@
+    indicates "not initialized" (WriteByte becomes a no-op). */
+ static int s_mpu401_port_base = -1;
+ 
+-/* DOSKUTSU patch (Phase 10 patch 0047): dispatch path selector.
+-   true = DSP-mediated MIDI (default) — funnels through SB16 DSP cmd 0x34
+-          + 0x38 via SDL_DOSAudioSB_DSPMidi* helpers (vendor/SDL/src/audio/
+-          dos/SDL_dosaudio_sb.c).
+-   false = direct-port (Option A from analysis) — writes to port_base+0/1
+-           directly. Selected when SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=1.
+-   Per W22-WB-F MPUPROBE forensic analysis (docs/MPUPROBE-W22WB-F-ANALYSIS.md),
+-   DSP-mediated avoids cross-firmware races between MPU-port access and
+-   DSP DMA programming that caused W22-WB-C/D lockups. */
+-static bool s_mpu401_use_dsp = true;
+-
+-/* Forward declaration: direct-port path body (extracted from patch-0044
+-   SDL_DOSMpu401Init for patch-0047 path-split). Callable only from
+-   SDL_DOSMpu401Init's direct-port branch. */
++/* DOSKUTSU patch (Phase 11 patch 0080): dispatch path selector.
++   true  = DSP-mediated MIDI fallback (opt-in via strict-"0" killswitch on
++           SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT). Funnels through SB16
++           DSP cmd 0x34 + 0x38 via SDL_DOSAudioSB_DSPMidi* helpers
++           (vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c).
++   false = direct-port + bit-6 DRR polling (default since patch 0080).
++           Writes to port_base+0/1 directly, gated on the MPU status
++           register's DRR (Data Ready to Receive) bit per DOSMID source
++           (github.com/Tronix286/DOSMID, MPU401.C).
++   Patch-0080 default flip is per WBTEST-006 H20 confirmation on g2k
++   Vibra16S CT2490: PATH=DOSMID with bit-6 polling produced piano + bass
++   drum where every prior non-polled direct-port path silently dropped
++   non-note MIDI events. The W22-WB-F-era DSP-mediated default never
++   actually drove the DreamBlaster S2 wavetable in production (see
++   CURRENT-STATE.md "WaveBlaster status" correction 2026-05-26). */
++static bool s_mpu401_use_dsp = false;
++
++/* Forward declarations: direct-port path body (extracted from patch-0044
++   SDL_DOSMpu401Init for patch-0047 path-split) + the bit-6 DRR poll
++   helper added by patch 0080. */
+ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base);
++static bool SDL_DOSMpu401WaitDRR(uint16_t port_base);
+ 
+ bool SDL_DOSMpu401Init(uint16_t port_base)
+ {
+-    /* DOSKUTSU patch (Phase 10 patch 0047): default = DSP-mediated MIDI.
+-
+-       W22-WB-F MPUPROBE forensic analysis (docs/MPUPROBE-W22WB-F-ANALYSIS.md)
+-       showed that direct-port MPU-401 access causes lockups under SDL load
+-       on real SB16 PnP CTL0026. The DSP-mediated path (DSP cmd 0x34 enter
+-       UART + cmd 0x38 dispatch) was probe-validated on the same hardware
+-       in section 10. DSP-mediated funnels all chip access through one
+-       bus contender (port 0x22C), eliminating cross-firmware races.
+-
+-       Direct-port path (Option A from analysis) retained behind opt-in
+-       hint SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=1 for hardware where
+-       DSP-mediated turns out to be fragile. Strict-1 env-var match per
++    /* DOSKUTSU patch (Phase 11 patch 0080): default = direct-port +
++       bit-6 DRR polling.
++
++       WBTEST-006 H20 confirmation on g2k Vibra16S CT2490 + DreamBlaster
++       S2: PATH=DOSMID (DOSMID-faithful direct-port with bit-6 DRR
++       polling before every write) produced audible piano + bass drum
++       where every prior path -- including the patch-0047 DSP-mediated
++       default -- silently dropped non-note MIDI events. Probe stats
++       (V1 polled): calls=51 iters_total=4170 iters_max=238 cap_hits=0
++       -> avg ~82 us per write, max ~238 us on P54C; well within IRQ-5
++       ISR budget under Lever 2b. See docs/internal/WBTEST-001-FINDINGS.md
++       rev-8 for the hypothesis chain.
++
++       The patch-0047 DSP-mediated path stays in-tree as an opt-in
++       fallback, selectable via strict-"0" killswitch on the
++       SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT env var (set to "0" to
++       revert to the DSP-mediated cmd 0x34/0x38 route). The W22-WB-F
++       MPUPROBE forensic analysis path concern about cross-firmware
++       races is not refuted -- but in practice the DSP-mediated route
++       never actually drove the DreamBlaster S2 wavetable in production
++       (see CURRENT-STATE.md "WaveBlaster status" correction
++       2026-05-26: every prior "WB working" entry was a misattributed
++       silent fallback to OPL3). Killswitch strict-"0" match per
+        CLAUDE.md.
+ 
+-       Init-order discipline: both paths require the SB16 audio backend
+-       to be open. Engine (nx-engine MidiBackendWaveBlaster) is responsible
+-       for calling SDL_DOSMpu401Init AFTER SoundManager::init has run AND
+-       after the audio thread has serviced at least one frame (per
+-       analysis § "Recommendations for sdl-engine SDL/0047 author" hard-no
+-       #3). We check IsInitialized() here as a minimum sanity gate. */
++       Init-order discipline: the DSP-mediated fallback path requires
++       the SB16 audio backend to be open. Engine (nx-engine
++       MidiBackendWaveBlaster) is responsible for calling
++       SDL_DOSMpu401Init AFTER SoundManager::init has run AND after
++       the audio thread has serviced at least one frame. We check
++       IsInitialized() inside the fallback branch. */
+     const char *direct_env = SDL_getenv("SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT");
+-    const bool use_direct = (direct_env && direct_env[0] == '1' && direct_env[1] == 0);
++    const bool use_dsp_fallback = (direct_env && direct_env[0] == '0' && direct_env[1] == 0);
+ 
+-    if (!use_direct) {
+-        /* === Default path: DSP-mediated MIDI (Option B) === */
++    if (use_dsp_fallback) {
++        /* === Opt-in fallback: DSP-mediated MIDI (legacy patch-0047 default) === */
+         if (!SDL_DOSAudioSB_IsInitialized()) {
+-            doskutsu_dbg_log("mpu401: DSP-mediated init aborted — SB16 backend "
+-                             "not initialized (engine init order bug). Engine "
+-                             "must SDL_AudioBackend_Init before calling "
+-                             "SDL_DOSMpu401Init.");
++            doskutsu_dbg_log("mpu401: DSP-mediated fallback init aborted -- "
++                             "SB16 backend not initialized (engine init order "
++                             "bug). Engine must SDL_AudioBackend_Init before "
++                             "calling SDL_DOSMpu401Init.");
+             return false;
+         }
+-        doskutsu_dbg_log("mpu401: DSP-mediated init at port_base=0x%04x "
+-                         "(default since patch 0047; DSP cmd 0x34 UART entry; "
+-                         "set SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=1 to use "
+-                         "direct-port path instead)",
++        doskutsu_dbg_log("mpu401: DSP-mediated fallback init at port_base=0x%04x "
++                         "(opt-in via SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=0; "
++                         "default since patch 0080 is direct-port + bit-6 DRR "
++                         "polling per WBTEST-006 H20 confirmation; DSP cmd 0x34 "
++                         "UART entry)",
+                          (unsigned)port_base);
+         SDL_DOSAudioSB_DSPMidiEnterUART();
+         s_mpu401_port_base = (int)port_base;  /* sentinel = "ready"; not used for I/O */
+@@ -121,11 +140,57 @@ bool SDL_DOSMpu401Init(uint16_t port_base)
+         return true;
+     }
+ 
+-    /* === Opt-in path: direct-port MPU-401 (Option A; legacy 0044 default) === */
++    /* === Default path: direct-port MPU-401 + bit-6 DRR polling (patch 0080) === */
+     s_mpu401_use_dsp = false;
+     return SDL_DOSMpu401Init_DirectPort(port_base);
+ }
+ 
++/* DOSKUTSU patch (Phase 11 patch 0080): bounded bit-6 DRR poll helper.
++
++   Mirrors DOSMID source (github.com/Tronix286/DOSMID, MPU401.C,
++   mpu401_waitwrite + mpu401_uart): poll bit 6 (DRR, mask 0x40) of the
++   MPU status register at port_base+1 until it CLEARS (chip ready to
++   receive); bounded iteration cap so a chip variant that never clears
++   DRR cannot hang the IRQ-5 ISR. Returns true if DRR cleared in time,
++   false if the cap was hit; callers fail-soft (write the byte anyway
++   so a chip with stuck-high bit 6 still gets the data, mirroring the
++   patch-0044 / patch-0047 "blind write" fallback policy).
++
++   Iter cap = 10000. Empirical max from WBTEST-006 probe on g2k
++   Vibra16S CT2490 (POD-83): iters_max=238 across calls=51 with
++   cap_hits=0 -- ~1 us per inportb on P54C, so 10000 iters ~= 10 ms
++   worst-case wallclock if a chip variant stalls; well outside the
++   per-write IRQ-5 service budget but bounded enough that one stuck
++   write does not freeze the system. The 40x headroom above the
++   observed maximum is the design margin against per-chip variation.
++
++   One-shot cap-warn so the log isn't spammed if a chip variant has
++   stuck-high DRR; the warn message names the killswitch path so the
++   operator has a clear next step. Per docs/internal/WBTEST-001-FINDINGS.md
++   rev-8 (H20 confirmation chain). */
++static bool s_mpu401_drr_cap_warned = false;
++static bool SDL_DOSMpu401WaitDRR(uint16_t port_base)
++{
++    const Uint16 status_port = (Uint16)(port_base + 1);
++    for (int iter = 0; iter < 10000; iter++) {
++        if ((inportb(status_port) & 0x40) == 0) {
++            return true;
++        }
++    }
++    if (!s_mpu401_drr_cap_warned) {
++        doskutsu_dbg_log("mpu401: DRR poll cap hit at port_base=0x%04x "
++                         "(bit 6 stuck high after 10000 iter ~= 10 ms; "
++                         "chip variant may have stuck DRR; fail-soft "
++                         "blind write follows -- direct-port path may be "
++                         "unreliable on this hardware; set "
++                         "SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=0 to "
++                         "fall back to DSP-mediated path)",
++                         (unsigned)port_base);
++        s_mpu401_drr_cap_warned = true;
++    }
++    return false;
++}
++
+ /* DOSKUTSU patch (Phase 10 patch 0047): direct-port path extracted from
+    the patch-0044 SDL_DOSMpu401Init body. Entry guarded behind the
+    SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=1 hint. Body unchanged from
+@@ -170,15 +235,26 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+     const bool do_probe = (probe_env && probe_env[0] == '1' && probe_env[1] == 0);
+ 
+     if (!do_probe) {
+-        doskutsu_dbg_log("mpu401: blind init at port_base=0x%04x "
+-                         "(probe disabled — patch 0044 default; set "
+-                         "SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1 to enable "
+-                         "probe path with LOCKUP RISK on real Vibra16S+S2)",
++        doskutsu_dbg_log("mpu401: direct-port init at port_base=0x%04x "
++                         "(default since patch 0080; bit-6 DRR polling "
++                         "before UART entry + every byte write per "
++                         "WBTEST-006 H20 confirmation; probe path "
++                         "disabled, set SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1 "
++                         "to enable it with LOCKUP RISK on real Vibra16S+S2; "
++                         "set SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=0 "
++                         "to fall back to DSP-mediated path)",
+                          (unsigned)port_base);
+-        /* UART mode entry. After this, all writes to data port pass
+-           directly to MIDI bus; status bit 6 (0x40) = DRR (data ready
+-           to receive; must be 0 before each write — but we never read
+-           it on this path; chip clocks data out on its own). */
++        /* DOSKUTSU patch (Phase 11 patch 0080): bit-6 DRR poll before
++           UART entry write. A capped-out poll at init is a strong "this
++           chip variant does not honor bit 6" signal -- the helper logs
++           it once-per-process; we fail-soft and write the byte anyway
++           so chips that work without polling still get the same blind
++           init the patch-0044 path provided. */
++        (void)SDL_DOSMpu401WaitDRR(port_base);
++        /* UART mode entry. After this, all writes to the data port pass
++           directly to the MIDI bus. Status bit 6 (0x40) = DRR (Data
++           Ready to Receive); the helper above gates this write on it
++           per DOSMID source (mpu401_uart in MPU401.C). */
+         outportb((Uint16)(port_base + 1), 0x3F);
+         s_mpu401_port_base = (int)port_base;
+         return true;
+@@ -255,15 +331,21 @@ void SDL_DOSMpu401WriteByte(uint8_t byte)
+         return;
+     }
+ 
+-    /* Direct-port path (Option A; legacy 0044 default). Per W22-WB-F
+-       analysis hard-no #1: do NOT poll MPU status bit 7 (TX-READY)
+-       before writing — it never clears on SB16 PnP CTL0026. The
+-       previous implementation's `while ((inportb(base+1) & 0x40) != 0)`
+-       happened to work only because bit 6 (DRR) is a different bit
+-       than bit 7 (TX-READY); but on chips where bit 6 also lies, this
+-       would hang. Removing the poll altogether per analysis Option A
+-       step 5 — "BLIND write; do not poll status". */
++    /* Direct-port path (default since patch 0080). DOSKUTSU patch
++       (Phase 11 patch 0080): bit-6 DRR poll before every byte write
++       per DOSMID source (github.com/Tronix286/DOSMID, MPU401.C,
++       mpu401_waitwrite). WBTEST-006 H20 confirmed on g2k Vibra16S
++       CT2490 that polling bit 6 -- NOT the patch-0042/0047-era
++       conjecture about bit 7 TX-READY -- is the prerequisite that
++       lets non-note MIDI events through. The previous "BLIND write;
++       do not poll status" comment (patch 0044/0047) was correct that
++       bit 7 lies on SB16 PnP CTL0026, but incorrect to extend that
++       to ALL status bits: bit 6 (DRR) is reliable on this hardware
++       and is the per-byte gate the chip expects. cap_hits=0 in the
++       reference probe; fail-soft writes the byte anyway if a stuck
++       chip variant ever caps out. */
+     const Uint16 base = (Uint16)s_mpu401_port_base;
++    (void)SDL_DOSMpu401WaitDRR(base);
+     outportb(base, byte);
+ }
+ 
+@@ -297,7 +379,16 @@ void SDL_DOSMpu401Shutdown(void)
+         outportb((Uint16)(s_mpu401_port_base + 1), 0xFF);
+     }
+     s_mpu401_port_base = -1;
+-    s_mpu401_use_dsp = true; /* reset to default for next init cycle */
++    /* DOSKUTSU patch (Phase 11 patch 0080): reset to default for next
++       init cycle. The patch-0047-era default was DSP-mediated (true);
++       patch 0080 flips the default to direct-port (false). Functionally
++       cosmetic -- SDL_DOSMpu401Init's env dispatch overwrites this on
++       every entry -- but kept consistent with the new default. */
++    s_mpu401_use_dsp = false;
++    /* Clear the DRR cap-warn one-shot too: a re-init may target
++       different hardware (or DOSBox-X smoke between iters), and a
++       prior cap-hit on one chip should not silence a future warn. */
++    s_mpu401_drr_cap_warned = false;
+ }
+ 
+ uint16_t SDL_DOSMpu401GetBLASTERPort(void)
+-- 
+2.47.3
+

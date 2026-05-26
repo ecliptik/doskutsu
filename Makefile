@@ -1002,6 +1002,55 @@ PROBE_ORGSYNTH_EXE := $(PROBES_DIR)/orgsynth.exe
 PROBE_WBMIDI_SRC := tests/probes/wbmidi.c
 PROBE_WBMIDI_EXE := $(PROBES_DIR)/wbmidi.exe
 
+# P32 -- v1.0.2 task #1: WaveBlaster MIDI A/B probe (WBTEST-001).
+#   Sends GM piano C-E-G chord on each of the two SDL/0047 dispatch paths
+#   in isolation. HISTORICAL v1; flush-instr post-iter analysis identified
+#   a probe-faithfulness defect (PATH=D omits 0x3F UART entry write).
+#   Kept on disk per bltpat / bltpat-v2 precedent. Source basename = binary
+#   basename = wbtest (8.3-clean) -> generic %.exe pattern rule applies.
+PROBE_WBTEST_SRC := tests/probes/wbtest.c
+PROBE_WBTEST_EXE := $(PROBES_DIR)/wbtest.exe
+
+# P33 -- v1.0.2 task #4: WaveBlaster MIDI 4-path probe (WBTEST-002).
+#   Revision of WBTEST-001 fixing the PATH=D faithfulness defect + adding
+#   PATH=DI (full MPU reset/ACK dance), PATH=PI (DSP + MPU reset prelude),
+#   GM Master Volume sysex + CC07 + drum-kit + CC120 sequence additions,
+#   and a 38-reg CT1745 mixer dump (verbatim from mpuwbprobe.c sec.2).
+#   ACK polling switched to DATA-port direct-byte detect (~5ms cap) since
+#   status bit 7 lies on Vibra16S CT2490 per W22-WB-F. Source basename =
+#   binary basename = wbtest2 (8.3-clean: 7+3) -> generic %.exe pattern.
+PROBE_WBTEST2_SRC := tests/probes/wbtest2.c
+PROBE_WBTEST2_EXE := $(PROBES_DIR)/wbtest2.exe
+
+# P34 -- v1.0.2 task #9: WBTEST-003 5-variant Reset SysEx probe.
+#   Single-lever discriminator across {GM,GS,XG} x {with,without drum bank}.
+#   PATH=P byte transport copied verbatim from wbtest2.c; only pre-phrase
+#   Reset SysEx differs per variant. Identifies the Reset SysEx that wakes
+#   Dream SAM2695 into GM Capital Tone state (current power-up has organ on
+#   prog 0 + cowbell on note 36 per WBTEST-002b ear-report). Source basename
+#   = binary basename = wbtest3 (8.3-clean) -> generic %.exe pattern rule.
+PROBE_WBTEST3_SRC := tests/probes/wbtest3.c
+PROBE_WBTEST3_EXE := $(PROBES_DIR)/wbtest3.exe
+
+# P35 -- v1.0.2 task #12: WBTEST-004 5-variant program-change matrix.
+#   Discriminates whether MIDI prog-change (0xCn) is honored at all by
+#   Dream SAM2695. WBTEST-003 found all 5 Reset SysEx variants ignored;
+#   if all 5 prog-change values also produce identical timbre, H16 (chip
+#   silently drops prog-change) is confirmed and next step is Doom-init
+#   byte replicate. PATH=P body verbatim from wbtest3.c; no Reset SysEx;
+#   no drum hit. Source basename = binary basename = wbtest4 (8.3-clean).
+PROBE_WBTEST4_SRC := tests/probes/wbtest4.c
+PROBE_WBTEST4_EXE := $(PROBES_DIR)/wbtest4.exe
+
+# P36 -- v1.0.2 task #16: WBTEST-006 DOSMID-faithful bit-6 DRR polling.
+#   Tests whether MPU status bit 6 (DRR) polling before every write is
+#   the missing piece for audible wavetable MIDI on Vibra16S + SAM2695.
+#   Source: DOSMID (github.com/Tronix286/DOSMID) MPU401.C. 3 variants:
+#   V1 polled control, V2 no-poll discriminator, V3 polled + bass program.
+#   No wbtest5 -- task #14 ran in-engine lane rather than probe lane.
+PROBE_WBTEST6_SRC := tests/probes/wbtest6.c
+PROBE_WBTEST6_EXE := $(PROBES_DIR)/wbtest6.exe
+
 # P22 -- Phase 11 wave-50 cycle 1: Cirrus 5434 CRTC start-address
 #   encoding probe. Gates SDL/0061 page-flip helper authoring.
 #   Per sdl-engine STOP-and-ack: VBE 0x4F07 silently fails on Cirrus 5434
@@ -1284,7 +1333,7 @@ $(PROBE_WBMIDI_EXE): $(PROBE_WBMIDI_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 s3blt s3blt-dosbox-smoke probes-p25 probes-s3blt dactest dactest-dosbox-smoke probes-p26 s3vram s3ckey s3vram-dosbox-smoke s3ckey-dosbox-smoke probes-p27 probes-p28 s3crtc probes-p29 s3wedge probes-p30 s3alias probes-p31
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi wbtest wbtest2 wbtest3 hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 s3blt s3blt-dosbox-smoke probes-p25 probes-s3blt dactest dactest-dosbox-smoke probes-p26 s3vram s3ckey s3vram-dosbox-smoke s3ckey-dosbox-smoke probes-p27 probes-p28 s3crtc probes-p29 s3wedge probes-p30 s3alias probes-p31 probes-p32 probes-p33 probes-p34 wbtest4 probes-p35 wbtest6 probes-p36
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -1571,6 +1620,74 @@ probes-p19: $(PROBE_ORGSYNTH_EXE)
 # P20 -- Phase 11 wave-40 task #29: WaveBlaster MIDI sanity probe.
 probes-p20: $(PROBE_WBMIDI_EXE)
 	@echo "Built P20 probe set: wbmidi.exe (wave-40 task #29 -- WaveBlaster MIDI sanity)"
+
+# P32 -- v1.0.2 task #1: WaveBlaster MIDI A/B probe (wbtest).
+wbtest: $(PROBE_WBTEST_EXE)
+	@echo "Built $(PROBE_WBTEST_EXE) -- v1.0.2 task #1 (WaveBlaster MIDI A/B probe)."
+	@echo "  Standalone DJGPP. Mirrors SDL/0047's two dispatch paths byte-for-byte:"
+	@echo "    PATH=D = direct-port blind (SDL/0047 opt-in branch)"
+	@echo "    PATH=P = DSP-mediated cmd 0x34/0x38 (SDL/0047 default)"
+	@echo "  Sends a GM Acoustic Grand Piano C-E-G chord on each path with a 1-sec"
+	@echo "  silence gap. Operator's ear-verdict picks which (if either) is correctly"
+	@echo "  framed; SDL/0047 default flips accordingly. Real-HW iter: bundle"
+	@echo "  WBTEST.EXE + CWSDPMI.EXE + tests/probes/wbtest.bat. Output -> WBTEST.LOG."
+	@echo "  Runtime ~12 sec. HAZARD low (PATH=D blind, no polling; PATH=P mirrors"
+	@echo "  W22-WB-F section 10 which ran cleanly)."
+
+probes-p32: $(PROBE_WBTEST_EXE)
+	@echo "Built P32 probe set: wbtest.exe (v1.0.2 task #1 -- WBTEST-001 historical)"
+
+# P33 -- v1.0.2 task #4: WBTEST-002 (4-path probe-faithful revision).
+wbtest2: $(PROBE_WBTEST2_EXE)
+	@echo "Built $(PROBE_WBTEST2_EXE) -- v1.0.2 task #4 (WBTEST-002 4-path probe)."
+	@echo "  Standalone DJGPP. Revision of WBTEST-001 fixing PATH=D faithfulness +"
+	@echo "  adding PATH=DI (full reset/ACK) + PATH=PI (DSP + MPU reset prelude),"
+	@echo "  GM Master Volume + CC07 + drum-kit + CC120 per-path additions, and"
+	@echo "  CT1745 38-reg mixer dump (verbatim from mpuwbprobe.c sec.2)."
+	@echo "  ACK polling on DATA port direct-byte (~5ms cap) -- status bit lies."
+	@echo "  Real-HW iter: bundle WBTEST2.EXE + CWSDPMI.EXE + tests/probes/wbtest2.bat."
+	@echo "  Output -> WBTEST2.LOG. Runtime ~28 sec. PicoGUS expected OUT this iter."
+
+probes-p33: $(PROBE_WBTEST2_EXE)
+	@echo "Built P33 probe set: wbtest2.exe (v1.0.2 task #4 -- WBTEST-002 4-path)"
+
+# P34 -- v1.0.2 task #9: WBTEST-003 5-variant Reset SysEx probe.
+wbtest3: $(PROBE_WBTEST3_EXE)
+	@echo "Built $(PROBE_WBTEST3_EXE) -- v1.0.2 task #9 (WBTEST-003 5-variant Reset SysEx)."
+	@echo "  Standalone DJGPP. PATH=P only (byte transport unchanged from wbtest2.c)."
+	@echo "  5 variants vary ONLY the pre-phrase Reset SysEx:"
+	@echo "    V1=GM Reset only (control)  V2=GS+GM  V3=XG+GM  V4=GS+drum bank  V5=XG+drum bank"
+	@echo "  Real-HW iter: bundle WBTEST3.EXE + CWSDPMI.EXE + tests/probes/wbtest3.bat."
+	@echo "  Output -> WBTEST3.LOG. Runtime ~35 sec. PicoGUS expected OUT (per campaign)."
+
+probes-p34: $(PROBE_WBTEST3_EXE)
+	@echo "Built P34 probe set: wbtest3.exe (v1.0.2 task #9 -- WBTEST-003 Reset SysEx)"
+
+# P35 -- v1.0.2 task #12: WBTEST-004 5-variant program-change matrix.
+wbtest4: $(PROBE_WBTEST4_EXE)
+	@echo "Built $(PROBE_WBTEST4_EXE) -- v1.0.2 task #12 (WBTEST-004 prog-change matrix)."
+	@echo "  Standalone DJGPP. PATH=P only (byte transport unchanged from wbtest3.c)."
+	@echo "  5 variants vary ONLY the program-change value (C0 vv):"
+	@echo "    V1=0x00 piano  V2=0x10 organ  V3=0x20 bass  V4=0x40 sax  V5=0x60 FX rain"
+	@echo "  No Reset SysEx prefix; no drum hit; melody-only timbre discrimination."
+	@echo "  Real-HW iter: bundle WBTEST4.EXE + CWSDPMI.EXE + tests/probes/wbtest4.bat."
+	@echo "  Output -> WBTEST4.LOG. Runtime ~30 sec. PicoGUS expected OUT (per campaign)."
+
+probes-p35: $(PROBE_WBTEST4_EXE)
+	@echo "Built P35 probe set: wbtest4.exe (v1.0.2 task #12 -- WBTEST-004 prog-change)"
+
+# P36 -- v1.0.2 task #16: WBTEST-006 DOSMID-faithful bit-6 polling.
+wbtest6: $(PROBE_WBTEST6_EXE)
+	@echo "Built $(PROBE_WBTEST6_EXE) -- v1.0.2 task #16 (WBTEST-006 DOSMID polled direct-port)."
+	@echo "  Standalone DJGPP. PATH=DOSMID byte-faithful to DOSMID MPU401.C:"
+	@echo "    mpu401_waitwrite (bit 6 == 0) before every outportb."
+	@echo "  3 variants: V1 polled+piano+drum, V2 no-poll discriminator, V3 polled+bass."
+	@echo "  Real-HW iter: bundle WBTEST6.EXE + CWSDPMI.EXE + tests/probes/wbtest6.bat."
+	@echo "  Output -> WBTEST6.LOG. Runtime ~20 sec. PicoGUS expected OUT (per campaign)."
+	@echo "  HAZARD: low; poll loop has 5ms wallclock cap; cap_hits stats logged per variant."
+
+probes-p36: $(PROBE_WBTEST6_EXE)
+	@echo "Built P36 probe set: wbtest6.exe (v1.0.2 task #16 -- WBTEST-006 DOSMID polled)"
 
 # P21 -- Phase 11 wave-41 task #10: HW-inventory snapshot.
 hwinv: $(PROBE_HWINV_EXE)

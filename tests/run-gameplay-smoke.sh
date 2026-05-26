@@ -316,6 +316,7 @@ BANNER_REGEX=(
   "midi ISR tick: engine registered tick_isr callback \(L2b active.*\)"
   "opl3 backend: PATCH_ORGAN \+ PATCH_MALLET RR=8"
   "audio: SDL/0079 TL=0x3F sweep applied \(18 voices"
+  "mpu401: direct-port init at port_base=0x[0-9a-fA-F]+ \(default since patch 0080"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -377,6 +378,7 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
   "optional"
   "optional"
 )
@@ -442,6 +444,7 @@ BANNER_LABEL=(
   "engine L2b tick_isr registration ASSERT (REQUIRED on default boot via SDL/0075 + nxengine-evo/0170 -- the engine 0168 banner emits at SoundManager::init when SDL_DOSMidiIsrTickActive() is true (default-ON since v1.0.1). Init-time DETERMINISTIC (NOT SFX-gated), and the smoke is verbose (DOSKUTSU_LOG_VERBOSE=1 -> INFO) so the engine LOG_INFO line emits. Distinct from L302 (which asserts SDL RESOLVED L2b ON): this asserts the ENGINE actually REGISTERED the tick_isr callback (followed the SDL flag) -- a regression where SDL says on but the engine registration path breaks would PASS L302 and FAIL this. The matching skipped-registration variant only emits under the =0 killswitch (deliberate non-default). Per flush-instr. patch SDL/0075)"
   "nxengine-evo/0171 OPL3 wub-wub fix banner (REQUIRED in builds carrying patch 0171 -- the 4-byte PATCH_ORGAN/PATCH_MALLET RR=0->RR=8 fix emits this LOG_INFO at MidiBackendOpl3 init confirming the fixed-bytes constexpr table linked. Default-ON, no killswitch; banner is unconditional in the new binary. Absence on a post-0171 build = build linked pre-fix bytes (regression / stale cache). Pairs with the SDL/0079 shutdown-sweep banner for the wub-wub residual fix bundle.)"
   "SDL/0079 OPL3 shutdown TL=0x3F sweep banner (REQUIRED on clean-quit in builds carrying SDL/0079 -- the SDL_DOSOpl3Shutdown TL=0x3F sweep zeroes all 18 voices x 2 ops before KEY-OFF-all, killing the post-quit envelope output. Default-ON, no killswitch; emits when engine destructor runs at clean quit (smoke's TAS-EOF auto-exit path triggers it). Absence = SDL/0079 not linked OR smoke didn't reach clean quit. Pairs with the nx-0171 engine-init banner.)"
+  "SDL/0080 mpu401 direct-port default banner (optional -- emits at SDL_DOSMpu401Init when the WB MIDI dispatch path engages, which is gated on either the auto-detect chain selecting WB or AUDIO_BACKEND=wb explicitly. Default smoke runs without AUDIO_BACKEND set and the auto-detect chain falls through WB -> OPL3 on DOSBox-X (no DreamBlaster S2 daughterboard emulated) so this banner is typically ABSENT under DOSBox-X. The runtime-witness side of the two-witness pattern for the patch-0080 default-flip: the strings|grep on the binary proves embed (\"mpu401: direct-port init at port_base=\"), and this banner regex proves runtime invocation if/when WB is selected. Real-HW iters with AUDIO_BACKEND=wb on g2k Vibra16S + S2 are the path where the banner actually emits and where the WBTEST-006 H20 confirmation lands. Killswitch path (SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=0) emits the \"DSP-mediated fallback init at port_base=\" banner instead -- not covered by this regex by design, since the default-config gate cares about the default-path banner. See patches/SDL/0080 commit message + docs/internal/WBTEST-001-FINDINGS.md rev-8.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
