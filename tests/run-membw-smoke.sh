@@ -136,6 +136,21 @@ else
     rc=1
 fi
 
+# S3-VIRGE campaign Lever-1 decider (size sweep): the LFB_WRITE_BOUND verdict
+# line must emit with a recognized token. This is a derived-metric emit-check
+# (probe_authoring_discipline) -- it gates STRUCTURE only; the BANDWIDTH vs
+# OVERHEAD VALUE is emulator-fictitious here (DOSBox-X LFB = host memory, so a
+# saturated curve / >100 GB/s asymptote is expected and the probe self-flags
+# it). INDETERMINATE is a valid emitted token (e.g. DOSBox-X reports no usable
+# VRAM size, or the host LFB does not show a per-byte slope).
+bound_line="$(grep -E '^\[membw\] LFB_WRITE_BOUND=' "$OUT" | head -1)"
+if [[ "$bound_line" =~ ^\[membw\]\ LFB_WRITE_BOUND=(BANDWIDTH|OVERHEAD|INDETERMINATE) ]]; then
+    echo "  PASS  LFB_WRITE_BOUND verdict emitted: ${bound_line#*LFB_WRITE_BOUND=}"
+else
+    echo "  FAIL  LFB_WRITE_BOUND verdict absent/invalid -- got: ${bound_line:-no LFB_WRITE_BOUND line}" >&2
+    rc=1
+fi
+
 if [[ "$rc" -eq 0 ]]; then
     echo "[membw-smoke] PASS: clean exit + LFB section + sentinel verified."
     echo "[membw-smoke] note: MB/s figures are emulator-fictitious (DOSBox-X LFB"

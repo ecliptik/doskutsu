@@ -1049,6 +1049,40 @@ PROBE_BANDCOMP_EXE := $(PROBES_DIR)/bandcomp.exe
 PROBE_BLTTILE_SRC := tests/probes/blttile.c
 PROBE_BLTTILE_EXE := $(PROBES_DIR)/blttile.exe
 
+# P25 -- S3 ViRGE/DX 2D BitBLT engine probe (S3-VIRGE campaign P3). NEW file
+# s3blt.c. Pure DJGPP; source basename == binary basename (s3blt) so the
+# generic %.exe pattern rule builds it -- no explicit rename rule needed.
+# minstack 512k (PROBES_MINSTK, like membw/blttile/chipid). Real-HW iter S3-1:
+# bundle alongside CWSDPMI.EXE + tests/probes/s3blt.bat. Output -> S3BLT.LOG
+# (CWD, fopen-direct, no shell redirect). HW-IO probe (direct S3 MMIO); the
+# real iter runs S3BLT.EXE with NO args (auto-detect ViRGE/DX); FORCE arg
+# bypasses the detect gate (used by the DOSBox-X correctness smoke only).
+PROBE_S3BLT_SRC := tests/probes/s3blt.c
+PROBE_S3BLT_EXE := $(PROBES_DIR)/s3blt.exe
+
+# P26 -- S3 SDAC DAC-detect probe (S3-VIRGE DetectVGA-fix sub-campaign task #2).
+# NEW file dactest.c. Confirms the 0x3C6 SDAC DetectVGA failure (T1 bare replica
+# of SDL's DetectVGA vs T2 0x3C8-reset variant). Pure DJGPP; same-basename ->
+# generic %.exe rule, no explicit rule. minstack 512k. Output -> DACTEST.LOG
+# (CWD, fopen-direct). Rides the DetectVGA-fix rebuild iter (task #3).
+PROBE_DACTEST_SRC := tests/probes/dactest.c
+PROBE_DACTEST_EXE := $(PROBES_DIR)/dactest.exe
+
+# P27/P28 -- S3-2 de-risk probes (UNIVBE/VBE3.0, LFB 0x78000000). Pure DJGPP,
+# same-basename -> generic %.exe rule, no explicit rule. minstack 512k (default).
+# s3vram (P27): VESA mode + LFB map, NO 2D MMIO (lower hazard) -> S3VRAM.LOG.
+# s3ckey (P28): direct ViRGE MMIO + colorkey BLT (hazard like s3blt) -> S3CKEY.LOG.
+PROBE_S3VRAM_SRC := tests/probes/s3vram.c
+PROBE_S3VRAM_EXE := $(PROBES_DIR)/s3vram.exe
+PROBE_S3CKEY_SRC := tests/probes/s3ckey.c
+PROBE_S3CKEY_EXE := $(PROBES_DIR)/s3ckey.exe
+PROBE_S3CRTC_SRC := tests/probes/s3crtc.c
+PROBE_S3CRTC_EXE := $(PROBES_DIR)/s3crtc.exe
+PROBE_S3WEDGE_SRC := tests/probes/s3wedge.c
+PROBE_S3WEDGE_EXE := $(PROBES_DIR)/s3wedge.exe
+PROBE_S3ALIAS_SRC := tests/probes/s3alias.c
+PROBE_S3ALIAS_EXE := $(PROBES_DIR)/s3alias.exe
+
 # P21 -- Phase 11 wave-41 task #10 + wave-43 task #16: comprehensive HW-
 #   inventory snapshot + RUNMANIFEST schema v1 emit.
 #
@@ -1250,7 +1284,7 @@ $(PROBE_WBMIDI_EXE): $(PROBE_WBMIDI_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 s3blt s3blt-dosbox-smoke probes-p25 probes-s3blt dactest dactest-dosbox-smoke probes-p26 s3vram s3ckey s3vram-dosbox-smoke s3ckey-dosbox-smoke probes-p27 probes-p28 s3crtc probes-p29 s3wedge probes-p30 s3alias probes-p31
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -1594,13 +1628,124 @@ blttile: $(PROBE_BLTTILE_EXE)
 probes-p24: $(PROBE_BLTTILE_EXE)
 	@echo "Built P24 probe set: blttile.exe (task #30 -- Cirrus 5434 BitBLT tile-copy card)"
 
+# P25 -- S3 ViRGE/DX 2D BitBLT engine probe (S3-VIRGE campaign P3).
+s3blt: $(PROBE_S3BLT_EXE)
+	@echo "Built $(PROBE_S3BLT_EXE) -- S3 ViRGE/DX 2D BitBLT engine probe (campaign P3)."
+	@echo "  Pure DJGPP. Real-HW iter S3-1: bundle alongside CWSDPMI.EXE +"
+	@echo "  tests/probes/s3blt.bat. Output -> S3BLT.LOG (fopen-direct, CWD)."
+	@echo "  Real-HW iter runs S3BLT.EXE with NO args (auto-detect ViRGE/DX);"
+	@echo "  FORCE arg bypasses the detect gate (DOSBox-X correctness smoke only)."
+	@echo "  HAZARD: direct S3 MMIO -- bounded writes, BLT watchdog, atexit text"
+	@echo "  restore. Real-HW-only verdict (DOSBox-X smoke = correctness-only)."
+
+probes-p25: $(PROBE_S3BLT_EXE)
+	@echo "Built P25 probe set: s3blt.exe (campaign P3 -- S3 ViRGE/DX 2D BitBLT engine)"
+
+# Alias matching the campaign plan's `make probes-s3blt` reference (sec.2.3/6).
+probes-s3blt: probes-p25
+
+# DOSBox-X correctness smoke for S3BLT.EXE (svga_s3 / Trio64 parity machine).
+# Runs S3BLT.EXE FORCE (bypasses the ViRGE-detect gate so the high-risk path --
+# 4 MB-aperture LFB map + MMIO + BLT-register + verify + teardown -- executes)
+# and checks S3BLT.LOG has BEGIN + DONE + a verdict line. Numbers are emulator-
+# fictitious per [[dosbox_not_proxy]]; the gate is emit-structure + clean-exit.
+s3blt-dosbox-smoke: $(PROBE_S3BLT_EXE) $(CWSDPMI_EXE)
+	@tests/run-s3blt-smoke.sh
+
+# P26 -- S3 SDAC DAC-detect probe (DetectVGA-fix sub-campaign task #2).
+dactest: $(PROBE_DACTEST_EXE)
+	@echo "Built $(PROBE_DACTEST_EXE) -- S3 SDAC DAC-detect probe (DetectVGA-fix task #2)."
+	@echo "  Pure DJGPP. Confirms the 0x3C6 SDAC DetectVGA failure (T1 bare replica"
+	@echo "  vs T2 0x3C8-reset variant). Real-HW iter: bundle alongside CWSDPMI.EXE +"
+	@echo "  tests/probes/dactest.bat. Output -> DACTEST.LOG (fopen-direct, CWD)."
+	@echo "  Expected: g2k+S3 -> T1 FAIL + T2 PASS = CONFIRMED_S3_SDAC_BUG_RESET_FIXES;"
+	@echo "  non-S3 (DOSBox-X) -> T1 PASS = NO_REPRO_PIXEL_MASK_OK (correctness-only)."
+
+probes-p26: $(PROBE_DACTEST_EXE)
+	@echo "Built P26 probe set: dactest.exe (DetectVGA-fix task #2 -- S3 SDAC DAC-detect)"
+
+# DOSBox-X correctness smoke for DACTEST.EXE. Checks DACTEST.LOG has BEGIN +
+# DONE + T1/T2/VERDICT. Non-S3 emu -> NO_REPRO_PIXEL_MASK_OK (expected); the
+# real T1-FAIL/T2-PASS confirmation is a g2k+S3 measurement ([[dosbox_not_proxy]]).
+dactest-dosbox-smoke: $(PROBE_DACTEST_EXE) $(CWSDPMI_EXE)
+	@tests/run-dactest-smoke.sh
+
+# P27/P28 -- S3-2 de-risk probes (K4 colorkey + VRAM-resident; run under UNIVBE).
+s3vram: $(PROBE_S3VRAM_EXE)
+	@echo "Built $(PROBE_S3VRAM_EXE) -- S3-2 VRAM-resident de-risk probe (UNIVBE)."
+	@echo "  Pure DJGPP. VESA mode + LFB map, no 2D MMIO (lower hazard); atexit text restore."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE. Output -> S3VRAM.LOG (fopen-direct, CWD)."
+
+s3ckey: $(PROBE_S3CKEY_EXE)
+	@echo "Built $(PROBE_S3CKEY_EXE) -- S3-2 K4 colorkey de-risk probe (UNIVBE)."
+	@echo "  Pure DJGPP. Direct ViRGE MMIO + colorkey BLT (hazard: BLT watchdog + atexit restore)."
+	@echo "  Real-HW: NO args (auto-detect); FORCE = DOSBox-smoke-only. Output -> S3CKEY.LOG."
+
+probes-p27: $(PROBE_S3VRAM_EXE)
+	@echo "Built P27 probe set: s3vram.exe (S3-2 VRAM-resident de-risk)"
+
+probes-p28: $(PROBE_S3CKEY_EXE)
+	@echo "Built P28 probe set: s3ckey.exe (S3-2 K4 colorkey de-risk)"
+
+# s3crtc (P29): direct-CRTC display-start de-risk for the Stage-1 flip fix (0078).
+# Pure PM port I/O (no real-mode INT). OPERATOR-OBSERVED: the operator watches
+# which display-start unit (byte/word/dword) flips the visible page bright.
+s3crtc: $(PROBE_S3CRTC_EXE)
+	@echo "Built $(PROBE_S3CRTC_EXE) -- S3-2 crtcswap probe (direct-CRTC display-start verify; UNIVBE)."
+	@echo "  Pure DJGPP, PM port I/O (no real-mode INT). OPERATOR-OBSERVED: watch which unit flips the page bright."
+	@echo "  Real-HW: run + WATCH the screen; streams-check auto. Output -> S3CRTC.LOG (fopen-direct, CWD)."
+
+probes-p29: $(PROBE_S3CRTC_EXE)
+	@echo "Built P29 probe set: s3crtc.exe (S3-2 direct-CRTC display-start de-risk)"
+
+# s3wedge (P30): Stage-1 concurrent-contention wedge go/no-go. Reproduces the
+# lever's scattered CPU->VRAM write pattern (read-sysmem->write-VRAM, 1800
+# tiles/frame, row-strided) concurrent with SB16 16-bit auto-init DMA (ch5/IRQ5)
+# + WORD-unit per-frame CRTC page-flip + vblank, always-heavy. Oracle = BIOS tick
+# 0040:006C vs RDTSC: FLATLINE = IRQ delivery dead = the freeze = Stage-1 NO-GO;
+# steady advance = finite stall = salvageable. SCATTERED vs SUSTAINED isolates
+# whether the scatter CADENCE (not raw bandwidth) is the wedge. HAZARD HIGH: on
+# real HW it may freeze the machine (Ctrl-Alt-Del recovers; that freeze IS the
+# answer). Run LAST, in its own cell. Real-HW = NO args (4000 frames + audio);
+# the smoke arg (128) is DOSBox-only.
+s3wedge: $(PROBE_S3WEDGE_EXE)
+	@echo "Built $(PROBE_S3WEDGE_EXE) -- S3-2 Stage-1 concurrent-contention wedge probe (go/no-go)."
+	@echo "  HAZARD HIGH: PURPOSE is to provoke the wedge; real HW may freeze (Ctrl-Alt-Del recovers)."
+	@echo "  Real-HW: run with NO args (4000 frames + audio). Output -> S3WEDGE.LOG (fopen-direct, per-line fsync)."
+
+probes-p30: $(PROBE_S3WEDGE_EXE)
+	@echo "Built P30 probe set: s3wedge.exe (S3-2 Stage-1 wedge go/no-go)"
+
+# s3alias (P31): hyp-3 proof for the Stage-1 crash. Does a SCATTERED LFB-aperture
+# write (misaligned dword+byte = the VRON backdrop pattern) reach the ViRGE 2D
+# engine (change CMD/SRC/DEST regs, activate SUBSYS_STAT, corrupt a sysmem canary)
+# while a BULK sequential write (= NOREP) stays clean? B-corrupts + A-clean =
+# MMIO-aliased-into-LFB confirmed (the in-bounds LFB write assembles a garbage
+# command -> wild bus-master BLT = the crash). Tests page 0 (CANSB suspect) +
+# page 1 + a low-offset alias SWEEP. HAZARD HIGH: may wedge (Ctrl-Alt-Del
+# recovers; the wedge IS a data point). Run LAST, own cell, reboot-first.
+s3alias: $(PROBE_S3ALIAS_EXE)
+	@echo "Built $(PROBE_S3ALIAS_EXE) -- S3-2 Stage-1 hyp-3 MMIO-alias probe (scattered LFB write -> 2D engine?)."
+	@echo "  HAZARD HIGH: may wedge (Ctrl-Alt-Del recovers; the wedge is a data point). Run LAST, own cell."
+	@echo "  Real-HW: run with NO args. Output -> S3ALIAS.LOG (fopen-direct, per-line fsync)."
+
+probes-p31: $(PROBE_S3ALIAS_EXE)
+	@echo "Built P31 probe set: s3alias.exe (S3-2 Stage-1 hyp-3 MMIO-alias proof)"
+
+# DOSBox-X correctness smokes (numbers fictitious -- no ViRGE 2D/VRAM model).
+s3vram-dosbox-smoke: $(PROBE_S3VRAM_EXE) $(CWSDPMI_EXE)
+	@tests/run-s3vram-smoke.sh
+
+s3ckey-dosbox-smoke: $(PROBE_S3CKEY_EXE) $(CWSDPMI_EXE)
+	@tests/run-s3ckey-smoke.sh
+
 probes-p23: $(PROBE_BANDCOMP_EXE)
 	@echo "Built P23 probe set: bandcomp.exe (wave-52/53 -- banded-composition resid_frac gate)"
 
-probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24
+probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 probes-p25 probes-p26 probes-p27 probes-p28
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
-	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (BAT redirect)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"
+	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (fopen-direct)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"
 
 # --- Distribution -------------------------------------------------------------
 #
