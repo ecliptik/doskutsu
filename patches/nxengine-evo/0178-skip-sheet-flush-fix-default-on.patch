@@ -1,0 +1,120 @@
+From 5b90bf82f4d2459c877d71ceca49cd45f24018de Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 10:01:22 -0700
+Subject: [PATCH 178/180] patch 0178 -- SFXPAUSE-012 SHIPPED FIX: skip per-cave
+ sprite-sheet flush (default-ON, killswitch =0)
+
+THE SHIPPED FIX for the fire-frame SFX pause (v1.0.3). Clean
+re-author preserving the operator-confirmed default-ON state.
+
+Root cause: load_stage's flushSheets() deletes ALL sprite sheets per
+cave entry; blitSprite lazy-decode reloads each on first blit;
+bullet/caret sheets only blit on fire/bonk so they re-decode (slow
+CF PNG decode) on the first fire after cave entry = the ~450 ms
+fire-frame pause.
+
+Fix: don't flush -- sheets stay resident (Cave Story sheets are
+static global assets, ~5-25 MB, fits 48 MB g2k). Cave 1 lazy-loads
+each once; cave 2+ finds them resident = no re-decode, no pause, no
+added load. OPERATOR-CONFIRMED on g2k: pause GONE, load times normal
+(~400-590 ms vs the eager-reload alternative's 10-12 s).
+
+DEFAULT-ON killswitch (mirrors patch-0080 backdrop-cache idiom):
+SDL_HINT_DOSKUTSU_SKIP_SHEET_FLUSH=0 restores the old per-cave
+flush. Gates ONLY the sprite-sheet flush; map_flush_graphics()
+(tilemap/backdrop cache) stays unconditional. Per-cave
+[skip-sheet-flush] cave=C emit (INFO-level, invisible on untagged
+WARN production boot). Decision banner narrates ENABLED (default) /
+DISABLED (killswitch =0).
+
+Low-RAM path: SKIP_SHEET_FLUSH=0 + patch-0177 EAGER_SHEET_RELOAD=1
+gives the per-cave re-decode middle ground (no resident
+accumulation). Mutual exclusion: both set -> SKIP wins (eager's
+_loadSheetIfNeeded short-circuits on resident sheets, benign).
+
+This is the ONLY default-ON patch in the v1.0.3 clean stack; the
+other 5 are default-OFF diagnostics/alternatives. Production config
+(this ON, all else OFF) is the g2k-confirmed behavior.
+
+Workspace-local; never upstreamed.
+---
+ src/map.cpp | 56 ++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 55 insertions(+), 1 deletion(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 0cf1d10e..3330500f 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1022,6 +1022,48 @@ static bool midgap_pump_active()
+ }
+ #define MIDGAP_PUMP() do { if (midgap_pump_active()) while (SDL_DOSAudioPump()) { } } while (0)
+ 
++// DOS-PORT (patch 0178, SFXPAUSE-012 SHIPPED FIX): skip the per-cave
++// sprite-sheet flush. Root cause: load_stage's flushSheets() deletes
++// ALL sprite sheets per cave entry; blitSprite-driven lazy decode
++// reloads each on first blit, and bullet/caret sheets only blit on
++// fire/bonk so they re-decode (slow CF PNG decode) on the first fire
++// after cave entry = the ~450 ms fire-frame pause. Fix: don't flush
++// -- Cave Story sheets are STATIC GLOBAL assets (~5-25 MB for all
++// ~67; fits 48 MB g2k), so cave 1 lazy-loads each once on first blit
++// (one-time cold start, same as the old behavior) and cave 2+ finds
++// them resident = no re-decode, no pause, no added load time.
++// OPERATOR-CONFIRMED on g2k: pause GONE, load times normal
++// (~400-590 ms vs the eager-reload alternative's 10-12 s). DEFAULT-ON.
++//
++// DEFAULT-ON killswitch (mirrors the patch-0080 backdrop-cache idiom):
++// SDL_HINT_DOSKUTSU_SKIP_SHEET_FLUSH=0 RESTORES the old per-cave
++// flush-and-lazy-reload. Unset / "1" / any other value keeps the fix
++// engaged. Gates ONLY the SPRITE sheet flush; map_flush_graphics()
++// (tilemap / backdrop cache) stays unconditional because tilesets DO
++// change per map. Mutually exclusive with patch 0177's
++// EAGER_SHEET_RELOAD (the low-RAM alternative): if both set, SKIP
++// wins (no flush -> eager's _loadSheetIfNeeded short-circuits on
++// resident sheets, benign).
++static int g_skip_sheet_flush_decided = -1;
++static bool skip_sheet_flush_active()
++{
++  if (g_skip_sheet_flush_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_SKIP_SHEET_FLUSH");
++    // Default-ON: disabled ONLY by the literal "0" killswitch.
++    g_skip_sheet_flush_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    LOG_INFO("skip sheet flush: {} (SFXPAUSE-012 SHIPPED FIX; sprite "
++             "sheets stay resident across caves so no per-cave "
++             "re-decode -> no fire-frame pause; map_flush_graphics "
++             "tilemap cache still flushes; set "
++             "SDL_HINT_DOSKUTSU_SKIP_SHEET_FLUSH=0 to restore the old "
++             "per-cave flush)",
++             g_skip_sheet_flush_decided ? "ENABLED (default)"
++                                        : "DISABLED (killswitch =0)");
++  }
++  return g_skip_sheet_flush_decided == 1;
++}
++
+ // RAII guard for the FIXED_TIMESTEP accumulator across load_stage. The
+ // constructor snapshots accum_ns at entry; the destructor restores it
+ // and resets last_ns to NOW at every return path -- so wall-clock spent
+@@ -1112,7 +1154,19 @@ bool load_stage(int stage_no)
+   game.curmap = stage_no; // do it now so onspawn events will have it
+ 
+   const Uint64 _lst_t_sheets = _lst_active ? SDL_GetTicksNS() : 0;
+-  Renderer::getInstance()->sprites.flushSheets();
++  // patch 0178 (SFXPAUSE-012 SHIPPED FIX): skip the sprite-sheet flush
++  // (default-ON) so sheets stay resident across caves. map_flush_
++  // graphics() below stays UNCONDITIONAL (tilemap/backdrop cache must
++  // flush per map). SDL_HINT_DOSKUTSU_SKIP_SHEET_FLUSH=0 restores the
++  // old per-cave flush.
++  if (skip_sheet_flush_active())
++  {
++    LOG_INFO("[skip-sheet-flush] cave={}", _lst_cave);
++  }
++  else
++  {
++    Renderer::getInstance()->sprites.flushSheets();
++  }
+   map_flush_graphics();
+   if (_lst_active)
+   {
+-- 
+2.47.3
+

@@ -1,0 +1,42 @@
+# io-audit-allowlist.txt -- phase=gameplay filesystem-IO ops exempt from the
+# re-decode rule.
+#
+# The permanent dev gate (tests/io-audit-gate.sh) runs DOSKUTSU.EXE in the
+# SHIPPING config (SFXPAUSE-012 fix default-ON: SKIP_SHEET_FLUSH skips the
+# per-cave sprite-sheet flush, so sheets stay resident) under
+# SDL_HINT_DOSKUTSU_IO_AUDIT=1 (patch 0180), drives several cave transitions
+# in DOSBox-X, and inspects every [io-audit] line tagged phase=gameplay.
+#
+# THE INVARIANT (don't-flush shipping config):
+#   With the fix on, each sprite sheet is decoded AT MOST ONCE per session --
+#   lazily on its first on-screen appearance (first-visit cold load, inherent
+#   to lazy-load + acceptable: a one-time event, not the per-cave-entry pause).
+#   It must NEVER be decoded a SECOND time: a re-decode means the per-cave
+#   flush came back (the SFXPAUSE-012 Bug 1 regression -> the fire-frame pause
+#   returns on every cave entry).
+#
+# GATE RULE:
+#   op=loadImage at phase=gameplay, same file seen >= 2 times  -> FAIL (re-decode)
+#   op=loadImage at phase=gameplay, same file seen == 1 time   -> OK (first-visit)
+#   ops matching a line below                                  -> EXEMPT (any count)
+#   any other phase=gameplay op type not listed                -> FAIL (new IO landmine)
+#
+# DOSBox-X is faithful for this: it is filesystem-IO ORDERING + repetition
+# (WHERE + how-many-times a read happens), not HW-IO timing ([[dosbox_not_proxy]]).
+#
+# Match syntax: "op=<TYPE> file=<BASENAME-or-GLOB>" (trailing/embedded * = glob).
+#
+# -------- EXEMPT: re-loadable by design (any count allowed) --------
+# Music changes fire on the TSC <CMU script command at arbitrary gameplay
+# moments and legitimately re-load when the player crosses music regions;
+# preloading all stage music is infeasible. Small load, scheduler-tolerated,
+# NOT the sprite-sheet pause class.
+op=music_org_load file=*
+op=music_ogg_load file=*
+
+# Backdrop images load via Map::loadBackdrop (a different path than the
+# Sprites:: sheet cache, so the SKIP_SHEET_FLUSH fix does not keep them
+# resident) and may re-load on backdrop change. KNOWN RESIDUAL tracked by
+# task #41 (move backdrop decode into the load band). DELETE the bk* line
+# when #41 ships so the gate re-catches backdrop re-decode regressions.
+op=loadImage file=bk*.pbm

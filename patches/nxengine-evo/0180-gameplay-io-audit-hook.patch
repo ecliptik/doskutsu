@@ -1,0 +1,393 @@
+From d9372e61263c4ebd6b5196504a3c963c28cda44e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 10:07:15 -0700
+Subject: [PATCH 180/180] patch 0180 -- phase-tagged gameplay-IO-audit hook
+ (v1.0.3 clean re-author)
+
+Clean re-author of the SFXPAUSE-013 IO-audit hook -- the permanent
+lazy-IO landmine detector that powers the no-gameplay-IO dev gate.
+Every instrumented filesystem-IO entry point emits its current game
+phase (boot / load_stage / gameplay), so a DOSBox-X run maps each IO
+op to WHEN it happens. phase=gameplay IO = a latent real-HW stall
+(the actionable subset).
+
+Env SDL_HINT_DOSKUTSU_IO_AUDIT=1 (cached strict-truthy, default OFF).
+Emit: [io-audit] phase=NAME op=OPTYPE file=BASENAME bytes=N wall_us=N.
+3-state phase enum driven by an RAII guard in load_stage (sets
+load_stage on entry, restores gameplay on all return paths;
+boot -> gameplay implicit on the first load_stage dtor).
+
+6 instrumented sites (op tag): Surface::loadImage (loadImage; the
+SFXPAUSE-012 sprite-sheet case + any lazy surface), TSC::Load
+(tsc_load), Organya::load (music_org_load), Ogg::load
+(music_ogg_load), profile_load / profile_save (save_read /
+save_write). loadImage + profile use local RAII guards covering all
+return paths; tsc/Organya/Ogg use inline brackets.
+
+Central infra (io_audit_enabled / io_audit_set_phase /
+io_audit_get_phase / io_audit_emit) in main.cpp, extern "C" so the
+consumer TUs link without header churn. io_audit_emit strips the path
+to basename via SDL_strrchr.
+
+Self-contained -- no dependency on the patch-0175 cave counter (tags
+phase, not cave). Validates the 0178 fix: with both
+EAGER_SHEET_RELOAD off + SKIP_SHEET_FLUSH default-ON, sprite
+loadImage ops appear ONLY at cave-1 first-visit, never recurring at
+phase=gameplay. Default OFF -> production byte-identical to golden.
+
+Workspace-local; never upstreamed.
+---
+ src/graphics/Surface.cpp | 29 ++++++++++++++++++++
+ src/main.cpp             | 58 ++++++++++++++++++++++++++++++++++++++++
+ src/map.cpp              | 17 ++++++++++++
+ src/profile.cpp          | 34 +++++++++++++++++++++++
+ src/sound/Ogg.cpp        | 13 +++++++++
+ src/sound/Organya.cpp    | 20 ++++++++++++++
+ src/tsc.cpp              | 17 ++++++++++++
+ 7 files changed, 188 insertions(+)
+
+diff --git a/src/graphics/Surface.cpp b/src/graphics/Surface.cpp
+index 185cf42a..6c8c89c3 100644
+--- a/src/graphics/Surface.cpp
++++ b/src/graphics/Surface.cpp
+@@ -171,9 +171,38 @@ Surface::~Surface()
+   cleanup();
+ }
+ 
++// patch 0180 (SFXPAUSE-013) IO-audit hooks (bodies in main.cpp) + a
++// local RAII guard so loadImage's 7 return paths are all covered with
++// one bracket. A phase=gameplay [io-audit] op=loadImage line is the
++// lazy-sprite-sheet-decode landmine (the SFXPAUSE-012 case).
++extern "C" bool io_audit_enabled(void);
++extern "C" void io_audit_emit(const char *op, const char *path,
++                              long bytes, unsigned long long wall_us);
++namespace
++{
++struct _IoAuditLoadImageGuard
++{
++  const char *_path;
++  bool        _active;
++  Uint64      _t0;
++  explicit _IoAuditLoadImageGuard(const char *path)
++    : _path(path), _active(io_audit_enabled()),
++      _t0(_active ? SDL_GetTicksNS() : 0) {}
++  ~_IoAuditLoadImageGuard()
++  {
++    if (_active)
++      io_audit_emit("loadImage", _path, 0,
++                    (unsigned long long)((SDL_GetTicksNS() - _t0) / 1000ull));
++  }
++};
++} // namespace
++
+ // load the surface from a .pbm or bitmap file
+ bool Surface::loadImage(const std::string &pbm_name, bool use_colorkey)
+ {
++  // patch 0180 (SFXPAUSE-013) IO-audit bracket (covers all returns).
++  _IoAuditLoadImageGuard _ioag(pbm_name.c_str());
++
+   cleanup();
+ 
+   // patch 0163 (data cache, intercept B): if SDL_HINT_DOSKUTSU_DATA_CACHE
+diff --git a/src/main.cpp b/src/main.cpp
+index e1a02cea..ecb557cc 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -431,6 +431,64 @@ extern "C" bool firepath_trace_active(void)
+   return firepath_trace_active_main();
+ }
+ 
++// DOS-PORT (patch 0180, SFXPAUSE-013): phase-tagged gameplay-IO-audit
++// hook -- the permanent lazy-IO landmine detector that powers the
++// no-gameplay-IO dev gate. Every instrumented filesystem-IO entry
++// point emits its CURRENT game phase, so a DOSBox-X run maps each IO
++// op to WHEN it happens. phase=gameplay IO = a latent real-HW stall
++// (the actionable subset); phase=boot / phase=load_stage IO is
++// expected. Phase enum: 0 boot / 1 load_stage / 2 gameplay; the
++// load_stage RAII guard (map.cpp) sets load_stage on all return
++// paths, restoring gameplay on exit (boot -> gameplay implicit on
++// the first load_stage's guard dtor). Default OFF; opt-in via strict
++// "1" on SDL_HINT_DOSKUTSU_IO_AUDIT.
++static int g_io_audit_phase   = 0;   // 0 boot / 1 load_stage / 2 gameplay
++static int g_io_audit_decided = -1;
++static bool io_audit_active_main()
++{
++  if (g_io_audit_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_IO_AUDIT");
++    g_io_audit_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    if (g_io_audit_decided)
++    {
++      LOG_INFO("IO audit: ENABLED (opt-in via SDL_HINT_DOSKUTSU_IO_AUDIT=1; "
++               "emits one [io-audit] line per filesystem-IO op tagged with "
++               "the current game phase; phase=gameplay is the actionable "
++               "lazy-IO-landmine subset; default OFF)");
++    }
++  }
++  return g_io_audit_decided == 1;
++}
++
++// patch 0180 extern accessors for the instrumented IO sites in
++// graphics/Surface.cpp, tsc.cpp, sound/Organya.cpp, sound/Ogg.cpp,
++// profile.cpp + the phase guard in map.cpp.
++extern "C" bool io_audit_enabled(void) { return io_audit_active_main(); }
++extern "C" void io_audit_set_phase(int phase) { g_io_audit_phase = phase; }
++extern "C" int  io_audit_get_phase(void) { return g_io_audit_phase; }
++extern "C" void io_audit_emit(const char *op, const char *path,
++                              long bytes, unsigned long long wall_us)
++{
++  if (!io_audit_active_main())
++    return;
++  static const char *const _phase_names[] = {"boot", "load_stage", "gameplay"};
++  int p = g_io_audit_phase;
++  if (p < 0 || p > 2) p = 0;
++  // Reduce the path to its basename so the log line stays short on
++  // DOS-length paths. Handle both '/' and '\\' separators.
++  const char *base = path ? path : "(null)";
++  if (path)
++  {
++    const char *s1 = SDL_strrchr(path, '/');
++    const char *s2 = SDL_strrchr(path, '\\');
++    const char *s  = (s1 > s2) ? s1 : s2;
++    if (s) base = s + 1;
++  }
++  LOG_INFO("[io-audit] phase={} op={} file={} bytes={} wall_us={}",
++           _phase_names[p], op ? op : "(null)", base, bytes, wall_us);
++}
++
+ static void run_tick_fixed(void)
+ {
+   static int frameskip      = 0;
+diff --git a/src/map.cpp b/src/map.cpp
+index 3330500f..954ecf94 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1086,6 +1086,19 @@ struct FtAccumulatorGuard
+   }
+ };
+ 
++// patch 0180 (SFXPAUSE-013) IO-audit phase setter (body in main.cpp)
++// + RAII guard that sets phase=load_stage(1) at load_stage entry and
++// restores gameplay(2) on every return path. boot(0) -> gameplay is
++// implicit on the first load_stage's dtor. So IO ops inside
++// load_stage tag phase=load_stage; main-loop IO tags phase=gameplay;
++// pre-first-stage IO (Sprites::init, title) tags phase=boot.
++extern "C" void io_audit_set_phase(int phase);
++struct IoAuditPhaseGuard
++{
++  IoAuditPhaseGuard()  { io_audit_set_phase(1); }
++  ~IoAuditPhaseGuard() { io_audit_set_phase(2); }
++};
++
+ // DOS-PORT (patch 0175, SFXPAUSE diagnostic): per-cave-entry trace of
+ // load_stage sub-phases + the SHARED cave counter. This patch owns
+ // g_loadstage_cave_counter + the loadstage_current_cave() extern
+@@ -1141,6 +1154,10 @@ bool load_stage(int stage_no)
+   // ctor/dtor; killswitch off (v2 default) makes the guard a no-op pair.
+   FtAccumulatorGuard _ftg;
+ 
++  // patch 0180 (SFXPAUSE-013) IO-audit phase guard: phase=load_stage
++  // for the duration of this call; restores gameplay on every return.
++  IoAuditPhaseGuard _ioapg;
++
+   // patch 0175 per-cave-entry trace setup. _lst_cave is the monotonic
+   // counter for this call (always increments). _lst_t0_total anchors
+   // the TOTAL summary. _lst_phases counts emitted sub-phases. The
+diff --git a/src/profile.cpp b/src/profile.cpp
+index 458a7c76..82d411e7 100644
+--- a/src/profile.cpp
++++ b/src/profile.cpp
+@@ -11,6 +11,34 @@
+ #include <sstream>
+ #include <string>
+ 
++// patch 0180 (SFXPAUSE-013) IO-audit hooks from main.cpp + a local
++// RAII guard so profile_load / profile_save cover all return paths
++// with one bracket each. Save/load is an intentional pause point, so
++// phase=gameplay here is expected-and-benign vs the loadImage
++// landmine -- but the audit captures it for the complete timeline.
++extern "C" bool io_audit_enabled(void);
++extern "C" void io_audit_emit(const char *op, const char *path,
++                              long bytes, unsigned long long wall_us);
++namespace
++{
++struct _IoAuditProfileGuard
++{
++  const char *_op;
++  const char *_path;
++  bool        _active;
++  Uint64      _t0;
++  _IoAuditProfileGuard(const char *op, const char *path)
++    : _op(op), _path(path), _active(io_audit_enabled()),
++      _t0(_active ? SDL_GetTicksNS() : 0) {}
++  ~_IoAuditProfileGuard()
++  {
++    if (_active)
++      io_audit_emit(_op, _path, 0,
++                    (unsigned long long)((SDL_GetTicksNS() - _t0) / 1000ull));
++  }
++};
++} // namespace
++
+ #define PF_WEAPONS_OFFS 0x38
+ #define PF_CURWEAPON_OFFS 0x24
+ #define PF_INVENTORY_OFFS 0xD8
+@@ -26,6 +54,9 @@ bool profile_load(const char *pfname, Profile *file)
+   int i, curweaponslot;
+   FILE *fp;
+ 
++  // patch 0180 (SFXPAUSE-013) IO-audit bracket (covers all returns).
++  _IoAuditProfileGuard _ioag("save_read", pfname);
++
+   LOG_INFO("Loading profile from {}", pfname);
+ //  memset(file, 0, sizeof(Profile));
+   file->wpnOrder.clear();
+@@ -145,6 +176,9 @@ bool profile_save(const char *pfname, Profile *file)
+   FILE *fp;
+   int i;
+ 
++  // patch 0180 (SFXPAUSE-013) IO-audit bracket (covers all returns).
++  _IoAuditProfileGuard _ioag("save_write", pfname);
++
+   // stat("Writing saved game to %s...", pfname);
+   fp = myfopen(widen(pfname).c_str(), widen("wb").c_str());
+   if (!fp)
+diff --git a/src/sound/Ogg.cpp b/src/sound/Ogg.cpp
+index 88b2cc37..d6a939c1 100644
+--- a/src/sound/Ogg.cpp
++++ b/src/sound/Ogg.cpp
+@@ -12,6 +12,11 @@
+ #include <cmath>
+ #include <cstdlib>
+ #include <cstring>
++
++// patch 0180 (SFXPAUSE-013) IO-audit hooks from main.cpp.
++extern "C" bool io_audit_enabled(void);
++extern "C" void io_audit_emit(const char *op, const char *path,
++                              long bytes, unsigned long long wall_us);
+ #include <functional>
+ #include <string>
+ 
+@@ -30,6 +35,11 @@ Ogg::~Ogg() {}
+ 
+ bool Ogg::load(const std::string &fname, const std::string &dir, bool doloop)
+ {
++  // patch 0180 (SFXPAUSE-013) IO-audit bracket. OGG music load +
++  // decode (intro + loop streams); emitted on the success path.
++  const bool _ioa = io_audit_enabled();
++  const Uint64 _ioa_t0 = _ioa ? SDL_GetTicksNS() : 0;
++
+   MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
+   if (!mixer)
+   {
+@@ -70,6 +80,9 @@ bool Ogg::load(const std::string &fname, const std::string &dir, bool doloop)
+ 
+   _song.doloop = doloop;
+ 
++  if (_ioa)
++    io_audit_emit("music_ogg_load", fname.c_str(), 0,
++                  (unsigned long long)((SDL_GetTicksNS() - _ioa_t0) / 1000ull));
+   return true;
+ }
+ 
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index 8be96e7c..e09e96d4 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -19,6 +19,11 @@
+ #include <SDL3_mixer/SDL_mixer.h>
+ #include <cmath>
+ #include <cstring>
++
++// patch 0180 (SFXPAUSE-013) IO-audit hooks from main.cpp.
++extern "C" bool io_audit_enabled(void);
++extern "C" void io_audit_emit(const char *op, const char *path,
++                              long bytes, unsigned long long wall_us);
+ #include <fstream>
+ #include <functional>
+ #include <iostream>
+@@ -333,17 +338,32 @@ void Song::Synth()
+ 
+ bool Organya::load(const std::string &fname)
+ {
++  // patch 0180 (SFXPAUSE-013) IO-audit bracket. Organya .org load +
++  // synth-table setup. A mid-gameplay <CMU (boss music) tags
++  // phase=gameplay -- a candidate lazy-IO landmine if .org decode is
++  // slow on CF.
++  const bool _ioa = io_audit_enabled();
++  const Uint64 _ioa_t0 = _ioa ? SDL_GetTicksNS() : 0;
++
+   song.loaded  = false;
+   song.playing = false;
+ 
+   if (!song.Load(fname))
++  {
++    if (_ioa)
++      io_audit_emit("music_org_load", fname.c_str(), 0,
++                    (unsigned long long)((SDL_GetTicksNS() - _ioa_t0) / 1000ull));
+     return false;
++  }
+   // Reset position
+   _setPlayPosition(0);
+ 
+   // Set as loaded
+   song.loaded = true;
+ 
++  if (_ioa)
++    io_audit_emit("music_org_load", fname.c_str(), 0,
++                  (unsigned long long)((SDL_GetTicksNS() - _ioa_t0) / 1000ull));
+   return true;
+ }
+ 
+diff --git a/src/tsc.cpp b/src/tsc.cpp
+index 71e45bf7..e545d4a7 100644
+--- a/src/tsc.cpp
++++ b/src/tsc.cpp
+@@ -27,6 +27,11 @@
+ #include <map>
+ #include <vector>
+ 
++// patch 0180 (SFXPAUSE-013) IO-audit hooks from main.cpp.
++extern "C" bool io_audit_enabled(void);
++extern "C" void io_audit_emit(const char *op, const char *path,
++                              long bytes, unsigned long long wall_us);
++
+ // which textbox options are enabled by the "<TUR" script command.
+ #define TUR_PARAMS (TB_LINE_AT_ONCE | TB_VARIABLE_WIDTH_CHARS | TB_CURSOR_NEVER_SHOWN)
+ 
+@@ -149,6 +154,12 @@ bool TSC::Load(const std::string &fname, ScriptPages pageno)
+   std::string buf;
+   bool result;
+ 
++  // patch 0180 (SFXPAUSE-013) IO-audit bracket. TSC loads happen
++  // inside load_stage (phase=load_stage expected); a phase=gameplay
++  // tsc_load line would flag an unexpected mid-gameplay script reload.
++  const bool _ioa = io_audit_enabled();
++  const Uint64 _ioa_t0 = _ioa ? SDL_GetTicksNS() : 0;
++
+   LOG_DEBUG("TSC::load: loading '{}' to page {}", fname, (int)pageno);
+ 
+   if (_curscript.running && _curscript.pageno == (int)pageno)
+@@ -161,6 +172,9 @@ bool TSC::Load(const std::string &fname, ScriptPages pageno)
+   if (buf.empty())
+   {
+     LOG_ERROR("tsc_load: failed to load file: '{}'", fname);
++    if (_ioa)
++      io_audit_emit("tsc_load", fname.c_str(), 0,
++                    (unsigned long long)((SDL_GetTicksNS() - _ioa_t0) / 1000ull));
+     return false;
+   }
+ 
+@@ -168,6 +182,9 @@ bool TSC::Load(const std::string &fname, ScriptPages pageno)
+   // int top_script = CompileScripts(buf, fsize, base);
+   result = Compile(buf.c_str(), fsize, pageno);
+ 
++  if (_ioa)
++    io_audit_emit("tsc_load", fname.c_str(), (long)fsize,
++                  (unsigned long long)((SDL_GetTicksNS() - _ioa_t0) / 1000ull));
+   return result;
+ }
+ 
+-- 
+2.47.3
+

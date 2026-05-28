@@ -1,0 +1,88 @@
+From 284eeb58109510edf3bb6a1888d69c4c70763f69 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 09:58:48 -0700
+Subject: [PATCH 176/180] patch 0176 -- sheet-load trace (v1.0.3 clean
+ re-author)
+
+Clean re-author of the SFXPAUSE-012 sheet-load probe. Brackets the
+actual-load branch of Sprites::_loadSheetIfNeeded (new Surface +
+loadImage PNG decode) with SDL_GetTicksNS + stamps the current cave
+number from loadstage_current_cave() (patch 0175). Cache-hit calls
+emit nothing.
+
+Env SDL_HINT_DOSKUTSU_SHEETLOAD_TRACE=1 (cached strict-truthy,
+default OFF). Emits [sheet-load] cave=C sheetno=N wall_us=N per
+actual decode. Monitors the SFXPAUSE-012 root cause + validates the
+0178 skip-flush fix: with the fix default-ON, sheet loads happen
+only on first visit + never recur per-cave.
+
+Self-contained (one extern decl of the patch-0175 cave accessor).
+Default OFF -> production byte-identical to golden. Workspace-local;
+never upstreamed.
+---
+ src/graphics/Sprites.cpp | 42 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 42 insertions(+)
+
+diff --git a/src/graphics/Sprites.cpp b/src/graphics/Sprites.cpp
+index ba55284e..c98ed4a3 100644
+--- a/src/graphics/Sprites.cpp
++++ b/src/graphics/Sprites.cpp
+@@ -189,13 +189,55 @@ void Sprites::flushSheets()
+   }
+ }
+ 
++// DOS-PORT (patch 0176, SFXPAUSE-012 diagnostic): sheet-load probe.
++// Brackets the actual-load branch of _loadSheetIfNeeded (the
++// !_spritesheets[sheetno] path that does new Surface + loadImage PNG
++// decode) with SDL_GetTicksNS + stamps the current cave number from
++// loadstage_current_cave() (patch 0175). Cache-hit calls emit
++// nothing. Proves/monitors the SFXPAUSE-012 root cause + the 0178
++// fix: a [sheet-load] cave=C line whose C matches a cave whose
++// load_stage completed many frames earlier = a fire-time decode (the
++// bug); with the 0178 skip-flush fix default-ON, sheet loads happen
++// only on first visit and never recur. Default OFF; opt-in via
++// strict "1" on SDL_HINT_DOSKUTSU_SHEETLOAD_TRACE.
++static int  g_sheetload_trace_decided = -1;
++static bool sheetload_trace_active()
++{
++  if (g_sheetload_trace_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_SHEETLOAD_TRACE");
++    g_sheetload_trace_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    if (g_sheetload_trace_decided)
++    {
++      LOG_INFO("sheet-load trace: ENABLED (opt-in via "
++               "SDL_HINT_DOSKUTSU_SHEETLOAD_TRACE=1; emits one "
++               "[sheet-load] line per actual PNG-decode in "
++               "_loadSheetIfNeeded; default OFF)");
++    }
++  }
++  return g_sheetload_trace_decided == 1;
++}
++
++// patch 0176 cave-number accessor declared by map.cpp (patch 0175).
++extern "C" int loadstage_current_cave(void);
++
+ // ensure the given spritesheet is loaded
+ void Sprites::_loadSheetIfNeeded(int sheetno)
+ {
+   if (!_spritesheets[sheetno])
+   {
++    // patch 0176 (SFXPAUSE-012) actual-load bracket. Only this branch
++    // incurs the new Surface + loadImage PNG-decode cost.
++    const bool _sl_active = sheetload_trace_active();
++    const Uint64 _sl_t0 = _sl_active ? SDL_GetTicksNS() : 0;
+     _spritesheets[sheetno] = new Surface;
+     _spritesheets[sheetno]->loadImage(ResourceManager::getInstance()->getPath(_sheetfiles.at(sheetno)), true);
++    if (_sl_active)
++    {
++      LOG_INFO("[sheet-load] cave={} sheetno={} wall_us={}",
++               loadstage_current_cave(), sheetno,
++               (unsigned long long)((SDL_GetTicksNS() - _sl_t0) / 1000ull));
++    }
+   }
+ }
+ 
+-- 
+2.47.3
+

@@ -1,0 +1,135 @@
+From 2f6e9da7214047420bfff6933d1a6f01c9ef61ad Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 10:00:32 -0700
+Subject: [PATCH 177/180] patch 0177 -- eager-reload-after-flush LOW-RAM
+ alternative (v1.0.3 clean re-author)
+
+Clean re-author of the SFXPAUSE-012 eager-reload variant, kept as the
+env-selectable LOW-RAM alternative to the shipped skip-flush fix
+(0178). New public method Sprites::eagerLoadAllSheets() loops
+_loadSheetIfNeeded over [0, _num_spritesheets); called from
+map.cpp's load_stage right after flushSheets() + map_flush_graphics()
+so every sheet's PNG decode lands in the load_stage band instead of
+deferring to first-blit at fire-time.
+
+Env SDL_HINT_DOSKUTSU_EAGER_SHEET_RELOAD=1 (cached strict-truthy,
+default OFF). Banner [eager-sheet-reload] cave=C sheets=K wall_ms=M
+per cave entry. For machines that cannot hold the resident sheet set
+the 0178 skip-flush fix requires: SKIP_SHEET_FLUSH=0 +
+EAGER_SHEET_RELOAD=1 gives the per-cave re-decode middle ground (no
+resident accumulation; trades the fire-frame pause for a load-band
+pause -- ~10-12 s on g2k, hence NOT the default).
+
+Uses the patch-0175 cave accessor. Default OFF -> production
+byte-identical to golden. Workspace-local; never upstreamed.
+---
+ src/graphics/Sprites.cpp | 48 ++++++++++++++++++++++++++++++++++++++++
+ src/graphics/Sprites.h   | 11 +++++++++
+ src/map.cpp              | 10 +++++++++
+ 3 files changed, 69 insertions(+)
+
+diff --git a/src/graphics/Sprites.cpp b/src/graphics/Sprites.cpp
+index c98ed4a3..f8d4bdfa 100644
+--- a/src/graphics/Sprites.cpp
++++ b/src/graphics/Sprites.cpp
+@@ -221,6 +221,54 @@ static bool sheetload_trace_active()
+ // patch 0176 cave-number accessor declared by map.cpp (patch 0175).
+ extern "C" int loadstage_current_cave(void);
+ 
++// DOS-PORT (patch 0177, SFXPAUSE-012): eager-reload LOW-RAM
++// alternative gate + driver. When SDL_HINT_DOSKUTSU_EAGER_SHEET_
++// RELOAD=1, load_stage calls eagerLoadAllSheets() right after
++// flushSheets() so EVERY sprite sheet's PNG decode lands in the
++// load_stage band rather than deferring to first-blit. Default OFF
++// (the shipped fix is 0178 skip-flush; this is the env-selectable
++// alternative for machines that cannot hold the resident sheet set).
++static int  g_eager_sheet_reload_decided = -1;
++static bool eager_sheet_reload_active()
++{
++  if (g_eager_sheet_reload_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_EAGER_SHEET_RELOAD");
++    g_eager_sheet_reload_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    if (g_eager_sheet_reload_decided)
++    {
++      LOG_INFO("eager sheet reload: ENABLED (opt-in via "
++               "SDL_HINT_DOSKUTSU_EAGER_SHEET_RELOAD=1; load_stage "
++               "eager-loads all sprite sheets after flushSheets so "
++               "PNG decode lands at load-time not fire-time; "
++               "default OFF)");
++    }
++  }
++  return g_eager_sheet_reload_decided == 1;
++}
++
++void Sprites::eagerLoadAllSheets()
++{
++  if (!eager_sheet_reload_active())
++    return;
++
++  const Uint64 _esr_t0 = SDL_GetTicksNS();
++  int _esr_sheets = 0;
++  for (int i = 0; i < _num_spritesheets; i++)
++  {
++    // _loadSheetIfNeeded short-circuits on already-resident sheets,
++    // so post-flushSheets this counts every sheet that gets a fresh
++    // PNG decode this cave.
++    if (!_spritesheets[i])
++      ++_esr_sheets;
++    _loadSheetIfNeeded(i);
++  }
++  const Uint64 _esr_dt_ms = (SDL_GetTicksNS() - _esr_t0) / 1000000ull;
++  LOG_INFO("[eager-sheet-reload] cave={} sheets={} wall_ms={}",
++           loadstage_current_cave(), _esr_sheets,
++           (unsigned long long)_esr_dt_ms);
++}
++
+ // ensure the given spritesheet is loaded
+ void Sprites::_loadSheetIfNeeded(int sheetno)
+ {
+diff --git a/src/graphics/Sprites.h b/src/graphics/Sprites.h
+index 2b24c1f4..e67fbc85 100644
+--- a/src/graphics/Sprites.h
++++ b/src/graphics/Sprites.h
+@@ -27,6 +27,17 @@ public:
+   void close();
+   void flushSheets();
+ 
++  // patch 0177 (SFXPAUSE-012): eager-reload-after-flush LOW-RAM
++  // ALTERNATIVE to the shipped skip-flush fix (0178). Loops
++  // _loadSheetIfNeeded over every sheetno so the per-cave PNG decode
++  // happens in the load_stage band instead of deferring to first-
++  // blit. Gated internally on SDL_HINT_DOSKUTSU_EAGER_SHEET_RELOAD=1
++  // (default OFF); no-op when OFF. Called from map.cpp's load_stage
++  // after flushSheets() + map_flush_graphics(). For machines that
++  // cannot hold the resident sheet set the 0178 fix requires; trades
++  // the fire-frame pause for a per-cave load-band re-decode.
++  void eagerLoadAllSheets();
++
+   void blitSprite(int x, int y, int s, int frame, uint8_t dir, int xoff, int yoff, int wd, int ht, int alpha = 255);
+   void blitSpriteMirrored(int x, int y, int s, int frame, uint8_t dir, int xoff, int yoff, int wd, int ht, int alpha = 255);
+ 
+diff --git a/src/map.cpp b/src/map.cpp
+index dab233d5..0cf1d10e 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1121,6 +1121,16 @@ bool load_stage(int stage_no)
+              (unsigned long long)((SDL_GetTicksNS() - _lst_t_sheets) / 1000000ull));
+     ++_lst_phases;
+   }
++
++  // patch 0177 (SFXPAUSE-012) eager-reload LOW-RAM alternative. Runs
++  // immediately after flushSheets() + map_flush_graphics(). When
++  // SDL_HINT_DOSKUTSU_EAGER_SHEET_RELOAD=1, re-decodes every sheet
++  // NOW (in the load_stage band) so the bullet/caret PNG decode no
++  // longer defers to first fire/bonk. No-op when OFF (the default;
++  // the shipped fix is 0178 skip-flush). Emits its own
++  // [eager-sheet-reload] banner.
++  Renderer::getInstance()->sprites.eagerLoadAllSheets();
++
+   MIDGAP_PUMP(); // patch 0162 Leg A seam 1: post-graphics-drop, pre-tileset.load
+ 
+   const Uint64 _lst_t_tileset = _lst_active ? SDL_GetTicksNS() : 0;
+-- 
+2.47.3
+

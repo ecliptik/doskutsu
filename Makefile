@@ -501,8 +501,24 @@ smoke-fast: $(HELLO_EXE)
 	tests/run-smoke.sh --exe $(HELLO_EXE) --fast
 
 .PHONY: smoke
-smoke: $(HELLO_EXE)
+smoke: $(HELLO_EXE) io-gate
 	tests/run-smoke.sh --exe $(HELLO_EXE)
+
+# --- SFXPAUSE-012 sprite-sheet re-decode regression gate (v1.0.3) -----------
+#
+# Guards the shipped SKIP_SHEET_FLUSH default-ON fix (patch 0178): runs
+# DOSKUTSU.EXE under SDL_HINT_DOSKUTSU_IO_AUDIT=1 in DOSBox-X, drives several
+# cave transitions, and FAILs if any sprite sheet is decoded more than once at
+# phase=gameplay (a re-decode == the per-cave flush regressed == the Bug 1
+# fire-frame pause is back). First-visit single decodes + music + bk* backdrops
+# are allowed (see tests/io-audit-allowlist.txt). Self-test: `tests/io-audit-
+# gate.sh --regress` flips SKIP_SHEET_FLUSH=0 and must FAIL (proves teeth).
+#
+# Depends on `stage` (needs the built + staged DOSKUTSU.EXE) and an X display
+# (xdotool drive, DISPLAY=:0) -- same weight class as run-gameplay-smoke.sh.
+.PHONY: io-gate
+io-gate: stage
+	tests/io-audit-gate.sh
 
 # --- Phase 8 prerequisite: DPMI LFN propagation probe (task #20) ------------
 #

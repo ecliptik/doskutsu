@@ -5,6 +5,99 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.0.3] - 2026-05-28
+
+The post-v1.0.1 cycle. Ships WaveBlaster/DreamBlaster wavetable MIDI (developed
+as the untagged "v1.0.2 task #1") and closes the long-standing first-SFX
+stage-load pause that was deferred from v1.0.1 as Bug 1. Also adds a permanent
+DOSBox-X dev gate that catches the entire class of bug that caused the pause.
+All operator-validated on the reference machine (g2k: Pentium-OverDrive-83 /
+Cirrus CL-GD5430 / SB16 PnP + DreamBlaster S2).
+
+### Added
+
+- **WaveBlaster / DreamBlaster wavetable MIDI** -- wavetable music now plays
+  through a daughterboard on the SB16 WaveBlaster header (DreamBlaster S2 on
+  g2k). Root cause of the prior non-function: an over-broad "do not poll MPU-401
+  status" generalization. Fixed in `patches/SDL/0080` by polling the bit-6 DRR
+  (Data-Read-Ready) flag before every MPU-401 write (UART entry + per byte) and
+  flipping `SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT` default to ON; the
+  auto-detect chain (WB -> OPL3 -> Organya) now selects WB without an env
+  override. Operator-validated: distinct, correct wavetable timbre across songs
+  in Mimiga Village + First Cave; PicoGUS (USB mode) coexistence confirmed.
+
+- **Permanent gameplay-IO-audit dev gate** -- `make io-gate` (also run by
+  `make smoke`) drives DOSBox-X with `SDL_HINT_DOSKUTSU_IO_AUDIT=1` and FAILs
+  the build if any disk IO is deferred to gameplay phase (the bug class behind
+  the SFX pause). The gate is a sprite-sheet re-decode detector: a sheet decoded
+  more than once at `phase=gameplay` means the per-cave flush regressed. Backed
+  by `patches/nxengine-evo/0180` (phase-tagged IO-audit hook) +
+  `tests/io-audit-gate.sh` + `tests/io-audit-allowlist.txt`. Self-validated to
+  have teeth (PASS on the shipped fix, FAIL on a simulated re-decode regression).
+
+### Fixed
+
+- **First-SFX stage-load pause (Bug 1)** -- the ~150-450 ms render-thread freeze
+  on the first sound effect (polar star fire, ceiling bonk, etc.) after entering
+  a new area. Root-caused after a multi-iteration campaign that ruled out
+  cooperative-scheduler starvation, DPMI page-faults (code + PCM data), and the
+  audio mix path: `load_stage` calls `Sprites::flushSheets()` on every cave
+  entry, deleting all decoded sprite sheets; each sheet is then lazily re-decoded
+  (PNG decode + surface alloc from the CF card) on its first blit. Action sprites
+  (bullets, carets) only blit when the player fires/bonks, so their sheets
+  cold-load mid-gameplay -- the operator-perceived "loads from disk" pause, which
+  was the right instinct (it is disk IO, for the sprite, not the sound). Fixed by
+  `patches/nxengine-evo/0178` (`SDL_HINT_DOSKUTSU_SKIP_SHEET_FLUSH`, default-ON):
+  sprite sheets stay resident across cave transitions instead of being flushed +
+  re-decoded. Operator-confirmed on g2k: pause gone, stage-load times unchanged.
+  Killswitch `=0` restores the old flush behavior. (An eager-reload alternative
+  -- re-decode all sheets up front at load time -- was also built and confirmed
+  to fix the pause but added ~10 s to each cave load; it is kept default-OFF as a
+  low-RAM option via `SDL_HINT_DOSKUTSU_EAGER_SHEET_RELOAD=1`. The shipped
+  resident-sheet approach costs ~5-25 MB RAM, comfortable on the 48 MB target.)
+
+### Changed
+
+- **Smoke gate wiring** -- `make smoke` now also runs the IO-audit re-decode
+  gate (`make io-gate`); `tests/run-gameplay-smoke.sh` BANNERS extended for the
+  shipped fix + the kept diagnostics, parity maintained across REGEX/SEVERITY/
+  LABEL.
+
+### Diagnostic infrastructure
+
+Kept default-OFF behind killswitch env-vars for ongoing investigation (the
+refuted fix-candidates and one-off probes from the narrowing campaign were
+dropped, leaving a clean stack):
+
+- `patches/nxengine-evo/0175` -- `load_stage` per-phase wall-clock trace
+  (`SDL_HINT_DOSKUTSU_LOADSTAGE_TRACE`); owns the shared per-cave counter.
+- `patches/nxengine-evo/0176` -- sprite sheet-load trace
+  (`SDL_HINT_DOSKUTSU_SHEETLOAD_TRACE`).
+- `patches/nxengine-evo/0179` -- frame-spike detector + fire-dispatch path
+  bracket (`SDL_HINT_DOSKUTSU_FRAME_SPIKE_DETECT` / `..._FIREPATH_TRACE`); the
+  no-fixed-window frame-spike detector is what finally localized Bug 1.
+
+### Known issues
+
+- **Backdrop-cache vertical-scroll black-on-jump** -- in caves with a low
+  backdrop area (most visibly water rooms), part of the parallax backdrop
+  renders black during a jump (camera-Y pan) and fills in on landing. Traced to
+  the DOS-PORT backdrop cache (`SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` disables it
+  and confirms the cause, but costs perf + an incomplete title backdrop, so the
+  killswitch is not a ship default). Real fix (cache to cover the vertical
+  scroll range) is queued for a later release. Long-standing; not introduced
+  here.
+
+- **Backdrop-image + Organya-music lazy loads** -- the IO-audit gate's first run
+  flagged two further gameplay-phase disk loads beyond sprites (a parallax
+  backdrop image; the Organya music file on a mid-area `<CMU>` change). Allowed
+  in the gate allowlist for now; queued as a follow-up. The default OPL3 / WB
+  music backends are unaffected.
+
+- **Lever 3 + Organya hard-freeze (Bug 5)** -- carried from v1.0.1. Only
+  reachable via the legacy Organya synth + Lever 3; a defensive interlock forces
+  Lever 3 off under Organya, so the default backends are unaffected.
+
 ## [1.0.1] - 2026-05-22
 
 The post-v1.0.0 486-class hardware campaign. First release cycle specifically

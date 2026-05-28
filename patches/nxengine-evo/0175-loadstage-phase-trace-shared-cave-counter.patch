@@ -1,0 +1,230 @@
+From 95dde17e741ade1ba72b1958de862bbe2fcc24fe Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 09:57:55 -0700
+Subject: [PATCH 175/180] patch 0175 -- load-stage per-phase trace + shared
+ cave counter (v1.0.3 clean re-author)
+
+Clean re-author of the SFXPAUSE-007 load-stage phase trace for the
+v1.0.3 ship. Owns the shared monotonic cave counter
+(g_loadstage_cave_counter) + the loadstage_current_cave() extern
+accessor consumed by the sheet-load trace (0176), eager-reload
+(0177), and the shipped skip-flush fix (0178) -- so it applies
+FIRST in the clean stack.
+
+Env SDL_HINT_DOSKUTSU_LOADSTAGE_TRACE=1 (cached strict-truthy,
+default OFF). Brackets the 8 load_stage sub-loaders (sheets_flush /
+tileset_load / load_map / load_tileattr / load_entities / tsc_load /
+backdrop_set / load_meta) with SDL_GetTicksNS + emits one
+[load-stage-phase] cave=N phase=NAME wall_ms=M line per phase + a
+TOTAL summary at success exit. Error-return paths emit per-phase
+lines up to the failure point but no TOTAL (absence flags the error
+path). NOT under FINE_INSTR -- per-cave-entry only (~9 emits/cave,
+~0.3 lines/sec).
+
+Clean-stack note: this re-author contains ONLY the load-stage-trace
+hooks. The campaign-era arm-hooks for the dropped probes (pixtone
+reset / renderer-arm / catchup-arm / postload-arm / deep-arm /
+yield-arm / pcm-touch) are GONE -- the load_stage success exit is
+the clean `return 0;` with no residue.
+
+OFF-cost: one cached-int branch at load_stage entry + ternary
+SDL_GetTicksNS selectors that the -O2 false-path elides. Production
+config (this probe OFF) is byte-identical-at-rendered-frame to the
+golden binary.
+
+Workspace-local; never upstreamed.
+---
+ src/map.cpp | 129 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 129 insertions(+)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 187a6c14..dab233d5 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1044,6 +1044,49 @@ struct FtAccumulatorGuard
+   }
+ };
+ 
++// DOS-PORT (patch 0175, SFXPAUSE diagnostic): per-cave-entry trace of
++// load_stage sub-phases + the SHARED cave counter. This patch owns
++// g_loadstage_cave_counter + the loadstage_current_cave() extern
++// accessor that the sheet-load trace (0176), eager-reload (0177) +
++// skip-flush fix (0178) all consume, so it MUST apply before them.
++// Default OFF; opt-in via strict "1" on SDL_HINT_DOSKUTSU_LOADSTAGE_
++// TRACE. Brackets the 8 sub-loaders with SDL_GetTicksNS + emits a
++// per-phase [load-stage-phase] line + a TOTAL summary at success
++// exit. NOT under the FINE_INSTR umbrella (per-cave-entry only; ~9
++// emits per cave, ~0.3 lines/sec -- two orders of magnitude below
++// the per-line-fsync contamination floor).
++inline bool loadstage_trace_active()
++{
++  static int decided = -1;
++  if (decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_LOADSTAGE_TRACE");
++    decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    if (decided)
++    {
++      LOG_INFO("load-stage trace: ENABLED (opt-in via "
++               "SDL_HINT_DOSKUTSU_LOADSTAGE_TRACE=1; emits one "
++               "[load-stage-phase] line per sub-loader + a TOTAL "
++               "summary per cave entry; default OFF)");
++    }
++  }
++  return decided == 1;
++}
++
++// patch 0175 monotonic cave counter -- increments on every load_stage
++// call (success OR error path) so per-cave logs across all the
++// SFXPAUSE probes align on cave=N.
++static int g_loadstage_cave_counter = 0;
++
++// patch 0175 SHARED cave-number accessor. Consumed by the sheet-load
++// trace (0176, Sprites.cpp), eager-reload (0177), + skip-flush fix
++// (0178). Read-only; the counter is only written inside load_stage
++// (engine-thread), so no synchronization is needed.
++extern "C" int loadstage_current_cave(void)
++{
++  return g_loadstage_cave_counter;
++}
++
+ bool load_stage(int stage_no)
+ {
+   char fname[MAXPATHLEN];
+@@ -1056,15 +1099,40 @@ bool load_stage(int stage_no)
+   // ctor/dtor; killswitch off (v2 default) makes the guard a no-op pair.
+   FtAccumulatorGuard _ftg;
+ 
++  // patch 0175 per-cave-entry trace setup. _lst_cave is the monotonic
++  // counter for this call (always increments). _lst_t0_total anchors
++  // the TOTAL summary. _lst_phases counts emitted sub-phases. The
++  // _lst_cave local is also read by the patch-0178 skip-flush emit.
++  const bool _lst_active = loadstage_trace_active();
++  const int  _lst_cave   = ++g_loadstage_cave_counter;
++  const Uint64 _lst_t0_total = _lst_active ? SDL_GetTicksNS() : 0;
++  int _lst_phases = 0;
++
+   LOG_INFO(" >> Entering stage {}: '{}'.", stage_no, stages[stage_no].stagename);
+   game.curmap = stage_no; // do it now so onspawn events will have it
+ 
++  const Uint64 _lst_t_sheets = _lst_active ? SDL_GetTicksNS() : 0;
+   Renderer::getInstance()->sprites.flushSheets();
+   map_flush_graphics();
++  if (_lst_active)
++  {
++    LOG_INFO("[load-stage-phase] cave={} phase=sheets_flush wall_ms={}",
++             _lst_cave,
++             (unsigned long long)((SDL_GetTicksNS() - _lst_t_sheets) / 1000000ull));
++    ++_lst_phases;
++  }
+   MIDGAP_PUMP(); // patch 0162 Leg A seam 1: post-graphics-drop, pre-tileset.load
+ 
++  const Uint64 _lst_t_tileset = _lst_active ? SDL_GetTicksNS() : 0;
+   if (!Renderer::getInstance()->tileset.load(stages[stage_no].tileset))
+     return 1;
++  if (_lst_active)
++  {
++    LOG_INFO("[load-stage-phase] cave={} phase=tileset_load wall_ms={}",
++             _lst_cave,
++             (unsigned long long)((SDL_GetTicksNS() - _lst_t_tileset) / 1000000ull));
++    ++_lst_phases;
++  }
+   MIDGAP_PUMP(); // patch 0162 Leg A seam 2: post-tileset.load (.pbm; the heavy sub-loader)
+ 
+   // get the base name of the stage without extension
+@@ -1073,31 +1141,92 @@ bool load_stage(int stage_no)
+     mapname = "Lounge";
+ 
+   sprintf(fname, "Stage/%s.pxm", mapname);
++  const Uint64 _lst_t_map = _lst_active ? SDL_GetTicksNS() : 0;
+   if (load_map(ResourceManager::getInstance()->getPath(fname, false)))
+     return 1;
++  if (_lst_active)
++  {
++    LOG_INFO("[load-stage-phase] cave={} phase=load_map wall_ms={}",
++             _lst_cave,
++             (unsigned long long)((SDL_GetTicksNS() - _lst_t_map) / 1000000ull));
++    ++_lst_phases;
++  }
+   MIDGAP_PUMP(); // patch 0162 Leg A seam 3: post-load_map (.pxm)
+ 
+   sprintf(fname, "Stage/%s.pxa", tileset_names[stages[stage_no].tileset]);
++  const Uint64 _lst_t_tileattr = _lst_active ? SDL_GetTicksNS() : 0;
+   if (load_tileattr(ResourceManager::getInstance()->getPath(fname, false)))
+     return 1;
++  if (_lst_active)
++  {
++    LOG_INFO("[load-stage-phase] cave={} phase=load_tileattr wall_ms={}",
++             _lst_cave,
++             (unsigned long long)((SDL_GetTicksNS() - _lst_t_tileattr) / 1000000ull));
++    ++_lst_phases;
++  }
+   MIDGAP_PUMP(); // patch 0162 Leg A seam 4: post-load_tileattr (.pxa)
+ 
+   sprintf(fname, "Stage/%s.pxe", mapname);
++  const Uint64 _lst_t_entities = _lst_active ? SDL_GetTicksNS() : 0;
+   if (load_entities(ResourceManager::getInstance()->getPath(fname, false)))
+     return 1;
++  if (_lst_active)
++  {
++    LOG_INFO("[load-stage-phase] cave={} phase=load_entities wall_ms={}",
++             _lst_cave,
++             (unsigned long long)((SDL_GetTicksNS() - _lst_t_entities) / 1000000ull));
++    ++_lst_phases;
++  }
+   MIDGAP_PUMP(); // patch 0162 Leg A seam 5: post-load_entities (.pxe)
+ 
+   sprintf(fname, "Stage/%s.tsc", mapname);
++  const Uint64 _lst_t_tsc = _lst_active ? SDL_GetTicksNS() : 0;
+   if (!game.tsc->Load(ResourceManager::getInstance()->getPath(fname), TSC::ScriptPages::SP_MAP))
+     return 1;
++  if (_lst_active)
++  {
++    LOG_INFO("[load-stage-phase] cave={} phase=tsc_load wall_ms={}",
++             _lst_cave,
++             (unsigned long long)((SDL_GetTicksNS() - _lst_t_tsc) / 1000000ull));
++    ++_lst_phases;
++  }
+   MIDGAP_PUMP(); // patch 0162 Leg A seam 6: post-tsc->Load (.tsc)
++
++  const Uint64 _lst_t_backdrop = _lst_active ? SDL_GetTicksNS() : 0;
+   map_set_backdrop(stages[stage_no].bg_no);
+   map.scrolltype = stages[stage_no].scroll_type;
+   map.motionpos  = 0;
++  if (_lst_active)
++  {
++    LOG_INFO("[load-stage-phase] cave={} phase=backdrop_set wall_ms={}",
++             _lst_cave,
++             (unsigned long long)((SDL_GetTicksNS() - _lst_t_backdrop) / 1000000ull));
++    ++_lst_phases;
++  }
+ 
+   // optional metadata
+   sprintf(fname, "StgMeta/%s.jsn", mapname);
++  const Uint64 _lst_t_meta = _lst_active ? SDL_GetTicksNS() : 0;
+   load_meta(ResourceManager::getInstance()->getPath(fname, false));
++  if (_lst_active)
++  {
++    LOG_INFO("[load-stage-phase] cave={} phase=load_meta wall_ms={}",
++             _lst_cave,
++             (unsigned long long)((SDL_GetTicksNS() - _lst_t_meta) / 1000000ull));
++    ++_lst_phases;
++  }
++
++  // patch 0175 success-path TOTAL summary. The operator-perceived
++  // per-cave-entry load pause correlates with wall_ms here. Emitted
++  // ONLY on success; an absent TOTAL for a given cave=N flags an
++  // error-return path.
++  if (_lst_active)
++  {
++    LOG_INFO("[load-stage-phase] cave={} phase=TOTAL wall_ms={} phases={}",
++             _lst_cave,
++             (unsigned long long)((SDL_GetTicksNS() - _lst_t0_total) / 1000000ull),
++             _lst_phases);
++  }
+ 
+   return 0;
+ }
+-- 
+2.47.3
+

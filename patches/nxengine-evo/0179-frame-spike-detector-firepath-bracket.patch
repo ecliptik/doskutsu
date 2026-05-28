@@ -1,0 +1,288 @@
+From bb5f79435e72742d5de8b35d0a2f763ba4f7f0c2 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 10:04:03 -0700
+Subject: [PATCH 179/180] patch 0179 -- frame-spike detector + fire-dispatch
+ path bracket (v1.0.3 clean re-author)
+
+Clean re-author of the SFXPAUSE-010 frame-spike + firepath probes,
+kept as useful no-window perf diagnostics.
+
+Two independent gates (both default OFF):
+- SDL_HINT_DOSKUTSU_FRAME_SPIKE_DETECT=1: emits [frame-spike]
+  inter_ms=M whenever the inter-frame wall delta in run_tick_fixed
+  exceeds 50 ms. NO fixed window -- session-wide. The no-window form
+  that caught the fire-frame stall all the frame-30-windowed probes
+  missed.
+- SDL_HINT_DOSKUTSU_FIREPATH_TRACE=1: emits [firepath] func=NAME
+  wall_us=N on the FIRST call per session of FireWeapon (p_arms.cpp),
+  CreateBullet (ObjManager.cpp), effect (caret.cpp), ai_polar_shot
+  (ai/weapons/polar_mgun.cpp). Per-function static-bool _seen flag
+  gated on the probe.
+
+main.cpp exports firepath_trace_active() extern "C"; the 4 consumer
+TUs declare it at file scope. Clean-stack note: run_tick_fixed
+contains ONLY the frame-spike entry check -- the dropped campaign
+catch-up/first_tick/per-tick/yield brackets are GONE.
+
+Both default OFF -> production byte-identical to golden.
+Workspace-local; never upstreamed.
+---
+ src/ObjManager.cpp            | 18 +++++++++
+ src/ai/weapons/polar_mgun.cpp | 19 +++++++++
+ src/caret.cpp                 | 19 +++++++++
+ src/main.cpp                  | 75 +++++++++++++++++++++++++++++++++++
+ src/p_arms.cpp                | 17 ++++++++
+ 5 files changed, 148 insertions(+)
+
+diff --git a/src/ObjManager.cpp b/src/ObjManager.cpp
+index 8007de5a..ed7958c1 100644
+--- a/src/ObjManager.cpp
++++ b/src/ObjManager.cpp
+@@ -69,9 +69,20 @@ Object *CreateObject(int x, int y, int type, int xinertia, int yinertia, int dir
+   return o;
+ }
+ 
++// patch 0179 (SFXPAUSE) firepath bracket extern accessor (main.cpp).
++extern "C" bool firepath_trace_active(void);
++
+ // bullets are stored in separate array
+ Object *CreateBullet(int x, int y, int type)
+ {
++  // patch 0179 (SFXPAUSE) FIRST-CALL bracket -- cold-ICache + cold-
++  // heap cost of the first CreateBullet per session.
++  static bool _firepath_seen_CreateBullet = false;
++  const bool _fp_active = firepath_trace_active();
++  const bool _fp_first = _fp_active && !_firepath_seen_CreateBullet;
++  if (_fp_first) _firepath_seen_CreateBullet = true;
++  const Uint64 _fp_t0 = _fp_first ? SDL_GetTicksNS() : 0;
++
+   Object *o;
+ 
+   o  = new Object;
+@@ -100,6 +111,13 @@ Object *CreateBullet(int x, int y, int type)
+   }
+   LL_ADD_END(o, lower, higher, lowestobject, highestobject);
+ 
++  // patch 0179 (SFXPAUSE) FIRST-CALL emit.
++  if (_fp_first)
++  {
++    LOG_INFO("[firepath] func=CreateBullet wall_us={}",
++             (unsigned long long)((SDL_GetTicksNS() - _fp_t0) / 1000ull));
++  }
++
+   return o;
+ }
+ 
+diff --git a/src/ai/weapons/polar_mgun.cpp b/src/ai/weapons/polar_mgun.cpp
+index fdd2d6d0..c4c81e70 100644
+--- a/src/ai/weapons/polar_mgun.cpp
++++ b/src/ai/weapons/polar_mgun.cpp
+@@ -29,8 +29,20 @@ INITFUNC(AIRoutines)
+ void c------------------------------() {}
+ */
+ 
++// patch 0179 (SFXPAUSE) firepath bracket extern accessor (main.cpp).
++extern "C" bool firepath_trace_active(void);
++
+ void ai_polar_shot(Object *o)
+ {
++  // patch 0179 (SFXPAUSE) FIRST-CALL bracket -- polar-star bullet AI
++  // handler, dispatched from object.cpp OnTick the first frame after
++  // CreateBullet; cold-ICache for polar_mgun.cpp's .text.
++  static bool _firepath_seen_ai_polar_shot = false;
++  const bool _fp_active = firepath_trace_active();
++  const bool _fp_first = _fp_active && !_firepath_seen_ai_polar_shot;
++  if (_fp_first) _firepath_seen_ai_polar_shot = true;
++  const Uint64 _fp_t0 = _fp_first ? SDL_GetTicksNS() : 0;
++
+   // flying/active state (as opposed to mgun leaders being a marker for their trails)
+   if (o->state == 0)
+   {
+@@ -92,6 +104,13 @@ void ai_polar_shot(Object *o)
+       o->Delete();
+     }
+   }
++
++  // patch 0179 (SFXPAUSE) FIRST-CALL emit.
++  if (_fp_first)
++  {
++    LOG_INFO("[firepath] func=ai_polar_shot wall_us={}",
++             (unsigned long long)((SDL_GetTicksNS() - _fp_t0) / 1000ull));
++  }
+ }
+ 
+ // the trails of a machine-gun L2 or L3 shot
+diff --git a/src/caret.cpp b/src/caret.cpp
+index 77a1785c..017eb0b5 100644
+--- a/src/caret.cpp
++++ b/src/caret.cpp
+@@ -197,8 +197,20 @@ void c------------------------------() {}
+ // an effect can be just a convenience function for creating a caret
+ // with a particular sprite/ai combo, or it can produce a group of carets
+ // which are always seen together (e.g. bonkplus or bloodspatter).
++// patch 0179 (SFXPAUSE) firepath bracket extern accessor (main.cpp).
++extern "C" bool firepath_trace_active(void);
++
+ Caret *effect(int x, int y, int effectno)
+ {
++  // patch 0179 (SFXPAUSE) FIRST-CALL bracket -- muzzle-flash / hit-
++  // flash caret spawn; cold-ICache for caret.cpp + cold-heap for
++  // CreateCaret's `new Caret`.
++  static bool _firepath_seen_effect = false;
++  const bool _fp_active = firepath_trace_active();
++  const bool _fp_first = _fp_active && !_firepath_seen_effect;
++  if (_fp_first) _firepath_seen_effect = true;
++  const Uint64 _fp_t0 = _fp_first ? SDL_GetTicksNS() : 0;
++
+   Caret *c;
+   int i;
+ 
+@@ -313,6 +325,13 @@ Caret *effect(int x, int y, int effectno)
+   }
+ 
+   _effecttype = EFFECT_NONE;
++  // patch 0179 (SFXPAUSE) FIRST-CALL emit (default-error early-return
++  // above is not a cold-ICache case so no emit there).
++  if (_fp_first)
++  {
++    LOG_INFO("[firepath] func=effect wall_us={}",
++             (unsigned long long)((SDL_GetTicksNS() - _fp_t0) / 1000ull));
++  }
+   return c;
+ }
+ 
+diff --git a/src/main.cpp b/src/main.cpp
+index 1fca25f1..e1a02cea 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -373,6 +373,64 @@ static bool tickpump_active()
+ }
+ #define TICKPUMP() do { if (tickpump_active()) while (SDL_DOSAudioPump()) { } } while (0)
+ 
++// DOS-PORT (patch 0179, SFXPAUSE diagnostic): frame-spike anomaly
++// detector. NO fixed window -- emits a [frame-spike] line every time
++// the inter-frame wall delta in run_tick_fixed exceeds 50 ms, for the
++// whole session. A session-wide perf diagnostic (the no-window form
++// that caught the fire-frame stall, which all the frame-30-windowed
++// probes missed). Default OFF; opt-in via strict "1" on
++// SDL_HINT_DOSKUTSU_FRAME_SPIKE_DETECT. ~10-20 emits/session.
++static int  g_frame_spike_decided = -1;
++static bool frame_spike_detect_active()
++{
++  if (g_frame_spike_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_FRAME_SPIKE_DETECT");
++    g_frame_spike_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    if (g_frame_spike_decided)
++    {
++      LOG_INFO("frame-spike detect: ENABLED (opt-in via "
++               "SDL_HINT_DOSKUTSU_FRAME_SPIKE_DETECT=1; emits one "
++               "[frame-spike] line per inter_frame_ms > 50; default "
++               "OFF; runs for the whole session, no fixed window)");
++    }
++  }
++  return g_frame_spike_decided == 1;
++}
++
++// DOS-PORT (patch 0179, SFXPAUSE diagnostic): fire-dispatch path
++// FIRST-CALL bracket. Separate env gate; emits [firepath] func=NAME
++// wall_us=N on the FIRST call per session of each instrumented fire-
++// path function (FireWeapon / CreateBullet / effect / ai_polar_shot).
++// Per-function static-bool _seen flag (gated on the probe so a boot-
++// OFF-then-ON session still captures the first call once the gate
++// goes hot). Default OFF; opt-in via strict "1" on
++// SDL_HINT_DOSKUTSU_FIREPATH_TRACE.
++static int  g_firepath_trace_decided = -1;
++static bool firepath_trace_active_main()
++{
++  if (g_firepath_trace_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_FIREPATH_TRACE");
++    g_firepath_trace_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    if (g_firepath_trace_decided)
++    {
++      LOG_INFO("firepath trace: ENABLED (opt-in via "
++               "SDL_HINT_DOSKUTSU_FIREPATH_TRACE=1; emits one "
++               "[firepath] line per bracketed function on FIRST CALL "
++               "per session; never resets; default OFF)");
++    }
++  }
++  return g_firepath_trace_decided == 1;
++}
++
++// patch 0179 extern accessor for the firepath brackets in p_arms.cpp,
++// ObjManager.cpp, caret.cpp, ai/weapons/polar_mgun.cpp.
++extern "C" bool firepath_trace_active(void)
++{
++  return firepath_trace_active_main();
++}
++
+ static void run_tick_fixed(void)
+ {
+   static int frameskip      = 0;
+@@ -430,6 +488,23 @@ static void run_tick_fixed(void)
+     frame_paused     = game.paused;
+   }
+ 
++  // patch 0179 (SFXPAUSE) frame-spike anomaly detector. Emits a
++  // [frame-spike] line ONLY when the inter-frame wall delta exceeds
++  // 50 ms. Independent of FINE_INSTR; no fixed window -- runs the
++  // whole session so fire-frame / load-frame stalls are captured
++  // wherever they occur. last_ns is the file-scope static the FT
++  // accumulator uses, so the arithmetic is invariant across this
++  // probe being ON or OFF.
++  if (last_ns != 0 && frame_spike_detect_active())
++  {
++    const Uint64 _spike_ns = now_ns - last_ns;
++    if (_spike_ns > (Uint64)50 * 1000000ull)
++    {
++      LOG_INFO("[frame-spike] inter_ms={}",
++               (unsigned long long)(_spike_ns / 1000000ull));
++    }
++  }
++
+   // --- LOGIC: tick_state() at a fixed 50 Hz ---
+   if (game.paused)
+   {
+diff --git a/src/p_arms.cpp b/src/p_arms.cpp
+index b86ada10..81d57e55 100644
+--- a/src/p_arms.cpp
++++ b/src/p_arms.cpp
+@@ -582,10 +582,20 @@ static void PFireMachineGun(int level)
+   }
+ }
+ 
++// patch 0179 (SFXPAUSE) firepath bracket extern accessor (main.cpp).
++extern "C" bool firepath_trace_active(void);
++
+ // called when player is trying to fire the current weapon
+ // i.e. the fire button is down.
+ void FireWeapon(void)
+ {
++  // patch 0179 (SFXPAUSE) FIRST-CALL bracket -- cold-ICache cost of
++  // the first FireWeapon per session. _seen gated on the probe.
++  static bool _firepath_seen_FireWeapon = false;
++  const bool _fp_active = firepath_trace_active();
++  const bool _fp_first = _fp_active && !_firepath_seen_FireWeapon;
++  if (_fp_first) _firepath_seen_FireWeapon = true;
++  const Uint64 _fp_t0 = _fp_first ? SDL_GetTicksNS() : 0;
+ 
+   Weapon *curweapon = &player->weapons[player->curWeapon];
+   int level         = curweapon->level;
+@@ -678,6 +688,13 @@ void FireWeapon(void)
+       NXE::Sound::SoundManager::getInstance()->playSfx(NXE::Sound::SFX::SND_BONK_HEAD);
+       break;
+   }
++
++  // patch 0179 (SFXPAUSE) FIRST-CALL emit (full-function path).
++  if (_fp_first)
++  {
++    LOG_INFO("[firepath] func=FireWeapon wall_us={}",
++             (unsigned long long)((SDL_GetTicksNS() - _fp_t0) / 1000ull));
++  }
+ }
+ 
+ // "run" the current weapon.
+-- 
+2.47.3
+
