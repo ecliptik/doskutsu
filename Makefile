@@ -1275,7 +1275,16 @@ $(PROBES_DIR)/%.exe: tests/probes/%.c | djgpp-check
 # Explicit rule for SDL3-linked probes -- overrides the pattern rule above
 # because Make picks the more-specific dep + recipe when both match.
 PROBES_SDL_CFLAGS := $(PROBES_CFLAGS) -I$(SYSROOT)/include
-PROBES_SDL_LDLIBS := -L$(SYSROOT)/lib -lSDL3 -lm
+# Shared engine-symbol stub TU (task #34): the SDL3 DOS audio backend references
+# engine-owned externs (g_pixtone_active_count, patch SDL/0071); standalone
+# probes link libSDL3.a with NO engine objects, so any audio-opening probe
+# (audbuf/idleprob/mpusdl/sdlprob1/qhexit) fails to resolve them. This TU is on
+# the link line of EVERY SDL-linked probe (via PROBES_SDL_LDLIBS below), one
+# seam for the whole fleet. Source-on-link-line (not a .o prereq) is fine -- the
+# stub is a write-once 1-liner; gcc compiles it inline each link (ms). Probes
+# that don't open audio link it harmlessly (unreferenced global).
+PROBE_SDL_STUBS_SRC := tests/probes/probe_sdl_stubs.c
+PROBES_SDL_LDLIBS := $(PROBE_SDL_STUBS_SRC) -L$(SYSROOT)/lib -lSDL3 -lm
 PROBES_SDL_MINSTK := 2048k
 
 $(PROBE_YIELD_EXE): $(PROBE_YIELD_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
