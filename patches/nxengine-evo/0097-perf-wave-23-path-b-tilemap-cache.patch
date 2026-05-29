@@ -7,31 +7,31 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-DOS-PORT (patch 0097, Phase 9 wave 23 W23A). Implements Path B —
+DOS-PORT (patch 0097, Phase 9 wave 23 W23A). Implements Path B --
 tilemap caching for the wave-22 W22A2-measured mds_tilemap_fg
 (14-17 ms in gameplay) and mds_tilemap_bg (3-13 ms across scenes)
 brackets which together account for 83-88% of mode_draw_scene per
-docs/PHASE11-WAVE-22-FINDINGS.md § 11.4. Plus bundles sdl-engine's
+docs/PHASE11-WAVE-22-FINDINGS.md sec. 11.4. Plus bundles sdl-engine's
 keyboard-fix diagnostic (5 mandatory fields appended to existing
-kbd/audio block log line) per team-lead's scope-addendum decision —
+kbd/audio block log line) per team-lead's scope-addendum decision --
 combined iter answers two questions in one cycle.
 
 Authored against:
-  - docs/PHASE11-WAVE-23-DESIGN.md § 1-12 (cache architecture)
-  - docs/PHASE11-WAVE-23-CONTRACT.md § 1-9 (cache instrumentation)
-  - docs/PHASE11-KEYBOARD-DIAGNOSTIC-SPEC.md § 1-9 (kbd diagnostic)
+  - docs/PHASE11-WAVE-23-DESIGN.md sec. 1-12 (cache architecture)
+  - docs/PHASE11-WAVE-23-CONTRACT.md sec. 1-9 (cache instrumentation)
+  - docs/PHASE11-KEYBOARD-DIAGNOSTIC-SPEC.md sec. 1-9 (kbd diagnostic)
 All three docs gitignored (workspace-local).
 
 Path B is the wave-23 ranked-1 candidate per
-docs/PHASE11-WAVE-22-FINDINGS.md § 11.6 — refuted Path A (drawcall
+docs/PHASE11-WAVE-22-FINDINGS.md sec. 11.6 -- refuted Path A (drawcall
 batching, mds_object_loop = 0.4-0.8 ms cap) and Path C (dirty-rect
 within DrawScene, regression-class per
 memory/wave_17_4_partial_flush_regression.md). Real-HW probe data
 (memcpy76k = 17.0 MB/s = 4.3 ms cache-blit cost; colorkey'd FG ~7.7
 ms ceiling) anchors the gain projection: ~10 ms savings per cache hit
-on Mimiga FG, ~10 ms on attract BG. Adaptive-α (Option α) auto-
-disables a layer's cache when miss-render-cost < 2 × hit-cost
-(8.6 ms BG / 15.4 ms FG thresholds) for 10 consecutive frames —
+on Mimiga FG, ~10 ms on attract BG. Adaptive-alpha (Option alpha) auto-
+disables a layer's cache when miss-render-cost < 2 x hit-cost
+(8.6 ms BG / 15.4 ms FG thresholds) for 10 consecutive frames --
 prevents per-scene regressions on attract FG (1.21 ms) + First Cave
 BG (3.56 ms) where caching would regress baseline.
 
@@ -42,7 +42,7 @@ Implementation:
    drawCachedBackdrop. Single SDL_BlitSurface from cache surface to
    window surface, plus 1 _record_dirty_rect call. Replaces the per-
    tile drawTile loop in map_draw() on cache hit. Color-key state
-   lives on src->flags — caller (map.cpp) sets it on FG cache surface
+   lives on src->flags -- caller (map.cpp) sets it on FG cache surface
    only; SDL_BlitSurface auto-dispatches.
 
 2. **NEW Tileset::drawTileToSurface(SDL_Surface *dst, int dst_x,
@@ -64,22 +64,22 @@ Implementation:
      TA_CURRENT + 0x43 cells; runs on every frame regardless of
      cache hit/miss),
      _tilemap_render_uncached_full_loop (killswitch / disabled-by-
-     adaptive-α path; original per-tile loop preserved verbatim)
+     adaptive-alpha path; original per-tile loop preserved verbatim)
    - Three render paths: uncached / cache-hit / cache-miss (per
-     contract § 3.2 spec for killswitch-disabled state shows
-     bg_h=0 bg_m=0 — counter increments NOT made on uncached path)
+     contract sec. 3.2 spec for killswitch-disabled state shows
+     bg_h=0 bg_m=0 -- counter increments NOT made on uncached path)
 
-4. **Architectural deviation from design § 4** (transparently flagged
+4. **Architectural deviation from design sec. 4** (transparently flagged
    to team-lead in pre-format-patch DM, explicit team-lead approval
    landed before format-patch):
-   - Design § 4 specified `motionpos*has_current` in cache key with
+   - Design sec. 4 specified `motionpos*has_current` in cache key with
      `has_visible_current_tiles` detection flag.
    - **Implementation: TA_CURRENT animated water-current cells AND
      0x43 destructible cells render LIVE every frame (via
      `_tilemap_render_special_tiles_to_window`) and are NOT cached.
      motionpos is NOT in cache key.**
    - Why: bypass-not-key keeps cache hit rate HIGH on motion-tile
-     maps (Almond, Reservoir) — cache stays valid even when motionpos
+     maps (Almond, Reservoir) -- cache stays valid even when motionpos
      changes every tick. With motionpos in key, those maps would see
      ~0% hit rate. Live-overlay cost is small (sparse animated tiles
      ~5-10 visible per map; ~0.1-0.5 ms overhead per frame) vs full-
@@ -95,7 +95,7 @@ Implementation:
      cached plain-tile pass for visual correctness. Both testable in
      W23A iter.
 
-5. **Adaptive-α state machine** (per design § 5 Option α):
+5. **Adaptive-alpha state machine** (per design sec. 5 Option alpha):
    - Per-layer `g_tilemap_*_consecutive_low_misses` counter (file-
      scope in map.cpp anonymous namespace).
    - On miss with `dt < threshold_ns`: increment; if counter reaches
@@ -104,57 +104,57 @@ Implementation:
    - On miss with `dt >= threshold` OR on hit: reset counter to 0.
    - Re-armed via `tilemap_cache_reset()` on map_flush_graphics().
    - Thresholds: TILEMAP_BG_MISS_THRESHOLD_NS = 8,600,000 (8.6 ms =
-     2× memcpy76k 4.3 ms); TILEMAP_FG_MISS_THRESHOLD_NS = 15,400,000
-     (15.4 ms = 2× colorkey'd-blit 7.7 ms ceiling). Hardcoded per
-     probe data § 11.6.
+     2x memcpy76k 4.3 ms); TILEMAP_FG_MISS_THRESHOLD_NS = 15,400,000
+     (15.4 ms = 2x colorkey'd-blit 7.7 ms ceiling). Hardcoded per
+     probe data sec. 11.6.
 
-6. **Tile mutation counter** — `g_tile_mutation_counter` (file-scope
+6. **Tile mutation counter** -- `g_tile_mutation_counter` (file-scope
    in map.cpp anonymous namespace) bumped by `map_ChangeTileWithSmoke`
    at the existing `map.tiles[x][y] = newtile;` mutation site.
 
 7. **Killswitch SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0** (strict-0,
-   default ON) per contract § 3.2:
+   default ON) per contract sec. 3.2:
    - NEW `_strict_falsy_env()` helper in Renderer.cpp anonymous
      namespace (sibling to `_strict_truthy_env`); returns true ONLY
      on env value "0".
    - NEW `_abl_tilemap_cache_killswitch()` env helper wraps
      `_strict_falsy_env("SDL_HINT_DOSKUTSU_TILEMAP_CACHE")` with
-     cached static-const-bool — -O2 hoists per-frame guards.
+     cached static-const-bool -- -O2 hoists per-frame guards.
    - NEW NXE::Diag::tilemap_cache_killswitch_active() forward-decl
      accessor (file-top wrapper) + definition at file-scope-after-
      both-namespace-closes block (mirrors W20B/W22A/W22.5 trap-and-
      fix pattern). map.cpp short-circuits via this accessor.
 
-8. **13-field hit/miss counter line** per contract § 1.2 + § 2.2:
+8. **13-field hit/miss counter line** per contract sec. 1.2 + sec. 2.2:
    - `[mds-tilemap-cache n=N bg_h=H bg_m=M bg_state=E|D bg_t=T
      fg_h=H fg_m=M fg_state=E|D fg_t=T bg_ms_h=N.NN bg_ms_m=N.NN
      fg_ms_h=N.NN fg_ms_m=N.NN]`
    - 13 storage variables in NXE::Diag (extern in
      diagnostic_timers.h, defined in Renderer.cpp).
    - Per-block reset of 12 counters AFTER emit; 2 sticky `*_enabled`
-     flags NOT reset per block (only flipped by adaptive-α state
+     flags NOT reset per block (only flipped by adaptive-alpha state
      machine or `tilemap_cache_reset()` on map change).
    - Mean ms = total_ns / 1e6 / count; computed inline in format
-     string. No p50/p95 per flush-instr's contract decision —
+     string. No p50/p95 per flush-instr's contract decision --
      running-sum + count sufficient for v1 cache-effectiveness
      analysis.
    - Counter emission gates on EXISTING SDL_HINT_DOSKUTSU_MODE_DRAW_-
-     SCENE_INSTR=1 (W22.5 hint) per contract § 3.1; killswitch only
+     SCENE_INSTR=1 (W22.5 hint) per contract sec. 3.1; killswitch only
      affects cache architecture, NOT counter emit.
    - `n` counter increments at start of DrawScene() in game.cpp
-     (NOT per Game::tick) per contract § 5.
+     (NOT per Game::tick) per contract sec. 5.
 
 9. **bg_state/fg_state field renders factor BOTH killswitch AND
-   adaptive-α sticky enabled flag** (post-build-qa-smoke-C fix —
-   see § 9.b below):
+   adaptive-alpha sticky enabled flag** (post-build-qa-smoke-C fix --
+   see sec. 9.b below):
    - `_bg_state_char = (killswitch_active || !g_tilemap_bg_cache_-
      enabled) ? 'D' : 'E'`; same for fg.
    - Killswitch wins at render time WITHOUT mutating the sticky
-     `*_enabled` flag (which preserves adaptive-α semantics).
-   - Per contract § 3.2: "killswitch-disabled: BOTH bg_state=D AND
-     fg_state=D from BLOCK 1 (no transition history)" — required
+     `*_enabled` flag (which preserves adaptive-alpha semantics).
+   - Per contract sec. 3.2: "killswitch-disabled: BOTH bg_state=D AND
+     fg_state=D from BLOCK 1 (no transition history)" -- required
      for flush-instr's analysis tooling to distinguish killswitch-
-     disabled (state=D from block 1) from adaptive-α-disabled
+     disabled (state=D from block 1) from adaptive-alpha-disabled
      (starts state=E, transitions via state=D).
 
    9.a. Pre-fix behavior (drafted): state field rendered ONLY the
@@ -164,36 +164,36 @@ Implementation:
         being bypassed.
    9.b. build-qa W23A smoke C surfaced this deviation per silent-
         narrow rule (their STOP-and-ack to nx-engine before claiming
-        Task #23 complete). Fix: render-time only — does NOT mutate
-        `g_tilemap_*_cache_enabled` (preserves adaptive-α semantics
+        Task #23 complete). Fix: render-time only -- does NOT mutate
+        `g_tilemap_*_cache_enabled` (preserves adaptive-alpha semantics
         for the layered-disable path). Counter behavior (canonical
         killswitch-engaged indicator) was already correct pre-fix;
         this fix only restores contract-literal compliance for the
         state field.
 
 10. **Keyboard-fix diagnostic** per
-    docs/PHASE11-KEYBOARD-DIAGNOSTIC-SPEC.md § 1-9:
+    docs/PHASE11-KEYBOARD-DIAGNOSTIC-SPEC.md sec. 1-9:
     - 5 mandatory fields (pic1_mask_live, kbd_8042_stat,
       bios_kbd_head, bios_kbd_tail, bios_kbd_buf0) appended to
       existing kbd/audio block log line at Renderer.cpp:1128.
     - Inlined `DOS_PeekUint16` body via raw `_farpeekw(_dos_ds, ...)`
-      per sdl-engine spec § 8 open invitation — avoids cross-vendor
+      per sdl-engine spec sec. 8 open invitation -- avoids cross-vendor
       relative include of vendor/SDL/src/core/dos/SDL_dos.h.
-    - Optional field 6 (`idt_int9_pm_off`) SKIPPED — Renderer.cpp
+    - Optional field 6 (`idt_int9_pm_off`) SKIPPED -- Renderer.cpp
       doesn't currently include `<dpmi.h>` / `<go32.h>`. The 5
-      mandatory fields disambiguate spec § 5 triage table.
-    - Default-emit per spec § 7.3 — no env-var gate.
+      mandatory fields disambiguate spec sec. 5 triage table.
+    - Default-emit per spec sec. 7.3 -- no env-var gate.
     - Existing 8 fields preserved verbatim (no rename/reorder).
     - sdl-engine review of placement: APPROVED end-to-end.
 
 Build-fix flag: initial build linker-error'd on `(anonymous
-namespace)::flipacceltime` — putting `extern int flipacceltime;`
+namespace)::flipacceltime` -- putting `extern int flipacceltime;`
 inside the anonymous namespace silently bound it to anonymous-
 namespace linkage. Fixed by declaring `extern int flipacceltime;`
 at GLOBAL scope above the anonymous namespace, referenced via
 `::flipacceltime` qualification.
 
-Memory overhead: ~154 KB heap (76,800 × 2 cache surfaces + ~80
+Memory overhead: ~154 KB heap (76,800 x 2 cache surfaces + ~80
 bytes static state). Trivial on g2k Tier-1 (0.3% of 48 MB).
 
 Documentation: docs/BOOT.md gets:
@@ -201,24 +201,24 @@ Documentation: docs/BOOT.md gets:
   entry mentioning the new [mds-tilemap-cache] emit line.
 - NEW SDL_HINT_DOSKUTSU_TILEMAP_CACHE killswitch entry covering
   cache architecture, default-ON semantics, strict-0 match,
-  adaptive-α state machine, motion-tile architectural note.
+  adaptive-alpha state machine, motion-tile architectural note.
 - BOOT.md is gitignored per pre-existing convention (.gitignore:
-  /docs/BOOT.md) — internal-only docs.
+  /docs/BOOT.md) -- internal-only docs.
 
 Reviewer ack:
-- flush-instr § 5 acceptance gate review: PASSED. 11/12 checkboxes
+- flush-instr sec. 5 acceptance gate review: PASSED. 11/12 checkboxes
   (item 12 = build-qa smoke). All 5 transparent flags acked.
 - sdl-engine kbd diagnostic placement review: PASSED.
 - team-lead architectural-deviation approval: PASSED. Explicit
   sign-off on TA_CURRENT/0x43 live-render + motionpos-not-in-key
-  vs design § 4.
+  vs design sec. 4.
 - build-qa W23A smoke A + B: PASSED. invariant `bg_h+bg_m==n`
   37/37 blocks; cold-start hit cost bg_ms_h=0.88 ms / fg_ms_h=
   15.19 ms; map-transition invalidation working; kbd diagnostic
   format-string parses with all 13 fields.
 - build-qa W23A smoke C: surfaced bg_state-E-under-killswitch
   deviation per silent-narrow STOP-and-ack rule; fix incorporated
-  pre-format-patch (§ 9 of this commit body).
+  pre-format-patch (sec. 9 of this commit body).
 
 References:
   patches/nxengine-evo/0080-perf-wave-17-2-cache-backdrop-render.patch
@@ -226,10 +226,10 @@ References:
   patches/nxengine-evo/0095-perf-wave-22-mode-tick-decomposition.patch
   patches/nxengine-evo/0096-perf-wave-22-5-mode-draw-scene-decomposition.patch
   vendor/nxengine-evo/src/Utils/diagnostic_timers.h
-  docs/PHASE11-WAVE-22-FINDINGS.md § 11.3-11.6
-  docs/PHASE11-WAVE-23-DESIGN.md § 1-12 (gitignored)
-  docs/PHASE11-WAVE-23-CONTRACT.md § 1-9 (gitignored)
-  docs/PHASE11-KEYBOARD-DIAGNOSTIC-SPEC.md § 1-9 (gitignored)
+  docs/PHASE11-WAVE-22-FINDINGS.md sec. 11.3-11.6
+  docs/PHASE11-WAVE-23-DESIGN.md sec. 1-12 (gitignored)
+  docs/PHASE11-WAVE-23-CONTRACT.md sec. 1-9 (gitignored)
+  docs/PHASE11-KEYBOARD-DIAGNOSTIC-SPEC.md sec. 1-9 (gitignored)
   memory/silent_narrow_pattern.md (build-qa STOP-and-ack on smoke C)
   memory/patch_cascade_trap.md
   memory/perf_predictions_unreliable.md
@@ -259,25 +259,25 @@ index 6adce1b..238f102 100644
  
 +// DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B tilemap cache):
 +// 13 cache hit/miss instrumentation counters per
-+// docs/PHASE11-WAVE-23-CONTRACT.md § 1.4. These accumulate per-100-
++// docs/PHASE11-WAVE-23-CONTRACT.md sec. 1.4. These accumulate per-100-
 +// tick block; emit + reset (12 of 13) at audit-flush, sticky
 +// `*_enabled` flags reset only on map_flush_graphics() (map change).
 +// Storage definitions live in Renderer.cpp's NXE::Diag block alongside
 +// W20B + W22A + W22.5 storage so audit-flush emits all 5
 +// instrumentation layers from a single TU.
 +//
-+// Adaptive-α state machine (per design § 5 Option α, contract § 5):
++// Adaptive-alpha state machine (per design sec. 5 Option alpha, contract sec. 5):
 +//   - per-layer `*_enabled` flag starts true; transitions to false
-+//     after 10 consecutive frames where miss_render_time < 2 ×
++//     after 10 consecutive frames where miss_render_time < 2 x
 +//     cache_hit_cost (BG threshold 8.6 ms; FG threshold 15.4 ms;
-+//     hardcoded per probe data § 11.6)
++//     hardcoded per probe data sec. 11.6)
 +//   - on disable transition, increment `*_disable_transitions_block`
 +//   - re-enables on map_flush_graphics() (map change)
 +//
 +// Killswitch: SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0 (strict-0; default
-+// ON) short-circuits the cache check entirely — both layers report
++// ON) short-circuits the cache check entirely -- both layers report
 +// `*_enabled=false` from block 1 with all counters at 0 (per contract
-+// § 3.2). Counter emission still gates on MODE_DRAW_SCENE_INSTR
++// sec. 3.2). Counter emission still gates on MODE_DRAW_SCENE_INSTR
 +// (the existing W22.5 hint), NOT on the killswitch.
 +extern std::uint32_t g_tilemap_bg_cache_hits_block;
 +extern std::uint32_t g_tilemap_bg_cache_misses_block;
@@ -293,14 +293,14 @@ index 6adce1b..238f102 100644
 +extern std::uint64_t g_tilemap_fg_miss_total_ns_block;
 +extern std::uint32_t g_tilemap_cache_n_block;                // DrawScene-call count
 +
-+// Killswitch accessor — definition in Renderer.cpp's anonymous-
++// Killswitch accessor -- definition in Renderer.cpp's anonymous-
 +// namespace `_abl_tilemap_cache_killswitch()` forwarded via the file-
 +// scope wrapper at end-of-file. map.cpp reads this to short-circuit
 +// the cache check when SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0.
 +bool tilemap_cache_killswitch_active();
 +
-+// Per-layer cache reset hook — called by map_flush_graphics() on map
-+// change to release cache surfaces + re-enable adaptive-α (sets
++// Per-layer cache reset hook -- called by map_flush_graphics() on map
++// change to release cache surfaces + re-enable adaptive-alpha (sets
 +// g_tilemap_*_cache_enabled = true). Definition in map.cpp's cache
 +// architecture block.
 +void tilemap_cache_reset();
@@ -318,15 +318,15 @@ index d6320bf..2490e68 100644
  
 +  // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): increment the
 +  // mds-tilemap-cache `n` block counter at the start of DrawScene per
-+  // contract § 1.4 + § 5. n counts DrawScene() calls (not Game::tick
++  // contract sec. 1.4 + sec. 5. n counts DrawScene() calls (not Game::tick
 +  // calls; DrawScene is only entered from game_tick_normal's
 +  // ModeDrawSceneTimer scope). Used by the [mds-tilemap-cache] emit
 +  // line to validate the per-block bg_h+bg_m==n invariant.
 +  ++NXE::Diag::g_tilemap_cache_n_block;
 +
-   // patch 0096 (wave 22.5 W22B): mode_draw_scene decomposition — 6
+   // patch 0096 (wave 22.5 W22B): mode_draw_scene decomposition -- 6
    // sub-bracket RAII timers wrapping non-overlapping work types per
-   // contract § 1. Each bracket scopes one of the per-frame work
+   // contract sec. 1. Each bracket scopes one of the per-frame work
 diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
 index 9e19e0f..e88364d 100644
 --- a/src/graphics/Renderer.cpp
@@ -337,17 +337,17 @@ index 9e19e0f..e88364d 100644
  
 +// DOS-PORT (patch 0097, Phase 9 wave 23 W23A): DJGPP-specific headers
 +// for the keyboard-fix diagnostic per docs/PHASE11-KEYBOARD-DIAGNOSTIC-
-+// SPEC.md § 3. `<pc.h>` provides `inportb()` for direct port reads
++// SPEC.md sec. 3. `<pc.h>` provides `inportb()` for direct port reads
 +// (0x21 PIC1 mask, 0x64 8042 status). `<sys/farptr.h>` + `<go32.h>`
 +// provide `_farpeekw()` + `_dos_ds` for BIOS Data Area peeks at
 +// 0040:001A/001C/001E (BIOS keyboard buffer head/tail/buf0).
 +//
 +// Replicates the `DOS_PeekUint16` body from
 +// vendor/SDL/src/core/dos/SDL_dos.h:104 inline (per sdl-engine's spec
-+// § 8 open invitation — avoids cross-vendor relative include of an
++// sec. 8 open invitation -- avoids cross-vendor relative include of an
 +// internal SDL header). The math
 +// `((segoffset & 0xFFFF0000) >> 12) + (segoffset & 0xFFFF)` converts
-+// seg:off to a flat 20-bit address: e.g. 0x0040001A → 0x41A.
++// seg:off to a flat 20-bit address: e.g. 0x0040001A -> 0x41A.
 +//
 +// Gated on `__DJGPP__` for hypothetical non-DOS preview builds; in
 +// practice doskutsu only builds for DJGPP target.
@@ -367,7 +367,7 @@ index 9e19e0f..e88364d 100644
 +
 +// DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B tilemap cache):
 +// 13 cache hit/miss instrumentation counters per docs/PHASE11-WAVE-23-
-+// CONTRACT.md § 1.4. 12 are per-block (reset at audit-flush); 2 are
++// CONTRACT.md sec. 1.4. 12 are per-block (reset at audit-flush); 2 are
 +// sticky `*_enabled` flags (reset only on map_flush_graphics).
 +// Initial state: both layers ENABLED (default-ON cache); all per-block
 +// counters at 0; 6 ns accumulators at 0.
@@ -411,7 +411,7 @@ index 9e19e0f..e88364d 100644
 +
 +// DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): strict-"0" match
 +// sibling to _strict_truthy_env. Used by the tilemap-cache killswitch
-+// per contract § 3.2 — default-ON cache requires opt-OUT semantics
++// per contract sec. 3.2 -- default-ON cache requires opt-OUT semantics
 +// (counter to project's strict-1 convention for opt-IN diagnostic
 +// hints). Returns true ONLY if env var is literal "0"; any other value
 +// (unset, "1", empty, anything else) returns false. Mirrors patch
@@ -430,14 +430,14 @@ index 9e19e0f..e88364d 100644
  }
  
 +// DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): tilemap-cache
-+// killswitch. Strict-"0" match per contract § 3.2 — default-ON cache
++// killswitch. Strict-"0" match per contract sec. 3.2 -- default-ON cache
 +// requires opt-OUT semantics. Setting SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0
 +// disables the cache (reverts to per-tile rendering for both BG and
 +// FG layers); any other value (unset, "1", empty) keeps cache ENABLED.
-+// Cache architecture in map.cpp short-circuits on this — when true,
++// Cache architecture in map.cpp short-circuits on this -- when true,
 +// bypass cache check + render directly. Counter emission still gates
 +// on MODE_DRAW_SCENE_INSTR; killswitch only affects cache architecture.
-+// Cached static-const-bool — -O2 hoists per-frame guards.
++// Cached static-const-bool -- -O2 hoists per-frame guards.
 +inline bool _abl_tilemap_cache_killswitch()
 +{
 +  static const bool v = _strict_falsy_env("SDL_HINT_DOSKUTSU_TILEMAP_CACHE");
@@ -452,31 +452,31 @@ index 9e19e0f..e88364d 100644
    // or refute hypothesis 3a; if 3a is refuted, IRR can be added in a
    // follow-up patch.
 +  // DOS-PORT (patch 0097, Phase 9 wave 23 W23A): keyboard-fix diagnostic
-+  // — 5 mandatory live-state fields appended to the existing kbd/audio
-+  // block line per docs/PHASE11-KEYBOARD-DIAGNOSTIC-SPEC.md § 3. Field
-+  // 6 (`idt_int9_pm_off`) optional per sdl-engine's spec § 2; SKIPPED
++  // -- 5 mandatory live-state fields appended to the existing kbd/audio
++  // block line per docs/PHASE11-KEYBOARD-DIAGNOSTIC-SPEC.md sec. 3. Field
++  // 6 (`idt_int9_pm_off`) optional per sdl-engine's spec sec. 2; SKIPPED
 +  // here because Renderer.cpp doesn't currently include `<dpmi.h>` /
 +  // `<go32.h>` for `_go32_dpmi_get_protected_mode_interrupt_vector()`
-+  // — the 5 mandatory fields are sufficient per sdl-engine's spec § 5
++  // -- the 5 mandatory fields are sufficient per sdl-engine's spec sec. 5
 +  // triage table. (Adding field 6 would require an additional
 +  // `<dpmi.h>` include + extra format-string args; deferred unless
 +  // findings reveal hypothesis (a) candidate where IDT-divergence
 +  // matters.)
 +  //
-+  // All reads are sub-µs at the per-100-pump_pass cadence; no env-var
-+  // gating per spec § 7. Reads:
++  // All reads are sub-us at the per-100-pump_pass cadence; no env-var
++  // gating per spec sec. 7. Reads:
 +  //   pic1_mask_live: live PIC1 mask (vs install-time snapshot above)
 +  //   kbd_8042_stat:  8042 controller status; bit 4 = keyboard inhibited
 +  //   bios_kbd_head:  BIOS keyboard buffer head pointer (0040:001A)
 +  //   bios_kbd_tail:  BIOS keyboard buffer tail pointer (0040:001C)
 +  //   bios_kbd_buf0:  first slot of BIOS buffer (scancode+ASCII word)
 +  //
-+  // Triage interpretation (sdl-engine spec § 5):
-+  //   - pic1_mask_live bit 1 = 1 → IRQ-1 masked at PIC (DPMI/PIC issue)
-+  //   - kbd_8042_stat bit 4 = 1 → 8042 controller disabled keyboard
-+  //   - bios_kbd_head != bios_kbd_tail → BIOS handler IS pushing to its
++  // Triage interpretation (sdl-engine spec sec. 5):
++  //   - pic1_mask_live bit 1 = 1 -> IRQ-1 masked at PIC (DPMI/PIC issue)
++  //   - kbd_8042_stat bit 4 = 1 -> 8042 controller disabled keyboard
++  //   - bios_kbd_head != bios_kbd_tail -> BIOS handler IS pushing to its
 +  //     buffer (proves BIOS INT 9 in chain despite SDL/0036 fix)
-+  //   - bios_kbd_buf0 != 0 → BIOS captured at least one scancode
++  //   - bios_kbd_buf0 != 0 -> BIOS captured at least one scancode
 +  unsigned pic1_mask_live = 0;
 +  unsigned kbd_8042_stat  = 0;
 +  unsigned bios_kbd_head  = 0;
@@ -486,7 +486,7 @@ index 9e19e0f..e88364d 100644
 +  pic1_mask_live = (unsigned)inportb(0x21) & 0xff;
 +  kbd_8042_stat  = (unsigned)inportb(0x64) & 0xff;
 +  // Inline DOS_PeekUint16 from vendor/SDL/src/core/dos/SDL_dos.h:104
-+  // (per sdl-engine spec § 8 open invitation — avoids cross-vendor
++  // (per sdl-engine spec sec. 8 open invitation -- avoids cross-vendor
 +  // relative include). Formula: ((segoff & 0xFFFF0000) >> 12) +
 +  // (segoff & 0xFFFF) = flat 20-bit linear address.
 +  bios_kbd_head = (unsigned)_farpeekw(_dos_ds,
@@ -527,24 +527,24 @@ index 9e19e0f..e88364d 100644
 +
 +  // patch 0097 (wave 23 W23A Path B): tilemap-cache hit/miss
 +  // instrumentation emit + per-block reset per
-+  // docs/PHASE11-WAVE-23-CONTRACT.md § 2. Single-line emit with 13
++  // docs/PHASE11-WAVE-23-CONTRACT.md sec. 2. Single-line emit with 13
 +  // fields (n + 6 BG + 6 FG including 4 ms accumulator-derived means).
 +  // Distinct prefix `[mds-tilemap-cache ...]` so 5-layer grep stays
-+  // clean: [flip-stat] → [engine-tick-stat] → [mode-tick-stat] →
-+  // [mode-draw-scene-stat] → [mds-tilemap-cache] → counters.
++  // clean: [flip-stat] -> [engine-tick-stat] -> [mode-tick-stat] ->
++  // [mode-draw-scene-stat] -> [mds-tilemap-cache] -> counters.
 +  //
 +  // Gates on existing W22.5 hint MODE_DRAW_SCENE_INSTR=1 per contract
-+  // § 3.1 — NOT on the killswitch. Killswitch (TILEMAP_CACHE=0) only
++  // sec. 3.1 -- NOT on the killswitch. Killswitch (TILEMAP_CACHE=0) only
 +  // affects cache architecture; counter emit still fires (showing
 +  // bg_state=D fg_state=D when killswitch active).
 +  //
-+  // Format string verbatim from contract § 2.2. ms accumulator-derived
++  // Format string verbatim from contract sec. 2.2. ms accumulator-derived
 +  // means computed inline (no new helper). Empty-block placeholders
-+  // (n=0, h=0, m=0 → ms_h=0.00 ms_m=0.00) emit with sane numbers via
++  // (n=0, h=0, m=0 -> ms_h=0.00 ms_m=0.00) emit with sane numbers via
 +  // the conditional ternaries.
 +  //
 +  // Per-block reset of 12 fields AFTER emit; the 2 sticky `*_enabled`
-+  // flags NOT reset (they only flip via adaptive-α state machine in
++  // flags NOT reset (they only flip via adaptive-alpha state machine in
 +  // map.cpp or via map_flush_graphics() reset hook).
 +  if (_abl_mode_draw_scene_instr())
 +  {
@@ -561,25 +561,25 @@ index 9e19e0f..e88364d 100644
 +    using NXE::Diag::g_tilemap_fg_cache_enabled;
 +    using NXE::Diag::g_tilemap_fg_hit_total_ns_block;
 +    using NXE::Diag::g_tilemap_fg_miss_total_ns_block;
-+    // patch 0097 (wave 23 W23A) — bg_state/fg_state field rendering
-+    // factors in BOTH the killswitch (TILEMAP_CACHE=0 → cache wholly
++    // patch 0097 (wave 23 W23A) -- bg_state/fg_state field rendering
++    // factors in BOTH the killswitch (TILEMAP_CACHE=0 -> cache wholly
 +    // bypassed; sticky enabled flag stays at its prior value because
-+    // we don't mutate it from the killswitch path) AND the adaptive-α
++    // we don't mutate it from the killswitch path) AND the adaptive-alpha
 +    // sticky enabled flag. Either condition that disables the cache
 +    // for the layer renders 'D'; only when BOTH allow the cache to
 +    // run does the state render 'E'.
 +    //
-+    // Per contract § 3.2: "killswitch-disabled: BOTH bg_state=D AND
++    // Per contract sec. 3.2: "killswitch-disabled: BOTH bg_state=D AND
 +    // fg_state=D from BLOCK 1 (no transition history)." This logic
 +    // is required for flush-instr's analysis tooling to differentiate
-+    // killswitch-disabled (state=D from block 1) from adaptive-α-
++    // killswitch-disabled (state=D from block 1) from adaptive-alpha-
 +    // disabled (starts state=E, transitions via state=D).
 +    //
 +    // build-qa W23A smoke C surfaced this: pre-fix, state field rendered
 +    // only the sticky enabled flag, so killswitch-active blocks showed
 +    // bg_state=E despite cache being short-circuited. Fix is render-time
-+    // only — does NOT mutate `g_tilemap_*_cache_enabled` (that flag
-+    // continues to mean "adaptive-α decision"; killswitch is layered
++    // only -- does NOT mutate `g_tilemap_*_cache_enabled` (that flag
++    // continues to mean "adaptive-alpha decision"; killswitch is layered
 +    // ABOVE it).
 +    const bool _killswitch_active = _abl_tilemap_cache_killswitch();
 +    const char _bg_state_char = (_killswitch_active || !g_tilemap_bg_cache_enabled) ? 'D' : 'E';
@@ -609,7 +609,7 @@ index 9e19e0f..e88364d 100644
 +  }
 +  // Reset 12 per-block counters regardless of MODE_DRAW_SCENE_INSTR
 +  // state. The 2 sticky `*_enabled` flags NOT reset here (per contract
-+  // § 1.2 — only flipped by adaptive-α state machine or
++  // sec. 1.2 -- only flipped by adaptive-alpha state machine or
 +  // map_flush_graphics() reset hook).
 +  NXE::Diag::g_tilemap_cache_n_block                       = 0;
 +  NXE::Diag::g_tilemap_bg_cache_hits_block                 = 0;
@@ -643,10 +643,10 @@ index 9e19e0f..e88364d 100644
 +// Mirrors drawCachedBackdrop's preconditions (format match, dim match,
 +// queue drain) plus dirty-rect record. Caller is responsible for
 +// allocating + populating `src`; this method only handles the
-+// cache→window blit.
++// cache->window blit.
 +bool Renderer::drawCachedTilemap(SDL_Surface *src, bool with_colorkey)
 +{
-+  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
++  _DrawcallTimer _dct;  // patch 0060 -- phase timing accumulator
 +  (void)with_colorkey;  // colorkey state is pre-set on src by caller;
 +                        // SDL_BlitSurface picks it up from src->flags.
 +                        // Param kept for API clarity / future variant.
@@ -664,9 +664,9 @@ index 9e19e0f..e88364d 100644
 +    _renderer_queue_dirty = false;
 +  }
 +
-+  // Same-format INDEX8→INDEX8 SDL_BlitSurface. For BG (opaque) this is
-+  // a per-row memcpy ≈ 4.3 ms on g2k. For FG (colorkey'd) this is per-
-+  // pixel branched ≈ 7.7 ms. The colorkey state lives on src->flags;
++  // Same-format INDEX8->INDEX8 SDL_BlitSurface. For BG (opaque) this is
++  // a per-row memcpy ~ 4.3 ms on g2k. For FG (colorkey'd) this is per-
++  // pixel branched ~ 7.7 ms. The colorkey state lives on src->flags;
 +  // SDL_BlitSurface auto-dispatches to the right inner loop.
 +  if (!SDL_BlitSurface(src, NULL, _cached_window_surface, NULL))
 +  {
@@ -682,7 +682,7 @@ index 9e19e0f..e88364d 100644
 +
  void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
  {
-   _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   _DrawcallTimer _dct;  // patch 0060 -- phase timing accumulator
 @@ -5442,3 +5721,18 @@ bool mode_tick_instr_active() { return ::NXE::Graphics::_abl_mode_tick_instr();
  namespace NXE { namespace Diag {
  bool mode_draw_scene_instr_active() { return ::NXE::Graphics::_abl_mode_draw_scene_instr(); }
@@ -799,14 +799,14 @@ index 4e1b250..89f10fe 100644
 +    // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): raw blit of
 +    // a tile from the loaded tileset into an arbitrary destination
 +    // SDL_Surface (intended target: map.cpp's tilemap cache surface).
-+    // Bypasses Renderer overhead — single SDL_BlitSurface call,
++    // Bypasses Renderer overhead -- single SDL_BlitSurface call,
 +    // no per-call dirty-rect record, no _DrawcallTimer. Used during
-+    // cache-miss rendering to populate the cache; cache→window blit
++    // cache-miss rendering to populate the cache; cache->window blit
 +    // happens via Renderer::drawCachedTilemap.
 +    //
 +    // Same source-rect math as drawTile (16 tiles per row tilesheet).
 +    // Caller responsible for dst surface allocation + format match
-+    // (INDEX8↔INDEX8 expected); errors logged but not propagated.
++    // (INDEX8<->INDEX8 expected); errors logged but not propagated.
 +    void drawTileToSurface(SDL_Surface *dst, int dst_x, int dst_y, int t);
    private:
      Surface *_tileset = nullptr;
@@ -829,9 +829,9 @@ index d5a786c..a50db37 100644
  
 +  // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): release tilemap
 +  // cache surfaces (BG + FG) before deleting backdrop[]. Same
-+  // rationale — cache is keyed on (curmap, scroll, …) which would
++  // rationale -- cache is keyed on (curmap, scroll, ...) which would
 +  // detect a map change, but explicit reset is robust + re-enables
-+  // adaptive-α state machine for the new map.
++  // adaptive-alpha state machine for the new map.
 +  NXE::Diag::tilemap_cache_reset();
 +
    for (i = 0; i < MAX_BACKDROPS; i++)
@@ -846,8 +846,8 @@ index d5a786c..a50db37 100644
 -//  if foreground = 0, draws backdrop and background tiles.
 -void map_draw(uint8_t foreground)
 +// DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): tilemap cache
-+// state + adaptive-α state machine + tile-mutation counter. See
-+// docs/PHASE11-WAVE-23-DESIGN.md § 2-6 for architecture rationale.
++// state + adaptive-alpha state machine + tile-mutation counter. See
++// docs/PHASE11-WAVE-23-DESIGN.md sec. 2-6 for architecture rationale.
 +//
 +// The cache stores PLAIN tiles only (the `tileset.drawTile(...)` else-
 +// branch in map_draw's hot loop). Animated TA_CURRENT tiles and
@@ -856,16 +856,16 @@ index d5a786c..a50db37 100644
 +//   - motionpos is NOT in the cache key (animated tiles are live-
 +//     rendered, so motionpos changes don't invalidate the cache)
 +//   - the cache stays valid across motion-tile-only animation ticks
-+//   - on cache HIT: blit cache → window THEN run the animated/
++//   - on cache HIT: blit cache -> window THEN run the animated/
 +//     destructible sub-loop to overlay live sprites
-+//   - on cache MISS: render plain tiles into cache, blit cache →
++//   - on cache MISS: render plain tiles into cache, blit cache ->
 +//     window, THEN run the animated/destructible sub-loop
 +//
 +// Per layer (BG + FG), we maintain:
-+//   - SDL_Surface* cache (lazy alloc, 320×240 INDEX8)
++//   - SDL_Surface* cache (lazy alloc, 320x240 INDEX8)
 +//   - cache key tuple (curmap, scroll_x, scroll_y, flipacceltime!=0,
 +//     tile_mutation_counter, w, h, format)
-+//   - adaptive-α state: `g_tilemap_*_cache_enabled` (in NXE::Diag,
++//   - adaptive-alpha state: `g_tilemap_*_cache_enabled` (in NXE::Diag,
 +//     sticky per-block) + per-layer "consecutive low-cost misses"
 +//     counter (file-scope here)
 +//
@@ -874,19 +874,19 @@ index d5a786c..a50db37 100644
 +// BG cache is opaque (full-screen coverage of plain tiles).
 +//
 +// Killswitch: SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0 (strict-0; default
-+// ON) short-circuits the cache check entirely — falls through to the
++// ON) short-circuits the cache check entirely -- falls through to the
 +// original per-tile-loop render. Counter emission still fires per
-+// W22.5 hint per contract § 3.2.
++// W22.5 hint per contract sec. 3.2.
 +
 +// flipacceltime is defined at global scope (in nx.cpp); declare here at
 +// global scope so the anonymous-namespace `_tilemap_cache_compute_key()`
 +// helper below picks up the GLOBAL symbol, not an anonymous-namespace
 +// shadow. (Putting `extern int flipacceltime;` inside the anonymous
 +// namespace would silently bind to an anonymous-namespace symbol with
-+// no definition — linker error.)
++// no definition -- linker error.)
 +extern int flipacceltime;
 +
-+namespace {  // file-scope cache state — accessed only from this TU
++namespace {  // file-scope cache state -- accessed only from this TU
 +
 +// Cache surfaces (lazy-alloc on first miss, released on map_flush_graphics).
 +SDL_Surface *g_tilemap_bg_cache_sfc = nullptr;
@@ -906,17 +906,17 @@ index d5a786c..a50db37 100644
 +TilemapCacheKey g_tilemap_bg_cache_key = {-1, INT_MIN, INT_MIN, -1, 0, 0, 0, SDL_PIXELFORMAT_UNKNOWN};
 +TilemapCacheKey g_tilemap_fg_cache_key = {-1, INT_MIN, INT_MIN, -1, 0, 0, 0, SDL_PIXELFORMAT_UNKNOWN};
 +
-+// Tile-mutation counter — bumped by map_ChangeTileWithSmoke (and any
++// Tile-mutation counter -- bumped by map_ChangeTileWithSmoke (and any
 +// other site that mutates map.tiles[x][y]). Cache key invalidates when
 +// this changes vs the cached value.
 +unsigned g_tile_mutation_counter = 0;
 +
-+// Adaptive-α state per design § 5 Option α. Per-layer "consecutive
++// Adaptive-alpha state per design sec. 5 Option alpha. Per-layer "consecutive
 +// low-cost misses" counter; transitions cache_enabled to false after
 +// 10 consecutive frames where miss_render_time_ns < threshold_ns.
-+// Threshold is hardcoded per probe data § 11.6:
-+//   BG: 2 × 4.3 ms = 8.6 ms = 8,600,000 ns (memcpy76k cost × 2)
-+//   FG: 2 × 7.7 ms = 15.4 ms = 15,400,000 ns (colorkey-blit ceiling × 2)
++// Threshold is hardcoded per probe data sec. 11.6:
++//   BG: 2 x 4.3 ms = 8.6 ms = 8,600,000 ns (memcpy76k cost x 2)
++//   FG: 2 x 7.7 ms = 15.4 ms = 15,400,000 ns (colorkey-blit ceiling x 2)
 +// Re-enables on map_flush_graphics() (map change).
 +constexpr std::uint64_t TILEMAP_BG_MISS_THRESHOLD_NS = 8600000ull;
 +constexpr std::uint64_t TILEMAP_FG_MISS_THRESHOLD_NS = 15400000ull;
@@ -942,7 +942,7 @@ index d5a786c..a50db37 100644
 +  SDL_Surface *sfc = SDL_CreateSurface(win->w, win->h, win->format);
 +  if (!sfc) return nullptr;
 +  // Attach master palette to INDEX8 cache surfaces so palette indexing
-+  // is correct on cache→window blit. Mirrors patch 0080's pattern.
++  // is correct on cache->window blit. Mirrors patch 0080's pattern.
 +  if (win->format == SDL_PIXELFORMAT_INDEX8 &&
 +      Renderer::getInstance()->masterPalette())
 +  {
@@ -994,8 +994,8 @@ index d5a786c..a50db37 100644
  
 -  blit_y       = -(scroll_y % TILE_H);
 -  blit_x_start = -(scroll_x % TILE_W);
-+// Render plain tiles for the given layer (foreground=0 → BG;
-+// foreground=TA_FOREGROUND → FG) into a destination cache surface.
++// Render plain tiles for the given layer (foreground=0 -> BG;
++// foreground=TA_FOREGROUND -> FG) into a destination cache surface.
 +// Skips TA_CURRENT and 0x43 cells (those render live in the post-
 +// cache sub-loop). Mirrors the per-tile loop structure in original
 +// map_draw's body.
@@ -1022,7 +1022,7 @@ index d5a786c..a50db37 100644
 +        }
 +        else if ((tileattr[t] & TA_FOREGROUND) == foreground)
 +        {
-+          // Skip TA_CURRENT (animated water) and 0x43 (destroyable) —
++          // Skip TA_CURRENT (animated water) and 0x43 (destroyable) --
 +          // those render live, not cached.
 +          if (!(tileattr[t] & TA_CURRENT) && tilecode[t] != 0x43)
 +          {
@@ -1098,11 +1098,11 @@ index d5a786c..a50db37 100644
 +}
  
 -    for (x = 0; x <= (Renderer::getInstance()->screenWidth / TILE_W) + MAP_DRAW_EXTRA_X; x++)
-+// Run the original (uncached) per-tile loop against the window — used
-+// when killswitch is active, when the cache is adaptive-α-disabled,
++// Run the original (uncached) per-tile loop against the window -- used
++// when killswitch is active, when the cache is adaptive-alpha-disabled,
 +// or when cache allocation fails. Equivalent to the pre-patch-0097
 +// map_draw body. Counter increments for hit/miss are NOT made when
-+// this path runs (per contract § 3.2: killswitch-disabled state shows
++// this path runs (per contract sec. 3.2: killswitch-disabled state shows
 +// `bg_h=0 bg_m=0`).
 +void _tilemap_render_uncached_full_loop(uint8_t foreground)
 +{
@@ -1152,7 +1152,7 @@ index d5a786c..a50db37 100644
 +// Defined in NXE::Diag namespace (forward-declared in
 +// vendor/nxengine-evo/src/Utils/diagnostic_timers.h). Called by
 +// map_flush_graphics() on map change. Releases both cache surfaces,
-+// resets keys to sentinel, re-enables both layers' adaptive-α state,
++// resets keys to sentinel, re-enables both layers' adaptive-alpha state,
 +// resets consecutive-low-misses counters. The g_tile_mutation_counter
 +// is NOT reset (it's monotonic; cache key compares against snapshot).
 +namespace NXE { namespace Diag {
@@ -1170,8 +1170,8 @@ index d5a786c..a50db37 100644
 +  }
 +  g_tilemap_bg_cache_key = {-1, INT_MIN, INT_MIN, -1, 0, 0, 0, SDL_PIXELFORMAT_UNKNOWN};
 +  g_tilemap_fg_cache_key = {-1, INT_MIN, INT_MIN, -1, 0, 0, 0, SDL_PIXELFORMAT_UNKNOWN};
-+  // Re-enable both layers' adaptive-α state on map change. Counter
-+  // emission stays consistent — `bg_state=E fg_state=E` for the first
++  // Re-enable both layers' adaptive-alpha state on map change. Counter
++  // emission stays consistent -- `bg_state=E fg_state=E` for the first
 +  // block of the new map.
 +  g_tilemap_bg_cache_enabled = true;
 +  g_tilemap_fg_cache_enabled = true;
@@ -1186,14 +1186,14 @@ index d5a786c..a50db37 100644
 +//
 +// DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): cache-aware
 +// version. Routes to one of three paths:
-+//   - Killswitch active OR layer adaptive-α-disabled: uncached full
-+//     loop (counters NOT bumped — emit shows `bg_h=0 bg_m=0` per
-+//     contract § 3.2).
++//   - Killswitch active OR layer adaptive-alpha-disabled: uncached full
++//     loop (counters NOT bumped -- emit shows `bg_h=0 bg_m=0` per
++//     contract sec. 3.2).
 +//   - Cache HIT: drawCachedTilemap blit + live-render TA_CURRENT/0x43
 +//     overlay; bump hit counter + accumulate hit_ns.
-+//   - Cache MISS: render plain tiles into cache, blit cache→window,
++//   - Cache MISS: render plain tiles into cache, blit cache->window,
 +//     live-render overlay; bump miss counter + accumulate miss_ns;
-+//     run adaptive-α threshold check.
++//     run adaptive-alpha threshold check.
 +//
 +// Original per-tile loop preserved in `_tilemap_render_uncached_full_-
 +// loop()` (anonymous namespace above) for the killswitch / disabled
@@ -1233,9 +1233,9 @@ index d5a786c..a50db37 100644
 +      ? TILEMAP_FG_MISS_THRESHOLD_NS
 +      : TILEMAP_BG_MISS_THRESHOLD_NS;
 +
-+  // Path 1: killswitch active OR adaptive-α-disabled OR window not
++  // Path 1: killswitch active OR adaptive-alpha-disabled OR window not
 +  // available (can't allocate cache without it). Run uncached full
-+  // loop; do NOT bump hit/miss counters per contract § 3.2.
++  // loop; do NOT bump hit/miss counters per contract sec. 3.2.
 +  if (NXE::Diag::tilemap_cache_killswitch_active() || !cache_enabled || !win)
 +  {
 +    _tilemap_render_uncached_full_loop(foreground);
@@ -1260,7 +1260,7 @@ index d5a786c..a50db37 100644
 +    cache_sfc = _tilemap_cache_alloc(win, is_fg);
 +    if (!cache_sfc)
 +    {
-+      // Allocation failed — fall back to uncached path. Don't bump
++      // Allocation failed -- fall back to uncached path. Don't bump
 +      // hit/miss; treat as if cache was disabled for this frame.
 +      _tilemap_render_uncached_full_loop(foreground);
 +      return;
@@ -1273,7 +1273,7 @@ index d5a786c..a50db37 100644
 +  const Uint64 t0 = SDL_GetTicksNS();
 +  if (_tilemap_cache_keys_equal(cache_key, cur_key))
 +  {
-+    // CACHE HIT — single SDL_BlitSurface from cache to window, then
++    // CACHE HIT -- single SDL_BlitSurface from cache to window, then
 +    // overlay live-render TA_CURRENT and 0x43 cells.
 +    if (r->drawCachedTilemap(cache_sfc, is_fg))
 +    {
@@ -1292,7 +1292,7 @@ index d5a786c..a50db37 100644
 +    cache_key = {-1, INT_MIN, INT_MIN, -1, 0, 0, 0, SDL_PIXELFORMAT_UNKNOWN};
 +  }
 +
-+  // CACHE MISS — render plain tiles into cache, blit cache to window,
++  // CACHE MISS -- render plain tiles into cache, blit cache to window,
 +  // overlay live-render TA_CURRENT/0x43 cells. Pre-clear cache to
 +  // colorkey (FG) or 0 (BG).
 +  if (is_fg)
@@ -1304,11 +1304,11 @@ index d5a786c..a50db37 100644
 +    SDL_FillSurfaceRect(cache_sfc, NULL, 0);
 +  }
 +  _tilemap_render_plain_tiles_into_cache(cache_sfc, foreground);
-+  // Blit cache → window. drawCachedTilemap honors the colorkey on
++  // Blit cache -> window. drawCachedTilemap honors the colorkey on
 +  // FG cache surface (set in _tilemap_cache_alloc).
 +  if (!r->drawCachedTilemap(cache_sfc, is_fg))
 +  {
-+    // Blit failed — fall back to uncached full loop; invalidate.
++    // Blit failed -- fall back to uncached full loop; invalidate.
 +    cache_key = {-1, INT_MIN, INT_MIN, -1, 0, 0, 0, SDL_PIXELFORMAT_UNKNOWN};
 +    _tilemap_render_uncached_full_loop(foreground);
 +    return;
@@ -1319,7 +1319,7 @@ index d5a786c..a50db37 100644
 +  ++cache_misses;
 +  miss_total_ns += dt;
 +
-+  // Adaptive-α: if this miss took less time than the threshold (cache-
++  // Adaptive-alpha: if this miss took less time than the threshold (cache-
 +  // hit cost would be ~half this), the layer's render is cheap enough
 +  // that caching is a net regression. Track consecutive low-cost
 +  // misses; disable cache after N in a row.
@@ -1339,12 +1339,12 @@ index d5a786c..a50db37 100644
 +  }
 +  else
 +  {
-+    // High-cost miss — cache will help next frame if scene is stable.
++    // High-cost miss -- cache will help next frame if scene is stable.
 +    // Reset counter; don't disable.
 +    consecutive_low_misses = 0;
 +  }
 +
-+  // Live overlay for animated/destructible tiles (always — both hit
++  // Live overlay for animated/destructible tiles (always -- both hit
 +  // and miss paths converge here).
 +  _tilemap_render_special_tiles_to_window(foreground);
 +}
@@ -1361,7 +1361,7 @@ index d5a786c..a50db37 100644
 +  // so any tile mutation invalidates the cache on the next frame.
 +  // Single increment per tile change is sufficient; the counter is
 +  // monotonic and never resets within a session (wraparound after
-+  // 2^32 mutations is acceptable per design § 4 — Cave Story has
++  // 2^32 mutations is acceptable per design sec. 4 -- Cave Story has
 +  // ~hundreds of destroyable tiles per map, never approaches limit).
 +  ++g_tile_mutation_counter;
 +

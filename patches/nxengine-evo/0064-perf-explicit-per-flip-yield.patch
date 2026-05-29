@@ -8,14 +8,14 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-Pairs with the SDL-side patch (patches/SDL/0021-…) that default-skips
+Pairs with the SDL-side patch (patches/SDL/0021-...) that default-skips
 the DOS_Yield in DOSVESA_PumpEvents. With that yield removed, the
 cooperative audio thread no longer gets scheduled time on every input
-poll — it would starve. Add an explicit SDL_Delay(0) once per flip in
+poll -- it would starve. Add an explicit SDL_Delay(0) once per flip in
 Renderer::flip() after RenderPresent / GetWindowSurface refresh, which
-routes through SDL_SYS_DelayNS(0) → DOS_Yield() on the DOS backend.
+routes through SDL_SYS_DelayNS(0) -> DOS_Yield() on the DOS backend.
 
-At 15 fps target this is one yield every ~67 ms — well within one
+At 15 fps target this is one yield every ~67 ms -- well within one
 audio chunk's worth of buffering (186 ms at 22050 Hz stereo S16,
 default 4096-frame chunks).
 
@@ -23,7 +23,7 @@ Also extends initVideo's diagnostic block to log whether the SDL-side
 pump yield is "skipped (default)" or "FORCED-ON" via env var, so
 DEBUG.LOG iter captures record which mode is active.
 
-See docs/PHASE9-NEXT-WAVES-PLAN.md §6 wave 13.2 ablation table for the
+See docs/PHASE9-NEXT-WAVES-PLAN.md sec.6 wave 13.2 ablation table for the
 115 ms NO_INPUT_POLL measurement that motivated this fix.
 ---
  src/graphics/Renderer.cpp | 19 +++++++++++++++++++
@@ -48,18 +48,18 @@ index 02e171e..fd270a9 100644
 +             "set SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 to restore old per-pump yield)",
 +             yield_forced ? "FORCED-ON" : "skipped (default)");
 +  }
-   // First frame must be a full refresh — we have no last-frame
+   // First frame must be a full refresh -- we have no last-frame
    // history to compare against and the backbuffer state is whatever
    // SDL3 initialized it to.
 @@ -1368,6 +1379,14 @@ void Renderer::flip()
-   // — re-query may be running fb_state populate inside SDL3-DOS).
+   // -- re-query may be running fb_state populate inside SDL3-DOS).
    if (!_abl_cache_winsurf())
      _cached_window_surface = SDL_GetWindowSurface(_window);
 +
 +  // DOS-PORT (patch 0064, Phase 9 wave 13.3): explicit cooperative-thread
 +  // yield once per flip. Pairs with the SDL-side patch that removes the
 +  // per-pump DOS_Yield from DOSVESA_PumpEvents. SDL_Delay(0) routes to
-+  // SDL_SYS_DelayNS(0) → DOS_Yield() on the DOS backend, giving the
++  // SDL_SYS_DelayNS(0) -> DOS_Yield() on the DOS backend, giving the
 +  // audio thread scheduled time without the 115 ms round-trip cost
 +  // measured in wave 13.2 NO_INPUT_POLL ablation.
 +  SDL_Delay(0);

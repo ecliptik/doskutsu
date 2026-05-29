@@ -9,7 +9,7 @@ Content-Transfer-Encoding: 8bit
 
 Reduce backdrop-blit bandwidth by skipping screen-Y rows where the
 FG/BG tilemap will fully overdraw the backdrop. Targets the dominant
-4 ms / flip cache→window or tile-loop transfer on PODP83+Cirrus per
+4 ms / flip cache->window or tile-loop transfer on PODP83+Cirrus per
 `wave_19_path_b_dead.md` 17 MB/s sysmem measurement.
 
 Mechanism. At map_flush_graphics (called on every map change), walk
@@ -25,7 +25,7 @@ Per-frame, `_compute_bg_visible_yrange` walks the visible map rows
 from camera_y and projects to screen-Y, returning the (top, bot)
 inclusive range covering all backdrop-visible rows. The range is
 cached on (curmap, mapy_tile_origin) so recompute fires only when the
-camera crosses a TILE_H boundary — a few times per second in normal
+camera crosses a TILE_H boundary -- a few times per second in normal
 play, not per-frame. The cache-miss counter
 g_bg_visible_y_recomputes_block is exposed in flush-instr's audit
 emit for verification.
@@ -37,13 +37,13 @@ Dispatch in map_draw_backdrop's cacheable-scrolltype branch
 range is a proper subset of [0, screenHeight-1]:
 
 - HIT path: `r->drawCachedBackdropClipped(cache, bg_top, bg_bot)`
-  (new Renderer method) — SDL_BlitSurface with clipped src/dst rects.
+  (new Renderer method) -- SDL_BlitSurface with clipped src/dst rects.
   Saves (1 - (bg_bot - bg_top + 1)/screenHeight) of the full transfer.
 - THRASHING tile loop (patch 0126 wave-30): outer Y loop bails on
   iterations whose dst-Y is entirely outside [bg_top, bg_bot]. Edge
   tiles that straddle the boundary blit fully (no src-rect trim);
   ~6.7% over-blit worst case per edge, preserved for simplicity.
-- WARM miss cache-fill path is INTENTIONALLY UNCHANGED — the cache
+- WARM miss cache-fill path is INTENTIONALLY UNCHANGED -- the cache
   surface must stay full-screen so subsequent HIT frames have valid
   content as visible-Y range changes. Optimizing only the dominant
   path (HIT + THRASHING) keeps cache correctness intact.
@@ -59,15 +59,15 @@ optimal.
 Conservative correctness model. The "tile_id == 0" proxy assumes any
 non-zero tile is fully FG-opaque. False negatives are possible only
 if a non-zero tile contains transparent pixels AND that tile is in a
-row where ALL other columns are also non-zero — would manifest as
+row where ALL other columns are also non-zero -- would manifest as
 "leftover framebuffer junk shows through a transparent edge of a
 terrain tile" caught by build-qa visual smoke. Killswitch reverts to
 the bit-for-bit pre-patch behavior.
 
-Architectural classification. CPU-cheap, bandwidth-bound win — fewer
+Architectural classification. CPU-cheap, bandwidth-bound win -- fewer
 INDEX8 bytes transferred per flip. Distinct from the wave-31 Lever B
 trap (parked at `patches/nxengine-evo/_disabled/0127-*.patch`) which
-re-introduced cache→window bandwidth equal to the underlying tile-
+re-introduced cache->window bandwidth equal to the underlying tile-
 render bandwidth. Slot 0130 ELIMINATES bytes-transferred for FG-
 opaque rows, which is what the 17 MB/s sysmem bandwidth math actually
 rewards. Composes additively with patch 0126 (wave-30 thrashing-
@@ -75,9 +75,9 @@ detect): the THRASHING path's tile loop now also skips outer-loop
 iterations for clipped rows, stacking the savings.
 
 Predicted savings. -1.5 to -3 ms / flip on Mimiga Village heavy-music
-(upper ~50% of screen is sky-only per visual inspection → ~50%
-bandwidth savings × ~4 ms full-blit cost ≈ ~2 ms). Per
-`perf_predictions_unreliable.md` predictions historically wrong 5-30×
+(upper ~50% of screen is sky-only per visual inspection -> ~50%
+bandwidth savings x ~4 ms full-blit cost ~ ~2 ms). Per
+`perf_predictions_unreliable.md` predictions historically wrong 5-30x
 on real HW; wave-34 PODP-83 measurement is the essential gate.
 
 Instrumentation. 5 per-block counters in NXE::Diag (storage +
@@ -85,7 +85,7 @@ externs):
 
 - g_bg_subregion_clip_top_block / g_bg_subregion_clip_bot_block:
   Sample-readout of the most-recent flip's visible-Y range. Will vary
-  frame-to-frame as camera scrolls — the data-driven discriminator
+  frame-to-frame as camera scrolls -- the data-driven discriminator
   for option-(A) implementation vs static-LUT alternatives.
 - g_bg_subregion_engaged_count_block / g_bg_subregion_fallback_count_block:
   Per-block running counts of "optimization fired" vs "fell back to
@@ -98,7 +98,7 @@ fallback=N recomputes=N]` gated on SDL_HINT_DOSKUTSU_FLIP_INSTR=1
 (same gate as flip-stat / flip-body-stat per flush-instr's contract).
 Default-on for the optimization itself, but counters silent unless
 FLIP_INSTR is also enabled. Counter equation
-`engaged + fallback ≈ 100` holds when subregion-blit is on across
+`engaged + fallback ~ 100` holds when subregion-blit is on across
 the block.
 
 Smoke. Builds clean at i486 -O3 -funroll-loops. New strings in
@@ -109,7 +109,7 @@ snd-shutdown[3.5/6] slot 0129, thrashing-detect engaged slot 0126)
 retained. Slot 0127 Lever B markers still absent (wave-32 revert
 intact). Real-HW gate: wave-34 W34A1 (default-on, BG_SUBREGION_BLIT
 unset) vs W34A2 (BG_SUBREGION_BLIT=0 control) on Mimiga Village heavy-
-music — flush-instr's contract uses the engaged/fallback discriminator
+music -- flush-instr's contract uses the engaged/fallback discriminator
 to confirm mechanism engagement before attributing the fps delta.
 
 Files. New: src/graphics/Renderer.cpp drawCachedBackdropClipped()
@@ -145,7 +145,7 @@ index c611bbb..e3b014d 100644
 +// - g_bg_subregion_clip_top_block / g_bg_subregion_clip_bot_block:
 +//   The most recent flip's computed visible-Y range (screen-pixel
 +//   coords, inclusive). Will vary frame-to-frame in option-(A) data-
-+//   driven dispatch as the camera scrolls — the per-flip variation is
++//   driven dispatch as the camera scrolls -- the per-flip variation is
 +//   the (A)-vs-(B/C) discriminator. Reset on emit; the value at emit
 +//   reflects the last flip in the block (sample-readout pattern).
 +// - g_bg_subregion_engaged_count_block: Number of flips in the block
@@ -186,7 +186,7 @@ index c611bbb..e3b014d 100644
 +// convention as patches 0088 / 0093 / 0117 / 0126 / 0128). When ON,
 +// map.cpp's `map_draw_backdrop` cacheable-scrolltype branches dispatch
 +// to clipped variants of `drawCachedBackdrop` / the THRASHING tile
-+// loop — only blit the screen-Y range where any visible map row has
++// loop -- only blit the screen-Y range where any visible map row has
 +// at least one transparent (`map.tiles[x][y] == 0`) column. When OFF
 +// (env=0), the full-screen blit runs (preserves slot 0080 + 0126
 +// behavior bit-for-bit). Predicted savings: -1.5 to -3 ms / flip
@@ -260,14 +260,14 @@ index 7607e4e..0d0baaa 100644
 +// hoisted at -O2.
 +//
 +// Predicted savings: -1.5 to -3 ms / flip on Mimiga Village heavy-
-+// music (upper ~50% of screen is sky-only, lower ~50% is opaque-FG →
-+// ~50% bandwidth savings × ~4 ms full-blit cost ≈ ~2 ms). Per
++// music (upper ~50% of screen is sky-only, lower ~50% is opaque-FG ->
++// ~50% bandwidth savings x ~4 ms full-blit cost ~ ~2 ms). Per
 +// `perf_predictions_unreliable.md` predictions historically wrong
-+// 5-30×; wave-34 real-HW PODP-83 is the essential measurement.
++// 5-30x; wave-34 real-HW PODP-83 is the essential measurement.
 +//
 +// Architectural classification. Bandwidth-bound win (fewer INDEX8
 +// bytes transferred per flip). Distinct from the wave-31 Lever B
-+// trap (`_disabled/0127-*.patch`) — Lever B re-introduced cache→
++// trap (`_disabled/0127-*.patch`) -- Lever B re-introduced cache->
 +// window bandwidth equal to the underlying tile-render bandwidth;
 +// slot 0130 ELIMINATES bytes-transferred for FG-opaque rows, which
 +// is what the bandwidth math (`wave_19_path_b_dead.md` 17 MB/s
@@ -296,7 +296,7 @@ index 7607e4e..0d0baaa 100644
 +  // DOS-PORT (patch 0130, Phase 11 wave-34 backdrop sub-region partial
 +  // blit): emit [bg-subregion ...] line gated on FLIP_INSTR. Same
 +  // FLIP_INSTR gate as flip-stat / flip-body-stat per flush-instr's
-+  // wave-34 contract — operator opts into the instrumentation via the
++  // wave-34 contract -- operator opts into the instrumentation via the
 +  // single hint. Format mirrors flush-instr's expectation (Q2 answer
 +  // re: per-block discriminator). clip_top / clip_bot reflect the
 +  // most-recent flip's visible-Y range; engaged_count / fallback_count
@@ -331,13 +331,13 @@ index 7607e4e..0d0baaa 100644
 +// 320x240-base screen-pixel coordinates) where the backdrop should be
 +// blitted from the cache surface to the window. Rows outside that
 +// range are left untouched in the window (the FG layers will overwrite
-+// them — they're fully FG-opaque per the FG-occlusion scan that
++// them -- they're fully FG-opaque per the FG-occlusion scan that
 +// computed the range).
 +//
 +// Bandwidth savings = (1 - (y_end_inclusive - y_start + 1)/screenHeight)
 +// of the full-screen drawCachedBackdrop's INDEX8 transfer cost. On
 +// Mimiga Village BK_PARALLAX heavy-music the visible range is roughly
-+// the upper ~50% of screen → ~50% bandwidth savings ≈ ~2 ms / flip on
++// the upper ~50% of screen -> ~50% bandwidth savings ~ ~2 ms / flip on
 +// PODP83+Cirrus (17 MB/s sysmem per `wave_19_path_b_dead.md`).
 +//
 +// Correctness: only safe to call when the caller has computed
@@ -398,7 +398,7 @@ index 7607e4e..0d0baaa 100644
 +  return true;
 +}
 +
- // DOS-PORT (patch 0126, Phase 11 wave-30 Option 2 — backdrop miss-streak
+ // DOS-PORT (patch 0126, Phase 11 wave-30 Option 2 -- backdrop miss-streak
  // direct-to-window). Two-phase helper for map.cpp's thrashing-bypass
  // path: when the patch-0080 backdrop cache has been missing every frame
 @@ -6947,3 +7110,10 @@ bool mds_bg_instr_active() { return ::NXE::Graphics::_abl_mds_bg_instr(); }
@@ -425,7 +425,7 @@ index f8aa6d1..8012727 100644
 +    // supplies the inclusive screen-Y range [y_start, y_end_inclusive]
 +    // (unscaled 320x240-base) where the backdrop should be blitted
 +    // from the cache to the window. Rows outside that range are left
-+    // untouched (FG layers will overwrite them — caller has verified
++    // untouched (FG layers will overwrite them -- caller has verified
 +    // those rows are fully FG-opaque). Returns true on success
 +    // including the empty-range no-op case; false on precondition
 +    // fail (same as drawCachedBackdrop above).
@@ -435,9 +435,9 @@ index f8aa6d1..8012727 100644
 +    // branch when SDL_HINT_DOSKUTSU_BG_SUBREGION_BLIT is on (default).
 +    bool drawCachedBackdropClipped(SDL_Surface *src, int y_start, int y_end_inclusive);
 +
-     // DOS-PORT (patch 0126, Phase 11 wave-30 Option 2 — backdrop miss-
+     // DOS-PORT (patch 0126, Phase 11 wave-30 Option 2 -- backdrop miss-
      // streak direct-to-window). Two-phase helper for the case where
-     // map_draw_backdrop has detected the cache is thrashing (≥N
+     // map_draw_backdrop has detected the cache is thrashing (>=N
 diff --git a/src/map.cpp b/src/map.cpp
 index a7525b7..82f234a 100644
 --- a/src/map.cpp
@@ -456,17 +456,17 @@ index a7525b7..82f234a 100644
 +//
 +// Semantics. g_bg_visible_per_row[y] == true iff at least one column
 +// in map row y has map.tiles[col][y] == 0. tile_id 0 in Cave Story is
-+// the "empty" tile — no FG/BG draw → backdrop pixel reaches the
++// the "empty" tile -- no FG/BG draw -> backdrop pixel reaches the
 +// composited framebuffer. Conservative: a row with ALL non-zero tiles
 +// is ASSUMED fully FG-opaque (no backdrop pixels need to land there).
 +// False negatives are possible only if a non-zero tile contains
 +// transparent pixels AND that tile is in a row where ALL other
-+// columns are non-zero — would manifest as "leftover framebuffer
++// columns are non-zero -- would manifest as "leftover framebuffer
 +// junk shows through a transparent edge of a terrain tile" and would
 +// be caught by build-qa visual smoke. Killswitch
 +// SDL_HINT_DOSKUTSU_BG_SUBREGION_BLIT=0 is the recovery path.
 +//
-+// Visible-Y cache: keyed on (curmap, mapy_tile_origin) — recompute
++// Visible-Y cache: keyed on (curmap, mapy_tile_origin) -- recompute
 +// fires only when the camera crosses a TILE_H boundary (i.e., a few
 +// times per second of vertical scroll, not per frame). Cache hits are
 +// the steady-state case.
@@ -499,10 +499,10 @@ index a7525b7..82f234a 100644
 +
 +// DOS-PORT (patch 0130, Phase 11 wave-34 backdrop sub-region partial
 +// blit). Build the per-row FG-occlusion table for the current map.
-+// Walks the FG tilemap O(map.xsize × map.ysize) once per map load;
++// Walks the FG tilemap O(map.xsize x map.ysize) once per map load;
 +// for each row, records whether ANY column has map.tiles[col][row] == 0
 +// (= "no tile drawn" = backdrop pixel reaches the composited
-+// framebuffer). Conservative — assumes any non-zero tile is fully
++// framebuffer). Conservative -- assumes any non-zero tile is fully
 +// FG-opaque. False negatives possible (a non-zero tile with transparent
 +// pixels, in a row where all other columns are non-zero) would
 +// manifest as visual regression caught by build-qa smoke; killswitch
@@ -521,7 +521,7 @@ index a7525b7..82f234a 100644
 +  {
 +    if (y >= map.ysize)
 +    {
-+      // Beyond the map's Y extent — these rows project to "above the
++      // Beyond the map's Y extent -- these rows project to "above the
 +      // map ceiling" or "below the map floor" depending on camera
 +      // position. Either way, backdrop is visible there (no FG tile
 +      // exists to occlude it).
@@ -613,7 +613,7 @@ index a7525b7..82f234a 100644
 +  bool range_proper_subset = false;
 +  if (top > bot)
 +  {
-+    // No backdrop-visible rows — entire visible window is fully FG-
++    // No backdrop-visible rows -- entire visible window is fully FG-
 +    // opaque. Caller can short-circuit and skip the backdrop blit
 +    // entirely (the FG layers will paint every pixel).
 +    top = 0; bot = -1;
@@ -668,7 +668,7 @@ index a7525b7..82f234a 100644
 +          ++NXE::Diag::g_bg_subregion_fallback_count_block;
 +      }
 +
-+      // patch 0130: HIT dispatch — clipped variant if sub-region
++      // patch 0130: HIT dispatch -- clipped variant if sub-region
 +      // engaged, full-screen otherwise. Behavior preserved bit-for-bit
 +      // when sub-region disabled or no visible-row reduction is
 +      // possible.
@@ -702,7 +702,7 @@ index a7525b7..82f234a 100644
 +          // bail out of the loop entirely once dst_y_top > bg_bot
 +          // because subsequent iterations are also past the clip. Edge
 +          // tiles that straddle the bg_top / bg_bot boundary are NOT
-+          // src-rect-trimmed — they blit fully + the FG layer
++          // src-rect-trimmed -- they blit fully + the FG layer
 +          // overwrites the over-blit. ~6.7% over-blit per edge in
 +          // worst case; preserved tile-loop simplicity.
 +          const int dst_y_top_unscaled = y - map.parscroll_y;

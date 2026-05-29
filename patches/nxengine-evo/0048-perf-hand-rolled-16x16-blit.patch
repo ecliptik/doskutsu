@@ -21,9 +21,9 @@ queue allocation remain fixed costs that don't shrink as pixel work
 shrinks. SDL_RenderTexture has fundamental overhead independent of the
 work it does.
 
-Approach B: bypass SDL_RenderTexture for the dominant 16×16 case by
+Approach B: bypass SDL_RenderTexture for the dominant 16x16 case by
 writing directly to the SDL_Window surface (which IS the SW renderer's
-backbuffer — verified by reading SDL_render_sw.c §60-80).
+backbuffer -- verified by reading SDL_render_sw.c sec.60-80).
 
 Integration strategy chosen: write directly to window->surface via
 SDL_GetWindowSurface. Verified safe by tracing SW_ActivateRenderer
@@ -48,7 +48,7 @@ in vendor/SDL/src/render/software/SDL_render_sw.c:
 SDL_GetWindowSurface(window). Therefore writes to window->surface from
 our fast path land on exactly the same memory the SW renderer would
 write to via SDL_RenderTexture. SDL_RenderPresent (= SW_RenderPresent
-→ SDL_UpdateWindowSurface → DOS backend's UpdateWindowFramebuffer)
+-> SDL_UpdateWindowSurface -> DOS backend's UpdateWindowFramebuffer)
 copies window->surface to VRAM. All paths converge at window->surface.
 No need to expose SDL3 internals via texture->internal or replace the
 present pipeline.
@@ -61,7 +61,7 @@ Surface class (Surface.{h,cpp}):
     immediately after texture creation; now kept for the lifetime of
     the Surface).
   - new accessors: surface16bpp(), colorkey16(), hasColorkey().
-  - cleanup() frees both the texture and the surface — they live and
+  - cleanup() frees both the texture and the surface -- they live and
     die together so the surface16bpp() != NULL check is sufficient as a
     fast-path opt-in.
   - colorkey is pre-extracted to a Uint16 at load time so the inner loop
@@ -69,20 +69,20 @@ Surface class (Surface.{h,cpp}):
 
 Renderer::drawSurface (Renderer.cpp):
   - new helper _try_fast_blit_16x16 attempts the fast path first.
-    Conditions: src->surface16bpp() != NULL, alpha == 255, srcrect 16×16,
-    dstrect 16×16 (no scale), window surface format == RGB565, window
-    surface dims == 320×240 (no logical-presentation letterbox).
+    Conditions: src->surface16bpp() != NULL, alpha == 255, srcrect 16x16,
+    dstrect 16x16 (no scale), window surface format == RGB565, window
+    surface dims == 320x240 (no logical-presentation letterbox).
   - on Cirrus + PIN_WINDOW_TO_NATIVE the window surface is exactly
-    320×240 RGB565 → fast path engages. On Mach64 with 640×480 window
-    and 320×240 logical presentation, the fast path falls through and
+    320x240 RGB565 -> fast path engages. On Mach64 with 640x480 window
+    and 320x240 logical presentation, the fast path falls through and
     the existing SDL_RenderTexture path remains correct.
   - SDL_FlushRenderer is called inside the fast path BEFORE the direct
     write so any pending slow-path commands (font, mirrored sprites,
     spot_light) drain to window->surface first. Z-order = call-order is
     preserved. When the queue is empty (the common steady-state case
     after a sequence of fast-path calls), FlushRenderCommands early-
-    returns at SDL_render.c §343 — essentially free.
-  - Inner loop: 16×16 RGB565 with colorkey skip, or per-row SDL_memcpy
+    returns at SDL_render.c sec.343 -- essentially free.
+  - Inner loop: 16x16 RGB565 with colorkey skip, or per-row SDL_memcpy
     when no colorkey.
   - Edge clipping: dst may legitimately be slightly off-screen for
     sprites near playfield boundaries (logged as `(-8,-8)` etc in
@@ -113,21 +113,21 @@ SDL3's renderer per-call overhead (~0.95 ms on real Cirrus per the
 wave-5 capture) exists regardless of the renderer backend. The SW
 renderer is the only option on DOS (no GPU). Approach C (patch 0047)
 already eliminated the per-pixel cost; Approach B eliminates the
-per-call cost for the dominant case. Together they target ~50 µs per
+per-call cost for the dominant case. Together they target ~50 us per
 drawcall (the actual blit work), reducing 340-drawcall queue_flush
-from 323 ms → ~17 ms target on real HW.
+from 323 ms -> ~17 ms target on real HW.
 
 Architectural note: the fast path's correctness depends on the
 SW renderer NOT using a separate backbuffer (verified per
 SW_ActivateRenderer above). If a future SDL3 release refactors the SW
 renderer to keep its own surface separate from window->surface, this
 patch would silently render to the wrong target. The conservative
-defense would be to write ALL drawcalls (not just 16×16) directly to
+defense would be to write ALL drawcalls (not just 16x16) directly to
 window->surface and disable SDL_UpdateWindowSurface's renderer path
-entirely — out of scope for wave 6 but documented here as the next
+entirely -- out of scope for wave 6 but documented here as the next
 step if the assumption breaks.
 
-Local-only patch per workspace policy (memory note "SDL upstream —
+Local-only patch per workspace policy (memory note "SDL upstream --
 local patches only"): never PR'd upstream. The equivalent change to
 SDL3 itself would be upstream-PR territory.
 
@@ -147,7 +147,7 @@ index b3183f8..8ae30c3 100644
             logical_w, logical_h, (int)logical_mode);
  }
 +
-+// DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — fast-path
++// DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) -- fast-path
 +// hit-rate counters. Block stats reset per audit cadence; global stats
 +// run for the whole process. Reported in `fastpath audit block N: ...`
 +// log lines emitted from flip() at the same per-100-flip cadence as
@@ -189,8 +189,8 @@ index b3183f8..8ae30c3 100644
  //  LOG_INFO("===FLIPPED===\n");
  }
  
-+// DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — hand-rolled
-+// 16×16 RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's
++// DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) -- hand-rolled
++// 16x16 RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's
 +// per-call validation/queue/dispatch overhead (~0.95 ms per call on
 +// real Cirrus per the wave-5 cirrus5 capture).
 +//
@@ -203,19 +203,19 @@ index b3183f8..8ae30c3 100644
 +//     drawcalls fall through so the renderer's alpha-mod plumbing
 +//     handles them correctly)
 +//   - srcrect.w == 16 AND srcrect.h == 16 (the dominant case per wave-5
-+//     drawcall logs — ~95% of drawSurface calls are 16×16 tile blits)
++//     drawcall logs -- ~95% of drawSurface calls are 16x16 tile blits)
 +//   - dstrect.w == srcrect.w AND dstrect.h == srcrect.h (no scaling)
 +//   - window surface format == SDL_PIXELFORMAT_RGB565 (the active mode
 +//     after patches 0041 + 0045; matches the Surface's RGB565 format)
-+//   - window surface dimensions == 320×240 logical (no logical-
-+//     presentation letterboxing — true on Cirrus + PIN_WINDOW_TO_NATIVE,
-+//     false on Mach64 / 640×480; Mach64 falls through to slow path which
++//   - window surface dimensions == 320x240 logical (no logical-
++//     presentation letterboxing -- true on Cirrus + PIN_WINDOW_TO_NATIVE,
++//     false on Mach64 / 640x480; Mach64 falls through to slow path which
 +//     remains the only correct option until we bypass logical-
 +//     presentation entirely)
 +//
 +// Ordering correctness with the SW renderer's queue:
 +//
-+//   The SW renderer (SDL_render_sw.c §60-80) writes to data->surface,
++//   The SW renderer (SDL_render_sw.c sec.60-80) writes to data->surface,
 +//   which is set to the window surface returned by SDL_GetWindowSurface.
 +//   So `window->surface` == `renderer's data->surface`, and any
 +//   slow-path drawcall queued by SDL_RenderTexture eventually lands on
@@ -225,7 +225,7 @@ index b3183f8..8ae30c3 100644
 +//   SDL_FlushRenderer FIRST. This drains any queued slow-path commands
 +//   to window->surface before we overlay our direct write. When the
 +//   queue is empty (the common case after a sequence of fast-path calls),
-+//   FlushRenderCommands early-returns at SDL_render.c §343 — essentially
++//   FlushRenderCommands early-returns at SDL_render.c sec.343 -- essentially
 +//   free.
 +//
 +//   The reverse case (fast-path call followed by slow-path call) is
@@ -296,14 +296,14 @@ index b3183f8..8ae30c3 100644
 +
 +  if (rows <= 0 || cols <= 0)
 +  {
-+    // Wholly off-screen — succeed with no work. The SDL_RenderTexture
++    // Wholly off-screen -- succeed with no work. The SDL_RenderTexture
 +    // path would have done the same.
 +    return true;
 +  }
 +
 +  // Drain any queued slow-path commands so our overlay lands AFTER
 +  // them. Empty-queue path is essentially free (early-return at
-+  // FlushRenderCommands SDL_render.c §343).
++  // FlushRenderCommands SDL_render.c sec.343).
 +  SDL_FlushRenderer(renderer);
 +
 +  // Pixel pitch in 16-bit elements.
@@ -351,12 +351,12 @@ index b3183f8..8ae30c3 100644
    _bump_alpha_count(src->alpha);
 +
 +  // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B): try the
-+  // hand-rolled 16×16 fast path before queuing through SDL_RenderTexture.
++  // hand-rolled 16x16 fast path before queuing through SDL_RenderTexture.
 +  // _try_fast_blit_16x16 returns true on success (drawn directly to
 +  // window->surface) or false if conditions don't match (we fall through
 +  // to the slow path below). Per wave-5 drawcall logs, ~95% of drawSurface
-+  // calls in the title scene are 16×16 sprites with alpha=255 and no
-+  // scale/clip — those all take the fast path.
++  // calls in the title scene are 16x16 sprites with alpha=255 and no
++  // scale/clip -- those all take the fast path.
 +  if (_try_fast_blit_16x16(_renderer, _window, src, srcx, srcy, srcrect, dstrect))
 +  {
 +    ++_fastpath_taken_block;
@@ -367,7 +367,7 @@ index b3183f8..8ae30c3 100644
 +  ++_fastpath_skipped_block;
 +  ++_fastpath_skipped_global;
 +
-   // Patch 0044 (Phase 9 lever 4 §3.4.2 Approach A): skip
+   // Patch 0044 (Phase 9 lever 4 sec.3.4.2 Approach A): skip
    // SDL_SetTextureAlphaMod when the texture's last set value matches
    // src->alpha. Default-not-cached is 255 (SDL3-side default), so the
 diff --git a/src/graphics/Surface.cpp b/src/graphics/Surface.cpp
@@ -387,13 +387,13 @@ index 32e5f21..9225ad3 100644
      return false;
    }
  
-+  // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — retain
++  // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) -- retain
 +  // the RGB565 surface so the hand-rolled fast-path blit in
 +  // Renderer::drawSurface can read from it directly. Patch 0047
 +  // (Approach C) destroyed this surface immediately after the texture
 +  // was created; Approach B needs it kept for the lifetime of the
 +  // Surface. Cost: ~2x the BMP size in CPU-side RAM (already accepted
-+  // by Approach C — the texture's internal copy was already that size,
++  // by Approach C -- the texture's internal copy was already that size,
 +  // we just keep a second pointer to it equivalent so we don't have
 +  // to reach into SDL3 internals via texture->internal).
 +  //
@@ -422,7 +422,7 @@ index 32e5f21..9225ad3 100644
    return _texture;
  }
  
-+// DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — accessors.
++// DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) -- accessors.
 +SDL_Surface *Surface::surface16bpp()
 +{
 +  return _surface_rgb565;
@@ -466,7 +466,7 @@ index 134af9a..0d82d49 100644
    int height();
    SDL_Texture* texture();
  
-+  // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — direct
++  // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) -- direct
 +  // CPU-side access to the RGB565 pixel data backing the texture, plus
 +  // the colorkey value pre-extracted to a 16-bit word for the
 +  // hand-rolled fast-path blit in Renderer::drawSurface.
@@ -482,7 +482,7 @@ index 134af9a..0d82d49 100644
 +  //
 +  // Lifetime: the cached surface is created in loadImage and freed in
 +  // cleanup (both alongside the texture). Always either both NULL or
-+  // both valid — drawSurface checks surface16bpp() before taking the
++  // both valid -- drawSurface checks surface16bpp() before taking the
 +  // fast path.
 +  //
 +  // colorkey16: pre-extracted 16-bit RGB565 colorkey, valid only when

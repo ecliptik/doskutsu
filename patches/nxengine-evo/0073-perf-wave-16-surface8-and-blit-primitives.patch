@@ -15,22 +15,22 @@ the master palette and the hand-rolled blit primitives dispatch on
 window-surface format.
 
 Surface (src/graphics/Surface.{h,cpp}):
-  * surface16bpp() → surfaceCpu(), colorkey16() → colorkey() returning
+  * surface16bpp() -> surfaceCpu(), colorkey16() -> colorkey() returning
     Uint32 (low 8 bits hold INDEX8 byte; low 16 bits hold RGB565 word)
   * pixelFormat() accessor added
-  * _surface_rgb565 → _surface_cpu, _colorkey16 → _colorkey
+  * _surface_rgb565 -> _surface_cpu, _colorkey16 -> _colorkey
   * loadImage / loadFromSDLSurface grow INDEX8 branches: indexed
     sources walk the per-asset remap LUT from master.palmap; truecolor
     sources (or assets without a palmap entry) take a per-pixel
     nearest-master-color path with a small one-shot 5/6/5-quantized
-    cache so the 320×240 truecolor backgrounds load in ~50 ms not
+    cache so the 320x240 truecolor backgrounds load in ~50 ms not
     seconds.
 
 Renderer (src/graphics/Renderer.{h,cpp}):
   * _indexed_mode + _master_palette + _palmap_cache members + public
     accessors indexedMode(), masterPalette(), paletteRemapFor()
   * _load_master_palette / _load_master_palmap: read the formats frozen
-    in /tmp/wave-16-1-palette-format.md §1+§2; gracefully fall back to
+    in /tmp/wave-16-1-palette-format.md sec.1+sec.2; gracefully fall back to
     wave-15 RGB565 on any IO/version mismatch
   * _blit_indexed + _blit_indexed_mirrored: byte-per-pixel siblings of
     the wave-12.1/12.3 RGB565 primitives. Same dst-clip pattern.
@@ -38,7 +38,7 @@ Renderer (src/graphics/Renderer.{h,cpp}):
     color search; used by clearScreen / fillRect / drawRect / drawLine
     INDEX8 arms
   * _try_fast_blit + _try_fast_blit_mirrored: format gate widened to
-    accept INDEX8↔INDEX8 (matched src/dst); dispatches to either the
+    accept INDEX8<->INDEX8 (matched src/dst); dispatches to either the
     RGB565 or INDEX8 primitive
   * _ensure_handrolled_surface: gate widened symmetrically
   * clearScreen / fillRect / drawRect / drawLine: per-format dispatch
@@ -49,7 +49,7 @@ Renderer (src/graphics/Renderer.{h,cpp}):
 Wave-16-3 (patch 0072) flipped SDL_HINT_DOS_MAX_BPP to "8" already; this
 patch makes the renderer produce the matching INDEX8 surfaces. Without
 master.pal/master.palmap the renderer logs an error and falls back to
-RGB565 — the kill-switch path still works (SDL3-DOS will then pick the
+RGB565 -- the kill-switch path still works (SDL3-DOS will then pick the
 highest-bpp <= 8 mode it can find, which the SW renderer handles via
 the slow-path SDL_RenderTexture).
 
@@ -123,14 +123,14 @@ index 800e758..4b8dffc 100644
 +      // Try to load the master palette. On failure (file missing,
 +      // short read, version mismatch) flip back to RGB565 and log
 +      // a clear error. This is the wave-16 "graceful fallback" path
-+      // per /tmp/wave-16-spec.md §4 risk row "Master palette + remap-
++      // per /tmp/wave-16-spec.md sec.4 risk row "Master palette + remap-
 +      // table file management bug".
 +      const bool pal_ok = _load_master_palette("data/master.pal");
 +      const bool map_ok = pal_ok && _load_master_palmap("data/master.palmap");
 +      if (pal_ok && map_ok)
 +      {
 +        _indexed_mode = true;
-+        LOG_INFO("Renderer::initVideo: indexed-mode (8bpp) ENABLED — "
++        LOG_INFO("Renderer::initVideo: indexed-mode (8bpp) ENABLED -- "
 +                 "master palette + {} per-asset remap LUTs loaded "
 +                 "(wave 16, default ON; set SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0 to disable)",
 +                 (int)_palmap_cache.size());
@@ -138,7 +138,7 @@ index 800e758..4b8dffc 100644
 +      else
 +      {
 +        _indexed_mode = false;
-+        LOG_ERROR("Renderer::initVideo: indexed-mode (8bpp) FALLBACK to RGB565 — "
++        LOG_ERROR("Renderer::initVideo: indexed-mode (8bpp) FALLBACK to RGB565 -- "
 +                  "master palette load {}; falling back to wave-15 baseline",
 +                  pal_ok ? "OK but palmap missing" : "FAILED");
 +        if (_master_palette)
@@ -156,8 +156,8 @@ index 800e758..4b8dffc 100644
 +}
 +
 +// DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): master palette loader.
-+// Reads exactly 768 bytes from `data/master.pal` (256 × RGB triples per
-+// /tmp/wave-16-1-palette-format.md §1.1) and populates _master_palette
++// Reads exactly 768 bytes from `data/master.pal` (256 x RGB triples per
++// /tmp/wave-16-1-palette-format.md sec.1.1) and populates _master_palette
 +// as an SDL_Palette with alpha=255. Returns true on success; logs and
 +// returns false on any IO / size mismatch (caller falls back to RGB565).
 +bool Renderer::_load_master_palette(const char *path)
@@ -197,15 +197,15 @@ index 800e758..4b8dffc 100644
 +    SDL_DestroyPalette(p);
 +    return false;
 +  }
-+  // Quick smoke per format spec §7: verify reserved slots.
++  // Quick smoke per format spec sec.7: verify reserved slots.
 +  if (!(colors[0].r == 0 && colors[0].g == 0 && colors[0].b == 0))
 +  {
-+    LOG_WARN("Renderer::_load_master_palette: index 0 is ({},{},{}) — expected (0,0,0)",
++    LOG_WARN("Renderer::_load_master_palette: index 0 is ({},{},{}) -- expected (0,0,0)",
 +             colors[0].r, colors[0].g, colors[0].b);
 +  }
 +  if (!(colors[255].r == 0xFF && colors[255].g == 0x00 && colors[255].b == 0xFF))
 +  {
-+    LOG_WARN("Renderer::_load_master_palette: index 255 is ({},{},{}) — expected (255,0,255)",
++    LOG_WARN("Renderer::_load_master_palette: index 255 is ({},{},{}) -- expected (255,0,255)",
 +             colors[255].r, colors[255].g, colors[255].b);
 +  }
 +  _master_palette = p;
@@ -214,8 +214,8 @@ index 800e758..4b8dffc 100644
  
 +// DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): per-asset palmap loader.
 +// Parses the on-disk format defined in /tmp/wave-16-1-palette-format.md
-+// §2 (12-byte header + variable-length per-entry frames). Each entry's
-+// remap[] is zero-padded to 256 bytes in the std::array slot — only the
++// sec.2 (12-byte header + variable-length per-entry frames). Each entry's
++// remap[] is zero-padded to 256 bytes in the std::array slot -- only the
 +// first src_palette_size bytes are meaningful, but the lookup at draw
 +// time always indexes by source-pixel-byte (which is 0-255), so the
 +// extra zeros are harmless and avoid a separate "size" field per entry.
@@ -236,26 +236,26 @@ index 800e758..4b8dffc 100644
 +    fclose(f);
 +    return false;
 +  }
-+  // Magic spelled "PMAP" = 0x504D4150 little-endian per format spec §2.1.
++  // Magic spelled "PMAP" = 0x504D4150 little-endian per format spec sec.2.1.
 +  if (magic != 0x504D4150u)
 +  {
-+    LOG_ERROR("Renderer::_load_master_palmap: bad magic 0x{:08x} — expected 0x504D4150 ('PMAP')",
++    LOG_ERROR("Renderer::_load_master_palmap: bad magic 0x{:08x} -- expected 0x504D4150 ('PMAP')",
 +              (unsigned)magic);
 +    fclose(f);
 +    return false;
 +  }
 +  if (version != 1u)
 +  {
-+    LOG_ERROR("Renderer::_load_master_palmap: unsupported version {} — expected 1",
++    LOG_ERROR("Renderer::_load_master_palmap: unsupported version {} -- expected 1",
 +              (unsigned)version);
 +    fclose(f);
 +    return false;
 +  }
-+  // Sanity guard: 16-bit path_len → max realistic entries ≈ tens of
++  // Sanity guard: 16-bit path_len -> max realistic entries ~ tens of
 +  // thousands; reject if num_entries is absurd.
 +  if (num_entries > 100000u)
 +  {
-+    LOG_ERROR("Renderer::_load_master_palmap: num_entries={} unreasonable — refusing", (unsigned)num_entries);
++    LOG_ERROR("Renderer::_load_master_palmap: num_entries={} unreasonable -- refusing", (unsigned)num_entries);
 +    fclose(f);
 +    return false;
 +  }
@@ -271,12 +271,12 @@ index 800e758..4b8dffc 100644
 +      if (fread(&src_size, 1, 1, f) != 1) goto truncated;
 +      if (src_size == 0)
 +      {
-+        // Truecolor source — no remap table. Skip; caller takes slow path.
++        // Truecolor source -- no remap table. Skip; caller takes slow path.
 +        continue;
 +      }
 +      if (src_size != 2 && src_size != 16 && (int)src_size != 256)
 +      {
-+        LOG_WARN("Renderer::_load_master_palmap: entry '{}' has odd src_size={} — skipping",
++        LOG_WARN("Renderer::_load_master_palmap: entry '{}' has odd src_size={} -- skipping",
 +                 asset_path, (int)src_size);
 +        // Still need to advance past the bytes the writer emitted.
 +        if (src_size > 0) fseek(f, (long)src_size, SEEK_CUR);
@@ -312,7 +312,7 @@ index 800e758..4b8dffc 100644
 +// DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): INDEX8 blit primitive.
 +// Byte-per-pixel sibling of _blit_rgb565. Same dst-clip pattern, but 1
 +// byte per pixel instead of 2. Per format spec /tmp/wave-16-1-palette-
-+// format.md §3.4 the colorkey byte for sprites is master index 0
++// format.md sec.3.4 the colorkey byte for sprites is master index 0
 +// (black) and for fonts is 255 (magenta), already pre-extracted at
 +// Surface load time.
 +//
@@ -371,7 +371,7 @@ index 800e758..4b8dffc 100644
 +// DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): INDEX8 mirrored blit
 +// primitive. Column-reverse 1-byte sibling of _blit_rgb565_mirrored.
 +// Same clip semantics: dst_x<0 drops rightmost source columns, dst_x+
-+// cols>dst->w drops leftmost source columns. No memcpy fast path —
++// cols>dst->w drops leftmost source columns. No memcpy fast path --
 +// column reversal requires per-pixel writes.
 +static inline bool _blit_indexed_mirrored(SDL_Surface *dst, SDL_Surface *src,
 +                                          SDL_Rect srcrect, SDL_Rect dstrect,
@@ -423,7 +423,7 @@ index 800e758..4b8dffc 100644
 +  return true;
 +}
 +
- // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — hand-rolled
+ // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) -- hand-rolled
  // RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's per-call
  // validation/queue/dispatch overhead (~0.95 ms per call on real Cirrus
 @@ -1768,7 +2092,7 @@ static inline bool _blit_rgb565_mirrored(SDL_Surface *dst, SDL_Surface *src,
@@ -452,7 +452,7 @@ index 800e758..4b8dffc 100644
 -  // 0047), so the only thing to check is the destination format.
 -  if (win_surface->format != SDL_PIXELFORMAT_RGB565)
 +  // Format gate: source + window surface must agree. Wave-15 baseline
-+  // is RGB565↔RGB565; wave-16 (patch 0073) adds INDEX8↔INDEX8. Mixed
++  // is RGB565<->RGB565; wave-16 (patch 0073) adds INDEX8<->INDEX8. Mixed
 +  // formats fall through to SDL_RenderTexture which handles the
 +  // conversion. The src surface format is set by Surface::loadImage
 +  // (RGB565 when !indexedMode, INDEX8 when indexedMode).
@@ -465,11 +465,11 @@ index 800e758..4b8dffc 100644
    // Logical-presentation gate: with letterboxing, dst coords need
 @@ -1888,8 +2218,16 @@ static inline bool _try_fast_blit(SDL_Renderer *renderer,
    // dst-bounds clamping and the per-row inner loop. Wave 12.2 dropped
-   // the 16×16 size gate — every opaque drawSurface call now flows
+   // the 16x16 size gate -- every opaque drawSurface call now flows
    // through here regardless of sprite size.
 +  //
 +  // DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): format dispatch.
-+  // INDEX8↔INDEX8 takes the byte-per-pixel sibling primitive.
++  // INDEX8<->INDEX8 takes the byte-per-pixel sibling primitive.
 +  if (win_surface->format == SDL_PIXELFORMAT_INDEX8)
 +  {
 +    return _blit_indexed(win_surface, src_surface, srcrect, dstrect,
@@ -523,7 +523,7 @@ index 800e758..4b8dffc 100644
    return (Uint16)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
  }
  
-+// DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): INDEX8 sibling — finds
++// DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): INDEX8 sibling -- finds
 +// the master-palette index closest to the requested (r,g,b). Used by
 +// the hand-rolled clearScreen / fillRect / drawRect / drawLine paths
 +// when the window surface is INDEX8 (wave-16 indexed mode).
@@ -533,7 +533,7 @@ index 800e758..4b8dffc 100644
 +// std::unordered_map saves the 256-entry walk on every call. The map
 +// grows once per unique (r,g,b) tuple ever used, then settles.
 +//
-+// Falls back to index 0 (master black) if no palette is loaded — this
++// Falls back to index 0 (master black) if no palette is loaded -- this
 +// path should never fire in indexed mode (the renderer would have
 +// flipped _indexed_mode=false), but a defensive fallback keeps the
 +// hot loop free of NULL-deref risk.
@@ -546,7 +546,7 @@ index 800e758..4b8dffc 100644
 +  Renderer *renderer = Renderer::getInstance();
 +  SDL_Palette *pal = renderer ? renderer->masterPalette() : nullptr;
 +  if (!pal) return 0;  // master black
-+  // Special cases match the format-spec §3.4 colorkey-stable rules.
++  // Special cases match the format-spec sec.3.4 colorkey-stable rules.
 +  if (r == 0 && g == 0 && b == 0)
 +  {
 +    _packed_index_cache[key] = 0;
@@ -666,7 +666,7 @@ index 800e758..4b8dffc 100644
        int err = dxa + dya;
 -      while (true)
 +      // DOS-PORT (patch 0073, Phase 9 wave 16): format dispatch on the
-+      // window surface — INDEX8 writes 1 byte/pixel (master-palette
++      // window surface -- INDEX8 writes 1 byte/pixel (master-palette
 +      // index), RGB565 writes 2 bytes/pixel (packed color word).
 +      if (win->format == SDL_PIXELFORMAT_INDEX8)
 +      {
@@ -830,7 +830,7 @@ index 800e758..4b8dffc 100644
 +    if (win->format == SDL_PIXELFORMAT_INDEX8)
 +    {
 +      const Uint8 c = _packed_index_for(r, g, b);
-+      // 1 byte/pixel × pitch×h. SDL_memset is the natural fast path
++      // 1 byte/pixel x pitchxh. SDL_memset is the natural fast path
 +      // (faster than per-Uint16 loop because byte stores fold trivially
 +      // into rep stosb on i486+).
 +      SDL_memset(win->pixels, c, (size_t)win->pitch * (size_t)win->h);
@@ -898,9 +898,9 @@ index a863d12..85781dc 100644
 +
 +    // DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): on-disk loaders for
 +    // the master palette + per-asset palmap. Formats are frozen at
-+    // /tmp/wave-16-1-palette-format.md §1 / §2; both are produced by
++    // /tmp/wave-16-1-palette-format.md sec.1 / sec.2; both are produced by
 +    // tools/build-master-palette.py. Both return true on success and
-+    // log+return false on any error — callers fall back to the wave-15
++    // log+return false on any error -- callers fall back to the wave-15
 +    // RGB565 path. Defined in Renderer.cpp.
 +    bool _load_master_palette(const char *path);
 +    bool _load_master_palmap(const char *path);
@@ -932,11 +932,11 @@ index 825813e..9bb5815 100644
 +// the per-asset Surface::loadImage indexed path when the asset is NOT
 +// in the master.palmap remap cache (mod / unknown asset), and by the
 +// loadFromSDLSurface (Font atlas) path which does not have a per-asset
-+// LUT. Coefficients are CCIR 601 luma weights × 1000 for integer math
-+// (matches the build tool /tmp/wave-16-1-palette-format.md §3.4).
++// LUT. Coefficients are CCIR 601 luma weights x 1000 for integer math
++// (matches the build tool /tmp/wave-16-1-palette-format.md sec.3.4).
 +//
-+// Special-cases (per format spec §3.4): pure black always maps to
-+// master index 0, pure magenta to 255 — required to keep colorkey
++// Special-cases (per format spec sec.3.4): pure black always maps to
++// master index 0, pure magenta to 255 -- required to keep colorkey
 +// stable through the remap.
 +static inline Uint8 _nearest_master_index_local(const SDL_Color *colors,
 +                                                int r, int g, int b)
@@ -991,7 +991,7 @@ index 825813e..9bb5815 100644
 +// Caller owns the returned surface.
 +//
 +// Optimization: keep a small one-shot cache keyed by source RGB so a
-+// 320×240 truecolor background with ~1000 unique colors only does ~1000
++// 320x240 truecolor background with ~1000 unique colors only does ~1000
 +// nearest-color walks instead of 76800. For the 3 known truecolor
 +// backgrounds at boot this is the difference between ~50 ms and ~3 s.
 +static SDL_Surface *_remap_truecolor_to_master(SDL_Surface *src,
@@ -1010,9 +1010,9 @@ index 825813e..9bb5815 100644
 +  const SDL_Color *colors = master_palette->colors;
 +  const int row_pixels = rgba->w;
 +
-+  // Tiny cache: 8-bit-per-channel quantization gives ~16M slots — too
++  // Tiny cache: 8-bit-per-channel quantization gives ~16M slots -- too
 +  // many. Use a 5/6/5-quantized cache (65536 slots) backed by a flat
-+  // array of int16 sentinels (-1 = unfilled). Per spec §3.4 the cache
++  // array of int16 sentinels (-1 = unfilled). Per spec sec.3.4 the cache
 +  // is short-lived (one asset load) so allocation cost is OK.
 +  static const int CACHE_SLOTS = 65536;
 +  std::vector<short> cache(CACHE_SLOTS, -1);
@@ -1027,7 +1027,7 @@ index 825813e..9bb5815 100644
 +      const Uint8 g = srow[x * 4 + 1];
 +      const Uint8 b = srow[x * 4 + 2];
 +      const Uint8 a = srow[x * 4 + 3];
-+      // Per format spec §3.4 special case: alpha == 0 → magenta (255).
++      // Per format spec sec.3.4 special case: alpha == 0 -> magenta (255).
 +      if (a == 0)
 +      {
 +        drow[x] = 255;
@@ -1089,7 +1089,7 @@ index 825813e..9bb5815 100644
 +    }
 +    if (use_colorkey)
 +    {
-+      // Master palette index 0 is reserved black (per format spec §1.2).
++      // Master palette index 0 is reserved black (per format spec sec.1.2).
 +      SDL_SetSurfaceColorKey(image_idx, true, 0);
 +    }
 +    _texture = SDL_CreateTextureFromSurface(r->renderer(), image_idx);
@@ -1146,10 +1146,10 @@ index 825813e..9bb5815 100644
 +  // DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): INDEX8 path for
 +  // Font atlases. The Font path always supplies magenta-flattened
 +  // alpha, so master index 255 (reserved magenta colorkey per format
-+  // spec §1.2) is the natural target. Source is RGB565 → take the
++  // spec sec.1.2) is the natural target. Source is RGB565 -> take the
 +  // slow per-pixel nearest-color route (no per-asset palmap entry for
 +  // PNG-loaded atlases). Atlas count is small (~2-4) and total pixel
-+  // count is small (Font atlases are ~1024×64 = 64K pixels), so the
++  // count is small (Font atlases are ~1024x64 = 64K pixels), so the
 +  // cost is negligible.
 +  Renderer *r = Renderer::getInstance();
 +  if (r && r->indexedMode() && r->masterPalette())
@@ -1216,7 +1216,7 @@ index 825813e..9bb5815 100644
 @@ -264,14 +497,16 @@ SDL_Texture* Surface::texture()
  }
  
- // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — accessors.
+ // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) -- accessors.
 -SDL_Surface *Surface::surface16bpp()
 +// Renamed in patch 0073 (wave 16 Lever 3) to reflect that the cached
 +// surface may now be RGB565 or INDEX8.
@@ -1277,7 +1277,7 @@ index 8970b15..a0c5222 100644
 @@ -42,9 +42,9 @@ public:
    SDL_Texture* texture();
  
-   // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — direct
+   // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) -- direct
 -  // CPU-side access to the RGB565 pixel data backing the texture, plus
 -  // the colorkey value pre-extracted to a 16-bit word for the
 -  // hand-rolled fast-path blit in Renderer::drawSurface.
@@ -1292,7 +1292,7 @@ index 8970b15..a0c5222 100644
    // call on real Cirrus, dominating queue_flush at 323 ms / 340 calls).
    //
 +  // DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): rename surface16bpp()
-+  // → surfaceCpu(), colorkey16() → colorkey() now returning Uint32. The
++  // -> surfaceCpu(), colorkey16() -> colorkey() now returning Uint32. The
 +  // cached surface is RGB565 when Renderer::indexedMode()==false (wave-12
 +  // baseline) or INDEX8 when Renderer::indexedMode()==true (wave 16).
 +  // pixelFormat() reports which one, so the per-format blit primitives
@@ -1300,8 +1300,8 @@ index 8970b15..a0c5222 100644
 +  //
    // Lifetime: the cached surface is created in loadImage and freed in
    // cleanup (both alongside the texture). Always either both NULL or
--  // both valid — drawSurface checks surface16bpp() before taking the
-+  // both valid — drawSurface checks surfaceCpu() before taking the
+-  // both valid -- drawSurface checks surface16bpp() before taking the
++  // both valid -- drawSurface checks surfaceCpu() before taking the
    // fast path.
    //
 -  // colorkey16: pre-extracted 16-bit RGB565 colorkey, valid only when
@@ -1327,10 +1327,10 @@ index 8970b15..a0c5222 100644
 -  SDL_Surface *_surface_rgb565 = nullptr; // DOSKUTSU patch 0048
 -  Uint16 _colorkey16 = 0;                 // DOSKUTSU patch 0048
 -  bool _has_colorkey = false;             // DOSKUTSU patch 0048
-+  // DOS-PORT (patch 0073, Phase 9 wave 16): renamed _surface_rgb565 →
++  // DOS-PORT (patch 0073, Phase 9 wave 16): renamed _surface_rgb565 ->
 +  // _surface_cpu since the cached surface may now be either RGB565
 +  // (16bpp baseline) or INDEX8 (wave-16 indexed mode), and _colorkey16
-+  // → _colorkey for the same reason. Type widened to Uint32.
++  // -> _colorkey for the same reason. Type widened to Uint32.
 +  SDL_Surface *_surface_cpu = nullptr;
 +  Uint32 _colorkey = 0;
 +  bool _has_colorkey = false;

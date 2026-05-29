@@ -10,26 +10,26 @@ Content-Transfer-Encoding: 8bit
 DOS-PORT (patch 0105, Phase 10 SAFETY revert). Reverts slot 0104's
 default-flip from auto_select back to organya for env-unset / empty
 SDL_HINT_DOSKUTSU_AUDIO_BACKEND. KEEPS the auto-detect chain code in
-place — explicit AUDIO_BACKEND=auto still engages it for opt-in.
+place -- explicit AUDIO_BACKEND=auto still engages it for opt-in.
 
-Background — real-HW W22-WB-C iter findings 2026-05-06:
+Background -- real-HW W22-WB-C iter findings 2026-05-06:
 
 The Stage-5 auto-detect chain (slot 0104) probes WB FIRST. Real-HW
 iter on g2k Vibra16S CT2490 + DreamBlaster S2 daughterboard found
 sdl-engine's SDL_DOSMpu401Init hangs INDEFINITELY on real S2 hardware
-(probe sends MPU-401 reset 0xFF → expects ACK 0xFE → S2 either does
-not ACK or ACKs at unexpected timing → busy-loop never terminates).
+(probe sends MPU-401 reset 0xFF -> expects ACK 0xFE -> S2 either does
+not ACK or ACKs at unexpected timing -> busy-loop never terminates).
 Default DOSKUTSU.EXE under default-flip = default lockup at "Loading"
 splash on g2k = unacceptable safety regression.
 
 sdl-engine triaging the WB probe issue in parallel (SDL/0042+ fix in
 flight); expect 1-2 iter cycles to land + validate. Until that fix
 ships AND validates clean on real-HW iter, default DOSKUTSU.EXE must
-be safe to run without operator action — i.e., must default to
+be safe to run without operator action -- i.e., must default to
 organya (Phase 10 baseline, pre-Stage-5 behavior).
 
 What this patch does:
-- selectBackendFromEnv: env-unset / empty → organya (was auto_select
+- selectBackendFromEnv: env-unset / empty -> organya (was auto_select
   at slot 0104). Single-line behavioral change.
 - Added LOG_INFO narration: "audio backend: organya (default; Phase
   10 baseline). Auto-detect chain available via SDL_HINT_DOSKUTSU_-
@@ -42,19 +42,19 @@ What this patch does:
 
 What this patch DOES NOT do (kept in place per team-lead dispatch):
 - The auto-detect chain code in SoundManager::init (slot 0104) is
-  unchanged. AUDIO_BACKEND=auto still runs WB → OPL3 → Organya
+  unchanged. AUDIO_BACKEND=auto still runs WB -> OPL3 -> Organya
   probes in sequence. Operators who want Phase 10 audio offload AND
   have validated their hardware doesn't hit the WB-probe-hang can
   opt in via the explicit env value.
 - The `auto_select` enum value (slot 0104) stays in place; just no
   longer selected by default.
 - Per-backend instantiation logic, helper statics, OPL3/WB backend
-  classes, MidiScheduler, MidiBackendStub — all intact.
+  classes, MidiScheduler, MidiBackendStub -- all intact.
 
 Restore-default plan:
 When sdl-engine ships the WB probe fix in SDL/0042+ AND it validates
 clean on real-HW iter (probe terminates with deterministic
-success/failure within ≤10 ms), a follow-up patch (slot 0107+) will
+success/failure within <=10 ms), a follow-up patch (slot 0107+) will
 flip the default back to auto_select by changing the env-unset/empty
 branch in selectBackendFromEnv to return auto_select again. This is
 a one-line revert pending the validation gate; the chain
@@ -62,24 +62,24 @@ infrastructure is fully ready.
 
 Smoke (DOSBox-X-fast, 6 gates):
 
-  Gate 1 — AUDIO_BACKEND unset (NEW DEFAULT = organya): logs
+  Gate 1 -- AUDIO_BACKEND unset (NEW DEFAULT = organya): logs
     "audio backend: organya (default; Phase 10 baseline)..."; no
     chain attempted; engine runs organya path. 39 flips, no crashes.
-    **The safety-critical gate — confirms default DOSKUTSU.EXE is
+    **The safety-critical gate -- confirms default DOSKUTSU.EXE is
     safe to run on g2k without operator-set env var.**
-  Gate 2 — AUDIO_BACKEND=auto (explicit, opt-in): chain still works;
-    "auto-detect: probing wb..." → "wb backend ready" → "auto-detect:
+  Gate 2 -- AUDIO_BACKEND=auto (explicit, opt-in): chain still works;
+    "auto-detect: probing wb..." -> "wb backend ready" -> "auto-detect:
     wb selected." Slot 0104 functionality preserved for opt-in users.
     38 flips, no crashes. Note narration explicitly warns about WB
     probe issue on real S2.
-  Gate 3 — AUDIO_BACKEND=organya forced: regression unchanged. 38
+  Gate 3 -- AUDIO_BACKEND=organya forced: regression unchanged. 38
     flips, no crashes.
-  Gate 4 — AUDIO_BACKEND=wb forced: regression unchanged; direct
+  Gate 4 -- AUDIO_BACKEND=wb forced: regression unchanged; direct
     install. 39 flips, no crashes.
-  Gate 5 — AUDIO_BACKEND=opl3 forced: regression unchanged; probe
-    fails under DOSBox-X → graceful organya fallback. 38 flips, no
+  Gate 5 -- AUDIO_BACKEND=opl3 forced: regression unchanged; probe
+    fails under DOSBox-X -> graceful organya fallback. 38 flips, no
     crashes.
-  Gate 6 — AUDIO_BACKEND=midi-stub forced: regression unchanged.
+  Gate 6 -- AUDIO_BACKEND=midi-stub forced: regression unchanged.
     39 flips, no crashes.
 
 All 6 gates PASS.
@@ -93,10 +93,10 @@ Phase 10.5 backlog (deferred per team-lead dispatch):
   - Restore default-to-auto when SDL/0042+ WB probe fix ships +
     validates real-HW. One-line revert in selectBackendFromEnv.
   - Idle-pause coordination, fuller GM bank, velocity/CC dispatch
-    refinements — all still pending Phase 10.5 prioritization.
+    refinements -- all still pending Phase 10.5 prioritization.
 
 Per CLAUDE.md `silent_narrow_pattern.md`: this revert IS a default-
-behavior narrowing of slot 0104's scope, but it is NOT silent — the
+behavior narrowing of slot 0104's scope, but it is NOT silent -- the
 explicit team-lead dispatch 2026-05-06 mandated this revert as an
 URGENT/SAFETY task in response to the W22-WB-C iter regression.
 Memorialized in commit message + LOG_INFO narration so the temporary
@@ -110,19 +110,19 @@ index 04f3bc5..0d44fa3 100644
 --- a/src/sound/AudioBackend.cpp
 +++ b/src/sound/AudioBackend.cpp
 @@ -26,24 +26,49 @@ void selectBackendFromEnv()
-   // overrides → process env → default). Returns NULL if unset.
+   // overrides -> process env -> default). Returns NULL if unset.
    const char *value = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
  
--  // Default (env unset OR `auto`) → for slot 0100 resolves to
--  // patch 0104 (Phase 10 Stage 5 auto-detect chain) — auto / unset /
+-  // Default (env unset OR `auto`) -> for slot 0100 resolves to
+-  // patch 0104 (Phase 10 Stage 5 auto-detect chain) -- auto / unset /
 -  // empty all resolve to `auto_select` so SoundManager::init runs the
--  // probe chain WB → OPL3 → Organya. Default (env unset) is auto per
+-  // probe chain WB -> OPL3 -> Organya. Default (env unset) is auto per
 -  // user's locked Tier-1 decision 2026-05-06: the engine will pick the
 -  // best available music backend at startup without operator
 -  // intervention. Explicit overrides (organya / wb / opl3 / midi-stub
 -  // / tracker) skip the chain and instantiate directly.
 -  NXE::Diag::AudioBackend selected = NXE::Diag::AudioBackend::auto_select;
-+  // patch 0105 (Phase 10 SAFETY revert) — default-flip reverted from
++  // patch 0105 (Phase 10 SAFETY revert) -- default-flip reverted from
 +  // auto_select (slot 0104) back to organya. Real-HW W22-WB-C iter
 +  // 2026-05-06 found the auto-detect chain probes WB FIRST, and
 +  // sdl-engine's SDL_DOSMpu401Init hangs indefinitely on real
@@ -131,7 +131,7 @@ index 04f3bc5..0d44fa3 100644
 +  // default lockup at "Loading" on g2k = unacceptable safety regression
 +  // until WB probe fix lands + validates on real HW.
 +  //
-+  // TEMPORARY revert: env-unset / empty → organya (Phase 10 baseline,
++  // TEMPORARY revert: env-unset / empty -> organya (Phase 10 baseline,
 +  // pre-Stage-5 behavior). KEEPS the auto-detect chain code in place;
 +  // explicit AUDIO_BACKEND=auto still engages the chain for operators
 +  // who want to opt in to Phase 10 audio offload AND have validated
@@ -158,12 +158,12 @@ index 04f3bc5..0d44fa3 100644
    {
      selected = NXE::Diag::AudioBackend::auto_select;
 -    LOG_INFO("audio backend: auto (Phase 10 Stage 5 auto-detect chain; "
--             "SoundManager::init will probe WB → OPL3 → Organya in "
+-             "SoundManager::init will probe WB -> OPL3 -> Organya in "
 -             "sequence and select the first backend whose probe "
 -             "succeeds). Pixtone SFX continues on SB16 DAC unchanged "
 -             "regardless of which music backend is selected.");
 +    LOG_INFO("audio backend: auto (explicit; Phase 10 Stage 5 auto-detect "
-+             "chain; SoundManager::init will probe WB → OPL3 → Organya "
++             "chain; SoundManager::init will probe WB -> OPL3 -> Organya "
 +             "in sequence and select the first backend whose probe "
 +             "succeeds). NOTE: WB probe is known-broken on real "
 +             "DreamBlaster S2 hardware as of 2026-05-06 (sdl-engine "

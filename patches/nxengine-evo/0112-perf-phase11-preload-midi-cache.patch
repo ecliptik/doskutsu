@@ -17,11 +17,11 @@ gameplay file-parse spike per W22-WB-D PAUSE measurement
 Killswitch: SDL_HINT_DOSKUTSU_PRELOAD_MIDI=1 strict-1, default OFF.
 
 NEW MidiScheduler API (2 methods):
-  add_to_preload_cache(path, cache_key) — parse file → store events
-    vector under cache_key. Memory ~50 KB per track × 41 tracks ≈
+  add_to_preload_cache(path, cache_key) -- parse file -> store events
+    vector under cache_key. Memory ~50 KB per track x 41 tracks ~
     ~2 MB resident. Failed parses NOT cached (so subsequent
-    load_from_preload_cache returns false → caller falls back).
-  load_from_preload_cache(cache_key) — lookup map; if hit, copy
+    load_from_preload_cache returns false -> caller falls back).
+  load_from_preload_cache(cache_key) -- lookup map; if hit, copy
     events to _events + reset playback position; return true. If
     miss, return false (caller falls back to load(path)).
 
@@ -31,10 +31,10 @@ NEW MidiScheduler storage:
 
 NEW SoundManager state + flow:
   bool _preload_midi_active member (default false; set at init from
-    env var × backend-active check)
+    env var x backend-active check)
   init() block (after _reloadTrackList + after backend install):
-    if env=1 AND backend ∈ {midi_stub, wb, opl3}:
-      iterate _music_names[1..N] → add_to_preload_cache for each
+    if env=1 AND backend in {midi_stub, wb, opl3}:
+      iterate _music_names[1..N] -> add_to_preload_cache for each
       log preloaded/failed counts
     else if env=1 (no MIDI backend):
       log "skipped to save init time + memory"
@@ -42,19 +42,19 @@ NEW SoundManager state + flow:
     load_from_preload_cache first; fallback to load(path) on miss
 
 DOS-PORT trade-offs (per dispatch):
-  +400 ms one-time init delay (41 × ~10ms parse on PODP83-class)
+  +400 ms one-time init delay (41 x ~10ms parse on PODP83-class)
   +2 MB resident memory (fits comfortably in 48 MB Tier-1 g2k)
-  −446 ms mid-gameplay spike on song change (load_from_preload_cache
+  -446 ms mid-gameplay spike on song change (load_from_preload_cache
    is sub-ms vs file-parse 446ms)
   No effect when AUDIO_BACKEND=organya (preload skipped to save
    init delay + memory; Organya doesn't use .mid files)
 
 Smoke (DOSBox-X-fast, AUDIO_BACKEND=midi-stub + PRELOAD_MIDI=1):
   - 41/41 tracks preloaded at init: all named tracks parsed +
-    cached in <1 sec emulated time. "preload complete — 41
+    cached in <1 sec emulated time. "preload complete -- 41
     tracks cached, 0 failed" line confirms.
   - Runtime track change to curly: "load_from_preload_cache: hit
-    'curly' = 5684 events" line fires — confirming cache lookup
+    'curly' = 5684 events" line fires -- confirming cache lookup
     path engaged. Mid-gameplay file-parse path skipped.
   - 67 flips, no crashes.
   - strings-grep verifies SDL_HINT_DOSKUTSU_PRELOAD_MIDI symbol +
@@ -77,7 +77,7 @@ Per-track division note (preserved across cache hits):
 Out of scope (per silent_narrow_pattern.md):
   - LRU cache eviction (memory growth bounded at ~2 MB; no eviction
     needed)
-  - Lazy preload (deferred to first-access) — defeats the purpose
+  - Lazy preload (deferred to first-access) -- defeats the purpose
     of eliminating mid-gameplay spike; init-time bulk preload is
     the essential approach
   - Cross-source-dir cache (key uses track name only; switching
@@ -103,7 +103,7 @@ index 49ee670..8da53df 100644
  }
  
 +// ----------------------------------------------------------------------
-+// Preload cache (patch 0112 — Phase 11 iter H opt #1)
++// Preload cache (patch 0112 -- Phase 11 iter H opt #1)
 +// ----------------------------------------------------------------------
 +
 +bool MidiScheduler::add_to_preload_cache(const std::string &path,
@@ -114,11 +114,11 @@ index 49ee670..8da53df 100644
 +  // empty (so subsequent load() calls don't accidentally replay this
 +  // file's events on the wrong track).
 +  //
-+  // Implementation reads file → parses → swaps _events into cache →
++  // Implementation reads file -> parses -> swaps _events into cache ->
 +  // resets _events to empty. The parse leaves _division_ppq and tempo
 +  // state populated; we let load_from_preload_cache restore state from
 +  // cache hit by re-reading defaults (tempo/division currently are
-+  // global, not per-track — a future refinement could cache them too).
++  // global, not per-track -- a future refinement could cache them too).
 +  //
 +  // For now: division is the ONLY per-track parsed state we store in
 +  // the cache; tempo state (default 500000 us/quarter = 120 BPM) gets
@@ -136,12 +136,12 @@ index 49ee670..8da53df 100644
 +  std::vector<MidiEvent> saved_events;
 +  saved_events.swap(_events);
 +
-+  // Parse — reuses existing load() machinery. Note: load() also calls
++  // Parse -- reuses existing load() machinery. Note: load() also calls
 +  // backend->on_song_stop if _playing, but at init time _playing is
-+  // false → no spurious backend lifecycle calls.
++  // false -> no spurious backend lifecycle calls.
 +  const bool ok = load(path);
 +
-+  // Capture the parsed event list (whether ok or not — empty events
++  // Capture the parsed event list (whether ok or not -- empty events
 +  // for parse failures still get cached so we know not to retry on
 +  // the same key).
 +  if (ok)
@@ -150,7 +150,7 @@ index 49ee670..8da53df 100644
 +  }
 +
 +  // Restore prior _events (currently empty unless a track was somehow
-+  // loaded between init steps — defensive).
++  // loaded between init steps -- defensive).
 +  _events = std::move(saved_events);
 +
 +  return ok;
@@ -173,7 +173,7 @@ index 49ee670..8da53df 100644
 +  }
 +  _playing = false;
 +
-+  // Copy from cache. ~5000 events × 12 bytes = ~60 KB; fast (sub-ms
++  // Copy from cache. ~5000 events x 12 bytes = ~60 KB; fast (sub-ms
 +  // memcpy) vs 446 ms file-parse spike. The cache retains its own
 +  // copy so subsequent loads of the same track don't re-parse.
 +  _events = it->second;
@@ -186,7 +186,7 @@ index 49ee670..8da53df 100644
 +  // _division_ppq is preserved across cache hits because it's set by
 +  // _parse_smf at preload time AND not reset by start(). For multiple
 +  // tracks with different divisions, the most-recently-cached track's
-+  // division wins — Cave Story tracks all use either 480 PPQ
++  // division wins -- Cave Story tracks all use either 480 PPQ
 +  // (WiiWare) or 24 PPQ (ORGMID) within the same source dir; first
 +  // track preloaded establishes the active division for the run.
 +  // (Robust fix would cache division per-key; deferred to wave-N+1
@@ -219,8 +219,8 @@ index de655d2..aac6479 100644
 +  // patch 0112 (Phase 11 iter H opt #1: front-load MIDI parsing).
 +  // Parse `path` and store the resulting event list under `cache_key`
 +  // in the in-memory preload cache. Idempotent re-call replaces the
-+  // entry. Memory cost ~50 KB per typical Cave Story track × 41
-+  // tracks ≈ 2 MB total resident. Used at SoundManager::init time
++  // entry. Memory cost ~50 KB per typical Cave Story track x 41
++  // tracks ~ 2 MB total resident. Used at SoundManager::init time
 +  // to avoid the ~446 ms mid-gameplay file-parse spike per
 +  // W22-WB-D PAUSE measurement (operator-perceived "studder during
 +  // disk write" on song change).
@@ -251,8 +251,8 @@ index de655d2..aac6479 100644
 +  // In-memory cache of pre-parsed event lists, keyed by track name
 +  // (e.g., "curly", "white", "gravity"). Populated at init via
 +  // add_to_preload_cache; consulted at play-time via
-+  // load_from_preload_cache. Empty by default (env unset → no
-+  // preload). Resident size ~2 MB max (41 tracks × ~50 KB each).
++  // load_from_preload_cache. Empty by default (env unset -> no
++  // preload). Resident size ~2 MB max (41 tracks x ~50 KB each).
 +  std::unordered_map<std::string, std::vector<MidiEvent>> _preload_cache;
    std::uint16_t _division_ppq          = 480;  // SMF default if header had 0
    std::uint32_t _tempo_us_per_quarter  = 500000;  // SMF default = 120 BPM
@@ -273,13 +273,13 @@ index 5303442..b9af0da 100644
 +  // change (W22-WB-D measurement; operator-perceived as "studder
 +  // during disk write" on PAUSE-equivalent runs).
 +  //
-+  // Memory cost: 41 tracks × ~50 KB each ≈ 2 MB resident; fits
++  // Memory cost: 41 tracks x ~50 KB each ~ 2 MB resident; fits
 +  // comfortably in 48 MB Tier-1 g2k.
-+  // Init-time cost: 41 × ~10ms parse ≈ ~400 ms additional init delay.
++  // Init-time cost: 41 x ~10ms parse ~ ~400 ms additional init delay.
 +  // Acceptable since one-time at startup; eliminated mid-gameplay
 +  // spike is the win.
 +  //
-+  // Only runs when env=1 AND a MIDI backend is selected — preload
++  // Only runs when env=1 AND a MIDI backend is selected -- preload
 +  // for organya-only runs is wasted work since _start_mid_track is
 +  // never called.
 +  {
@@ -317,7 +317,7 @@ index 5303442..b9af0da 100644
 +          ++failed;
 +        }
 +      }
-+      LOG_INFO("MidiScheduler: preload complete — {} tracks cached, {} "
++      LOG_INFO("MidiScheduler: preload complete -- {} tracks cached, {} "
 +               "failed (failed tracks will fall through to runtime "
 +               "file-parse path on demand)",
 +               preloaded, failed);
@@ -338,11 +338,11 @@ index 5303442..b9af0da 100644
  
    // patch 0107: use _midi_source_dir resolved at init from SDL_HINT_-
    // DOSKUTSU_AUDIO_MIDI_SOURCE. Default = "midi" (data/midi/);
--  // "orgmid" → "midi-orgmid" (data/midi-orgmid/).
+-  // "orgmid" -> "midi-orgmid" (data/midi-orgmid/).
 -  const std::string path = ResourceManager::getInstance()->getPath(
 -      _midi_source_dir + "/" + _music_names[songno] + ".mid", false);
 -  if (MidiScheduler::getInstance()->load(path))
-+  // "orgmid" → "data/orgmid/".
++  // "orgmid" -> "data/orgmid/".
 +  // patch 0112: when _preload_midi_active, try preload cache first
 +  // (avoids ~446ms mid-gameplay file-parse spike). Fallback to
 +  // file-parse on cache miss (e.g., track that failed to preload at

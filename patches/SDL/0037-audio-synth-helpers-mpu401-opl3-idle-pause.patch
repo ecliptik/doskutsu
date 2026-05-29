@@ -16,24 +16,24 @@ backend to use them.
 
 New files:
 
-- src/core/dos/SDL_dos_audio_synth.h — public API contract:
+- src/core/dos/SDL_dos_audio_synth.h -- public API contract:
   * MPU-401: Init/WriteByte/Shutdown/GetBLASTERPort
   * OPL3: Detect/InitChip/Shutdown/WriteRegister/WriteRegisterBlock/
     VoiceRegOffsets/VoiceWritePatch/VoiceNoteOn/VoiceNoteOff
   * Idle-pause: RegisterIdlePauseCallback/SetIdlePauseEnabled/
     ForcePause/ForceResume + SDL_DOSIdlePauseCallback typedef
-  * Per-block extern counters (uint32_t µs/count, atomic on x86):
+  * Per-block extern counters (uint32_t us/count, atomic on x86):
     doskutsu_audio_irq_wall_us / _irq_count / _sfx_active_count
 
-- src/core/dos/SDL_dos_audio_synth.c — implementations:
+- src/core/dos/SDL_dos_audio_synth.c -- implementations:
   * MPU-401: reset+ACK probe at Init (10 ms timeout); UART-mode entry
     via 0x3F to command port; per-byte poll on bit 6 of status before
     data write; BLASTER env parser for `Pxxxx` field with 0x330 default
-  * OPL3: canonical Adlib timer-1 detection (s1=0x00 → s2=0xC0); register
+  * OPL3: canonical Adlib timer-1 detection (s1=0x00 -> s2=0xC0); register
     write helper with bank routing (0x388/0x389 vs 0x38A/0x38B for
     secondary bank) + 6-dummy-status-read inter-write delay; voice
     register offset table for all 18 voices in 9-channel 2-op mode
-    layout (per § D.5 design recommendation); OPL3-mode init via
+    layout (per sec. D.5 design recommendation); OPL3-mode init via
     register 0x105 = 0x01 + 4-op disable via register 0x104 = 0x00
   * Idle-pause: state vars exposed to SB16 backend (patch 0038 services
     the request flags + DSP pause/resume command issuing); callback
@@ -46,7 +46,7 @@ Per CLAUDE.md threading-zero invariant: all helpers synchronous /
 blocking. No threads, no DPMI thunks beyond port-I/O primitives.
 
 Per kbd-counter precedent (patches 0023+0025): uint32_t volatile
-externs, atomic single-bus-cycle reads on x86 — no cli/sti.
+externs, atomic single-bus-cycle reads on x86 -- no cli/sti.
 
 Per `audio_mix_zero_is_not_audio_off.md`: idle-pause is the essential
 lever for the projected ~12 ms / flip wall-clock removal during silent
@@ -54,7 +54,7 @@ gameplay (IRQ entry/exit cost, not mix work).
 
 CMakeLists.txt unchanged: src/core/dos/*.c is globbed.
 
-Design contract: docs/PHASE10-DESIGN.md § C / § D / § E.6 (gitignored).
+Design contract: docs/PHASE10-DESIGN.md sec. C / sec. D / sec. E.6 (gitignored).
 Instrumentation contract: docs/PHASE10-CONTRACT.md (gitignored).
 ---
  src/core/dos/SDL_dos_audio_synth.c | 435 +++++++++++++++++++++++++++++
@@ -95,7 +95,7 @@ index 000000000..e6adfb38f
 + * implementations. See SDL_dos_audio_synth.h for the API contract +
 + * design rationale references.
 + *
-+ * The MPU-401 + OPL3 helpers are pure port I/O — no DPMI, no allocation,
++ * The MPU-401 + OPL3 helpers are pure port I/O -- no DPMI, no allocation,
 + * no FPU. The audio idle-pause coordination state lives in this TU as
 + * statics; the SB16 audio backend (SDL_dosaudio_sb.c, modified by
 + * patch 0038) reaches into them via the public Set/Force/Register API.
@@ -137,7 +137,7 @@ index 000000000..e6adfb38f
 +                   (data ready to receive; must be 0 before each write). */
 +                outportb((Uint16)(port_base + 1), 0x3F);
 +                /* Some clones don't ACK the UART-mode command per
-+                   docs/PHASE10-DESIGN.md § C.2 step 4; we don't require
++                   docs/PHASE10-DESIGN.md sec. C.2 step 4; we don't require
 +                   a second ACK. */
 +                s_mpu401_port_base = (int)port_base;
 +                return true;
@@ -155,7 +155,7 @@ index 000000000..e6adfb38f
 +    const Uint16 base = (Uint16)s_mpu401_port_base;
 +    /* Spin until DRR clear (data ready to receive). On real HW with a
 +       fast wavetable like DreamBlaster S2, this is typically already
-+       clear; the spin is sub-µs. */
++       clear; the spin is sub-us. */
 +    while ((inportb((Uint16)(base + 1)) & 0x40) != 0) {
 +        /* spin */
 +    }
@@ -167,7 +167,7 @@ index 000000000..e6adfb38f
 +    if (s_mpu401_port_base < 0) {
 +        return; /* never initialized; nothing to reset */
 +    }
-+    /* Reset to BIOS-default state. Suppress ACK polling on shutdown —
++    /* Reset to BIOS-default state. Suppress ACK polling on shutdown --
 +       process is exiting; we don't care if reset is acknowledged. */
 +    outportb((Uint16)(s_mpu401_port_base + 1), 0xFF);
 +    s_mpu401_port_base = -1;
@@ -175,7 +175,7 @@ index 000000000..e6adfb38f
 +
 +uint16_t SDL_DOSMpu401GetBLASTERPort(void)
 +{
-+    /* BLASTER format example: "A220 I5 D1 H5 T6 J200 P330" — fields are
++    /* BLASTER format example: "A220 I5 D1 H5 T6 J200 P330" -- fields are
 +       single letter + hex/decimal port. We want `Pxxxx`; default 0x330. */
 +    const char *blaster = SDL_getenv("BLASTER");
 +    if (!blaster) {
@@ -271,7 +271,7 @@ index 000000000..e6adfb38f
 +       3. Read status (port 0x388); high bits should be 0x00.
 +       4. Set timer-1 to load fast (0xFF to register 0x02).
 +       5. Unmask timer-1 (0x21 to register 0x04).
-+       6. Wait ~100 µs for timer to expire.
++       6. Wait ~100 us for timer to expire.
 +       7. Read status; high bits should be 0xC0 (overflow + timer-1).
 +       8. Reset + mask timers again. */
 +    SDL_DOSOpl3WriteRegister(0x04, 0x60);
@@ -288,15 +288,15 @@ index 000000000..e6adfb38f
 +
 +void SDL_DOSOpl3WriteRegister(uint16_t reg, uint8_t value)
 +{
-+    /* Bank routing: registers 0x000-0x0FF → primary bank (0x388/0x389);
-+       0x100-0x1FF → secondary bank (0x38A/0x38B). */
++    /* Bank routing: registers 0x000-0x0FF -> primary bank (0x388/0x389);
++       0x100-0x1FF -> secondary bank (0x38A/0x38B). */
 +    const Uint16 addr_port = (reg < 0x100) ? 0x388 : 0x38A;
 +    const Uint16 data_port = (reg < 0x100) ? 0x389 : 0x38B;
 +
 +    outportb(addr_port, (Uint8)(reg & 0xFF));
 +    /* Inter-write delay: canonical Adlib 6 dummy status reads.
-+       Per YMF262 datasheet ~24 master clock cycles ≈ 1.7 µs at
-+       14.318 MHz; six ISA-bus reads at ~1 µs each = ~6 µs — well
++       Per YMF262 datasheet ~24 master clock cycles ~ 1.7 us at
++       14.318 MHz; six ISA-bus reads at ~1 us each = ~6 us -- well
 +       past the requirement, bullet-proof on PODP83 + Cirrus 5434. */
 +    for (int i = 0; i < 6; i++) {
 +        (void)inportb(0x388);
@@ -339,18 +339,18 @@ index 000000000..e6adfb38f
 +    if (voice_id < 0 || voice_id >= 18) {
 +        return;
 +    }
-+    /* OPL3Patch struct layout per docs/PHASE10-DESIGN.md § D.8 / plan
-+       doc § 5:
++    /* OPL3Patch struct layout per docs/PHASE10-DESIGN.md sec. D.8 / plan
++       doc sec. 5:
 +         op0[0..5]: AM/VIB/EG/KSR/MULT, KSL/TL, AR/DR, SL/RR, WS, FB/CONN
 +         op1[0..4]: AM/VIB/EG/KSR/MULT, KSL/TL, AR/DR, SL/RR, WS
 +         feedback_algo: 1 byte combining FB + CONN (channel-level)
 +       Total 12 bytes mapped to OPL3 registers:
 +         op0 0x20+offset, 0x40+, 0x60+, 0x80+, 0xE0+, [op0 byte 5 = FB
-+              actually goes at the channel reg 0xC0+, NOT op-level —
++              actually goes at the channel reg 0xC0+, NOT op-level --
 +              per YMF262 datasheet, FB/CONN is per-channel]
 +         op1 0x20+, 0x40+, 0x60+, 0x80+, 0xE0+
 +         feedback_algo: 0xC0+channel
-+       Reading the plan doc § 5 struct again: op0[6] includes the
++       Reading the plan doc sec. 5 struct again: op0[6] includes the
 +       FB/CONN byte; we put that at channel 0xC0. op1[5] does NOT
 +       include FB/CONN (one less byte); the patch layout assumes
 +       op0_byte5 IS the channel-level FB/CONN. */
@@ -364,7 +364,7 @@ index 000000000..e6adfb38f
 +    SDL_DOSOpl3WriteRegister((uint16_t)(0x60 + op0), patch[2]);
 +    SDL_DOSOpl3WriteRegister((uint16_t)(0x80 + op0), patch[3]);
 +    SDL_DOSOpl3WriteRegister((uint16_t)(0xE0 + op0), patch[4]);
-+    /* patch[5] = combined feedback_algo + connection (per § D.8 last byte
++    /* patch[5] = combined feedback_algo + connection (per sec. D.8 last byte
 +       of the 12-byte struct via op0[5] convention). Goes at 0xC0+channel. */
 +    SDL_DOSOpl3WriteRegister((uint16_t)(0xC0 + ch), patch[5]);
 +
@@ -416,7 +416,7 @@ index 000000000..e6adfb38f
 +    SDL_DOSOpl3WriteRegister(0x105, 0x01);
 +
 +    /* Disable 4-op mode: register 0x104 = 0x00 (no 4-op channels).
-+       We use 18 × 2-op layout per § D.5 recommendation. */
++       We use 18 x 2-op layout per sec. D.5 recommendation. */
 +    SDL_DOSOpl3WriteRegister(0x104, 0x00);
 +
 +    /* Silence all voices: clear key-on bit (0xB0+channel = 0x00) for
@@ -536,7 +536,7 @@ index 000000000..a6faebeca
 + * the WaveBlaster (MPU-401) and OPL3 (YMF262) backends, plus the SB16
 + * audio-IRQ idle-pause coordination API.
 + *
-+ * Design contract: docs/PHASE10-DESIGN.md § C / § D / § E.6 (gitignored).
++ * Design contract: docs/PHASE10-DESIGN.md sec. C / sec. D / sec. E.6 (gitignored).
 + * Instrumentation contract: docs/PHASE10-CONTRACT.md (gitignored).
 + *
 + * The helpers are consumed by the engine-side AudioBackendWB and
@@ -564,7 +564,7 @@ index 000000000..a6faebeca
 +#endif
 +
 +/* ------------------------------------------------------------------------
-+ * MPU-401 (WaveBlaster) — § C of design doc
++ * MPU-401 (WaveBlaster) -- sec. C of design doc
 + * ------------------------------------------------------------------------
 + *
 + * MIDI byte stream output to a UART-mode MPU-401. Default port 0x330 from
@@ -582,7 +582,7 @@ index 000000000..a6faebeca
 +extern bool SDL_DOSMpu401Init(uint16_t port_base);
 +
 +// Writes one MIDI byte to the data port. Polls bit 6 of status port until
-+// clear (data-ready-to-receive). Sub-µs typical on real HW. Caller is
++// clear (data-ready-to-receive). Sub-us typical on real HW. Caller is
 +// responsible for the byte being a valid MIDI message component.
 +// Caller must have called SDL_DOSMpu401Init() previously; calling without
 +// init is a no-op (writes nothing).
@@ -598,12 +598,12 @@ index 000000000..a6faebeca
 +extern uint16_t SDL_DOSMpu401GetBLASTERPort(void);
 +
 +/* ------------------------------------------------------------------------
-+ * OPL3 (YMF262) — § D of design doc
++ * OPL3 (YMF262) -- sec. D of design doc
 + * ------------------------------------------------------------------------
 + *
 + * FM-synth register I/O at fixed Adlib-compatible base 0x388 (primary
 + * bank, registers 0x000-0x0FF) + 0x38A (secondary bank, registers
-+ * 0x100-0x1FF). 18 voices in 9-channel 2-op mode (recommended; see § D.5).
++ * 0x100-0x1FF). 18 voices in 9-channel 2-op mode (recommended; see sec. D.5).
 + *
 + * Voice IDs 0-17. Voices 0-8 use primary bank registers; voices 9-17 use
 + * secondary bank.
@@ -617,7 +617,7 @@ index 000000000..a6faebeca
 +extern bool SDL_DOSOpl3Detect(void);
 +
 +// Initializes OPL3 chip to known state: enables OPL3 mode (4-op disabled
-+// = 18 × 2-op layout per § D.5), silences all voices.
++// = 18 x 2-op layout per sec. D.5), silences all voices.
 +extern void SDL_DOSOpl3InitChip(void);
 +
 +// Restores Adlib OPL2 mode (clears OPL3 enable bit), silences all voices.
@@ -627,7 +627,7 @@ index 000000000..a6faebeca
 +
 +// Single register write. Handles primary/secondary bank routing
 +// automatically based on `reg`'s high bit. Includes the canonical
-+// 6-dummy-status-read inter-write delay (~6 µs on PODP83 ISA bus).
++// 6-dummy-status-read inter-write delay (~6 us on PODP83 ISA bus).
 +extern void SDL_DOSOpl3WriteRegister(uint16_t reg, uint8_t value);
 +
 +// Bulk register write. Equivalent to a loop of SDL_DOSOpl3WriteRegister
@@ -644,7 +644,7 @@ index 000000000..a6faebeca
 +
 +// Convenience: writes the 12-byte patch from `patch[12]` into the voice's
 +// 12 patch registers (op0 6 bytes + op1 5 bytes + feedback/algorithm 1 byte).
-+// Order matches docs/PHASE10-DESIGN.md § D.8 / plan doc § 5 OPL3Patch struct.
++// Order matches docs/PHASE10-DESIGN.md sec. D.8 / plan doc sec. 5 OPL3Patch struct.
 +extern void SDL_DOSOpl3VoiceWritePatch(int voice_id, const uint8_t patch[12]);
 +
 +// Convenience hot-path: triggers note-on for a voice. `freq` is the OPL3
@@ -657,7 +657,7 @@ index 000000000..a6faebeca
 +extern void SDL_DOSOpl3VoiceNoteOff(int voice_id);
 +
 +/* ------------------------------------------------------------------------
-+ * Audio IRQ-5 idle-pause coordination — § E of design doc
++ * Audio IRQ-5 idle-pause coordination -- sec. E of design doc
 + * ------------------------------------------------------------------------
 + *
 + * When music is offloaded to OPL3/WB, the SB16 DMA stream becomes idle
@@ -678,7 +678,7 @@ index 000000000..a6faebeca
 + */
 +
 +// Callback fired at each pause-resume transition. Argument is nanoseconds
-+// elapsed during the pause window (uint64 for sub-µs precision). Fired
++// elapsed during the pause window (uint64 for sub-us precision). Fired
 +// from non-IRQ context; callback may use FPU, locks, allocations.
 +typedef void (*SDL_DOSIdlePauseCallback)(Uint64 paused_ns);
 +
@@ -716,7 +716,7 @@ index 000000000..a6faebeca
 + * C99 unsigned overflow semantics.
 + *
 + * The audio-IRQ wall-clock measurement is in microseconds (uint32_t)
-+ * for atomic readability. Wraps at uint32_t max ≈ 71.6 min cumulative
++ * for atomic readability. Wraps at uint32_t max ~ 71.6 min cumulative
 + * IRQ wall-clock; iter sessions are well under this.
 + */
 +extern volatile uint32_t doskutsu_audio_irq_wall_us;

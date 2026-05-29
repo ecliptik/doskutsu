@@ -26,7 +26,7 @@ on the M64VBE ROM or selects a stale page on the next flip.
 The post-flush block in SDL_dosframebuffer.c (around line 880) does
 contain a VBE 0x4F07 call, but the rotation it performs assumes a
 working PageSet that on Mach64 + M64VBE doesn't reliably swap the
-displayed image. We don't need page-flipping at our target framerate —
+displayed image. We don't need page-flipping at our target framerate --
 single-buffered with potential tearing is invisible at 2-15 fps.
 
 Two-pronged fix:
@@ -42,7 +42,7 @@ Two-pronged fix:
    PREFER_LFB hint (which doskutsu sets unconditionally on DJGPP) is
    active, page_flip_available stays false. The post-flush rotation
    block at SDL_dosframebuffer.c:880 gates on
-   `vdata->page_flip_available` so it becomes a no-op — no VBE 0x4F07
+   `vdata->page_flip_available` so it becomes a no-op -- no VBE 0x4F07
    calls, no vram_ptr swap. Belt-and-braces consistency with #1.
 
 Verified under DOSBox-X parity smoke (build/stage/SDLDBG.LOG, fast cycles,
@@ -53,7 +53,7 @@ Verified under DOSBox-X parity smoke (build/stage/SDLDBG.LOG, fast cycles,
   UpdateWindowFramebuffer #200: ... vram_ptr=dfc00000 ...
   ... (stable through #900)
 
-vram_ptr stable across all 900 sampled flushes — single page, no
+vram_ptr stable across all 900 sampled flushes -- single page, no
 rotation. Wave-2's alternation behavior is gone.
 
 Trade-off accepted: lose double-buffer tear-prevention. At Cave Story's
@@ -70,7 +70,7 @@ empirically via the wave-2 capture; not a problem on DOSBox-X parity
 because its emulated VBE PageSet is a memcpy. DOS-only fix in the DOS
 backend.
 
-Local-only patch per workspace policy (memory note "SDL upstream —
+Local-only patch per workspace policy (memory note "SDL upstream --
 local patches only"): never PR'd upstream.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
@@ -86,7 +86,7 @@ index 418189449..4594ab5da 100644
 @@ -343,8 +343,26 @@ static bool populate_fb_state_for_direct_fb(SDL_VideoDevice *device,
  
      if (use_lfb_path) {
-         // LFB nearptr — DPMI-mapped VRAM linear address.
+         // LFB nearptr -- DPMI-mapped VRAM linear address.
 -        int back_page = data->page_flip_available ? (1 - data->current_page) : 0;
 -        fb_state.vram_ptr = (Uint8 *)DOS_PhysicalToLinear(data->mapping.address) + data->page_offset[back_page];
 +        //
@@ -96,7 +96,7 @@ index 418189449..4594ab5da 100644
 +        // post-flush block at line ~880 then calls VBE 0x4F07 to swap the
 +        // DISPLAYED page and rotate vram_ptr. On real Cirrus / Mach64
 +        // hardware that swap either silently fails or leaves the wrong page
-+        // visible — symptom: the boot-time "Loading…" splash sticks while
++        // visible -- symptom: the boot-time "Loading..." splash sticks while
 +        // the engine renders into the invisible page (`vram_ptr` alternates
 +        // between `0x77c00000` and `0x77c25800` per /tmp/cirrus2 SDLDBG.LOG
 +        // line 184 vs 180). DOSVESA_SetDisplayMode also force-disables
@@ -126,7 +126,7 @@ index 8cdbf34bc..dd4e7a6b5 100644
 +    // is set, also force-disable page-flipping. The post-flush rotation in
 +    // SDL_dosframebuffer.c (`__dpmi_int(0x10, ax=0x4F07)` plus vram_ptr swap)
 +    // does not produce a stable visible image on Cirrus / Mach64 + M64VBE in
-+    // wave-2 testing — symptom is the boot splash sticking while the engine
++    // wave-2 testing -- symptom is the boot splash sticking while the engine
 +    // renders to the off-screen page. Forcing single-buffered page 0 makes
 +    // every frame land on the visible page; the post-flush block becomes a
 +    // no-op because it gates on `page_flip_available`. Pairs with the

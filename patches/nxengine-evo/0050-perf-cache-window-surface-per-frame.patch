@@ -10,8 +10,8 @@ Content-Transfer-Encoding: 8bit
 Wave 7 perf attribution (cirrus7 SDLDBG.LOG / DEBUG.LOG): per-flip
 wall-clock ~167 ms with SDL_RenderPresent only ~10 ms; remainder is
 NXEngine's ~340 drawcalls/frame @ ~0.46 ms each. Approach B's hand-
-rolled 16x16 inner loop is ~15 µs of actual blit work, so the per-
-call overhead (~445 µs) is the next attack surface.
+rolled 16x16 inner loop is ~15 us of actual blit work, so the per-
+call overhead (~445 us) is the next attack surface.
 
 One contributor: _try_fast_blit_16x16 was calling
 SDL_GetWindowSurface(_window) on every drawcall. SDL3 (SW renderer)
@@ -19,7 +19,7 @@ walks the renderer's surface chain on each call. Cheap individually,
 but 340x/frame adds up.
 
 Fix: cache SDL_GetWindowSurface's return value in a Renderer member
-and refresh it post-RenderPresent (canonical SDL3 invalidation point —
+and refresh it post-RenderPresent (canonical SDL3 invalidation point --
 RenderPresent may swap the SW renderer's backing surface on mode
 change or window-surface invalidation).
 
@@ -27,7 +27,7 @@ Implementation:
   * New member: SDL_Surface *_cached_window_surface (Renderer.h, public
     so the future-considered extraction of drawSurface to header-side
     inline could read it without a getter).
-  * Seed at end of initVideo() — first drawcall happens before first
+  * Seed at end of initVideo() -- first drawcall happens before first
     flip(), so initVideo's seed is required.
   * Refresh in flip() after SDL_RenderPresent and in flushAll() after
     its SDL_RenderPresent (engine has two flip points; both must
@@ -39,10 +39,10 @@ Implementation:
 
 Smoke-tested under DOSBox-X parity (build/stage runs cleanly, title
 renders correctly, intro/Mimiga scene renders, character moves).
-DEBUG.LOG flip-probe shows present_ms=0–1 ms steady (DOSBox-X is not
+DEBUG.LOG flip-probe shows present_ms=0-1 ms steady (DOSBox-X is not
 a perf proxy, but the rendering pipeline is functionally intact).
 
-Expected real-HW saving: 340 × N µs per frame where N is the per-
+Expected real-HW saving: 340 x N us per frame where N is the per-
 SDL_GetWindowSurface cost on real HW. Direct-write fast-path savings
 arrive together with patch 0051's conditional flush.
 
@@ -64,7 +64,7 @@ index 8ae30c3..7980cae 100644
 +  // surface cache. _try_fast_blit_16x16 reads this on every drawcall;
 +  // the first drawcall happens before the first flip() so we need a
 +  // valid pointer here. Refreshed after every SDL_RenderPresent in
-+  // flip() (post-present is the canonical SDL3 invalidation point —
++  // flip() (post-present is the canonical SDL3 invalidation point --
 +  // RenderPresent may swap the SW renderer's backing surface, e.g. on
 +  // mode change or window-surface invalidation).
 +  _cached_window_surface = SDL_GetWindowSurface(_window);
@@ -89,7 +89,7 @@ index 8ae30c3..7980cae 100644
    ++_flip_total;
 +  // DOS-PORT (patch 0050, Phase 9 wave 8): refresh the cached window
 +  // surface post-present. SDL_RenderPresent (SW renderer) may swap or
-+  // invalidate the underlying window surface — re-querying once per
++  // invalidate the underlying window surface -- re-querying once per
 +  // flip is the safe invalidation hook.
 +  _cached_window_surface = SDL_GetWindowSurface(_window);
    if (!ok)
@@ -118,8 +118,8 @@ index 8ae30c3..7980cae 100644
  
 @@ -921,7 +942,8 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
    // to the slow path below). Per wave-5 drawcall logs, ~95% of drawSurface
-   // calls in the title scene are 16×16 sprites with alpha=255 and no
-   // scale/clip — those all take the fast path.
+   // calls in the title scene are 16x16 sprites with alpha=255 and no
+   // scale/clip -- those all take the fast path.
 -  if (_try_fast_blit_16x16(_renderer, _window, src, srcx, srcy, srcrect, dstrect))
 +  if (_try_fast_blit_16x16(_renderer, _cached_window_surface,
 +                           src, srcx, srcy, srcrect, dstrect))

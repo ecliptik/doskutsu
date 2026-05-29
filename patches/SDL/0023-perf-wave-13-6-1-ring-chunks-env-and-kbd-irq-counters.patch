@@ -11,20 +11,20 @@ Content-Transfer-Encoding: 8bit
 Wave 13.6 (patch 0022) hardcoded RING_BUFFER_CHUNKS=16 to fix audio chop
 on PODP 5V83. That introduced a keyboard regression on real HW (frozen
 keyboard input after engine startup, 8042 buffer-overflow beep on
-keypress). See docs/PHASE9-WAVE-14-PLAN.md §2.
+keypress). See docs/PHASE9-WAVE-14-PLAN.md sec.2.
 
 This patch makes wave 13.6 bisectable in a single CF-card swap:
 
 1. SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=4|8|16 toggles the audio ring
    depth at runtime. Default = 16 (matches wave 13.6 behaviour with no
-   env vars set; the regression is intentionally still in the default —
+   env vars set; the regression is intentionally still in the default --
    this slot is for diagnosis, not a pre-emptive fix). Strict-match
    parsing per the project convention: anything other than the exact
-   strings "4", "8", "16" → 16. Cached on first OpenDevice call so
+   strings "4", "8", "16" -> 16. Cached on first OpenDevice call so
    re-entry never re-reads the env. resolve_ring_chunks() also exports
    the resolved value to a linkage-visible int
    doskutsu_audio_ring_chunks_active that the engine's phase-timing log
-   reads — single source of truth, avoids engine-side parser drift.
+   reads -- single source of truth, avoids engine-side parser drift.
 
 2. IRQ-delivery counters doskutsu_kbd_irq_count and
    doskutsu_kbd_drain_count (volatile uint32_t, DOS_LockVariable'd)
@@ -32,8 +32,8 @@ This patch makes wave 13.6 bisectable in a single CF-card swap:
    respectively. Engine's phase-timing log block reads both via extern
    declarations. Locked with DOS_LockVariable since they're read across
    IRQ/main-thread context. If the kbd freeze on g2k coincides with
-   irq_count plateauing → DPMI/scheduler problem; if irq_count keeps
-   climbing but drain_count falls behind → game-thread starvation.
+   irq_count plateauing -> DPMI/scheduler problem; if irq_count keeps
+   climbing but drain_count falls behind -> game-thread starvation.
 
 3. New SDL_Log line at OpenDevice records the active ring_chunks,
    chunk_size, ring_size, and the raw env-var string (or "(unset)") so
@@ -43,7 +43,7 @@ Default behaviour unchanged from wave 13.6 when no env vars are set.
 Pairs with engine-side patch 0068 (Renderer.cpp phase-timing log
 extension + ring-chunks init banner).
 
-See docs/PHASE9-WAVE-14-PLAN.md §2 for the full bisect plan.
+See docs/PHASE9-WAVE-14-PLAN.md sec.2 for the full bisect plan.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
@@ -65,14 +65,14 @@ index eb3e50b2c..327260a8b 100644
 -   SDL3's default sample_frames=512 (2048-byte chunks at 22050 stereo S16),
 -   16 chunks = 32 KB = 372 ms of buffer. Wave 13.5 real-HW measurements
 -   (PODP 5V83) showed bigger sample_frames is SLOWER per-flip (cache
--   pressure on the P54C's 8 KB L1 D-cache when chunk memcpy ≥ 8 KB), so
+-   pressure on the P54C's 8 KB L1 D-cache when chunk memcpy >= 8 KB), so
 -   we keep small chunks for speed but use a deeper ring to avoid audio
 -   underrun in slow scenes (cmod-heavy menus drop to ~2 fps = 500 ms
--   between game-yields → buffer needs ≥500 ms to never miss). 372 ms is
+-   between game-yields -> buffer needs >=500 ms to never miss). 372 ms is
 -   not enough for the worst-case 500 ms cmod-menu gap but covers the
 -   common 10 fps title scene with margin and dramatically improves the
 -   chop frequency vs the 92 ms of the original 4-chunk ring. Memory
--   cost: 32 KB ring + 2 KB staging vs 8 KB ring + 2 KB staging — 24 KB
+-   cost: 32 KB ring + 2 KB staging vs 8 KB ring + 2 KB staging -- 24 KB
 -   extra, trivial against 48 MB XMS budget. */
 -#define RING_BUFFER_CHUNKS 16
 +// Number of DMA half-buffers that fit in the ring. Must be a power of two
@@ -82,12 +82,12 @@ index eb3e50b2c..327260a8b 100644
 +// DOSKUTSU patch (Phase 9 wave 13.6.1): wave 13.6 hardcoded this to 16
 +// (372 ms buffer at 22050 Hz stereo S16, default chunk_size 2048 B) to
 +// fix audio chop on PODP 5V83. That introduced a keyboard regression
-+// — see docs/PHASE9-WAVE-14-PLAN.md §2. Wave 13.6.1 makes the value
++// -- see docs/PHASE9-WAVE-14-PLAN.md sec.2. Wave 13.6.1 makes the value
 +// runtime-overridable so the regression can be bisected in a single
 +// CF-card swap by setting:
-+//   SET SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=4   (8 KB ring, 92 ms — wave 13.5 baseline)
-+//   SET SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=8   (16 KB ring, 184 ms — intermediate)
-+//   SET SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=16  (32 KB ring, 372 ms — wave 13.6 default)
++//   SET SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=4   (8 KB ring, 92 ms -- wave 13.5 baseline)
++//   SET SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=8   (16 KB ring, 184 ms -- intermediate)
++//   SET SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS=16  (32 KB ring, 372 ms -- wave 13.6 default)
 +// Default (unset / unrecognized) = 16 to match wave 13.6 behaviour
 +// when no env vars are set.
 +//
@@ -104,7 +104,7 @@ index eb3e50b2c..327260a8b 100644
 +    static int cached = -1;
 +    if (cached == -1) {
 +        const char *e = SDL_getenv("SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS");
-+        int v = 16; /* default — matches wave 13.6 behaviour */
++        int v = 16; /* default -- matches wave 13.6 behaviour */
 +        if (e) {
 +            if (e[0] == '4' && e[1] == 0) {
 +                v = 4;
@@ -166,16 +166,16 @@ index 22906c6b6..912da585b 100644
 +   keyboard regression bisect. These are bumped:
 +     - kbd_irq_count: in KeyboardIRQHandler, once per IRQ-1 fire. If
 +       this stops incrementing during the freeze, IRQ delivery is
-+       dead → DPMI-side problem (audio thread / scheduler hogging).
++       dead -> DPMI-side problem (audio thread / scheduler hogging).
 +     - kbd_drain_count: in DOSVESA_PumpEvents, once per byte drained
 +       from keyevents_ringbuffer. If kbd_irq keeps incrementing but
-+       drain falls behind, pump scheduling is the bottleneck →
++       drain falls behind, pump scheduling is the bottleneck ->
 +       game-thread starvation.
 +   Both visible to engine via extern declarations in Renderer.cpp.
 +   Both DOS_LockVariable'd: kbd_irq_count is updated from IRQ
 +   context and must be locked. kbd_drain_count is bumped from the
 +   main thread BUT torn-read from IRQ context isn't impossible
-+   (engine thread reading via extern, IRQ firing) — the lock costs
++   (engine thread reading via extern, IRQ firing) -- the lock costs
 +   nothing once and avoids reasoning about atomicity. Lock both. */
 +volatile uint32_t doskutsu_kbd_irq_count = 0;
 +volatile uint32_t doskutsu_kbd_drain_count = 0;

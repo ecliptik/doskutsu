@@ -14,17 +14,17 @@ identify what dominates the unmeasured ~11.6 ms misc slice on real
 HW. Default-OFF, env-gated by SDL_HINT_DOSKUTSU_FLIP_INSTR=1 (strict
 "1" match per CLAUDE.md DOSKUTSU env-var convention).
 
-Background — wave 18 + 19 closures:
+Background -- wave 18 + 19 closures:
 
 The wave-18 measured per-flip flush is 16.7 ms. Wave 19 isolated the
 pure dosmemput at ~4.0 ms (76800 bytes); wave 18's bypass measured
-SDL dispatch glue at ~1.1 ms. That leaves ~11.6 ms unidentified —
+SDL dispatch glue at ~1.1 ms. That leaves ~11.6 ms unidentified --
 the wave-20 Lever A target. Plausible candidates: palette DAC
 programming on every flip, cursor compositing setup cost, surface
 bookkeeping, format conversion, dosmemput pre/post DPMI thunk
 overhead. Without instrumentation, prioritizing C/D/E is guessing;
 per memory perf_predictions_unreliable.md, perf predictions on this
-project have been 5-30× wrong. Diagnose before optimizing.
+project have been 5-30x wrong. Diagnose before optimizing.
 
 Dual-path coverage rationale:
 
@@ -54,7 +54,7 @@ Mechanics:
 - block_events anchor: bumped by EITHER UWFB return (slow-path
   per-flip) OR SDL_DOSVesaDirectPresentFull (fast-path per-flip).
   Sub-ops (GetState / ProgramPalette / BankedFlush direct call /
-  4× internal ProgramVGADAC) bump their own counters but NOT the
+  4x internal ProgramVGADAC) bump their own counters but NOT the
   anchor. When block_events hits 100, _instr_emit_block fires.
 
 - Helper functions: _instr_account_flip_and_maybe_emit (anchor
@@ -63,21 +63,21 @@ Mechanics:
   helper recording), _instr_record_dv_present_at_exit (PresentFull-
   specific recording that ALSO bumps the anchor).
 
-- 4× ProgramVGADAC sites instrumented in UWFB (fast-path + 3
+- 4x ProgramVGADAC sites instrumented in UWFB (fast-path + 3
   normal-path); all four feed the slow-path palette_dac aggregator.
   ProgramVGADAC site inside SDL_DOSVesaDirectProgramPalette feeds
   the SEPARATE direct_vesa_program_palette aggregator so the
   operator can see which path called it.
 
-- 1× dosmemput bracket on UWFB's fast-path VRAM-write block.
+- 1x dosmemput bracket on UWFB's fast-path VRAM-write block.
   Equivalent on the direct-VESA path is captured implicitly by
   present_full (which IS that block).
 
-- 6× total brackets via _instr_record_total_at_exit covering all
+- 6x total brackets via _instr_record_total_at_exit covering all
   6 UWFB return paths (fast-path success, normal-path success, 4
   error returns).
 
-- 4× direct-VESA function bodies instrumented end-to-end (every
+- 4x direct-VESA function bodies instrumented end-to-end (every
   return path records, including early-error returns, so call
   counts reflect all entries).
 
@@ -112,13 +112,13 @@ Output format:
                        block_events=N]                                                         (always emitted)
 
 palette_dac and program_palette stats both apply a low-N gate
-(emit only when sample count ≥ 10) to avoid noisy single-sample
+(emit only when sample count >= 10) to avoid noisy single-sample
 reports.
 
 Coordination with engine side:
 
 The companion engine patch (nxengine/0087) reads the same hint
-SDL_HINT_DOSKUTSU_FLIP_INSTR and emits its own [flip-stat …]
+SDL_HINT_DOSKUTSU_FLIP_INSTR and emits its own [flip-stat ...]
 block over the same 100-flip window so a single env-var toggle
 enables both layers' instrumentation simultaneously. Engine emits
 its own brackets around the Renderer::flip() phases (drawcall
@@ -179,26 +179,26 @@ index 9b05b3c45..8b3c610d2 100644
 + *
 + * Slow-path phases (only meaningful when `DOSVESA_UpdateWindowFramebuffer`
 + * is called):
-+ *  - `total` — function entry to exit; covers all sub-phases.
-+ *  - `dosmemput` — narrow bracket around the VRAM-write block on the
++ *  - `total` -- function entry to exit; covers all sub-phases.
++ *  - `dosmemput` -- narrow bracket around the VRAM-write block on the
 + *    fast path (LFB SDL_memcpy or banked dosmemput).
-+ *  - `palette_dac` — narrow bracket around any of the 4 ProgramVGADAC
++ *  - `palette_dac` -- narrow bracket around any of the 4 ProgramVGADAC
 + *    call sites (only fires when palette version changed; emitted only
-+ *    when sample count ≥ 10 in the block to avoid noisy single-sample
++ *    when sample count >= 10 in the block to avoid noisy single-sample
 + *    reports).
 + *
 + * Fast-path phases (only meaningful when the engine takes the
 + * direct-VESA route via SDL_HINT_DOSKUTSU_DIRECT_VESA=1):
-+ *  - `present_full` — full body of `SDL_DOSVesaDirectPresentFull`; the
++ *  - `present_full` -- full body of `SDL_DOSVesaDirectPresentFull`; the
 + *    per-flip anchor on the fast path. In the wave-20 W20A run config
 + *    (DV=1 + FORCE_LFB=1) this is the dominant signal.
-+ *  - `program_palette` — body of `SDL_DOSVesaDirectProgramPalette`;
++ *  - `program_palette` -- body of `SDL_DOSVesaDirectProgramPalette`;
 + *    same low-N gate as slow-path `palette_dac`.
-+ *  - `get_state` — body of `SDL_DOSVesaDirectGetState`; cheap
++ *  - `get_state` -- body of `SDL_DOSVesaDirectGetState`; cheap
 + *    (struct-copy + a valid-flag check), but non-zero per call. Engine
 + *    typically calls once per flip if it re-snapshots on
 + *    generation-counter bumps.
-+ *  - `banked_flush` — body of `SDL_DOSVesaDirectBankedFlush`; only
++ *  - `banked_flush` -- body of `SDL_DOSVesaDirectBankedFlush`; only
 + *    fires when the engine calls it directly for partial-flush. May
 + *    be zero in W20A.
 + *
@@ -212,7 +212,7 @@ index 9b05b3c45..8b3c610d2 100644
 + * Levers C/D/E are right-sized based on its findings.
 + *
 + * Added by patches/SDL/0035 (DOSKUTSU local patch, never upstreamed).
-+ * See docs/PHASE9-WAVE-20-COLD-PICKUP.md § 3 Lever A for the wave-20
++ * See docs/PHASE9-WAVE-20-COLD-PICKUP.md sec. 3 Lever A for the wave-20
 + * plan.
 + */
 +#define SDL_HINT_DOSKUTSU_FLIP_INSTR "SDL_HINT_DOSKUTSU_FLIP_INSTR"
@@ -227,17 +227,17 @@ index 42e9ed907..1ee59c1e5 100644
 @@ -40,6 +40,7 @@
  #include <sys/movedata.h> // for dosmemput (banked framebuffer writes)
  #include <stdio.h>        // diagnostic file I/O (DOSKUTSU patches/SDL/0002)
- #include <unistd.h>       // fsync — crash-survive log writes on DOS (patch 0004)
-+#include <stdlib.h>       // qsort — wave-20 flush instrumentation (patch 0035)
+ #include <unistd.h>       // fsync -- crash-survive log writes on DOS (patch 0004)
++#include <stdlib.h>       // qsort -- wave-20 flush instrumentation (patch 0035)
  
- // DOSKUTSU patch 0034 (Phase 9 wave 18) — direct-VESA generation counter.
+ // DOSKUTSU patch 0034 (Phase 9 wave 18) -- direct-VESA generation counter.
  // Bumped whenever fb_state is invalidated (DOSVESA_InvalidateCachedFramebuffer)
 @@ -49,6 +50,346 @@
  // needed; plain Uint32 is fine.
  static Uint32 _doskutsu_dvd_generation = 0;
  
 +// ============================================================================
-+// DOSKUTSU patch 0035 (Phase 9 wave 20) — flush-path instrumentation.
++// DOSKUTSU patch 0035 (Phase 9 wave 20) -- flush-path instrumentation.
 +//
 +// Per-flip phase timing brackets + counters wrapped around
 +// DOSVESA_UpdateWindowFramebuffer to identify what dominates the
@@ -266,7 +266,7 @@ index 42e9ed907..1ee59c1e5 100644
 +
 +// Sample buffers (uint64 nanoseconds). Sized to DOSKUTSU_INSTR_BLOCK_SAMPLES;
 +// counters track how many slots are populated so we don't emit stats over
-+// uninitialized entries (palette_dac in particular is sparsely populated —
++// uninitialized entries (palette_dac in particular is sparsely populated --
 +// the palette only changes once every 16-20 flips on the title screen).
 +//
 +// Slow-path buffers (DOSVESA_UpdateWindowFramebuffer):
@@ -302,19 +302,19 @@ index 42e9ed907..1ee59c1e5 100644
 +static Uint32 _instr_dv_banked_flush_calls_block = 0;
 +
 +// Block-emit anchor: bumped by either UWFB's record_total_at_exit OR
-+// SDL_DOSVesaDirectPresentFull's per-call recording — whichever path
++// SDL_DOSVesaDirectPresentFull's per-call recording -- whichever path
 +// "owns" the per-flip flush. Sub-ops (GetState / ProgramPalette /
-+// BankedFlush direct call / 4× internal ProgramVGADAC) bump their own
++// BankedFlush direct call / 4x internal ProgramVGADAC) bump their own
 +// counters but do NOT bump this anchor; they're sub-operations within
 +// a single flip and counting them would skew the block boundary.
 +//
 +// If the engine bypasses both UWFB and PresentFull (e.g., SDL_memcpy
 +// through vram_ptr directly for the LFB path), the anchor never bumps
-+// and the block never emits — that's correct: SDL-side has nothing
++// and the block never emits -- that's correct: SDL-side has nothing
 +// authoritative to report; engine-side instrumentation owns that case.
 +static int _instr_block_events = 0;
 +
-+// Cumulative flip counter (across blocks) — for the "@flush=N" tag.
++// Cumulative flip counter (across blocks) -- for the "@flush=N" tag.
 +static Uint32 _instr_total_flips = 0;
 +
 +// qsort comparator for Uint64 (ascending). Used by _instr_emit_block to
@@ -334,9 +334,9 @@ index 42e9ed907..1ee59c1e5 100644
 +// which is plenty for ms-scale phase timings.
 +static const char *_instr_fmt_ms(Uint64 ns, char *buf16)
 +{
-+    // ns / 10000 = ms × 100; integer divide gives whole ms, modulo gives
++    // ns / 10000 = ms x 100; integer divide gives whole ms, modulo gives
 +    // hundredths-of-ms. Cap the whole part at 99999 to fit "99999.99\0" in
-+    // 16 bytes — sub-second phases never exceed this.
++    // 16 bytes -- sub-second phases never exceed this.
 +    Uint64 ms_x100 = ns / 10000ULL;
 +    Uint32 whole = (Uint32)(ms_x100 / 100ULL);
 +    Uint32 frac  = (Uint32)(ms_x100 % 100ULL);
@@ -348,10 +348,10 @@ index 42e9ed907..1ee59c1e5 100644
 +
 +// Emit one phase's stat line to sdldbg.log over the current block's
 +// samples. min/med/mean/p95/max computed over the populated portion of
-+// `arr` (size `n`); arr is sorted in place. n must be >= 1 — caller
++// `arr` (size `n`); arr is sorted in place. n must be >= 1 -- caller
 +// gates on this for the palette case.
 +//
-+// `tag` is the line-prefix tag — "uwfb-stat" for slow-path buckets,
++// `tag` is the line-prefix tag -- "uwfb-stat" for slow-path buckets,
 +// "direct-vesa-stat" for fast-path buckets. Two tags lets the operator's
 +// grep tooling separate the two layers cleanly while sharing a single
 +// formatter.
@@ -372,7 +372,7 @@ index 42e9ed907..1ee59c1e5 100644
 +    Uint64 mean = sum / (Uint64)n;
 +    Uint64 mn   = arr[0];
 +    Uint64 mx   = arr[n - 1];
-+    int idx_med = n / 2;                 // n=100 → 50; n=1 → 0 (the one)
++    int idx_med = n / 2;                 // n=100 -> 50; n=1 -> 0 (the one)
 +    int idx_p95 = (n * 95) / 100;
 +    if (idx_p95 >= n) idx_p95 = n - 1;   // cover n=1..19 gracefully
 +    Uint64 med = arr[idx_med];
@@ -391,10 +391,10 @@ index 42e9ed907..1ee59c1e5 100644
 +}
 +
 +// Emit + reset one block. Called when _instr_block_events reaches
-+// DOSKUTSU_INSTR_BLOCK_SAMPLES (i.e., after 100 flip anchors fired —
++// DOSKUTSU_INSTR_BLOCK_SAMPLES (i.e., after 100 flip anchors fired --
 +// either UWFB returns or SDL_DOSVesaDirectPresentFull calls). Palette
 +// stats suppressed below MIN_PALETTE_SAMPLES (prevents noisy single-
-+// sample reports — palette typically fires 5-10 times in a 100-flip
++// sample reports -- palette typically fires 5-10 times in a 100-flip
 +// block, both on the slow path and on direct-VESA's program_palette).
 +static void _instr_emit_block(void)
 +{
@@ -403,8 +403,8 @@ index 42e9ed907..1ee59c1e5 100644
 +    // ---- Slow-path stats (DOSVESA_UpdateWindowFramebuffer) ----
 +    // In the W20A run config (DV=1 + FORCE_LFB=1), the slow path is
 +    // expected to be silent (slow_path_uwfb_calls=0/100). When that's
-+    // the case, the slow-path phase lines emit nothing (n=0 → early
-+    // return inside _instr_emit_phase) — only the counters line below
++    // the case, the slow-path phase lines emit nothing (n=0 -> early
++    // return inside _instr_emit_phase) -- only the counters line below
 +    // confirms the slow path was bypassed. If something forces the
 +    // slow path mid-run (lazy-reinit fall-back, mode change), these
 +    // lines start populating and reveal the regression.
@@ -458,7 +458,7 @@ index 42e9ed907..1ee59c1e5 100644
 +    // ---- Combined counter line (one place for both paths) ----
 +    // direct_vesa_lazy_reinit_calls reuses the same observable as the
 +    // slow-path lazy-reinit counter (populate_fb_state_for_direct_fb
-+    // recovery fires) — non-zero on a direct-VESA run signals SDL is
++    // recovery fires) -- non-zero on a direct-VESA run signals SDL is
 +    // re-populating fb_state mid-run, which the engine handles by
 +    // re-snapshotting on generation bump (see patch 0034 doc-comments).
 +    doskutsu_dbg_log(
@@ -477,7 +477,7 @@ index 42e9ed907..1ee59c1e5 100644
 +        _instr_block_events,
 +        (unsigned long)_instr_total_flips);
 +
-+    // direct_vesa_banked_flush_calls is reported only when non-zero —
++    // direct_vesa_banked_flush_calls is reported only when non-zero --
 +    // partial-flush callers are rare; including in every block adds
 +    // noise to the common case where it's always 0.
 +    if (_instr_dv_banked_flush_calls_block > 0) {
@@ -513,7 +513,7 @@ index 42e9ed907..1ee59c1e5 100644
 +// Per-flip anchor: bumps the block-event counter and emits + resets
 +// when the block is full. Called from BOTH the slow-path UWFB return
 +// helper AND the fast-path DirectPresentFull recorder. Sub-ops do NOT
-+// call this — they're sub-operations within a single flip.
++// call this -- they're sub-operations within a single flip.
 +static void _instr_account_flip_and_maybe_emit(void)
 +{
 +    if (!_instr_enabled_cached) {
@@ -544,7 +544,7 @@ index 42e9ed907..1ee59c1e5 100644
 +
 +// Generic recorder for SDL_DOSVesaDirect* helpers. Records a phase
 +// sample and bumps the helper's call counter. Does NOT call
-+// _instr_account_flip_and_maybe_emit — fast-path flip accounting is
++// _instr_account_flip_and_maybe_emit -- fast-path flip accounting is
 +// handled by SDL_DOSVesaDirectPresentFull only (the per-flip anchor).
 +// Sub-ops (GetState, ProgramPalette, BankedFlush direct calls) bump
 +// only their own counters here.
@@ -559,7 +559,7 @@ index 42e9ed907..1ee59c1e5 100644
 +    (*calls)++;
 +}
 +
-+// Same as _instr_record_dv_phase but ALSO calls the per-flip anchor —
++// Same as _instr_record_dv_phase but ALSO calls the per-flip anchor --
 +// for SDL_DOSVesaDirectPresentFull only. Each PresentFull call counts
 +// as one flip event; sub-ops invoked from within PresentFull (via
 +// internal BankedDosmemput / dosmemput / SDL_memcpy) don't have their
@@ -583,7 +583,7 @@ index 42e9ed907..1ee59c1e5 100644
  {
      SDL_VideoData *vdata = device->internal;
  
-+    // DOSKUTSU patch 0035 (Phase 9 wave 20) — flush instrumentation entry.
++    // DOSKUTSU patch 0035 (Phase 9 wave 20) -- flush instrumentation entry.
 +    // Cache the hint state on first call (default OFF; strict "1" match per
 +    // CLAUDE.md DOSKUTSU env-var convention). Record entry timestamp; the
 +    // total-bracket [_instr_t_entry .. _instr_t_exit] is recorded at every
@@ -619,7 +619,7 @@ index 42e9ed907..1ee59c1e5 100644
              if (pal && pal->version != vdata->palette_version) {
                  vdata->palette_version = pal->version;
 +                // DOSKUTSU patch 0035 (wave 20): bracket the ProgramVGADAC
-+                // call. Lever C looks at this stat — if palette_dac fires
++                // call. Lever C looks at this stat -- if palette_dac fires
 +                // every flip when it should only fire on actual palette
 +                // changes, the bug is upstream of this gate.
 +                const Uint64 _instr_pal_a =
@@ -637,7 +637,7 @@ index 42e9ed907..1ee59c1e5 100644
 +        // DOSKUTSU patch 0035 (wave 20): start of the dosmemput / VRAM-
 +        // write block. Whether the path below resolves to LFB SDL_memcpy
 +        // or banked dosmemput / BankedDosmemput, we time the whole block
-+        // as one "dosmemput" sample — that's the time spent moving 76800
++        // as one "dosmemput" sample -- that's the time spent moving 76800
 +        // bytes into VRAM, the slice we already characterized as ~4 ms on
 +        // real HW (wave 19 probe).
 +        const Uint64 _instr_dos_a =
@@ -652,7 +652,7 @@ index 42e9ed907..1ee59c1e5 100644
 +        // DOSKUTSU patch 0035 (wave 20): close the dosmemput bracket.
 +        // Both LFB and banked branches above flow here; the sample
 +        // captures whichever branch ran. This is narrower than patch
-+        // 0015's t1→t2 (which also includes the palette update); the
++        // 0015's t1->t2 (which also includes the palette update); the
 +        // narrower bracket is what Lever A needs to disambiguate VRAM-
 +        // write cost from the misc slice.
 +        if (_instr_enabled_cached) {
@@ -662,8 +662,8 @@ index 42e9ed907..1ee59c1e5 100644
 +        }
 +
          // DOSKUTSU patch 0015 timing point t2: VRAM-copy block done.
-         // Bracket [_ts_t1 .. _ts_t2] covers the system-RAM → VRAM blit.
-         // Expected: 153,600 bytes (320×240×16bpp) at PCI write-combining
+         // Bracket [_ts_t1 .. _ts_t2] covers the system-RAM -> VRAM blit.
+         // Expected: 153,600 bytes (320x240x16bpp) at PCI write-combining
 @@ -1595,6 +1989,9 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
              _tb_dpmi_min_us = _tb_copy_min_us = _tb_post_min_us = _tb_total_min_us = 0xFFFFFFFF;
          }
@@ -688,13 +688,13 @@ index 42e9ed907..1ee59c1e5 100644
              cur = cur->animation->frames[cur->animation->current_frame];
          }
          if (mouse && mouse->internal && !mouse->relative_mode && mouse->cursor_visible && cur && cur->internal) {
-+            // DOSKUTSU patch 0035 (wave 20): Lever D scout — count entry
++            // DOSKUTSU patch 0035 (wave 20): Lever D scout -- count entry
 +            // into the cursor-composite block. Cave Story / NXEngine-evo
 +            // hide the system cursor (SDL_HideCursor in Renderer init), so
 +            // the expected baseline on doskutsu is 0/100. Non-zero would
 +            // indicate the engine isn't successfully suppressing the
 +            // cursor, and the composite is paying its setup cost per
-+            // flip — that'd be a useful slice to attack.
++            // flip -- that'd be a useful slice to attack.
 +            if (_instr_enabled_cached) {
 +                _instr_cursor_calls_block++;
 +            }
@@ -734,7 +734,7 @@ index 42e9ed907..1ee59c1e5 100644
              cur = cur->animation->frames[cur->animation->current_frame];
          }
          if (mouse && mouse->internal && !mouse->relative_mode && mouse->cursor_visible && cur && cur->internal) {
-+            // DOSKUTSU patch 0035 (wave 20): Lever D scout — count entry
++            // DOSKUTSU patch 0035 (wave 20): Lever D scout -- count entry
 +            // into the LFB-branch cursor-composite block. Mirrors the
 +            // banked-branch counter increment above; same semantics
 +            // (expected baseline 0/100 on doskutsu).
@@ -828,7 +828,7 @@ index 42e9ed907..1ee59c1e5 100644
      SDL_zerop(out);
 @@ -1939,6 +2410,10 @@ bool SDL_DOSVesaDirectGetState(SDL_DOSVesaDirectState *out)
      // This mirrors the guard in DOSVESA_UpdateWindowFramebuffer's fast-path
-     // dispatch — same predicate keeps the two layers in sync.
+     // dispatch -- same predicate keeps the two layers in sync.
      if (!fb_state.direct_fb || (!fb_state.vram_ptr && !fb_state.vram_phys)) {
 +        _instr_record_dv_phase(_instr_dv_get_state_samples,
 +                               &_instr_dv_get_state_n,
@@ -877,7 +877,7 @@ index 42e9ed907..1ee59c1e5 100644
      }
      if (!st->win_gran_bytes || !st->win_size_bytes) {
          // Defensive: a banked snapshot with zero window granularity is
-         // a corrupt populate (shouldn't happen — populate gates on
+         // a corrupt populate (shouldn't happen -- populate gates on
          // win_a_segment + win_size > 0 before setting use_dosmemput).
 +        _instr_record_dv_phase(_instr_dv_banked_flush_samples,
 +                               &_instr_dv_banked_flush_n,
@@ -900,8 +900,8 @@ index 42e9ed907..1ee59c1e5 100644
  {
 +    // DOSKUTSU patch 0035 (wave 20): wrap entire body for direct-VESA
 +    // program_palette phase timing. Same `palette_dac` cost shape as
-+    // the slow-path uwfb-stat::palette_dac bucket — the body is
-+    // identical (both call ProgramVGADAC) — but kept in a separate
++    // the slow-path uwfb-stat::palette_dac bucket -- the body is
++    // identical (both call ProgramVGADAC) -- but kept in a separate
 +    // bucket here so the operator can correlate which path actually
 +    // fired which call (slow path's palette_dac counter vs fast
 +    // path's program_palette counter).
@@ -930,7 +930,7 @@ index 42e9ed907..1ee59c1e5 100644
                                     const void *pixels)
  {
 +    // DOSKUTSU patch 0035 (wave 20): wrap entire body. PresentFull is
-+    // the per-flip anchor on the fast path — _instr_record_dv_present_at_exit
++    // the per-flip anchor on the fast path -- _instr_record_dv_present_at_exit
 +    // bumps the block-events counter and triggers _instr_emit_block when
 +    // 100 anchors have fired. Sub-ops (internal SDL_memcpy / dosmemput /
 +    // BankedDosmemput) are accounted as part of this single sample;
@@ -946,7 +946,7 @@ index 42e9ed907..1ee59c1e5 100644
          return false;
      }
      if (!st->pitches_match) {
-         // Convenience path requires pitches_match — the per-row case is
+         // Convenience path requires pitches_match -- the per-row case is
          // an engine concern (different stride means the engine must
          // walk rows itself). Documented in the header.
 +        _instr_record_dv_present_at_exit(_instr_t_entry);

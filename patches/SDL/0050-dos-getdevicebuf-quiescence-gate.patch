@@ -13,7 +13,7 @@ IRQ-5 cleanly on operator's SB16-PnP CTL0026 + DSP v4.13) but in-
 gameplay yield = 0.26 ms / flip because the DAC ring is continuously
 filled and never drains long enough for auto-engage to fire.
 
-Root cause: SDL3's PlaybackAudioThread runs Iterate→WaitDevice
+Root cause: SDL3's PlaybackAudioThread runs Iterate->WaitDevice
 continuously. DOSSOUNDBLASTER_GetDeviceBuf returns the staging buffer
 unconditionally; SDL_audio.c:1230 falls into SDL_memset silence-fill
 when no streams have data; PlayDevice writes silence to the SB16 ring;
@@ -21,7 +21,7 @@ ring stays full; ISR drains chunk by chunk; auto-engage silent-IRQ
 counter never crosses threshold; DSP never pauses.
 
 Fix: GetDeviceBuf walks device->logical_devices->bound_streams calling
-SDL_GetAudioStreamAvailable on each. If all return 0 → set
+SDL_GetAudioStreamAvailable on each. If all return 0 -> set
 *buffer_size = 0 + SDL_Delay(10). Audio thread's SDL_PlaybackAudioThreadIterate
 at SDL_audio.c:1189 enters the "abandon iteration" branch, skips
 PlayDevice. Ring drains via IRQ; 4 silent IRQs trip auto-engage; DSP
@@ -42,7 +42,7 @@ match per CLAUDE.md env-var convention. Cached at module scope; resolved
 once at OpenDevice time to avoid SDL_GetHint per-call cost in hot path.
 
 Killswitch motivation per team-lead's iter L dispatch: PLAY1 (treatment,
-gate active default) − PLAY2 (control, gate killswitched) = within-iter
+gate active default) - PLAY2 (control, gate killswitched) = within-iter
 SDL/0050 isolation signal. Without env-var killswitch, both PLAYs would
 have identical audio config; cross-iter comparison vs iter K would
 absorb any drift. The env var enables clean within-iter measurement.
@@ -51,18 +51,18 @@ Mirrors SDL3's existing SDL_AudioGetDeviceBuf_Default WASAPI pattern at
 SDL_audio.c:867 (buffer_size=0 = "skip iteration"). Pattern is
 well-tested upstream; this patch extends it to the DOS backend.
 
-Resume: when engine fires SFX trigger → mixer queues data into a stream
-→ next GetDeviceBuf finds available > 0 → returns staging_buffer
-normally → PlayDevice's auto-resume gate (line ~828) detects DSP paused
-+ !g_dos_audio_force_dsp_pause → 0xD6 sent → DSP resumes → IRQ-5
-resumes → SFX plays. Latency: <1 audio thread iter cycle.
+Resume: when engine fires SFX trigger -> mixer queues data into a stream
+-> next GetDeviceBuf finds available > 0 -> returns staging_buffer
+normally -> PlayDevice's auto-resume gate (line ~828) detects DSP paused
++ !g_dos_audio_force_dsp_pause -> 0xD6 sent -> DSP resumes -> IRQ-5
+resumes -> SFX plays. Latency: <1 audio thread iter cycle.
 
-Hot-path cost: walking bound_streams ≈ sub-µs per check on Cave Story
+Hot-path cost: walking bound_streams ~ sub-us per check on Cave Story
 (1-2 typical bound streams). The SDL_Delay(10) only fires on the
 quiescent path (no streams have data); during normal mixing the gate
 returns staging_buffer immediately.
 
-Edge case — Tier-1 Organya path uses MIX_HookMusic (callback). Mixer
+Edge case -- Tier-1 Organya path uses MIX_HookMusic (callback). Mixer
 queues hook output to a stream so the gate sees available > 0 and falls
 through to default path. Phase-10 OPL3 default null-hooks MIX_HookMusic
 so SB16 sees no callback path; gate engages cleanly during silent
@@ -138,7 +138,7 @@ index b6cd35b3d..e41b4d79a 100644
 +        } else {
 +            doskutsu_dbg_log("audio: SDL/0050 quiescence gate active (default); "
 +                             "GetDeviceBuf returns *buffer_size=0 when no streams "
-+                             "have data → auto-engage path can fire on silent gameplay");
++                             "have data -> auto-engage path can fire on silent gameplay");
 +        }
 +    }
 +
@@ -160,7 +160,7 @@ index b6cd35b3d..e41b4d79a 100644
 +       PlayDevice call entirely.
 +
 +       Mechanism + motivation per docs/PHASE12-PIXTONE-DECOUPLE-DESIGN.md:
-+       SDL3's audio thread runs Iterate→WaitDevice continuously, filling the
++       SDL3's audio thread runs Iterate->WaitDevice continuously, filling the
 +       SB16 ring with silence (SDL_audio.c:1230 SDL_memset fallback) when no
 +       streams have data. Ring stays full; ISR keeps draining; auto-engage
 +       silent-IRQ counter never crosses threshold; idle-pause never fires.
@@ -168,14 +168,14 @@ index b6cd35b3d..e41b4d79a 100644
 +       Iter K IDLEPROB v2 confirmed slot 0048 mechanism works (DSP 0xD5 halts
 +       IRQ-5 cleanly) but in-gameplay yield = 0.26 ms because the ring stayed
 +       continuously filled. This patch is the missing piece: when audio
-+       quiescent, GetDeviceBuf returns buffer_size=0 → audio thread skips
-+       PlayDevice → ring drains via IRQ → 4 silent IRQs trip auto-engage →
-+       DSP pause → IRQ-5 stops → fps recovered.
++       quiescent, GetDeviceBuf returns buffer_size=0 -> audio thread skips
++       PlayDevice -> ring drains via IRQ -> 4 silent IRQs trip auto-engage ->
++       DSP pause -> IRQ-5 stops -> fps recovered.
 +
 +       Killswitch: SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0 disables
 +       the gate (returns staging_buffer unconditionally; pre-0050 behavior).
 +       Iter L PLAY2 (control) sets this env var; PLAY1 (treatment) leaves
-+       unset. Within-iter PLAY1−PLAY2 = SDL/0050 isolation signal.
++       unset. Within-iter PLAY1-PLAY2 = SDL/0050 isolation signal.
 +
 +       The SDL_Delay(10) inside the gate path throttles audio thread to
 +       ~100 iter/sec when quiescent, preventing CPU spin under cooperative
@@ -196,7 +196,7 @@ index b6cd35b3d..e41b4d79a 100644
 +        }
 +        if (!any_data) {
 +            *buffer_size = 0;  /* skip this iteration; audio thread does
-+                                  GetDeviceBuf → buffer_size==0 → return
++                                  GetDeviceBuf -> buffer_size==0 -> return
 +                                  without calling PlayDevice */
 +            SDL_Delay(10);      /* throttle audio thread to ~100 iter/sec
 +                                   when quiescent. Prevents CPU spin when
@@ -208,8 +208,8 @@ index b6cd35b3d..e41b4d79a 100644
 +    }
 +
 +    /* Default path: at least one bound stream has data (or gate disabled
-+       via killswitch); return staging buffer for normal mix → PlayDevice
-+       → ring write → IRQ drain. */
++       via killswitch); return staging buffer for normal mix -> PlayDevice
++       -> ring write -> IRQ drain. */
      return hidden->staging_buffer;
  }
  

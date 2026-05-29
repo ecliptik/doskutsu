@@ -14,7 +14,7 @@ dependency that the original 0080 carried. The cache logic is
 unchanged; this version uses the bare _record_dirty_rect signature.
 
 The wave-17.1 callsite-attribution investigation served its purpose
-(found that no single callsite records a >50%-screen rect — the
+(found that no single callsite records a >50%-screen rect -- the
 coalesce cap-and-collapse merges ~80 small bg-tile rects every frame)
 and has been removed (patch 0079 dropped). This patch keeps the lever
 that came out of that investigation: replace map_draw_backdrop's
@@ -33,7 +33,7 @@ Subsequent frames hit the cache.
 For BK_FIXED scenes (intro cutscene curmap=72, static-bg game scenes)
 parscroll is always 0,0 so the cache hits 100% after the first render.
 For BK_PARALLAX / BK_FOLLOWFG, the cache hits whenever scrolling is
-paused (player not moving) and misses when it's active — but a miss
+paused (player not moving) and misses when it's active -- but a miss
 still runs the same tile count as today (just into the cache instead
 of the window) plus one final cache-to-window blit, so the miss path
 is no worse than baseline. Cache hit beats baseline by ~80x on
@@ -72,13 +72,13 @@ index 78d3d62..3f15ff7 100644
  
 +// DOS-PORT (patch 0080, Phase 9 wave 17.2): cached-backdrop blit. See
 +// Renderer.h for the contract. Single same-format SDL_BlitSurface
-+// followed by ONE _record_dirty_rect call — replaces the ~80
++// followed by ONE _record_dirty_rect call -- replaces the ~80
 +// drawSurface tile-loop emitted from map_draw_backdrop on every frame
 +// before patch 0080. The dirty rect IS the whole screen (the bg layer
-+// is unconditionally repainted), but the per-call overhead drops N→1.
++// is unconditionally repainted), but the per-call overhead drops N->1.
 +bool Renderer::drawCachedBackdrop(SDL_Surface *src)
 +{
-+  _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
++  _DrawcallTimer _dct;  // patch 0060 -- phase timing accumulator
 +  if (!src || !_cached_window_surface) return false;
 +  if (src->format != _cached_window_surface->format) return false;
 +  if (src->w != _cached_window_surface->w ||
@@ -92,7 +92,7 @@ index 78d3d62..3f15ff7 100644
 +    _renderer_queue_dirty = false;
 +  }
 +
-+  // Same-format INDEX8→INDEX8 (or RGB565→RGB565) → SDL_BlitSurface
++  // Same-format INDEX8->INDEX8 (or RGB565->RGB565) -> SDL_BlitSurface
 +  // resolves to a per-row memcpy. Source has no colorkey on the cache
 +  // path (caller pre-cleared the cache surface and rendered tiles into
 +  // it; the result is opaque coverage).
@@ -110,7 +110,7 @@ index 78d3d62..3f15ff7 100644
 +
  void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
  {
-   _DrawcallTimer _dct;  // patch 0060 — phase timing accumulator
+   _DrawcallTimer _dct;  // patch 0060 -- phase timing accumulator
 diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
 index c5fbd6d..523cf7b 100644
 --- a/src/graphics/Renderer.h
@@ -163,16 +163,16 @@ index f17bb44..fb9ce37 100644
 +// indexed-mode), we skip the tile loop entirely and blit the cache to
 +// the window in a single drawSurface-equivalent call (Renderer::
 +// drawCachedBackdrop, patch 0080). On miss, we render tiles INTO the
-+// cache surface (via raw SDL_BlitSurface — no Renderer overhead) and
-+// then blit cache → window. Subsequent frames hit the cache.
++// cache surface (via raw SDL_BlitSurface -- no Renderer overhead) and
++// then blit cache -> window. Subsequent frames hit the cache.
 +//
 +// Wave-17.1 root cause this addresses: the per-frame ~80 drawSurface
 +// tile-loop emits ~80 _record_dirty_rect calls whose union collapses
 +// (via DIRTY_RECTS_MAX=16's cap-and-collapse step) into a single
 +// screen-spanning bounding box every frame, tripping the dirty-path
 +// threshold check so dirty_path_taken stays at 0. With a single
-+// drawcall per frame the dirty rect is still full-screen — that
-+// doesn't fix dirty-path engagement — but the per-call accounting
++// drawcall per frame the dirty rect is still full-screen -- that
++// doesn't fix dirty-path engagement -- but the per-call accounting
 +// overhead AND the bg-layer drawcall count drop ~80x.
 +//
 +// Killswitch: SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0 disables. Default ON.
@@ -237,7 +237,7 @@ index f17bb44..fb9ce37 100644
 +  // The tile-loop below is unchanged, but on a cache HIT we skip it
 +  // entirely and blit the pre-rendered cache to the window. On a MISS
 +  // we render the tile loop INTO the cache surface (raw SDL_BlitSurface
-+  // — no Renderer overhead) and then blit cache → window. The cache
++  // -- no Renderer overhead) and then blit cache -> window. The cache
 +  // key invalidates on map / backdrop / scrolltype / parscroll / format
 +  // / indexed-mode change. Disabling via SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0
 +  // falls through to the original tile-loop path.
@@ -250,7 +250,7 @@ index f17bb44..fb9ce37 100644
 +    SDL_Surface *bg_src = backdrop[map.backdrop]->surfaceCpu();
 +    if (bg_src && bg_src->format == win->format)
 +    {
-+      // Cache key match check — if all dimensions/keys agree, single blit.
++      // Cache key match check -- if all dimensions/keys agree, single blit.
 +      const bool cache_hit =
 +          g_backdrop_cache_sfc &&
 +          g_backdrop_cache_curmap     == game.curmap &&
@@ -268,7 +268,7 @@ index f17bb44..fb9ce37 100644
 +        return;  // single drawcall + dirty rect recorded; done.
 +      }
 +
-+      // MISS — (re)allocate cache surface if dims/format changed.
++      // MISS -- (re)allocate cache surface if dims/format changed.
 +      if (!g_backdrop_cache_sfc ||
 +          g_backdrop_cache_w != win->w ||
 +          g_backdrop_cache_h != win->h ||
@@ -293,7 +293,7 @@ index f17bb44..fb9ce37 100644
 +
 +      if (g_backdrop_cache_sfc)
 +      {
-+        // Render tiles directly into the cache surface — same loop
++        // Render tiles directly into the cache surface -- same loop
 +        // structure as below, but SDL_BlitSurface (raw, no Renderer
 +        // overhead, no per-call dirty-rect record). Bg sources have
 +        // no colorkey for the cacheable scrolltypes hit here so a
@@ -325,7 +325,7 @@ index f17bb44..fb9ce37 100644
 +          return;
 +        }
 +        // Else fall through to the live tile loop (cache blit failed
-+        // — invalidate key so we don't claim a hit next frame).
++        // -- invalidate key so we don't claim a hit next frame).
 +        g_backdrop_cache_curmap = -1;
 +      }
 +    }

@@ -11,42 +11,42 @@ Content-Transfer-Encoding: 8bit
 Pairs with SDL-side patch 0023 (which defines the externs this engine
 patch consumes). Wave 13.6 introduced a keyboard regression on PODP
 5V83 (frozen kbd, 8042 buffer-overflow beep) when ring_chunks was
-bumped 4→16 to fix audio chop. This patch makes that regression
+bumped 4->16 to fix audio chop. This patch makes that regression
 bisectable in a single CF-card swap by surfacing the relevant runtime
 state in DEBUG.LOG.
 
 Changes:
 
-1. Renderer.cpp::_maybe_flush_phase_timing_audit() — second LOG_INFO
+1. Renderer.cpp::_maybe_flush_phase_timing_audit() -- second LOG_INFO
    line "kbd/audio block N: kbd_irq=X kbd_drain=Y ring_chunks=Z"
    immediately after the existing phase-timing line. Same block index
    so the two lines correlate via grep. Adding three more fields to
    the existing 11-line LOG_INFO would be unreadable; a separate line
    is materially easier to diff between bisect runs. The kbd counters
-   are MONOTONIC (only increment, never reset) — user reads deltas
+   are MONOTONIC (only increment, never reset) -- user reads deltas
    between consecutive blocks. Per 100 flips so cost is negligible.
 
-2. SoundManager.cpp::init() — wave-13.6.1 init banner "ring_chunks=N
+2. SoundManager.cpp::init() -- wave-13.6.1 init banner "ring_chunks=N
    FORCE_PUMP_YIELD=on/off" placed AFTER MIX_CreateMixerDevice
    succeeds.
 
-§5 Option A vs B decision:
+sec.5 Option A vs B decision:
 
-   Spec §5 placed the init banner at end of Renderer::initVideo, but
+   Spec sec.5 placed the init banner at end of Renderer::initVideo, but
    in this codebase Renderer::init runs BEFORE SoundManager::init
    (vendor/nxengine-evo/src/main.cpp lines 482 vs 510). The
    doskutsu_audio_ring_chunks_active symbol is set inside
-   DOSSOUNDBLASTER_OpenDevice → resolve_ring_chunks(), which doesn't
+   DOSSOUNDBLASTER_OpenDevice -> resolve_ring_chunks(), which doesn't
    run until MIX_CreateMixerDevice fires inside SoundManager::init().
    Logging from Renderer::initVideo would always read the initializer
-   value 16 regardless of env-var setting — silently misleading.
+   value 16 regardless of env-var setting -- silently misleading.
 
    Chose Option A (move the banner to SoundManager.cpp, after
    MIX_CreateMixerDevice success) over Option B (log the env var as
    set/unset directly via SDL_getenv) because Option A preserves
    single-source-of-truth: the SDL-side resolver normalizes garbage
    inputs (foo, empty, 0, 32) to 16, while SDL_getenv would log the
-   literal string "foo" — misleading. Banner now logically sits in
+   literal string "foo" -- misleading. Banner now logically sits in
    the audio init path where it belongs (it's an audio-system
    runtime knob).
 
@@ -66,7 +66,7 @@ Externs:
    are UB.
 
 Default behaviour unchanged from wave 13.6 (ring_chunks=16) when no
-env vars are set. See docs/PHASE9-WAVE-14-PLAN.md §2.
+env vars are set. See docs/PHASE9-WAVE-14-PLAN.md sec.2.
 
 Co-Authored-By: Claude Code
 ---
@@ -116,7 +116,7 @@ index fd270a9..34b59c4 100644
 +  // pump drain). ring_chunks resolved in SDL_dosaudio_sb.c on first
 +  // OpenDevice. Externs declared at namespace scope just above; see
 +  // their comment block for the linkage rationale. The kbd counters
-+  // are MONOTONIC across the run (never reset) — read deltas between
++  // are MONOTONIC across the run (never reset) -- read deltas between
 +  // consecutive blocks.
 +  LOG_INFO("kbd/audio block {}: kbd_irq={} kbd_drain={} ring_chunks={}",
 +           _dc_block_idx,
@@ -157,8 +157,8 @@ index d5fb824..3191cc6 100644
 +  // banner so DEBUG.LOG records which ring-chunks value and yield mode a
 +  // given iter ran with. ring_chunks is sourced from SDL_dosaudio_sb.c's
 +  // resolve_ring_chunks() via the extern declared at namespace scope
-+  // above — single source of truth. Placed here (NOT in Renderer::
-+  // initVideo as the original spec §5 suggested) because in this code-
++  // above -- single source of truth. Placed here (NOT in Renderer::
++  // initVideo as the original spec sec.5 suggested) because in this code-
 +  // base Renderer::init runs BEFORE SoundManager::init (see vendor/
 +  // nxengine-evo/src/main.cpp lines 482 vs 510), so logging from init-
 +  // Video would always read the initializer value 16 regardless of
@@ -175,7 +175,7 @@ index d5fb824..3191cc6 100644
 +             yield_forced ? "on" : "off");
 +  }
 +
-   // DOS-PORT: Mix_AllocateChannels(64) is gone in SDL3_mixer — the new
+   // DOS-PORT: Mix_AllocateChannels(64) is gone in SDL3_mixer -- the new
    // API has no fixed channel count. Tracks are created on-demand by
    // Pixtone via MIX_CreateTrack(). The 64-channel cap is preserved by
 -- 

@@ -20,10 +20,10 @@ that dwarfed the bytes-saved win on 2-4 rects. Per-rect flush =
 See memory/wave_17_4_partial_flush_regression.md for the postmortem.
 
 Wave 17.5 pivots: same prev-frame diff (wave 17.4's mechanism was
-correct — memcmp produces real dirty bands), but COLLAPSE the 2-4
+correct -- memcmp produces real dirty bands), but COLLAPSE the 2-4
 rect list to its bounding box and send ONE rect to
 SDL_UpdateWindowSurfaceRects. SDL/0033's per-rect path then issues
-ONE dosmemput per flush — paying the setup cost once and pushing the
+ONE dosmemput per flush -- paying the setup cost once and pushing the
 gap pixels too.
 
 Wave 17.5 trade: bbox area is always >= rect-union area. The gap is
@@ -45,7 +45,7 @@ Renderer.h:
    max(y+h)). Threshold check: when diff is engaged, gate on
    bbox_pixels > 57600 (75%); when not engaged, preserve legacy
    50% gate on rect-union pixels. Partial flush dispatch passes
-    to SDL_UpdateWindowSurfaceRects — single rect, single
+    to SDL_UpdateWindowSurfaceRects -- single rect, single
    dosmemput at SDL/0033's per-rect path. When bbox is empty (screen
    unchanged from prior flush), pass  for a no-op flush
    that still runs SDL palette / cursor plumbing.
@@ -62,17 +62,17 @@ DOSBox-X smoke (binary 87ea2e6a6759, 60s on title, default-ON):
 - Title (curmap=1005): bbox_pct_x10 = 453-466 (45.3-46.6% of screen),
   threshold exceeded 0 / 100. Partial path 100% engaged.
 - bbox-vs-dirty gap on title is only 2-4% (rects are tightly packed
-  in a single parallax band — bbox is nearly optimal).
+  in a single parallax band -- bbox is nearly optimal).
 
 Real-HW prediction (per memory/perf_predictions_unreliable.md
-honest variance: 5-30× off):
+honest variance: 5-30x off):
 
 - Wave 17.4 PLAY1: 18.5 fps. Per-rect flush 32.6 ms.
 - Wave 17.5 prediction: ONE dosmemput pushing ~46% of screen + setup
-  cost ≈ 8 + 4 = 12 ms flush. Total flip 12 + 21 (other phases) =
-  ~33 ms → ~30 fps title.
+  cost ~ 8 + 4 = 12 ms flush. Total flip 12 + 21 (other phases) =
+  ~33 ms -> ~30 fps title.
 - Honest range: 0 fps gain (cost model still wrong) to +5 fps title
-  (25.7 → 30.7).
+  (25.7 -> 30.7).
 
 Worst case: bbox always exceeds 75%, threshold trips every frame,
 falls back to full flush. fps lands at ~24.5-25.0 (slight regression
@@ -80,7 +80,7 @@ from baseline because of the wasted diff CPU). DOSBox-X smoke shows
 this WON'T happen on title (max bbox observed 46.6% < 75%).
 
 Killswitch: SDL_HINT_DOSKUTSU_PREVFRAME_DIFF=0 still disables the
-entire diff+bbox path → falls back to full flush (wave-17.3
+entire diff+bbox path -> falls back to full flush (wave-17.3
 equivalent). No new env var needed.
 
 No SDL-side changes. SDL/0033 already handles single-rect dispatch
@@ -105,14 +105,14 @@ index 9bc152c..fa5216a 100644
 +  // regressed -7.1 fps on real HW because each dosmemput carries a
 +  // DPMI thunk + bank-switch setup cost (~3-5 ms / call) that dwarfed
 +  // the bytes-saved win on 2-4 rects per flush. Wave 17.5 sends ONE
-+  // bbox-rect to SDL_UpdateWindowSurfaceRects → single dosmemput per
++  // bbox-rect to SDL_UpdateWindowSurfaceRects -> single dosmemput per
 +  // flush via SDL/0033's per-rect path, paying the setup cost once
 +  // and pushing the gap pixels too.
 +  //
 +  // For the non-diff path (_prev_diff_engaged==false), _dirty_rects
-+  // already contains whatever the drawcall tracker produced — usually
++  // already contains whatever the drawcall tracker produced -- usually
 +  // a screen-spanning bounding box from the wave-15 coalesce. Computing
-+  // the bbox of that is a no-op (single rect → identical bbox).
++  // the bbox of that is a no-op (single rect -> identical bbox).
 +  SDL_Rect bbox = {0, 0, 0, 0};
 +  int bbox_pixels = 0;
 +  if (!_dirty_rects.empty())
@@ -164,8 +164,8 @@ index 9bc152c..fa5216a 100644
      }
 -    ok = SDL_UpdateWindowSurfaceRects(_window, _dirty_rects.data(),
 -                                      (int)_dirty_rects.size());
-+    // DOS-PORT (patch 0084, Phase 9 wave 17.5): pass &bbox, 1 — single
-+    // bbox rect → SDL/0033 per-rect path → ONE dosmemput per flush.
++    // DOS-PORT (patch 0084, Phase 9 wave 17.5): pass &bbox, 1 -- single
++    // bbox rect -> SDL/0033 per-rect path -> ONE dosmemput per flush.
 +    // For the non-diff path, _dirty_rects has at most one rect anyway
 +    // (the drawcall-coalesced screen-spanning bbox); &bbox, 1 produces
 +    // the same bytes-pushed as the prior &_dirty_rects.data(), N call
@@ -177,7 +177,7 @@ index 9bc152c..fa5216a 100644
 +    }
 +    else
 +    {
-+      // Empty diff (screen unchanged) — call with 0 rects. SDL3-DOS
++      // Empty diff (screen unchanged) -- call with 0 rects. SDL3-DOS
 +      // still runs palette / cursor plumbing without any dosmemput.
 +      ok = SDL_UpdateWindowSurfaceRects(_window, NULL, 0);
 +    }
@@ -203,14 +203,14 @@ index 9bc152c..fa5216a 100644
 +      //               big bands, higher = more fragmented dirty regions)
 +      //   dirty_pct_x10 = avg permille rect-union area during diff-
 +      //                   engaged flips
-+      //   bbox_pct_x10 = avg permille bbox area (≥ dirty_pct_x10)
-+      //   bbox_thresh_exceeded = N/100 — how often bbox > 75% threshold
++      //   bbox_pct_x10 = avg permille bbox area (>= dirty_pct_x10)
++      //   bbox_thresh_exceeded = N/100 -- how often bbox > 75% threshold
 +      //                          tripped a fall-back to full flush
 +      // Wave 17.5 trade: the bbox path sends bbox_pct_x10 / 1000 of the
 +      // screen in ONE dosmemput vs the wave-17.4 per-rect approach which
 +      // sent dirty_pct_x10 / 1000 across 2-4 dosmemputs. Win when the
 +      // gap between dirty rects (bbox - rect-union) is smaller than the
-+      // per-call setup cost × (N-1) extra calls.
++      // per-call setup cost x (N-1) extra calls.
        const int diff_calls = _prev_frame_diff_calls_block;
        const int diff_rects_avg = diff_calls
            ? (_prev_frame_diff_rects_sum_block / diff_calls)
@@ -247,17 +247,17 @@ index 485fadf..d8f742b 100644
 +++ b/src/graphics/Renderer.h
 @@ -229,6 +229,17 @@ class Renderer
      // Threshold at flip(): if sum(rect.w*rect.h) > this many pixels we
-     // fall back to full flush. ~50% of the 320×240 logical screen.
+     // fall back to full flush. ~50% of the 320x240 logical screen.
      static constexpr int DIRTY_THRESHOLD_PIXELS = 38400;
 +    // DOS-PORT (patch 0084, Phase 9 wave 17.5): bbox-flush threshold.
-+    // 75% of screen area (57,600 pixels at 320×240). Wave-17.4's
++    // 75% of screen area (57,600 pixels at 320x240). Wave-17.4's
 +    // per-rect dosmemput approach regressed -7.1 fps real HW because
 +    // each dosmemput carries a DPMI thunk + bank-switch setup cost
 +    // (~3-5 ms / call) that dwarfed the bytes-saved win on 2-4 rects.
-+    // Wave 17.5 collapses the diff rect list to its BBOX → ONE
++    // Wave 17.5 collapses the diff rect list to its BBOX -> ONE
 +    // dosmemput per flush at the cost of pushing pixels in the
 +    // gaps between dirty rects. Threshold raised from 50% to 75%
-+    // because bbox area is always ≥ rect-union area; below 75% the
++    // because bbox area is always >= rect-union area; below 75% the
 +    // bytes-saved-vs-call-overhead trade still wins.
 +    static constexpr int DIRTY_BBOX_THRESHOLD_PIXELS = 57600;
      // First-N-frames force-full count.
@@ -271,13 +271,13 @@ index 485fadf..d8f742b 100644
 +    // for the per-100-flip diagnostic. Pairs with the rect-union
 +    // dirty_pct above so the log can show both "bytes the diff said
 +    // were dirty" (rect-union) and "bytes we actually pushed via
-+    // bbox dosmemput" (bbox area). Bbox area is always ≥ rect-union;
++    // bbox dosmemput" (bbox area). Bbox area is always >= rect-union;
 +    // the gap is the cost we pay for one-call setup at PCI throughput.
 +    int _prev_frame_diff_bbox_pct_x10_sum_block = 0;
 +    int _prev_frame_diff_bbox_threshold_exceeded_block = 0;
  
      // DOS-PORT (patch 0071, Phase 9 wave 15): mark a destination rect as
-     // dirty for the current frame. Clips to the 320×240 logical viewport,
+     // dirty for the current frame. Clips to the 320x240 logical viewport,
 -- 
 2.47.3
 

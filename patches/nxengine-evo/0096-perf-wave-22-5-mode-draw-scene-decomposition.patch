@@ -9,7 +9,7 @@ Content-Transfer-Encoding: 8bit
 
 DOS-PORT (patch 0096, Phase 9 wave 22.5 W22B). Decomposes the wave-22
 W22A2-measured mode_draw_scene = 22.53 ms gameplay (84% of mode_tick
-= THE primary lever per docs/PHASE11-WAVE-22-FINDINGS.md § 10 +
+= THE primary lever per docs/PHASE11-WAVE-22-FINDINGS.md sec. 10 +
 wave-23 candidate-E ranking) into 6 work-type sub-buckets covering
 DrawScene() body at vendor/nxengine-evo/src/game.cpp:489-736.
 
@@ -18,7 +18,7 @@ The wave-22.5 measurement gates wave-23 implementation: dominant
 sub-bucket determines whether wave-23 attacks per-object batching
 (if mds_object_loop dominates), tilemap caching (if mds_tilemap_bg
 + mds_tilemap_fg dominate), or other paths. Per
-perf_predictions_unreliable.md + dosbox_scales_per_code_path.md —
+perf_predictions_unreliable.md + dosbox_scales_per_code_path.md --
 measure first, optimize second. Pre-authoring batching against the
 3-10 ms gain ceiling without knowing path-dominance was the trap
 the wave-22 audit-first discipline was meant to prevent.
@@ -27,24 +27,24 @@ Implementation:
 
 1. **SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR=1** env helper (strict-1,
    default OFF). NEW separate hint from W22A's MODE_TICK_INSTR per
-   contract § 2 — preserves the MODE_*_INSTR family-prefix
-   consistency (FLIP_INSTR → FINE_INSTR → MODE_TICK_INSTR →
+   contract sec. 2 -- preserves the MODE_*_INSTR family-prefix
+   consistency (FLIP_INSTR -> FINE_INSTR -> MODE_TICK_INSTR ->
    MODE_DRAW_SCENE_INSTR makes the layer hierarchy visible in env
    listings) and rejects strict-"1" violation of numeric escalation
    `=2` (one-way door breaking CLAUDE.md convention; same call as
-   W22A § 2). Cached static-const-bool — -O2 hoists per-tick guards.
+   W22A sec. 2). Cached static-const-bool -- -O2 hoists per-tick guards.
 
 2. **6 RAII timer structs** in src/Utils/diagnostic_timers.h,
    mirroring W22A's ModeSimTimer / ModeDrawSceneTimer etc. pattern:
-   - MdsClearTimer            — clearScreen(BLACK) at game.cpp:493
-   - MdsTilemapBgTimer        — map_draw_backdrop + map_draw(false) +
+   - MdsClearTimer            -- clearScreen(BLACK) at game.cpp:493
+   - MdsTilemapBgTimer        -- map_draw_backdrop + map_draw(false) +
                                 tintScreen at game.cpp:496-503
-   - MdsObjectLoopTimer       — the for-loop body at game.cpp:506-710
+   - MdsObjectLoopTimer       -- the for-loop body at game.cpp:506-710
                                 (per-object drawSprite +
                                  drawSpotLight switch over ~200
                                  sprite IDs)
-   - MdsPlayerTimer           — DrawPlayer() at game.cpp:713
-   - MdsTilemapFgTimer        — map_draw(TA_FOREGROUND) +
+   - MdsPlayerTimer           -- DrawPlayer() at game.cpp:713
+   - MdsTilemapFgTimer        -- map_draw(TA_FOREGROUND) +
                                 map_draw_oob() at game.cpp:716-721
    - MdsCaretsWaterFloatsTimer- Carets::DrawAll +
                                 map_drawwaterlevel +
@@ -62,13 +62,13 @@ Implementation:
    - 6 per-tick dt locals (reset at Game::tick entry; written by
      each timer's destructor; consumed by the new residual block)
 
-   Reuses W22A's g_eng_tick_block_size = 100 (per contract § 3 — no
+   Reuses W22A's g_eng_tick_block_size = 100 (per contract sec. 3 -- no
    new block_size constant introduced).
 
 4. **Residual derivation** at end-of-mode-draw-scene scope, gated
    separately from W20B + W22A residual blocks. Reuses W22A's
    g_mt_draw_scene_dt_this_tick (populated by ModeDrawSceneTimer
-   in patch 0095) as the parent total — NO new SDL_GetTicksNS read
+   in patch 0095) as the parent total -- NO new SDL_GetTicksNS read
    at end-of-tick.
 
        _mds_residual = g_mt_draw_scene_dt_this_tick
@@ -81,14 +81,14 @@ Implementation:
    surfaces an unbracketed chunk inside DrawScene() body for
    wave-23 candidate-E refinement.
 
-   CRITICAL PLACEMENT CONSTRAINT (per contract § 4 / § 8 #8 / § 9):
+   CRITICAL PLACEMENT CONSTRAINT (per contract sec. 4 / sec. 8 #8 / sec. 9):
    the residual block lives in `game_tick_normal()` IMMEDIATELY
    AFTER the ModeDrawSceneTimer scope closes (BETWEEN that scope
    close and the ModeDrawHudTimer scope open), NOT at end-of-
    DrawScene() body. Reason: g_mt_draw_scene_dt_this_tick is only
    written by W22A's ModeDrawSceneTimer destructor at scope-exit,
    which fires INSIDE game_tick_normal() around the DrawScene()
-   call — NOT inside DrawScene() body itself. Reading the variable
+   call -- NOT inside DrawScene() body itself. Reading the variable
    inside DrawScene() before the destructor fires would see stale
    data from prior tick. Same trap-and-fix structure as W22A's
    residual reading post-EngineTickTimer.
@@ -98,7 +98,7 @@ Implementation:
    only written when MODE_TICK_INSTR=1 (W22A's gate). With
    MODE_DRAW_SCENE_INSTR=1 but MODE_TICK_INSTR=0, residual
    silently clamps to 0 every tick (sub-bucket samples remain
-   valid). Operator's W22B iter (contract § 6) sets both hints,
+   valid). Operator's W22B iter (contract sec. 6) sets both hints,
    so this is not a real-world issue; documented in BOOT.md.
 
 5. **Audit-flush emission** in _maybe_flush_phase_timing_audit():
@@ -112,21 +112,21 @@ Implementation:
    `engine-tick-stat`, W22A's `mode-tick-stat`) so 4-layer grep
    tooling separates the layers without ambiguity. Empty-block
    placeholder lines (n=0, all numerics 0.00) emitted for the 6
-   sub-buckets with zero firings — critical for W22B1 title menu
+   sub-buckets with zero firings -- critical for W22B1 title menu
    where ALL 6 sub-buckets fire n=0 (title's draw_title doesn't
    enter DrawScene). Residual line ALWAYS emits with sane numbers
    via the emit-gate construction (no placeholder branch needed).
 
-   Order in the log per block: [flip-stat] (W20A) →
-   [engine-tick-stat] (W20B) → [mode-tick-stat] (W22A) →
-   [mode-draw-scene-stat] (W22.5) → counters. Outermost-to-
+   Order in the log per block: [flip-stat] (W20A) ->
+   [engine-tick-stat] (W20B) -> [mode-tick-stat] (W22A) ->
+   [mode-draw-scene-stat] (W22.5) -> counters. Outermost-to-
    innermost decomposition; greppable in priority order.
 
 6. **Same _compute_flip_phase_stats helper** reused (W20A's
    sort/min/med/mean/p95/max/2-decimal infrastructure stays
    layer-agnostic; same _FlipPhaseStats struct). NO fourth-layer
-   copy of the helper — three or four copies would diverge over
-   time per contract § 8 #2.
+   copy of the helper -- three or four copies would diverge over
+   time per contract sec. 8 #2.
 
 7. **Cross-namespace plumbing** mirrors W20B + W22A precedent:
    forward-declared free function NXE::Diag::mode_draw_scene_-
@@ -134,22 +134,22 @@ Implementation:
    instr_active and mode_tick_instr_active in the file-top
    wrapper) with a 1-line definition at file scope after BOTH
    outer NXE::Graphics namespace braces close. Heeds the W20B
-   build-fix amendment (per W22A precedent) — placement at
+   build-fix amendment (per W22A precedent) -- placement at
    "after the anonymous namespace closes but BEFORE the outer
    NXE::Graphics closes" would re-open NXE inside NXE::Graphics,
    producing nested NXE::Graphics::NXE::Diag. File-scope-after-
    both-namespace-closes is the correct placement; same trap,
    same fix.
 
-Bracket-placement decisions vs contract § 1 (transparent flag of
-contract-text-vs-implementation deltas, per silent-narrow rule —
+Bracket-placement decisions vs contract sec. 1 (transparent flag of
+contract-text-vs-implementation deltas, per silent-narrow rule --
 all 3 acked by flush-instr at Task #3-equivalent review):
 
 a. game.cpp:567 `nOnscreenObjects = 0;` falls into mds_residual
-   rather than mds_object_loop. Contract § 1 enumerated "lines
-   506-710 (entire for-loop)" — strictly the for-statement and
+   rather than mds_object_loop. Contract sec. 1 enumerated "lines
+   506-710 (entire for-loop)" -- strictly the for-statement and
    its compound block. The 1-line int assignment immediately
-   preceding is correctly outside scope. Sub-µs work; residual
+   preceding is correctly outside scope. Sub-us work; residual
    absorbs without distorting the headline number. Same pattern
    as W22A's player-init flag at game_tick_normal().
 
@@ -158,31 +158,31 @@ b. game.cpp:552-553 DrawScene function-entry decls (`int scr_x,
    Pure stack allocation + extern decl; near-zero cost. Contract
    didn't enumerate these as a bracket.
 
-c. MdsObjectLoopTimer scope brace style — used a `{ ... }` block
+c. MdsObjectLoopTimer scope brace style -- used a `{ ... }` block
    with internal comment `// end MdsObjectLoopTimer scope` to
    make the closing-brace identity visible, since the for-loop's
    `}` and the timer scope's `}` would otherwise look identical
    at a glance. Preference, not contract item.
 
-Non-coverage (intentional, per contract § 1):
-- Title menu's draw_title() NOT bracketed by W22.5 — title's
+Non-coverage (intentional, per contract sec. 1):
+- Title menu's draw_title() NOT bracketed by W22.5 -- title's
   mode_draw_scene continues as a single number from W22A. Could
   be added later as a parallel mds_title_* scheme if W22B1
   reveals title-side work needs decomposition; not in scope here
   per silent-narrow rule.
 - Within-object-loop sub-decomposition (drawSprite vs
-  drawSpriteClipped vs drawSpotLight switch) NOT bracketed —
+  drawSpriteClipped vs drawSpotLight switch) NOT bracketed --
   wave-23 candidate-E's audit work itself will surface within-
   loop concentration if mds_object_loop dominates >50%.
 - DrawBoundingBoxes (debug-only, off in production) NOT
-  bracketed — falls into mds_residual.
+  bracketed -- falls into mds_residual.
 
 Hot-path cost when MODE_DRAW_SCENE_INSTR unset (mirrors W22A):
 - 6 RAII destructors per DrawScene() invocation (each reads
   SDL_GetTicksNS at construction unconditionally; gating happens
   at destruction).
 - Construction overhead: 6 SDL_GetTicksNS reads per DrawScene
-  (paid only when game_tick_normal runs; 0× cost on title attract
+  (paid only when game_tick_normal runs; 0x cost on title attract
   where DrawScene is never called). Negligible per the W22A
   precedent.
 - ~4.3 KB unused static state.
@@ -194,7 +194,7 @@ MODE_DRAW_SCENE_INSTR entry covering bracket scheme, residual
 semantics + critical placement constraint, empty-block
 placeholder behavior, MODE_TICK_INSTR pairing dependency,
 non-coverage scope, and strict-match convention. BOOT.md is
-gitignored per pre-existing convention (.gitignore:95) —
+gitignored per pre-existing convention (.gitignore:95) --
 internal-only docs that live on-disk for reference, not in the
 public repo. Same situation as W20B's FINE_INSTR + W22A's
 MODE_TICK_INSTR doc trail.
@@ -209,38 +209,38 @@ Test plan (subsequent tasks):
        MODE_DRAW_SCENE_INSTR=1 (full 4-layer; all four layers
        emit per-100-tick blocks).
 - Real-HW iter (realhw Task #6-equivalent): 2-PLAY ablation per
-  contract § 6.
-  - W22B1 — title menu (cross-validates W22A1 numbers stable;
+  contract sec. 6.
+  - W22B1 -- title menu (cross-validates W22A1 numbers stable;
     all 6 mds_* sub-buckets fire n=0)
-  - W22B2 — heavy-music gameplay Mimiga Village outdoor
+  - W22B2 -- heavy-music gameplay Mimiga Village outdoor
     (THE wave-23 candidate-E lever-target case)
 - Analysis (flush-instr Task #8-equivalent): identifies dominant
   mds_* sub-bucket; refines wave-23 candidate-E target scope per
-  findings § 12.
+  findings sec. 12.
 
 References:
   patches/nxengine-evo/0095-perf-wave-22-mode-tick-decomposition.patch
-    (W22A authoring model — same RAII pattern, same accessor
+    (W22A authoring model -- same RAII pattern, same accessor
      wrapper convention, same audit-flush extension shape)
   patches/nxengine-evo/0090-perf-wave-20-w20b-engine-tick-decomposition.patch
     (W20B precedent that W22A built upon)
   patches/nxengine-evo/0087-perf-wave-20-flip-instrumentation.patch
-    (W20A coarse brackets — outermost of the 4-layer
+    (W20A coarse brackets -- outermost of the 4-layer
      instrumentation stack; provides _compute_flip_phase_stats
      reused here)
   vendor/nxengine-evo/src/Utils/diagnostic_timers.h
     (existing AudioMixerTimer + EngineTickTimer + W20B + W22A
      timers + W22.5 6 new MdsClear/TilemapBg/ObjectLoop/Player/
-     TilemapFg/CaretsWaterFloats timers — single header,
+     TilemapFg/CaretsWaterFloats timers -- single header,
      14 timer structs total)
-  docs/PHASE11-WAVE-22-FINDINGS.md § 10
+  docs/PHASE11-WAVE-22-FINDINGS.md sec. 10
     (W22A2 mode_draw_scene = 22.53 ms gameplay = 84% of
-     mode_tick — THE wave-23 lever)
+     mode_tick -- THE wave-23 lever)
   docs/PHASE11-WAVE-22-5-CONTRACT.md (gitignored, on-disk only)
-    § 1 (bracket scheme), § 2 (hint name option B rationale),
-    § 3 (output format), § 4 (storage + residual placement
-    constraint), § 5 (file footprint), § 6 (W22B iter shape),
-    § 8 (anti-patterns), § 9 (acceptance gate satisfied at
+    sec. 1 (bracket scheme), sec. 2 (hint name option B rationale),
+    sec. 3 (output format), sec. 4 (storage + residual placement
+    constraint), sec. 5 (file footprint), sec. 6 (W22B iter shape),
+    sec. 8 (anti-patterns), sec. 9 (acceptance gate satisfied at
     flush-instr review)
   memory/silent_narrow_pattern.md
   memory/patch_cascade_trap.md
@@ -266,18 +266,18 @@ index 56e5507..6adce1b 100644
 +// DOS-PORT (patch 0096, Phase 9 wave 22.5 W22B mode_draw_scene
 +// decomposition): 6 sub-bracket RAII timers + residual derivation.
 +// Decomposes the wave-22 W22A2-measured mode_draw_scene = 22.53 ms
-+// gameplay (84% of mode_tick = THE primary lever per W22A findings § 10
++// gameplay (84% of mode_tick = THE primary lever per W22A findings sec. 10
 +// + wave-23 candidate-E ranking) into 6 work-type sub-buckets covering
 +// `DrawScene()` body at vendor/nxengine-evo/src/game.cpp:489-736.
 +//
-+// The brackets fire only inside `DrawScene()` body — title menu's
++// The brackets fire only inside `DrawScene()` body -- title menu's
 +// `draw_title()` is NOT bracketed by W22.5 (out of scope per contract
-+// § 1; title's mode_draw_scene continues as a single number from W22A).
++// sec. 1; title's mode_draw_scene continues as a single number from W22A).
 +//
 +// Gated on SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR=1 (NEW; option B per
-+// contract § 2 — preserves the MODE_*_INSTR family-prefix consistency
++// contract sec. 2 -- preserves the MODE_*_INSTR family-prefix consistency
 +// from W22A's MODE_TICK_INSTR; rejects strict-"1" violation of numeric
-+// escalation `=2`). Cached static-const-bool — -O2 hoists per-tick
++// escalation `=2`). Cached static-const-bool -- -O2 hoists per-tick
 +// guards.
 +//
 +// Sub-buckets (sibling, non-overlapping inside `DrawScene()` scope):
@@ -297,12 +297,12 @@ index 56e5507..6adce1b 100644
 +// computed in `game_tick_normal()` IMMEDIATELY AFTER the
 +// ModeDrawSceneTimer scope closes (NOT at end-of-DrawScene). Reuses
 +// W22A's `g_mt_draw_scene_dt_this_tick` populated by ModeDrawSceneTimer
-+// in patch 0095 — that local is only written when the W22A timer
++// in patch 0095 -- that local is only written when the W22A timer
 +// destructor fires at scope-exit, which happens INSIDE
 +// game_tick_normal() around the DrawScene() call. Reading the variable
 +// inside DrawScene() before the destructor would see stale data; same
 +// trap as W22A residual reading post-EngineTickTimer (per W22A
-+// contract § 4 / W22B contract § 4 placement rationale).
++// contract sec. 4 / W22B contract sec. 4 placement rationale).
 +//
 +// Self-validation: small mds_residual median (<1 ms) means brackets
 +// are exhaustive. Large mds_residual surfaces an unbracketed chunk
@@ -319,7 +319,7 @@ index 56e5507..6adce1b 100644
 +// Storage: 6 sample arrays + 6 idxes + 6 per-tick dt locals + 1
 +// residual array + 1 residual idx, all extern-declared here, defined
 +// in Renderer.cpp where the audit-flush emission lives. Reuses W22A's
-+// `g_eng_tick_block_size = 100` cadence (per contract § 3 — NO new
++// `g_eng_tick_block_size = 100` cadence (per contract sec. 3 -- NO new
 +// block_size constant introduced).
 +
 +// Forward-declare the env helper. Definition lives in Renderer.cpp's
@@ -330,7 +330,7 @@ index 56e5507..6adce1b 100644
 +
 +// Sample-array storage (extern; defined in Renderer.cpp). Sized at
 +// `g_eng_tick_block_size` (= 100), shared with W20B + W22A per
-+// contract § 3.
++// contract sec. 3.
 +extern std::uint64_t g_mds_clear_samples[g_eng_tick_block_size];
 +extern std::uint64_t g_mds_tilemap_bg_samples[g_eng_tick_block_size];
 +extern std::uint64_t g_mds_object_loop_samples[g_eng_tick_block_size];
@@ -346,7 +346,7 @@ index 56e5507..6adce1b 100644
 +extern int g_mds_carets_water_floats_idx;
 +extern int g_mds_residual_idx;
 +
-+// Per-tick dt locals — written by each timer's destructor, consumed
++// Per-tick dt locals -- written by each timer's destructor, consumed
 +// by the new residual block in game_tick_normal() AFTER the
 +// ModeDrawSceneTimer scope closes. Reset by caller at Game::tick
 +// entry so leftover-from-prior-tick doesn't pollute the residual
@@ -362,7 +362,7 @@ index 56e5507..6adce1b 100644
 +// dt, write to per-tick local, push to sample array (with bounds-
 +// check + env gate). Cost when env unset: 1 SDL_GetTicksNS at
 +// construction (always) + 1 at destruction + 1 branch-on-cached-bool.
-+// Mirrors W22A's `ModeSimTimer` etc. — same pattern, layered
++// Mirrors W22A's `ModeSimTimer` etc. -- same pattern, layered
 +// independently behind the new `mode_draw_scene_instr_active()` gate.
 +struct MdsClearTimer
 +{
@@ -461,7 +461,7 @@ index bf752be..d6320bf 100644
    NXE::Diag::g_mt_post_dt_this_tick        = 0;
 +
 +  // patch 0096 (wave 22.5 W22B): mode_draw_scene sub-bracket per-tick
-+  // dt locals. Same reset rationale as W22A's cluster above —
++  // dt locals. Same reset rationale as W22A's cluster above --
 +  // leftover-from-prior-tick must not pollute the new mode_draw_scene
 +  // residual computation in game_tick_normal() after the
 +  // ModeDrawSceneTimer scope closes. Each MdsClearTimer / MdsTilemap*
@@ -470,7 +470,7 @@ index bf752be..d6320bf 100644
 +  // bucket doesn't fire this tick (e.g. mode_draw_scene_instr unset,
 +  // or the !flipacceltime branch skipped), the local stays at 0 and
 +  // the residual subtraction sees 0 for that bucket. Layered
-+  // independently of W22A — these locals exist whether
++  // independently of W22A -- these locals exist whether
 +  // MODE_DRAW_SCENE_INSTR is set or not (zero cost when unset; storage
 +  // is small).
 +  NXE::Diag::g_mds_clear_dt_this_tick                = 0;
@@ -481,19 +481,19 @@ index bf752be..d6320bf 100644
 +  NXE::Diag::g_mds_carets_water_floats_dt_this_tick  = 0;
    // Capture engine-tick start; used for residual computation at the
    // very end of this function. Duplicates EngineTickTimer's t0 but
-   // EngineTickTimer's destructor fires at scope-exit — we need the
+   // EngineTickTimer's destructor fires at scope-exit -- we need the
 @@ -440,6 +460,47 @@ void game_tick_normal(void)
      DrawScene();
    }
  
 +  // patch 0096 (wave 22.5 W22B): compute mode_draw_scene residual.
-+  // Placement constraint per contract § 4 / § 8 #8 / § 9 — must read
++  // Placement constraint per contract sec. 4 / sec. 8 #8 / sec. 9 -- must read
 +  // g_mt_draw_scene_dt_this_tick AFTER the ModeDrawSceneTimer scope
 +  // above closes (W22A's destructor fires at scope-exit and writes
 +  // the parent total). Reading it inside DrawScene() body would see
 +  // stale data from prior tick.
 +  //
-+  // Reuses W22A's g_mt_draw_scene_dt_this_tick as parent total — NO
++  // Reuses W22A's g_mt_draw_scene_dt_this_tick as parent total -- NO
 +  // new SDL_GetTicksNS read here. Subtract the 6 W22.5 sub-bucket dts
 +  // populated by the MdsClearTimer / MdsTilemapBgTimer / MdsObject-
 +  // LoopTimer / MdsPlayerTimer / MdsTilemapFgTimer /
@@ -511,7 +511,7 @@ index bf752be..d6320bf 100644
 +  // only written when MODE_TICK_INSTR=1 (W22A's gate). With
 +  // MODE_DRAW_SCENE_INSTR=1 but MODE_TICK_INSTR=0, residual silently
 +  // clamps to 0 every tick; sub-bucket samples remain valid. Operator
-+  // W22B iter sets both hints (contract § 6).
++  // W22B iter sets both hints (contract sec. 6).
 +  if (NXE::Diag::mode_draw_scene_instr_active()
 +      && NXE::Diag::g_mds_residual_idx < NXE::Diag::g_eng_tick_block_size)
 +  {
@@ -538,13 +538,13 @@ index bf752be..d6320bf 100644
  
 -  // draw background map tiles
 -  if (!flipacceltime)
-+  // patch 0096 (wave 22.5 W22B): mode_draw_scene decomposition — 6
++  // patch 0096 (wave 22.5 W22B): mode_draw_scene decomposition -- 6
 +  // sub-bracket RAII timers wrapping non-overlapping work types per
-+  // contract § 1. Each bracket scopes one of the per-frame work
++  // contract sec. 1. Each bracket scopes one of the per-frame work
 +  // clusters. The function-entry init lines (491-492 + 506
 +  // nOnscreenObjects=0) and the debug DrawBoundingBoxes at end
-+  // (794-795) fall into mds_residual — sub-µs each; residual stays
-+  // small. Per contract § 8 #8 the residual block lives in
++  // (794-795) fall into mds_residual -- sub-us each; residual stays
++  // small. Per contract sec. 8 #8 the residual block lives in
 +  // game_tick_normal() AFTER the ModeDrawSceneTimer scope closes,
 +  // NOT here at end-of-DrawScene; reading g_mt_draw_scene_dt_this_-
 +  // tick inside DrawScene would see stale data from prior tick.
@@ -609,8 +609,8 @@ index bf752be..d6320bf 100644
 -  // draw carets (always-on-top effects such as boomflash)
 -  Carets::DrawAll();
 +  // draw carets (always-on-top effects such as boomflash) +
-+  // water-level + floats — patch 0096 lumps these 3 into one bracket
-+  // per contract § 1 (mds_carets_water_floats).
++  // water-level + floats -- patch 0096 lumps these 3 into one bracket
++  // per contract sec. 1 (mds_carets_water_floats).
 +  {
 +    NXE::Diag::MdsCaretsWaterFloatsTimer _mcwf;
 +    Carets::DrawAll();
@@ -627,7 +627,7 @@ index bf752be..d6320bf 100644
 +  }
  
 +  // patch 0096: DrawBoundingBoxes (debug-only, off in production
-+  // builds) intentionally NOT bracketed — falls into mds_residual.
++  // builds) intentionally NOT bracketed -- falls into mds_residual.
    if (game.debug.DrawBoundingBoxes)
      DrawBoundingBoxes();
    // if (game.debug.debugmode) DrawAttrPoints();
@@ -646,7 +646,7 @@ index 6a6c1b6..9e19e0f 100644
 +// evo/src/Utils/diagnostic_timers.h; definitions live here alongside
 +// W20B engine_tick + W22A mode_tick storage so audit-flush emits all
 +// 4 layers from a single TU. Reuses W22A's g_eng_tick_block_size =
-+// 100 cadence (per contract § 3).
++// 100 cadence (per contract sec. 3).
 +std::uint64_t g_mds_clear_samples[g_eng_tick_block_size]                 = {};
 +std::uint64_t g_mds_tilemap_bg_samples[g_eng_tick_block_size]            = {};
 +std::uint64_t g_mds_object_loop_samples[g_eng_tick_block_size]           = {};
@@ -692,16 +692,16 @@ index 6a6c1b6..9e19e0f 100644
  
 +// DOS-PORT (patch 0096, Phase 9 wave 22.5 W22B): mode_draw_scene
 +// decomposition brackets opt-in. NEW separate hint from MODE_TICK_INSTR
-+// (option B in docs/PHASE11-WAVE-22-5-CONTRACT.md § 2) — preserves the
++// (option B in docs/PHASE11-WAVE-22-5-CONTRACT.md sec. 2) -- preserves the
 +// MODE_*_INSTR family-prefix consistency from W22A's MODE_TICK_INSTR
-+// (the instrumentation hierarchy reads top-down: FLIP_INSTR → FINE_INSTR
-+// → MODE_TICK_INSTR → MODE_DRAW_SCENE_INSTR). Captures the wave-22
++// (the instrumentation hierarchy reads top-down: FLIP_INSTR -> FINE_INSTR
++// -> MODE_TICK_INSTR -> MODE_DRAW_SCENE_INSTR). Captures the wave-22
 +// W22A2-measured mode_draw_scene = 22.53 ms gameplay (84% of mode_tick
-+// = THE primary wave-23 lever per W22A findings § 10) decomposed into 6
++// = THE primary wave-23 lever per W22A findings sec. 10) decomposed into 6
 +// work-type sub-buckets covering DrawScene() body. Strict "1" match;
-+// default OFF (instrumentation has its own per-tick cost — 6 RAII
++// default OFF (instrumentation has its own per-tick cost -- 6 RAII
 +// destructors per DrawScene + bounds-checked array stores). Cached
-+// static const bool — -O2 hoists per-tick guards.
++// static const bool -- -O2 hoists per-tick guards.
 +inline bool _abl_mode_draw_scene_instr()
 +{
 +  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR");
@@ -718,18 +718,18 @@ index 6a6c1b6..9e19e0f 100644
 +
 +  // patch 0096 (wave 22.5 W22B): mode-draw-scene decomposition emit +
 +  // reset. Gated on MODE_DRAW_SCENE_INSTR (separate from W22A's
-+  // MODE_TICK_INSTR per contract § 2 — independent layer toggle).
++  // MODE_TICK_INSTR per contract sec. 2 -- independent layer toggle).
 +  // 6 sub-bracket stat lines + 1 derived residual line. Output prefix
 +  // `mode-draw-scene-stat` distinct from W20A's `flip-stat`, W20B's
 +  // `engine-tick-stat`, and W22A's `mode-tick-stat` so 4-layer grep
 +  // stays clean.
 +  //
-+  // Per contract § 3, emit block lives AFTER the W22A mode-tick-stat
++  // Per contract sec. 3, emit block lives AFTER the W22A mode-tick-stat
 +  // emission and BEFORE the function closing brace (outermost-to-
-+  // innermost decomposition: flip-stat → engine-tick-stat →
-+  // mode-tick-stat → mode-draw-scene-stat). Empty-block placeholder
++  // innermost decomposition: flip-stat -> engine-tick-stat ->
++  // mode-tick-stat -> mode-draw-scene-stat). Empty-block placeholder
 +  // lines (n=0) emitted for every sub-bucket regardless of activity
-+  // so per-block log shape stays uniform — critical for W22B1 (title
++  // so per-block log shape stays uniform -- critical for W22B1 (title
 +  // menu) where ALL 6 sub-buckets fire n=0 (title's draw_title doesn't
 +  // enter DrawScene). Analysis tooling expects 7 lines per block.
 +  //
@@ -738,7 +738,7 @@ index 6a6c1b6..9e19e0f 100644
 +  // when MODE_DRAW_SCENE_INSTR is active (game.cpp residual block).
 +  // For title menu where mode_draw_scene_dt parent is 0 (W22A's
 +  // ModeDrawSceneTimer never fires inside title's draw_title), the
-+  // residual is signed-math-clamped to 0 every tick — log shows
++  // residual is signed-math-clamped to 0 every tick -- log shows
 +  // n=N, all numerics 0.00. Same shape as W22A's mode_residual on
 +  // empty branches.
 +  if (_abl_mode_draw_scene_instr() && NXE::Diag::g_mds_residual_idx > 0)
@@ -830,7 +830,7 @@ index 6a6c1b6..9e19e0f 100644
 +             n_res, st_res.min_ms, st_res.med_ms, st_res.mean_ms, st_res.p95_ms, st_res.max_ms);
 +  }
 +  // Reset mode-draw-scene sample arrays + idxes regardless of
-+  // MODE_DRAW_SCENE_INSTR state — same pattern as W22A reset cluster.
++  // MODE_DRAW_SCENE_INSTR state -- same pattern as W22A reset cluster.
 +  NXE::Diag::g_mds_clear_idx                = 0;
 +  NXE::Diag::g_mds_tilemap_bg_idx           = 0;
 +  NXE::Diag::g_mds_object_loop_idx          = 0;

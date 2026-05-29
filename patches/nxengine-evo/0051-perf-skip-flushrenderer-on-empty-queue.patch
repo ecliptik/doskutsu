@@ -17,8 +17,8 @@ interleave.
 But on title scene cirrus7 fastpath audit reports ~98.9% of drawcalls
 take the fast path. So the renderer queue is almost always already
 empty when fast path calls FlushRenderer. SDL_FlushRenderer's
-empty-queue early-return at SDL_render.c §343 is cheap, but it's
-still a function-call + parameter validation pass per drawcall ×
+empty-queue early-return at SDL_render.c sec.343 is cheap, but it's
+still a function-call + parameter validation pass per drawcall x
 340/frame.
 
 Fix: track a per-renderer "queue dirty" bit. Set in every slow-path
@@ -43,14 +43,14 @@ Cleared in:
   * Renderer::flushAll   (after SDL_RenderPresent)
   * _try_fast_blit_16x16 (after the conditional SDL_FlushRenderer)
 
-First slow-path → fast-path transition behavior: slow path sets
+First slow-path -> fast-path transition behavior: slow path sets
 dirty=true, fast path on next call sees dirty, performs SDL_Flush-
 Renderer (which empties the queue and lands the slow-path output on
 window->surface), clears dirty=false, then performs its direct write.
 Z-order is preserved exactly as in the unconditional-flush version.
 
-Reverse case (fast-path → slow-path): patch 0048's analysis still
-applies — the slow-path queues a command and the fast-path's prior
+Reverse case (fast-path -> slow-path): patch 0048's analysis still
+applies -- the slow-path queues a command and the fast-path's prior
 direct write is already on window->surface, so when SDL_RenderPresent
 or the next fast-path's flush drains the queue, the slow-path output
 composites on top of the fast-path output exactly as if both went
@@ -59,10 +59,10 @@ through the renderer.
 Smoke-tested under DOSBox-X parity (build/stage runs cleanly, title
 renders correctly, intro scene proceeds, character moves).
 fastpath audit shows the same ~415/2370 ratio as wave 7, so the
-gating logic is unchanged — only the cost-per-fastpath-call is
+gating logic is unchanged -- only the cost-per-fastpath-call is
 reduced.
 
-Expected real-HW saving: ~340 × N µs per frame where N is the per-
+Expected real-HW saving: ~340 x N us per frame where N is the per-
 SDL_FlushRenderer-empty-queue cost on real HW. Combined with patch
 0050's GetWindowSurface-cache, the per-call overhead in the fast
 path drops by both contributors.
@@ -87,7 +87,7 @@ index 7980cae..8d9c52d 100644
    tileset.reload();
    map_flush_graphics();
 @@ -713,6 +715,9 @@ void Renderer::flip()
-   // invalidate the underlying window surface — re-querying once per
+   // invalidate the underlying window surface -- re-querying once per
    // flip is the safe invalidation hook.
    _cached_window_surface = SDL_GetWindowSurface(_window);
 +  // DOS-PORT (patch 0051, Phase 9 wave 8): SDL_RenderPresent
@@ -110,16 +110,16 @@ index 7980cae..8d9c52d 100644
  
 -  // Drain any queued slow-path commands so our overlay lands AFTER
 -  // them. Empty-queue path is essentially free (early-return at
--  // FlushRenderCommands SDL_render.c §343).
+-  // FlushRenderCommands SDL_render.c sec.343).
 -  SDL_FlushRenderer(renderer);
 +  // DOS-PORT (patch 0051, Phase 9 wave 8): drain queued slow-path
-+  // commands so our overlay lands AFTER them — but ONLY when the queue
++  // commands so our overlay lands AFTER them -- but ONLY when the queue
 +  // is actually dirty. Pre-patch we called SDL_FlushRenderer
 +  // unconditionally on every fast-path drawcall; on title scene 98.9%
 +  // of drawcalls take the fast path so the queue is almost always
 +  // already empty. SDL_FlushRenderer's empty-queue early-return at
-+  // SDL_render.c §343 is cheap but not free: still a function call,
-+  // validation pass, etc., per drawcall × 340/frame. The dirty bit is
++  // SDL_render.c sec.343 is cheap but not free: still a function call,
++  // validation pass, etc., per drawcall x 340/frame. The dirty bit is
 +  // set by every slow-path render command (RenderTexture /
 +  // RenderTextureRotated / RenderLine / RenderFillRect /
 +  // RenderFillRects). Cleared here after flush, and again at
@@ -134,8 +134,8 @@ index 7980cae..8d9c52d 100644
    // Pixel pitch in 16-bit elements.
    const int src_pitch_pixels = src_surface->pitch / 2;
 @@ -943,6 +963,7 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
-   // calls in the title scene are 16×16 sprites with alpha=255 and no
-   // scale/clip — those all take the fast path.
+   // calls in the title scene are 16x16 sprites with alpha=255 and no
+   // scale/clip -- those all take the fast path.
    if (_try_fast_blit_16x16(_renderer, _cached_window_surface,
 +                           _renderer_queue_dirty,
                             src, srcx, srcy, srcrect, dstrect))
@@ -145,7 +145,7 @@ index 7980cae..8d9c52d 100644
    {
      _bump_drawcall();
    }
-+  // DOS-PORT (patch 0051): slow-path queued a command — fast path
++  // DOS-PORT (patch 0051): slow-path queued a command -- fast path
 +  // must flush before its next direct surface write.
 +  _renderer_queue_dirty = true;
  }
@@ -171,7 +171,7 @@ index 7980cae..8d9c52d 100644
  }
 @@ -1074,6 +1102,8 @@ void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
    SDL_SetRenderDrawColor(_renderer, color.r, color.g, color.b, SDL_ALPHA_OPAQUE);
-   // SDL3: SDL_RenderDrawLine → SDL_RenderLine, float coords.
+   // SDL3: SDL_RenderDrawLine -> SDL_RenderLine, float coords.
    SDL_RenderLine(_renderer, (float)(x1 * scale), (float)(y1 * scale), (float)(x2 * scale), (float)(y2 * scale));
 +  // DOS-PORT (patch 0051): slow-path queued a command.
 +  _renderer_queue_dirty = true;
@@ -239,7 +239,7 @@ index 26daf9f..1c7ce4c 100644
 +    // SDL_RenderLine / SDL_RenderFillRect / SDL_RenderFillRects call
 +    // site below. Read by _try_fast_blit_16x16: if clean, skip
 +    // SDL_FlushRenderer (the empty-queue call is cheap but still SDL3-
-+    // side function-call + validation overhead per drawcall × 340/
++    // side function-call + validation overhead per drawcall x 340/
 +    // frame). Cleared on flush, and on SDL_RenderPresent (which
 +    // implicitly flushes).
 +    bool _renderer_queue_dirty = false;

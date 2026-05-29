@@ -19,7 +19,7 @@ hardware that invalidate the patch-0044 direct-port default:
    this by not polling, but section-9-style direct-port writes are
    still vulnerable when SDL is concurrently running.
 
-2. **MPU-401 IRQ never fires in UART mode** on this chip — mixer reg
+2. **MPU-401 IRQ never fires in UART mode** on this chip -- mixer reg
    0x82 stayed at 0x30 across 12 byte dispatches. UART output is
    strictly poll-only; specifically poll the DSP write-status (port
    0x22D bit 7) which IS reliable, NOT the MPU status which lies.
@@ -45,18 +45,18 @@ Sequence per Creative SB16 reference + probe-validated:
     which silences MIDI output alongside DAC).
 
 New SB16-backend exports (vendor/SDL/src/audio/dos/SDL_dosaudio_sb.c):
-  - SDL_DOSAudioSB_IsInitialized() — checks soundblaster_base_port
+  - SDL_DOSAudioSB_IsInitialized() -- checks soundblaster_base_port
     >= 0 (i.e., DOSSOUNDBLASTER_OpenDevice ran successfully).
-  - SDL_DOSAudioSB_DSPMidiEnterUART() — calls the existing static
+  - SDL_DOSAudioSB_DSPMidiEnterUART() -- calls the existing static
     WriteSoundBlasterDSP(0x34). The DSP write-status (port 0x22D bit
     7) timeout in WriteSoundBlasterDSP is 100000 iterations and
     reliable per W22-WB-F probe section 10 evidence.
-  - SDL_DOSAudioSB_DSPMidiWriteByte(byte) — issues 0x38 + byte via
+  - SDL_DOSAudioSB_DSPMidiWriteByte(byte) -- issues 0x38 + byte via
     two WriteSoundBlasterDSP calls.
 
 Declarations live in vendor/SDL/src/core/dos/SDL_dos_audio_synth.h
 alongside the existing MPU-401 + OPL3 helper declarations. Engine
-(MidiBackendWaveBlaster) doesn't need changes — it continues calling
+(MidiBackendWaveBlaster) doesn't need changes -- it continues calling
 SDL_DOSMpu401Init / SDL_DOSMpu401WriteByte / SDL_DOSMpu401Shutdown
 unchanged; the path-selection decision lives entirely inside the
 SDL helpers.
@@ -73,7 +73,7 @@ Dispatch logic in SDL_DOSMpu401Init / WriteByte / Shutdown:
 
 WriteByte additionally drops the previous direct-port poll on bit 6
 (DRR) per analysis hard-no #1. Section 9 of the probe demonstrated
-direct-port writes succeed BLIND — no status read needed.
+direct-port writes succeed BLIND -- no status read needed.
 
 Shutdown is a no-op for the DSP-mediated path (the engine's all-
 notes-off MIDI bytes already went through the DSP path before
@@ -85,11 +85,11 @@ Init-order discipline (the analysis's strongest single recommendation,
 hard-no #3): engine must call SDL_DOSMpu401Init AFTER
 SDL_AudioBackend_Init has returned AND after the audio thread has
 serviced at least one frame. We check IsInitialized() as a minimum
-sanity gate; the "≥1 frame serviced" check is intentionally
+sanity gate; the ">=1 frame serviced" check is intentionally
 engine-side because we don't track frame count here. Engine
 (nx-engine MidiBackendWaveBlaster) currently calls Init in its
-constructor which runs after SoundManager::init() completes — that
-satisfies "audio backend open" but not necessarily "≥1 frame
+constructor which runs after SoundManager::init() completes -- that
+satisfies "audio backend open" but not necessarily ">=1 frame
 serviced". If real-HW W22-WB-G iter still hangs at WB init, the
 engine-side init order needs further sequencing (nx-engine's lane).
 
@@ -99,7 +99,7 @@ doskutsu_dbg_log lines:
     entry; set SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=1 to use
     direct-port path instead)"
   - DSP-mediated init aborted (no SB16): "mpu401: DSP-mediated init
-    aborted — SB16 backend not initialized (engine init order bug)..."
+    aborted -- SB16 backend not initialized (engine init order bug)..."
   - Direct-port path: existing 0044 lines preserved.
 
 BOOT.md entry added per env_vars_document_in_user_docs.md:
@@ -148,7 +148,7 @@ index a9430c662..3a38e8ba6 100644
 +   W22-WB-F MPUPROBE forensic analysis (docs/MPUPROBE-W22WB-F-ANALYSIS.md)
 +   showed that direct-port MPU-401 access at port 0x330/0x331 has two
 +   essential issues on real SB16 PnP CTL0026 + DreamBlaster S2:
-+   (a) MPU status bit 7 (TX-READY) never clears — any polling-gated
++   (a) MPU status bit 7 (TX-READY) never clears -- any polling-gated
 +       write hangs indefinitely;
 +   (b) the W22-WB-C/D lockups were SDL-orchestration issues, most
 +       plausibly cross-firmware concurrency between MPU-port access
@@ -173,7 +173,7 @@ index a9430c662..3a38e8ba6 100644
 +   Init precondition (engine's responsibility, not ours): the SB16
 +   audio backend must be open AND the audio playback thread should
 +   have serviced at least one frame. We expose IsInitialized() for
-+   the bare backend-open check; the "≥1 frame serviced" check is
++   the bare backend-open check; the ">=1 frame serviced" check is
 +   intentionally engine-side because we don't track frame count here. */
 +bool SDL_DOSAudioSB_IsInitialized(void)
 +{
@@ -185,7 +185,7 @@ index a9430c662..3a38e8ba6 100644
 +
 +void SDL_DOSAudioSB_DSPMidiEnterUART(void)
 +{
-+    /* No precondition gate — caller (synth.c MPU init) checks
++    /* No precondition gate -- caller (synth.c MPU init) checks
 +       IsInitialized() first. WriteSoundBlasterDSP itself has a
 +       100000-iter timeout on the DSP write-status port (0x22D bit 7)
 +       which is reliable per W22-WB-F probe section 10 evidence. */
@@ -210,10 +210,10 @@ index a5509d3cd..3693d0961 100644
  static int s_mpu401_port_base = -1;
  
 +/* DOSKUTSU patch (Phase 10 patch 0047): dispatch path selector.
-+   true = DSP-mediated MIDI (default) — funnels through SB16 DSP cmd 0x34
++   true = DSP-mediated MIDI (default) -- funnels through SB16 DSP cmd 0x34
 +          + 0x38 via SDL_DOSAudioSB_DSPMidi* helpers (vendor/SDL/src/audio/
 +          dos/SDL_dosaudio_sb.c).
-+   false = direct-port (Option A from analysis) — writes to port_base+0/1
++   false = direct-port (Option A from analysis) -- writes to port_base+0/1
 +           directly. Selected when SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=1.
 +   Per W22-WB-F MPUPROBE forensic analysis (docs/MPUPROBE-W22WB-F-ANALYSIS.md),
 +   DSP-mediated avoids cross-firmware races between MPU-port access and
@@ -245,7 +245,7 @@ index a5509d3cd..3693d0961 100644
 +       to be open. Engine (nx-engine MidiBackendWaveBlaster) is responsible
 +       for calling SDL_DOSMpu401Init AFTER SoundManager::init has run AND
 +       after the audio thread has serviced at least one frame (per
-+       analysis § "Recommendations for sdl-engine SDL/0047 author" hard-no
++       analysis sec. "Recommendations for sdl-engine SDL/0047 author" hard-no
 +       #3). We check IsInitialized() here as a minimum sanity gate. */
 +    const char *direct_env = SDL_getenv("SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT");
 +    const bool use_direct = (direct_env && direct_env[0] == '1' && direct_env[1] == 0);
@@ -253,7 +253,7 @@ index a5509d3cd..3693d0961 100644
 +    if (!use_direct) {
 +        /* === Default path: DSP-mediated MIDI (Option B) === */
 +        if (!SDL_DOSAudioSB_IsInitialized()) {
-+            doskutsu_dbg_log("mpu401: DSP-mediated init aborted — SB16 backend "
++            doskutsu_dbg_log("mpu401: DSP-mediated init aborted -- SB16 backend "
 +                             "not initialized (engine init order bug). Engine "
 +                             "must SDL_AudioBackend_Init before calling "
 +                             "SDL_DOSMpu401Init.");
@@ -291,7 +291,7 @@ index a5509d3cd..3693d0961 100644
 -    const Uint16 base = (Uint16)s_mpu401_port_base;
 -    /* Spin until DRR clear (data ready to receive). On real HW with a
 -       fast wavetable like DreamBlaster S2, this is typically already
--       clear; the spin is sub-µs. */
+-       clear; the spin is sub-us. */
 -    while ((inportb((Uint16)(base + 1)) & 0x40) != 0) {
 -        /* spin */
 +
@@ -301,7 +301,7 @@ index a5509d3cd..3693d0961 100644
 +    if (s_mpu401_use_dsp) {
 +        /* DSP-mediated: WriteSoundBlasterDSP polls DSP write-status
 +           (port 0x22D bit 7) which IS reliable per W22-WB-F probe
-+           section 10. Two DSP writes per MIDI byte; ~µs each. NO
++           section 10. Two DSP writes per MIDI byte; ~us each. NO
 +           polling on the lying MPU status bit 7. */
 +        SDL_DOSAudioSB_DSPMidiWriteByte(byte);
 +        return;
@@ -309,12 +309,12 @@ index a5509d3cd..3693d0961 100644
 +
 +    /* Direct-port path (Option A; legacy 0044 default). Per W22-WB-F
 +       analysis hard-no #1: do NOT poll MPU status bit 7 (TX-READY)
-+       before writing — it never clears on SB16 PnP CTL0026. The
++       before writing -- it never clears on SB16 PnP CTL0026. The
 +       previous implementation's `while ((inportb(base+1) & 0x40) != 0)`
 +       happened to work only because bit 6 (DRR) is a different bit
 +       than bit 7 (TX-READY); but on chips where bit 6 also lies, this
 +       would hang. Removing the poll altogether per analysis Option A
-+       step 5 — "BLIND write; do not poll status". */
++       step 5 -- "BLIND write; do not poll status". */
 +    const Uint16 base = (Uint16)s_mpu401_port_base;
      outportb(base, byte);
  }
@@ -323,13 +323,13 @@ index a5509d3cd..3693d0961 100644
      if (s_mpu401_port_base < 0) {
          return; /* never initialized; nothing to reset */
      }
--    /* Reset to BIOS-default state. Suppress ACK polling on shutdown —
+-    /* Reset to BIOS-default state. Suppress ACK polling on shutdown --
 -       process is exiting; we don't care if reset is acknowledged. */
 -    outportb((Uint16)(s_mpu401_port_base + 1), 0xFF);
 +
 +    /* DOSKUTSU patch (Phase 10 patch 0047): no teardown DSP command
 +       needed for DSP-mediated path. Per W22-WB-F MPUPROBE analysis:
-+       "DSP cmd 0xD3 to disable speaker is sufficient at shutdown" —
++       "DSP cmd 0xD3 to disable speaker is sufficient at shutdown" --
 +       the existing audio-backend CloseDevice (DOSSOUNDBLASTER_CloseDevice
 +       in SDL_dosaudio_sb.c) issues 0xD3 as part of its standard
 +       teardown, silencing MIDI output through the WaveBlaster header
@@ -337,7 +337,7 @@ index a5509d3cd..3693d0961 100644
 +
 +       Engine (MidiBackendWaveBlaster::~MidiBackendWaveBlaster) has
 +       already issued all-notes-off MIDI bytes through the DSP path
-+       BEFORE calling SDL_DOSMpu401Shutdown — so no sustaining notes
++       BEFORE calling SDL_DOSMpu401Shutdown -- so no sustaining notes
 +       remain. We just clear our state here.
 +
 +       Direct-port path retains the 0xFF reset write for symmetry with
@@ -382,7 +382,7 @@ index a98e588de..cd1cfa0e1 100644
 +
 +// Returns true if the SB16 audio backend is open (DOSSOUNDBLASTER_OpenDevice
 +// completed successfully). Used by SDL_DOSMpu401Init to gate DSP-mediated
-+// path on backend availability — the path requires DSP I/O which only
++// path on backend availability -- the path requires DSP I/O which only
 +// works when the audio backend has detected + initialized the chip. Engine
 +// is additionally responsible for ensuring the audio playback thread has
 +// serviced at least one frame before WB init (per analysis hard-no #3).
@@ -397,11 +397,11 @@ index a98e588de..cd1cfa0e1 100644
 +// Issues DSP cmd 0x38 + byte payload to dispatch one MIDI byte through
 +// the DSP-mediated path. Polls DSP write-status (port 0x22D bit 7) which
 +// IS reliable on real hardware (probe section 10 evidence). Two DSP
-+// writes per MIDI byte; ~µs per write on Pentium.
++// writes per MIDI byte; ~us per write on Pentium.
 +extern void SDL_DOSAudioSB_DSPMidiWriteByte(uint8_t byte);
 +
  /* ------------------------------------------------------------------------
-  * OPL3 (YMF262) — § D of design doc
+  * OPL3 (YMF262) -- sec. D of design doc
   * ------------------------------------------------------------------------
 -- 
 2.47.3

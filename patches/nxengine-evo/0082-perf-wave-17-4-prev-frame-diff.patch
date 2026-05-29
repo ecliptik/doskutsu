@@ -18,13 +18,13 @@ but its dirty rect IS still full-screen. Result: dirty_path_taken=0,
 full_flush_taken=100, dirty_pct_x10=1000 every block on real HW.
 
 This patch adds a prev-frame buffer (one screen-sized SDL_Surface,
-~76 KB at 320×240 INDEX8) and a per-scanline diff against current
+~76 KB at 320x240 INDEX8) and a per-scanline diff against current
 window contents. The diff produces full-width row-band rects covering
 only the actually-changed scanlines. The engine's drawcall-tracked
 _dirty_rects is OVERWRITTEN with the diff result before the threshold
 decision. When diff produces small dirty area (title menu's static
 content with small parallax band, dialog overlays, paused gameplay),
-threshold doesn't trip → SDL_UpdateWindowSurfaceRects fires with the
+threshold doesn't trip -> SDL_UpdateWindowSurfaceRects fires with the
 real partial list.
 
 Pairs with SDL/0033 which makes DOSVESA_UpdateWindowFramebuffer's
@@ -33,26 +33,26 @@ moot if SDL ignores the rects).
 
 Five changes in Renderer.h / Renderer.cpp:
 
-1. Renderer.h: new state —  (the buffer),
+1. Renderer.h: new state --  (the buffer),
     (killswitch cache), three diagnostic
    accumulators (diff_calls / diff_rects_sum / diff_dirty_pct_sum).
 
-2. Renderer.cpp helpers —
+2. Renderer.cpp helpers --
    (env-var killswitch probe; default ON, set
    SDL_HINT_DOSKUTSU_PREVFRAME_DIFF=0 to disable) and
     (per-scanline memcmp returning a list
    of full-width row-band rects, coalesces contiguous dirty rows).
 
-3. Renderer::flip(): inserted before the dirty-pixel decision —
+3. Renderer::flip(): inserted before the dirty-pixel decision --
    when diff is enabled and prev_frame_surface is valid+matching, drain
    queued slow-path renderer commands (so the window surface reflects
    all engine drawcalls), then run the diff and OVERWRITE _dirty_rects.
    The existing threshold + first_n_force + force_full_refresh checks
-   gate the partial-flush dispatch as before — the diff just changes
+   gate the partial-flush dispatch as before -- the diff just changes
    the input.
 
-4. Renderer::flip(): post-flush — lazy alloc / re-alloc / blit current
-   window → prev_frame_surface so next flip's diff has the right
+4. Renderer::flip(): post-flush -- lazy alloc / re-alloc / blit current
+   window -> prev_frame_surface so next flip's diff has the right
    reference. Skipped when diff is disabled (saves ~0.5 ms / flip).
 
 5. Renderer::flushAll() / Renderer::~Renderer(): release
@@ -67,9 +67,9 @@ constant 100% from the drawcall coalesce.
 
 Memory cost: ~76 KB heap on Tier 1 (PODP83 + 48 MB).
 CPU cost: 240 SDL_memcmp(320 bytes) + one 76 KB SDL_BlitSurface per
-flip ≈ 1-2 ms. Win: every byte not flushed to VRAM saves ~3.5 us at
+flip ~ 1-2 ms. Win: every byte not flushed to VRAM saves ~3.5 us at
 the measured Mach64 PCI write throughput. Title screen with ~70%
-static area should save ~35-50 KB / flush × 3.5 us = ~12-17 ms / flush.
+static area should save ~35-50 KB / flush x 3.5 us = ~12-17 ms / flush.
 Honest variance per memory perf_predictions_unreliable.md is wide;
 real-HW measures.
 ---
@@ -134,19 +134,19 @@ index 3f15ff7..9bc152c 100644
 +
 +// DOS-PORT (patch 0082, Phase 9 wave 17.4): per-scanline diff between
 +// `prev` and `curr`. Returns the count of dirty rects written into
-+// `out` (each rect is a full-width band — `(0, y, w, h)`). Coalesces
++// `out` (each rect is a full-width band -- `(0, y, w, h)`). Coalesces
 +// contiguous dirty rows into a single rect. If the rect count would
 +// exceed `max_rects`, the trailing rect is widened to cover all remaining
-+// rows and the function returns max_rects (preserves correctness — the
++// rows and the function returns max_rects (preserves correctness -- the
 +// caller will treat the over-cap result as "near-full" and likely fall
 +// back to full flush via the threshold check, which is fine).
 +//
 +// Pre-conditions: prev/curr same dimensions and format. Pitches may
 +// differ (each surface uses its own pitch for row stride).
 +//
-+// Cost: 240 × SDL_memcmp(320 bytes) on the title-mode INDEX8 path.
++// Cost: 240 x SDL_memcmp(320 bytes) on the title-mode INDEX8 path.
 +// Roughly 1-2 ms on PODP83. The win is paying ~2 ms scan to save up
-+// to ~14 ms of flush time (3-5× return).
++// to ~14 ms of flush time (3-5x return).
 +static int _doskutsu_diff_against_prev(SDL_Surface *prev,
 +                                        SDL_Surface *curr,
 +                                        SDL_Rect *out,
@@ -193,7 +193,7 @@ index 3f15ff7..9bc152c 100644
 +      }
 +      else
 +      {
-+        // Cap reached — extend the last emitted rect to cover this band.
++        // Cap reached -- extend the last emitted rect to cover this band.
 +        // Lossy but conservative: more rows marked dirty than needed.
 +        out[max_rects - 1].h = (y - out[max_rects - 1].y);
 +      }
@@ -279,7 +279,7 @@ index 3f15ff7..9bc152c 100644
    //     there genuinely were none; full flush is cheap insurance)
 +  //
 +  // DOS-PORT (patch 0082, Phase 9 wave 17.4): when prev-frame diff
-+  // produces an empty list, the screen IS unchanged from prior frame —
++  // produces an empty list, the screen IS unchanged from prior frame --
 +  // we should SKIP the flush entirely. But SDL3 expects a present per
 +  // frame to keep palette / cursor / vsync state correct, so we still
 +  // call the partial path with an empty rect list (SDL3-DOS will iterate
@@ -307,7 +307,7 @@ index 3f15ff7..9bc152c 100644
 -      !_dirty_rects.empty();
 +      // DOS-PORT (patch 0082, wave 17.4): when prev-frame diff is engaged
 +      // and produced an empty list, the screen is genuinely unchanged
-+      // since last flush — let the partial path fire with an empty rect
++      // since last flush -- let the partial path fire with an empty rect
 +      // list so the SDL palette-update / cursor-composite logic still
 +      // runs. Skipping the flush entirely is safe-er but loses palette
 +      // sync; an empty-rect partial flush is essentially a no-op flush
@@ -322,13 +322,13 @@ index 3f15ff7..9bc152c 100644
  
 +  // DOS-PORT (patch 0082, Phase 9 wave 17.4): refresh prev-frame buffer
 +  // for next flip's diff. Lazy-(re)alloc to match window dimensions/
-+  // format. Only runs when the diff path is enabled — disabling via
++  // format. Only runs when the diff path is enabled -- disabling via
 +  // SDL_HINT_DOSKUTSU_PREVFRAME_DIFF=0 also skips the alloc + copy
 +  // overhead, restoring the wave-17.3 baseline.
 +  //
-+  // Copy is BLT-equivalent (~76 KB at 320×240 INDEX8 = ~0.5 ms on
++  // Copy is BLT-equivalent (~76 KB at 320x240 INDEX8 = ~0.5 ms on
 +  // PODP83). Done after the flush so prev reflects what's currently in
-+  // VRAM (within the limits of partial-flush — partial flushes only
++  // VRAM (within the limits of partial-flush -- partial flushes only
 +  // overwrite changed regions of VRAM, but prev mirrors the engine's
 +  // window surface which is the source of truth, not VRAM directly).
 +  if (ok && !_doskutsu_prev_frame_diff_is_disabled(_prev_frame_diff_disabled) &&
@@ -421,7 +421,7 @@ index 523cf7b..485fadf 100644
 +    // _dirty_rects from the actual changed regions. Result: small dirty
 +    // area when scenes are mostly static (title menu, dialog boxes).
 +    //
-+    // Memory cost: 1 screen-sized SDL_Surface (~76 KB at 320×240×8bpp).
++    // Memory cost: 1 screen-sized SDL_Surface (~76 KB at 320x240x8bpp).
 +    // CPU cost: 240 row memcmp + 1 full-screen blit per flip (~1-2 ms
 +    // on PODP83). Hugely net-positive when prev-frame diff produces
 +    // <50% dirty area (most title / menu / dialog frames).
@@ -435,7 +435,7 @@ index 523cf7b..485fadf 100644
 +    int _prev_frame_diff_calls_block = 0;
 +
      // DOS-PORT (patch 0071, Phase 9 wave 15): mark a destination rect as
-     // dirty for the current frame. Clips to the 320×240 logical viewport,
+     // dirty for the current frame. Clips to the 320x240 logical viewport,
      // drops empty rects, and applies cheap coalescing:
 -- 
 2.47.3

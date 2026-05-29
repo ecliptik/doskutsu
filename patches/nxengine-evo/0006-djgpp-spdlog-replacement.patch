@@ -11,15 +11,15 @@ DJGPP cross-toolchain for two independent reasons identified by task #34's
 investigation:
 
 1. `SPDLOG_WCHAR_FILENAMES` is unconditionally enabled in the vendored
-   `deps/spdlog/tweakme.h:59` — not the originally-suspected
+   `deps/spdlog/tweakme.h:59` -- not the originally-suspected
    `SPDLOG_WCHAR_TO_UTF8_SUPPORT`. The macro pulls
    `<spdlog/fmt/xchar.h>` which references `std::fputws` and
-   `std::wostream`. DJGPP's libstdc++ provides neither — wide-stream
+   `std::wostream`. DJGPP's libstdc++ provides neither -- wide-stream
    support is missing. Compilation fails before linking with
    `'fputws' is not a member of 'std'` and `'wostream' is not a member of
    'std'`.
 
-2. `std::mutex` is not instantiable on DJGPP 12.2.0 — `_GLIBCXX_HAS_GTHREADS`
+2. `std::mutex` is not instantiable on DJGPP 12.2.0 -- `_GLIBCXX_HAS_GTHREADS`
    is undefined because there's no pthread runtime to back it. spdlog's
    `*_mt` sink typedefs (`stdout_color_sink_mt`, `basic_file_sink_mt`)
    instantiate `std::mutex` at static-construction time, and the global
@@ -55,7 +55,7 @@ Files modified:
   DJGPP branch declares the shim's `djgpp_log_fp` + `djgpp_log_level`
   storage, then `init()` `fopen()`s the log file in text mode (CRLF
   line endings desired for DOS log readers) and sets the level based
-  on `DEBUG`. fopen failure logs to stderr and continues — log noise
+  on `DEBUG`. fopen failure logs to stderr and continues -- log noise
   remains visible even when the configured path can't be written.
 
 Behaviour deltas vs. upstream spdlog:
@@ -65,7 +65,7 @@ Behaviour deltas vs. upstream spdlog:
 - Log pattern is hardcoded to `[HH:MM:SS] [LEVEL] message`. The
   `set_pattern(LOG_PATTERN)` call from Logger.cpp's non-DJGPP branch
   becomes a no-op on DJGPP. Sub-second precision (`%e` in upstream)
-  dropped — `time()`+`localtime()` is enough for human-readable DOS
+  dropped -- `time()`+`localtime()` is enough for human-readable DOS
   logs and avoids pulling in chrono machinery.
 - No ANSI colour. DOS stdout is a single stream where escape codes
   would be visible literal noise unless an ANSI driver is loaded.
@@ -80,7 +80,7 @@ This is patch slot 0006-0009 (reserved for future DOS concerns per #29
 brief). The DJGPP series now extends from 5 to 6 patches; tech-writer
 should reflect the expansion in patches/nxengine-evo/README.md when this
 lands. The patch is orthogonal to the SDL3 migration patches (0010-0018)
-— neither touches `src/Utils/`.
+-- neither touches `src/Utils/`.
 ---
  src/Utils/Logger.cpp     |  44 ++++++++++--
  src/Utils/Logger.h       |  19 +++++-
@@ -127,12 +127,12 @@ index f0ecf98..269a8b4 100644
    {
 +#ifdef __DJGPP__
 +    // DOS-PORT: open the log file in text mode ("w", not "wb"). This is the
-+    // legitimate exception to CLAUDE.md's "always 'rb' on DOS" rule — log
++    // legitimate exception to CLAUDE.md's "always 'rb' on DOS" rule -- log
 +    // output is line-oriented text where DOS's CRLF translation is desirable
 +    // (notepad-style readers expect CRLF). Binary-mode here would make the
 +    // log file look single-line in DOS text editors. If fopen fails we keep
 +    // djgpp_log_fp == nullptr and the macros silently fall back to stderr-
-+    // only — log noise stays visible even when the configured path can't
++    // only -- log noise stays visible even when the configured path can't
 +    // be written.
 +    djgpp_log_fp = std::fopen(filename.c_str(), "w");
 +    if (!djgpp_log_fp)
@@ -174,8 +174,8 @@ index 8817961..a660e7e 100644
 -#include <spdlog/spdlog.h>
 +// On DJGPP we substitute a fmt-only Logger shim for spdlog. spdlog itself
 +// pulls `<spdlog/fmt/xchar.h>` (via SPDLOG_WCHAR_FILENAMES in the vendored
-+// tweakme.h) which references std::fputws / std::wostream — neither in
-+// DJGPP's libstdc++ — and uses `std::mutex` at static-init time, which
++// tweakme.h) which references std::fputws / std::wostream -- neither in
++// DJGPP's libstdc++ -- and uses `std::mutex` at static-init time, which
 +// DJGPP 12.2.0 cannot instantiate. See task #34's diagnosis and the
 +// header comment in Logger_djgpp.h for the full story. The shim preserves
 +// the LOG_TRACE / LOG_DEBUG / LOG_INFO / LOG_WARN / LOG_ERROR /
@@ -225,7 +225,7 @@ index 0000000..970fc44
 +//   * `std::mutex` is not instantiable on DJGPP 12.2.0 (gthreads support
 +//     undefined) and spdlog's `_mt` sinks plus the global registry both
 +//     instantiate it at static construction time. Switching to `_st` does
-+//     not help — the registry singleton uses mutex unconditionally.
++//     not help -- the registry singleton uses mutex unconditionally.
 +//
 +// This shim:
 +//   * Keeps the LOG_TRACE / LOG_DEBUG / LOG_INFO / LOG_WARN / LOG_ERROR /
@@ -293,7 +293,7 @@ index 0000000..970fc44
 +//
 +// `##__VA_ARGS__` is the GCC extension that swallows the preceding comma
 +// when __VA_ARGS__ is empty. Used here for robustness even though
-+// NXEngine has no LOG_*() empty-args call sites today — keeps a future
++// NXEngine has no LOG_*() empty-args call sites today -- keeps a future
 +// `LOG_INFO()` stub from breaking the macro layer (it would still fail
 +// at fmt::format_to time, same as spdlog's behaviour, but the
 +// preprocessor stays happy). DJGPP gcc 12.2.0 supports `##__VA_ARGS__`;

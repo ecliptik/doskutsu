@@ -56,7 +56,7 @@ index ebf0a00..87f2f31 100644
    _base   = 0;
    _glyphs.clear();
 +  // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): atlases are now
-+  // Surface* — delete them (Surface::~Surface frees the SDL_Texture +
++  // Surface* -- delete them (Surface::~Surface frees the SDL_Texture +
 +  // RGB565 surface together).
    for (auto atlas : _atlases)
    {
@@ -91,7 +91,7 @@ index ebf0a00..87f2f31 100644
 +      // SDL_SetTextureColorMod + SDL_RenderTexture + reset triple (twice
 +      // when shaded) with drawSurfaceColorMod calls. The (0,0,0) shadow
 +      // and (r,g,b) foreground branches dispatch internally to the
-+      // hand-rolled blit primitives — no SDL_Renderer state mailbox
++      // hand-rolled blit primitives -- no SDL_Renderer state mailbox
 +      // touched on the hot path.
        if (isShaded)
        {
@@ -177,7 +177,7 @@ index dd7285d..cc12a92 100644
    const Font::Glyph &glyph(uint32_t codepoint);
 -  SDL_Texture *atlas(uint32_t idx);
 +  // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): atlas is a
-+  // Surface* not an SDL_Texture* — gives Renderer::drawSurfaceColorMod
++  // Surface* not an SDL_Texture* -- gives Renderer::drawSurfaceColorMod
 +  // direct access to the atlas's RGB565 pixel data and pre-extracted
 +  // colorkey, avoiding the SDL_RenderTexture queue/dispatch path on
 +  // every glyph.
@@ -190,7 +190,7 @@ index dd7285d..cc12a92 100644
  
  private:
 -  std::vector<SDL_Texture *> _atlases;
-+  std::vector<Surface *> _atlases;  // patch 0059 — was std::vector<SDL_Texture *>
++  std::vector<Surface *> _atlases;  // patch 0059 -- was std::vector<SDL_Texture *>
    std::map<uint32_t, Glyph> _glyphs;
    uint32_t _height;
    uint32_t _base;
@@ -206,10 +206,10 @@ index dbc0b74..1e6738c 100644
 +// engagement counters + drawSurfaceColorMod branch tally. Reported in
 +// `color/alpha audit block N: ...` at the per-100-flip cadence.
 +//   alpha_taken/skipped: alpha<255 fastpath (took / fell through)
-+//   cmod_white: drawSurfaceColorMod called with (255,255,255) — delegated
++//   cmod_white: drawSurfaceColorMod called with (255,255,255) -- delegated
 +//     to the regular drawSurface path; counted here for visibility
-+//   cmod_black: drawSurfaceColorMod called with (0,0,0) — Font shadow path
-+//   cmod_general: any other (r,g,b) — Font foreground path
++//   cmod_black: drawSurfaceColorMod called with (0,0,0) -- Font shadow path
++//   cmod_general: any other (r,g,b) -- Font foreground path
 +//   cmod_fallback: drawSurfaceColorMod fell through to SDL_Renderer
 +//     (Mach64 / format mismatch). Should be 0 on Cirrus.
 +int _fastpath_alpha_taken_block = 0;
@@ -262,18 +262,18 @@ index dbc0b74..1e6738c 100644
 +  _maybe_flush_color_alpha_audit();
  
    // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): per-frame
-   // bookkeeping. Tally the skip stats, swap last-frame ↔ current-
+   // bookkeeping. Tally the skip stats, swap last-frame <-> current-
 @@ -1604,6 +1655,208 @@ static inline SDL_Surface *_ensure_handrolled_surface(SDL_Renderer *renderer,
    return win_surface;
  }
  
 +// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): alpha-blend RGB565
-+// blit primitive — the alpha<255 sibling of _blit_rgb565. Per architect
-+// design memo §4: per-pixel `(src*alpha + dst*(255-alpha)) >> 8` (the
++// blit primitive -- the alpha<255 sibling of _blit_rgb565. Per architect
++// design memo sec.4: per-pixel `(src*alpha + dst*(255-alpha)) >> 8` (the
 +// `>> 8` divisor approximates `/255` with a 0.4% rounding error,
 +// invisible at 5/6/5 quantization).
 +//
-+// ~22 integer ops/pixel — about 2x the no-blend path. For typical
++// ~22 integer ops/pixel -- about 2x the no-blend path. For typical
 +// alpha-mod sites (menu fade-in, ~80x80 dialog box = 6400 px) this is
 +// ~1.7 ms per call on PODP. Full-screen tintScreen-equivalents are
 +// ~20 ms (handled separately in 12.6).
@@ -316,7 +316,7 @@ index dbc0b74..1e6738c 100644
 +      const Uint16 spx = sp[col];
 +      if (has_colorkey && spx == colorkey) continue;
 +
-+      // Unpack src 5/6/5 → 8/8/8 (replicate top bits for cheap fidelity).
++      // Unpack src 5/6/5 -> 8/8/8 (replicate top bits for cheap fidelity).
 +      const int sr5 = (spx >> 11) & 0x1F;
 +      const int sg6 = (spx >>  5) & 0x3F;
 +      const int sb5 =  spx        & 0x1F;
@@ -375,10 +375,10 @@ index dbc0b74..1e6738c 100644
 +}
 +
 +// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): color-mod RGB565 blit
-+// primitive — black branch (mod_r=mod_g=mod_b=0). Every non-colorkey
++// primitive -- black branch (mod_r=mod_g=mod_b=0). Every non-colorkey
 +// source pixel is written as 0x0000 (RGB565 black). Hot path for Font
-+// shadow rendering. Cheaper than the general branch — no multiply, no
-+// 5/6/5 ↔ 8/8/8 expansion needed since the output is constant.
++// shadow rendering. Cheaper than the general branch -- no multiply, no
++// 5/6/5 <-> 8/8/8 expansion needed since the output is constant.
 +static inline bool _blit_rgb565_color_mod_black(SDL_Surface *dst, SDL_Surface *src,
 +                                                SDL_Rect srcrect, SDL_Rect dstrect,
 +                                                Uint16 colorkey, bool has_colorkey)
@@ -416,9 +416,9 @@ index dbc0b74..1e6738c 100644
 +}
 +
 +// DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): color-mod RGB565 blit
-+// primitive — general branch. Per architect design memo §3: per-pixel
-+// per-channel multiply with 5/6/5 ↔ 8/8/8 expansion. ~14 integer ops
-+// per pixel. ~35 µs per 13×16 glyph on PODP, ~1 ms total for ~30
++// primitive -- general branch. Per architect design memo sec.3: per-pixel
++// per-channel multiply with 5/6/5 <-> 8/8/8 expansion. ~14 integer ops
++// per pixel. ~35 us per 13x16 glyph on PODP, ~1 ms total for ~30
 +// glyphs/frame on dialog-heavy scenes.
 +static inline bool _blit_rgb565_color_mod_general(SDL_Surface *dst, SDL_Surface *src,
 +                                                  SDL_Rect srcrect, SDL_Rect dstrect,
@@ -496,7 +496,7 @@ index dbc0b74..1e6738c 100644
 +  // Skipped counter only bumps when alpha<255 (otherwise the alpha
 +  // wrapper returned false on its first gate; not interesting). This
 +  // makes alpha_taken+alpha_skipped == count of alpha<255 calls that
-+  // went through drawSurface — directly comparable to slow-path's
++  // went through drawSurface -- directly comparable to slow-path's
 +  // alpha bucket.
 +  if (src->alpha != 255)
 +  {
@@ -506,7 +506,7 @@ index dbc0b74..1e6738c 100644
 +
    // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): categorize WHY this call
    // missed the fastpath. Re-checks the same gates as _try_fast_blit in
-   // priority order — first match wins. Helps decide which 12.5+
+   // priority order -- first match wins. Helps decide which 12.5+
 @@ -1841,6 +2122,107 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
    _renderer_queue_dirty = true;
  }
@@ -516,17 +516,17 @@ index dbc0b74..1e6738c 100644
 +// reset-to-(255,255,255) sequence that Font.cpp used to emit for every
 +// glyph shadow + foreground (4 SDL state-mailbox calls per glyph).
 +// With Lever B engaged, NONE of those state mailbox calls fire on the
-+// hot path — the wave-11 trap class is permanently sidestepped.
++// hot path -- the wave-11 trap class is permanently sidestepped.
 +//
-+// Three branches per architect design memo §3:
-+//   (255,255,255) → no mod, delegate to drawSurface
-+//   (0,0,0)       → write 0x0000 for non-colorkey pixels (shadow)
-+//   anything else → per-channel multiply via _blit_rgb565_color_mod_general
++// Three branches per architect design memo sec.3:
++//   (255,255,255) -> no mod, delegate to drawSurface
++//   (0,0,0)       -> write 0x0000 for non-colorkey pixels (shadow)
++//   anything else -> per-channel multiply via _blit_rgb565_color_mod_general
 +//
 +// Mach64 fallback (when _ensure_handrolled_surface returns NULL): uses
 +// the legacy SDL_SetTextureColorMod + SDL_RenderTexture path, restoring
 +// color-mod to (255,255,255) afterward to match Font.cpp's pre-12.5
-+// behavior. The reset is essential — leaving the texture's color-mod
++// behavior. The reset is essential -- leaving the texture's color-mod
 +// at (r,g,b) would tint subsequent SDL_RenderTexture calls on the same
 +// atlas (e.g., the next glyph in the same string).
 +void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
@@ -540,7 +540,7 @@ index dbc0b74..1e6738c 100644
 +    return;
 +  }
 +
-+  // (255,255,255) — no modulation; equivalent to plain drawSurface.
++  // (255,255,255) -- no modulation; equivalent to plain drawSurface.
 +  // Counted separately for visibility; should be rare with Font.cpp's
 +  // post-12.5 calling convention (always passes (0,0,0) for shadows
 +  // and the user-supplied color for foreground; neither is white in
@@ -585,7 +585,7 @@ index dbc0b74..1e6738c 100644
 +    }
 +  }
 +
-+  // Mach64 fallback / format mismatch / alpha<255 — preserve the legacy
++  // Mach64 fallback / format mismatch / alpha<255 -- preserve the legacy
 +  // SDL_RenderTexture path with color-mod state-mailbox manipulation.
 +  ++_color_mod_fallback_block;
 +  ++_color_mod_fallback_global;
@@ -626,10 +626,10 @@ index 539e151..c0f996f 100644
 +    // DOS-PORT (patch 0059, Phase 9 wave 12.5 Lever B): per-pixel color
 +    // modulation blit. Used by Font::draw to render glyph shadow + glyph
 +    // foreground without going through SDL_SetTextureColorMod. Three
-+    // special-cased branches per architect design memo §3:
-+    //   (255,255,255) → delegate to plain drawSurface (no modulation)
-+    //   (0,0,0)       → write 0x0000 for non-colorkey pixels (shadow)
-+    //   anything else → full per-channel multiply
++    // special-cased branches per architect design memo sec.3:
++    //   (255,255,255) -> delegate to plain drawSurface (no modulation)
++    //   (0,0,0)       -> write 0x0000 for non-colorkey pixels (shadow)
++    //   anything else -> full per-channel multiply
 +    // Falls through to SDL_SetTextureColorMod + SDL_RenderTexture on
 +    // Mach64 / 640x480 (preserves the slow path for non-Cirrus targets).
 +    void drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
@@ -712,7 +712,7 @@ index 9225ad3..825813e 100644
 +    return false;
 +  }
 +
-+  // Re-assert the colorkey on the RGB565 surface — same belt-and-braces
++  // Re-assert the colorkey on the RGB565 surface -- same belt-and-braces
 +  // pattern as loadImage. Magenta in RGB565 = 0xF81F.
 +  if (flatten_alpha_to_colorkey)
 +  {
@@ -764,7 +764,7 @@ index 0d82d49..8970b15 100644
 +  // RGB565 conversion, and the colorkey is set to magenta on the
 +  // resulting surface. This preserves PNG transparency through the
 +  // RGB565 path. Pixels with intermediate alpha (anti-aliased edges)
-+  // are NOT preserved — they become opaque. Cave Story's font atlases
++  // are NOT preserved -- they become opaque. Cave Story's font atlases
 +  // are pixel-art with binary alpha, so this is faithful.
 +  bool loadFromSDLSurface(SDL_Surface *src, bool flatten_alpha_to_colorkey = true);
 +

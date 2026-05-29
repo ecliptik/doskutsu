@@ -24,12 +24,12 @@ index 45855fe..92baa82 100644
 +  // surface cache. _try_fast_blit reads this on every drawcall;
    // the first drawcall happens before the first flip() so we need a
    // valid pointer here. Refreshed after every SDL_RenderPresent in
-   // flip() (post-present is the canonical SDL3 invalidation point —
+   // flip() (post-present is the canonical SDL3 invalidation point --
 @@ -1130,9 +1130,9 @@ static inline bool _blit_rgb565(SDL_Surface *dst, SDL_Surface *src,
  }
  
- // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) — hand-rolled
--// 16×16 RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's
+ // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B) -- hand-rolled
+-// 16x16 RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's
 -// per-call validation/queue/dispatch overhead (~0.95 ms per call on
 -// real Cirrus per the wave-5 cirrus5 capture).
 +// RGB565 colorkey blit fast path. Bypasses SDL_RenderTexture's per-call
@@ -43,19 +43,19 @@ index 45855fe..92baa82 100644
  //     drawcalls fall through so the renderer's alpha-mod plumbing
  //     handles them correctly)
 -//   - srcrect.w == 16 AND srcrect.h == 16 (the dominant case per wave-5
--//     drawcall logs — ~95% of drawSurface calls are 16×16 tile blits)
+-//     drawcall logs -- ~95% of drawSurface calls are 16x16 tile blits)
 -//   - dstrect.w == srcrect.w AND dstrect.h == srcrect.h (no scaling)
  //   - window surface format == SDL_PIXELFORMAT_RGB565 (the active mode
  //     after patches 0041 + 0045; matches the Surface's RGB565 format)
- //   - window surface dimensions == 320×240 logical (no logical-
+ //   - window surface dimensions == 320x240 logical (no logical-
 @@ -1153,6 +1150,24 @@ static inline bool _blit_rgb565(SDL_Surface *dst, SDL_Surface *src,
  //     remains the only correct option until we bypass logical-
  //     presentation entirely)
  //
 +// DOS-PORT (patch 0055, Phase 9 wave 12.2): the dim-match precondition
 +// (dstrect.w == srcrect.w && dstrect.h == srcrect.h) was dropped along
-+// with the 16×16 size gate, but only because Renderer::scale == 1 in the
-+// DOS port (locked at 320×240 fullscreen by patch 0010). Every
++// with the 16x16 size gate, but only because Renderer::scale == 1 in the
++// DOS port (locked at 320x240 fullscreen by patch 0010). Every
 +// drawSurface call site does:
 +//
 +//     srcrect.w = wd * scale;   dstrect.w = srcrect.w;
@@ -64,7 +64,7 @@ index 45855fe..92baa82 100644
 +// (see Renderer::drawSurface, ~line 1284). With scale==1 the dst dims
 +// are *always* identical to src dims, so dropping the explicit check is
 +// a no-op invariant. **If a future widescreen attempt sets scale > 1,
-+// this assumption breaks and dim-match must be re-asserted** — or
++// this assumption breaks and dim-match must be re-asserted** -- or
 +// _blit_rgb565 must be extended to handle stretching, which it
 +// currently does NOT (it advances src and dst pointers in lockstep at
 +// matching pitches). Same caveat applies to drawSurfaceMirrored when
@@ -72,7 +72,7 @@ index 45855fe..92baa82 100644
 +//
  // Ordering correctness with the SW renderer's queue:
  //
- //   The SW renderer (SDL_render_sw.c §60-80) writes to data->surface,
+ //   The SW renderer (SDL_render_sw.c sec.60-80) writes to data->surface,
 @@ -1174,19 +1189,19 @@ static inline bool _blit_rgb565(SDL_Surface *dst, SDL_Surface *src,
  //   called or SDL_RenderPresent fires. Either way the slow-path output
  //   composites on top of fast-path output exactly as it would if both
@@ -95,7 +95,7 @@ index 45855fe..92baa82 100644
 -    return false;
 -  if (dstrect.w != srcrect.w || dstrect.h != srcrect.h)
 -    return false;
-+  // DOS-PORT (patch 0055, Phase 9 wave 12.2): size gates dropped — see
++  // DOS-PORT (patch 0055, Phase 9 wave 12.2): size gates dropped -- see
 +  // header comment block for the scale==1 invariant that justifies it.
 +  // _blit_rgb565 reads srcrect.w/srcrect.h directly so any size flows
 +  // through the same primitive.
@@ -106,13 +106,13 @@ index 45855fe..92baa82 100644
    }
  
    // DOS-PORT (patch 0054, Phase 9 wave 12 Lever B): delegate the actual
--  // pixel work to the generic RGB565 primitive. The 16×16 + format +
+-  // pixel work to the generic RGB565 primitive. The 16x16 + format +
 -  // win-dim gates above stay here in this wrapper; _blit_rgb565 handles
 -  // dst-bounds clamping and the per-row inner loop.
 +  // pixel work to the generic RGB565 primitive. The format + win-dim
 +  // gates above stay here in this wrapper; _blit_rgb565 handles
 +  // dst-bounds clamping and the per-row inner loop. Wave 12.2 dropped
-+  // the 16×16 size gate — every opaque drawSurface call now flows
++  // the 16x16 size gate -- every opaque drawSurface call now flows
 +  // through here regardless of sprite size.
    return _blit_rgb565(win_surface, src_surface, srcrect, dstrect,
                        src->colorkey16(), src->hasColorkey());
@@ -121,19 +121,19 @@ index 45855fe..92baa82 100644
    }
  
    // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B): try the
--  // hand-rolled 16×16 fast path before queuing through SDL_RenderTexture.
+-  // hand-rolled 16x16 fast path before queuing through SDL_RenderTexture.
 -  // _try_fast_blit_16x16 returns true on success (drawn directly to
 +  // hand-rolled fast path before queuing through SDL_RenderTexture.
 +  // _try_fast_blit returns true on success (drawn directly to
    // window->surface) or false if conditions don't match (we fall through
    // to the slow path below). Per wave-5 drawcall logs, ~95% of drawSurface
-   // calls in the title scene are 16×16 sprites with alpha=255 and no
--  // scale/clip — those all take the fast path.
+   // calls in the title scene are 16x16 sprites with alpha=255 and no
+-  // scale/clip -- those all take the fast path.
 -  if (_try_fast_blit_16x16(_renderer, _cached_window_surface,
 -                           _renderer_queue_dirty,
 -                           src, srcx, srcy, srcrect, dstrect))
-+  // scale/clip — those all took the fast path even at wave-10. Wave
-+  // 12.2 (patch 0055) drops the 16×16 size gate so larger opaque sprites
++  // scale/clip -- those all took the fast path even at wave-10. Wave
++  // 12.2 (patch 0055) drops the 16x16 size gate so larger opaque sprites
 +  // (font runs, dialog backgrounds, etc.) take the same path.
 +  if (_try_fast_blit(_renderer, _cached_window_surface,
 +                     _renderer_queue_dirty,

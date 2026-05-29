@@ -10,10 +10,10 @@ Content-Transfer-Encoding: 8bit
 Wave 16 8bpp integration on real Cirrus + UNIVBE 6.7 surfaces a missing-
 bottom-strip symptom: title screen renders but the bottom ~35-40 scanlines
 appear blank. Mode 0x01F8 (320x240 8bpp banked) puts fb_size=76800, which
-crosses the 64 KB bank boundary by ~11,264 bytes (35 lines × 320 B). The
+crosses the 64 KB bank boundary by ~11,264 bytes (35 lines x 320 B). The
 bandwidth math from the wave-15 vs wave-16 timing brackets is suggestive
-but not conclusive (W15 16bpp at 153,600 B / 9.3 ms ≈ 16.5 MB/s, W16 8bpp
-at 76,800 B / 4.83 ms ≈ 15.9 MB/s — looks like full-frame writes, but a
+but not conclusive (W15 16bpp at 153,600 B / 9.3 ms ~ 16.5 MB/s, W16 8bpp
+at 76,800 B / 4.83 ms ~ 15.9 MB/s -- looks like full-frame writes, but a
 single-bank-only path would be 13.6 MB/s, only 2 MB/s lower).
 
 Two competing hypotheses for the missing-bottom-strip:
@@ -41,7 +41,7 @@ This patch ships diagnostics, not a fix. We need real-HW data to discriminate.
 
   - Bank-1 VRAM readback. Every 100th flush (and the first), after the flush
     completes, the audit code switches to bank 1, reads the first 16 bytes
-    (= VRAM offset win_size_bytes ≈ start of the spill region for lines
+    (= VRAM offset win_size_bytes ~ start of the spill region for lines
     205-239), and emits a DOSVESA-FB-VRAM-BANK1 dump line. If those bytes
     are zero on a non-zero source frame, H-B is confirmed (writes didn't
     land). If they show pixel data, H-A is confirmed (flush is fine,
@@ -66,14 +66,14 @@ index 4005c1d5d..c0ec89709 100644
  
  static DOSFramebufferState fb_state;
  
-+// DOSKUTSU patch 0027 (Phase 9 wave 16 — banked-mode 8bpp flush audit).
++// DOSKUTSU patch 0027 (Phase 9 wave 16 -- banked-mode 8bpp flush audit).
 +// Cumulative counters bumped from inside SwitchBank() and BankedDosmemput()
 +// so we can prove (or disprove) that BOTH banks are firing per flush at
 +// 8bpp. 76,800-byte frames cross the 64 KB bank boundary by ~11,264 bytes
-+// (35 scanlines × 320 B); a missing-bottom-strip symptom on real Cirrus +
-+// UNIVBE points us either at a bank-switch failure (only bank 0 fires →
-+// bytes_per_flush ≈ 65536, switches_per_flush = 1) or at correct writes
-+// + display-geometry issue elsewhere (bytes_per_flush ≈ 76800, switches
++// (35 scanlines x 320 B); a missing-bottom-strip symptom on real Cirrus +
++// UNIVBE points us either at a bank-switch failure (only bank 0 fires ->
++// bytes_per_flush ~ 65536, switches_per_flush = 1) or at correct writes
++// + display-geometry issue elsewhere (bytes_per_flush ~ 76800, switches
 +// = 2). UpdateWindowFramebuffer snapshots these counters pre/post flush
 +// and emits a periodic WAVE16-FB-FLUSH-AUDIT line.
 +static Uint32 _dbg_bank_switches_total = 0;
@@ -115,7 +115,7 @@ index 4005c1d5d..c0ec89709 100644
 +    const Uint32 _audit_switches_pre = _dbg_bank_switches_total;
 +    const Uint32 _audit_bytes_pre    = _dbg_bytes_written_total;
 +
-     // DOSKUTSU diagnostic (patches/SDL/0008 — Lever 1 lifecycle trace).
+     // DOSKUTSU diagnostic (patches/SDL/0008 -- Lever 1 lifecycle trace).
      // Logs once on first call and every 100th call. Surfaces the staleness
      // bug where fb_state was invalidated by InvalidateCachedFramebuffer but
 @@ -997,6 +1025,92 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
@@ -123,12 +123,12 @@ index 4005c1d5d..c0ec89709 100644
              }
              _doskutsu_dbg_dump_first16("DOSVESA-FB-VRAM ", vram_first, 16);
 +
-+            // DOSKUTSU patch 0027 (wave 16 banked-flush audit) — bank-1
++            // DOSKUTSU patch 0027 (wave 16 banked-flush audit) -- bank-1
 +            // VRAM readback. After the flush has completed, switch to bank
 +            // 1 and read the first 16 bytes (= VRAM offset win_size_bytes).
 +            // At 8bpp this is the start of the spill region (~lines 205-239).
 +            // If those bytes are zero on a non-zero source, the writes for
-+            // bytes ≥ 65,536 didn't land (bank-switch fail). If they reflect
++            // bytes >= 65,536 didn't land (bank-switch fail). If they reflect
 +            // sensible pixel data, the flush is correct and the missing-
 +            // bottom-strip is a display-geometry issue, not a flush bug.
 +            //
@@ -150,7 +150,7 @@ index 4005c1d5d..c0ec89709 100644
 +            }
 +        }
 +
-+        // DOSKUTSU patch 0027 (wave 16 banked-flush audit) — per-flush
++        // DOSKUTSU patch 0027 (wave 16 banked-flush audit) -- per-flush
 +        // delta accumulator. Computes how many bank switches and bytes
 +        // were issued by THIS flush from the pre-snapshot taken at t0.
 +        // Tracks min/max/sum across 100-flush windows and emits a single
@@ -159,7 +159,7 @@ index 4005c1d5d..c0ec89709 100644
 +        //   switches/flush = 2  (bank 0 then bank 1, fresh from probe-reset)
 +        //   bytes/flush    = 76800
 +        // If switches/flush stays at 1 and bytes/flush stays at 65536, the
-+        // multi-bank logic isn't firing the second SwitchBank call → that's
++        // multi-bank logic isn't firing the second SwitchBank call -> that's
 +        // the missing-bottom-strip cause.
 +        //
 +        // NOTE: the bank-1 readback above issues 2 extra SwitchBank calls

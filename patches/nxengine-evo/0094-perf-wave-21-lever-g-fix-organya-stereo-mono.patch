@@ -19,8 +19,8 @@ samples[p*2+0] / samples[p*2+1] at Organya.cpp lines ~325-326)
 regardless of `AUDIO_CHANNELS`. The pre-0094 `_musicCallback` copies
 `samples[]` LINEARLY into the audio device's output stream. When SDL
 device is mono (Tier-2), it interprets `L,R,L,R,...` as MONO FRAMES
-→ playback steps through the synth buffer at HALF the intended rate
-→ music plays at half speed + sub-Nyquist aliasing distortion.
+-> playback steps through the synth buffer at HALF the intended rate
+-> music plays at half speed + sub-Nyquist aliasing distortion.
 
 Why this slipped through 0092: the patch correctly substituted
 AUDIO_CHANNELS at the SDL audio device spec (SoundManager.cpp:91)
@@ -38,8 +38,8 @@ sampling_rate at line 187 correctly captures the runtime SAMPLE_RATE
 Why the W21A fps measurement was inflated:
 
 Half-speed playback meant `Synth()` refilled the synth buffer half as
-often per real second → audio_mix CPU work distributed over 2× as
-long → per-callback measurement showed 0.40 ms vs Tier-1's 6.55 ms
+often per real second -> audio_mix CPU work distributed over 2x as
+long -> per-callback measurement showed 0.40 ms vs Tier-1's 6.55 ms
 (94% reduction). That was a measurement artifact of the bug, not a
 real CPU saving.
 
@@ -68,7 +68,7 @@ gets a branch:
 Bounds check on R-channel index: defensive belt-and-braces in case
 idx wraps to an odd value (synth.Synth() always produces an even
 number of samples, so idx+1 < size when idx is even, but the existing
-`if (idx >= song.samples.size())` guard only checks idx — not idx+1).
+`if (idx >= song.samples.size())` guard only checks idx -- not idx+1).
 Pathological fallback uses L value if R would OOB.
 
 Audit re-confirmed clean for other rate / channel hardcoding:
@@ -84,7 +84,7 @@ Audit re-confirmed clean for other rate / channel hardcoding:
   mono/stereo conversion automatically. No internal stereo-
   interleave in Pixtone's data path.
 - OGG clean: SDL3 OGG decoder auto-resamples to whatever device
-  config is set (per docs/PHASE9-LEVER-G-PLAN.md § 2.6).
+  config is set (per docs/PHASE9-LEVER-G-PLAN.md sec. 2.6).
 
 The "Organya phase math has a hardcoded SAMPLE_RATE" hypothesis (per
 team-lead's diagnostic direction) was a good first guess but the
@@ -94,7 +94,7 @@ Symptom (slow + distorted) is identical for both root causes.
 Slot 0094 (NOT amend 0092) per the two-stage rollout pattern: keeps
 0092 as the working-modulo-this-bug baseline; if 0094 surfaces a
 regression the rollback is just dropping 0094 alone. Mirrors
-0086→0088 / 0085 polarity-flip / 0087+ext patterns.
+0086->0088 / 0085 polarity-flip / 0087+ext patterns.
 
 Test plan:
 - DOSBox-X smoke (build-qa): verify Tier-2 init clean, audio plays
@@ -104,9 +104,9 @@ Test plan:
 - Real-HW iter W21B (realhw): single-PLAY at Tier-2 (env stack
   matches W21A2). Operator listens to title attract music + first-
   room ambient + SFX + music+SFX overlap per
-  docs/PHASE9-LEVER-G-PLAN.md § 4 canonical scene checklist.
+  docs/PHASE9-LEVER-G-PLAN.md sec. 4 canonical scene checklist.
 - If "acceptable / borderline" verdict: 0095 ships default-flip
-  (mirrors 0092 → would-be-0093 / 0086 → 0088 pattern).
+  (mirrors 0092 -> would-be-0093 / 0086 -> 0088 pattern).
 - If "unacceptable": investigate further (could be the simple-average
   downmix loses too much spectral content; alternatives are
   max-of-L/R, weighted-by-pan, or single-channel synth which would
@@ -117,7 +117,7 @@ Reference:
     (the working baseline this fixes)
   docs/PHASE9-LEVER-G-PLAN.md (Lever G spec)
   W21A real-HW data (referenced in commit at top of session via
-    team-lead's W20B closure → 0092 dispatch chain)
+    team-lead's W20B closure -> 0092 dispatch chain)
   memory/audio_mix_zero_is_not_audio_off.md (similar measurement-
     artifact-vs-reality lesson)
   memory/perf_predictions_unreliable.md
@@ -141,11 +141,11 @@ index 3f18110..bca66f9 100644
 +  // stereo-interleaved samples (samples[p*2+0]=L, samples[p*2+1]=R at
 +  // lines ~325-326) regardless of the SDL audio device's channel
 +  // count. The pre-0094 callback below copied samples[] linearly into
-+  // the output stream — for a mono-configured device, this stuffs
++  // the output stream -- for a mono-configured device, this stuffs
 +  // L,R,L,R,... into a stream the device interprets as MONO FRAMES, so
 +  // playback steps through the synth buffer at HALF the intended rate
 +  // (each "frame" of intended stereo = 2 mono frames at the consumer)
-+  // → music plays at half speed + sub-Nyquist aliasing distortion.
++  // -> music plays at half speed + sub-Nyquist aliasing distortion.
 +  //
 +  // Fix: mono branch averages the synth's interleaved L/R pair into a
 +  // single mono sample per output frame, advancing the read index by 2
@@ -161,7 +161,7 @@ index 3f18110..bca66f9 100644
 +  // (-26.6 ms/flip vs predicted -3 to -22) was inflated by the
 +  // half-speed playback artifact (synth's Synth() refilled half as
 +  // often per real second). Post-0094 fps gain will fall into the
-+  // predicted range — still significant, just not the buggy figure.
++  // predicted range -- still significant, just not the buggy figure.
    uint32_t idx = song.last_pos;
 +  const bool mono_output = (::AUDIO_CHANNELS == 1);
    for (uint32_t i = 0; i < len / 2; i++)
@@ -177,7 +177,7 @@ index 3f18110..bca66f9 100644
 +    {
 +      // Tier-2 path: average the synth's interleaved L/R pair into one
 +      // mono sample. Each output frame consumes 2 synth entries.
-+      // Defensive bounds check on idx+1 — Synth() always produces an
++      // Defensive bounds check on idx+1 -- Synth() always produces an
 +      // even number of samples (samples_per_beat * 2 at line ~202) so
 +      // idx+1 < song.samples.size() is guaranteed when idx is even,
 +      // but the size() check above only guards idx < size; if idx

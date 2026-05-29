@@ -14,7 +14,7 @@ correctly but the fast-path didn't engage):
 When SDL3-DOS's DOSVESA_SetDisplayMode runs a mode-change, it calls
 DOSVESA_InvalidateCachedFramebuffer which clears the fast-path
 fb_state fields (.direct_fb, .vram_ptr, .vram_phys, .use_dosmemput,
-.lfb_surface) — but the mode-change does NOT trigger a fresh call to
+.lfb_surface) -- but the mode-change does NOT trigger a fresh call to
 DOSVESA_CreateWindowFramebuffer to re-populate them. Result: between
 the splash-screen mode-set and the engine's main mode-set, fb_state
 ends up partial-stale (cleared fast-path fields, intact dimensions
@@ -31,7 +31,7 @@ Path B fix
 At the top of DOSVESA_UpdateWindowFramebuffer, before any logging or
 VRAM access, detect the invalidated condition and re-populate fb_state
 from the device's current_mode + window->surface. The factored-out
-helper populate_fb_state_for_direct_fb does the work — same code
+helper populate_fb_state_for_direct_fb does the work -- same code
 DOSVESA_CreateWindowFramebuffer runs, just on a window->surface that
 already exists rather than one CreateSystemSurface just made.
 
@@ -58,7 +58,7 @@ the helper would still pick banked dosmemput because the SDL3-DOS
 PR #15377 author tuned that preference for cards where banked is
 faster than LFB nearptr. On Mach64 + M64VBE the priority inverts:
 banked is bandwidth-bound at ~500 KB/s while LFB nearptr is
-5-10× faster. PREFER_LFB now applies the same policy at this
+5-10x faster. PREFER_LFB now applies the same policy at this
 VRAM-path-selection layer that it applies at the mode-selection
 layer in SDL_dosmodes.c.
 
@@ -76,7 +76,7 @@ the LFB-decision flow correctly:
                   use_dosmemput=1 vram_ptr=0 ... fb_size=614400
                   vram_w=640 vram_h=480
 
-(The lazy-reinit confirmation is the smoking gun — the prior log line
+(The lazy-reinit confirmation is the smoking gun -- the prior log line
 shows direct_fb=0 with stale 320x240 fb_size; lazy-reinit fixes it to
 the 640x480 mode's correct values without anything else having to
 re-call CreateWindowFramebuffer. Pre-patch this guard would have
@@ -87,11 +87,11 @@ Surface lifecycle / DPMI mapping caveats
 
 The previous fb_state.surface (from a prior mode) may have been
 destroyed by SDL_GetWindowSurface's destroy+recreate path. We don't
-re-free it — SDL owns it through the window's DOS_SURFACE property.
+re-free it -- SDL owns it through the window's DOS_SURFACE property.
 We just overwrite the pointer with the new window->surface.
 
 The DPMI mapping for LFB is set up by DOSVESA_SetDisplayMode itself
-(in src/video/dos/SDL_dosmodes.c around line 705-720) — the
+(in src/video/dos/SDL_dosmodes.c around line 705-720) -- the
 __dpmi_physical_address_mapping happens inside SetDisplayMode when
 use_lfb is true. So by the time we reach UpdateWindowFramebuffer,
 data->mapping.address is already populated; we just consume it.
@@ -104,14 +104,14 @@ Why Path B over A / C / D
 -------------------------
 
 Considered:
-  Path A — backend manual lifecycle in SetDisplayMode (walk
+  Path A -- backend manual lifecycle in SetDisplayMode (walk
     device->windows after mode-set, destroy + re-create each window's
     framebuffer): touches more state machinery, would require us to
     re-enter through the surface-creation API which is not designed to
     be re-entrant from within the DOS backend. Higher risk.
-  Path C — make SDL_zero(fb_state) idempotent: subtle, easy to leak
+  Path C -- make SDL_zero(fb_state) idempotent: subtle, easy to leak
     surfaces.
-  Path D — NXEngine destroys + re-creates renderer on PIXEL_SIZE_CHANGED:
+  Path D -- NXEngine destroys + re-creates renderer on PIXEL_SIZE_CHANGED:
     architecturally cleanest but heavyweight, requires NXE event-loop
     integration we don't currently have.
 
@@ -126,7 +126,7 @@ on non-DOS builds. Required for SDL_HINT_DOS_PREFER_LFB (patch 0010)
 to actually engage LFB across mode-change boundaries on real Mach64
 hardware.
 
-Local-only patch per workspace policy (memory note "SDL upstream —
+Local-only patch per workspace policy (memory note "SDL upstream --
 local patches only"): never PR'd upstream, sidestepping
 vendor/SDL/CLAUDE.md's no-AI-PRs restriction.
 
@@ -143,7 +143,7 @@ index ee69c3c95..418189449 100644
      return true;
  }
  
-+// DOSKUTSU helper (patch 0011 — Phase 9 lever 1 lifecycle fix, Path B).
++// DOSKUTSU helper (patch 0011 -- Phase 9 lever 1 lifecycle fix, Path B).
 +//
 +// Populate fb_state's "fast-path" fields (direct_fb=true plus all the
 +// vram/win/pitch derived data) from the device's current_mode and an
@@ -159,12 +159,12 @@ index ee69c3c95..418189449 100644
 +//     window->surface).
 +//
 +// On entry, fb_state.surface and fb_state.fb_size etc may or may not
-+// already be set — the caller controls that. On exit, fb_state is
++// already be set -- the caller controls that. On exit, fb_state is
 +// internally consistent: direct_fb=true, all derived fields match the
 +// current mode + surface dimensions. Returns false if no usable VRAM
 +// path is available (caller should fall back to the normal path).
 +//
-+// IMPORTANT: this function does NOT call SDL_zero(fb_state) — leaving
++// IMPORTANT: this function does NOT call SDL_zero(fb_state) -- leaving
 +// that to the caller. CreateWindowFramebuffer zeros first; the lazy
 +// re-init in UpdateWindowFramebuffer must NOT zero, because doing so
 +// would discard fb_state.surface that we want to preserve.
@@ -194,7 +194,7 @@ index ee69c3c95..418189449 100644
 +    // nearptr over banked dosmemput when both are usable. The default
 +    // ordering (banked-first) is what the SDL3-DOS PR #15377 author tuned
 +    // for; on Mach64 + M64VBE the banked window is bandwidth-bound
-+    // (~500 KB/s) and LFB is 5-10× faster. PREFER_LFB applies the same
++    // (~500 KB/s) and LFB is 5-10x faster. PREFER_LFB applies the same
 +    // policy at this VRAM-path-selection layer that it applies at the
 +    // mode-selection layer (SDL_dosmodes.c LFB-decision).
 +    const bool prefer_lfb = SDL_GetHintBoolean(SDL_HINT_DOS_PREFER_LFB, false);
@@ -212,7 +212,7 @@ index ee69c3c95..418189449 100644
 +    fb_state.pitches_match = (surface->pitch == vram_pitch);
 +
 +    if (use_lfb_path) {
-+        // LFB nearptr — DPMI-mapped VRAM linear address.
++        // LFB nearptr -- DPMI-mapped VRAM linear address.
 +        int back_page = data->page_flip_available ? (1 - data->current_page) : 0;
 +        fb_state.vram_ptr = (Uint8 *)DOS_PhysicalToLinear(data->mapping.address) + data->page_offset[back_page];
 +        fb_state.vram_phys = 0;
@@ -310,8 +310,8 @@ index ee69c3c95..418189449 100644
 +            // Patch 0011: factor populate-fb_state into helper so the lazy
 +            // re-init in UpdateWindowFramebuffer can call the same code.
 +            if (!populate_fb_state_for_direct_fb(device, surface)) {
-+                // populate failed (shouldn't happen — we checked usability
-+                // above) — bail to normal path.
++                // populate failed (shouldn't happen -- we checked usability
++                // above) -- bail to normal path.
                  SDL_DestroySurface(surface);
                  return CreateNormalFramebuffer(device, window, format, pixels, pitch);
              }
@@ -332,12 +332,12 @@ index ee69c3c95..418189449 100644
          }
      }
  
-+    // DOSKUTSU patch 0011 — Phase 9 lever 1, Path B: lazy re-init.
++    // DOSKUTSU patch 0011 -- Phase 9 lever 1, Path B: lazy re-init.
 +    //
 +    // The bug: when SDL3-DOS does a mode-change between
 +    // CreateWindowFramebuffer and the next UpdateWindowFramebuffer,
 +    // DOSVESA_InvalidateCachedFramebuffer clears fb_state.direct_fb,
-+    // .vram_ptr, .vram_phys, .use_dosmemput, .lfb_surface — but
++    // .vram_ptr, .vram_phys, .use_dosmemput, .lfb_surface -- but
 +    // CreateWindowFramebuffer is NOT called again to re-populate those
 +    // fields with the new mode's values. The fast-path guard further
 +    // down then evaluates false (direct_fb=false), and the call falls
@@ -373,7 +373,7 @@ index ee69c3c95..418189449 100644
 +                        (unsigned long)fb_state.fb_size,
 +                        fb_state.vram_w, fb_state.vram_h,
 +                        vdata->current_mode.internal->mode_id);
-+        // If populate fails, fall through — the normal path (further
++        // If populate fails, fall through -- the normal path (further
 +        // down) will try its best (and probably also fail; that's the
 +        // pre-patch behaviour).
 +    }

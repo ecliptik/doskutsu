@@ -28,29 +28,29 @@ process exit (Ogg singleton's dtor running after SoundManager's mixer is
 already gone).
 
 API mapping (all in src/sound/Ogg.cpp):
-- Mix_LoadMUS(path)              → MIX_LoadAudio(mixer, path, false)
-- Mix_GetError()                 → SDL_GetError()  (unified in SDL3)
-- Mix_PlayMusic(audio, 0)        → MIX_SetTrackAudio + MIX_PlayTrack
-- Mix_HookMusicFinished(cb)      → MIX_SetTrackStoppedCallback(track, cb, ud)
-- Mix_HookMusicFinished(NULL)    → MIX_SetTrackStoppedCallback(track, NULL, NULL)
-- Mix_HaltMusic()                → MIX_StopTrack(track, 0)
-- Mix_FreeMusic(audio)           → MIX_DestroyAudio(audio)
-- Mix_PauseMusic()               → MIX_PauseTrack(track)
-- Mix_ResumeMusic()               → MIX_ResumeTrack(track)
-- Mix_VolumeMusic(int_0..128)    → MIX_SetTrackGain(track, float_0..1)
-- Mix_SetMusicPosition(sec_dbl)  → MIX_SetTrackPlaybackPosition(track, frames)
+- Mix_LoadMUS(path)              -> MIX_LoadAudio(mixer, path, false)
+- Mix_GetError()                 -> SDL_GetError()  (unified in SDL3)
+- Mix_PlayMusic(audio, 0)        -> MIX_SetTrackAudio + MIX_PlayTrack
+- Mix_HookMusicFinished(cb)      -> MIX_SetTrackStoppedCallback(track, cb, ud)
+- Mix_HookMusicFinished(NULL)    -> MIX_SetTrackStoppedCallback(track, NULL, NULL)
+- Mix_HaltMusic()                -> MIX_StopTrack(track, 0)
+- Mix_FreeMusic(audio)           -> MIX_DestroyAudio(audio)
+- Mix_PauseMusic()               -> MIX_PauseTrack(track)
+- Mix_ResumeMusic()               -> MIX_ResumeTrack(track)
+- Mix_VolumeMusic(int_0..128)    -> MIX_SetTrackGain(track, float_0..1)
+- Mix_SetMusicPosition(sec_dbl)  -> MIX_SetTrackPlaybackPosition(track, frames)
                                     via MIX_MSToFrames(SAMPLE_RATE, ms)
 
 Type changes (in src/sound/Ogg.h):
-- struct oggSong:    Mix_Music *intro / *loop  →  MIX_Audio *intro / *loop
+- struct oggSong:    Mix_Music *intro / *loop  ->  MIX_Audio *intro / *loop
 - class Ogg adds:    MIX_Track *_music_track = nullptr  (private member)
 
 Callback signature change (musicFinishedCallback):
 - SDL2_mixer Mix_HookMusicFinished's   void (*)(void)
 - SDL3_mixer MIX_TrackStoppedCallback: void (*)(void *userdata, MIX_Track *track)
-Both args ignored — singleton lookup gives us state. SDLCALL added per
+Both args ignored -- singleton lookup gives us state. SDLCALL added per
 the typedef. Original "Here be dragons" comment about calling mixer
-functions from the callback context preserved verbatim — same advisory
+functions from the callback context preserved verbatim -- same advisory
 applies to MIX_*; nxengine's synthesis-correctness review will validate
 empirically against pre-migration audio capture.
 
@@ -66,15 +66,15 @@ stop() ordering: the new MIX_StopTrack + MIX_SetTrackAudio(NULL)
 sequence detaches the audio from the track BEFORE MIX_DestroyAudio
 runs on the song's audio handles. Without this, the track would
 briefly reference freed memory if the mixer hadn't yet processed the
-stop — defensive ordering.
+stop -- defensive ordering.
 
 DOS-PORT annotations on the architectural decisions per
-docs/SDL3-MIGRATION.md § 4: persistent _music_track lifetime model,
-volume-scale preservation rationale, MS→frames unit conversion at the
+docs/SDL3-MIGRATION.md sec. 4: persistent _music_track lifetime model,
+volume-scale preservation rationale, MS->frames unit conversion at the
 position-set call.
 
-Patch 2/4 of the audio refactor's remaining work; 0014 (Pixtone Mix→MIX
-+ 64-track pool) and 0015 (Organya HookMusic→TrackRawCallback + S16→
+Patch 2/4 of the audio refactor's remaining work; 0014 (Pixtone Mix->MIX
++ 64-track pool) and 0015 (Organya HookMusic->TrackRawCallback + S16->
 float boundary) follow. The series 0013-0017 together compiles; this
 patch alone leaves Pixtone/Organya still calling SDL2_mixer Mix_*.
 ---
@@ -143,7 +143,7 @@ index ac9cbd3..88b2cc3 100644
  
 -static void musicFinishedCallback()
 +// DOS-PORT: SDL3_mixer's MIX_TrackStoppedCallback signature is
-+// (void *userdata, MIX_Track *track) — wider than SDL2_mixer's
++// (void *userdata, MIX_Track *track) -- wider than SDL2_mixer's
 +// Mix_HookMusicFinished's void(void) but functionally equivalent for
 +// our use case (we ignore both args; singleton lookup gives us state).
 +static void SDLCALL musicFinishedCallback(void * /*userdata*/, MIX_Track * /*track*/)
@@ -165,7 +165,7 @@ index ac9cbd3..88b2cc3 100644
    }
  
 +  // DOS-PORT: SDL3_mixer requires a MIX_Track to play through. We hold
-+  // a single persistent track for the lifetime of the Ogg singleton —
++  // a single persistent track for the lifetime of the Ogg singleton --
 +  // lazy-create on first play, never destroyed. Reused across songs by
 +  // re-calling MIX_SetTrackAudio with the new MIX_Audio. Track is owned
 +  // by the mixer, cleaned up on MIX_DestroyMixer.
@@ -200,7 +200,7 @@ index ac9cbd3..88b2cc3 100644
 +  MIX_PlayTrack(_music_track, 0);
  
 -  Mix_HookMusicFinished(musicFinishedCallback);
-+  // DOS-PORT: Mix_VolumeMusic(int_0..128) → MIX_SetTrackGain(float_0..1).
++  // DOS-PORT: Mix_VolumeMusic(int_0..128) -> MIX_SetTrackGain(float_0..1).
 +  // Preserve existing math: upstream feeds 0..100 to a 0..128 API (using
 +  // ~78% of the volume range). Keeping the /128 divisor gives the same
 +  // effective gain post-migration.
@@ -237,7 +237,7 @@ index ac9cbd3..88b2cc3 100644
 +    {
 +      MIX_SetTrackStoppedCallback(_music_track, nullptr, nullptr);
 +      MIX_StopTrack(_music_track, 0);
-+      // Detach audio from the track before destroying audio handles —
++      // Detach audio from the track before destroying audio handles --
 +      // otherwise the track briefly references freed memory.
 +      MIX_SetTrackAudio(_music_track, nullptr);
 +    }
@@ -320,7 +320,7 @@ index 2a332ec..5f28cc2 100644
 +  // DOS-PORT: SDL3_mixer model: a single MIX_Track owns the music
 +  // playback "slot" (no global Mix_PlayMusic equivalent). Lazy-created
 +  // on first play from SoundManager's mixer; never explicitly destroyed
-+  // — owned by the mixer, cleaned up when MIX_DestroyMixer runs in
++  // -- owned by the mixer, cleaned up when MIX_DestroyMixer runs in
 +  // SoundManager::shutdown().
 +  MIX_Track *_music_track = nullptr;
  };

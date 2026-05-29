@@ -9,17 +9,17 @@ Content-Transfer-Encoding: 8bit
 
 Iter J IDLEPROB ABORT (2026-05-08): SDL_DOSAudioForcePause() issued but
 doskutsu_audio_irq_count kept incrementing past 200 ms watchdog (last_count=74).
-DSP cmd 0xD5 was being clobbered by PlayDevice's auto-resume within ~µs.
+DSP cmd 0xD5 was being clobbered by PlayDevice's auto-resume within ~us.
 
 Root cause (full diagnostic in docs/PHASE11-IDLEPAUSE-DIAGNOSTIC.md):
-SDL3 PlaybackAudioThread runs Iterate→WaitDevice in a loop. WaitDevice's
+SDL3 PlaybackAudioThread runs Iterate->WaitDevice in a loop. WaitDevice's
 MaybeServiceIdlePauseRequests() consumes g_dos_audio_pause_request and
 issues 0xD5; DSP paused. Next Iterate cycle calls PlayDevice, which has
 an auto-resume gate (SDL_dosaudio_sb.c:828 post-SDL/0040):
 
   if (isr_dsp_paused && !g_dos_audio_force_dsp_pause) {
       g_dos_audio_resume_request = true;
-      MaybeServiceIdlePauseRequests();  // → 0xD6 → DSP resumed
+      MaybeServiceIdlePauseRequests();  // -> 0xD6 -> DSP resumed
   }
 
 g_dos_audio_force_dsp_pause was set ONLY by SDL_HINT_DOSKUTSU_AUDIO_FORCE_DSP_PAUSE=1
@@ -41,14 +41,14 @@ IDLEPROB re-run on operator's g2k machine is the validation gate.
 Slot 0115 (engine-side SetIdlePauseEnabled) DISPOSITION: keep default-OFF
 in iter K. Even with this patch landed, the auto-engage path
 (consecutive-silent-IRQs detector) cannot trigger under SDL3-DOS audio
-architecture — SDL3 audio thread continuously fills ring with silence,
+architecture -- SDL3 audio thread continuously fills ring with silence,
 so ring never underruns, so silent-IRQ counter never crosses threshold.
 Re-engaging slot 0115 requires re-architecting the detector to observe
 SDL stream-level quiescence, not ring-underrun. Iter L scope.
 
 No new env vars. No new public-API symbols (g_dos_audio_force_dsp_pause
 exposure is for cross-TU coordination, not engine consumption). No
-behavior change on Phase 9 organya path or Phase 10 OPL3 path —
+behavior change on Phase 9 organya path or Phase 10 OPL3 path --
 ForcePause is dev-only per its docstring.
 ---
  src/audio/dos/SDL_dosaudio_sb.c    |  9 ++++++++-
@@ -70,7 +70,7 @@ index 3a38e8ba6..b6cd35b3d 100644
 +   gates auto-resume on (see auto-resume gate at line ~828). Diagnostic in
 +   docs/PHASE11-IDLEPAUSE-DIAGNOSTIC.md: ForcePause API set the request flag
 +   but PlayDevice's auto-resume on `!g_dos_audio_force_dsp_pause` re-issued
-+   0xD6 within ~µs of every 0xD5. Net pause window invisible to probe;
++   0xD6 within ~us of every 0xD5. Net pause window invisible to probe;
 +   IDLEPROB ABORT on iter J. Header decl added in SDL_dos_audio_synth.h. */
 +volatile bool g_dos_audio_force_dsp_pause = false;
  
@@ -87,7 +87,7 @@ index 3693d0961..765f8eec7 100644
 +    /* Patch 0048: also assert g_dos_audio_force_dsp_pause so PlayDevice's
 +       auto-resume gate (SDL_dosaudio_sb.c:828) does NOT re-issue 0xD6
 +       on the next audio-thread iter. Without this gate, ForcePause's
-+       0xD5 was being clobbered by PlayDevice's auto-resume within ~µs;
++       0xD5 was being clobbered by PlayDevice's auto-resume within ~us;
 +       iter J IDLEPROB measured net IRQ-5 unaffected. Diagnostic in
 +       docs/PHASE11-IDLEPAUSE-DIAGNOSTIC.md. */
 +    g_dos_audio_force_dsp_pause = true;
@@ -117,7 +117,7 @@ index cd1cfa0e1..596b8a028 100644
 +// Patch 0048: ForcePause now ALSO sets g_dos_audio_force_dsp_pause = true
 +// to suppress PlayDevice's auto-resume gate. Without this, the SDL3 audio
 +// thread's PlayDevice(`SDL_dosaudio_sb.c:828`) would re-issue 0xD6 within
-+// µs of every 0xD5 we send, defeating the pause. See
++// us of every 0xD5 we send, defeating the pause. See
 +// docs/PHASE11-IDLEPAUSE-DIAGNOSTIC.md (iter J IDLEPROB ABORT 2026-05-08).
  extern void SDL_DOSAudioForcePause(void);
  

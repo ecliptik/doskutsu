@@ -9,7 +9,7 @@ Content-Transfer-Encoding: 8bit
 
 DOS-PORT (patch 0100, Phase 10 audio offload). Engine-side wiring for
 the Phase 10 audio-IRQ instrumentation contract authored by flush-instr
-(docs/PHASE10-CONTRACT.md). Pure instrumentation scaffolding — no
+(docs/PHASE10-CONTRACT.md). Pure instrumentation scaffolding -- no
 backend dispatch logic. Stage 2 MidiScheduler / Stage 3 WaveBlaster /
 Stage 4 OPL3 backend implementations land in patches 0101+.
 
@@ -20,41 +20,41 @@ Pentium-OD-83 decomposes into:
 
   ~1.5 ms music-DMA-mix      (existing g_audio_mix_accum_ns_block bracket)
   ~12.0 ms IRQ-entry/exit     (NEW: irq_wall_us - audio_mix delta)
-  variable SFX windows        (NEW: sfx_active_count × per-IRQ cost)
+  variable SFX windows        (NEW: sfx_active_count x per-IRQ cost)
 
 This patch lands the engine-side scaffolding that surfaces these three
 slices distinctly, so the W22-WB-A iter can validate Phase 10's
-mechanism claim — that the essential lever is DSP idle-pause
+mechanism claim -- that the essential lever is DSP idle-pause
 removing IRQ-entry/exit overhead, not music-routing alone.
 
-Counter additions per contract § 1 (5 per-block reset + 1 sticky enum):
+Counter additions per contract sec. 1 (5 per-block reset + 1 sticky enum):
 
-  uint32_t g_p10_audio_irq_count_block        — IRQ-5 fires within block
-  uint32_t g_p10_audio_irq_wall_us_block      — full ISR scope wall-clock
-  uint32_t g_p10_audio_idle_pause_count_block — DSP pause→resume transitions
-  uint32_t g_p10_audio_idle_pause_us_block    — cumulative paused-µs in block
-  uint32_t g_p10_sfx_active_count_block       — IRQs where Pixtone was mixing
-  AudioBackend g_p10_audio_backend_active     — sticky; backend selection
+  uint32_t g_p10_audio_irq_count_block        -- IRQ-5 fires within block
+  uint32_t g_p10_audio_irq_wall_us_block      -- full ISR scope wall-clock
+  uint32_t g_p10_audio_idle_pause_count_block -- DSP pause->resume transitions
+  uint32_t g_p10_audio_idle_pause_us_block    -- cumulative paused-us in block
+  uint32_t g_p10_sfx_active_count_block       -- IRQs where Pixtone was mixing
+  AudioBackend g_p10_audio_backend_active     -- sticky; backend selection
 
-Output format per contract § 3.1 — distinct prefix from the existing
+Output format per contract sec. 3.1 -- distinct prefix from the existing
 `kbd/audio block` and `audio/engine split block` lines:
 
   [audio-block n=N irq_count=N irq_wall_us=N idle_count=N idle_us=N
    backend=organya|wb|opl3|tracker|none sfx=N]
 
-Two new env vars per contract § 2 (both documented in docs/BOOT.md):
+Two new env vars per contract sec. 2 (both documented in docs/BOOT.md):
 
-  SDL_HINT_DOSKUTSU_AUDIO_INSTR=1 (dev-only, strict-1) — gates [audio-block]
+  SDL_HINT_DOSKUTSU_AUDIO_INSTR=1 (dev-only, strict-1) -- gates [audio-block]
     emit. Counter UPDATES are unconditional per anti-pattern #2 so values
     are ready when emit fires. Per-flush cost when env unset: <500 ns.
 
   SDL_HINT_DOSKUTSU_AUDIO_BACKEND={auto,organya,opl3,wb,tracker} (user-
-    facing, string-enum) — backend selection. Default `auto` resolves
+    facing, string-enum) -- backend selection. Default `auto` resolves
     to organya in slot 0100 (only backend currently implemented).
     Forced selections (wb / opl3 / tracker) requested-but-unavailable
     fall back to organya gracefully; logged at SoundManager::init.
 
-Cross-vendor lane-split per flush-instr's locked α-API 2026-05-06:
+Cross-vendor lane-split per flush-instr's locked alpha-API 2026-05-06:
 
   ENGINE LANE (this patch):
     - Storage decls + definitions (5 numeric + 1 enum)
@@ -64,9 +64,9 @@ Cross-vendor lane-split per flush-instr's locked α-API 2026-05-06:
     - Engine-side delta-compute pattern: read SDL-side cumulative
       externs (doskutsu_audio_irq_count / _wall_us / _sfx_active_count),
       subtract last-read snapshot, write deltas to per-block storage
-    - p10_audio_idle_pause_callback() — registered at SoundManager::
+    - p10_audio_idle_pause_callback() -- registered at SoundManager::
       init() via SDL_DOSAudioRegisterIdlePauseCallback; invoked by SDL
-      DSP-pause primitive on each pause→resume transition with
+      DSP-pause primitive on each pause->resume transition with
       paused_ns; increments idle_pause_count + accumulates paused_us
     - AudioBackend.{h,cpp} (NEW): selectBackendFromEnv() translates
       SDL_HINT_DOSKUTSU_AUDIO_BACKEND env to AudioBackend enum at
@@ -76,8 +76,8 @@ Cross-vendor lane-split per flush-instr's locked α-API 2026-05-06:
       MIX_PlayTrack; -- in pxtSoundDone, balanced via MIX_StopTrack's
       inline callback dispatch on cooperative SDL3-DOS scheduler).
       Read by SDL-side IRQ-5 ISR at handler entry to determine SFX-
-      active state (engine-state framing per nx-engine ↔ flush-instr
-      ↔ sdl-engine refinement 2026-05-06; semantically correct across
+      active state (engine-state framing per nx-engine <-> flush-instr
+      <-> sdl-engine refinement 2026-05-06; semantically correct across
       all three W22-WB-A PLAYs vs ring-observation default).
 
   SDL LANE (sdl-engine's slots 0037+, NOT in this patch):
@@ -91,7 +91,7 @@ Cross-vendor lane-split per flush-instr's locked α-API 2026-05-06:
       g_pixtone_active_count > 0 at entry (engine-state framing)
 
 Standalone build of this patch fails at link with 4 expected unresolved
-references — `doskutsu_audio_irq_count`, `doskutsu_audio_irq_wall_us`,
+references -- `doskutsu_audio_irq_count`, `doskutsu_audio_irq_wall_us`,
 `doskutsu_audio_sfx_active_count`, `SDL_DOSAudioRegisterIdlePauseCallback`.
 This is the W22A combined-review precedent: both lanes' diffs land
 together, build-qa runs the combined smoke. Compile is clean (no
@@ -99,24 +99,24 @@ warnings); linker errors resolve when sdl-engine's slots 0037+ land
 alongside.
 
 Files touched (5 modified + 2 new):
-  src/Utils/diagnostic_timers.h    — extern decls + AudioBackend enum
+  src/Utils/diagnostic_timers.h    -- extern decls + AudioBackend enum
                                      + p10_audio_instr_active forward decl
-  src/graphics/Renderer.cpp        — storage definitions in NXE::Diag,
+  src/graphics/Renderer.cpp        -- storage definitions in NXE::Diag,
                                      _abl_p10_audio_instr() in anonymous
                                      namespace, emit + reset + delta-
                                      compute block in _maybe_flush_phase_
                                      timing_audit(), idle-pause callback
                                      definition, file-scope wrapper
-  src/sound/Pixtone.h              — g_pixtone_active_count extern decl
-  src/sound/Pixtone.cpp            — definition + 3 mutation sites
+  src/sound/Pixtone.h              -- g_pixtone_active_count extern decl
+  src/sound/Pixtone.cpp            -- definition + 3 mutation sites
                                      (play, playResampled, pxtSoundDone)
-  src/sound/SoundManager.cpp       — selectBackendFromEnv() call +
+  src/sound/SoundManager.cpp       -- selectBackendFromEnv() call +
                                      SDL_DOSAudioRegisterIdlePauseCallback
                                      registration at init
-  src/sound/AudioBackend.h         — NEW skeleton header (Stage 2+
+  src/sound/AudioBackend.h         -- NEW skeleton header (Stage 2+
                                      extends with backend interface;
-                                     slot 0100 has only env→enum)
-  src/sound/AudioBackend.cpp       — NEW skeleton implementation
+                                     slot 0100 has only env->enum)
+  src/sound/AudioBackend.cpp       -- NEW skeleton implementation
 
 CMake re-glob via `cmake -S vendor/nxengine-evo -B build/nxengine`
 required after this patch lands so the build picks up the new
@@ -151,17 +151,17 @@ index a244341..809e107 100644
  // architecture block.
  void tilemap_cache_reset();
  
-+// DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++// DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +// scaffolding): 5 per-block reset counters + 1 sticky enum field per
-+// docs/PHASE10-CONTRACT.md § 1. Distinct field set from the existing
-+// `g_audio_mix_accum_ns_block` (W13.1-D2 patch 0062) — that one
++// docs/PHASE10-CONTRACT.md sec. 1. Distinct field set from the existing
++// `g_audio_mix_accum_ns_block` (W13.1-D2 patch 0062) -- that one
 +// measures music-DMA-mix wall-clock (~1.5 ms / flip subset). Phase 10
 +// adds full-IRQ-scope wall-clock + idle-pause savings + SFX-active
 +// counter so the W22-WB-A iter can decompose:
 +//
 +//   ~13.5 ms total IRQ overhead = ~1.5 ms music-mix    (existing audio_mix bracket)
 +//                               + ~12.0 ms IRQ-entry/exit (NEW: irq_wall_us - audio_mix)
-+//                               + variable SFX windows   (NEW: sfx_active_count × per-IRQ)
++//                               + variable SFX windows   (NEW: sfx_active_count x per-IRQ)
 +//
 +// The essential finding from sdl-engine's W20A2 reanalysis
 +// (memorialized in memory/audio_mix_zero_is_not_audio_off.md): the
@@ -169,7 +169,7 @@ index a244341..809e107 100644
 +// pause mechanism removes that slice; this instrumentation captures
 +// the savings in real-HW measurements.
 +//
-+// All counters use uint32_t µs (atomicity-discipline-driven; matches
++// All counters use uint32_t us (atomicity-discipline-driven; matches
 +// the kbd-counter precedent from patches 0023 + 0025; sized large
 +// enough that 100-flip block accumulation cannot overflow at any
 +// realistic IRQ rate). Per-block reset cadence matches existing
@@ -178,7 +178,7 @@ index a244341..809e107 100644
 +// Sticky `g_p10_audio_backend_active` enum is set once at game-init by
 +// AudioBackend::selectBackendFromEnv() per the SDL_HINT_DOSKUTSU_AUDIO_-
 +// BACKEND env-var; only flips on backend swap (rare; auto-detect chain
-+// succession in Stage 5 — not currently triggered).
++// succession in Stage 5 -- not currently triggered).
 +//
 +// Cross-vendor sourcing: 3 of 5 numerics (`audio_irq_count`,
 +// `audio_irq_wall_us`, `sfx_active_count`) are populated by the SDL-
@@ -191,11 +191,11 @@ index a244341..809e107 100644
 +//
 +// Idle-pause counters (2 of 5: `audio_idle_pause_count`,
 +// `audio_idle_pause_us`) are populated by the engine-side callback
-+// registered at SoundManager::init() — `p10_audio_idle_pause_callback()`
-+// — that the SDL-side DSP-pause primitive invokes on each pause→resume
++// registered at SoundManager::init() -- `p10_audio_idle_pause_callback()`
++// -- that the SDL-side DSP-pause primitive invokes on each pause->resume
 +// transition with the paused-duration in ns.
 +
-+// Sticky enum — currently-active audio backend per SDL_HINT_DOSKUTSU_
++// Sticky enum -- currently-active audio backend per SDL_HINT_DOSKUTSU_
 +// AUDIO_BACKEND. Default `none` until AudioBackend::selectBackendFromEnv()
 +// runs at SoundManager::init(); after init, one of organya / wb / opl3
 +// / tracker.
@@ -214,7 +214,7 @@ index a244341..809e107 100644
 +// in Renderer.cpp's NXE::Diag block alongside the storage.
 +const char *backend_to_string(AudioBackend b);
 +
-+// 5 per-block reset counters — engine-side delta-derived from
++// 5 per-block reset counters -- engine-side delta-derived from
 +// `doskutsu_audio_*` SDL-side cumulative externs (3) + populated by
 +// idle-pause callback (2). All written from the audit-flush path in
 +// Renderer.cpp; reset to 0 after [audio-block ...] emit on each flush.
@@ -232,7 +232,7 @@ index a244341..809e107 100644
 +// amendment about avoiding the nested NXE::Graphics::NXE::Diag trap.
 +//
 +// Strict-"1" match per CLAUDE.md convention (dev-only opt-in
-+// instrumentation; default OFF). Cached static-const-bool — -O2
++// instrumentation; default OFF). Cached static-const-bool -- -O2
 +// hoists the per-flush guard.
 +bool p10_audio_instr_active();
 +
@@ -247,20 +247,20 @@ index 27a34e2..158308d 100644
  #include <go32.h>         // _dos_ds
  #endif
  
-+// DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
-+// scaffolding): cross-vendor extern declarations for SDL→engine
++// DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
++// scaffolding): cross-vendor extern declarations for SDL->engine
 +// counter externs. The SDL-side IRQ-5 ISR (in vendor/SDL/src/audio/
 +// dos/SDL_dosaudio.c per sdl-engine's slots 0037+) writes to these
 +// volatile counters at handler entry/exit; engine-side reads
 +// cumulative values at _maybe_flush_phase_timing_audit() entry and
-+// computes deltas vs the prior block-flush snapshot. Same option-α
++// computes deltas vs the prior block-flush snapshot. Same option-alpha
 +// pattern as the existing g_audio_mix_accum_ns_block (patch 0062
-+// W13.1-D2) — that accumulator is also written from inside the SDL
++// W13.1-D2) -- that accumulator is also written from inside the SDL
 +// audio callback path; this is the same precedent extended to full-
 +// IRQ-scope wall-clock + IRQ-fire count + SFX-active count.
 +//
 +// C linkage so cross-vendor symbol resolution does not require name-
-+// mangling agreement. uint32_t µs (atomicity-discipline-driven; matches
++// mangling agreement. uint32_t us (atomicity-discipline-driven; matches
 +// the kbd-counter precedent from patches 0023 + 0025); modular wrap-
 +// safe under uint32_t arithmetic per C99.
 +extern "C" {
@@ -277,9 +277,9 @@ index 27a34e2..158308d 100644
  std::uint32_t g_w237_speedup_sample_count         = 0;
  bool          g_w237_speedup_measured             = false;
 +
-+// DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++// DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +// scaffolding): 5 per-block reset counters + 1 sticky enum per
-+// docs/PHASE10-CONTRACT.md § 1. Storage sits alongside the W20B /
++// docs/PHASE10-CONTRACT.md sec. 1. Storage sits alongside the W20B /
 +// W22A / W22.5 / W23 / W23.7 storage so audit-flush emits all
 +// instrumentation layers from a single TU. Decls in Utils/diagnostic_-
 +// timers.h; the [audio-block ...] emit + reset block lives in
@@ -311,23 +311,23 @@ index 27a34e2..158308d 100644
  }  // namespace Diag
  }  // namespace NXE
  
-+// DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++// DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +// scaffolding): idle-pause callback. Registered once at SoundManager::
 +// init() via SDL_DOSAudioRegisterIdlePauseCallback (sdl-engine's
 +// slot-0037+ helper API). The SDL-side DSP-pause primitive invokes
-+// this callback on each pause→resume transition, passing the duration
++// this callback on each pause->resume transition, passing the duration
 +// the DSP was paused in nanoseconds.
 +//
 +// Engine-side storage at NXE::Diag scope. C linkage so cross-vendor
 +// ABI matches the SDL-side typedef SDL_DOSIdlePauseCallback_t.
 +//
-+// Per docs/PHASE10-CONTRACT.md § 1.4 idle-pause counter wiring: count
++// Per docs/PHASE10-CONTRACT.md sec. 1.4 idle-pause counter wiring: count
 +// transitions in `audio_idle_pause_count_block`; sum durations
-+// (converted ns → µs) in `audio_idle_pause_us_block`. Both reset per
++// (converted ns -> us) in `audio_idle_pause_us_block`. Both reset per
 +// audit-flush block alongside the 3 IRQ-scope counters.
 +//
 +// Cooperative-scheduler-safe per CLAUDE.md threading-zero invariant.
-+// The callback fires on the SDL ISR side at pause→resume transition;
++// The callback fires on the SDL ISR side at pause->resume transition;
 +// the writes are to NXE::Diag uint32_t storage that the engine-side
 +// reads at audit-flush time. Single-volatile-uint write/read pattern
 +// without atomics matches the existing g_audio_mix_accum_ns_block
@@ -346,7 +346,7 @@ index 27a34e2..158308d 100644
  bool mode_tick_instr_active();
  bool mode_draw_scene_instr_active();
  bool tilemap_cache_killswitch_active();
-+// patch 0100 (Phase 10 audio offload — instrumentation scaffolding):
++// patch 0100 (Phase 10 audio offload -- instrumentation scaffolding):
 +// p10_audio_instr_active() forward-decl joins the family. Definition
 +// at file-scope-after-both-namespace-closes at end-of-file (heeds
 +// W20B build-fix amendment about avoiding the nested NXE::Graphics::
@@ -359,18 +359,18 @@ index 27a34e2..158308d 100644
    return v;
  }
  
-+// DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++// DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +// scaffolding): gate the [audio-block ...] emit on the env var per
-+// docs/PHASE10-CONTRACT.md § 2.1. Strict-"1" match; default OFF
-+// (instrumentation has its own per-flush cost — 3 SDL-side cumulative
++// docs/PHASE10-CONTRACT.md sec. 2.1. Strict-"1" match; default OFF
++// (instrumentation has its own per-flush cost -- 3 SDL-side cumulative
 +// reads + delta-compute + 1 LOG_INFO emission per 100-flip block).
-+// Cached static-const-bool — -O2 hoists per-flush guards. Pairs with
++// Cached static-const-bool -- -O2 hoists per-flush guards. Pairs with
 +// SDL_HINT_DOSKUTSU_AUDIO_BACKEND (user-facing backend selector) per
 +// the design's two-hint pattern: AUDIO_INSTR is dev-only diagnostic
 +// emission; AUDIO_BACKEND is the runtime backend choice (independent
 +// from instrumentation).
 +//
-+// Per contract § 2.1 anti-pattern #2: this gate controls EMIT only,
++// Per contract sec. 2.1 anti-pattern #2: this gate controls EMIT only,
 +// NOT counter UPDATES. Counters increment unconditionally so values
 +// are ready when emit fires; engine-side delta-compute reads SDL-side
 +// cumulative externs unconditionally so the prior-snapshot read at
@@ -390,15 +390,15 @@ index 27a34e2..158308d 100644
      }
    }
 +
-+  // patch 0100 (Phase 10 audio offload — instrumentation scaffolding):
-+  // [audio-block ...] emit per docs/PHASE10-CONTRACT.md § 3.1 + delta-
-+  // compute per § 1.4 + per-block reset per § 1.1. Distinct prefix
++  // patch 0100 (Phase 10 audio offload -- instrumentation scaffolding):
++  // [audio-block ...] emit per docs/PHASE10-CONTRACT.md sec. 3.1 + delta-
++  // compute per sec. 1.4 + per-block reset per sec. 1.1. Distinct prefix
 +  // from the existing `kbd/audio block` (kbd-diagnostic) and
 +  // `audio/engine split block` (W13.1-D2 audio_mix bracket) so the
-+  // 6-layer grep stays clean: [flip-stat] → [engine-tick-stat] →
-+  // [mode-tick-stat] → [mode-draw-scene-stat] → [mds-tilemap-cache] →
-+  // [tile-speedup-stat] (one-shot) → kbd/audio block → audio/engine
-+  // split block → **[audio-block ...]** → counters/closers.
++  // 6-layer grep stays clean: [flip-stat] -> [engine-tick-stat] ->
++  // [mode-tick-stat] -> [mode-draw-scene-stat] -> [mds-tilemap-cache] ->
++  // [tile-speedup-stat] (one-shot) -> kbd/audio block -> audio/engine
++  // split block -> **[audio-block ...]** -> counters/closers.
 +  //
 +  // Delta-compute pattern (per flush-instr's locked spec 2026-05-06):
 +  // SDL-side IRQ-5 ISR maintains cumulative counters
@@ -440,10 +440,10 @@ index 27a34e2..158308d 100644
 +
 +    // Emit gated on AUDIO_INSTR=1. Counter values are set above
 +    // unconditionally; gate prevents log noise when env unset.
-+    // Per § 3.5 emission cadence: per audit-flush block (matches
++    // Per sec. 3.5 emission cadence: per audit-flush block (matches
 +    // existing _flip_phase_block_size = 100 cadence). Defensive
-+    // empty-block placeholder per § 3.5: if irq_count=0 (block had
-+    // zero IRQs — defensive for very early in the run before any
++    // empty-block placeholder per sec. 3.5: if irq_count=0 (block had
++    // zero IRQs -- defensive for very early in the run before any
 +    // audio init), still emit with backend=current (sticky).
 +    if (_abl_p10_audio_instr())
 +    {
@@ -458,8 +458,8 @@ index 27a34e2..158308d 100644
 +    }
 +
 +    // Per-block reset of 5 numeric counters AFTER emit. backend_active
-+    // sticky NOT reset (per contract § 1.2). Reset runs unconditionally
-+    // — counter values matter only across the prior block window;
++    // sticky NOT reset (per contract sec. 1.2). Reset runs unconditionally
++    // -- counter values matter only across the prior block window;
 +    // resetting clears them for the next window regardless of whether
 +    // emit fired.
 +    NXE::Diag::g_p10_audio_irq_count_block         = 0;
@@ -476,7 +476,7 @@ index 27a34e2..158308d 100644
  bool tilemap_cache_killswitch_active() { return ::NXE::Graphics::_abl_tilemap_cache_killswitch(); }
  }}
 +
-+// DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++// DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +// scaffolding): p10_audio_instr_active() env-helper accessor.
 +// Forward-declared in diagnostic_timers.h + at the file-top wrapper
 +// alongside the W20B + W22A + W22.5 + W23 accessors. Definition at
@@ -498,7 +498,7 @@ index 0000000..ef53acf
 --- /dev/null
 +++ b/src/sound/AudioBackend.cpp
 @@ -0,0 +1,90 @@
-+/* Cave Story port — Phase 10 audio offload, slot 0100 (instrumentation
++/* Cave Story port -- Phase 10 audio offload, slot 0100 (instrumentation
 + * scaffolding). Engine-side audio-backend selection.
 + *
 + * See AudioBackend.h for the per-stage scope discussion. Slot 0100
@@ -523,21 +523,21 @@ index 0000000..ef53acf
 +void selectBackendFromEnv()
 +{
 +  // SDL_GetHint reads via SDL3's env-var lookup chain (SDL_SetHint
-+  // overrides → process env → default). Returns NULL if unset.
++  // overrides -> process env -> default). Returns NULL if unset.
 +  const char *value = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
 +
-+  // Default (env unset OR `auto`) → for slot 0100 resolves to
++  // Default (env unset OR `auto`) -> for slot 0100 resolves to
 +  // `organya` (Phase 10 baseline; only backend currently implemented).
-+  // The auto-detect chain (WB available → use WB; else OPL3 → use
++  // The auto-detect chain (WB available -> use WB; else OPL3 -> use
 +  // OPL3; else Organya) lands in patches 0101+ once SDL-side detect
-+  // probes exist (per design § 7).
++  // probes exist (per design sec. 7).
 +  NXE::Diag::AudioBackend selected = NXE::Diag::AudioBackend::organya;
 +
 +  if (value == nullptr || std::strcmp(value, "auto") == 0)
 +  {
 +    selected = NXE::Diag::AudioBackend::organya;
-+    LOG_INFO("audio backend: auto → organya (Phase 10 slot-0100 baseline; "
-+             "auto-detect chain WB → OPL3 → Organya lands with backend "
++    LOG_INFO("audio backend: auto -> organya (Phase 10 slot-0100 baseline; "
++             "auto-detect chain WB -> OPL3 -> Organya lands with backend "
 +             "implementations in patches 0101+)");
 +  }
 +  else if (std::strcmp(value, "organya") == 0)
@@ -568,7 +568,7 @@ index 0000000..ef53acf
 +  {
 +    selected = NXE::Diag::AudioBackend::organya;
 +    LOG_INFO("audio backend: tracker requested but not available "
-+             "(Stage 5 reserved per design § 8; not currently planned); "
++             "(Stage 5 reserved per design sec. 8; not currently planned); "
 +             "falling back to organya.");
 +  }
 +  else
@@ -580,8 +580,8 @@ index 0000000..ef53acf
 +             value);
 +  }
 +
-+  // Sticky write — only changes on backend swap (rare; Stage 5+ when
-+  // auto-detect chain succession fires). Per PHASE10-CONTRACT.md § 1.2:
++  // Sticky write -- only changes on backend swap (rare; Stage 5+ when
++  // auto-detect chain succession fires). Per PHASE10-CONTRACT.md sec. 1.2:
 +  // backend_active is NOT reset per audit-flush block.
 +  NXE::Diag::g_p10_audio_backend_active = selected;
 +}
@@ -594,18 +594,18 @@ index 0000000..5a1ed61
 --- /dev/null
 +++ b/src/sound/AudioBackend.h
 @@ -0,0 +1,52 @@
-+/* Cave Story port — Phase 10 audio offload, slot 0100 (instrumentation
++/* Cave Story port -- Phase 10 audio offload, slot 0100 (instrumentation
 + * scaffolding). Engine-side audio-backend selection scaffold.
 + *
 + * Stage 1 (slot 0100, this patch): the AudioBackend enum lives in
 + * `Utils/diagnostic_timers.h` (because it is also an instrumentation
 + * field via `g_p10_audio_backend_active`). This header declares the
-+ * one Stage-1 entry point — `selectBackendFromEnv()` — that translates
++ * one Stage-1 entry point -- `selectBackendFromEnv()` -- that translates
 + * the user-facing `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` env var into the
 + * sticky `g_p10_audio_backend_active` value. NO backend dispatch
 + * logic: the actual MIDI scheduler / WaveBlaster / OPL3 implementations
 + * land in patches 0101+ (Stage 2 / 3 / 4 deliverables per
-+ * docs/PHASE10-DESIGN.md § 4-7).
++ * docs/PHASE10-DESIGN.md sec. 4-7).
 + *
 + * Stage 2+ will extend this header with an abstract `class AudioBackend`
 + * interface (init / shutdown / playMusic / pauseMusic / etc.) and
@@ -629,7 +629,7 @@ index 0000000..5a1ed61
 +// NXE::Diag::AudioBackend enum and write it to
 +// `g_p10_audio_backend_active`. Default (env unset) = `auto`, which
 +// for slot 0100 resolves to `organya` (Phase 10 baseline; the only
-+// backend currently implemented). Auto-detect chain (WB → OPL3 →
++// backend currently implemented). Auto-detect chain (WB -> OPL3 ->
 +// Organya) lands with the actual backend implementations in patches
 +// 0101+ once detect probes exist on the SDL side.
 +//
@@ -662,7 +662,7 @@ index 64dca02..bac9883 100644
  
  // using std::fgetc;
  
-+// DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++// DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +// scaffolding): Pixtone-active state definition. Header decl at
 +// Pixtone.h (extern "C" volatile std::uint32_t). Read by the SDL-side
 +// IRQ-5 ISR via a sibling extern decl in the SDL audio backend; written
@@ -671,7 +671,7 @@ index 64dca02..bac9883 100644
 +// resolution does not require name-mangling agreement.
 +//
 +// `extern "C" { ... }` block (NOT `extern "C" var = init` syntax) per
-+// the canonical C++ idiom for defining-with-initializer at C linkage —
++// the canonical C++ idiom for defining-with-initializer at C linkage --
 +// avoids GCC's `'X' initialized and declared 'extern'` warning that
 +// fires when `extern` keyword and initializer co-occur on a single
 +// declaration.
@@ -686,7 +686,7 @@ index 64dca02..bac9883 100644
      if (chan >= 0)
      {
        MIX_Track *track = _track_pool[chan];
-+      // patch 0100 (Phase 10 audio offload — instrumentation): the
++      // patch 0100 (Phase 10 audio offload -- instrumentation): the
 +      // MIX_StopTrack below dispatches pxtSoundDone INLINE on the
 +      // cooperative SDL3-DOS scheduler if the track was already
 +      // playing (per the synchronous-callback comment above).
@@ -694,7 +694,7 @@ index 64dca02..bac9883 100644
 +      // the prior play()'s increment. The new MIX_PlayTrack below
 +      // then increments g_pixtone_active_count for the new sound.
 +      // Net for "play() over an active track": 0. Net for
-+      // "play() over an idle channel": +1. Both correct — the
++      // "play() over an idle channel": +1. Both correct -- the
 +      // counter reflects "how many tracks are sounding now."
        MIX_StopTrack(track, 0);
        MIX_SetTrackAudio(track, _sound_fx[slot].chunk);
@@ -723,10 +723,10 @@ index 64dca02..bac9883 100644
    if (_slots[channel] != -1)
    {
      _sound_fx[_slots[channel]].channel = -1;
-+    // patch 0100 (Phase 10 audio offload — instrumentation): balance
++    // patch 0100 (Phase 10 audio offload -- instrumentation): balance
 +    // the Pixtone::play / playResampled increment when this track ends
 +    // (natural end-of-SFX OR explicit Pixtone::stop's MIX_StopTrack
-+    // dispatching this callback inline). Guarded `> 0` defensively —
++    // dispatching this callback inline). Guarded `> 0` defensively --
 +    // the increment/decrement bookkeeping should always be balanced
 +    // through this single callback path, but a stray callback (e.g.
 +    // SDL3_mixer firing pxtSoundDone for an already-ended track during
@@ -749,10 +749,10 @@ index cde52bb..d593229 100644
 +#include <cstdint>
  #include <string>
  
-+// DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++// DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +// scaffolding): Pixtone-active state for cross-vendor query. Per
-+// PHASE10-CONTRACT.md § 1.4 SFX-active discriminator (resolved 2026-05-06
-+// nx-engine ↔ flush-instr ↔ sdl-engine cycle): the SDL-side IRQ-5 ISR
++// PHASE10-CONTRACT.md sec. 1.4 SFX-active discriminator (resolved 2026-05-06
++// nx-engine <-> flush-instr <-> sdl-engine cycle): the SDL-side IRQ-5 ISR
 +// reads this volatile counter at handler entry; if `> 0`, increments
 +// `doskutsu_audio_sfx_active_count` so the W22-WB-A iter can distinguish
 +// SFX-active IRQ overhead from music-only IRQ overhead.
@@ -760,7 +760,7 @@ index cde52bb..d593229 100644
 +// Engine-side semantics: incremented when MIX_PlayTrack succeeds in
 +// Pixtone::play / Pixtone::playResampled; decremented in Pixtone::
 +// pxtSoundDone (per-track stopped callback, also dispatched inline by
-+// MIX_StopTrack on the cooperative SDL3-DOS scheduler — both natural
++// MIX_StopTrack on the cooperative SDL3-DOS scheduler -- both natural
 +// end-of-SFX and explicit Pixtone::stop balance through the same
 +// callback path).
 +//
@@ -792,12 +792,12 @@ index f3544ba..7ecc3b2 100644
  #include <fstream>
  #include <iostream>
  
-+// DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++// DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +// scaffolding): cross-vendor extern declarations for the SDL-side
 +// idle-pause registration API + the engine-side callback that gets
 +// registered. The SDL-side publishes a matching header at
 +// `vendor/SDL/src/core/dos/SDL_dos_audio_synth.h` per
-+// docs/PHASE10-DESIGN.md § E.6 (sdl-engine's slots 0037+); engine-side
++// docs/PHASE10-DESIGN.md sec. E.6 (sdl-engine's slots 0037+); engine-side
 +// references it here at file scope for the SoundManager::init()
 +// registration call. Both sides use C linkage so the cross-vendor
 +// symbol resolution is mangling-agnostic.
@@ -815,9 +815,9 @@ index f3544ba..7ecc3b2 100644
  #define MUSIC_BOSS_ONLY 2
 @@ -221,6 +241,43 @@ bool SoundManager::init()
    // Pixtone's _slots[64] array; channel-pool-vs-on-demand decision is
-   // documented in docs/SDL3-MIGRATION.md § 3.
+   // documented in docs/SDL3-MIGRATION.md sec. 3.
  
-+  // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++  // DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +  // scaffolding): translate SDL_HINT_DOSKUTSU_AUDIO_BACKEND env var to
 +  // the sticky g_p10_audio_backend_active enum. Slot 0100 has only
 +  // organya implementation; wb/opl3/tracker selections log as
@@ -825,11 +825,11 @@ index f3544ba..7ecc3b2 100644
 +  // 2/3/4 (patches 0101+) plug the actual backend implementations.
 +  selectBackendFromEnv();
 +
-+  // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
++  // DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
 +  // scaffolding): register the idle-pause callback that the SDL-side
-+  // DSP-pause primitive (per PHASE10-DESIGN.md § E + sdl-engine's
-+  // SDL/0037+ helpers) invokes when the DSP transitions resume → paused
-+  // → resume cycle. Callback writes paused_ns/1000 into
++  // DSP-pause primitive (per PHASE10-DESIGN.md sec. E + sdl-engine's
++  // SDL/0037+ helpers) invokes when the DSP transitions resume -> paused
++  // -> resume cycle. Callback writes paused_ns/1000 into
 +  // g_p10_audio_idle_pause_us_block + increments
 +  // g_p10_audio_idle_pause_count_block, surfacing the essential
 +  // -12 ms idle-pause savings in the [audio-block ...] emit.
@@ -841,8 +841,8 @@ index f3544ba..7ecc3b2 100644
 +  // helper API surface is published by sdl-engine via patches/SDL/
 +  // 0037+.
 +  //
-+  // Cross-vendor coordination (per PHASE10-CONTRACT.md § 4 final
-+  // lane-split + flush-instr's locked α-API 2026-05-06): the SDL-side
++  // Cross-vendor coordination (per PHASE10-CONTRACT.md sec. 4 final
++  // lane-split + flush-instr's locked alpha-API 2026-05-06): the SDL-side
 +  // publishes `SDL_DOSAudioRegisterIdlePauseCallback(cb)` accepting a
 +  // `void(*)(uint64_t paused_ns)` callback. Engine-side callback body
 +  // at Renderer.cpp's NXE::Diag scope. Forward declarations at file-

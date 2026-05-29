@@ -9,8 +9,8 @@ Content-Transfer-Encoding: 8bit
 Why DOS needs this: NXEngine-evo defaults to whatever optimisation level
 the host platform's CMake module picks. The DJGPP cross-build to MS-DOS
 6.22 on Pentium-era hardware needs explicit ISA / scheduling flags to
-emit code that runs on a 486DX (the project's architectural floor — see
-CLAUDE.md § Target Hardware) while being scheduled for the Pentium
+emit code that runs on a 486DX (the project's architectural floor -- see
+CLAUDE.md sec. Target Hardware) while being scheduled for the Pentium
 OverDrive in the g2k reference machine. We also need a compile-time
 NXE_DOS define so port-specific code (renderer software-mode forcing,
 runtime 320x240 lock, audio-init fallbacks, etc.) can gate cleanly with
@@ -18,37 +18,37 @@ runtime 320x240 lock, audio-init fallbacks, etc.) can gate cleanly with
 
 Detection: matches either `CMAKE_SYSTEM_NAME == MSDOS` (set by future DJGPP
 toolchain files) or `CMAKE_CXX_COMPILER MATCHES "msdosdjgpp"` (matches the
-DJGPP cross-prefix used by `i586-pc-msdosdjgpp-g++` and any variants — kept
+DJGPP cross-prefix used by `i586-pc-msdosdjgpp-g++` and any variants -- kept
 broad so a 386 or 686 prefix would still trigger).
 
 Flags chosen:
-- `-march=i486` — instruction-set floor; project explicitly drops 486SX
+- `-march=i486` -- instruction-set floor; project explicitly drops 486SX
   (no x87, DJGPP requires FPU) and runs on 486DX or better.
-- `-mtune=pentium` — schedule code for the Pentium pipeline (the g2k
+- `-mtune=pentium` -- schedule code for the Pentium pipeline (the g2k
   reference target). Doesn't restrict ISA.
-- `-O2` — standard optimisation. -O3 is avoided here; loop unrolling can
+- `-O2` -- standard optimisation. -O3 is avoided here; loop unrolling can
   bloat code size and DJGPP's i486 cache is small.
-- `-fno-rtti` — confirmed safe by #27 audit: zero `dynamic_cast` / `typeid`
+- `-fno-rtti` -- confirmed safe by #27 audit: zero `dynamic_cast` / `typeid`
   hits across `src/`. Saves a small amount of binary size.
 
 Notably NOT included:
-- `-fno-exceptions` — #27 audit found `src/map.cpp:448-486` wraps
+- `-fno-exceptions` -- #27 audit found `src/map.cpp:448-486` wraps
   `nlohmann::json::parse` in try/catch (real catch handler, logs + continues).
-  Five other files (`ResourceManager.cpp`, `Font.cpp`, `SoundManager.cpp` ×2,
-  `i18n/translate.cpp`) call `nlohmann::json::parse` without try/catch —
+  Five other files (`ResourceManager.cpp`, `Font.cpp`, `SoundManager.cpp` x2,
+  `i18n/translate.cpp`) call `nlohmann::json::parse` without try/catch --
   under `-fno-exceptions` + `JSON_NOEXCEPTION` those become hard `abort()`
   calls on any malformed asset. Worse failure mode than the existing
   exception-throw-and-terminate. Recommended against in #27 report,
   ratified per architecture brief #29.
-- MMX / SSE / SSE2 — P54C (Pentium OverDrive) predates MMX; CLAUDE.md
+- MMX / SSE / SSE2 -- P54C (Pentium OverDrive) predates MMX; CLAUDE.md
   hard rule.
-- `-ffast-math` — Cave Story's collision math relies on bit-exact integer
+- `-ffast-math` -- Cave Story's collision math relies on bit-exact integer
   arithmetic; floating-point is only used in trig.cpp's sin/tan tables at
   init time. -ffast-math saves nothing for this codebase and risks subtle
   trajectory bugs.
 
 The block is gated by toolchain detection so non-DJGPP builds (Linux,
-macOS, Windows native, Vita, Switch) are unaffected — this patch is
+macOS, Windows native, Vita, Switch) are unaffected -- this patch is
 strictly additive on those targets.
 ---
  CMakeLists.txt | 10 ++++++++++

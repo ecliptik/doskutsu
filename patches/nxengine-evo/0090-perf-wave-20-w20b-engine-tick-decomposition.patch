@@ -14,9 +14,9 @@ measurements) into 4 named sub-buckets + 1 residual derived stat.
 Scope reduction: original W20B plan was flip()-body brackets
 (yield_call / flush_renderer_call / dirty_rects_clear /
 maybe_flush_audits) + engine_tick brackets. After W20C probe results
-(YIELD.EXE 0.515 µs flat, CFFSYNC.EXE explained the LOG-line tail
+(YIELD.EXE 0.515 us flat, CFFSYNC.EXE explained the LOG-line tail
 cost, IRQRATE.EXE confirmed timer/keyboard IRQs ~18 Hz are
-negligible), all 4 flip()-body brackets dropped — they would have
+negligible), all 4 flip()-body brackets dropped -- they would have
 measured sub-ms work that doesn't compose to meaningful fps gains.
 The flip()-body draft (263+/1-) parked to
 tests/probes/wip-w20b-flip-body-brackets.diff (gitignored) for
@@ -35,22 +35,22 @@ The engine_tick decomposition stays essential because:
 Implementation:
 
 1. **`SDL_HINT_DOSKUTSU_FINE_INSTR=1`** env helper (strict-1, default
-   OFF). Cached static-const-bool — -O2 hoists per-tick guards.
+   OFF). Cached static-const-bool -- -O2 hoists per-tick guards.
    Originally introduced for the parked flip-body brackets; reused
    here.
 
 2. **4 RAII timer structs** in
    `vendor/nxengine-evo/src/Utils/diagnostic_timers.h`, mirroring
    the existing `EngineTickTimer` pattern from patch 0062:
-   - `ClearScreenTimer` — wraps `Renderer::clearScreen(BLACK)` at
+   - `ClearScreenTimer` -- wraps `Renderer::clearScreen(BLACK)` at
      game.cpp:228.
-   - `TscInterpTimer` — wraps `tsc->RunScripts()` at game.cpp:238
+   - `TscInterpTimer` -- wraps `tsc->RunScripts()` at game.cpp:238
      (only fires on `!game.paused` branch; n=actual_count).
-   - `ModeTickTimer` — wraps `tickfunctions[].OnTick()` at game.cpp
+   - `ModeTickTimer` -- wraps `tickfunctions[].OnTick()` at game.cpp
      line 233 (paused branch) AND line 247 (normal branch); one or
-     other always fires; n=100/100. THIS IS THE BIG ONE — captures
+     other always fires; n=100/100. THIS IS THE BIG ONE -- captures
      sprite update + AI + drawcall exec + room logic.
-   - `DebugOverlayTimer` — wraps `DrawDebug() + console.Draw()`
+   - `DebugOverlayTimer` -- wraps `DrawDebug() + console.Draw()`
      lumped at lines 250-251.
 
    Each timer's destructor: read elapsed ns, write to per-tick dt
@@ -73,7 +73,7 @@ Implementation:
              - mode_tick_dt - debug_overlay_dt
    ```
    Signed math + clamp at 0. Reflects un-bracketed time inside
-   `Game::tick` body — `debug_clear`, the esc-pause check, branch
+   `Game::tick` body -- `debug_clear`, the esc-pause check, branch
    overhead, and any uncaught small calls. Self-validating: small
    residual (<1 ms median) means brackets are exhaustive; large
    residual means there's still an unbracketed chunk worth
@@ -129,7 +129,7 @@ Hot-path cost when FINE_INSTR unset:
 
 If construction-time SDL_GetTicksNS ever shows up as overhead in
 real-HW data, gate the constructors too (constructor only sets t0
-if active). Not done in this patch — keeps consistency with the
+if active). Not done in this patch -- keeps consistency with the
 existing EngineTickTimer pattern; can be optimized later.
 
 Test plan (subsequent task #3 / #4 / #5 equivalents for W20B iter):
@@ -152,7 +152,7 @@ but the env var name is unchanged.
 
 Reference:
   patches/nxengine-evo/0087-perf-wave-20-flip-instrumentation.patch
-    (W20A coarse brackets — drain/dirty/present/housekeeping/total)
+    (W20A coarse brackets -- drain/dirty/present/housekeeping/total)
   patches/nxengine-evo/0089-perf-wave-20a2-audio-off-killswitch.patch
     (audio-off ablation that answered the 13.5 ms baseline question)
   vendor/nxengine-evo/src/Utils/diagnostic_timers.h
@@ -160,7 +160,7 @@ Reference:
      patch mirrors)
   tests/probes/wip-w20b-flip-body-brackets.diff
     (gitignored; archived flip-body draft for salvage)
-  docs/PHASE9-WAVE-20-FINDINGS.md § 9
+  docs/PHASE9-WAVE-20-FINDINGS.md sec. 9
     (W20C probe results that drove scope reduction)
   memory/wave_20_misc_slice_in_flip_body.md
   memory/audio_mix_zero_is_not_audio_off.md
@@ -207,7 +207,7 @@ index 992b7d5..12dc544 100644
 +// Self-validating: small residual (<1 ms median) means brackets are
 +// exhaustive; large residual means there's still an unfound chunk in
 +// Game::tick body (likely the small calls debug_clear / esc-pause check
-+// / branch overhead, or — surprise — something we didn't anticipate).
++// / branch overhead, or -- surprise -- something we didn't anticipate).
 +//
 +// Storage: 4 sample arrays + idxes + per-tick dt locals + 1 residual
 +// array + idx, all extern-declared here, defined in Renderer.cpp where
@@ -233,7 +233,7 @@ index 992b7d5..12dc544 100644
 +extern int g_eng_debug_overlay_idx;
 +extern int g_eng_residual_idx;
 +
-+// Per-tick dt locals — written by each timer's destructor, consumed by
++// Per-tick dt locals -- written by each timer's destructor, consumed by
 +// the residual computation at end-of-Game::tick. Reset by caller at
 +// Game::tick entry (so leftover-from-prior-tick doesn't pollute).
 +extern std::uint64_t g_eng_clear_screen_dt_this_tick;
@@ -334,7 +334,7 @@ index c53c0c2..8ac2a48 100644
 +  NXE::Diag::g_eng_debug_overlay_dt_this_tick  = 0;
 +  // Capture engine-tick start; used for residual computation at the
 +  // very end of this function. Duplicates EngineTickTimer's t0 but
-+  // EngineTickTimer's destructor fires at scope-exit — we need the
++  // EngineTickTimer's destructor fires at scope-exit -- we need the
 +  // value here to read once more BEFORE that destructor runs.
 +  const Uint64 _engine_tick_t0 = SDL_GetTicksNS();
 +
@@ -383,7 +383,7 @@ index c53c0c2..8ac2a48 100644
 +  // dt by sampling SDL_GetTicksNS once more here (cheap; same call site
 +  // pattern as W20A's _flip_inner_dt_ns). Subtract per-tick dt locals
 +  // populated by the 4 sub-bucket timers above. Residual reflects
-+  // un-bracketed time inside Game::tick body — debug_clear, the
++  // un-bracketed time inside Game::tick body -- debug_clear, the
 +  // esc-pause check, branch overhead, and any uncaught small calls.
 +  // Signed math + clamp at 0 in case measurement noise produces a
 +  // tiny negative.
@@ -458,10 +458,10 @@ index 6a13b32..171fea7 100644
 +// flip-body brackets were parked to tests/probes/wip-w20b-flip-body-
 +// brackets.diff (gitignored) per W20C probe results that showed sub-ms
 +// for all 4 flip-body candidates. The engine_tick decomposition stays
-+// essential — captures what's in the 17.8 ms (audio-off) /
++// essential -- captures what's in the 17.8 ms (audio-off) /
 +// 21.1 ms (audio-on) engine_tick budget. Strict "1" match per CLAUDE.md
 +// convention; default OFF (instrumentation has its own per-tick cost).
-+// Cached static const bool — -O2 hoists per-tick guards.
++// Cached static const bool -- -O2 hoists per-tick guards.
 +inline bool _abl_fine_instr()
 +{
 +  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_FINE_INSTR");
@@ -544,7 +544,7 @@ index 6a13b32..171fea7 100644
 +             n_res, st_res.min_ms, st_res.med_ms, st_res.mean_ms, st_res.p95_ms, st_res.max_ms);
 +  }
 +  // Reset engine-tick sample arrays + idxes regardless of FINE_INSTR
-+  // state — keeps storage cleanly zeroed for the next block.
++  // state -- keeps storage cleanly zeroed for the next block.
 +  NXE::Diag::g_eng_clear_screen_idx  = 0;
 +  NXE::Diag::g_eng_tsc_interp_idx    = 0;
 +  NXE::Diag::g_eng_mode_tick_idx     = 0;

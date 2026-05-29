@@ -14,12 +14,12 @@ fast path landing correctly. Drawcalls account for ~7 ms per flip
 flip work in DOSVESA_UpdateWindowFramebuffer.
 
 Add per-flush timing brackets via SDL_GetPerformanceCounter (which
-calls DJGPP uclock() — microsecond resolution per src/timer/dos/
+calls DJGPP uclock() -- microsecond resolution per src/timer/dos/
 SDL_systimer.c) to segment the fast-path cost into four phases:
 
   t0 = function entry
   t1 = after lazy-reinit / DPMI work       => DPMI bracket = t1 - t0
-  t2 = after the system-RAM → VRAM copy    => COPY bracket = t2 - t1
+  t2 = after the system-RAM -> VRAM copy    => COPY bracket = t2 - t1
   t3 = after post-flush block (now no-op    => POST bracket = t3 - t2
        since patch 0014 disabled page-flip)
                                             TOTAL bracket = t3 - t0
@@ -30,7 +30,7 @@ format by CreateSystemSurface, so the inner copy is either a single
 SDL_memcpy (pitches match) or a per-rect SDL_memcpy. Conversion
 work, if any ever materialized, would surface as inflated COPY
 bracket. The brackets cannot distinguish "convert + copy" from
-"long copy" since they share the same code span — but the existing
+"long copy" since they share the same code span -- but the existing
 DOSVESA-FB-INIT log line already prints `pitches_match=1`, so we
 know which sub-mode is active.
 
@@ -54,13 +54,13 @@ memory note). Real-HW capture is the only valid datapoint for the
 datapoint.
 
 What we expect to see on real Cirrus:
-  - dpmi_ms_avg ≈ 0 (lazy-reinit only fires on mode-change boundaries;
+  - dpmi_ms_avg ~ 0 (lazy-reinit only fires on mode-change boundaries;
     the hot loop skips it; the conditional check costs ~0)
   - copy_ms_avg = where the 320 ms goes IF the bottleneck is
     write-combining / cached-mapping issues on the Mach64 LFB. ~6 ms
     expected for 153,600 bytes at PCI write-combining throughput; if
-    measured ≫ 6 ms, that's the mapping-cache attribute problem.
-  - post_ms_avg ≈ 0 (page-flip block gates on page_flip_available
+    measured >> 6 ms, that's the mapping-cache attribute problem.
+  - post_ms_avg ~ 0 (page-flip block gates on page_flip_available
     which patch 0014 forces false)
   - total_ms_avg = 320-360 ms steady = matches drawcall + flip total
 
@@ -68,14 +68,14 @@ If copy_ms_avg explains all 320 ms: bottleneck is uncached PCI writes.
 Mitigation menu: write-combining DPMI mapping attribute, MTRR, dword-
 aligned word writes, REP MOVSD vs SDL_memcpy.
 
-If copy_ms_avg ≈ 6 ms but total_ms_avg = 320 ms: bottleneck is
-elsewhere and these brackets are insufficient — next iteration adds
+If copy_ms_avg ~ 6 ms but total_ms_avg = 320 ms: bottleneck is
+elsewhere and these brackets are insufficient -- next iteration adds
 finer-grained measurement (palette ProgramVGADAC?).
 
 Counters use static accumulators reset every 100 flushes. Min/max/sum
 tracked per bracket. uS resolution; ms+fractional ms in the printout.
 Cost: ~4 SDL_GetPerformanceCounter calls per flush (single uclock()
-read each ≈ 1-2 µs) — negligible compared to the work being measured.
+read each ~ 1-2 us) -- negligible compared to the work being measured.
 
 Why DOS needs this
 ------------------
@@ -86,7 +86,7 @@ unconditionally on the DOS backend; non-DOS builds don't include
 SDL_dosframebuffer.c. Output is via doskutsu_dbg_log so it routes
 to the same /sdldbg.log used by the patch 0009 lifecycle traces.
 
-Local-only patch per workspace policy (memory note "SDL upstream —
+Local-only patch per workspace policy (memory note "SDL upstream --
 local patches only"): never PR'd upstream.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
@@ -125,7 +125,7 @@ index 4594ab5da..e76f9d524 100644
 +        _ts_freq = SDL_GetPerformanceFrequency();
 +    }
 +
-     // DOSKUTSU diagnostic (patches/SDL/0008 — Lever 1 lifecycle trace).
+     // DOSKUTSU diagnostic (patches/SDL/0008 -- Lever 1 lifecycle trace).
      // Logs once on first call and every 100th call. Surfaces the staleness
      // bug where fb_state was invalidated by InvalidateCachedFramebuffer but
 @@ -680,6 +703,13 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
@@ -147,10 +147,10 @@ index 4594ab5da..e76f9d524 100644
          }
  
 +        // DOSKUTSU patch 0015 timing point t2: VRAM-copy block done.
-+        // Bracket [_ts_t1 .. _ts_t2] covers the system-RAM → VRAM blit.
-+        // Expected: 153,600 bytes (320×240×16bpp) at PCI write-combining
++        // Bracket [_ts_t1 .. _ts_t2] covers the system-RAM -> VRAM blit.
++        // Expected: 153,600 bytes (320x240x16bpp) at PCI write-combining
 +        // throughput. Real-HW Mach64 PCI bus theoretical max ~25 MB/s
-+        // uncached → ~6 ms; if measured copy_ms >> 6 ms, write-combining
++        // uncached -> ~6 ms; if measured copy_ms >> 6 ms, write-combining
 +        // / cached-mapping issue.
 +        const Uint64 _ts_t2 = SDL_GetPerformanceCounter();
 +

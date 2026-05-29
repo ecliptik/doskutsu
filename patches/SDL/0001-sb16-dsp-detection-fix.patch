@@ -35,39 +35,39 @@ The original polling loop:
 
 The comment "may take up to 100msecs to initialize. We'll give it 300."
 implies 300ms total. But SDL_DelayPrecise() takes nanoseconds (per
-include/SDL3/SDL_timer.h:299), so SDL_DelayPrecise(1000) is 1μs per
-iteration. 300 × 1μs = 300μs total — three orders of magnitude under
+include/SDL3/SDL_timer.h:299), so SDL_DelayPrecise(1000) is 1us per
+iteration. 300 x 1us = 300us total -- three orders of magnitude under
 the comment-stated intent. Real-hardware DSPs that go ready early
 were happy; anything slow missed the window.
 
-Fix: SDL_DelayPrecise(SDL_MS_TO_NS(1)) — 1ms per iteration. Loop count
+Fix: SDL_DelayPrecise(SDL_MS_TO_NS(1)) -- 1ms per iteration. Loop count
 trimmed to 100 (giving 100ms total at worst, matching the comment-
 stated init window exactly). On real hardware the loop almost always
-exits early (ready usually in ≤10ms). On the slow path we now have
+exits early (ready usually in <=10ms). On the slow path we now have
 the margin the comment promised. This fix alone is unambiguously
 correct.
 
 ================================================================
-Fix 2 (CONSERVATIVE): 100μs reset pulse hold + 100μs post-ready settle
+Fix 2 (CONSERVATIVE): 100us reset pulse hold + 100us post-ready settle
 ================================================================
 
-The original ResetSoundBlasterDSP() held the reset pulse for 3μs, the
-floor of the SB programming guide's "≥3μs" minimum. Real SB16 hardware
-typically registers a 3μs pulse fine, but cheap clones and some
+The original ResetSoundBlasterDSP() held the reset pulse for 3us, the
+floor of the SB programming guide's ">=3us" minimum. Real SB16 hardware
+typically registers a 3us pulse fine, but cheap clones and some
 emulators (DOSBox-X 2025.02.01 SB16 in particular) miss the reset
-when the pulse is at the floor — they don't cleanly transition through
+when the pulse is at the floor -- they don't cleanly transition through
 the reset state and the subsequent DSP read returns 0xFF (no-device
-bus pull-up pattern). Bumping the reset hold to 100μs is well within
+bus pull-up pattern). Bumping the reset hold to 100us is well within
 any plausible upper bound and matches what most retro DOS audio drivers
 historically use; observable boot-time impact is zero. Per djgpp-dos's
 review: no real-HW SB16 chip (including Vibra16S CT2490) has a maximum
-reset-hold constraint at 100μs; the only known historical issue was
+reset-hold constraint at 100us; the only known historical issue was
 some early CT2290/CT2940 Vibras tripping a self-test mode at >50ms holds,
-firmly outside our 100μs zone.
+firmly outside our 100us zone.
 
-The post-ready settle (100μs between the ready-bit-true detection and
+The post-ready settle (100us between the ready-bit-true detection and
 the first DSP read) defends against emulators that latch ready before
-the 0xAA byte is staged into the read FIFO. Same justification —
+the 0xAA byte is staged into the read FIFO. Same justification --
 sub-millisecond is well below the SB programming guide's command-
 response latency floor on any real hardware.
 
@@ -77,7 +77,7 @@ Fix 3 (RESILIENT): 3-attempt outer retry loop
 
 Wraps the full reset-and-detect sequence in a 3-attempt retry loop
 with 5ms inter-attempt delays. Standard retro-DOS-driver pattern
-(adopted by Allegro at 2 retries × 1ms, djgpp-libsb at 3 retries × 10ms,
+(adopted by Allegro at 2 retries x 1ms, djgpp-libsb at 3 retries x 10ms,
 and many DJGPP-built games' inline SB detection) for robustness against
 transient timing quirks: hardware/emulator state that requires a second
 reset, brief bus-noise glitches, scheduler jitter on cooperative-
@@ -93,7 +93,7 @@ real-HW shows weirdness on the retry path (e.g. audio occasionally
 missing on first launch on the Vibra16S), bumping inter-attempt to
 10ms is the diagnostic knob.
 
-Worst-case latency: 3 × 100ms ready-wait + 2 × 5ms inter-attempt =
+Worst-case latency: 3 x 100ms ready-wait + 2 x 5ms inter-attempt =
 ~310ms, comparable to the upper end of the SB programming guide's
 init-window allowance and invisible at app boot.
 
@@ -102,10 +102,10 @@ Fix 4 (ESCAPE HATCH): SDL_DOS_AUDIO_SB_SKIP_DETECTION env var
 ================================================================
 
 The DSP-reset detection sequence is broken in DOSBox-X 2025.02.01's
-SB16 emulation in a way that no amount of timing tuning fixes — every
+SB16 emulation in a way that no amount of timing tuning fixes -- every
 combination of reset pulse / settle / retry returns 0xFF on read,
 indicating no actual response from the emulated DSP. Verified across
-3μs, 100μs, and 1ms reset pulses; 10μs and 100μs post-ready settles;
+3us, 100us, and 1ms reset pulses; 10us and 100us post-ready settles;
 and 1-, 3-, and 8-attempt retry counts.
 
 Rather than over-tune the detection sequence to DOSBox-X-specific
@@ -156,16 +156,16 @@ operates normally.
 
 Real Vibra16S on g2k (Phase 8 gate, untested in this patch):
   Fix 1 is unambiguously correct on real hardware.
-  Fixes 2-3 are conservative timing relaxations — slower paths than
+  Fixes 2-3 are conservative timing relaxations -- slower paths than
     the original, but well within hardware specs (per djgpp-dos's
-    review: no upper-bound constraint at the 100μs reset hold for
+    review: no upper-bound constraint at the 100us reset hold for
     any SB-class chip including Vibra16S).
   Fix 4 is opt-in only; real-HW users won't set the env var unless
     detection genuinely fails on their device.
 
 If real-hardware testing surfaces a regression, the fixes are layered
 so partial reverts are clean: drop Fix 4 alone (rare), or drop Fixes
-2-3 keeping Fix 1 (more conservative — gives back the comment-intent
+2-3 keeping Fix 1 (more conservative -- gives back the comment-intent
 fix without other timing changes).
 
 ================================================================
@@ -174,9 +174,9 @@ Memory / footprint impact: zero
 
 Per djgpp-dos's review: ~70 source lines added, but no heap allocations,
 no new static state (loop variables are stack-local), one added libc
-call (SDL_getenv → DJGPP's getenv on the existing env block, no copy
+call (SDL_getenv -> DJGPP's getenv on the existing env block, no copy
 no alloc), three added SDL_DelayPrecise call sites at existing library.
-DPMI selector count, conventional-memory budget, transient-stack peak —
+DPMI selector count, conventional-memory budget, transient-stack peak --
 all unchanged.
 
 ================================================================
@@ -209,12 +209,12 @@ index 881750d1d..c9c174a58 100644
      outportb(reset_port, 1);
 -    SDL_DelayPrecise(3000); // wait at least 3 microseconds for hardware to see it.
 +    // The SB programming guide states "at least 3 microseconds" as the
-+    // minimum reset pulse hold. Real SB16 hardware actually needs ~100μs
++    // minimum reset pulse hold. Real SB16 hardware actually needs ~100us
 +    // to register the reset reliably, and emulators (notably DOSBox-X
 +    // 2025.02.01's SB16) miss the reset entirely if the pulse is at the
-+    // 3μs floor — they then fail subsequent detection because the DSP
++    // 3us floor -- they then fail subsequent detection because the DSP
 +    // didn't actually reset, returning 0xFF (no-device pattern) on read.
-+    // 100μs is well within any plausible upper-bound the spec allows
++    // 100us is well within any plausible upper-bound the spec allows
 +    // and matches what most retro DOS audio drivers historically use.
 +    SDL_DelayPrecise(SDL_US_TO_NS(100));
      outportb(reset_port, 0);
@@ -251,10 +251,10 @@ index 881750d1d..c9c174a58 100644
 +    // The full reset-and-detect sequence is wrapped in a 3-attempt outer
 +    // loop. On real SB hardware the very first attempt succeeds, but
 +    // some cheap clones (and some emulator implementations) miss a single
-+    // reset due to internal timing quirks. Retrying up to 3 times — with
-+    // a 5ms delay between attempts to let any transient settle — is the
++    // reset due to internal timing quirks. Retrying up to 3 times -- with
++    // a 5ms delay between attempts to let any transient settle -- is the
 +    // standard retro-DOS-driver pattern for robust detection. Total
-+    // worst-case latency is ~310ms (3 × 100ms ready-wait + 2 × 5ms
++    // worst-case latency is ~310ms (3 x 100ms ready-wait + 2 x 5ms
 +    // inter-attempt), comparable to the upper end of what real SB
 +    // hardware needs anyway and invisible at app boot.
 +    Uint8 dsp_byte = 0;
@@ -269,9 +269,9 @@ index 881750d1d..c9c174a58 100644
 +
 +        // Wait for the DSP to say it's ready. SDL_DelayPrecise takes
 +        // nanoseconds (per SDL_timer.h:299); the original SDL_DelayPrecise(1000)
-+        // here was 1μs per iteration (= 300μs total over 300 iters) — far
++        // here was 1us per iteration (= 300us total over 300 iters) -- far
 +        // short of the comment's stated "100msecs". Use SDL_MS_TO_NS(1)
-+        // for 1ms per iteration → 100ms total at worst, matching intent.
++        // for 1ms per iteration -> 100ms total at worst, matching intent.
 +        bool ready = false;
 +        for (int i = 0; i < 100; i++) {
 +            SDL_DelayPrecise(SDL_MS_TO_NS(1));
@@ -285,7 +285,7 @@ index 881750d1d..c9c174a58 100644
 +        }
 +
 +        // Some emulators latch ready before the 0xAA byte is staged
-+        // into the read FIFO. A 100μs settle is well below the SB
++        // into the read FIFO. A 100us settle is well below the SB
 +        // programming guide's command-response latency floor on any
 +        // hardware (real or emulated) so it won't observably slow
 +        // real-hardware detection.

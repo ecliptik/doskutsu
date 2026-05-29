@@ -11,20 +11,20 @@ DOS-PORT (patch 0110, Phase 10 W22-WB-E #44 v3 hang triage). Adds 6
 doskutsu_dbg_log sub-bracket lines inside SoundManager::shutdown body
 to pinpoint which exact sub-step hangs.
 
-Background — slot 0108 narrowing 2026-05-07:
+Background -- slot 0108 narrowing 2026-05-07:
 
 W22-WB-E iter showed slot 0108's engine-shutdown brackets fired
 exactly as designed and pinned the hang to INSIDE SoundManager::
 shutdown:
 
-  engine-shutdown[1/8]: pre-game.tsc->Close   ✓
-  engine-shutdown[2/8]: pre-game.close        ✓
-  engine-shutdown[3/8]: pre-Carets::close     ✓
-  engine-shutdown[4/8]: pre-input_close       ✓
-  engine-shutdown[5/8]: pre-textbox.Deinit    ✓
-  engine-shutdown[6/8]: pre-SoundManager::shutdown  ✓
-  engine-shutdown[7/8]: pre-Renderer::close   ✗ NEVER FIRES
-  engine-shutdown[8/8]: pre-SDL_Quit          ✗ NEVER FIRES
+  engine-shutdown[1/8]: pre-game.tsc->Close   [OK]
+  engine-shutdown[2/8]: pre-game.close        [OK]
+  engine-shutdown[3/8]: pre-Carets::close     [OK]
+  engine-shutdown[4/8]: pre-input_close       [OK]
+  engine-shutdown[5/8]: pre-textbox.Deinit    [OK]
+  engine-shutdown[6/8]: pre-SoundManager::shutdown  [OK]
+  engine-shutdown[7/8]: pre-Renderer::close   [X] NEVER FIRES
+  engine-shutdown[8/8]: pre-SDL_Quit          [X] NEVER FIRES
 
 Slot 0110 drills into SoundManager::shutdown body. The function has
 5 sub-steps (MidiScheduler::shutdown, Organya::shutdown, Pixtone::
@@ -35,25 +35,25 @@ sub-step that completed before the #44 v3 hang.
 
 Bracket points:
   [1/6] pre-MidiScheduler::shutdown
-        (slot-0106 method; if hang here → MidiBackend dtor or
+        (slot-0106 method; if hang here -> MidiBackend dtor or
         SDL_DOSMpu401Shutdown / SDL_DOSOpl3Shutdown; further
         sub-bracketing into MidiScheduler::shutdown for next iter)
   [2/6] pre-Organya::shutdown
-        (Organya synth teardown; if hang here → singleton dtor or
+        (Organya synth teardown; if hang here -> singleton dtor or
         SDL3_mixer track destruction)
   [3/6] pre-Pixtone::shutdown
-        (Pixtone SFX teardown; if hang here → track-pool destroy or
+        (Pixtone SFX teardown; if hang here -> track-pool destroy or
         sound-fx buffer free loop)
   [4/6] pre-MIX_DestroyMixer (conditional on _mixer)
-        (SDL3_mixer device shutdown; if hang here → audio-device
-        close path; sdl-engine territory possibly — depends where
+        (SDL3_mixer device shutdown; if hang here -> audio-device
+        close path; sdl-engine territory possibly -- depends where
         in MIX_DestroyMixer the hang is)
   [5/6] pre-MIX_Quit
-        (SDL3_mixer global state unwind; if hang here → likely SDL
+        (SDL3_mixer global state unwind; if hang here -> likely SDL
         backend dispatch table teardown)
   [6/6] post-MIX_Quit; SoundManager::shutdown body complete;
         returning to engine-shutdown[7/8]
-        (if [6/6] fires but [7/8] doesn't → hang BETWEEN
+        (if [6/6] fires but [7/8] doesn't -> hang BETWEEN
         SoundManager::shutdown return and Renderer::close call;
         narrow further next iter at engine-level)
 
@@ -77,21 +77,21 @@ Smoke (DOSBox-X-fast):
   expected per slot-0108 + slot-0110 testing pattern). All 6
   sub-bracket strings confirmed present in binary via strings-grep.
 
-  Real-HW iter is the essential validation gate — operator's
+  Real-HW iter is the essential validation gate -- operator's
   next iter (W22-WB-F or whatever the next iter shape is) Quit
   path will produce numbered sub-bracket lines in PAUSESDL.LOG up
   to the hang point; flush-instr / nx-engine identifies the
   hanging sub-step from the highest line written.
 
 Quality gates per team-lead's dispatch:
-  1. ✓ DOSBox-X smoke regression (engine launches cleanly with
+  1. [OK] DOSBox-X smoke regression (engine launches cleanly with
      0110 in tree on top of 0109)
-  2. ✓ strings-grep verifies all 6 sub-bracket lines in binary
-  3. ✓ Other configs regression unchanged
-  4. ✓ Patch applies cleanly on top of slot 0109
+  2. [OK] strings-grep verifies all 6 sub-bracket lines in binary
+  3. [OK] Other configs regression unchanged
+  4. [OK] Patch applies cleanly on top of slot 0109
 
 Iter shape note (per team-lead 2026-05-07): WB removed from next
-iter — operator's photo confirms SB16 PnP CTL0026 + DSP v4.13 (not
+iter -- operator's photo confirms SB16 PnP CTL0026 + DSP v4.13 (not
 the chip variant memory had); probe-engineer dispatching standalone
 MPU-401 hardware probe in parallel. WB stays out of operator iters
 until probe data informs new SDL approach. Iter shape going forward:
@@ -137,7 +137,7 @@ index a3373cc..5303442 100644
 +  // patch 0110 (Phase 10 W22-WB-E #44 v3 hang triage): sub-bracket
 +  // logs for each step inside this body. Slot 0108 narrowed the
 +  // hang to between [6/8] (pre-SoundManager::shutdown) and where
-+  // [7/8] (pre-Renderer::close) would have fired — confirming the
++  // [7/8] (pre-Renderer::close) would have fired -- confirming the
 +  // hang is INSIDE this function. Numbered sub-bracket lines via
 +  // doskutsu_dbg_log (declared at file-scope in main.cpp per slot
 +  // 0108) pinpoint the exact sub-step. SDL/0024's per-line fsync
@@ -150,7 +150,7 @@ index a3373cc..5303442 100644
    // FIRST. Released backend's dtor (MidiBackendOpl3 / WaveBlaster /
    // Stub) fires here in deterministic teardown order, ensuring chip
 @@ -564,17 +584,25 @@ void SoundManager::shutdown()
-   // KEY-ON → audible hanging note that persists until reboot.
+   // KEY-ON -> audible hanging note that persists until reboot.
    MidiScheduler::getInstance()->shutdown();
  
 +  doskutsu_dbg_log("snd-shutdown[2/6]: pre-Organya::shutdown");

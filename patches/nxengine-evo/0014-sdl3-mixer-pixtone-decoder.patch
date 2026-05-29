@@ -32,29 +32,29 @@ Architectural design:
   Tier 3 (8 MB). Phase 9 perf work owns any future trim with profile data.
 
 API mapping:
-- Mix_QuickLoad_RAW(buf, len)        → MIX_LoadRawAudioNoCopy(mixer, buf,
+- Mix_QuickLoad_RAW(buf, len)        -> MIX_LoadRawAudioNoCopy(mixer, buf,
                                         len, &spec, free_when_done=true)
-                                        — preserves SDL2_mixer's QuickLoad
+                                        -- preserves SDL2_mixer's QuickLoad
                                         ownership semantics (mixer owns
                                         the SDL_malloc'd buf, frees it on
                                         MIX_DestroyAudio).
-- Mix_PlayChannel(chan, chunk, loop) → _findFreeTrack() (when chan==-1) +
+- Mix_PlayChannel(chan, chunk, loop) -> _findFreeTrack() (when chan==-1) +
                                         MIX_StopTrack(track, 0) +
                                         MIX_SetTrackAudio(track, audio) +
                                         MIX_SetTrackLoops(track, loop) +
                                         MIX_PlayTrack(track, 0).
-- Mix_HaltChannel(chan)              → MIX_StopTrack(_track_pool[chan], 0).
-- Mix_FreeChunk(chunk)               → MIX_DestroyAudio(audio). Removed
+- Mix_HaltChannel(chan)              -> MIX_StopTrack(_track_pool[chan], 0).
+- Mix_FreeChunk(chunk)               -> MIX_DestroyAudio(audio). Removed
                                         the manual SDL_free(chunk->abuf)
-                                        — NoCopy-mode buffer ownership
+                                        -- NoCopy-mode buffer ownership
                                         is handed to MIX_Audio.
-- Mix_ChannelFinished(global_cb)     → MIX_SetTrackStoppedCallback per-track
+- Mix_ChannelFinished(global_cb)     -> MIX_SetTrackStoppedCallback per-track
                                         at init, with userdata = pool
                                         index packed as (intptr_t).
 
 Type changes (in src/sound/Pixtone.h):
-- Mix_Chunk *chunk          →  MIX_Audio *chunk
-- Mix_Chunk *resampled[16]  →  MIX_Audio *resampled[16]
+- Mix_Chunk *chunk          ->  MIX_Audio *chunk
+- Mix_Chunk *resampled[16]  ->  MIX_Audio *resampled[16]
 - Added MIX_Track *_track_pool[64] = {NULL} private member.
 - Added int _findFreeTrack() private method.
 - Added PIXTONE_TRACK_POOL_SIZE = 64 macro.
@@ -63,7 +63,7 @@ Callback signature change (mySfxCallback):
 - SDL2_mixer Mix_ChannelFinished's    void (*)(int chan)
 - SDL3_mixer MIX_TrackStoppedCallback: void (*)(void *userdata, MIX_Track *track)
 Implementation unpacks the pool index from userdata
-((int)(intptr_t)userdata) and dispatches to the existing sfxCallback —
+((int)(intptr_t)userdata) and dispatches to the existing sfxCallback --
 the std::function-based downstream hook (Pixtone::pxtSoundDone) is
 unchanged.
 
@@ -75,11 +75,11 @@ out-of-place. Renamed inner loop variable to `j` to access
 _sound_fx[i].resampled[j] correctly. The bug was harmless on SDL2_mixer
 (Mix_FreeChunk on null was a no-op after the first cleanup pass), but
 in SDL3_mixer territory the equivalent could surface as MIX_DestroyAudio
-on a stale pointer — fixed defensively while we're rewriting these
+on a stale pointer -- fixed defensively while we're rewriting these
 exact lines anyway.
 
 Patch 4/5 of the audio refactor's remaining work; only 0015 (Organya
-HookMusic→TrackRawCallback + S16→float boundary) remains. Together with
+HookMusic->TrackRawCallback + S16->float boundary) remains. Together with
 0017 (foundation), 0013 (Pixtone CVT), 0016 (Ogg), and 0014 (this), the
 0013-0017 series produces a compiling tree that passes the title-screen
 milestone gate.
@@ -113,7 +113,7 @@ index ab954d6..4e2645a 100644
 +// MIX_TrackStoppedCallback signature is void(void *userdata, MIX_Track *track).
 +// We register this same function on every pool track at init, with the
 +// channel index packed into userdata. SDL2_mixer's mySfxCallback dispatch
-+// to sfxCallback(chan) is preserved verbatim — only the entry point's
++// to sfxCallback(chan) is preserved verbatim -- only the entry point's
 +// signature changes.
 +static void SDLCALL mySfxCallback(void *userdata, MIX_Track * /*track*/)
  {
@@ -142,7 +142,7 @@ index ab954d6..4e2645a 100644
 +    if (!_track_pool[i])
 +    {
 +      LOG_ERROR("MIX_CreateTrack({}): {}", i, SDL_GetError());
-+      // Continue anyway — _findFreeTrack() guards on null pool entries.
++      // Continue anyway -- _findFreeTrack() guards on null pool entries.
 +      continue;
 +    }
 +    MIX_SetTrackStoppedCallback(_track_pool[i], mySfxCallback, (void *)(intptr_t)i);
@@ -153,8 +153,8 @@ index ab954d6..4e2645a 100644
  
  void Pixtone::shutdown()
  {
-+  // DOS-PORT: Mix_FreeChunk(chunk) → MIX_DestroyAudio(audio). Also no
-+  // longer need the manual `SDL_free(chunk->abuf)` from the SDL2 era —
++  // DOS-PORT: Mix_FreeChunk(chunk) -> MIX_DestroyAudio(audio). Also no
++  // longer need the manual `SDL_free(chunk->abuf)` from the SDL2 era --
 +  // MIX_LoadRawAudioNoCopy(..., free_when_done=true) hands buffer
 +  // ownership to the mixer, which frees it inside MIX_DestroyAudio.
 +  //
@@ -243,7 +243,7 @@ index ab954d6..4e2645a 100644
 +{
 +  // Scan pool for a track that isn't currently playing. Mirrors
 +  // SDL2_mixer's Mix_PlayChannel(-1, ...) "first free channel" semantics.
-+  // Linear scan over 64 entries — fast enough that O(1) bookkeeping isn't
++  // Linear scan over 64 entries -- fast enough that O(1) bookkeeping isn't
 +  // worth the complexity, especially in non-contended typical play.
 +  for (int i = 0; i < PIXTONE_TRACK_POOL_SIZE; ++i)
 +  {
@@ -261,9 +261,9 @@ index ab954d6..4e2645a 100644
        SDL_DestroyAudioStream(stream);
  
 -      _sound_fx[slot].resampled[rslot] = Mix_QuickLoad_RAW(sound_buf, converted_len);
-+      // DOS-PORT: Mix_QuickLoad_RAW(buf, len) → MIX_LoadRawAudioNoCopy
++      // DOS-PORT: Mix_QuickLoad_RAW(buf, len) -> MIX_LoadRawAudioNoCopy
 +      // (mixer, buf, len, &spec, free_when_done=true). NoCopy variant
-+      // takes ownership of the SDL_malloc'd buffer — matches SDL2_mixer's
++      // takes ownership of the SDL_malloc'd buffer -- matches SDL2_mixer's
 +      // QuickLoad ownership semantics and avoids a redundant memcpy.
 +      MIX_Mixer *mixer = SoundManager::getInstance()->mixer();
 +      SDL_AudioSpec audio_spec = { SDL_AUDIO_S16, 2, (int)resampled_rate };
@@ -277,9 +277,9 @@ index ab954d6..4e2645a 100644
 -    _slots[chan]            = slot;
 -
 -    if (chan < 0)
-+    // DOS-PORT: Mix_PlayChannel(chan_or_-1, audio, loops) → track-pool
++    // DOS-PORT: Mix_PlayChannel(chan_or_-1, audio, loops) -> track-pool
 +    // lookup + MIX_SetTrackAudio + MIX_SetTrackLoops + MIX_PlayTrack.
-+    // chan == -1 → find first free track. chan >= 0 → use that pool slot
++    // chan == -1 -> find first free track. chan >= 0 -> use that pool slot
 +    // (interrupting any current playback).
 +    if (chan < 0) chan = _findFreeTrack();
 +    if (chan >= 0)
@@ -320,7 +320,7 @@ index ab954d6..4e2645a 100644
 +    int32_t chan = _sound_fx[slot].channel;
 +    if (chan >= 0 && chan < PIXTONE_TRACK_POOL_SIZE && _track_pool[chan])
 +    {
-+      // DOS-PORT: Mix_HaltChannel(chan) → MIX_StopTrack(_track_pool[chan], 0).
++      // DOS-PORT: Mix_HaltChannel(chan) -> MIX_StopTrack(_track_pool[chan], 0).
 +      // The fade_out_frames=0 second arg means stop immediately, no fade.
 +      MIX_StopTrack(_track_pool[chan], 0);
 +    }

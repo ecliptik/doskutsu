@@ -9,20 +9,20 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 Wave 8 confirmed Cirrus runs at ~6.4 fps with the bottleneck being SDL3
-drawcall overhead (~155 ms/frame from 340 calls × 0.46 ms each). The way
+drawcall overhead (~155 ms/frame from 340 calls x 0.46 ms each). The way
 to attack it is to STOP CALLING drawSurface for unchanged content.
 
 This patch fingerprints every drawcall (FNV-1a 64-bit hash of op type,
 surface ptr, src/dst rects, alpha, mod color) and compares against the
 previous frame's same-index entry. Match + no prior divergence means the
-backbuffer at that destination is already correct from last frame — skip
+backbuffer at that destination is already correct from last frame -- skip
 the blit AND don't include that region in the dirty list. First diverging
 index forces the rest of the frame to run normally (backbuffer state past
 that point is uncertain).
 
 flip() then calls SDL_FlushRenderer + SDL_UpdateWindowSurfaceRects on the
 accumulated dirty list instead of SDL_RenderPresent's full-screen
-SDL_UpdateWindowSurface — partial flush only covers the changed regions.
+SDL_UpdateWindowSurface -- partial flush only covers the changed regions.
 
 Forced full refresh on first frame, drawcall-count delta > 32, clearScreen
 color change, and every 60 flips (paranoia coherency check).
@@ -39,8 +39,8 @@ Title-screen idle = 430/430 drawcalls skipped, 3-7 dirty rects covering
 3-6% of pixels. Active scene = 74-89% skipped depending on motion.
 
 Predicted real-HW Cirrus impact:
-  - drawcall portion 155ms → ~3-15ms (90%+ skipped × 0.46ms each)
-  - flush portion 9.5ms (full) → ~1-2ms (small dirty-rect total)
+  - drawcall portion 155ms -> ~3-15ms (90%+ skipped x 0.46ms each)
+  - flush portion 9.5ms (full) -> ~1-2ms (small dirty-rect total)
   - per-flip total estimated ~25-30ms for title = 30-40 fps
   - Phase 9 gate of 15 fps: high confidence
 ---
@@ -149,7 +149,7 @@ index 8d9c52d..692aec1 100644
 +               "(set SDL_HINT_DOSKUTSU_DIRTY_RECTS=0 to disable)");
 +    }
 +  }
-+  // First frame must be a full refresh — we have no last-frame
++  // First frame must be a full refresh -- we have no last-frame
 +  // history to compare against and the backbuffer state is whatever
 +  // SDL3 initialized it to.
 +  _force_full_refresh = true;
@@ -203,7 +203,7 @@ index 8d9c52d..692aec1 100644
 +  fp.dst_h = dst_h;
 +  _current_frame_calls.push_back(fp);
 +
-+  // Master kill switch — env var SDL_HINT_DOSKUTSU_DIRTY_RECTS=0 turns
++  // Master kill switch -- env var SDL_HINT_DOSKUTSU_DIRTY_RECTS=0 turns
 +  // the optimization off. Decided once at init() time, cached on the
 +  // instance.
 +  if (!_dirty_rect_enabled) return false;
@@ -211,7 +211,7 @@ index 8d9c52d..692aec1 100644
 +  if (_first_diverging_call >= 0) return false;
 +  if (call_index >= (int)_last_frame_calls.size())
 +  {
-+    // Drawcall count grew vs last frame — call has no peer to compare
++    // Drawcall count grew vs last frame -- call has no peer to compare
 +    // against. Mark divergence here.
 +    _first_diverging_call = call_index;
 +    return false;
@@ -267,7 +267,7 @@ index 8d9c52d..692aec1 100644
 +  //
 +  // Decision tree:
 +  //   force_full_refresh OR no last-frame history => full present
-+  //     (SDL_RenderPresent — preserves the existing flush path)
++  //     (SDL_RenderPresent -- preserves the existing flush path)
 +  //   dirty-list mode active => SDL_FlushRenderer + SDL_UpdateWindow-
 +  //     SurfaceRects(dirty_rects). If dirty_rects is empty, flush
 +  //     just the renderer queue (in case any slow-path landed) and
@@ -304,7 +304,7 @@ index 8d9c52d..692aec1 100644
    ++_flip_total;
    // DOS-PORT (patch 0050, Phase 9 wave 8): refresh the cached window
 @@ -715,9 +929,6 @@ void Renderer::flip()
-   // invalidate the underlying window surface — re-querying once per
+   // invalidate the underlying window surface -- re-querying once per
    // flip is the safe invalidation hook.
    _cached_window_surface = SDL_GetWindowSurface(_window);
 -  // DOS-PORT (patch 0051, Phase 9 wave 8): SDL_RenderPresent
@@ -319,7 +319,7 @@ index 8d9c52d..692aec1 100644
    _maybe_flush_fastpath_audit();
 +
 +  // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): per-frame
-+  // bookkeeping. Tally the skip stats, swap last-frame ↔ current-
++  // bookkeeping. Tally the skip stats, swap last-frame <-> current-
 +  // frame fingerprint vectors (no copy), then clear the new current
 +  // and the dirty-rect list. Decide whether the next frame is a
 +  // forced full refresh.
@@ -371,7 +371,7 @@ index 8d9c52d..692aec1 100644
 +    }
 +
 +    // Forced-full-refresh decision for the NEXT frame:
-+    //   - significant drawcall-count change (>32 delta) ⇒ force
++    //   - significant drawcall-count change (>32 delta) => force
 +    //   - periodic paranoia (every FORCE_FULL_REFRESH_EVERY flips)
 +    //   - clearScreen color changed
 +    bool next_force = false;
@@ -404,7 +404,7 @@ index 8d9c52d..692aec1 100644
 +  // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): drawcall fingerprint
 +  // skip check. If this drawcall's hash matches the same-index entry
 +  // in the previous frame and no earlier call this frame has diverged,
-+  // the destination region is already correct from last frame — return
++  // the destination region is already correct from last frame -- return
 +  // without blitting and without recording a dirty rect.
 +  {
 +    const std::uint64_t h = _hash_drawcall(
@@ -420,7 +420,7 @@ index 8d9c52d..692aec1 100644
 +  }
 +
    // DOSKUTSU patch 0048 (Phase 9 wave 6 Lever 2 Approach B): try the
-   // hand-rolled 16×16 fast path before queuing through SDL_RenderTexture.
+   // hand-rolled 16x16 fast path before queuing through SDL_RenderTexture.
    // _try_fast_blit_16x16 returns true on success (drawn directly to
 @@ -969,6 +1275,7 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
      ++_fastpath_taken_block;
@@ -436,7 +436,7 @@ index 8d9c52d..692aec1 100644
      _bump_drawcall();
 +    _record_dirty_rect(dstrect.x, dstrect.y, dstrect.w, dstrect.h);
    }
-   // DOS-PORT (patch 0051): slow-path queued a command — fast path
+   // DOS-PORT (patch 0051): slow-path queued a command -- fast path
    // must flush before its next direct surface write.
 @@ -1031,6 +1339,23 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
  
@@ -461,7 +461,7 @@ index 8d9c52d..692aec1 100644
 +
    // Patch 0044: conditional alpha-mod (mirrored variant).
    _conditional_set_texture_alpha_mod(src->texture(), src->alpha);
-   // SDL3: SDL_RenderCopyEx → SDL_RenderTextureRotated; rect args are SDL_FRect.
+   // SDL3: SDL_RenderCopyEx -> SDL_RenderTextureRotated; rect args are SDL_FRect.
 @@ -1049,6 +1374,7 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
    else
    {
@@ -491,7 +491,7 @@ index 8d9c52d..692aec1 100644
 +      }
 +    }
 +
-     // SDL3: SDL_RenderCopy → SDL_RenderTexture; SDL_Rect → SDL_FRect.
+     // SDL3: SDL_RenderCopy -> SDL_RenderTexture; SDL_Rect -> SDL_FRect.
      SDL_FRect _srcfr, _dstfr;
      SDL_RectToFRect(&srcrect, &_srcfr);
 @@ -1090,6 +1433,7 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
@@ -528,7 +528,7 @@ index 8d9c52d..692aec1 100644
 +  }
 +
    SDL_SetRenderDrawColor(_renderer, color.r, color.g, color.b, SDL_ALPHA_OPAQUE);
-   // SDL3: SDL_RenderDrawLine → SDL_RenderLine, float coords.
+   // SDL3: SDL_RenderDrawLine -> SDL_RenderLine, float coords.
 -  SDL_RenderLine(_renderer, (float)(x1 * scale), (float)(y1 * scale), (float)(x2 * scale), (float)(y2 * scale));
 +  SDL_RenderLine(_renderer, (float)sx1, (float)sy1, (float)sx2, (float)sy2);
 +  _record_dirty_rect(bx, by, bw, bh);
@@ -610,7 +610,7 @@ index 8d9c52d..692aec1 100644
 +  // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): full-screen alpha-
 +  // blend op; if the same op ran at the same index last frame the
 +  // backbuffer is already tinted from then. (NB: tintScreen is
-+  // additive-style on the existing pixels — repeating it once a
++  // additive-style on the existing pixels -- repeating it once a
 +  // frame on the SAME backbuffer would double-tint, which is why
 +  // the backbuffer NOT being cleared between frames matters here.
 +  // Cave Story's tintScreen sites all run after a clear/redraw of
@@ -641,7 +641,7 @@ index 8d9c52d..692aec1 100644
 +  // the color separately on the renderer so a frame-over-frame
 +  // color change forces a full refresh (the entire backbuffer must
 +  // be repainted). clearScreen called with the SAME color as last
-+  // frame can be skipped — the backbuffer's first-clear pixels are
++  // frame can be skipped -- the backbuffer's first-clear pixels are
 +  // unchanged, and any subsequent draws either match (skip) or
 +  // diverge (full-frame redraw downstream).
 +  const std::uint64_t color32 =
@@ -679,7 +679,7 @@ index 8d9c52d..692aec1 100644
 +  }
 +
    SDL_SetTextureColorMod(_spot_light, r, g, b);
-   // SDL3: SDL_RenderCopy → SDL_RenderTexture; SDL_Rect → SDL_FRect.
+   // SDL3: SDL_RenderCopy -> SDL_RenderTexture; SDL_Rect -> SDL_FRect.
    SDL_FRect _dstfr;
    SDL_RectToFRect(&dstrec, &_dstfr);
    SDL_RenderTexture(_renderer, _spot_light, NULL, &_dstfr);
@@ -713,7 +713,7 @@ index 1c7ce4c..b578e2d 100644
 +    // diverging index forces every subsequent drawcall in the frame to
 +    // run normally (the in-flight backbuffer state is uncertain past
 +    // that point). Skipped drawcalls also skip dirty-rect accumulation
-+    // — only blits that actually touched pixels add to _dirty_rects,
++    // -- only blits that actually touched pixels add to _dirty_rects,
 +    // which is fed to SDL_UpdateWindowSurfaceRects in flip() instead of
 +    // calling SDL_RenderPresent's full SDL_UpdateWindowSurface.
 +    //
@@ -742,7 +742,7 @@ index 1c7ce4c..b578e2d 100644
 +    // Forced full-frame trigger. Set true on first frame, on window
 +    // surface size change, and on the periodic paranoia refresh.
 +    bool _force_full_refresh = true;
-+    // Periodic paranoia refresh — re-seed the dirty-rect tracker every
++    // Periodic paranoia refresh -- re-seed the dirty-rect tracker every
 +    // N flips so any accumulated invariant drift gets corrected.
 +    static constexpr int FORCE_FULL_REFRESH_EVERY = 60;
 +    // Master enable. Default ON; flipped to OFF if the
@@ -760,14 +760,14 @@ index 1c7ce4c..b578e2d 100644
 +    // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): per-drawcall skip
 +    // check. Returns true if this drawcall's hash matches the previous
 +    // frame's same-index hash AND no earlier drawcall in this frame
-+    // has diverged — meaning the destination region is already correct
++    // has diverged -- meaning the destination region is already correct
 +    // in the backbuffer and the actual blit can be skipped. Always
 +    // appends a fingerprint to _current_frame_calls (whether the blit
 +    // ran or not) so frame-to-frame comparison stays index-aligned.
 +    //
 +    // call_index is the position this drawcall would occupy in
 +    // _current_frame_calls (i.e. _current_frame_calls.size() at entry).
-+    // Returns true ⇒ caller skips the blit; returns false ⇒ caller
++    // Returns true => caller skips the blit; returns false => caller
 +    // must perform the blit AND afterwards call _record_dirty_rect.
 +    bool _check_skip_drawcall(std::uint64_t hash,
 +                              int dst_x, int dst_y, int dst_w, int dst_h);

@@ -10,30 +10,30 @@ Content-Transfer-Encoding: 8bit
 DOS-PORT (patch 0103, Phase 10 Stage 4). Concrete OPL3 (YMF262) FM
 synthesis MidiBackend implementation routing MIDI events to the
 SB16/Vibra16S-built-in OPL3 chip via SDL/0037+'s OPL3 helpers
-(SDL_DOSOpl3* family). 18 × 2-op voice allocator with round-robin
+(SDL_DOSOpl3* family). 18 x 2-op voice allocator with round-robin
 LRU steal; small inline GM patch bank covering 7 family categories;
 per-MIDI-channel program / volume / expression state.
 
 Selected when SDL_HINT_DOSKUTSU_AUDIO_BACKEND=opl3. SoundManager::init()
 probes via SDL_DOSOpl3Detect (Adlib timer-1 sequence per AdLib spec);
-on success, calls SDL_DOSOpl3InitChip (enables 18×2-op mode, silences
+on success, calls SDL_DOSOpl3InitChip (enables 18x2-op mode, silences
 all voices) + installs MidiBackendOpl3 on the singleton MidiScheduler.
 On probe failure: same graceful-degradation pattern as Stage 3's
-MidiBackendWaveBlaster — engine rolls active backend back to organya
+MidiBackendWaveBlaster -- engine rolls active backend back to organya
 with clear LOG_INFO; Pixtone SFX continues unchanged on SB16 DAC.
 
 NEW files (2):
 
-  src/sound/MidiBackendOpl3.{h,cpp} — MidiBackendOpl3 class:
+  src/sound/MidiBackendOpl3.{h,cpp} -- MidiBackendOpl3 class:
     Constructor: probe + InitChip + arm voice allocator + reset per-
       MIDI-channel state to GM defaults (program=0 Acoustic Grand
       Piano; volume=100 medium-loud; expression=127 full-on).
-    Voice allocator: 18 × 2-op layout per design § D.5;
+    Voice allocator: 18 x 2-op layout per design sec. D.5;
       _allocate_voice() prefers free voices (lowest-ID for
       determinism); LRU-steals when all 18 are busy. Tracks per-voice
       (active, midi_channel, midi_note, last_used).
     note_on: allocate voice + apply patch (drum patch on channel 9;
-      family-bucket patch otherwise) + convert MIDI note → OPL3
+      family-bucket patch otherwise) + convert MIDI note -> OPL3
       (fnum, block) via 12-entry octave-base lookup table + trigger
       key-on.
     note_off: reverse-lookup voice for (channel, note) + clear key-on;
@@ -43,7 +43,7 @@ NEW files (2):
       (All Sound Off), CC 123 (All Notes Off); other CCs ignored
       (slot 0103 placeholder; Phase 10.5 may add more).
     program_change: updates per-channel current GM program;
-      subsequent notes pick up the new patch (per GM spec — held
+      subsequent notes pick up the new patch (per GM spec -- held
       notes keep original patch).
     on_song_start / on_song_stop: silence all voices + reset per-
       channel state to GM defaults.
@@ -74,17 +74,17 @@ NEW files (2):
 
 MODIFIED (2):
 
-  src/sound/AudioBackend.cpp — selectBackendFromEnv handles "opl3"
+  src/sound/AudioBackend.cpp -- selectBackendFromEnv handles "opl3"
     env value: sets g_p10_audio_backend_active = opl3 (slot-0100
     fallback "Stage 4 not yet shipped" retired). Runtime probe +
     fallback in SoundManager::init.
 
-  src/sound/SoundManager.cpp — three integration points (mirroring
+  src/sound/SoundManager.cpp -- three integration points (mirroring
     Stage 3 pattern):
     1. init(): when backend==opl3, instantiate MidiBackendOpl3 (probes
        in constructor); if isReady(), install on MidiScheduler; else
        log + roll g_p10_audio_backend_active back to organya. The
-       opl3-fallback IS a backend swap per PHASE10-CONTRACT.md § 1.2.
+       opl3-fallback IS a backend swap per PHASE10-CONTRACT.md sec. 1.2.
     2. music() / enableMusic(): midi_path predicate extended to also
        match opl3 (in addition to slot-0101 midi_stub + slot-0102 wb).
     3. runFade(): MidiScheduler::tick driver predicate extended to
@@ -92,11 +92,11 @@ MODIFIED (2):
 
 Smoke (DOSBox-X-fast, 4 gates per team-lead 2026-05-06 dispatch):
 
-  Gate 1 — AUDIO_BACKEND=opl3:
+  Gate 1 -- AUDIO_BACKEND=opl3:
     Probe FAILED under DOSBox-X (Adlib timer-1 sequence didn't
-    produce expected status — DOSBox-X's OPL3 emulation may not
+    produce expected status -- DOSBox-X's OPL3 emulation may not
     pass this specific probe). Engine fell back to organya
-    GRACEFULLY: `opl3 backend probe failed — no OPL chip detected
+    GRACEFULLY: `opl3 backend probe failed -- no OPL chip detected
     (timer sequence did not produce expected status). Engine falls
     back to organya per design's auto-detect-chain semantics.`
     70 flips, no crashes/hangs/fatal markers. This is the smoke
@@ -106,30 +106,30 @@ Smoke (DOSBox-X-fast, 4 gates per team-lead 2026-05-06 dispatch):
     Real-HW iter on g2k (BLASTER T6 = SB16 = OPL3 present) will
     exercise the success path with audible FM synthesis.
 
-  Gate 2 — AUDIO_BACKEND=organya regression: 36 flips, no crashes,
+  Gate 2 -- AUDIO_BACKEND=organya regression: 36 flips, no crashes,
     no MidiScheduler / opl3 / wb backend involvement. Default Organya
     path unchanged.
 
-  Gate 3 — AUDIO_BACKEND=midi-stub regression: Stage 2 path still
+  Gate 3 -- AUDIO_BACKEND=midi-stub regression: Stage 2 path still
     works; `MidiScheduler armed with MidiBackendStub` logged; 36
     flips, no crashes.
 
-  Gate 4 — AUDIO_BACKEND=wb regression: Stage 3 path still works;
+  Gate 4 -- AUDIO_BACKEND=wb regression: Stage 3 path still works;
     DOSBox-X MPU-401 emulation responds to probe; `wb backend ready
     (MPU-401 at 0x0330, UART mode active)` logged; 38 flips, no
     crashes.
 
 Quality gates per team-lead's dispatch:
-  1. ✓ opl3 under DOSBox-X (probe-or-fallback both valid; under
+  1. [OK] opl3 under DOSBox-X (probe-or-fallback both valid; under
      DOSBox-X 2025.02 the probe path didn't pass, exercising the
-     fallback — exactly matching team-lead's "no MPU-401 emulation;
+     fallback -- exactly matching team-lead's "no MPU-401 emulation;
      falls back to organya gracefully + emit clear 'wb probe failed'
      log line" phrasing applied to OPL3)
-  2. ✓ organya regression unchanged
-  3. ✓ midi-stub regression unchanged
-  4. ✓ wb regression unchanged
-  5. ✓ Patch applies cleanly on top of nxengine-evo/0102
-  6. ✓ strings-grep verifies MidiBackendOpl3 (mangled
+  2. [OK] organya regression unchanged
+  3. [OK] midi-stub regression unchanged
+  4. [OK] wb regression unchanged
+  5. [OK] Patch applies cleanly on top of nxengine-evo/0102
+  6. [OK] strings-grep verifies MidiBackendOpl3 (mangled
      `__ZN3NXE5Sound15MidiBackendOpl3*` symbols + readable strings),
      opl3 backend probing, opl3 backend ready, opl3 backend probe
      failed, opl3 backend: on_song_start/stop, integration message
@@ -137,7 +137,7 @@ Quality gates per team-lead's dispatch:
      0103 Phase 10 Stage 4)"
 
 Out of scope (Stage 5 + Phase 10.5):
-  - Auto-detect chain WB → OPL3 → Organya (Stage 5)
+  - Auto-detect chain WB -> OPL3 -> Organya (Stage 5)
   - Velocity / volume / expression dynamic TL adjustment (Phase
     10.5; slot 0103 uses pre-baked TL from patch bank)
   - Sustain pedal / pan / modulation CC dispatch (Phase 10.5)
@@ -147,7 +147,7 @@ Out of scope (Stage 5 + Phase 10.5):
     loader (Phase 10.5)
   - Idle-pause coordination (Stage 5+; engine should call
     SDL_DOSAudioSetIdlePauseEnabled(true) post-OPL3-install for the
-    ~12 ms / flip W20A2 savings — slot 0103 leaves this OFF
+    ~12 ms / flip W20A2 savings -- slot 0103 leaves this OFF
     matching slot 0102's pattern; flush-instr findings on W22-WB-B
     will inform the timing)
 ---
@@ -179,7 +179,7 @@ index 5990581..63b483b 100644
 +    // succeed under emulation; on real g2k Vibra16S CT2490 hardware,
 +    // BLASTER T6 = SB16 = OPL3 present, so probe also succeeds.
 +    selected = NXE::Diag::AudioBackend::opl3;
-+    LOG_INFO("audio backend: opl3 (Phase 10 Stage 4 — concrete OPL3 "
++    LOG_INFO("audio backend: opl3 (Phase 10 Stage 4 -- concrete OPL3 "
 +             "FM synthesis backend via SDL/0037+ OPL3 helpers; "
 +             "MidiScheduler routes music dispatch through 18 x 2-op "
 +             "voice allocator + small inline patch bank). "
@@ -195,11 +195,11 @@ index 0000000..98e2c7e
 --- /dev/null
 +++ b/src/sound/MidiBackendOpl3.cpp
 @@ -0,0 +1,549 @@
-+/* Cave Story port — Phase 10 Stage 4 (slot 0103). MidiBackendOpl3
++/* Cave Story port -- Phase 10 Stage 4 (slot 0103). MidiBackendOpl3
 + * implementation. See MidiBackendOpl3.h for design + API contract.
 + *
-+ * Patch bank sourcing — community attribution (per team-lead 2026-05-06
-+ * dispatch + design § D.8):
++ * Patch bank sourcing -- community attribution (per team-lead 2026-05-06
++ * dispatch + design sec. D.8):
 + *
 + * The inline patch bank below is a SMALL representative set of 8 OPL3
 + * patches covering common GM family categories (piano, mallet, organ,
@@ -217,7 +217,7 @@ index 0000000..98e2c7e
 + *
 + * Mapping: 128 GM melodic programs collapse into 7 family-buckets
 + * (8-program groupings per GM spec, e.g. programs 0-7 = pianos, 8-15
-+ * = chromatic percussion, 16-23 = organs, etc. — 16 buckets total but
++ * = chromatic percussion, 16-23 = organs, etc. -- 16 buckets total but
 + * we only define 7 distinct patches and reuse them across some
 + * adjacent buckets that sound similar on FM). Drum channel (MIDI
 + * channel 9) uses a single percussion patch ignoring the program
@@ -226,7 +226,7 @@ index 0000000..98e2c7e
 + * Phase 10.5 follow-up).
 + *
 + * Aesthetic disclosure: this 8-patch placeholder will sound "generic
-+ * FM" on a real OPL3 — pianos sound thin, brass sounds buzzy, drums
++ * FM" on a real OPL3 -- pianos sound thin, brass sounds buzzy, drums
 + * sound like noise envelopes. That's expected for the Stage 4
 + * baseline. Phase 10.5 follow-up may swap in a fuller community bank
 + * (e.g., libADLMIDI's wohlstand_default OPL3 bank, ~175 patches
@@ -246,7 +246,7 @@ index 0000000..98e2c7e
 +#include <cstring>
 +
 +// Cross-vendor extern declarations for SDL/0037+ OPL3 helpers. Same
-+// pattern as MidiBackendWB.cpp (slot 0102) — public header lives at
++// pattern as MidiBackendWB.cpp (slot 0102) -- public header lives at
 +// vendor/SDL/src/core/dos/SDL_dos_audio_synth.h but is not part of
 +// SDL's public install include path; engine-side references at file
 +// scope with C linkage.
@@ -266,15 +266,15 @@ index 0000000..98e2c7e
 +{
 +
 +// ============================================================================
-+// Patch bank — 8 representative OPL3 patches, public-domain-derived
++// Patch bank -- 8 representative OPL3 patches, public-domain-derived
 +// ============================================================================
 +//
 +// Each patch is 12 bytes per the SDL_DOSOpl3VoiceWritePatch contract:
-+//   patch[0..4]: op0 (modulator) — AM/VIB/EG/KSR/MULT, KSL/TL, AR/DR,
++//   patch[0..4]: op0 (modulator) -- AM/VIB/EG/KSR/MULT, KSL/TL, AR/DR,
 +//                                  SL/RR, WS
-+//   patch[5]:    channel — feedback + connection + L/R panning (0xC0)
-+//   patch[6..10]: op1 (carrier) — same 5 op-level registers as op0
-+//   patch[11]:   fine-tune — engine-side, not written by helper
++//   patch[5]:    channel -- feedback + connection + L/R panning (0xC0)
++//   patch[6..10]: op1 (carrier) -- same 5 op-level registers as op0
++//   patch[11]:   fine-tune -- engine-side, not written by helper
 +//
 +// Index by GM family bucket (programs 0-127 collapse into 7 buckets
 +// covering ~85% of Cave Story's WiiWare arrangement palette).
@@ -284,24 +284,24 @@ index 0000000..98e2c7e
 +//   KSL/TL byte:             KSL(7..6) | TL(5..0)
 +//   AR/DR byte:              AR(7..4) | DR(3..0)
 +//   SL/RR byte:              SL(7..4) | RR(3..0)
-+//   WS byte:                 WS(2..0) — waveform 0=sine, 1=half-sine,
++//   WS byte:                 WS(2..0) -- waveform 0=sine, 1=half-sine,
 +//                                       2=abs-sine, 3=quarter-sine,
 +//                                       4=alt-sine, 5=cam-sine,
 +//                                       6=square, 7=logsaw
 +//   FB/CONN byte:            CHA(7) | CHB(6) | CHC(5) | CHD(4) |
 +//                            FB(3..1) | CONN(0)
-+//                            (For 18×2-op mode in NXE port: CHA=CHB=
-+//                             CHC=CHD=1 → both stereo banks audible;
++//                            (For 18x2-op mode in NXE port: CHA=CHB=
++//                             CHC=CHD=1 -> both stereo banks audible;
 +//                             CONN=0 = AM modulation, CONN=1 = additive)
 +//
-+// PATCH_PIANO: bright, percussive — for GM 0-7 (piano family).
-+// PATCH_MALLET: short attack, long decay — for GM 8-15 (chromatic perc).
-+// PATCH_ORGAN: sustained, sine-like — for GM 16-23, 92-95.
-+// PATCH_GUITAR: bright pluck — for GM 24-31, 80-87 (lead synth too).
-+// PATCH_BRASS: harsh, edge-on — for GM 56-63 (brass family).
-+// PATCH_REED: reedy/woody — for GM 64-79 (reeds + flutes).
-+// PATCH_PAD: slow attack, long sustain — for GM 88-103 (synth pad).
-+// PATCH_DRUM: noise-burst envelope — drum channel only.
++// PATCH_PIANO: bright, percussive -- for GM 0-7 (piano family).
++// PATCH_MALLET: short attack, long decay -- for GM 8-15 (chromatic perc).
++// PATCH_ORGAN: sustained, sine-like -- for GM 16-23, 92-95.
++// PATCH_GUITAR: bright pluck -- for GM 24-31, 80-87 (lead synth too).
++// PATCH_BRASS: harsh, edge-on -- for GM 56-63 (brass family).
++// PATCH_REED: reedy/woody -- for GM 64-79 (reeds + flutes).
++// PATCH_PAD: slow attack, long sustain -- for GM 88-103 (synth pad).
++// PATCH_DRUM: noise-burst envelope -- drum channel only.
 +
 +static constexpr uint8_t PATCH_PIANO[12] = {
 +  // op0: tremolo off, vibrato off, EG sustain off, KSR off, MULT=1
@@ -379,23 +379,23 @@ index 0000000..98e2c7e
 +  0x00,
 +};
 +
-+// GM program (0-127) → patch family. Buckets per GM § standard:
-+//   0-7   piano       → PATCH_PIANO
-+//   8-15  chrom perc  → PATCH_MALLET
-+//   16-23 organ       → PATCH_ORGAN
-+//   24-31 guitar      → PATCH_GUITAR
-+//   32-39 bass        → PATCH_GUITAR (close enough on FM)
-+//   40-47 strings     → PATCH_PAD (sustained string sound)
-+//   48-55 ensemble    → PATCH_PAD
-+//   56-63 brass       → PATCH_BRASS
-+//   64-71 reed        → PATCH_REED
-+//   72-79 pipe        → PATCH_REED
-+//   80-87 synth lead  → PATCH_GUITAR
-+//   88-95 synth pad   → PATCH_PAD
-+//   96-103 fx pad     → PATCH_PAD
-+//   104-111 ethnic    → PATCH_GUITAR
-+//   112-119 perc      → PATCH_MALLET
-+//   120-127 sfx       → PATCH_PIANO (bell-like for sfx hits)
++// GM program (0-127) -> patch family. Buckets per GM sec. standard:
++//   0-7   piano       -> PATCH_PIANO
++//   8-15  chrom perc  -> PATCH_MALLET
++//   16-23 organ       -> PATCH_ORGAN
++//   24-31 guitar      -> PATCH_GUITAR
++//   32-39 bass        -> PATCH_GUITAR (close enough on FM)
++//   40-47 strings     -> PATCH_PAD (sustained string sound)
++//   48-55 ensemble    -> PATCH_PAD
++//   56-63 brass       -> PATCH_BRASS
++//   64-71 reed        -> PATCH_REED
++//   72-79 pipe        -> PATCH_REED
++//   80-87 synth lead  -> PATCH_GUITAR
++//   88-95 synth pad   -> PATCH_PAD
++//   96-103 fx pad     -> PATCH_PAD
++//   104-111 ethnic    -> PATCH_GUITAR
++//   112-119 perc      -> PATCH_MALLET
++//   120-127 sfx       -> PATCH_PIANO (bell-like for sfx hits)
 +static const uint8_t *_program_to_patch(int program)
 +{
 +  if (program < 0 || program > 127) return PATCH_PIANO;
@@ -423,7 +423,7 @@ index 0000000..98e2c7e
 +}
 +
 +// ============================================================================
-+// MIDI note → OPL3 (fnum, block) lookup
++// MIDI note -> OPL3 (fnum, block) lookup
 +// ============================================================================
 +//
 +// Canonical AdLib formula: for OPL3 master clock 14.318 MHz, the
@@ -437,7 +437,7 @@ index 0000000..98e2c7e
 +
 +// Base F-num table at block=4 (octave reference), 12 semitones starting
 +// from C. Computed: freq = 440 * 2^((midi_note - 69) / 12) where
-+// midi_note = 60 (C4) at block=4 yields fnum ≈ 363.
++// midi_note = 60 (C4) at block=4 yields fnum ~ 363.
 +static const uint16_t _base_fnum_table[12] = {
 +  363, 385, 408, 432, 458, 485,
 +  514, 544, 577, 611, 647, 686,
@@ -492,7 +492,7 @@ index 0000000..98e2c7e
 +  if (!SDL_DOSOpl3Detect())
 +  {
 +    _ready = false;
-+    LOG_INFO("opl3 backend probe failed — no OPL chip detected (timer "
++    LOG_INFO("opl3 backend probe failed -- no OPL chip detected (timer "
 +             "sequence did not produce expected status). Engine falls "
 +             "back to organya per design's auto-detect-chain semantics. "
 +             "This is expected on systems without SB16/Vibra16S/AdLib-"
@@ -500,8 +500,8 @@ index 0000000..98e2c7e
 +    return;
 +  }
 +
-+  // Detected. Initialize: enable OPL3 mode (4-op disabled = 18×2-op
-+  // layout per § D.5), silence all voices.
++  // Detected. Initialize: enable OPL3 mode (4-op disabled = 18x2-op
++  // layout per sec. D.5), silence all voices.
 +  SDL_DOSOpl3InitChip();
 +  _ready = true;
 +
@@ -675,8 +675,8 @@ index 0000000..98e2c7e
 +    case 11:   // Expression MSB
 +      _channel_expression[channel & 0x0F] = (std::uint8_t)(value & 0x7F);
 +      break;
-+    case 120:  // All Sound Off — immediate silence for this channel
-+    case 123:  // All Notes Off — release-env-honoring (we collapse to
++    case 120:  // All Sound Off -- immediate silence for this channel
++    case 123:  // All Notes Off -- release-env-honoring (we collapse to
 +               // immediate silence on OPL3 since per-voice envelopes
 +               // handle release timing)
 +    {
@@ -750,35 +750,35 @@ index 0000000..3784639
 --- /dev/null
 +++ b/src/sound/MidiBackendOpl3.h
 @@ -0,0 +1,130 @@
-+/* Cave Story port — Phase 10 Stage 4 (slot 0103). MidiBackendOpl3:
++/* Cave Story port -- Phase 10 Stage 4 (slot 0103). MidiBackendOpl3:
 + * concrete MidiBackend implementation that routes MIDI events to OPL3
 + * (YMF262) FM synthesis via SDL/0037+'s OPL3 helpers (SDL_DOSOpl3*
-+ * family). 18 × 2-op voice allocator with round-robin LRU steal; small
++ * family). 18 x 2-op voice allocator with round-robin LRU steal; small
 + * inline GM patch bank; per-MIDI-channel program state.
 + *
 + * Selected when SDL_HINT_DOSKUTSU_AUDIO_BACKEND=opl3. SoundManager::init()
 + * probes OPL3 presence via SDL_DOSOpl3Detect (timer-1 sequence per
-+ * AdLib-spec); on success, calls SDL_DOSOpl3InitChip (enables 18×2-op
++ * AdLib-spec); on success, calls SDL_DOSOpl3InitChip (enables 18x2-op
 + * mode, silences all voices) + installs MidiBackendOpl3 on the singleton
-+ * MidiScheduler. On probe failure, engine falls back to organya — same
++ * MidiScheduler. On probe failure, engine falls back to organya -- same
 + * graceful-degradation path as Stage 3's MidiBackendWaveBlaster.
 + *
 + * Threading-zero invariant per CLAUDE.md: dispatch synchronous on main
 + * loop. Per-event cost = 12 register writes for note-on (patch +
-+ * fnum/block) ≈ 75-100 µs on PODP83 ISA bus. At 30 fps tick rate with
++ * fnum/block) ~ 75-100 us on PODP83 ISA bus. At 30 fps tick rate with
 + * Cave Story's typical ~5-10 events/frame: well under 1 ms / frame.
 + *
 + * Patch bank: small inline set covering GM family categories
-+ * (piano, strings, brass, organ, lead, pad, etc.) — community-sourced
-+ * per design § D.8 + plan doc § 5 + team-lead 2026-05-06 dispatch.
++ * (piano, strings, brass, organ, lead, pad, etc.) -- community-sourced
++ * per design sec. D.8 + plan doc sec. 5 + team-lead 2026-05-06 dispatch.
 + * See MidiBackendOpl3.cpp for the inline bank + sourcing attribution.
 + * Stage 4.5 / Phase 10.5 follow-up may swap in a fuller bank (175
 + * patches = 128 melodic + 47 drum) via runtime data/opl3-patches.dat
 + * loader if the inline placeholder's aesthetics need improving on
 + * real-HW operator listening.
 + *
-+ * Stage 5 wires up auto-detect chain at SoundManager::init: WB → OPL3
-+ * → Organya. Slot 0103 only handles env-driven `opl3` selection.
++ * Stage 5 wires up auto-detect chain at SoundManager::init: WB -> OPL3
++ * -> Organya. Slot 0103 only handles env-driven `opl3` selection.
 + */
 +
 +#ifndef _MIDI_BACKEND_OPL3_H
@@ -812,7 +812,7 @@ index 0000000..3784639
 +  void on_song_stop()                                             override;
 +
 +private:
-+  // Total OPL3 voices in 18×2-op mode (per design § D.5 + SDL/0037+
++  // Total OPL3 voices in 18x2-op mode (per design sec. D.5 + SDL/0037+
 +  // SDL_DOSOpl3InitChip layout).
 +  static constexpr int VOICES = 18;
 +
@@ -822,7 +822,7 @@ index 0000000..3784639
 +  // Drum channel = MIDI channel 9 (0-indexed; per GM spec).
 +  static constexpr int DRUM_CHANNEL = 9;
 +
-+  // Per-voice state. Used for note→voice tracking and LRU steal.
++  // Per-voice state. Used for note->voice tracking and LRU steal.
 +  struct Voice
 +  {
 +    bool        active        = false;  // currently playing a note
@@ -867,11 +867,11 @@ index 0000000..3784639
 +  // Per-MIDI-channel current GM program (0-127). Default = 0 (Acoustic
 +  // Grand Piano) per GM spec. Updated on program_change events.
 +  std::uint8_t  _channel_program[MIDI_CHANNELS] = {0};
-+  // Per-MIDI-channel volume (controller 7) — applied at note-on as
++  // Per-MIDI-channel volume (controller 7) -- applied at note-on as
 +  // velocity scaler. Default 100 per GM spec ("medium-loud"). Stored
 +  // as 0-127 from the CC value.
 +  std::uint8_t  _channel_volume[MIDI_CHANNELS] = {0};
-+  // Per-MIDI-channel expression (controller 11) — secondary scaler.
++  // Per-MIDI-channel expression (controller 11) -- secondary scaler.
 +  // Default 127 (full-on) per GM spec.
 +  std::uint8_t  _channel_expression[MIDI_CHANNELS] = {0};
 +};
@@ -900,7 +900,7 @@ index be15340..4ea452f 100644
 +  // is opl3, instantiate MidiBackendOpl3 which probes OPL3 in its
 +  // constructor via SDL_DOSOpl3Detect (Adlib timer-1 sequence). On
 +  // probe success, install on MidiScheduler. On probe failure, roll
-+  // active backend back to organya — same graceful-degradation
++  // active backend back to organya -- same graceful-degradation
 +  // pattern as Stage 3's WB. DOSBox-X SB16 default config emulates
 +  // OPL3 so probe succeeds under emulation; g2k Vibra16S CT2490 has
 +  // BLASTER T6 = SB16 = OPL3, so probe succeeds on real HW.
@@ -919,7 +919,7 @@ index be15340..4ea452f 100644
 +    }
 +    else
 +    {
-+      // Probe failed — roll back to organya. opl3 unique_ptr's dtor
++      // Probe failed -- roll back to organya. opl3 unique_ptr's dtor
 +      // calls SDL_DOSOpl3Shutdown which is idempotent when _ready
 +      // was false (no chip state to restore).
 +      NXE::Diag::g_p10_audio_backend_active = NXE::Diag::AudioBackend::organya;
@@ -932,10 +932,10 @@ index be15340..4ea452f 100644
 +    }
 +  }
  
-   // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
+   // DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
    // scaffolding): register the idle-pause callback that the SDL-side
 @@ -489,7 +525,8 @@ void SoundManager::music(uint32_t songno, bool resume)
-   // enum semantic per PHASE10-CONTRACT.md § 1.2).
+   // enum semantic per PHASE10-CONTRACT.md sec. 1.2).
    const bool midi_path =
        (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub) ||
 -      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb);

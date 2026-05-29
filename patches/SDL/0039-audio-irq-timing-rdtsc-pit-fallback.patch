@@ -9,7 +9,7 @@ Content-Transfer-Encoding: 8bit
 
 Bug: patch 0038 used BIOS tick at 0040:006C for IRQ entry/exit timing.
 That was wrong: BIOS tick advances via IRQ-0 (timer interrupt), and
-our audio IRQ-5 handler runs with CLI held by DPMI — IRQ-0 cannot
+our audio IRQ-5 handler runs with CLI held by DPMI -- IRQ-0 cannot
 fire during our handler invocation. Result: entry_tick == exit_tick
 ALWAYS, cumulative `doskutsu_audio_irq_wall_us` stayed 0 forever.
 Iter 1 surfaced this; flush-instr's review accepted "cumulative-mean
@@ -19,7 +19,7 @@ Fix: auto-detect a timer that advances independent of CLI:
 
   1. RDTSC (Pentium+, detected via CPUID): ~12 ns at PODP83's 83 MHz.
      Single-instruction read; advances per CPU cycle regardless of
-     interrupt flag state. Calibrated cycles-per-µs at init via
+     interrupt flag state. Calibrated cycles-per-us at init via
      SDL_GetTicksNS as wall-clock reference.
 
   2. 8253 PIT counter 0 (always available; 486-class fallback):
@@ -30,7 +30,7 @@ Fix: auto-detect a timer that advances independent of CLI:
 
   3. BIOS tick (kept as last-resort default if neither detected;
      known broken in IRQ context but harmless as it just gives 0
-     deltas — same as pre-fix behavior).
+     deltas -- same as pre-fix behavior).
 
 CPUID detection via EFLAGS bit 21 flip-test (settable only on CPUs
 that support CPUID; Pentium+ guaranteed, late-486DX4 may also have).
@@ -46,7 +46,7 @@ BEFORE IRQ hook installs so first IRQ has correct mode set.
 
 Inline timer-read helpers (SDL_DOSAudioReadTimer +
 SDL_DOSAudioTimerDeltaUs) defined in SDL_dos_audio_synth.h so they
-expand at the IRQ-handler call site — no external function call,
+expand at the IRQ-handler call site -- no external function call,
 no memory-lock concerns. All underlying operations are IRQ-safe by
 construction.
 
@@ -57,11 +57,11 @@ READ from IRQ context. Both DOS_LockVariable'd.
 
 Smoke criteria:
   DOSBox-X: timer-mode banner emits cleanly (DOSBox-X simulates
-  Pentium → RDTSC path); per-block irq_wall_us is non-zero.
+  Pentium -> RDTSC path); per-block irq_wall_us is non-zero.
   Real-HW (PODP83): same RDTSC path; per-block irq_wall_us
-  ~7-70 ms aggregate (W20A2-equivalent ~13.5 ms/flip × ~5 flips/block).
+  ~7-70 ms aggregate (W20A2-equivalent ~13.5 ms/flip x ~5 flips/block).
 
-ASCII-only log strings per dos_batch_files_crlf.md (no µ or ≈ chars
+ASCII-only log strings per dos_batch_files_crlf.md (no u or ~ chars
 in DEBUG.LOG output; "us" + "~=" instead).
 
 Out-of-scope for 0039: no idle-pause mechanism changes; no new env
@@ -88,14 +88,14 @@ index 7f44cbfc6..dabeddb34 100644
 +    /* DOSKUTSU patch (Phase 10 patch 0039): IRQ-safe timer for
 +       wall-clock measurement. Patch 0038 used BIOS tick at 0040:006C,
 +       which was wrong: BIOS tick advances via IRQ-0 (timer) which can't
-+       fire while we hold CLI in this IRQ-5 handler → entry_tick ==
-+       exit_tick always → cumulative wall_us stayed 0. Iter 1 surfaced
++       fire while we hold CLI in this IRQ-5 handler -> entry_tick ==
++       exit_tick always -> cumulative wall_us stayed 0. Iter 1 surfaced
 +       this. RDTSC + PIT both advance independent of CLI; mode is auto-
 +       detected at OpenDevice time via SDL_DOSAudioInitTimer().
 +
 +       SDL_DOSAudioReadTimer + SDL_DOSAudioTimerDeltaUs are static-inline
 +       in SDL_dos_audio_synth.h; they expand at this call site so no
-+       external function call → no memory-lock concerns. */
++       external function call -> no memory-lock concerns. */
 +    const Uint64 entry_timer = SDL_DOSAudioReadTimer();
  
      // Acknowledge hardware first.
@@ -106,7 +106,7 @@ index 7f44cbfc6..dabeddb34 100644
  
 -    /* DOSKUTSU patch (Phase 10): wall-clock accumulate via BIOS tick
 -       delta. uint32_t modular arithmetic handles wrap (BIOS tick cycles
--       through uint32_t over ~63 hours). 1 tick = 54925 µs. */
+-       through uint32_t over ~63 hours). 1 tick = 54925 us. */
 -    const uint32_t exit_tick = (uint32_t)_farpeekl(_dos_ds, 0x46Cul);
 -    const uint32_t delta_ticks = exit_tick - entry_tick; /* modular */
 -    if (delta_ticks > 0) {
@@ -163,7 +163,7 @@ index e6adfb38f..f31ad1229 100644
 +
 +/* CPUID detection. The CPUID instruction is available on Pentium+;
 +   486 may or may not have it (only some late-step 486DX4 do). We test
-+   by attempting to flip EFLAGS bit 21 (ID flag) — settable only on
++   by attempting to flip EFLAGS bit 21 (ID flag) -- settable only on
 +   CPUs that support CPUID. */
 +static int detect_cpuid_supported(void)
 +{
@@ -204,7 +204,7 @@ index e6adfb38f..f31ad1229 100644
 +    return ((edx & (1u << 4)) != 0) ? 1 : 0;
 +}
 +
-+/* Calibrate TSC speed in cycles-per-µs. Called once at init, non-IRQ
++/* Calibrate TSC speed in cycles-per-us. Called once at init, non-IRQ
 +   context. Uses SDL_GetTicksNS as the wall-clock reference (which is
 +   safe outside IRQ context). Spins for ~10 ms to get a stable rate. */
 +static uint32_t calibrate_tsc_cycles_per_us(void)
@@ -247,7 +247,7 @@ index e6adfb38f..f31ad1229 100644
 +                    (unsigned)mhz, (unsigned)mhz);
 +            return;
 +        }
-+        /* TSC supported but calibration failed — fall through to PIT. */
++        /* TSC supported but calibration failed -- fall through to PIT. */
 +    }
 +
 +    /* PIT counter 0 is always available on PC-compatible hardware.
@@ -274,7 +274,7 @@ index a6faebeca..a98e588de 100644
 + * Patch 0038 used BIOS tick at 0040:006C for IRQ entry/exit timing. That
 + * was wrong: BIOS tick advances via IRQ-0 (timer interrupt), and our
 + * audio IRQ handler runs with CLI held by DPMI. IRQ-0 can't fire during
-+ * our handler → entry_tick == exit_tick always → cumulative wall_us
++ * our handler -> entry_tick == exit_tick always -> cumulative wall_us
 + * stayed 0. Iter 1 surfaced this bug.
 + *
 + * Patch 0039 fix: auto-detect a timer that advances independent of CLI:
@@ -292,13 +292,13 @@ index a6faebeca..a98e588de 100644
 + */
 +
 +typedef enum {
-+    SDL_DOS_AUDIO_TIMER_BIOS_TICK = 0, /* fallback / coarse — broken in IRQ context */
++    SDL_DOS_AUDIO_TIMER_BIOS_TICK = 0, /* fallback / coarse -- broken in IRQ context */
 +    SDL_DOS_AUDIO_TIMER_PIT,           /* 8253 PIT counter 0, ~838 ns */
 +    SDL_DOS_AUDIO_TIMER_RDTSC          /* CPU TSC, ~12 ns at 83 MHz */
 +} SDL_DOSAudioTimerMode;
 +
 +extern volatile uint32_t g_dos_audio_timer_mode;     /* one of SDL_DOSAudioTimerMode */
-+extern volatile uint32_t g_dos_audio_timer_tsc_mhz;  /* TSC cycles per µs (only valid when mode == RDTSC) */
++extern volatile uint32_t g_dos_audio_timer_tsc_mhz;  /* TSC cycles per us (only valid when mode == RDTSC) */
 +
 +/* Initializes timer auto-detection. Must be called from non-IRQ context
 +   (uses SDL_GetTicksNS for TSC calibration). Logs the chosen mode at
@@ -308,14 +308,14 @@ index a6faebeca..a98e588de 100644
 +
 +/* IRQ-safe inline timer reads. Both functions are header-defined so the
 +   compiler inlines them at the IRQ-handler call site (no external function
-+   call → no memory-lock concerns for the call itself). All underlying
++   call -> no memory-lock concerns for the call itself). All underlying
 +   operations (rdtsc instruction, PIT port I/O, BIOS tick far-peek) are
 +   IRQ-safe. */
 +
 +SDL_FORCE_INLINE Uint64 SDL_DOSAudioReadTimer(void)
 +{
 +    /* Mode-dispatched read. Returns an opaque timestamp; pair with
-+       SDL_DOSAudioTimerDeltaUs to compute elapsed µs. */
++       SDL_DOSAudioTimerDeltaUs to compute elapsed us. */
 +    const uint32_t mode = g_dos_audio_timer_mode;
 +    if (mode == SDL_DOS_AUDIO_TIMER_RDTSC) {
 +        uint32_t lo, hi;
@@ -344,18 +344,18 @@ index a6faebeca..a98e588de 100644
 +        return (mhz > 0) ? (uint32_t)(cycles / mhz) : 0;
 +    } else if (mode == SDL_DOS_AUDIO_TIMER_PIT) {
 +        /* PIT counts DOWN: entry > exit normally; if exit > entry, wrapped
-+           (counter rolled 0xFFFF → 0xFFFE → ... → 0x0000 → 0xFFFF). */
++           (counter rolled 0xFFFF -> 0xFFFE -> ... -> 0x0000 -> 0xFFFF). */
 +        const uint16_t e = (uint16_t)entry;
 +        const uint16_t x = (uint16_t)exit_;
 +        const uint32_t delta_counts = (e >= x)
 +            ? (uint32_t)(e - x)
 +            : (uint32_t)(0x10000u - x + e);
-+        /* 1 count = 838.0959 ns ≈ 838 / 1000 µs.
++        /* 1 count = 838.0959 ns ~ 838 / 1000 us.
 +           Or equivalently: delta_us = delta_counts * 1000 / 1193 (since
-+           PIT freq is 1193182 Hz; 1000000 / 1193182 ≈ 0.838). */
++           PIT freq is 1193182 Hz; 1000000 / 1193182 ~ 0.838). */
 +        return (delta_counts * 1000u) / 1193u;
 +    }
-+    /* BIOS tick fallback (broken-in-IRQ-context per § E timer rationale;
++    /* BIOS tick fallback (broken-in-IRQ-context per sec. E timer rationale;
 +       the multiply is technically correct for the resolution but won't
 +       see non-zero deltas in practice). */
 +    const uint32_t delta_ticks = (uint32_t)exit_ - (uint32_t)entry;

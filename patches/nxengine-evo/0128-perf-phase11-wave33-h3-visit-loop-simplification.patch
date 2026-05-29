@@ -31,7 +31,7 @@ Inside the template the bounds test is written as
 
 Under `bounds_known=true` the literal-true short-circuits the OOB
 compares (no side effects) and -O3 DCE's both the compare chain
-and the `else { ++skipped_oob }` branch — every iter of the
+and the `else { ++skipped_oob }` branch -- every iter of the
 bounds-known variant skips four compares and three short-circuit
 branches. Under `bounds_known=false` the original behavior is
 preserved bit-for-bit.
@@ -42,7 +42,7 @@ inner-body OOB check is still essential for correctness in
 the `=0` (default-OFF) path of slot 0113. Splitting the dispatch
 on a second hint lets A/B iters measure the bounds-check-elim
 gain in isolation (`SET SDL_HINT_DOSKUTSU_TILE_BOUNDS_SKIP=0`
-keeps the bbox-skip but reverts to the bounds-checked variant —
+keeps the bbox-skip but reverts to the bounds-checked variant --
 no rebuild needed).
 
 Defaults. `SDL_HINT_DOSKUTSU_TILE_BOUNDS_SKIP` is a default-ON
@@ -56,24 +56,24 @@ bounds-known variant `skipped_oob` stays 0 because no OOB iters
 happen (the bbox-skip clipped range already excluded them at the
 outer-loop level). In the bounds-checked variant the counter
 bumps as before. Equation `visited == drawn_normal + drawn_special
-+ skipped_attr + skipped_oob` therefore holds in both — distinguish-
++ skipped_attr + skipped_oob` therefore holds in both -- distinguish-
 able by the skipped_oob field across A/B PLAYs.
 
 Architectural classification. This is CPU-bound work (compares +
 short-circuit branches in the inner loop, no memory-stride or
 cache change). It survives wave-31's bandwidth-bound architectural
-finding per `wave_17_4_partial_flush_regression.md` — wave-31
+finding per `wave_17_4_partial_flush_regression.md` -- wave-31
 refuted output-cache approaches because cache-blit-OUT bandwidth
 equaled underlying-render bandwidth; slot 0128 doesn't change any
 memory access pattern, just removes redundant compares.
 
 Predicted savings. iter K slot-0111 instrumentation reported
-visit_overhead = +6.7 µs/tile × ~150 in-bounds tiles per FG/BG
-flip ≈ ~1 ms / flip total visit-overhead budget. The OOB compares
+visit_overhead = +6.7 us/tile x ~150 in-bounds tiles per FG/BG
+flip ~ ~1 ms / flip total visit-overhead budget. The OOB compares
 + branch are ~30-50% of that budget (the remainder being array-
 load + attribute-load + counter bumps which stay in the body).
 Predicted -0.3 to -0.7 ms / flip; per `perf_predictions_unreliable.md`
-predictions historically wrong 5-30× so wave-33 real-HW PODP-83
+predictions historically wrong 5-30x so wave-33 real-HW PODP-83
 measurement is the essential gate. The broader brief predicted
 -1 to -2 ms which would assume eliminating ~100% of visit_overhead;
 my honest model says ~50% is the realistic ceiling.
@@ -89,7 +89,7 @@ Files. Touches `src/graphics/Renderer.cpp` (new env helper
 `src/Utils/diagnostic_timers.h` (forward-decl), `src/map.cpp`
 (template helper + dispatcher in `_tilemap_render_uncached_full_loop`).
 Out of map.cpp scope: BG-only callsites in `_tilemap_render_plain_-
-tiles_into_cache` + `_tilemap_render_special_tiles_to_window` —
+tiles_into_cache` + `_tilemap_render_special_tiles_to_window` --
 their bbox-skip / bounds-check footprint is different and a
 separate slot if warranted.
 
@@ -98,7 +98,7 @@ patch 0127 (Lever B) is parked at `patches/nxengine-evo/_disabled/`
 + documented in `patches/nxengine-evo/_disabled/NOTES.md` (sibling
 ride-along commit, separate slot). The CMakeLists.txt `-O3
 -funroll-loops` working-tree edit is intentionally NOT in this
-patch — it predates slot 0128 and is tracked separately at the
+patch -- it predates slot 0128 and is tracked separately at the
 team-lead's discretion (next-session hygiene: bake into a numbered
 patch slot or leave as working-tree drift, team-lead call).
 ---
@@ -115,13 +115,13 @@ index 6f6fb18..c611bbb 100644
  // comparison iter to attribute the iter K-1 fps gain to this lever.
  bool drawtile_fast_active();
  
-+// patch 0128 (Phase 11 wave-33 H3 visit-loop simplification — slot
++// patch 0128 (Phase 11 wave-33 H3 visit-loop simplification -- slot
 +// 0113 extension). Forward-decl for the FG/BG tilemap-loop bounds-
 +// check elimination killswitch reader. Default ON; literal "0"
 +// disables (same inverse-killswitch convention as patches 0088 /
 +// 0093 / 0115 / 0117). When ON AND slot 0113 bbox-skip is also
 +// active, map.cpp's `_tilemap_render_uncached_full_loop` dispatches
-+// to a `<bounds_known=true>` template instantiation — the per-tile
++// to a `<bounds_known=true>` template instantiation -- the per-tile
 +// `((mapx+x) >= 0) && ((mapy+y) >= 0) && ((mapx+x) < map.xsize) &&
 +// ((mapy+y) < map.ysize)` OOB check is DCE'd by -O3 because the
 +// bbox-skip clipped range guarantees in-bounds. When OFF (env=0)
@@ -130,13 +130,13 @@ index 6f6fb18..c611bbb 100644
 +// can legitimately fall outside map bounds). Predicted savings:
 +// -0.3 to -0.7 ms / flip (iter K visit_overhead = ~1 ms/flip total;
 +// OOB check is ~30-50% of that). CPU-bound (compares + branches in
-+// inner loop); NOT bandwidth-bound — survives wave-31's architectural
++// inner loop); NOT bandwidth-bound -- survives wave-31's architectural
 +// finding.
 +bool tile_bounds_skip_active();
 +
- // DOS-PORT (patch 0100, Phase 10 audio offload — instrumentation
+ // DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
  // scaffolding): 5 per-block reset counters + 1 sticky enum field per
- // docs/PHASE10-CONTRACT.md § 1. Distinct field set from the existing
+ // docs/PHASE10-CONTRACT.md sec. 1. Distinct field set from the existing
 diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
 index 580556c..7607e4e 100644
 --- a/src/graphics/Renderer.cpp
@@ -145,7 +145,7 @@ index 580556c..7607e4e 100644
  // patch 0117 (Phase 11 iter K Cand #1: drawTileFast inline):
  // drawtile_fast_active() forward-decl. Same pattern.
  bool drawtile_fast_active();
-+// patch 0128 (Phase 11 wave-33 H3 visit-loop simplification —
++// patch 0128 (Phase 11 wave-33 H3 visit-loop simplification --
 +// slot 0113 extension): tile_bounds_skip_active() forward-decl.
 +// Same file-scope-after-both-namespace-closes definition pattern.
 +bool tile_bounds_skip_active();
@@ -156,16 +156,16 @@ index 580556c..7607e4e 100644
    return v;
  }
  
-+// DOS-PORT (patch 0128, Phase 11 wave-33 H3 visit-loop simplification —
++// DOS-PORT (patch 0128, Phase 11 wave-33 H3 visit-loop simplification --
 +// slot 0113 extension). Killswitch for the FG/BG tilemap-loop bounds-
 +// check elimination optimization. When ENABLED (default), the inner-
 +// loop body in map.cpp's `_tilemap_render_uncached_full_loop` dispatches
 +// to a `<bounds_known=true>` template instantiation whenever bbox-skip
-+// is also active — the OOB check `((mapx+x) >= 0) && ((mapy+y) >= 0)
++// is also active -- the OOB check `((mapx+x) >= 0) && ((mapy+y) >= 0)
 +// && ((mapx+x) < map.xsize) && ((mapy+y) < map.ysize)` is dead-code-
 +// eliminated by -O3 because the bbox-skip clipped range guarantees
 +// in-bounds. When DISABLED (env=0), the bounds-checked variant is
-+// used unconditionally — preserves slot 0113 pre-H3 behavior exactly.
++// used unconditionally -- preserves slot 0113 pre-H3 behavior exactly.
 +//
 +// Polarity: only literal "0" disables (mirror of patch 0088 / 0093 /
 +// 0115 / 0117's killswitch convention). Any other value (unset, empty,
@@ -178,15 +178,15 @@ index 580556c..7607e4e 100644
 +// helper return true. If bbox-skip is off, the bounds-checked variant
 +// runs (mapx+x may legitimately fall outside map; OOB check is load-
 +// bearing for correctness in that path). This dependency is why the
-+// dispatcher reads both helpers — they are NOT independently toggleable
++// dispatcher reads both helpers -- they are NOT independently toggleable
 +// because the OOB check is only redundant under bbox-skip clipping.
 +//
 +// Predicted savings: -0.3 to -0.7 ms / flip (per iter K visit_overhead
-+// = +6.7 µs/tile × ~150 in-bounds tiles per FG/BG flip ≈ ~1 ms/flip
++// = +6.7 us/tile x ~150 in-bounds tiles per FG/BG flip ~ ~1 ms/flip
 +// total visit-overhead budget; OOB check is ~30-50% of that budget;
-+// per `perf_predictions_unreliable.md` predictions historically 5-30×
++// per `perf_predictions_unreliable.md` predictions historically 5-30x
 +// wrong, so iter N+6 measurement is the essential gate). CPU-bound
-+// (compares + branches in inner loop); NOT bandwidth-bound — survives
++// (compares + branches in inner loop); NOT bandwidth-bound -- survives
 +// wave-31's bandwidth-bound architectural finding per
 +// `wave_17_4_partial_flush_regression.md`.
 +inline bool _abl_tile_bounds_skip()
@@ -206,7 +206,7 @@ index 580556c..7607e4e 100644
  bool mds_bg_instr_active() { return ::NXE::Graphics::_abl_mds_bg_instr(); }
  }}
 +
-+// DOS-PORT (patch 0128, Phase 11 wave-33 H3 visit-loop simplification —
++// DOS-PORT (patch 0128, Phase 11 wave-33 H3 visit-loop simplification --
 +// slot 0113 extension): tile_bounds_skip_active() env-helper accessor.
 +// Same file-scope-after-both-namespace-closes definition pattern
 +// (heeds the W20B build-fix amendment about avoiding the nested
@@ -220,14 +220,14 @@ index 6d2a975..a7525b7 100644
 +++ b/src/map.cpp
 @@ -1592,96 +1592,39 @@ void _tilemap_render_special_tiles_to_window(uint8_t foreground)
  // map_draw body. Counter increments for hit/miss are NOT made when
- // this path runs (per contract § 3.2: killswitch-disabled state shows
+ // this path runs (per contract sec. 3.2: killswitch-disabled state shows
  // `bg_h=0 bg_m=0`).
 -void _tilemap_render_uncached_full_loop(uint8_t foreground)
-+// patch 0128 (Phase 11 wave-33 H3 visit-loop simplification — slot
++// patch 0128 (Phase 11 wave-33 H3 visit-loop simplification -- slot
 +// 0113 extension). Template-factored inner-loop body. The
 +// `bounds_known` template parameter dispatches at compile time:
 +//   - `bounds_known=true`: callers guarantee (mapx+x, mapy+y) is in
-+//     [0, map.xsize) × [0, map.ysize) for every iteration. OOB check
++//     [0, map.xsize) x [0, map.ysize) for every iteration. OOB check
 +//     `((mapx+x) >= 0) && ((mapy+y) >= 0) && ((mapx+x) < map.xsize)
 +//     && ((mapy+y) < map.ysize)` is dead-code-eliminated by -O3:
 +//     `const bool in_bounds = true || (...);` folds to literal true,
@@ -242,8 +242,8 @@ index 6d2a975..a7525b7 100644
 +//
 +// The template lives in the same anonymous namespace as
 +// `_tilemap_render_uncached_full_loop`; the compiler instantiates two
-+// fully inlined loop bodies in this TU. Binary-size cost: ~2× the
-+// inner-body LOC (~100 lines compiled twice ≈ a few KB; negligible
++// fully inlined loop bodies in this TU. Binary-size cost: ~2x the
++// inner-body LOC (~100 lines compiled twice ~ a few KB; negligible
 +// against DJGPP's 2 MB binary). Compile-time cost: trivial.
 +template <bool bounds_known>
 +inline void _tilemap_inner_render_dispatch(
@@ -264,10 +264,10 @@ index 6d2a975..a7525b7 100644
 -  // (not sprites / HUD / other render paths that also invoke
 -  // _blit_indexed).
 -  //
--  // Cost when env unset: instr_on stays false → 1 branch + 0 RDTSC
+-  // Cost when env unset: instr_on stays false -> 1 branch + 0 RDTSC
 -  // reads. Effectively free.
 -  // Cost when env set + foreground == TA_FOREGROUND: ~0.23 ms / flip
--  // total (~600 RDTSC reads at 30 cycles each on PODP83). § 6 budget.
+-  // total (~600 RDTSC reads at 30 cycles each on PODP83). sec. 6 budget.
 -  const bool instr_on =
 -      (foreground == TA_FOREGROUND) && NXE::Diag::mds_tfg_instr_active();
 -  if (instr_on)
@@ -277,14 +277,14 @@ index 6d2a975..a7525b7 100644
 -
 -  // patch 0113 (Phase 11 iter H opt #2: off-screen tile bbox skip).
 -  // When SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP=1, the loop pre-clips
--  // iteration range to [x_start..x_end] × [y_start..y_end] computed
+-  // iteration range to [x_start..x_end] x [y_start..y_end] computed
 -  // from camera position + screen size + map bounds. Eliminates the
 -  // per-iteration `(mapx+x) >= 0 && (mapx+x) < map.xsize && ...` OOB
 -  // bounds check (always-passes in the clipped range) AND skips OOB
 -  // tiles entirely (no iterations spent on tiles outside the map).
 -  // Wave-22.5 data: ~30000 tiles visited / ~1900 drawn per 100 flips
 -  // (94% wasted iteration); this lever cuts the iteration overhead
--  // out. Default OFF (killswitch — iter H PLAY2 is the A/B opt-in).
+-  // out. Default OFF (killswitch -- iter H PLAY2 is the A/B opt-in).
 -  //
 -  // Wave-25 instrumentation note: when bbox-skip is ON, the visited
 -  // count drops by the OOB-skip count vs OFF (no iterations spent on
@@ -295,15 +295,15 @@ index 6d2a975..a7525b7 100644
 -  // lever's actual fps gain on real HW.
 -  const bool bbox_skip_on = NXE::Diag::tile_bbox_skip_active();
 -
--  // patch 0117 (Phase 11 iter K Cand #1 — drawTileFast inline). When
+-  // patch 0117 (Phase 11 iter K Cand #1 -- drawTileFast inline). When
 -  // killswitch is ON (default), the dominant `tileset.drawTile` call
 -  // in the else-branch below routes through `tileset.drawTileFast`
 -  // instead, which bypasses Renderer::drawSurface's entry chain.
 -  // Sample readout (cached static-const-bool; -O2 hoists this guard
 -  // out of the per-tile loop body). Wave-25 dispatch_overhead_per_-
--  // tile_us = 32.4 µs × 329 tiles = 10.7 ms / flip pure overhead;
+-  // tile_us = 32.4 us x 329 tiles = 10.7 ms / flip pure overhead;
 -  // drawTileFast targets recovering most of that. Special-tile paths
--  // (TA_CURRENT, 0x43 destructible) keep using drawSprite — they
+-  // (TA_CURRENT, 0x43 destructible) keep using drawSprite -- they
 -  // need full sprite-pipeline plumbing (mirror, frame-anim) so
 -  // they're outside this lever's scope.
 -  const bool drawtile_fast_on = NXE::Diag::drawtile_fast_active();
@@ -319,8 +319,8 @@ index 6d2a975..a7525b7 100644
 -  const int y_max_inclusive = (Renderer::getInstance()->screenHeight / TILE_H) + MAP_DRAW_EXTRA_Y;
 -
 -  // patch 0113: pre-compute bbox-clipped iteration range when killswitch
--  // is ON. mapx+x >= 0 → x >= -mapx (clamped to 0 lower bound, since
--  // x can't be negative). mapx+x < map.xsize → x < map.xsize - mapx,
+-  // is ON. mapx+x >= 0 -> x >= -mapx (clamped to 0 lower bound, since
+-  // x can't be negative). mapx+x < map.xsize -> x < map.xsize - mapx,
 -  // so x_end_inclusive = map.xsize - mapx - 1 (clamped to x_max_inclusive
 -  // upper bound). Same logic for y.
 -  int x_loop_start = 0;
@@ -396,10 +396,10 @@ index 6d2a975..a7525b7 100644
 +  // (not sprites / HUD / other render paths that also invoke
 +  // _blit_indexed).
 +  //
-+  // Cost when env unset: instr_on stays false → 1 branch + 0 RDTSC
++  // Cost when env unset: instr_on stays false -> 1 branch + 0 RDTSC
 +  // reads. Effectively free.
 +  // Cost when env set + foreground == TA_FOREGROUND: ~0.23 ms / flip
-+  // total (~600 RDTSC reads at 30 cycles each on PODP83). § 6 budget.
++  // total (~600 RDTSC reads at 30 cycles each on PODP83). sec. 6 budget.
 +  const bool instr_on =
 +      (foreground == TA_FOREGROUND) && NXE::Diag::mds_tfg_instr_active();
 +  if (instr_on)
@@ -409,14 +409,14 @@ index 6d2a975..a7525b7 100644
 +
 +  // patch 0113 (Phase 11 iter H opt #2: off-screen tile bbox skip).
 +  // When SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP=1, the loop pre-clips
-+  // iteration range to [x_start..x_end] × [y_start..y_end] computed
++  // iteration range to [x_start..x_end] x [y_start..y_end] computed
 +  // from camera position + screen size + map bounds. Eliminates the
 +  // per-iteration `(mapx+x) >= 0 && (mapx+x) < map.xsize && ...` OOB
 +  // bounds check (always-passes in the clipped range) AND skips OOB
 +  // tiles entirely (no iterations spent on tiles outside the map).
 +  // Wave-22.5 data: ~30000 tiles visited / ~1900 drawn per 100 flips
 +  // (94% wasted iteration); this lever cuts the iteration overhead
-+  // out. Default OFF (killswitch — iter H PLAY2 is the A/B opt-in).
++  // out. Default OFF (killswitch -- iter H PLAY2 is the A/B opt-in).
 +  //
 +  // Wave-25 instrumentation note: when bbox-skip is ON, the visited
 +  // count drops by the OOB-skip count vs OFF (no iterations spent on
@@ -427,15 +427,15 @@ index 6d2a975..a7525b7 100644
 +  // lever's actual fps gain on real HW.
 +  const bool bbox_skip_on = NXE::Diag::tile_bbox_skip_active();
 +
-+  // patch 0117 (Phase 11 iter K Cand #1 — drawTileFast inline). When
++  // patch 0117 (Phase 11 iter K Cand #1 -- drawTileFast inline). When
 +  // killswitch is ON (default), the dominant `tileset.drawTile` call
 +  // in the else-branch below routes through `tileset.drawTileFast`
 +  // instead, which bypasses Renderer::drawSurface's entry chain.
 +  // Sample readout (cached static-const-bool; -O2 hoists this guard
 +  // out of the per-tile loop body). Wave-25 dispatch_overhead_per_-
-+  // tile_us = 32.4 µs × 329 tiles = 10.7 ms / flip pure overhead;
++  // tile_us = 32.4 us x 329 tiles = 10.7 ms / flip pure overhead;
 +  // drawTileFast targets recovering most of that. Special-tile paths
-+  // (TA_CURRENT, 0x43 destructible) keep using drawSprite — they
++  // (TA_CURRENT, 0x43 destructible) keep using drawSprite -- they
 +  // need full sprite-pipeline plumbing (mirror, frame-anim) so
 +  // they're outside this lever's scope.
 +  const bool drawtile_fast_on = NXE::Diag::drawtile_fast_active();
@@ -451,8 +451,8 @@ index 6d2a975..a7525b7 100644
 +  const int y_max_inclusive = (Renderer::getInstance()->screenHeight / TILE_H) + MAP_DRAW_EXTRA_Y;
 +
 +  // patch 0113: pre-compute bbox-clipped iteration range when killswitch
-+  // is ON. mapx+x >= 0 → x >= -mapx (clamped to 0 lower bound, since
-+  // x can't be negative). mapx+x < map.xsize → x < map.xsize - mapx,
++  // is ON. mapx+x >= 0 -> x >= -mapx (clamped to 0 lower bound, since
++  // x can't be negative). mapx+x < map.xsize -> x < map.xsize - mapx,
 +  // so x_end_inclusive = map.xsize - mapx - 1 (clamped to x_max_inclusive
 +  // upper bound). Same logic for y.
 +  int x_loop_start = 0;
@@ -475,11 +475,11 @@ index 6d2a975..a7525b7 100644
 +    blit_x_start += x_loop_start * TILE_W;
 +    blit_y       += y_loop_start * TILE_H;
 +  }
-+  // patch 0128 (Phase 11 wave-33 H3 visit-loop simplification —
++  // patch 0128 (Phase 11 wave-33 H3 visit-loop simplification --
 +  // slot 0113 extension): dispatch on (bbox_skip_on && bounds_skip_on).
 +  // When BOTH are true, the bounds-known template instantiation runs
 +  // with the OOB check DCE'd by -O3. When EITHER is false, the
-+  // bounds-checked variant runs (preserves correctness — bbox_skip_off
++  // bounds-checked variant runs (preserves correctness -- bbox_skip_off
 +  // means mapx+x may legitimately exceed map bounds; OOB check is
 +  // essential in that path). bounds_skip_on is killswitch
 +  // SDL_HINT_DOSKUTSU_TILE_BOUNDS_SKIP (default ON; set to "0" to

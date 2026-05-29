@@ -120,10 +120,10 @@ index 066f78b2b..587aaf8af 100644
  static int s_mpu401_port_base = -1;
  
 -/* DOSKUTSU patch (Phase 10 patch 0047): dispatch path selector.
--   true = DSP-mediated MIDI (default) — funnels through SB16 DSP cmd 0x34
+-   true = DSP-mediated MIDI (default) -- funnels through SB16 DSP cmd 0x34
 -          + 0x38 via SDL_DOSAudioSB_DSPMidi* helpers (vendor/SDL/src/audio/
 -          dos/SDL_dosaudio_sb.c).
--   false = direct-port (Option A from analysis) — writes to port_base+0/1
+-   false = direct-port (Option A from analysis) -- writes to port_base+0/1
 -           directly. Selected when SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=1.
 -   Per W22-WB-F MPUPROBE forensic analysis (docs/MPUPROBE-W22WB-F-ANALYSIS.md),
 -   DSP-mediated avoids cross-firmware races between MPU-port access and
@@ -199,7 +199,7 @@ index 066f78b2b..587aaf8af 100644
 -       to be open. Engine (nx-engine MidiBackendWaveBlaster) is responsible
 -       for calling SDL_DOSMpu401Init AFTER SoundManager::init has run AND
 -       after the audio thread has serviced at least one frame (per
--       analysis § "Recommendations for sdl-engine SDL/0047 author" hard-no
+-       analysis sec. "Recommendations for sdl-engine SDL/0047 author" hard-no
 -       #3). We check IsInitialized() here as a minimum sanity gate. */
 +       Init-order discipline: the DSP-mediated fallback path requires
 +       the SB16 audio backend to be open. Engine (nx-engine
@@ -216,7 +216,7 @@ index 066f78b2b..587aaf8af 100644
 +    if (use_dsp_fallback) {
 +        /* === Opt-in fallback: DSP-mediated MIDI (legacy patch-0047 default) === */
          if (!SDL_DOSAudioSB_IsInitialized()) {
--            doskutsu_dbg_log("mpu401: DSP-mediated init aborted — SB16 backend "
+-            doskutsu_dbg_log("mpu401: DSP-mediated init aborted -- SB16 backend "
 -                             "not initialized (engine init order bug). Engine "
 -                             "must SDL_AudioBackend_Init before calling "
 -                             "SDL_DOSMpu401Init.");
@@ -302,7 +302,7 @@ index 066f78b2b..587aaf8af 100644
  
      if (!do_probe) {
 -        doskutsu_dbg_log("mpu401: blind init at port_base=0x%04x "
--                         "(probe disabled — patch 0044 default; set "
+-                         "(probe disabled -- patch 0044 default; set "
 -                         "SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1 to enable "
 -                         "probe path with LOCKUP RISK on real Vibra16S+S2)",
 +        doskutsu_dbg_log("mpu401: direct-port init at port_base=0x%04x "
@@ -316,7 +316,7 @@ index 066f78b2b..587aaf8af 100644
                           (unsigned)port_base);
 -        /* UART mode entry. After this, all writes to data port pass
 -           directly to MIDI bus; status bit 6 (0x40) = DRR (data ready
--           to receive; must be 0 before each write — but we never read
+-           to receive; must be 0 before each write -- but we never read
 -           it on this path; chip clocks data out on its own). */
 +        /* DOSKUTSU patch (Phase 11 patch 0080): bit-6 DRR poll before
 +           UART entry write. A capped-out poll at init is a strong "this
@@ -338,12 +338,12 @@ index 066f78b2b..587aaf8af 100644
  
 -    /* Direct-port path (Option A; legacy 0044 default). Per W22-WB-F
 -       analysis hard-no #1: do NOT poll MPU status bit 7 (TX-READY)
--       before writing — it never clears on SB16 PnP CTL0026. The
+-       before writing -- it never clears on SB16 PnP CTL0026. The
 -       previous implementation's `while ((inportb(base+1) & 0x40) != 0)`
 -       happened to work only because bit 6 (DRR) is a different bit
 -       than bit 7 (TX-READY); but on chips where bit 6 also lies, this
 -       would hang. Removing the poll altogether per analysis Option A
--       step 5 — "BLIND write; do not poll status". */
+-       step 5 -- "BLIND write; do not poll status". */
 +    /* Direct-port path (default since patch 0080). DOSKUTSU patch
 +       (Phase 11 patch 0080): bit-6 DRR poll before every byte write
 +       per DOSMID source (github.com/Tronix286/DOSMID, MPU401.C,

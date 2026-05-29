@@ -9,45 +9,45 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 Extends patch 0080's existing rendered-backdrop cache (default-ON since
-wave 17.2) with a 3-state thrashing-detect that bypasses the cache→window
+wave 17.2) with a 3-state thrashing-detect that bypasses the cache->window
 blit when the cache is missing every frame. Targets the 13.5 ms heavy-
 music backdrop cost measured in W29A1 (per docs/PHASE11-WAVE-29-HEADLINE.md
-§ 1, First Cave heavy-music = dominant remaining single-bucket slice).
+sec. 1, First Cave heavy-music = dominant remaining single-bucket slice).
 
 **Root-cause analysis (STOP-and-ack to team-lead 2026-05-11):** wave-30
 lever A spec (hash `(scroll_x, scroll_y, curmap, flipacceltime)`) was
-predicated on a misreading of tree state — patch 0080's backdrop cache
+predicated on a misreading of tree state -- patch 0080's backdrop cache
 ALREADY hashes on `(curmap, backdrop_id, scrolltype, parscroll_x,
 parscroll_y, indexed, w, h, format)` since wave 17.2, and the existing
 key is already integer-pixel-quantized (parscroll_x = displayed_xscroll
 / CSFI / 2 with CSFI=512 dividing out sub-pixel bits). The 13.5 ms
 cost is the existing cache's MISS PATH firing every frame because
 operator's held-key navigation (per `keyboard_held_key_works.md`)
-drives the camera continuously → parscroll_x changes integer-pixels
-per frame → genuine cache misses. Increasing hit rate via finer
+drives the camera continuously -> parscroll_x changes integer-pixels
+per frame -> genuine cache misses. Increasing hit rate via finer
 quantization can't help; the cost-reduction lever is the miss-path
 itself.
 
-Team-lead picked Option 2 (3-state miss-streak → direct-to-window).
+Team-lead picked Option 2 (3-state miss-streak -> direct-to-window).
 This patch implements that.
 
 **State machine (3 states):**
-  WARM       — default after _backdrop_cache_reset. Each miss
+  WARM       -- default after _backdrop_cache_reset. Each miss
                increments `g_backdrop_miss_streak`; on streak >= 4
                (BACKDROP_THRASH_MISS_THRESHOLD), transition to
                THRASHING + log marker emission.
-  THRASHING  — `g_backdrop_thrash_engaged=true`. Each frame: render
+  THRASHING  -- `g_backdrop_thrash_engaged=true`. Each frame: render
                tile loop DIRECTLY into window surface via raw
                SDL_BlitSurface, skip cache surface fill +
-               cache→window blit. Cache contents stay stale.
+               cache->window blit. Cache contents stay stale.
                Frames-in-state count tick; at 60 frames
                (BACKDROP_THRASH_PROBE_INTERVAL) transition back to
                WARM for one frame to probe whether motion has
                stopped (cache might hit again).
-  HIT (any)  — drawCachedBackdrop fires; streak + thrashing reset
+  HIT (any)  -- drawCachedBackdrop fires; streak + thrashing reset
                to fresh state.
 
-**Reuses existing `SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` killswitch** —
+**Reuses existing `SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` killswitch** --
 when set, BOTH the original patch-0080 cache AND this thrashing-detect
 extension bypass. No new env var per team-lead's direction. Cleaner
 semantics: BACKDROP_CACHE=0 means "render fresh every frame, no cache
@@ -56,7 +56,7 @@ machinery at all."
 **Two cache-wrapper paths modified consistently:**
   1. BK_FASTLEFT_LAYERS branch (Outer Wall / Balcony / title menu;
      patch 0081 wave 17.3 cache wrapper). Direct-to-window path:
-     `_render_layered_to_surface(win, r)` — same helper as the
+     `_render_layered_to_surface(win, r)` -- same helper as the
      cache-fill path, just targets window directly.
   2. Generic loop branch (BK_PARALLAX / BK_FOLLOWFG / BK_FASTLEFT
      / wrap of patch 0080 wave 17.2). Direct-to-window path: tile
@@ -66,35 +66,35 @@ machinery at all."
 Both paths drain the renderer queue + record a full-screen dirty rect
 + bump drawcall via two new public Renderer methods:
 `prepareDirectBackdropWrite()` + `commitDirectBackdropWrite()`.
-Same accounting semantics as `drawCachedBackdrop()` — caller's tile
+Same accounting semantics as `drawCachedBackdrop()` -- caller's tile
 writes are the visible drawcall.
 
 **Hypothesis savings:** -3 to -4 ms / flip in the thrashing regime
-(saves the cache→window blit which is bandwidth-bound at ~17 MB/s
+(saves the cache->window blit which is bandwidth-bound at ~17 MB/s
 for 76 KB on PODP83+Cirrus per `podp83_membw_real_hw_actuals.md`).
 0 ms regression in cache-hit scenes (player stationary, dialog,
 paused). Periodic probe amortizes one cache-fill cycle every 60
-frames (~3-4 ms / 60 frames ≈ 0.07 ms / flip overhead in thrashing).
+frames (~3-4 ms / 60 frames ~ 0.07 ms / flip overhead in thrashing).
 
 Per `perf_predictions_unreliable.md` predictions on this project have
-been 5-30× wrong; 40 fps target requires -3.82 ms / flip cut from
-34.7 fps baseline → Option 2's -3 to -4 ms hypothesis just brackets
+been 5-30x wrong; 40 fps target requires -3.82 ms / flip cut from
+34.7 fps baseline -> Option 2's -3 to -4 ms hypothesis just brackets
 the threshold. Could overshoot (40-43 fps) or undershoot (37-38 fps).
 
 **Strings marker per flush-instr's contract:**
 `backdrop cache: thrashing-detect engaged (streak=N, route=direct)`
-LOG_INFO emitted once per WARM→THRASHING transition (quiet during
-steady-state thrashing; re-emits each probe→re-thrash cycle ~once
+LOG_INFO emitted once per WARM->THRASHING transition (quiet during
+steady-state thrashing; re-emits each probe->re-thrash cycle ~once
 per second at 30 fps in continuous-motion scenes). Allows post-iter
 real-HW log grep to count engagement frequency by scene.
 
-**Risk profile:** 3-state machine is shallow vs wave-23's adaptive-α
+**Risk profile:** 3-state machine is shallow vs wave-23's adaptive-alpha
 (10+ states, multi-frame timing accumulator that proved a footgun).
 This is a single int comparison driving transitions; map_flush_graphics
 resets state on map change so per-map regressions don't cascade.
 Direct-to-window path uses the SAME tile loop / SAME SDL_BlitSurface
 calls as the cache-fill path, just with a different target surface
-— per-pixel result is byte-identical to the cache-hit path's output
+-- per-pixel result is byte-identical to the cache-hit path's output
 (verified visually in local DOSBox-X smoke: title parallax renders
 correctly with 39 thrashing emissions in ~12 sec; Start Point
 gameplay renders correctly post-thrash; no black gaps; no visual
@@ -108,11 +108,11 @@ artifacts).
   text + menu).
 - Intro cutscene (BK_HIDE, black screen): correctly rendered.
 - Start Point gameplay (BK_FIXED/BK_FOLLOWFG): cache hits every
-  frame → thrashing stays disengaged → no marker emissions; tile
+  frame -> thrashing stays disengaged -> no marker emissions; tile
   layer + sprites + textbox render correctly.
 
 Workspace-local; never upstreamed. See docs/PHASE11-WAVE-29-HEADLINE.md
-§ 2 for the wave-29 measurement that motivated the optimization.
+sec. 2 for the wave-29 measurement that motivated the optimization.
 ---
  src/graphics/Renderer.cpp |  34 +++++
  src/graphics/Renderer.h   |  26 ++++
@@ -127,14 +127,14 @@ index 8eba87d..580556c 100644
    return true;
  }
  
-+// DOS-PORT (patch 0126, Phase 11 wave-30 Option 2 — backdrop miss-streak
++// DOS-PORT (patch 0126, Phase 11 wave-30 Option 2 -- backdrop miss-streak
 +// direct-to-window). Two-phase helper for map.cpp's thrashing-bypass
 +// path: when the patch-0080 backdrop cache has been missing every frame
-+// for ≥4 frames (operator continuously moving in heavy-music gameplay
++// for >=4 frames (operator continuously moving in heavy-music gameplay
 +// per `keyboard_held_key_works.md`), map.cpp routes the backdrop tile
 +// loop DIRECTLY into the window surface and skips the cache-fill +
-+// cache→window-blit double-step. Saves ~3-4 ms / flip per the patch-
-+// 0080 cost decomposition (the cache→window blit is bandwidth-bound on
++// cache->window-blit double-step. Saves ~3-4 ms / flip per the patch-
++// 0080 cost decomposition (the cache->window blit is bandwidth-bound on
 +// PODP83+Cirrus at ~17 MB/s for the 76 KB transfer).
 +//
 +// Same drain + dirty-rect-record + drawcall-bump accounting as
@@ -172,12 +172,12 @@ index 60c6861..f8aa6d1 100644
      // (caller must fall back to the live tile loop in that case).
      bool drawCachedBackdrop(SDL_Surface *src);
  
-+    // DOS-PORT (patch 0126, Phase 11 wave-30 Option 2 — backdrop miss-
++    // DOS-PORT (patch 0126, Phase 11 wave-30 Option 2 -- backdrop miss-
 +    // streak direct-to-window). Two-phase helper for the case where
-+    // map_draw_backdrop has detected the cache is thrashing (≥N
++    // map_draw_backdrop has detected the cache is thrashing (>=N
 +    // consecutive misses) and wants to render the backdrop tile loop
 +    // DIRECTLY into the window surface, skipping the cache-fill +
-+    // cache→window-blit double-step. Sibling to drawCachedBackdrop;
++    // cache->window-blit double-step. Sibling to drawCachedBackdrop;
 +    // does NOT touch the cache surface.
 +    //
 +    // prepareDirectBackdropWrite():
@@ -211,16 +211,16 @@ index f1db4ff..6d2a975 100644
  
 +// DOS-PORT (patch 0126, Phase 11 wave-30 Option 2): backdrop miss-streak
 +// thrashing detect. When patch 0080's cache misses every frame (operator
-+// actively moving in heavy-music per `keyboard_held_key_works.md` →
-+// parscroll_x changes integer-pixels each frame → cache key never
-+// matches), the miss path's render-into-cache + cache→window blit dual-
-+// step costs ~13.5 ms / flip on PODP83+Cirrus (per W29A1 measurement —
-+// `docs/PHASE11-WAVE-29-HEADLINE.md` § 1, First Cave heavy-music).
++// actively moving in heavy-music per `keyboard_held_key_works.md` ->
++// parscroll_x changes integer-pixels each frame -> cache key never
++// matches), the miss path's render-into-cache + cache->window blit dual-
++// step costs ~13.5 ms / flip on PODP83+Cirrus (per W29A1 measurement --
++// `docs/PHASE11-WAVE-29-HEADLINE.md` sec. 1, First Cave heavy-music).
 +//
 +// Wave-30 Option 2 (team-lead pick): after N consecutive misses, mark
 +// state THRASHING and route the tile loop DIRECTLY into the window
 +// surface via raw SDL_BlitSurface, skipping the cache-surface fill +
-+// cache→window blit. Hypothesis savings: -3 to -4 ms / flip in the
++// cache->window blit. Hypothesis savings: -3 to -4 ms / flip in the
 +// thrashing regime; 0 ms regression in cache-hit scenes (state exits
 +// THRASHING on any hit-eligible frame or after a periodic probe).
 +//
@@ -243,7 +243,7 @@ index f1db4ff..6d2a975 100644
 +// Reset on map_flush_graphics (called from _backdrop_cache_reset) so
 +// each map starts in WARM with fresh state.
 +//
-+// Reuses existing SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0 killswitch — when
++// Reuses existing SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0 killswitch -- when
 +// the killswitch is active, the entire cache machinery (including this
 +// thrashing-detect extension) is bypassed and the legacy render-fresh-
 +// every-frame path runs.
@@ -281,9 +281,9 @@ index f1db4ff..6d2a975 100644
 +          // patch 0126 (wave-30 Option 2): thrashing-detect probe tick.
 +          // When thrashing is engaged, count frames-in-state; after
 +          // BACKDROP_THRASH_PROBE_INTERVAL frames, exit thrashing for
-+          // ONE frame to test if cache contents would match — gives
++          // ONE frame to test if cache contents would match -- gives
 +          // motion-pause scenarios a path back to WARM without manual
-+          // restart. Amortized probe cost: ~3-4 ms / 60 frames ≈ 0.07
++          // restart. Amortized probe cost: ~3-4 ms / 60 frames ~ 0.07
 +          // ms / flip in the thrashing regime.
 +          if (g_backdrop_thrash_engaged)
 +          {
@@ -328,7 +328,7 @@ index f1db4ff..6d2a975 100644
 +              g_backdrop_thrash_engaged         = true;
 +              g_backdrop_thrash_frames_in_state = 0;
 +              // Strings marker for post-iter grep verification per
-+              // flush-instr's contract. One emission per WARM→THRASHING
++              // flush-instr's contract. One emission per WARM->THRASHING
 +              // transition; quiet during steady-state thrashing.
 +              LOG_INFO("backdrop cache: thrashing-detect engaged (streak={}, route=direct)",
 +                       g_backdrop_miss_streak);
@@ -337,7 +337,7 @@ index f1db4ff..6d2a975 100644
 +            if (g_backdrop_thrash_engaged)
 +            {
 +              // THRASHING: render direct-to-window. Skip cache surface
-+              // fill + cache→window blit (the ~3-4 ms savings target).
++              // fill + cache->window blit (the ~3-4 ms savings target).
 +              // Cache contents stay stale; the periodic probe above
 +              // restores WARM after BACKDROP_THRASH_PROBE_INTERVAL
 +              // frames so motion-pause scenarios re-engage cache.
@@ -406,7 +406,7 @@ index f1db4ff..6d2a975 100644
 -              g_backdrop_cache_h = win->h;
 -              g_backdrop_cache_format = win->format;
 -            }
-+              // If alloc / render failed, key stays stale → next frame
++              // If alloc / render failed, key stays stale -> next frame
 +              // also misses; fall through to drawCachedBackdrop below.
  
 -            if (g_backdrop_cache_sfc &&
@@ -426,7 +426,7 @@ index f1db4ff..6d2a975 100644
 +                return;
 +              }
              }
--            // If alloc / render failed, key stays stale → next frame
+-            // If alloc / render failed, key stays stale -> next frame
 -            // also misses; fall through to drawCachedBackdrop below
 -            // which will return false (key won't match anyway), and
 -            // we'll fall through to the post-cache fallback.
@@ -435,7 +435,7 @@ index f1db4ff..6d2a975 100644
 -          if (g_backdrop_cache_sfc && r->drawCachedBackdrop(g_backdrop_cache_sfc))
 -          {
 -            // Optional post-cache overlay (mirrors DrawFastLeftLayered's
--            // tail — backdrop 9 with negative mapy gets a black fill
+-            // tail -- backdrop 9 with negative mapy gets a black fill
 -            // above the displayed area).
 -            int mapy = map.displayed_yscroll / CSFI;
 -            if (mapy < 0 && map.backdrop == 9)
@@ -469,11 +469,11 @@ index f1db4ff..6d2a975 100644
          return;  // single drawcall + dirty rect recorded; done.
        }
  
--      // MISS — (re)allocate cache surface if dims/format changed.
+-      // MISS -- (re)allocate cache surface if dims/format changed.
 +      // patch 0126 (wave-30 Option 2): miss accounting + thrashing
 +      // transition. Increment streak on any cache_hit==false OR
 +      // cache_hit==true-but-drawCachedBackdrop-failed (latter is rare
-+      // — alloc/format failures fall through to legacy below either
++      // -- alloc/format failures fall through to legacy below either
 +      // way, and counting them as misses keeps the streak monotonic).
 +      ++g_backdrop_miss_streak;
 +      if (!g_backdrop_thrash_engaged &&
@@ -482,7 +482,7 @@ index f1db4ff..6d2a975 100644
 +        g_backdrop_thrash_engaged         = true;
 +        g_backdrop_thrash_frames_in_state = 0;
 +        // Strings marker per flush-instr's contract. One emission per
-+        // WARM→THRASHING transition; quiet during steady-state.
++        // WARM->THRASHING transition; quiet during steady-state.
 +        LOG_INFO("backdrop cache: thrashing-detect engaged (streak={}, route=direct)",
 +                 g_backdrop_miss_streak);
 +      }
@@ -490,7 +490,7 @@ index f1db4ff..6d2a975 100644
 +      if (g_backdrop_thrash_engaged)
 +      {
 +        // THRASHING: render tile loop direct-to-window. Skip cache
-+        // surface fill + cache→window blit (~3-4 ms savings target).
++        // surface fill + cache->window blit (~3-4 ms savings target).
 +        // Cache contents stay stale; periodic probe above restores
 +        // WARM after BACKDROP_THRASH_PROBE_INTERVAL frames so motion-
 +        // pause scenarios re-engage cache.
@@ -502,7 +502,7 @@ index f1db4ff..6d2a975 100644
 +        //
 +        // NOTE: the cache-fill path does an SDL_FillSurfaceRect(NULL)
 +        // pre-clear (line ~1042 below in the old code). The legacy
-+        // fallback path (line ~1080 below) does NOT — its tile loop
++        // fallback path (line ~1080 below) does NOT -- its tile loop
 +        // covers the screen via `< screenWidth + parscroll_x`. We
 +        // match the legacy fallback's behavior here: skip pre-clear.
 +        // Bg sources for cacheable scrolltypes have no colorkey and

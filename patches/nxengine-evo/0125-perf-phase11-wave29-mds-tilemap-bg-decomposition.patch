@@ -13,35 +13,35 @@ buckets + 1 derived residual, covering the dominant remaining single-
 bucket engine-side slice (8.30 ms median = 28% of inter_flip on First
 Cave Tier-2 heavy-music per iter K K3). Wave-28 refuted the iter K
 residual-decomp prediction that the 12 ms unmeasured slice lived inside
-`phase=total`; instead it lives in `engine_tick - phase=total` ≈ 24 ms,
+`phase=total`; instead it lives in `engine_tick - phase=total` ~ 24 ms,
 and `mds_tilemap_bg` is its largest unmeasured sub-slice. Cutting it in
 half (~4 ms) lands the session 40 fps goal.
 
 Brackets (at game.cpp:605-636 inside W22.5's MdsTilemapBgTimer scope):
-  mdt_bg_backdrop   — map_draw_backdrop() at game.cpp:609. BK_FASTLEFT_-
+  mdt_bg_backdrop   -- map_draw_backdrop() at game.cpp:609. BK_FASTLEFT_-
                       LAYERS parallax / BK_FOLLOW / BK_FIXED dispatch.
                       H-A hypothesis: 2-5 ms.
-  mdt_bg_tilelayer  — map_draw(false) at game.cpp:610. BG tile layer
-                      render via _tilemap_render_uncached_full_loop —
+  mdt_bg_tilelayer  -- map_draw(false) at game.cpp:610. BG tile layer
+                      render via _tilemap_render_uncached_full_loop --
                       slot 0117's drawTileFast call site lives here.
                       H-B hypothesis: 3-6 ms.
-  mdt_bg_tintscreen — tintScreen() at game.cpp:614 (only when
-                      settings->lights=on; full 320×240 INDEX8
+  mdt_bg_tintscreen -- tintScreen() at game.cpp:614 (only when
+                      settings->lights=on; full 320x240 INDEX8
                       darkening pass). H-C hypothesis: 0.5-4 ms.
-  mdt_bg_residual   — derived. g_mds_tilemap_bg_dt_this_tick − sum(3
+  mdt_bg_residual   -- derived. g_mds_tilemap_bg_dt_this_tick - sum(3
                       sub-buckets); clamped 0. Self-validation:
-                      median <0.5 ms ⇒ brackets exhaustive.
+                      median <0.5 ms => brackets exhaustive.
 
 Implementation pattern: RAII (matches W22.5 / W22A / W20B game.cpp
-convention; NOT the inline pattern used by W28 in Renderer.cpp — game.cpp
+convention; NOT the inline pattern used by W28 in Renderer.cpp -- game.cpp
 mode_draw_scene work uses RAII, Renderer.cpp flip()-side uses inline).
 Three new RAII timer structs in diagnostic_timers.h:
 MdtBgBackdropTimer / MdtBgTilelayerTimer / MdtBgTintscreenTimer.
 
-Critical placement decision per contract § 4: MdtBgTintscreenTimer scope
+Critical placement decision per contract sec. 4: MdtBgTintscreenTimer scope
 lives INSIDE the `if (settings->lights)` conditional, NOT outside. When
 lights=off the timer never constructs (no SDL_GetTicksNS cost) and the
-bucket emits n=0 placeholder per § 3 — uniform 4-line per-block log
+bucket emits n=0 placeholder per sec. 3 -- uniform 4-line per-block log
 shape regardless of scene's lighting state.
 
 Residual block lives in `game_tick_normal()` immediately after the W22.5
@@ -51,29 +51,29 @@ the value is readable in game_tick_normal post-DrawScene-return).
 
 Gated on SDL_HINT_DOSKUTSU_MDS_BG_INSTR=1 (NEW; strict-1 per CLAUDE.md
 convention; family-prefix consistency with W25's MDS_TFG_INSTR). Default
-OFF. Cached static-const-bool — -O2 hoists per-tick guards. Pairs with
+OFF. Cached static-const-bool -- -O2 hoists per-tick guards. Pairs with
 SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR=1 (W22.5) for the residual: the
 parent total is gated on MODE_DRAW_SCENE_INSTR; without it the residual
 silently clamps to 0 (sub-bucket samples remain valid). Operator's W29A
 iter sets both hints + the lower 3 layers (W20A + W20B + W22A) per
-contract § 6.
+contract sec. 6.
 
 Per-tick overhead when env unset: ~3 SDL_GetTicksNS reads (RAII
 construction always fires; 2 always + 1 conditional on lights) + 3
 conditional branches (RAII destructors gate on cached static-const-bool)
-= sub-µs cumulative. Will not measurably regress fps; PLAY2 control
+= sub-us cumulative. Will not measurably regress fps; PLAY2 control
 parity (W29A2) confirms empirically against iter L baseline.
 
 Storage: 3 sample arrays + 3 idxes + 3 per-tick dt locals + 1 residual
 array + 1 residual idx (~3 KB static state at file scope in Renderer.cpp's
 NXE::Diag block). Reuses W22.5's g_eng_tick_block_size = 100 cadence
-(per contract § 3 — NO new block_size constant).
+(per contract sec. 3 -- NO new block_size constant).
 
 Emit site: _maybe_flush_phase_timing_audit() in Renderer.cpp, AFTER the
 W22.5 [mode-draw-scene-stat] block and BEFORE the W23 [mds-tilemap-cache]
-block. Output ordering: flip-stat → flip-body-stat → engine-tick-stat →
-mode-tick-stat → mode-draw-scene-stat → mds-bg-stat (NEW; layer 5.5) →
-mds-tilemap-cache → mds-tfg-stat → mds-tfg-tiles → counters. Distinct
+block. Output ordering: flip-stat -> flip-body-stat -> engine-tick-stat ->
+mode-tick-stat -> mode-draw-scene-stat -> mds-bg-stat (NEW; layer 5.5) ->
+mds-tilemap-cache -> mds-tfg-stat -> mds-tfg-tiles -> counters. Distinct
 prefix `mds-bg-stat` so 8-layer grep stays clean. Empty-block placeholder
 (n=0; 0.00 numerics) emitted for sub-buckets with no firings + a full
 4-line placeholder block when env is set but no residual samples landed
@@ -100,7 +100,7 @@ vs tintScreen LUT swap).
 Workspace-local; never upstreamed.
 
 See docs/PHASE11-WAVE-29-CONTRACT.md for the full bracket-scheme
-rationale + § 10 wave-30 decision tree.
+rationale + sec. 10 wave-30 decision tree.
 ---
  src/Utils/diagnostic_timers.h | 142 ++++++++++++++++++++++++++++++++
  src/game.cpp                  |  86 +++++++++++++++++++-
@@ -119,29 +119,29 @@ index 03856f8..6f6fb18 100644
 +// per docs/PHASE11-WAVE-29-CONTRACT.md): 3 sub-bracket RAII timers +
 +// derived residual sub-decomposing W22.5's `mds_tilemap_bg` parent
 +// bucket. iter K K3 measured `mds_tilemap_bg` median = 8.30 ms post-
-+// slot-0117 = 28% of inter_flip on First Cave Tier-2 heavy-music — the
++// slot-0117 = 28% of inter_flip on First Cave Tier-2 heavy-music -- the
 +// dominant remaining single-bucket engine-side slice. Wave-28 refuted
 +// the iter K residual-decomp prediction that the 12 ms unmeasured slice
 +// lived inside `phase=total`; instead it lives in `engine_tick - phase=
-+// total` ≈ 24 ms, and `mds_tilemap_bg` is its largest unmeasured sub-
++// total` ~ 24 ms, and `mds_tilemap_bg` is its largest unmeasured sub-
 +// slice. Cutting it in half (~4 ms) lands the session 40 fps goal.
 +//
-+// The brackets fire ONLY inside `DrawScene()` body — at the three call
++// The brackets fire ONLY inside `DrawScene()` body -- at the three call
 +// sites inside the existing W22.5 `MdsTilemapBgTimer` scope at game.cpp
 +// lines 605-615:
 +//   line 609: map_draw_backdrop()          (only when !flipacceltime)
 +//   line 610: map_draw(false)              (only when !flipacceltime)
 +//   line 614: tintScreen()                 (only when settings->lights)
 +//
-+// Three competing hypotheses for the 8 ms (per contract § 0.3):
++// Three competing hypotheses for the 8 ms (per contract sec. 0.3):
 +//   H-A  mdt_bg_backdrop dominant  (2-5 ms; BK_FASTLEFT_LAYERS parallax)
-+//   H-B  mdt_bg_tilelayer dominant (3-6 ms; ~150 tiles × ~50 µs)
++//   H-B  mdt_bg_tilelayer dominant (3-6 ms; ~150 tiles x ~50 us)
 +//   H-C  mdt_bg_tintscreen dominant (0.5-4 ms; 76800-pixel darkening)
 +// Wave-30 lever depends on which dominates; can't pick without data.
 +//
 +// Gated on SDL_HINT_DOSKUTSU_MDS_BG_INSTR=1 (NEW; strict-1 per CLAUDE.md
 +// convention; family-prefix consistency with W25's MDS_TFG_INSTR).
-+// Cached static-const-bool — -O2 hoists per-tick guards.
++// Cached static-const-bool -- -O2 hoists per-tick guards.
 +//
 +// Sub-buckets (sibling, non-overlapping inside MdsTilemapBgTimer
 +// scope at game.cpp:605-615):
@@ -153,11 +153,11 @@ index 03856f8..6f6fb18 100644
 +//
 +// Residual = mds_tilemap_bg_total - sum(3 sub-buckets), clamped 0,
 +// computed in `game_tick_normal()` after DrawScene returns (placement
-+// alongside the W22.5 residual block at game.cpp:515 area — same
++// alongside the W22.5 residual block at game.cpp:515 area -- same
 +// rationale as W22.5: parent total has been written by the
 +// MdsTilemapBgTimer destructor by the time DrawScene returns). Reuses
 +// W22.5's `g_mds_tilemap_bg_dt_this_tick` populated by
-+// MdsTilemapBgTimer in patch 0096 — NO new SDL_GetTicksNS read.
++// MdsTilemapBgTimer in patch 0096 -- NO new SDL_GetTicksNS read.
 +//
 +// COUPLING (mirrors W22.5's coupling on MODE_TICK_INSTR): the W29
 +// residual requires MODE_DRAW_SCENE_INSTR=1 because g_mds_tilemap_bg_-
@@ -165,19 +165,19 @@ index 03856f8..6f6fb18 100644
 +// MDS_BG_INSTR=1 but MODE_DRAW_SCENE_INSTR=0, residual silently clamps
 +// to 0 every tick (sub-bucket samples remain valid). Operator's W29A
 +// iter sets MODE_DRAW_SCENE_INSTR=1 alongside MDS_BG_INSTR=1 per
-+// contract § 6.
++// contract sec. 6.
 +//
 +// Storage: 3 sample arrays + 3 idxes + 3 per-tick dt locals + 1
 +// residual array + 1 residual idx, all extern-declared here, defined
 +// in Renderer.cpp where the audit-flush emission lives. Reuses W22.5's
-+// `g_eng_tick_block_size = 100` cadence (per contract § 3 — NO new
++// `g_eng_tick_block_size = 100` cadence (per contract sec. 3 -- NO new
 +// block_size constant introduced).
 +//
-+// Critical placement decision (per contract § 4): MdtBgTintscreenTimer
++// Critical placement decision (per contract sec. 4): MdtBgTintscreenTimer
 +// scope MUST live inside the `if (settings->lights)` conditional, NOT
 +// outside it. When lights=off, the timer never constructs (no
 +// SDL_GetTicksNS cost), the dt local stays at the per-tick-reset zero,
-+// and the bucket emits `n=0` placeholder per § 3.
++// and the bucket emits `n=0` placeholder per sec. 3.
 +
 +// Forward-decl the env helper. Definition lives in Renderer.cpp's
 +// ablation-flag cluster (alongside _abl_flip_instr / _abl_mode_tick_-
@@ -189,7 +189,7 @@ index 03856f8..6f6fb18 100644
 +
 +// Sample-array storage (extern; defined in Renderer.cpp). Sized at
 +// `g_eng_tick_block_size` (= 100), shared with W20B + W22A + W22.5 +
-+// W25 per contract § 3.
++// W25 per contract sec. 3.
 +extern std::uint64_t g_mdt_bg_backdrop_samples[g_eng_tick_block_size];
 +extern std::uint64_t g_mdt_bg_tilelayer_samples[g_eng_tick_block_size];
 +extern std::uint64_t g_mdt_bg_tintscreen_samples[g_eng_tick_block_size];
@@ -199,7 +199,7 @@ index 03856f8..6f6fb18 100644
 +extern int g_mdt_bg_tintscreen_idx;
 +extern int g_mdt_bg_residual_idx;
 +
-+// Per-tick dt locals — written by each timer's destructor, consumed
++// Per-tick dt locals -- written by each timer's destructor, consumed
 +// by the new residual block in `game_tick_normal()` after DrawScene
 +// returns. Reset by caller at Game::tick entry so leftover-from-prior-
 +// tick doesn't pollute the residual subtraction (mirrors W22.5's
@@ -259,7 +259,7 @@ index 03856f8..6f6fb18 100644
 +
  // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B tilemap cache):
  // 13 cache hit/miss instrumentation counters per
- // docs/PHASE11-WAVE-23-CONTRACT.md § 1.4. These accumulate per-100-
+ // docs/PHASE11-WAVE-23-CONTRACT.md sec. 1.4. These accumulate per-100-
 diff --git a/src/game.cpp b/src/game.cpp
 index 7626fac..56f3c95 100644
 --- a/src/game.cpp
@@ -270,7 +270,7 @@ index 7626fac..56f3c95 100644
    NXE::Diag::g_mds_carets_water_floats_dt_this_tick  = 0;
 +
 +  // patch 0125 (wave 29 W29A): mds_tilemap_bg sub-bracket per-tick dt
-+  // locals. Same reset rationale as W22.5's cluster above — leftover-
++  // locals. Same reset rationale as W22.5's cluster above -- leftover-
 +  // from-prior-tick must not pollute the new wave-29 residual
 +  // computation. Each MdtBgBackdropTimer / MdtBgTilelayerTimer /
 +  // MdtBgTintscreenTimer destructor overwrites its bucket when its
@@ -278,20 +278,20 @@ index 7626fac..56f3c95 100644
 +  // MDS_BG_INSTR unset, OR `flipacceltime` skipped both backdrop +
 +  // tilelayer, OR `settings->lights=false` skipped tintscreen), the
 +  // local stays at 0 and the residual subtraction sees 0 for that
-+  // bucket. Layered independently of W22.5 — these locals exist
++  // bucket. Layered independently of W22.5 -- these locals exist
 +  // whether MDS_BG_INSTR is set or not (zero cost when unset).
 +  NXE::Diag::g_mdt_bg_backdrop_dt_this_tick    = 0;
 +  NXE::Diag::g_mdt_bg_tilelayer_dt_this_tick   = 0;
 +  NXE::Diag::g_mdt_bg_tintscreen_dt_this_tick  = 0;
    // Capture engine-tick start; used for residual computation at the
    // very end of this function. Duplicates EngineTickTimer's t0 but
-   // EngineTickTimer's destructor fires at scope-exit — we need the
+   // EngineTickTimer's destructor fires at scope-exit -- we need the
 @@ -527,6 +542,50 @@ void game_tick_normal(void)
      NXE::Diag::g_mds_residual_samples[NXE::Diag::g_mds_residual_idx++] = (Uint64)_mds_res;
    }
  
 +  // patch 0125 (wave 29 W29A): compute mds_tilemap_bg residual.
-+  // Placement constraint per contract § 4 / § 9 — same rationale as
++  // Placement constraint per contract sec. 4 / sec. 9 -- same rationale as
 +  // W22.5's residual above. Parent total
 +  // `g_mds_tilemap_bg_dt_this_tick` is written by the W22.5
 +  // MdsTilemapBgTimer destructor inside DrawScene() at the close of
@@ -302,7 +302,7 @@ index 7626fac..56f3c95 100644
 +  // MdtBgTintscreenTimer destructors that fired inside the W22.5
 +  // scope.
 +  //
-+  // Reuses `g_mds_tilemap_bg_dt_this_tick` as parent total — NO new
++  // Reuses `g_mds_tilemap_bg_dt_this_tick` as parent total -- NO new
 +  // SDL_GetTicksNS read here. Subtract the 3 sub-bucket dts. Signed
 +  // math + clamp at 0 in case measurement noise produces a tiny
 +  // negative.
@@ -310,7 +310,7 @@ index 7626fac..56f3c95 100644
 +  // Self-validating: small mdt_bg_residual median (<0.5 ms) means
 +  // brackets are exhaustive for that scene (the 3 sub-bucket calls
 +  // cover the entire mds_tilemap_bg work). Large residual surfaces an
-+  // unbracketed chunk inside the W22.5 mds_tilemap_bg bracket span —
++  // unbracketed chunk inside the W22.5 mds_tilemap_bg bracket span --
 +  // possibilities: the `!flipacceltime` check + branch overhead, or
 +  // something we didn't anticipate inside the bracket span (the only
 +  // statements there are the 3 calls + the conditional gates).
@@ -321,7 +321,7 @@ index 7626fac..56f3c95 100644
 +  // MODE_DRAW_SCENE_INSTR=0, residual silently clamps to 0 every
 +  // tick (sub-bucket samples remain valid). Operator's W29A iter sets
 +  // both hints + the lower 3 layers (W20A + W20B + W22A) per contract
-+  // § 6.
++  // sec. 6.
 +  if (NXE::Diag::mds_bg_instr_active()
 +      && NXE::Diag::g_mdt_bg_residual_idx < NXE::Diag::g_eng_tick_block_size)
 +  {
@@ -343,17 +343,17 @@ index 7626fac..56f3c95 100644
      {
 -      map_draw_backdrop();
 -      map_draw(false);
-+      // patch 0125 (wave 29 W29A): mdt_bg_backdrop sub-bracket — wraps
++      // patch 0125 (wave 29 W29A): mdt_bg_backdrop sub-bracket -- wraps
 +      // map_draw_backdrop() (BK_FASTLEFT_LAYERS parallax, BK_FOLLOW,
-+      // BK_FIXED, etc.). H-A hypothesis (per contract § 0.3).
++      // BK_FIXED, etc.). H-A hypothesis (per contract sec. 0.3).
 +      {
 +        NXE::Diag::MdtBgBackdropTimer _mtbg_bd;
 +        map_draw_backdrop();
 +      }
-+      // patch 0125 (wave 29 W29A): mdt_bg_tilelayer sub-bracket — wraps
++      // patch 0125 (wave 29 W29A): mdt_bg_tilelayer sub-bracket -- wraps
 +      // map_draw(false), the BG tile-layer render via
 +      // _tilemap_render_uncached_full_loop (slot 0117's call site).
-+      // H-B hypothesis (per contract § 0.3).
++      // H-B hypothesis (per contract sec. 0.3).
 +      {
 +        NXE::Diag::MdtBgTilelayerTimer _mtbg_tl;
 +        map_draw(false);
@@ -362,13 +362,13 @@ index 7626fac..56f3c95 100644
  
      if (settings->lights)
 +    {
-+      // patch 0125 (wave 29 W29A): mdt_bg_tintscreen sub-bracket — wraps
-+      // tintScreen() (full 320×240 INDEX8 darkening pass; only fires
++      // patch 0125 (wave 29 W29A): mdt_bg_tintscreen sub-bracket -- wraps
++      // tintScreen() (full 320x240 INDEX8 darkening pass; only fires
 +      // when settings->lights=on, default on First Cave + Mimiga).
-+      // H-C hypothesis (per contract § 0.3). RAII scope INSIDE the
-+      // `if (settings->lights)` conditional per contract § 4 — when
++      // H-C hypothesis (per contract sec. 0.3). RAII scope INSIDE the
++      // `if (settings->lights)` conditional per contract sec. 4 -- when
 +      // lights=off the timer never constructs (no SDL_GetTicksNS cost)
-+      // and the bucket emits n=0 placeholder per § 3.
++      // and the bucket emits n=0 placeholder per sec. 3.
 +      NXE::Diag::MdtBgTintscreenTimer _mtbg_ts;
        Renderer::getInstance()->tintScreen();
 +    }
@@ -389,7 +389,7 @@ index 91bdcbc..8eba87d 100644
 +// Decls in vendor/nxengine-evo/src/Utils/diagnostic_timers.h; definitions
 +// live here alongside W20B / W22A / W22.5 / W25 storage so audit-flush
 +// emits all 6 layers from a single TU. Reuses W22.5's
-+// g_eng_tick_block_size = 100 cadence (per contract § 3 — NO new
++// g_eng_tick_block_size = 100 cadence (per contract sec. 3 -- NO new
 +// block_size constant). Layer 5.5 in the instrumentation hierarchy
 +// (sub-decomposes W22.5's `mds_tilemap_bg` parent total).
 +std::uint64_t g_mdt_bg_backdrop_samples[g_eng_tick_block_size]    = {};
@@ -406,7 +406,7 @@ index 91bdcbc..8eba87d 100644
 +
  // DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B tilemap cache):
  // 13 cache hit/miss instrumentation counters per docs/PHASE11-WAVE-23-
- // CONTRACT.md § 1.4. 12 are per-block (reset at audit-flush); 2 are
+ // CONTRACT.md sec. 1.4. 12 are per-block (reset at audit-flush); 2 are
 @@ -333,6 +354,12 @@ bool tile_bbox_skip_active();
  // patch 0117 (Phase 11 iter K Cand #1: drawTileFast inline):
  // drawtile_fast_active() forward-decl. Same pattern.
@@ -428,11 +428,11 @@ index 91bdcbc..8eba87d 100644
 +// per docs/PHASE11-WAVE-29-CONTRACT.md): env-var gate for the 3 sub-
 +// bucket RAII timers + 1 derived residual sub-decomposing W22.5's
 +// `mds_tilemap_bg` parent bucket (8.30 ms median in iter K K3 First
-+// Cave Tier-2 = 28% of inter_flip — the dominant remaining single-
++// Cave Tier-2 = 28% of inter_flip -- the dominant remaining single-
 +// bucket engine-side slice). Disambiguates H-A (map_draw_backdrop) /
 +// H-B (map_draw(false)) / H-C (tintScreen) for wave-30 lever pick.
 +// Strict-"1" match per CLAUDE.md convention; default OFF. Cached
-+// static-const-bool — -O2 hoists per-tick guards. Pairs with
++// static-const-bool -- -O2 hoists per-tick guards. Pairs with
 +// SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR=1 (W22.5): without W22.5's
 +// gate the parent total `g_mds_tilemap_bg_dt_this_tick` stays 0 and
 +// the residual silently clamps to 0 every tick (sub-bucket samples
@@ -457,25 +457,25 @@ index 91bdcbc..8eba87d 100644
 +  // parent total into 3 sub-buckets + 1 derived residual. Sits AFTER
 +  // the W22.5 `[mode-draw-scene-stat]` block (above) and BEFORE the W23
 +  // `[mds-tilemap-cache]` block (below). Output ordering is outermost-
-+  // to-innermost: flip-stat → flip-body-stat → engine-tick-stat →
-+  // mode-tick-stat → mode-draw-scene-stat → mds-bg-stat (NEW) →
-+  // mds-tilemap-cache → mds-tfg-stat → mds-tfg-tiles → counters.
++  // to-innermost: flip-stat -> flip-body-stat -> engine-tick-stat ->
++  // mode-tick-stat -> mode-draw-scene-stat -> mds-bg-stat (NEW) ->
++  // mds-tilemap-cache -> mds-tfg-stat -> mds-tfg-tiles -> counters.
 +  // Distinct prefix `mds-bg-stat` so 8-layer grep stays clean.
 +  //
-+  // Empty-block placeholder (n=0; 0.00 numerics) emitted per § 3 for
-+  // sub-buckets with no firings — critical for `mdt_bg_tintscreen`
++  // Empty-block placeholder (n=0; 0.00 numerics) emitted per sec. 3 for
++  // sub-buckets with no firings -- critical for `mdt_bg_tintscreen`
 +  // when `settings->lights=off` (timer never constructs, dt local
-+  // stays 0, but idx tick doesn't advance → block shape stays uniform
++  // stays 0, but idx tick doesn't advance -> block shape stays uniform
 +  // 4 lines via the placeholder branch). When MdsTilemapBgTimer never
 +  // fires this block (env unset, or `flipacceltime` skip path), the
 +  // gate `n_resid > 0` fails and the placeholder branch fires for all
 +  // 4 lines.
 +  //
 +  // Independent gate: only this block reads from `g_mdt_bg_*` storage;
-+  // W22.5's gate doesn't reach it. Residual idx is the gate counter —
++  // W22.5's gate doesn't reach it. Residual idx is the gate counter --
 +  // it ticks once per `MdsTilemapBgTimer` invocation (in game_tick_-
 +  // normal residual block); when MDS_BG_INSTR unset, residual idx
-+  // stays 0 → placeholder lines emit on each audit-flush (gives a
++  // stays 0 -> placeholder lines emit on each audit-flush (gives a
 +  // visible "instrumentation OFF" marker in the log).
 +  if (_abl_mds_bg_instr() && NXE::Diag::g_mdt_bg_residual_idx > 0)
 +  {
@@ -537,7 +537,7 @@ index 91bdcbc..8eba87d 100644
 +    LOG_INFO("[mds-bg-stat n=0 phase=mdt_bg_residual   min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
 +  }
 +  // Reset wave-29 sample arrays + idxes regardless of MDS_BG_INSTR
-+  // state — same pattern as W22.5 reset cluster.
++  // state -- same pattern as W22.5 reset cluster.
 +  NXE::Diag::g_mdt_bg_backdrop_idx    = 0;
 +  NXE::Diag::g_mdt_bg_tilelayer_idx   = 0;
 +  NXE::Diag::g_mdt_bg_tintscreen_idx  = 0;
@@ -545,7 +545,7 @@ index 91bdcbc..8eba87d 100644
 +
    // patch 0118 (Phase 11 iter K, slot 0111 ordering bug fix). Slot
    // 0111's emit block (further below) reads `g_mds_tilemap_fg_idx` +
-   // `g_mds_tilemap_fg_samples[]` to compute `mds_fg_total_ms` —
+   // `g_mds_tilemap_fg_samples[]` to compute `mds_fg_total_ms` --
 @@ -6710,3 +6849,12 @@ bool tile_bbox_skip_active() { return ::NXE::Graphics::_abl_tile_bbox_skip(); }
  namespace NXE { namespace Diag {
  bool drawtile_fast_active() { return ::NXE::Graphics::_abl_drawtile_fast(); }

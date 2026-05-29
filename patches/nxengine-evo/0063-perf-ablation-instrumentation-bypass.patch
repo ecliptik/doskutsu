@@ -9,18 +9,18 @@ Content-Transfer-Encoding: 8bit
 
 Three runtime env-var ablation flags to test the two prime MISC suspects
 identified by the 2026-04-27 3-reviewer pass plus a control. See
-docs/PHASE9-NEXT-WAVES-PLAN.md §6 for the decision tree.
+docs/PHASE9-NEXT-WAVES-PLAN.md sec.6 for the decision tree.
 
   DOSKUTSU_NO_DC_TIMING=1   skip per-drawcall SDL_GetTicks{,NS} reads
                             (R1 hypothesis: 1200-2200 PIT-port reads
-                            per frame — diagnostic measuring itself)
+                            per frame -- diagnostic measuring itself)
 
   DOSKUTSU_CACHE_WINSURF=1  skip per-flip SDL_GetWindowSurface refresh
                             after RenderPresent in flip() and flushAll()
                             (R3 hypothesis: re-query runs fb_state
                             populate inside SDL3-DOS)
 
-  DOSKUTSU_NO_INPUT_POLL=1  stub input_poll() body — game uncontrollable;
+  DOSKUTSU_NO_INPUT_POLL=1  stub input_poll() body -- game uncontrollable;
                             control variable for SDL_PollEvent /
                             DOS_Yield ping-pong cost (R3 secondary)
 
@@ -30,7 +30,7 @@ on this run so DEBUG.LOG records the iter context.
 Risk: CACHE_WINSURF may segfault if SDL3 actually invalidates the
 surface pointer post-RenderPresent. Acceptable for one ablation iter
 on real HW; not for shipping. Per-drawcall timer ablation freezes the
-phase-timing accumulators at zero — the phase-timing block report will
+phase-timing accumulators at zero -- the phase-timing block report will
 show dc_total_ms=0 which is misleading; the real signal is inter_flip_ms.
 
 Builds clean at i586 -O2 -fno-rtti. DOSBox-X smoke pending.
@@ -49,12 +49,12 @@ index 0e90c88..02e171e 100644
  {
 +// DOS-PORT (patch 0063, Phase 9 wave 13.2): surgical instrumentation
 +// ablation flags. Tests two prime MISC suspects from the 2026-04-27
-+// 3-reviewer pass — see docs/PHASE9-NEXT-WAVES-PLAN.md §6.
-+//   DOSKUTSU_NO_DC_TIMING=1 — skip per-drawcall SDL_GetTicks{,NS} reads
++// 3-reviewer pass -- see docs/PHASE9-NEXT-WAVES-PLAN.md sec.6.
++//   DOSKUTSU_NO_DC_TIMING=1 -- skip per-drawcall SDL_GetTicks{,NS} reads
 +//                             (R1 hypothesis: PIT-port reads dominate)
-+//   DOSKUTSU_CACHE_WINSURF=1 — skip per-flip SDL_GetWindowSurface refresh
++//   DOSKUTSU_CACHE_WINSURF=1 -- skip per-flip SDL_GetWindowSurface refresh
 +//                              (R3 hypothesis: fb_state populate is misc)
-+//   DOSKUTSU_NO_INPUT_POLL=1 — stub input_poll() body
++//   DOSKUTSU_NO_INPUT_POLL=1 -- stub input_poll() body
 +//                              (R3 secondary hypothesis; defined in input.cpp;
 +//                               this accessor is for the init-log emission)
 +// Lazy-initialized via getenv on first call; constant for the run. Strict
@@ -116,7 +116,7 @@ index 0e90c88..02e171e 100644
    Uint64 _t0;
 -  _DrawcallTimer() : _t0(SDL_GetTicksNS()) {}
 +  // patch 0063 ablation: skip ns-resolution timing when DOSKUTSU_NO_DC_TIMING
-+  // is set. Constructor reads zero, destructor early-returns — accumulators
++  // is set. Constructor reads zero, destructor early-returns -- accumulators
 +  // freeze at whatever value they had pre-flag (typically 0 if set at boot).
 +  _DrawcallTimer() : _t0(_abl_no_dc_timing() ? 0 : SDL_GetTicksNS()) {}
    ~_DrawcallTimer()
@@ -130,7 +130,7 @@ index 0e90c88..02e171e 100644
                      / ((Uint64)_drawcall_count_block * 1000ull))
        : 0;
 +  // patch 0063: append ablation-flag suffix so each block line self-describes
-+  // — under NO_DC_TIMING=1 the dc_total_ms / dc_avg fields will read zero
++  // -- under NO_DC_TIMING=1 the dc_total_ms / dc_avg fields will read zero
 +  // because the accumulators are gated; this suffix tells a future log-grepper
 +  // why without forcing them back to the patch.
    LOG_INFO("phase timing block {}: drawcalls={} dc_total_ms={} "
@@ -155,12 +155,12 @@ index 0e90c88..02e171e 100644
    }
 +  // DOS-PORT (patch 0063, Phase 9 wave 13.2): log ablation-flag state
 +  // so DEBUG.LOG records which surgical-instrumentation ablations were
-+  // active for this iter. See docs/PHASE9-NEXT-WAVES-PLAN.md §6.
++  // active for this iter. See docs/PHASE9-NEXT-WAVES-PLAN.md sec.6.
 +  LOG_INFO("Renderer::initVideo: ablation flags: NO_DC_TIMING={} CACHE_WINSURF={} NO_INPUT_POLL={}",
 +           _abl_no_dc_timing() ? 1 : 0,
 +           _abl_cache_winsurf() ? 1 : 0,
 +           _abl_no_input_poll_env() ? 1 : 0);
-   // First frame must be a full refresh — we have no last-frame
+   // First frame must be a full refresh -- we have no last-frame
    // history to compare against and the backbuffer state is whatever
    // SDL3 initialized it to.
 @@ -993,7 +1046,11 @@ bool Renderer::flushAll()
@@ -178,11 +178,11 @@ index 0e90c88..02e171e 100644
    // DOS-PORT (patch 0052, Phase 9 wave 9 Lever A): flushAll() bypasses
 @@ -1307,7 +1364,10 @@ void Renderer::flip()
    // surface post-present. SDL_RenderPresent (SW renderer) may swap or
-   // invalidate the underlying window surface — re-querying once per
+   // invalidate the underlying window surface -- re-querying once per
    // flip is the safe invalidation hook.
 -  _cached_window_surface = SDL_GetWindowSurface(_window);
 +  // patch 0063 ablation: gate on DOSKUTSU_CACHE_WINSURF (R3 hypothesis
-+  // — re-query may be running fb_state populate inside SDL3-DOS).
++  // -- re-query may be running fb_state populate inside SDL3-DOS).
 +  if (!_abl_cache_winsurf())
 +    _cached_window_surface = SDL_GetWindowSurface(_window);
    if (!ok)
@@ -196,7 +196,7 @@ index e6e352a..228ec5c 100644
  #include "sound/SoundManager.h"
  
  #include <array>
-+#include <cstdlib>  // patch 0063 — std::getenv for ablation flag
++#include <cstdlib>  // patch 0063 -- std::getenv for ablation flag
  
  in_action mappings[INPUT_COUNT];
  
@@ -204,10 +204,10 @@ index e6e352a..228ec5c 100644
  
  void input_poll(void)
  {
-+  // DOS-PORT (patch 0063, Phase 9 wave 13.2): ablation flag — skip the
++  // DOS-PORT (patch 0063, Phase 9 wave 13.2): ablation flag -- skip the
 +  // event-pump entirely. R3 hypothesis: SDL_PollEvent + DOS_Yield
 +  // ping-pong with the audio cooperative thread is a misc cost. Game
-+  // becomes uncontrollable when set; control variable for §6 decision
++  // becomes uncontrollable when set; control variable for sec.6 decision
 +  // tree. Strict "1"-only match (matches Renderer.cpp helpers) so
 +  // `SET DOSKUTSU_NO_INPUT_POLL=0` does NOT enable. See
 +  // docs/PHASE9-NEXT-WAVES-PLAN.md.
