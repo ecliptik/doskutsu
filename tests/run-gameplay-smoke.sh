@@ -414,12 +414,13 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
 )
-# FOLLOW-UP (build-qa, v1.0.4): BANNER_LABEL is shorter than BANNER_REGEX/SEVERITY
-# (a long-standing gap -- labels were not kept in lockstep as regexes were appended).
-# The gate loop indexes BANNER_LABEL[$i] parallel to BANNER_REGEX, so tail banners get
-# EMPTY display labels. COSMETIC ONLY -- the gate keys on regex+severity (both aligned),
-# so pass/fail logic is correct. Re-aligning needs a manual regex<->label re-map; tracked
-# as a low-pri cleanup, do not block ship on it.
+# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 78 entries;
+# the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
+# add a BANNER_REGEX + BANNER_SEVERITY entry, add a matching BANNER_LABEL line at the same
+# index. (v1.0.5 #16 re-aligned these -- v1.0.4 had a 2-entry tail gap from the P2 banners,
+# masked by the `${BANNER_LABEL[$i]:-}` guard in the loop below; the guard is now
+# belt-and-suspenders, not load-bearing.) Labels are DISPLAY-ONLY -- pass/fail keys on
+# regex+severity -- but an aligned label makes the gate output readable.
 BANNER_LABEL=(
   "lever-1 opaque-tile fastpath (patch 0137)"
   "lever-2b nx-engine consumer (patch 0138)"
@@ -497,6 +498,8 @@ BANNER_LABEL=(
   "0187 SFXPAUSE-013 IO-audit per-op emit (optional -- one [io-audit] phase=NAME op=OPTYPE file=BASENAME bytes=N wall_us=N line per instrumented filesystem-IO op when SDL_HINT_DOSKUTSU_IO_AUDIT=1. Phases: boot / load_stage / gameplay. Op types: loadImage / tsc_load / music_org_load / music_ogg_load / save_read / save_write. The actionable subset is phase=gameplay (a latent real-HW lazy-IO stall); phase=boot + phase=load_stage are expected. Validates the 0186 fix (sprite loadImage ops should appear at phase=load_stage, not phase=gameplay) AND surfaces any other phase=gameplay IO landmines. Default smoke leaves the hint unset so this is ABSENT, expected. build-qa task #38 runs the audit + produces the landmine list + authors the permanent no-gameplay-IO dev gate. Mechanism is pure CPU/filesystem so DOSBox-X runs it faithfully. See docs/internal/BOOT.md + patches/nxengine-evo/0187 commit message.)"
   "0188 SFXPAUSE-012 skip-sheet-flush decision banner (optional -- the SHIPPED FIX, DEFAULT-ON. LOG_INFO emitted on the first skip_sheet_flush_active() call (first cave entry), narrating ENABLED (default) vs DISABLED (killswitch =0). INFO-level so it appears only on tagged runs or DOSKUTSU_LOG_VERBOSE=1; absent on a plain untagged WARN-level production boot which is expected not a failure. On a default boot the ENABLED (default) variant confirms the per-cave sprite-sheet flush is skipped (the SFXPAUSE-012 fire-frame-pause fix). SDL_HINT_DOSKUTSU_SKIP_SHEET_FLUSH=0 emits DISABLED (killswitch) + restores the old per-cave flush. Pairs with the [skip-sheet-flush] regex below.)"
   "0188 SFXPAUSE-012 skip-sheet-flush per-cave emit (optional -- one [skip-sheet-flush] cave=C line per cave entry on the default-ON path, confirming load_stage skipped the sprite-sheet flush so sheets stay resident. cave 1 lazy-loads sheets one-time, cave 2+ finds them resident (no re-decode, no pause, no added load) -- the SHIPPED fix. INFO-level so absent on an untagged WARN-level boot (expected). The companion [io-audit] op=loadImage lines (under SDL_HINT_DOSKUTSU_IO_AUDIT=1) should appear ONLY in cave 1, never recurring cave 2+ -- the gate-validation signature build-qa's IO-audit dev gate keys off. See docs/internal/BOOT.md + patches/nxengine-evo/0188 commit message.)"
+  "0185 P2 FIX-2 entry-music preload (PRELOAD_STAGE_MUSIC default-ON; optional -- BANNER_REGEX idx 76)"
+  "0184 P2 FIX-1 eager-title-IO phase tag (EAGER_TITLE_IO default-ON; optional -- BANNER_REGEX idx 77)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
@@ -515,7 +518,7 @@ log "=== Banner-emit gate (proves runtime invocation, not just embed) ==="
 for i in "${!BANNER_REGEX[@]}"; do
   regex="${BANNER_REGEX[$i]}"
   severity="${BANNER_SEVERITY[$i]}"
-  label="${BANNER_LABEL[$i]:-}"   # set-u-safe: BANNER_LABEL is shorter than BANNER_REGEX (see comment above BANNER_LABEL=); display-only, gate keys on regex+severity
+  label="${BANNER_LABEL[$i]:-}"   # set-u-safe guard (belt-and-suspenders; arrays aligned 78=78 as of #16); display-only, gate keys on regex+severity
 
   hit_total=0
   hit_source=""

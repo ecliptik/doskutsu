@@ -93,28 +93,33 @@ NOSIMD_FLAGS := -DSDL_DISABLE_MMX=1 -DSDL_DISABLE_SSE=1 -DSDL_DISABLE_SSE2=1 \
 # without modifying the vendored CMakeLists.txt; harmless to other
 # stages since they don't `#include` it.
 #
-# DOSKUTSU_BUILD_SHA12: BUILD-CONTENT fingerprint (sha256[:12]) over the repo
-# git HEAD + the DIFF CONTENT of every APPLIED patch (patches/*/*.patch, excluding
-# _disabled/), embedded into the RUNMANIFEST `binary_sha12` field.
-# v1.0.4 fix (build-qa, task #19): the prior `git rev-parse HEAD` alone was a
-# STALE BASE-PIN -- our patch stack is applied from working-tree patches/ files
-# that do NOT move HEAD, so every v1.0.4 build reported HEAD=0f5126b (the v1.0.3
-# ship commit). That mis-routed log-based binary attribution (read as "ran the
-# v1.0.3 binary") and bit the #18 quit-hang triage. Hashing HEAD + the patch set
-# makes the field reflect the actual built content -> no commit-sha collision.
-# STABILITY (v1.0.4 refinement): we grep ONLY the diff-content lines
-# (`diff --git ` / `@@ ` / `+`/`-`), NOT the whole patch file. git format-patch
-# regenerates volatile `From <hash>` / `Date:` / `index ab..cd` headers on every
-# re-export even when the DIFF is identical -- hashing those would churn the
-# fingerprint (and the exe sha) on cosmetic patch re-exports. Diff-content-only
-# is INVARIANT to re-export, so identical code -> identical fingerprint.
+# DOSKUTSU_BUILD_SHA12: BUILD-CONTENT fingerprint (sha256[:12]) over the DIFF
+# CONTENT of every APPLIED patch (patches/*/*.patch, excluding _disabled/),
+# embedded into the RUNMANIFEST `binary_sha12` field.
+# HISTORY: v1.0.3-and-earlier baked `git rev-parse HEAD` alone -- a STALE
+# BASE-PIN, since our patch stack is applied from working-tree patches/ files
+# that do NOT move HEAD, so every patched build reported HEAD=0f5126b (the
+# v1.0.3 ship commit). That mis-routed log-based binary attribution (read as
+# "ran the v1.0.3 binary") and bit the #18 quit-hang triage (build-qa #19).
+# v1.0.5 fix (build-qa #23): the fingerprint is now PURELY the patch diff-content
+# -- the live `git rev-parse HEAD` term is DROPPED. Rationale: with HEAD piped
+# in, the stamp baked BUILD-TIME HEAD, so a clean rebuild from a release tag
+# (HEAD = the release commit) produced a DIFFERENT stamp than the shipped binary
+# (built pre-commit at the parent HEAD) -- i.e. NOT reproducible-from-tag. Pure
+# diff-content is HEAD-independent, so `make` from tag vN reproduces vN's exact
+# stamp. Still serves #18 (any diff-content hash != 0f5126b's commit sha).
+# STABILITY: we grep ONLY the diff-content lines (`diff --git ` / `@@ ` / `+`/`-`),
+# NOT the whole patch file -- git format-patch regenerates volatile
+# `From <hash>` / `Date:` / `index ab..cd` headers on every re-export even when
+# the DIFF is identical; diff-content-only is INVARIANT to re-export, so
+# identical code -> identical fingerprint.
 # NOTE: still a SOURCE-INPUT fingerprint, not the literal exe-content hash (the
 # latter needs a post-link self-hash injection -- deliberate, non-rework-safe;
 # tracked as a follow-up). Evaluated immediately (`:=`). Fallback "UNKNOWN_____"
-# if git + patches both unavailable. 12 hex chars -> valid bare -D token
-# (stringified by main.cpp's _DOSKUTSU_STR; see below).
+# if patches unavailable. 12 hex chars -> valid bare -D token (stringified by
+# main.cpp's _DOSKUTSU_STR; see below).
 RUNMANIFEST_INC := -I$(REPO_ROOT)/include
-DOSKUTSU_BUILD_SHA12 := $(shell { git -C $(REPO_ROOT) rev-parse HEAD 2>/dev/null; find $(REPO_ROOT)/patches -maxdepth 2 -name '*.patch' -not -path '*_disabled*' 2>/dev/null | LC_ALL=C sort | xargs cat 2>/dev/null | grep -E '^(diff --git |@@ |[-+])'; } | sha256sum 2>/dev/null | cut -c1-12 | grep . || echo UNKNOWN_____)
+DOSKUTSU_BUILD_SHA12 := $(shell find $(REPO_ROOT)/patches -maxdepth 2 -name '*.patch' -not -path '*_disabled*' 2>/dev/null | LC_ALL=C sort | xargs cat 2>/dev/null | grep -E '^(diff --git |@@ |[-+])' | sha256sum 2>/dev/null | cut -c1-12 | grep . || echo UNKNOWN_____)
 # Pass SHA as BARE TOKEN (no quotes); main.cpp's _DOSKUTSU_STR macro
 # stringifies via C preprocessor. Avoids multi-layer quote escaping
 # through bash + make + cmake -> compiler. SHA is always 12 hex chars

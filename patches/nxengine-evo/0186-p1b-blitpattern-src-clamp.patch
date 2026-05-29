@@ -1,0 +1,93 @@
+From 7091ac43bd1dffb60417ac79066e49744d44e784 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 21:00:34 -0700
+Subject: [PATCH] patch 0186 -- P1b blitPatternAcross src-rect clamp (cache-OFF
+ title, default-OFF)
+
+WHY DOS NEEDS THIS: the cache-OFF title screen (SDL_HINT_DOSKUTSU_
+BACKDROP_CACHE=0) drops its bottom cloud band on g2k (operator IMG_3176).
+Root cause: DrawFastLeftLayered's Layer 4 calls blitPatternAcross with a
+src rect that reads 1px past the bkMoon texture -- bkMoon is 320x240,
+layer_ys[4]=240, height (240-177)+1=64 from y_src=177 -> reads row 240
+(OOB on a 240-row texture). Benign in production: the cache-ON title
+renders via _render_layered_to_surface (SDL_BlitSurface clips OOB src),
+and the only production blitPatternAcross caller (map_drawwaterlevel)
+reads in-bounds -> the clamp is a no-op for every production path. The
+OOB only bites the cache-OFF SDL_RenderTexture path, and only on g2k
+(DOSBox-X renders the cache-OFF title fully; g2k drops the band -- the
+same DOSBox-vs-g2k render divergence class as the v1.0.4 backdrop-black).
+
+FIX: SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=1 clamps srcrect.h so
+srcrect.y+srcrect.h <= texture height. Unconditionally correct (the
+clamped row is off-screen anyway -> visibly identical where it already
+renders). Strict "1", default OFF -> byte-identical to current behavior;
+g2k blind A/B (NOT DOSBox-reproducible), flip default-ON once g2k
+confirms IMG_3176. Independent of THRASH_FULLCOVER + all cache paths
+(separate lever, single-attributable). GPLv3 (derivative of nxengine-evo).
+---
+ src/graphics/Renderer.cpp | 45 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 012f5329..7dd62d41 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -7379,6 +7379,38 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
+   _renderer_queue_dirty = true;
+ }
+ 
++// DOS-PORT (patch 0186, v1.0.4 P1b): blitPatternAcross source-rect clamp
++// lever. A blitPatternAcross caller whose (y_src + height) exceeds the
++// source texture height produces an out-of-bounds src rect. The only
++// such caller is DrawFastLeftLayered's Layer 4 on the title backdrop
++// (bkMoon is 320x240; layer_ys[4]=240, height (240-177)+1=64 from
++// y_src=177 -> reads row 240, 1px OOB). It is BENIGN in production: the
++// cache-ON title renders via _render_layered_to_surface (SDL_BlitSurface,
++// which clips OOB src), and the sole production blitPatternAcross caller
++// (map_drawwaterlevel) reads in-bounds rows -- so the clamp is a no-op
++// for every production path. The OOB only bites the cache-OFF
++// (SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0) SDL_RenderTexture path, and only
++// on g2k (DOSBox-X renders the cache-OFF title fully; g2k drops the
++// bottom cloud band, operator IMG_3176) -- same DOSBox-vs-g2k render
++// divergence class as the v1.0.4 backdrop-black. When this lever is ON
++// the src rect is clamped to the texture height (the clamped row is
++// off-screen anyway, so it is visibly identical where it already
++// works). Strict "1", default OFF (g2k blind A/B; flip default-ON once
++// g2k confirms IMG_3176 is fixed). Independent of THRASH_FULLCOVER and
++// all cache paths. Sentinel-cached.
++static bool _blitpattern_src_clamp()
++{
++  static int v = -1;
++  if (v < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP");
++    v = (e && e[0] == '1' && e[1] == 0) ? 1 : 0;
++    LOG_INFO("blitPatternAcross src-clamp {} (set SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=1 to enable)",
++             v ? "ENABLED" : "disabled (default)");
++  }
++  return v == 1;
++}
++
+ // blit the specified surface across the screen in a repeating pattern
+ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src, int height)
+ {
+@@ -7396,6 +7428,19 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+   srcrect.y = (y_src * scale);
+   srcrect.h = (height * scale);
+ 
++  // patch 0186 (P1b): clamp the src rect to the texture height so an
++  // over-tall layer (title Layer 4 reads bkMoon row 240, 1px OOB) does
++  // not read past the texture. Default-OFF; the clamped row is off-
++  // screen, so this is visibly identical wherever blitPatternAcross
++  // already renders correctly (production water-level callers are in-
++  // bounds -> no-op). Set <=0 to nothing if fully OOB.
++  if (_blitpattern_src_clamp())
++  {
++    const int tex_h = sfc->height() * scale;
++    if (srcrect.y + srcrect.h > tex_h)
++      srcrect.h = (srcrect.y < tex_h) ? (tex_h - srcrect.y) : 0;
++  }
++
+   dstrect.w = srcrect.w;
+   dstrect.h = srcrect.h;
+ 
