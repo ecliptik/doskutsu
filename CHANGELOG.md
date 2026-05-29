@@ -5,6 +5,36 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.0.5] - 2026-05-29
+
+A maintenance and hardening release on top of v1.0.4. Production render and audio
+behavior is byte-identical to v1.0.4; the changes are build provenance, source and
+test hygiene, and an opt-in clamp for a latent out-of-bounds read on the
+backdrop-cache-disabled title render path (a debug/fallback config, not the default).
+
+### Fixed
+
+- **Title-screen clouds clipped with the backdrop cache disabled** -- with
+  `SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` (a debug/fallback config), the title
+  backdrop dropped its lower clouds on real hardware, from a one-row out-of-bounds
+  read in the layered pattern blit. The default render path (backdrop cache on) was
+  never affected -- it clips the read harmlessly. New opt-in
+  `SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=1` clamps the blit's source height to the
+  texture bounds; confirmed on the reference machine. Ships off by default (the
+  default path has no out-of-bounds read), so v1.0.5 is production-identical to
+  v1.0.4.
+
+### Changed
+
+- **Reproducible build stamp** -- the embedded build identifier
+  (`binary_sha12` in the run manifest) is now reproducible from the release tag: it
+  hashes only the applied patch set's diff content, so the same source always yields
+  the same stamp (previously it mixed in the live commit hash, so a rebuild from the
+  tag produced a different stamp than the shipped binary).
+- **Internal hygiene** -- removed the last non-ASCII character from the active patch
+  stack and re-aligned the gameplay smoke-test's banner-label table (no user-facing
+  effect).
+
 ## [1.0.4] - 2026-05-28
 
 A visual and load-time quality pass on top of v1.0.3. Fixes parallax backdrops
