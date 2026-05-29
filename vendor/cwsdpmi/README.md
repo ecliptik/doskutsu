@@ -1,6 +1,6 @@
 # vendor/cwsdpmi/
 
-**CWSDPMI** is the DPMI host required at runtime by DJGPP-compiled programs on DOS. It provides 32-bit protected mode services and is a separate executable — **not** statically linked into `DOSKUTSU.EXE`. It ships alongside the binary in every CF deploy and in `dist/doskutsu-cf.zip`.
+**CWSDPMI** is the DPMI host required at runtime by DJGPP-compiled programs on DOS. It provides 32-bit protected mode services and is a separate executable -- **not** statically linked into `DOSKUTSU.EXE`. It ships alongside the binary in every CF deploy and in `dist/doskutsu-cf.zip`.
 
 ## Expected files
 
@@ -22,7 +22,7 @@ cp ~/git/vellm/vendor/cwsdpmi/cwsdpmi.exe  vendor/cwsdpmi/
 cp ~/git/vellm/vendor/cwsdpmi/cwsdpmi.doc  vendor/cwsdpmi/
 ```
 
-This is the preferred path on a machine that already has `vellm` set up. The binaries are identical — CWSDPMI r7 is r7 regardless of which project vendored it.
+This is the preferred path on a machine that already has `vellm` set up. The binaries are identical -- CWSDPMI r7 is r7 regardless of which project vendored it.
 
 ### Option 2: download fresh from Charles W. Sandmann's site
 
@@ -51,4 +51,4 @@ See `cwsdpmi.doc` for the full terms. DOSKUTSU's `make dist` target includes bot
 
 ## Why this is not in the build graph
 
-`CWSDPMI.EXE` is not compiled as part of `make` — it's a pre-built binary we redistribute unmodified. Rebuilding CWSDPMI from source would require a real-mode 16-bit DOS toolchain (DJGPP's assembler won't produce a DPMI host). Redistributing the upstream binary is the practical approach, and the license permits it.
+`CWSDPMI.EXE` is not compiled as part of `make` -- it's a pre-built binary we redistribute unmodified. Rebuilding CWSDPMI from source would require a real-mode 16-bit DOS toolchain (DJGPP's assembler won't produce a DPMI host). Redistributing the upstream binary is the practical approach, and the license permits it.
