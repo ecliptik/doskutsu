@@ -1244,20 +1244,27 @@ PROBE_SDLPROB2_EXE := $(PROBES_DIR)/sdlprob2.exe
 PROBE_SDLPROB1_SRC := tests/probes/sdlprob1.c
 PROBE_SDLPROB1_EXE := $(PROBES_DIR)/sdlprob1.exe
 
-# P37 -- task #32 SECONDARY: DJGPP/CWSDPMI/uclock process-EXIT hang isolation.
-#   Engages minimal SDL audio (SB16 device + IRQ-5 ISR) + uclock PIT + SDL
-#   ticks, tears SDL down via SDL_Quit, then walks the DOS-exit unwind with
-#   fsync'd markers M1/M4/M2/M3 (post-SDL_Quit / pre-return / atexit-LIFO-first
-#   before uclock-restore / atexit-LIFO-last after uclock-restore). Tests
-#   whether the post-SDL_Quit exit path hangs in ISOLATION (no engine state).
-#   SECONDARY to nx-engine's in-situ engine exit-brackets; can false-negative
-#   (the real hang is intermittent + Pool-st15 scene-specific). SDL3-linked
-#   (PROBES_SDL_* recipe, minstack 2048k -- matches YIELD/IDLEPROB). Source
-#   basename = binary basename = qhexit (8.3-clean: 6+3). Output -> QHEXIT.LOG
-#   (CWD, fopen-direct, per-line fsync so it survives a hang). DOSBox-X smoke
-#   is correctness-only (the hang does not reproduce under DOSBox-X).
+# P37 -- task #32 SECONDARY: DOS-exit hang isolation (post-SDL_Quit). Tests
+#   whether the DJGPP libc + CWSDPMI process-EXIT unwind (atexit / uclock
+#   PIT-restore / INT 21h 0x4C) hangs in ISOLATION, no engine state. 3 cells,
+#   2 binaries; markers are raw write()+fsync to a kept-open fd (stdio-
+#   teardown-proof), mirroring nx-engine's in-situ 0187 brackets:
+#     qhexit.exe  (cell A, SDL-linked)  -- SDL_Init(EVENTS)+ticks+SDL_Quit+exit
+#                 (uclock armed by SDL_InitTicks); NO audio. -> QHEXITA.LOG
+#     qhexitp.exe (cells U + B, pure DJGPP) -- U: uclock() armed + exit
+#                 (-> QHEXITU.LOG); B: no uclock + exit (-> QHEXITB.LOG). The
+#                 SDL-free uclock on/off discriminator (SDL_Init always arms
+#                 uclock, so cell A alone can't isolate it).
+#   One-way test: HANG localizes the wedge bucket; CLEAN is INCONCLUSIVE (real
+#   hang may need Pool-st15 engine audio state -- does NOT exonerate exit path).
+#   DOSBox-X smoke is correctness-only (no audio opened -> all cells exit clean
+#   under DOSBox; the g2k run is the signal).
 PROBE_QHEXIT_SRC := tests/probes/qhexit.c
 PROBE_QHEXIT_EXE := $(PROBES_DIR)/qhexit.exe
+# Cells U + B (pure DJGPP, no SDL, no g_pixtone stub). Generic %.exe pattern
+# rule builds it (qhexitp = 8 chars, 8.3-clean); mode arg selects U vs B.
+PROBE_QHEXITP_SRC := tests/probes/qhexitp.c
+PROBE_QHEXITP_EXE := $(PROBES_DIR)/qhexitp.exe
 
 # Generic build rule for any probe .c with no library deps (P0/P1/P3-pure).
 $(PROBES_DIR)/%.exe: tests/probes/%.c | djgpp-check
@@ -1406,7 +1413,7 @@ $(PROBE_QHEXIT_EXE): $(PROBE_QHEXIT_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
 	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
 	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi wbtest wbtest2 wbtest3 hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 s3blt s3blt-dosbox-smoke probes-p25 probes-s3blt dactest dactest-dosbox-smoke probes-p26 s3vram s3ckey s3vram-dosbox-smoke s3ckey-dosbox-smoke probes-p27 probes-p28 s3crtc probes-p29 s3wedge probes-p30 s3alias probes-p31 probes-p32 probes-p33 probes-p34 wbtest4 probes-p35 wbtest6 probes-p36 qhexit probes-p37
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi wbtest wbtest2 wbtest3 hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 s3blt s3blt-dosbox-smoke probes-p25 probes-s3blt dactest dactest-dosbox-smoke probes-p26 s3vram s3ckey s3vram-dosbox-smoke s3ckey-dosbox-smoke probes-p27 probes-p28 s3crtc probes-p29 s3wedge probes-p30 s3alias probes-p31 probes-p32 probes-p33 probes-p34 wbtest4 probes-p35 wbtest6 probes-p36 qhexit qhexitp probes-p37
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -1762,18 +1769,19 @@ wbtest6: $(PROBE_WBTEST6_EXE)
 probes-p36: $(PROBE_WBTEST6_EXE)
 	@echo "Built P36 probe set: wbtest6.exe (v1.0.2 task #16 -- WBTEST-006 DOSMID polled)"
 
-# P37 -- task #32 SECONDARY: DJGPP/CWSDPMI/uclock process-EXIT hang isolation.
-qhexit: $(PROBE_QHEXIT_EXE)
-	@echo "Built P37 probe: qhexit.exe (task #32 -- DOS-exit hang isolation, SECONDARY)"
-	@echo "  SDL3-linked. Engages SB16 audio + uclock PIT + SDL ticks, SDL_Quit,"
-	@echo "  then walks the DOS-exit unwind with fsync'd markers M1/M4/M2/M3."
-	@echo "  Real-HW iter: bundle QHEXIT.EXE + CWSDPMI.EXE + tests/probes/qhexit.bat."
-	@echo "  Output -> QHEXIT.LOG (per-line fsync; last line names the region if hung)."
-	@echo "  POSITIVE result = hang at exit (needs power-cycle; log survives on disk)."
-	@echo "  SECONDARY to nx-engine in-situ engine brackets; can false-negative."
+# P37 -- task #32 SECONDARY: DOS-exit hang isolation (cells A + U + B).
+qhexit: $(PROBE_QHEXIT_EXE) $(PROBE_QHEXITP_EXE)
+	@echo "Built P37 probes: qhexit.exe (cell A, SDL) + qhexitp.exe (cells U/B, pure DJGPP)"
+	@echo "  Cell A: qhexit.exe        -> QHEXITA.LOG (SDL init+ticks+quit+exit; uclock armed by SDL)"
+	@echo "  Cell U: qhexitp.exe U     -> QHEXITU.LOG (pure DJGPP, uclock() armed + exit)"
+	@echo "  Cell B: qhexitp.exe B     -> QHEXITB.LOG (pure DJGPP, no uclock + exit; baseline)"
+	@echo "  Markers raw write()+fsync (stdio-teardown-proof); last line names the region if hung."
+	@echo "  Real-HW iter: bundle QHEXIT.EXE + QHEXITP.EXE + CWSDPMI.EXE + tests/probes/qhexit.bat."
+	@echo "  POSITIVE result = hang at exit (power-cycle OK; logs survive). One-way test;"
+	@echo "  CLEAN is INCONCLUSIVE (real hang may need engine state). SECONDARY to nx-engine brackets."
 
-probes-p37: $(PROBE_QHEXIT_EXE)
-	@echo "Built P37 probe set: qhexit.exe (task #32 DOS-exit hang isolation)"
+probes-p37: $(PROBE_QHEXIT_EXE) $(PROBE_QHEXITP_EXE)
+	@echo "Built P37 probe set: qhexit.exe (cell A) + qhexitp.exe (cells U/B) -- DOS-exit hang isolation"
 
 # P21 -- Phase 11 wave-41 task #10: HW-inventory snapshot.
 hwinv: $(PROBE_HWINV_EXE)
