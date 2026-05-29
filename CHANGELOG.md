@@ -5,6 +5,39 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.0.4] - 2026-05-28
+
+A visual and load-time quality pass on top of v1.0.3. Fixes parallax backdrops
+flashing black during camera motion, and eliminates two disk reads that were
+deferred to gameplay phase (both caught by the v1.0.3 IO-audit gate). Both fixes
+are default-ON with killswitches and were validated on the reference machine
+(g2k: Pentium-OverDrive-83 / Cirrus CL-GD5430 / SB16 PnP + DreamBlaster S2).
+
+### Fixed
+
+- **Backdrop flashes black on camera motion** -- parallax backdrops rendered black
+  bands during jumps and room entry in caves with terrain dips and water areas,
+  filling back in on landing. A sub-region render optimization (the cached-backdrop
+  clip) under-covered the backdrop while the camera moved: harmless under the
+  emulator's fast render, but exposed on the reference machine's slower
+  per-rendered-frame camera delta, where the uncovered rows showed through as
+  black. Fixed by `patches/nxengine-evo/0183`
+  (`SDL_HINT_DOSKUTSU_THRASH_FULLCOVER`, default-ON): the cached backdrop now
+  full-covers on every render path. Operator-confirmed on g2k -- black gone in
+  water caves, Mimiga Village, and the Farm-cave entry. Killswitch `=0` restores
+  the previous clip behavior.
+
+- **First-frame disk stalls on title and stage entry** -- two reads the IO-audit
+  gate flagged as deferred to gameplay phase. The title screen loaded its music and
+  backdrop inside the game loop (now reclassified as a scene-load via
+  `patches/nxengine-evo/0184`, `SDL_HINT_DOSKUTSU_EAGER_TITLE_IO`), and each
+  stage's entry music decoded on the first gameplay frame from its `<CMU>` script
+  command (now preloaded during stage load via `patches/nxengine-evo/0185`,
+  `SDL_HINT_DOSKUTSU_PRELOAD_STAGE_MUSIC`, which peeks the stage's entry event for
+  its first song and starts it before play begins). The IO-audit gate now passes
+  with zero non-allowlisted gameplay-phase disk reads; its allowlist was trimmed so
+  a regression of either load re-trips the gate. Both default-ON; killswitches `=0`.
+
 ## [1.0.3] - 2026-05-28
 
 The post-v1.0.1 cycle. Ships WaveBlaster/DreamBlaster wavetable MIDI (developed
