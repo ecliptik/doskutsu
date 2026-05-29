@@ -1,0 +1,261 @@
+From a9d26588ac761568e4b274b241c526969feb40da Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 17:43:08 -0700
+Subject: [PATCH 182/185] patch 0182 -- backdrop render-path diag (bd-diag,
+ default-OFF) + runmanifest sha12 build-content-fingerprint comment (build-qa
+ #19)
+
+---
+ src/game.cpp |  11 ++++-
+ src/main.cpp |  19 ++++---
+ src/map.cpp  | 136 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/map.h    |   9 ++++
+ 4 files changed, 167 insertions(+), 8 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index 61e3a93e..1e1c3382 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -980,8 +980,15 @@ void DrawScene(void)
+     // the scrolling-frame skip. MdsClearTimer scope kept intact so
+     // [mds-decomp-stat phase=mds_clear] keeps sample-count parity
+     // (empty scope, ~0 us, when the clear is skipped).
+-    if (!bg_skip_unchanged &&
+-        !(skip_redundant_clear_enabled() && map_clear_is_redundant()))
++    // DOS-PORT (patch 0182, v1.0.4 P1-DIAG2): capture the ACTUAL
++    // clearScreen-skip decision for the backdrop render-path diagnostic
++    // (read in map.cpp _backdrop_diag_emit). Behavior is unchanged --
++    // same predicates, same short-circuit order; just split out so the
++    // result is observable. One int store, no cost when the diag is off.
++    const bool _do_clear = !bg_skip_unchanged &&
++        !(skip_redundant_clear_enabled() && map_clear_is_redundant());
++    g_backdrop_diag_clear_skipped = _do_clear ? 0 : 1;
++    if (_do_clear)
+     {
+       Renderer::getInstance()->clearScreen(BLACK);
+     }
+diff --git a/src/main.cpp b/src/main.cpp
+index ecb557cc..ed24ccc4 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -854,12 +854,19 @@ static const char *const _runmanifest_env_allowlist[] = {
+     NULL  // sentinel
+ };
+ 
+-// Build-time source-content sha12 for the binary_sha12 field. Defined at
+-// compile time via -DDOSKUTSU_BUILD_SHA12=<git-short-sha> from the
+-// top-level Makefile. The Makefile passes it as a bare token (no
+-// quotes); C preprocessor stringify converts to "literal" at compile
+-// time. Avoids the multi-layer quote-escape pain through bash + make
+-// + cmake -> compiler -D forwarding.
++// Build-CONTENT fingerprint for the binary_sha12 manifest field:
++// sha256[:12] over the repo HEAD commit sha + the concatenated contents
++// of all applied patches/**/*.patch (build-qa #19 Makefile fix). Passed
++// at compile time via -DDOSKUTSU_BUILD_SHA12=<fingerprint> from the top-
++// level Makefile. Unlike the pre-#19 `git rev-parse HEAD` alone (a
++// commit base-pin that collided with a commit sha AND did NOT change
++// when the working tree had uncommitted patches), this fingerprint
++// CHANGES with the applied-patch set -- so a v1.0.4 build (base +
++// uncommitted v1.0.4 patches) gets a value distinct from the v1.0.3
++// commit sha. NOTE: it is a SOURCE-INPUT fingerprint (HEAD + patch
++// text), NOT the literal exe-content hash (build-qa's deferred follow-
++// up). The Makefile passes it as a bare token (no quotes); C
++// preprocessor stringify converts to "literal" at compile time.
+ // Fallback "UNKNOWN_____" (12 chars; pads the sha12 field) if the
+ // Makefile didn't pass the define (e.g., out-of-tree CMake build).
+ #define _DOSKUTSU_STRINGIFY(x) #x
+diff --git a/src/map.cpp b/src/map.cpp
+index 954ecf94..a78f9c36 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -512,6 +512,129 @@ static bool _backdrop_cache_is_disabled()
+   return g_backdrop_cache_disabled == 1;
+ }
+ 
++// DOS-PORT (patch 0182, v1.0.4 P1-DIAG2): opt-in backdrop render-path
++// diagnostic for the backdrop-black-on-motion bug (water caves esp.).
++// env SDL_HINT_DOSKUTSU_BACKDROP_DIAG=1 (strict "1"; default OFF). This
++// rides INDEPENDENTLY of the cache killswitch and of the (paused) 0181
++// fix lever -- it changes no behavior, it only logs. Per BK_PARALLAX
++// frame it records which render path ran, the scroll + parscroll_y, the
++// vertical coverage band the tile loop produces vs [0,screenHeight),
++// the thrash-detect state, and whether DrawScene skipped clearScreen
++// this frame -- the data needed to confirm/refute H4 (thrash-direct +
++// skip-redundant-clear coverage gap) without inferring from
++// screenshots. Throttled (log-on-state-change + a 1-per-8-frames
++// heartbeat during sustained motion) so it does not flood DEBUG.LOG;
++// per-line fsync (patch 0036) keeps it mid-run readable.
++enum {
++  BD_DIAG_PATH_HIT = 0,
++  BD_DIAG_PATH_WARM,
++  BD_DIAG_PATH_THRASH,
++  BD_DIAG_PATH_LEGACY,
++};
++
++// Cross-TU: set by game.cpp DrawScene (see map.h). 1 = clearScreen
++// skipped this frame, 0 = it ran.
++int g_backdrop_diag_clear_skipped = 0;
++
++static int _backdrop_diag_enabled()
++{
++  static int v = -1;
++  if (v < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_BACKDROP_DIAG");
++    v = (e && e[0] == '1' && e[1] == 0) ? 1 : 0;
++    LOG_INFO("[bd-diag] backdrop render-path diag {} (set SDL_HINT_DOSKUTSU_BACKDROP_DIAG=1 to enable)",
++             v ? "ENABLED" : "disabled (default)");
++  }
++  return v;
++}
++
++// Emit one diagnostic line for the BK_PARALLAX backdrop pass. `path` is
++// one of BD_DIAG_PATH_*; h is the backdrop tile height (w accepted for
++// symmetry). `subrgn`/`sub_top`/`sub_bot` are the patch-0130
++// bg_subregion clip the cache HIT + THRASH paths apply this frame
++// (full screen for WARM-MISS + LEGACY -- callers pass subrgn=false).
++// No-op (single cached-bool test) when the diag env is off; scoped to
++// BK_PARALLAX per the P1-DIAG2 contract.
++static void _backdrop_diag_emit(int path, int w, int h,
++                                bool subrgn, int sub_top, int sub_bot)
++{
++  if (!_backdrop_diag_enabled())
++    return;
++  if (map.scrolltype != BK_PARALLAX)
++    return;
++  (void)w;
++
++  const int sh  = Renderer::getInstance()->screenHeight;
++  const int psy = map.parscroll_y;
++
++  // Tile-loop vertical coverage (the UNCLIPPED backdrop draw extent):
++  // y = 0,h,2h,... while y < sh+psy ; dst.y = y - psy. cover_top =
++  // first tile's dst.y, cover_bot = last tile's bottom edge. A positive
++  // cover_top OR cover_bot < sh is a tile-loop coverage gap (H2-class;
++  // expected absent now that min ysize=16 keeps psy>=0).
++  const int cover_top = -psy;
++  int cover_bot = cover_top;  // degenerate: loop body never runs
++  if (h > 0 && (sh + psy) > 0)
++  {
++    const int last_y = ((sh + psy - 1) / h) * h;
++    cover_bot = (last_y - psy) + h;
++  }
++  const int gap_top = (cover_top > 0) ? cover_top : 0;
++  const int gap_bot = (cover_bot < sh) ? (sh - cover_bot) : 0;
++
++  // bg_subregion clip (H5 surface): HIT uses drawCachedBackdropClipped,
++  // THRASH uses loop continue/break, both honoring [sub_top,sub_bot]
++  // when `subrgn`. The visible-Y cache (g_bg_visible_cache_mapy_tile) is
++  // keyed on mapy_tile ONLY -- not the sub-tile blit_y_off -- so the
++  // clip range can drift up to TILE_H stale during vertical motion;
++  // with skip-redundant-clear suppressing clearScreen the clipped-out
++  // top rows then show black. curmy vs cachemy + yoff expose that.
++  const bool clipped =
++      subrgn && (path == BD_DIAG_PATH_HIT || path == BD_DIAG_PATH_THRASH);
++  const int scroll_y   = (map.displayed_yscroll / CSFI);
++  const int cur_mapy   = scroll_y / TILE_H;
++  const int blit_y_off = -(scroll_y % TILE_H);
++
++  const bool ck = backdrop[map.backdrop] && backdrop[map.backdrop]->hasColorkey();
++
++  // Throttle: emit EVERY camera-motion frame (displayed scroll changed)
++  // so a 1-2 frame THRASH/clip window is never missed, PLUS on any
++  // state-key change, PLUS a slow heartbeat at rest.
++  static int last_dx  = INT_MIN;
++  static int last_dy  = INT_MIN;
++  static int last_sig = INT_MIN;
++  static int rest_ctr = 0;
++  const int sig = (path << 6)
++                  | ((g_backdrop_thrash_engaged ? 1 : 0) << 5)
++                  | ((g_backdrop_diag_clear_skipped ? 1 : 0) << 4)
++                  | ((subrgn ? 1 : 0) << 3)
++                  | ((clipped ? 1 : 0) << 2)
++                  | ((psy < 0 ? 1 : 0) << 1)
++                  | ((gap_top > 0 || gap_bot > 0) ? 1 : 0);
++  const bool moving = (map.displayed_xscroll != last_dx) ||
++                      (map.displayed_yscroll != last_dy);
++  bool emit = moving || (sig != last_sig);
++  if (!emit && ++rest_ctr >= 120)
++    emit = true;
++  if (!emit)
++    return;
++  last_dx  = map.displayed_xscroll;
++  last_dy  = map.displayed_yscroll;
++  last_sig = sig;
++  rest_ctr = 0;
++
++  static const char *const pn[] = {"HIT", "WARM-MISS", "THRASH", "LEGACY"};
++  LOG_INFO("[bd-diag] path={} bd={} ck={} dy={} psy={} cover=[{},{}) sh={} gap_top={} gap_bot={} thrash={} streak={} clearskip={} subrgn={} clip=[{},{}] variant={} curmy={} cachemy={} yoff={}",
++           pn[path], map.backdrop, ck ? 1 : 0,
++           map.displayed_yscroll, psy, cover_top, cover_bot, sh,
++           gap_top, gap_bot,
++           g_backdrop_thrash_engaged ? 1 : 0, g_backdrop_miss_streak,
++           g_backdrop_diag_clear_skipped,
++           subrgn ? 1 : 0, sub_top, sub_bot, clipped ? "clipped" : "full",
++           cur_mapy, g_bg_visible_cache_mapy_tile, blit_y_off);
++}
++
+ // DOS-PORT (patch 0081, Phase 9 wave 17.3): forward decl — extracts the
+ // parscroll_x auto-decrement out of DrawFastLeftLayered (defined later).
+ // Used by both the cache wrapper (so the decrement runs once per frame
+@@ -2168,6 +2291,8 @@ void map_draw_backdrop(void)
+           g_backdrop_miss_streak            = 0;
+           g_backdrop_thrash_engaged         = false;
+           g_backdrop_thrash_frames_in_state = 0;
++          _backdrop_diag_emit(BD_DIAG_PATH_HIT, w, h,
++                              bg_subregion_engaged, bg_top, bg_bot);  // patch 0182
+           return;  // single drawcall + dirty rect recorded; done.
+         }
+       }
+@@ -2241,6 +2366,8 @@ void map_draw_backdrop(void)
+           }
+         }
+         r->commitDirectBackdropWrite();
++        _backdrop_diag_emit(BD_DIAG_PATH_THRASH, w, h,
++                            bg_subregion_engaged, bg_top, bg_bot);  // patch 0182
+         return;
+       }
+ 
+@@ -2298,6 +2425,8 @@ void map_draw_backdrop(void)
+         g_backdrop_cache_indexed    = cache_indexed;
+         if (r->drawCachedBackdrop(g_backdrop_cache_sfc))
+         {
++          _backdrop_diag_emit(BD_DIAG_PATH_WARM, w, h,
++                              bg_subregion_engaged, bg_top, bg_bot);  // patch 0182
+           return;
+         }
+         // Else fall through to the live tile loop (cache blit failed
+@@ -2317,6 +2446,13 @@ void map_draw_backdrop(void)
+       Renderer::getInstance()->drawSurface(backdrop[map.backdrop], x - map.parscroll_x, y - map.parscroll_y);
+     }
+   }
++  // patch 0182: legacy fall-through (cache disabled / format mismatch /
++  // alloc or blit failure). Shared by BK_FIXED/FOLLOWFG/PARALLAX/
++  // FASTLEFT/default; the emit helper self-scopes to BK_PARALLAX. w/h
++  // are the backdrop dims computed above. Legacy draws full-screen (no
++  // bg_subregion clip) -> subrgn=false, full [0,sh-1] range.
++  _backdrop_diag_emit(BD_DIAG_PATH_LEGACY, w, h, false, 0,
++                      Renderer::getInstance()->screenHeight - 1);
+ }
+ 
+ // blit OSide's BK_FASTLEFT_LAYERS
+diff --git a/src/map.h b/src/map.h
+index 22edd799..afefaf28 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -152,6 +152,15 @@ void map_backdrop_invalidate_skip_state();
+ bool map_clear_is_redundant();
+ bool skip_redundant_clear_enabled();
+ 
++// DOS-PORT (patch 0182, v1.0.4 P1-DIAG2): set by game.cpp DrawScene at
++// the clearScreen decision (1 = clearScreen(BLACK) was SKIPPED this
++// frame, 0 = it ran). Read by map.cpp's backdrop render-path diagnostic
++// (_backdrop_diag_emit) so the diag can report whether a coverage gap
++// was masked by skip-redundant-clear. Always written (one int store,
++// no per-frame cost when the diag env is off); only consumed when
++// SDL_HINT_DOSKUTSU_BACKDROP_DIAG=1.
++extern int g_backdrop_diag_clear_skipped;
++
+ // DOS-PORT (patch 0150, Phase 11 wave-54 -- Track A Performance Mode):
+ // SDL_HINT_DOSKUTSU_PERF_MODE level toggle. perf_mode_level() returns
+ // the cached opt-in fidelity-reduction level (0 faithful default / 1

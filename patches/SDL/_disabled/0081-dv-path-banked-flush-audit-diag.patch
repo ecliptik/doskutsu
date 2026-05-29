@@ -1,0 +1,209 @@
+From 1911f19fd394878e6551351839c90abcf5a069aa Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 13:14:42 -0700
+Subject: [PATCH] dos: patch 0081 -- DV-path banked-flush audit (DV_BANK_AUDIT
+ diag, default-OFF)
+
+WHY DOS NEEDS THIS: the v1.0.4 g2k backdrop-black-on-jump investigation
+(task #13) established that production presents via the DV fast path
+(SDL_DOSVesaDirectPresentFull -> banked_multibank -> BankedDosmemput),
+which pushes the full 76800-byte frame across 2 banks every flip. Every
+existing bank-1 audit/readback in this file (WAVE16-FB-FLUSH-AUDIT,
+DOSVESA-FB-VRAM-BANK1, the bank sentinel) lives inside
+DOSVESA_UpdateWindowFramebuffer -- the SLOW path -- which DIRECT_VESA
+bypasses, so on the path g2k actually runs we have zero bank-1 evidence.
+
+This adds, inside PresentFull's banked branch, a default-OFF diagnostic
+(SDL_HINT_DOSKUTSU_DV_BANK_AUDIT=1, strict "1", mirroring the FLIP_INSTR
+/ BANK_SENTINEL convention in this file):
+  1. per-flush bank-switch + byte deltas (mirror of WAVE16-FB-FLUSH-AUDIT),
+     emitted every 100 flips -- confirms bank 1 is still written 76800/2
+     during the jump (cheap; reads the global counters SwitchBank /
+     BankedDosmemput already bump, no extra switches).
+  2. on the same cadence, a post-flush bank-1 readback (switch to bank 1,
+     dosmemget win_base+16, restore bank 0) compared against the SOURCE
+     surface's bank-1 bytes (pixels + win_size_bytes). match=0 with VRAM
+     all-zero while source is non-zero is positive evidence the bank-1
+     write transiently failed (hypothesis B); match=1 non-zero means
+     bank 1 is fine and the black is engine-side surface content (A).
+
+DIAGNOSTIC, not a fix: read-only w.r.t. the displayed frame (the readback
+restores bank 0 and writes nothing to VRAM). Default OFF so production fps
+is unbiased; the cadence readback adds 2 switches on 1-of-100 flips
+(noted in the log line). Rides in the g2k diag bundle with the engine
+backdrop-diag (0182) + FIX-A (0183) so one CF swap discriminates A vs B.
+
+Workspace-local; never upstreamed (per sdl_ai_policy).
+---
+ src/video/dos/SDL_dosframebuffer.c | 145 +++++++++++++++++++++++++++++
+ 1 file changed, 145 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index e5a46cfa1..48d873201 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -2599,6 +2599,140 @@ static void _vram_resident_finish_swap(const SDL_DOSVesaDirectState *st,
+ // re-query composites the next frame straight into VRAM (zero engine change).
+ static void _vram_resident_repoint_window_surface(Uint8 *new_pixels);
+ 
++// ============================================================================
++// DOSKUTSU patch 0081 (v1.0.4 task #15) -- DV-path banked-flush audit.
++//
++// DIAGNOSTIC, not a fix. The v1.0.4 g2k backdrop-black-on-jump investigation
++// (task #13) established that production presents via the DV fast path
++// (SDL_DOSVesaDirectPresentFull -> banked_multibank -> BankedDosmemput), which
++// pushes the full 76800-byte frame across 2 banks every flip and is operator-
++// confirmed correct for the bank-1 rows (screen bottom, rows ~205-239) in
++// steady state. EVERY existing bank-1 audit/readback in this file
++// (WAVE16-FB-FLUSH-AUDIT, DOSVESA-FB-VRAM-BANK1, the bank sentinel) lives
++// inside DOSVESA_UpdateWindowFramebuffer -- the SLOW path -- which DIRECT_VESA
++// bypasses. So on the path g2k actually runs we have ZERO bank-1 evidence.
++//
++// This adds, INSIDE PresentFull's banked branch, the two observables the iter
++// needs to discriminate (A) engine-content (surface bottom went black ->
++// nx-engine FIX-A 0183 is the fix) from (B) a g2k-only banked write/switch
++// transient (bank-1 VRAM black while the surface is full -> an SDL retry/
++// verify fix):
++//   1. per-flush bank-switch + byte deltas (mirror of WAVE16-FB-FLUSH-AUDIT),
++//      accumulated and emitted every 100 flips -- confirms bank 1 is still
++//      written 76800/2 during the jump (cheap; reads the global counters that
++//      SwitchBank/BankedDosmemput already bump, no extra bank switches).
++//   2. on the same 100-flip cadence, a post-flush bank-1 readback: switch to
++//      bank 1, dosmemget(win_base, 16), restore bank 0, and compare those 16
++//      VRAM bytes against the SOURCE surface's bank-1 bytes (pixels +
++//      win_size_bytes). Logs both + match + an all-zero flag. match=0 (esp.
++//      VRAM all-zero while source is non-zero) is positive evidence for (B).
++//
++// Default OFF; enabled by SDL_HINT_DOSKUTSU_DV_BANK_AUDIT=1 (strict "1" match,
++// mirroring the FLIP_INSTR / BANK_SENTINEL convention in this file -- read via
++// SDL_getenv to match those neighbors exactly). The cadence readback adds 2
++// bank switches on 1-of-100 flips (so that flip's switch delta reads ~4, not
++// 2 -- noted in the log); biases fps so the operator enables it only for the
++// diagnostic capture. Read-only w.r.t. the displayed frame: the readback
++// restores bank 0 before returning and writes nothing to VRAM.
++//
++// Workspace-local; never upstreamed (per sdl_ai_policy memory).
++// ============================================================================
++static int _dv_bank_audit_enabled = -1; // -1 unknown / 0 off / 1 on
++
++static void _dv_bank_audit_after_banked_present(const SDL_DOSVesaDirectState *st,
++                                                const void *pixels,
++                                                Uint32 sw_delta, Uint32 by_delta)
++{
++    if (_dv_bank_audit_enabled == -1) {
++        const char *e = SDL_getenv("SDL_HINT_DOSKUTSU_DV_BANK_AUDIT");
++        _dv_bank_audit_enabled = (e && e[0] == '1' && e[1] == 0) ? 1 : 0;
++    }
++    if (!_dv_bank_audit_enabled || !st) {
++        return;
++    }
++
++    // (1) Per-flush delta accumulation (no extra bank switches here).
++    static int    _dva_n = 0;
++    static Uint32 _dva_sw_sum = 0, _dva_by_sum = 0;
++    static Uint32 _dva_sw_min = 0xFFFFFFFF, _dva_by_min = 0xFFFFFFFF;
++    static Uint32 _dva_sw_max = 0, _dva_by_max = 0;
++    static Uint32 _dva_flush  = 0;
++    _dva_n++;
++    _dva_flush++;
++    _dva_sw_sum += sw_delta; _dva_by_sum += by_delta;
++    if (sw_delta < _dva_sw_min) _dva_sw_min = sw_delta;
++    if (by_delta < _dva_by_min) _dva_by_min = by_delta;
++    if (sw_delta > _dva_sw_max) _dva_sw_max = sw_delta;
++    if (by_delta > _dva_by_max) _dva_by_max = by_delta;
++
++    // (2) Bank-1 readback on the 100-flip cadence (adds 2 switches to THIS
++    // flip; the +2 lands in the block max, hence min is the clean signal).
++    // Gated on a real multi-bank banked snapshot with sane window metadata.
++    if ((_dva_n % 100) == 0 &&
++        st->use_dosmemput && st->banked_multibank &&
++        st->win_gran_bytes > 0 && st->win_size_bytes > 0 &&
++        st->fb_size > st->win_size_bytes) {
++        Uint8 vram_b1[16] = { 0 };
++        int   probe_bank  = (int)(st->win_size_bytes / st->win_gran_bytes);
++        int   dummy_w     = -1;
++        int   dummy_r     = -1;
++        // Switch to bank 1, read its first 16 bytes (= VRAM offset
++        // win_size_bytes = start of the bottom-strip region), restore bank 0.
++        SwitchBank(probe_bank, &dummy_w, st->win_func_ptr);
++        dosmemget(st->win_base, 16, vram_b1);
++        SwitchBank(0, &dummy_r, st->win_func_ptr);
++
++        // The SOURCE bytes that SHOULD be in bank 1 offset 0. page_offset is 0
++        // on the production banked path (VRAM-resident is S3-only / default-
++        // OFF), so the surface byte at win_size_bytes maps to VRAM bank-1
++        // offset 0. Skip the compare if a non-zero page_offset is ever in play.
++        Uint8 src_b1[16] = { 0 };
++        int   have_src   = 0;
++        if (pixels && st->page_offset == 0) {
++            SDL_memcpy(src_b1, (const Uint8 *)pixels + st->win_size_bytes, 16);
++            have_src = 1;
++        }
++        int match  = have_src ? (SDL_memcmp(vram_b1, src_b1, 16) == 0 ? 1 : 0) : -1;
++        int v_zero = 1, s_zero = 1;
++        for (int i = 0; i < 16; i++) { if (vram_b1[i]) v_zero = 0; if (src_b1[i]) s_zero = 0; }
++
++        doskutsu_dbg_log(
++            "DV-BANK1-READBACK @flush=%lu: probe_bank=%d match=%d vram_all_zero=%d "
++            "src_all_zero=%d "
++            "vram=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x "
++            "src=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x "
++            "(match=0 + vram_all_zero=1 + src_all_zero=0 => bank-1 WRITE FAILED "
++            "= hypothesis B; match=1 non-zero => bank-1 fine, look engine-side = A)",
++            (unsigned long)_dva_flush, probe_bank, match, v_zero, (have_src ? s_zero : -1),
++            vram_b1[0],vram_b1[1],vram_b1[2],vram_b1[3],vram_b1[4],vram_b1[5],vram_b1[6],vram_b1[7],
++            vram_b1[8],vram_b1[9],vram_b1[10],vram_b1[11],vram_b1[12],vram_b1[13],vram_b1[14],vram_b1[15],
++            src_b1[0],src_b1[1],src_b1[2],src_b1[3],src_b1[4],src_b1[5],src_b1[6],src_b1[7],
++            src_b1[8],src_b1[9],src_b1[10],src_b1[11],src_b1[12],src_b1[13],src_b1[14],src_b1[15]);
++    }
++
++    // Emit + reset the per-flush delta block every 100 flips.
++    if (_dva_n >= 100) {
++        doskutsu_dbg_log(
++            "DV-BANK-AUDIT @flush=%lu: switches/flush avg=%lu.%02lu (min=%lu max=%lu) "
++            "bytes/flush avg=%lu (min=%lu max=%lu) "
++            "fb_size=%lu win_size=%lu win_gran=%lu multibank=%d [over %d flips] "
++            "(min switches/bytes = clean per-flip signal; max switches +2 on the "
++            "readback flip)",
++            (unsigned long)_dva_flush,
++            (unsigned long)(_dva_sw_sum / _dva_n),
++            (unsigned long)(((_dva_sw_sum * 100) / _dva_n) % 100),
++            (unsigned long)_dva_sw_min, (unsigned long)_dva_sw_max,
++            (unsigned long)(_dva_by_sum / _dva_n),
++            (unsigned long)_dva_by_min, (unsigned long)_dva_by_max,
++            (unsigned long)st->fb_size, (unsigned long)st->win_size_bytes,
++            (unsigned long)st->win_gran_bytes, (int)st->banked_multibank, _dva_n);
++        _dva_n = 0;
++        _dva_sw_sum = _dva_by_sum = 0;
++        _dva_sw_max = _dva_by_max = 0;
++        _dva_sw_min = _dva_by_min = 0xFFFFFFFF;
++    }
++}
++
+ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+                                    const void *pixels)
+ {
+@@ -2675,9 +2809,20 @@ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+         SDL_memcpy(st->vram_ptr + st->page_offset, pixels, st->fb_size);
+     } else if (st->banked_multibank) {
+         int current_bank = -1;
++        // DOSKUTSU patch 0081 (v1.0.4 task #15): snapshot the global bank-
++        // switch / bytes-written counters around the banked write so the
++        // DV-path audit can compute a per-flush delta (the counters are
++        // bumped inside SwitchBank / BankedDosmemput). Both are cheap reads
++        // and the audit helper is a no-op when the hint is off.
++        const Uint32 _dva_sw_pre = _dbg_bank_switches_total;
++        const Uint32 _dva_by_pre = _dbg_bytes_written_total;
+         BankedDosmemput((const Uint8 *)pixels, st->fb_size, st->page_offset,
+                         st->win_gran_bytes, st->win_size_bytes,
+                         st->win_base, st->win_func_ptr, &current_bank);
++        _dv_bank_audit_after_banked_present(
++            st, pixels,
++            _dbg_bank_switches_total - _dva_sw_pre,
++            _dbg_bytes_written_total - _dva_by_pre);
+     } else {
+         dosmemput(pixels, st->fb_size, st->vram_phys + st->page_offset);
+     }
+-- 
+2.47.3
+

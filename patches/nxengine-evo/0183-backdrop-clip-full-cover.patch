@@ -1,0 +1,87 @@
+From c397b2f9d61f5a24907f66b63fa7821fe318b919 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 28 May 2026 17:43:08 -0700
+Subject: [PATCH 183/185] patch 0183 -- backdrop clip full-cover
+ (THRASH_FULLCOVER, default-ON; FIX-A+P1-FIX2 squashed)
+
+---
+ src/map.cpp | 52 +++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index a78f9c36..72c2cde7 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -512,6 +512,40 @@ static bool _backdrop_cache_is_disabled()
+   return g_backdrop_cache_disabled == 1;
+ }
+ 
++// DOS-PORT (patch 0183, v1.0.4 P1 FIX-A + P1-FIX2): backdrop cached-path
++// full-coverage lever. The patch-0130 bg_subregion clip skips FG-opaque
++// rows on the cached backdrop paths (HIT -> drawCachedBackdropClipped;
++// THRASH -> continue/break) -- leaving those rows for the FG layer to
++// cover. On g2k that under-coverage IS the operator's backdrop-black:
++// the g2k A/B confirmed the clip is the root (FXA.LOG: HIT frames
++// subrgn=1 clip=[24,239] variant=clipped -> top 24px clearScreen-black
++// at Farm-cave entry; gap_top/gap_bot=0 means the UNCLIPPED tile loop
++// would cover -- it's the CLIPPED blit that under-covers). FIX-A fixed
++// the dominant thrash path (~98%); P1-FIX2 completes it for the residual
++// HIT path (entry/stationary/slow-motion). When this lever is ON the
++// bg_subregion clip is DISABLED at source (bg_subregion_engaged stays
++// false), so ALL cached paths full-cover: HIT uses drawCachedBackdrop
++// (full), thrash tiles the full screen, WARM-miss is already full. Perf
++// ~nil (the clip only "helped" the ~1-2% HIT frames). Strict "1",
++// default OFF (flips ON in the ship commit once the follow-up g2k iter
++// confirms Farm-entry black + flicker gone); sentinel-cached (no per-
++// frame getenv). First call emits the build-qa BANNERS banner.
++static bool _thrash_fullcover()
++{
++  static int v = -1;
++  if (v < 0)
++  {
++    // default-ON for v1.0.4 ship (g2k-confirmed the clip full-cover fixes
++    // the backdrop-black on all cached paths); killswitch =0 restores the
++    // legacy bg_subregion clip. Inverse strict-match (patch 0088 idiom).
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_THRASH_FULLCOVER");
++    v = (e && e[0] == '0' && e[1] == 0) ? 0 : 1;
++    LOG_INFO("backdrop thrash full-cover {} (set SDL_HINT_DOSKUTSU_THRASH_FULLCOVER=0 to disable)",
++             v ? "ENABLED (default)" : "DISABLED (killswitch)");
++  }
++  return v == 1;
++}
++
+ // DOS-PORT (patch 0182, v1.0.4 P1-DIAG2): opt-in backdrop render-path
+ // diagnostic for the backdrop-black-on-motion bug (water caves esp.).
+ // env SDL_HINT_DOSKUTSU_BACKDROP_DIAG=1 (strict "1"; default OFF). This
+@@ -2257,7 +2291,18 @@ void map_draw_backdrop(void)
+       // entire visible window is non-FG-opaque (no rows to skip);
+       // either way fall back to the full-screen blit. Counter bumps
+       // populate flush-instr's `[bg-subregion ...]` audit line.
+-      const bool bg_subregion_on = NXE::Diag::bg_subregion_active();
++      // patch 0183 (FIX-A + P1-FIX2): when full-cover is engaged, skip the
++      // bg_subregion clip computation ENTIRELY so bg_subregion_engaged
++      // stays false on ALL cached-backdrop paths -- HIT uses the full
++      // drawCachedBackdrop (not ...Clipped) and the thrash loop tiles the
++      // full screen. g2k confirmed the clip's under-coverage is the root
++      // of the backdrop-black (FXA.LOG: HIT frames subrgn=1 clip=[24,239]
++      // variant=clipped -> top 24px clearScreen-black at Farm-cave entry);
++      // FIX-A covered the dominant thrash path, this completes it for the
++      // residual HIT path. Perf cost ~nil (the clip only "helped" the
++      // ~1-2% HIT frames; thrash dominates 98% and already full-covers).
++      const bool bg_subregion_on =
++          NXE::Diag::bg_subregion_active() && !_thrash_fullcover();
+       int bg_top = 0;
+       int bg_bot = r->screenHeight - 1;
+       bool bg_subregion_engaged = false;
+@@ -2353,6 +2398,11 @@ void map_draw_backdrop(void)
+           // worst case; preserved tile-loop simplicity.
+           const int dst_y_top_unscaled = y - map.parscroll_y;
+           const int dst_y_bot_unscaled = dst_y_top_unscaled + h - 1;
++          // patch 0183 (FIX-A + P1-FIX2): the bg_subregion clip is now
++          // disabled at its source (above) when full-cover is engaged, so
++          // bg_subregion_engaged is already false here in that case -- this
++          // continue/break only runs in the legacy (full-cover OFF) regime,
++          // exactly as patch 0130.
+           if (bg_subregion_engaged)
+           {
+             if (dst_y_bot_unscaled < bg_top) continue;     // above clip

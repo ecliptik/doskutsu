@@ -331,6 +331,8 @@ BANNER_REGEX=(
   "\\[io-audit\\] phase=(boot|load_stage|gameplay) op=[A-Za-z_]+ file=.* bytes=-?[0-9]+ wall_us=[0-9]+"
   "skip sheet flush: (ENABLED \(default\)|DISABLED \(killswitch =0\))"
   "\\[skip-sheet-flush\\] cave=[0-9]+"
+  "load_stage: entry-music preload (ENABLED \(default\)|DISABLED \(killswitch\))"
+  "title: eager-title-IO phase tag (ENABLED \(default\)|DISABLED \(killswitch\))"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -409,7 +411,15 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "optional"
+  "optional"
+  "optional"
 )
+# FOLLOW-UP (build-qa, v1.0.4): BANNER_LABEL is shorter than BANNER_REGEX/SEVERITY
+# (a long-standing gap -- labels were not kept in lockstep as regexes were appended).
+# The gate loop indexes BANNER_LABEL[$i] parallel to BANNER_REGEX, so tail banners get
+# EMPTY display labels. COSMETIC ONLY -- the gate keys on regex+severity (both aligned),
+# so pass/fail logic is correct. Re-aligning needs a manual regex<->label re-map; tracked
+# as a low-pri cleanup, do not block ship on it.
 BANNER_LABEL=(
   "lever-1 opaque-tile fastpath (patch 0137)"
   "lever-2b nx-engine consumer (patch 0138)"
@@ -505,7 +515,7 @@ log "=== Banner-emit gate (proves runtime invocation, not just embed) ==="
 for i in "${!BANNER_REGEX[@]}"; do
   regex="${BANNER_REGEX[$i]}"
   severity="${BANNER_SEVERITY[$i]}"
-  label="${BANNER_LABEL[$i]}"
+  label="${BANNER_LABEL[$i]:-}"   # set-u-safe: BANNER_LABEL is shorter than BANNER_REGEX (see comment above BANNER_LABEL=); display-only, gate keys on regex+severity
 
   hit_total=0
   hit_source=""

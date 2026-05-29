@@ -93,15 +93,28 @@ NOSIMD_FLAGS := -DSDL_DISABLE_MMX=1 -DSDL_DISABLE_SSE=1 -DSDL_DISABLE_SSE2=1 \
 # without modifying the vendored CMakeLists.txt; harmless to other
 # stages since they don't `#include` it.
 #
-# DOSKUTSU_BUILD_SHA12: source-tree git short sha at make-config time,
-# embedded into the binary's RUNMANIFEST `binary_sha12` field. Per
-# probe-engineer 2026-05-14 recommendation: git short sha as the
-# strongest "this commit produced this binary" anchor. Fallback
-# "UNKNOWN_____" (12 chars; pads the sha12 field) if git unavailable
-# or repo not yet cloned. Evaluated immediately (`:=`) so we capture
-# the sha at the top of the build, not at recipe-execution time.
+# DOSKUTSU_BUILD_SHA12: BUILD-CONTENT fingerprint (sha256[:12]) over the repo
+# git HEAD + the DIFF CONTENT of every APPLIED patch (patches/*/*.patch, excluding
+# _disabled/), embedded into the RUNMANIFEST `binary_sha12` field.
+# v1.0.4 fix (build-qa, task #19): the prior `git rev-parse HEAD` alone was a
+# STALE BASE-PIN -- our patch stack is applied from working-tree patches/ files
+# that do NOT move HEAD, so every v1.0.4 build reported HEAD=0f5126b (the v1.0.3
+# ship commit). That mis-routed log-based binary attribution (read as "ran the
+# v1.0.3 binary") and bit the #18 quit-hang triage. Hashing HEAD + the patch set
+# makes the field reflect the actual built content -> no commit-sha collision.
+# STABILITY (v1.0.4 refinement): we grep ONLY the diff-content lines
+# (`diff --git ` / `@@ ` / `+`/`-`), NOT the whole patch file. git format-patch
+# regenerates volatile `From <hash>` / `Date:` / `index ab..cd` headers on every
+# re-export even when the DIFF is identical -- hashing those would churn the
+# fingerprint (and the exe sha) on cosmetic patch re-exports. Diff-content-only
+# is INVARIANT to re-export, so identical code -> identical fingerprint.
+# NOTE: still a SOURCE-INPUT fingerprint, not the literal exe-content hash (the
+# latter needs a post-link self-hash injection -- deliberate, non-rework-safe;
+# tracked as a follow-up). Evaluated immediately (`:=`). Fallback "UNKNOWN_____"
+# if git + patches both unavailable. 12 hex chars -> valid bare -D token
+# (stringified by main.cpp's _DOSKUTSU_STR; see below).
 RUNMANIFEST_INC := -I$(REPO_ROOT)/include
-DOSKUTSU_BUILD_SHA12 := $(shell git -C $(REPO_ROOT) rev-parse --short=12 HEAD 2>/dev/null || echo UNKNOWN_____)
+DOSKUTSU_BUILD_SHA12 := $(shell { git -C $(REPO_ROOT) rev-parse HEAD 2>/dev/null; find $(REPO_ROOT)/patches -maxdepth 2 -name '*.patch' -not -path '*_disabled*' 2>/dev/null | LC_ALL=C sort | xargs cat 2>/dev/null | grep -E '^(diff --git |@@ |[-+])'; } | sha256sum 2>/dev/null | cut -c1-12 | grep . || echo UNKNOWN_____)
 # Pass SHA as BARE TOKEN (no quotes); main.cpp's _DOSKUTSU_STR macro
 # stringifies via C preprocessor. Avoids multi-layer quote escaping
 # through bash + make + cmake -> compiler. SHA is always 12 hex chars
