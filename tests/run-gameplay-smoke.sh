@@ -333,6 +333,7 @@ BANNER_REGEX=(
   "\\[skip-sheet-flush\\] cave=[0-9]+"
   "load_stage: entry-music preload (ENABLED \(default\)|DISABLED \(killswitch\))"
   "title: eager-title-IO phase tag (ENABLED \(default\)|DISABLED \(killswitch\))"
+  "blitPatternAcross src-clamp (ENABLED \(default\)|DISABLED \(killswitch\))"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -413,8 +414,9 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "optional"
+  "optional"
 )
-# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 78 entries;
+# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 79 entries;
 # the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
 # add a BANNER_REGEX + BANNER_SEVERITY entry, add a matching BANNER_LABEL line at the same
 # index. (v1.0.5 #16 re-aligned these -- v1.0.4 had a 2-entry tail gap from the P2 banners,
@@ -500,6 +502,7 @@ BANNER_LABEL=(
   "0188 SFXPAUSE-012 skip-sheet-flush per-cave emit (optional -- one [skip-sheet-flush] cave=C line per cave entry on the default-ON path, confirming load_stage skipped the sprite-sheet flush so sheets stay resident. cave 1 lazy-loads sheets one-time, cave 2+ finds them resident (no re-decode, no pause, no added load) -- the SHIPPED fix. INFO-level so absent on an untagged WARN-level boot (expected). The companion [io-audit] op=loadImage lines (under SDL_HINT_DOSKUTSU_IO_AUDIT=1) should appear ONLY in cave 1, never recurring cave 2+ -- the gate-validation signature build-qa's IO-audit dev gate keys off. See docs/internal/BOOT.md + patches/nxengine-evo/0188 commit message.)"
   "0185 P2 FIX-2 entry-music preload (PRELOAD_STAGE_MUSIC default-ON; optional -- BANNER_REGEX idx 76)"
   "0184 P2 FIX-1 eager-title-IO phase tag (EAGER_TITLE_IO default-ON; optional -- BANNER_REGEX idx 77)"
+  "0186 P1b BLITPATTERN_CLAMP src-clamp decision banner (default-ON v1.0.6; optional -- LOG_INFO via _blitpattern_src_clamp() narrating ENABLED (default) vs DISABLED (killswitch). INFO-level so present only on tagged/verbose runs, absent on a plain untagged WARN boot which is expected not a failure. ENABLED (default) confirms the layered-pattern-blit source-height clamp is active -- the v1.0.5 cache-OFF title cloud OOB-read fix, flipped default-ON for v1.0.6 since the OFF state was production-byte-identical and PLAY1 confirmed it clean on g2k. SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=0 emits DISABLED (killswitch) + restores the unclamped read. See docs/internal/BOOT.md + patches/nxengine-evo/0186 commit message. BANNER_REGEX idx 78.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
@@ -518,7 +521,7 @@ log "=== Banner-emit gate (proves runtime invocation, not just embed) ==="
 for i in "${!BANNER_REGEX[@]}"; do
   regex="${BANNER_REGEX[$i]}"
   severity="${BANNER_SEVERITY[$i]}"
-  label="${BANNER_LABEL[$i]:-}"   # set-u-safe guard (belt-and-suspenders; arrays aligned 78=78 as of #16); display-only, gate keys on regex+severity
+  label="${BANNER_LABEL[$i]:-}"   # set-u-safe guard (belt-and-suspenders; arrays aligned 79=79 as of #33 v1.0.6 0186 default-ON banner); display-only, gate keys on regex+severity
 
   hit_total=0
   hit_source=""

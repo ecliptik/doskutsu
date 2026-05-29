@@ -1,38 +1,37 @@
-From 7091ac43bd1dffb60417ac79066e49744d44e784 Mon Sep 17 00:00:00 2001
+From 3b64876e94d98c4cef19939cc0a1284a5d7d83d6 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Thu, 28 May 2026 21:00:34 -0700
 Subject: [PATCH] patch 0186 -- P1b blitPatternAcross src-rect clamp (cache-OFF
- title, default-OFF)
+ title, default-ON v1.0.6)
 
-WHY DOS NEEDS THIS: the cache-OFF title screen (SDL_HINT_DOSKUTSU_
-BACKDROP_CACHE=0) drops its bottom cloud band on g2k (operator IMG_3176).
-Root cause: DrawFastLeftLayered's Layer 4 calls blitPatternAcross with a
-src rect that reads 1px past the bkMoon texture -- bkMoon is 320x240,
-layer_ys[4]=240, height (240-177)+1=64 from y_src=177 -> reads row 240
-(OOB on a 240-row texture). Benign in production: the cache-ON title
-renders via _render_layered_to_surface (SDL_BlitSurface clips OOB src),
-and the only production blitPatternAcross caller (map_drawwaterlevel)
-reads in-bounds -> the clamp is a no-op for every production path. The
-OOB only bites the cache-OFF SDL_RenderTexture path, and only on g2k
-(DOSBox-X renders the cache-OFF title fully; g2k drops the band -- the
-same DOSBox-vs-g2k render divergence class as the v1.0.4 backdrop-black).
+blitPatternAcross (Renderer.cpp legacy DrawFastLeftLayered path) reads
+srcrect.y + srcrect.h rows from the pattern surface. For the title
+backdrop (bkMoon, 240 tall) layer 4 has layer_ys[4]==240, so the
+unclamped read touches row 240 -- 1px past the surface. Benign in
+production (SDL_BlitSurface clips; the map_drawwaterlevel caller is
+in-bounds), but the cache-OFF SDL_RenderTexture title path on g2k
+exposes it as under-covered title clouds.
 
-FIX: SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=1 clamps srcrect.h so
-srcrect.y+srcrect.h <= texture height. Unconditionally correct (the
-clamped row is off-screen anyway -> visibly identical where it already
-renders). Strict "1", default OFF -> byte-identical to current behavior;
-g2k blind A/B (NOT DOSBox-reproducible), flip default-ON once g2k
-confirms IMG_3176. Independent of THRASH_FULLCOVER + all cache paths
-(separate lever, single-attributable). GPLv3 (derivative of nxengine-evo).
+The clamp trims srcrect.h to the surface height. v1.0.5 shipped it
+default-OFF for a g2k blind A/B; PLAY1 (cache-OFF + clamp ON)
+confirmed clean incl. water caves, validating the in-bounds no-op
+analysis on the production caller. The OFF state is byte-identical to
+prior production, so default-ON is behavior-safe.
+
+v1.0.6 flips the default to ON (operator opt-in). Killswitch:
+SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=0 restores the legacy unclamped
+read (inverse strict-match, patch 0088 idiom).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 ---
- src/graphics/Renderer.cpp | 45 +++++++++++++++++++++++++++++++++++++++
- 1 file changed, 45 insertions(+)
+ src/graphics/Renderer.cpp | 53 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 53 insertions(+)
 
 diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
-index 012f5329..7dd62d41 100644
+index 012f5329..9fe29ff0 100644
 --- a/src/graphics/Renderer.cpp
 +++ b/src/graphics/Renderer.cpp
-@@ -7379,6 +7379,38 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
+@@ -7379,6 +7379,46 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
    _renderer_queue_dirty = true;
  }
  
@@ -52,18 +51,26 @@ index 012f5329..7dd62d41 100644
 +// divergence class as the v1.0.4 backdrop-black. When this lever is ON
 +// the src rect is clamped to the texture height (the clamped row is
 +// off-screen anyway, so it is visibly identical where it already
-+// works). Strict "1", default OFF (g2k blind A/B; flip default-ON once
-+// g2k confirms IMG_3176 is fixed). Independent of THRASH_FULLCOVER and
-+// all cache paths. Sentinel-cached.
++// works). Default-ON as of v1.0.6 (g2k PLAY1 confirmed IMG_3176 fixed
++// on the cache-OFF path; OFF state byte-identical to prior production).
++// Killswitch SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=0 (inverse strict-
++// match). Independent of THRASH_FULLCOVER and all cache paths.
++// Sentinel-cached.
 +static bool _blitpattern_src_clamp()
 +{
 +  static int v = -1;
 +  if (v < 0)
 +  {
++    // default-ON for v1.0.6 (operator opt-in; g2k PLAY1 confirmed clean
++    // incl. water caves -- the production map_drawwaterlevel caller is
++    // in-bounds so the clamp is a proven no-op there; OFF state was
++    // byte-identical, so default-ON is production-behavior-safe).
++    // Killswitch =0 restores the legacy (unclamped) read. Inverse
++    // strict-match (patch 0088 idiom).
 +    const char *e = std::getenv("SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP");
-+    v = (e && e[0] == '1' && e[1] == 0) ? 1 : 0;
-+    LOG_INFO("blitPatternAcross src-clamp {} (set SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=1 to enable)",
-+             v ? "ENABLED" : "disabled (default)");
++    v = (e && e[0] == '0' && e[1] == 0) ? 0 : 1;
++    LOG_INFO("blitPatternAcross src-clamp {} (set SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=0 to disable)",
++             v ? "ENABLED (default)" : "DISABLED (killswitch)");
 +  }
 +  return v == 1;
 +}
@@ -71,7 +78,7 @@ index 012f5329..7dd62d41 100644
  // blit the specified surface across the screen in a repeating pattern
  void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src, int height)
  {
-@@ -7396,6 +7428,19 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
+@@ -7396,6 +7436,19 @@ void Renderer::blitPatternAcross(Surface *sfc, int x_dst, int y_dst, int y_src,
    srcrect.y = (y_src * scale);
    srcrect.h = (height * scale);
  
@@ -91,3 +98,6 @@ index 012f5329..7dd62d41 100644
    dstrect.w = srcrect.w;
    dstrect.h = srcrect.h;
  
+-- 
+2.47.3
+

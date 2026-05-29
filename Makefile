@@ -519,8 +519,24 @@ smoke-fast: $(HELLO_EXE)
 	tests/run-smoke.sh --exe $(HELLO_EXE) --fast
 
 .PHONY: smoke
-smoke: $(HELLO_EXE) io-gate
+smoke: $(HELLO_EXE) changelog-gate io-gate
 	tests/run-smoke.sh --exe $(HELLO_EXE)
+
+# --- CHANGELOG-presence ship-gate (v1.0.6) ----------------------------------
+#
+# A release entry was omitted from the release commit TWICE (v1.0.4, v1.0.5 --
+# both patched after the fact; [[changelog_in_release_commit_discipline]]). This
+# makes that failure loud. Pure text + git -- no build, no DOSBox, instant.
+#
+#   make changelog-gate              standing check (no-arg): FAILs if CHANGELOG
+#                                     falls BEHIND the newest v* tag (the omitted-
+#                                     entry signature). Steady state passes.
+#   tests/check-changelog.sh vX.Y.Z  EXPLICIT pre-tag gate: run with the pending
+#                                     version IMMEDIATELY before `git tag` -- FAILs
+#                                     unless CHANGELOG already has its ## [X.Y.Z].
+.PHONY: changelog-gate
+changelog-gate:
+	tests/check-changelog.sh
 
 # --- SFXPAUSE-012 sprite-sheet re-decode regression gate (v1.0.3) -----------
 #
@@ -1228,6 +1244,21 @@ PROBE_SDLPROB2_EXE := $(PROBES_DIR)/sdlprob2.exe
 PROBE_SDLPROB1_SRC := tests/probes/sdlprob1.c
 PROBE_SDLPROB1_EXE := $(PROBES_DIR)/sdlprob1.exe
 
+# P37 -- task #32 SECONDARY: DJGPP/CWSDPMI/uclock process-EXIT hang isolation.
+#   Engages minimal SDL audio (SB16 device + IRQ-5 ISR) + uclock PIT + SDL
+#   ticks, tears SDL down via SDL_Quit, then walks the DOS-exit unwind with
+#   fsync'd markers M1/M4/M2/M3 (post-SDL_Quit / pre-return / atexit-LIFO-first
+#   before uclock-restore / atexit-LIFO-last after uclock-restore). Tests
+#   whether the post-SDL_Quit exit path hangs in ISOLATION (no engine state).
+#   SECONDARY to nx-engine's in-situ engine exit-brackets; can false-negative
+#   (the real hang is intermittent + Pool-st15 scene-specific). SDL3-linked
+#   (PROBES_SDL_* recipe, minstack 2048k -- matches YIELD/IDLEPROB). Source
+#   basename = binary basename = qhexit (8.3-clean: 6+3). Output -> QHEXIT.LOG
+#   (CWD, fopen-direct, per-line fsync so it survives a hang). DOSBox-X smoke
+#   is correctness-only (the hang does not reproduce under DOSBox-X).
+PROBE_QHEXIT_SRC := tests/probes/qhexit.c
+PROBE_QHEXIT_EXE := $(PROBES_DIR)/qhexit.exe
+
 # Generic build rule for any probe .c with no library deps (P0/P1/P3-pure).
 $(PROBES_DIR)/%.exe: tests/probes/%.c | djgpp-check
 	@mkdir -p $(PROBES_DIR)
@@ -1367,7 +1398,15 @@ $(PROBE_WBMIDI_EXE): $(PROBE_WBMIDI_SRC) | djgpp-check
 	$(CC) $(PROBES_CFLAGS) -o $@ $<
 	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi wbtest wbtest2 wbtest3 hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 s3blt s3blt-dosbox-smoke probes-p25 probes-s3blt dactest dactest-dosbox-smoke probes-p26 s3vram s3ckey s3vram-dosbox-smoke s3ckey-dosbox-smoke probes-p27 probes-p28 s3crtc probes-p29 s3wedge probes-p30 s3alias probes-p31 probes-p32 probes-p33 probes-p34 wbtest4 probes-p35 wbtest6 probes-p36
+# Explicit rule for the DOS-exit hang isolation probe (task #32 SECONDARY).
+# SDL3-linked (SDL_Init/SDL_OpenAudioDeviceStream/SDL_GetTicks/SDL_Quit);
+# minstack 2048k matches YIELD/IDLEPROB/MIXBENCH.
+$(PROBE_QHEXIT_EXE): $(PROBE_QHEXIT_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi wbtest wbtest2 wbtest3 hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 s3blt s3blt-dosbox-smoke probes-p25 probes-s3blt dactest dactest-dosbox-smoke probes-p26 s3vram s3ckey s3vram-dosbox-smoke s3ckey-dosbox-smoke probes-p27 probes-p28 s3crtc probes-p29 s3wedge probes-p30 s3alias probes-p31 probes-p32 probes-p33 probes-p34 wbtest4 probes-p35 wbtest6 probes-p36 qhexit probes-p37
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -1723,6 +1762,19 @@ wbtest6: $(PROBE_WBTEST6_EXE)
 probes-p36: $(PROBE_WBTEST6_EXE)
 	@echo "Built P36 probe set: wbtest6.exe (v1.0.2 task #16 -- WBTEST-006 DOSMID polled)"
 
+# P37 -- task #32 SECONDARY: DJGPP/CWSDPMI/uclock process-EXIT hang isolation.
+qhexit: $(PROBE_QHEXIT_EXE)
+	@echo "Built P37 probe: qhexit.exe (task #32 -- DOS-exit hang isolation, SECONDARY)"
+	@echo "  SDL3-linked. Engages SB16 audio + uclock PIT + SDL ticks, SDL_Quit,"
+	@echo "  then walks the DOS-exit unwind with fsync'd markers M1/M4/M2/M3."
+	@echo "  Real-HW iter: bundle QHEXIT.EXE + CWSDPMI.EXE + tests/probes/qhexit.bat."
+	@echo "  Output -> QHEXIT.LOG (per-line fsync; last line names the region if hung)."
+	@echo "  POSITIVE result = hang at exit (needs power-cycle; log survives on disk)."
+	@echo "  SECONDARY to nx-engine in-situ engine brackets; can false-negative."
+
+probes-p37: $(PROBE_QHEXIT_EXE)
+	@echo "Built P37 probe set: qhexit.exe (task #32 DOS-exit hang isolation)"
+
 # P21 -- Phase 11 wave-41 task #10: HW-inventory snapshot.
 hwinv: $(PROBE_HWINV_EXE)
 	@echo "Built $(PROBE_HWINV_EXE) -- phase11 wave-41 task #10 (HW-inventory MVP)."
@@ -1893,7 +1945,7 @@ s3ckey-dosbox-smoke: $(PROBE_S3CKEY_EXE) $(CWSDPMI_EXE)
 probes-p23: $(PROBE_BANDCOMP_EXE)
 	@echo "Built P23 probe set: bandcomp.exe (wave-52/53 -- banded-composition resid_frac gate)"
 
-probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 probes-p25 probes-p26 probes-p27 probes-p28
+probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 probes-p25 probes-p26 probes-p27 probes-p28 probes-p37
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
 	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (fopen-direct)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"
@@ -1912,7 +1964,7 @@ probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 pr
 #   CWSDPMI.DOC        CWSDPMI redistribution terms (required by its license)
 #   LICENSE.TXT        this repo's MIT license
 #   GPLV3.TXT          NXEngine-evo's GPLv3 (dominant license of the binary)
-#   THIRD-PARTY.TXT    attribution matrix (CRLF normalized)
+#   3RDPARTY.TXT       attribution matrix (CRLF normalized)
 #   README.TXT         DOS-readable quick-start + asset-extraction pointer
 #   DATA/...           NXEngine-evo bundled engine data -- fonts, baseline
 #                      .pbm backgrounds, sprite metadata, JSON configs,
@@ -2004,7 +2056,7 @@ LICENSES
 This binary is licensed under the GNU General Public License v3 because
 it statically links NXEngine-evo (GPLv3). The port source code in this
 repository is MIT licensed. See LICENSE.TXT (MIT, for the repo source)
-and GPLV3.TXT (GPLv3, for the binary as a whole). THIRD-PARTY.TXT has
+and GPLV3.TXT (GPLv3, for the binary as a whole). 3RDPARTY.TXT has
 the complete attribution matrix. The DATA\ contents shipped here inherit
 NXEngine-evo's GPLv3.
 
@@ -2036,7 +2088,7 @@ dist-list:
 	@$(call _dist_list_entry,CWSDPMI.DOC,$(CWSDPMI_DOC),CWSDPMI redistribution terms)
 	@$(call _dist_list_entry,LICENSE.TXT,$(REPO_ROOT)/LICENSE,MIT - repo source [CRLF])
 	@$(call _dist_list_entry,GPLV3.TXT,$(NX_LICENSE),GPLv3 - binary as a whole [CRLF])
-	@$(call _dist_list_entry,THIRD-PARTY.TXT,$(REPO_ROOT)/THIRD-PARTY.md,attribution matrix [CRLF])
+	@$(call _dist_list_entry,3RDPARTY.TXT,$(REPO_ROOT)/THIRD-PARTY.md,attribution matrix [CRLF])
 	@printf '  %-22s %-55s %s\n' "README.TXT" "(generated from DIST_README)" "DOS-readable quick start [CRLF]"
 	@printf '\nDATA/ subdirectory (engine-bundled - NXEngine-evo GPLv3):\n'
 	@# LC_ALL=C on the sort: byte-order, locale-stable. Without this the
@@ -2086,7 +2138,7 @@ dist: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 	@install -m 0644 $(CWSDPMI_DOC)            "$(CF_STAGE)/CWSDPMI.DOC"
 	@$(CRLF) < LICENSE           > "$(CF_STAGE)/LICENSE.TXT"
 	@$(CRLF) < $(NX_LICENSE)     > "$(CF_STAGE)/GPLV3.TXT"
-	@$(CRLF) < THIRD-PARTY.md    > "$(CF_STAGE)/THIRD-PARTY.TXT"
+	@$(CRLF) < THIRD-PARTY.md    > "$(CF_STAGE)/3RDPARTY.TXT"
 	@url='$(shell git remote get-url origin 2>/dev/null || echo "https://forgejo.ecliptik.com/ecliptik/doskutsu")'; \
 	    printf '%s\n' "$$DIST_README" | \
 	    awk -v url="$$url" '{gsub(/@REPO_URL@/, url); print}' | \

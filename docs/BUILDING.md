@@ -248,7 +248,7 @@ CWSDPMI.EXE           DPMI host (from vendor/cwsdpmi/)
 CWSDPMI.DOC           CWSDPMI redistribution terms
 LICENSE.TXT           DOSKUTSU port MIT license
 GPLV3.TXT             NXEngine-evo GPLv3 (the dominant license of the binary)
-THIRD-PARTY.TXT       attribution matrix (CRLF)
+3RDPARTY.TXT          attribution matrix (CRLF)
 README.TXT            DOS-readable quick-start + how to obtain Cave Story data
 ```
 

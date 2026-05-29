@@ -5,6 +5,24 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.0.6] - 2026-05-29
+
+A small maintenance release on top of v1.0.5. No gameplay change; production render
+and audio behavior is identical to v1.0.5 plus one default flip on a debug-path lever.
+
+### Changed
+
+- The backdrop-cache-disabled title-clamp added in v1.0.5
+  (`SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP`) is now **on by default** (set `=0` to
+  disable). The default render path (backdrop cache on) is unaffected either way; this
+  activates the clamp for the `SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` debug/fallback
+  config as well, where it was confirmed clean on the reference machine.
+- The bundled third-party-licenses file is renamed `THIRD-PARTY.TXT` -> `3RDPARTY.TXT`
+  so every file in the distribution archive is a strict DOS 8.3 name (no `THIRD-~1.TXT`
+  mangling on real hardware). Content unchanged.
+- Internal: the release process now mechanically verifies CHANGELOG.md carries an entry
+  for the version being tagged. No user-facing effect.
+
 ## [1.0.5] - 2026-05-29
 
 A maintenance and hardening release on top of v1.0.4. Production render and audio
