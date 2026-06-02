@@ -5,6 +5,31 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.0.7] - 2026-06-02
+
+Bugfix release: the 486-class Organya music hang (Bug 5) is fixed. This is the
+golden v1.0.6 surface plus a single SDL3-DOS audio fix; no change to the render
+path or to the OPL3 / WaveBlaster audio paths.
+
+### Fixed
+
+- **Bug 5 -- Organya music hang on 486-class CPUs.** On DX2-66-class hardware the
+  Organya music path could wedge: the cooperative-scheduler audio producer was
+  starved by the main thread during the title/gameplay cooperative slack, and the
+  Organya ring stopped being serviced. Fixed by an in-band cooperative yield on the
+  SDL3-DOS audio WaitDevice room-path -- the audio thread now yields to the main
+  thread per chunk so the ring stays fed. **Default-ON**; killswitch
+  `SDL_HINT_DOSKUTSU_DOS_AUDIO_COOP_YIELD=0` restores the pre-fix blocking behavior.
+  Confirmed on the reference 486 (DX2-66): a deterministic 110-second Mimiga Village
+  heavy-Organya replay runs to completion with a clean exit.
+
+### Notes
+
+- Organya gameplay on 486-class hardware remains tempo-limited by synthesizer
+  throughput (a future cheaper-synth effort is planned); **`opl3` is recommended
+  for 486 gameplay** (`SDL_HINT_DOSKUTSU_AUDIO_BACKEND=opl3`). The Bug-5 hang fix
+  above applies regardless of the selected backend.
+
 ## [1.0.6] - 2026-05-29
 
 A small maintenance release on top of v1.0.5. No gameplay change; production render

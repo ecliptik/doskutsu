@@ -1,0 +1,122 @@
+From 30ee436d591adb5b104c354f4ed077ee4e98e48f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 2 Jun 2026 13:43:50 -0700
+Subject: [PATCH] dos: patch 0086 -- Bug-5 (#31) FIX: in-band
+ cooperative-scheduler yield (v1.0.7 ship, rebased onto golden)
+
+v1.0.7 ship form of the Bug-5 organya title/stage HANG fix, rebased to apply
+SHIP-CLEAN onto golden SDL (== patch 0080) with ZERO dependency on the
+0082-0085 diagnostic scaffolding (those were pure markers; stripped here).
+
+Root cause (g2k-confirmed via the 0082-0085 + engine 0194/0195 marker
+bisection, now stripped): a cooperative-scheduler MONOPOLY. The game main
+thread parks at the per-flip SDL_Delay(0) -> DOS_Yield(); the scheduler hands
+the CPU to the organya software-synth audio thread, which under organya never
+yields back (its PlayDevice silence-throttle does not fire on the non-silent
+in-band mix, and its WaitDevice ring-full yield does not fire because the IRQ-5
+ISR keeps the ring lean) -- so main never resumes and the title/stage hangs.
+opl3 / WaveBlaster are immune (their ring carries silence -> the silence-
+throttle yields every iteration).
+
+FIX (the minimal functional core, g2k-confirmed to take organya from 100%-hung
+to clean-exit): a bare DOS_Yield() on the WaitDevice room-available path,
+gated by the killswitch. Lock-free site -- WaitDevice runs outside Iterate's
+device->lock (per the 0066 hard-park analysis), so the yield cannot create a
+new cooperative-lock wedge. Bare yield, not a sleep: the organya producer is
+the audio thread itself, so a sleep would starve it; a bare DOS_Yield only
+switches when main is READY (self-regulating).
+
+Default-ON (correctness fix); killswitch SDL_HINT_DOSKUTSU_DOS_AUDIO_COOP_YIELD=0
+(strict "0") reverts to the pre-fix monopoly. Resolved once at OpenDevice +
+cached; banner emitted unconditionally for the smoke gate. opl3/wb unaffected by
+construction (they yield via the silence-throttle regardless of the room-path).
+
+Diag-CLEAN: carries NONE of the 0082-0085 campaign instrumentation (no
+starve-diag/snd:/eng:, no room_returns/coop_yields/yield_full counters, no
+FindNextRunnable/S1/S2/present-diag markers) -- two-witnessed by strings|grep on
+the built libSDL3.a. organya audio quality (the every-chunk yield's underrun) is
+NOT addressed here; that is deferred to v1.0.8 (cheaper organya synth). SDL-only;
+single lever. Workspace-local; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 49 +++++++++++++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 36c280e15..53a828396 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -1408,6 +1408,25 @@ static void MaybeServiceIdlePauseRequests(void)
+     }
+ }
+ 
++/* DOSKUTSU patch (SDL/0086): Bug-5 in-band cooperative-scheduler yield.
++   Fixes the 486/g2k organya title/stage HANG (g2k-confirmed: organya went from
++   100%-hung to clean-exit). Root cause = cooperative-scheduler MONOPOLY: the
++   game main thread parks at the per-flip SDL_Delay(0) -> DOS_Yield(); the
++   scheduler hands the CPU to the organya software-synth audio thread, which
++   under organya NEVER yields back -- its silence-throttle (PlayDevice
++   SDL_Delay(10)) does not fire on the non-silent in-band mix, and its ring-full
++   yield does not fire because the ISR keeps the ring lean -- so main never
++   resumes. opl3 / WaveBlaster are immune (their ring carries silence, so the
++   silence-throttle yields every iteration). Fix: a bare DOS_Yield() on the
++   WaitDevice room-available path (lock-free -- WaitDevice runs outside the
++   audio device->lock, so this cannot create a cooperative-lock wedge), handing
++   CPU back to main once per chunk so the audio thread cannot monopolize. Bare
++   yield, not a sleep: the organya producer is the audio thread itself, so a
++   sleep would starve it. Default-ON; killswitch
++   SDL_HINT_DOSKUTSU_DOS_AUDIO_COOP_YIELD=0 reverts to the pre-fix monopoly.
++   Resolved once at OpenDevice. Workspace-local; never upstreamed. */
++static bool g_dos_audio_coop_yield_enabled = true;  /* default-ON; =0 killswitch */
++
+ // Wait until the ring buffer has room for one more chunk.
+ // The audio thread keeps yielding so the game's main thread can run while
+ // we wait. Because the ISR is steadily draining the ring, this only blocks
+@@ -1499,6 +1518,16 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+             if (g_p12_sdl_audio_instr_active) {
+                 g_p12_sdl_audio_thread_ns += SDL_GetTicksNS() - _p12_wait_t0;
+             }
++            /* DOSKUTSU patch (SDL/0086): Bug-5 in-band cooperative yield. Hand
++               CPU back to main on the room-available path so the organya audio
++               thread cannot monopolize the cooperative scheduler (the confirmed
++               title-hang). Lock-free site; bare DOS_Yield only switches if main
++               is READY (self-regulating) and does not sleep the producer. See
++               the block comment at the g_dos_audio_coop_yield_enabled decl.
++               Killswitch =0 -> pre-fix monopoly. */
++            if (g_dos_audio_coop_yield_enabled) {
++                DOS_Yield();
++            }
+             return true; // room for at least one chunk
+         }
+ 
+@@ -1618,6 +1647,26 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (SDL/0086): resolve the Bug-5 in-band cooperative-yield
++       killswitch. Default-ON (the hang fix); SDL_HINT_DOSKUTSU_DOS_AUDIO_COOP_YIELD=0
++       reverts to the pre-fix cooperative-scheduler monopoly (organya title/stage
++       hang). Strict "0" per CLAUDE.md killswitch discipline. Resolved once here
++       (main thread, before the audio thread starts) and read in
++       DOSSOUNDBLASTER_WaitDevice. Banner emitted unconditionally so the smoke
++       gate can verify the lever is wired. */
++    {
++        const char *cy_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_DOS_AUDIO_COOP_YIELD");
++        const bool cy_disabled = (cy_hint && cy_hint[0] == '0' && cy_hint[1] == 0);
++        g_dos_audio_coop_yield_enabled = !cy_disabled;
++        doskutsu_dbg_log("audio: SDL/0086 in-band COOP_YIELD %s -- Bug-5 organya "
++                         "cooperative-scheduler monopoly fix (WaitDevice room-path "
++                         "DOS_Yield; %s)",
++                         g_dos_audio_coop_yield_enabled ? "ENABLED (default-ON)" : "DISABLED",
++                         g_dos_audio_coop_yield_enabled
++                             ? "audio thread yields to main per chunk"
++                             : "killswitch=0, pre-fix monopoly behavior");
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0069): banner for the cumulative
+        silent-IRQ counter export. Pure-data instrumentation -- no
+        killswitch, no env var; the counter (defined in
+-- 
+2.47.3
+
