@@ -1,0 +1,225 @@
+From ca5dc69a4faa0ed80b7bd0430cd63c070431b443 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 3 Jun 2026 18:59:31 -0700
+Subject: [PATCH] patch 0208 -- #31 v1.0.8 audio-delivery: Organya pre-render
+ on-disk PCM cache
+
+The first time a song is rendered (~10-14 s on the 486) the PCM buffer is
+written to CACHE\<NAME>.PCM; subsequent plays fast-load it -- the render
+becomes one-time-per-song-ever. A cache HIT short-circuits the patch-0206
+trigger gate at ANY phase, so a cached boss song plays real-time instantly
+with no freeze (this is what makes the 0206 live-synth fallback a one-time
+event).
+
+VERSION KEY = DOSKUTSU_BUILD_SHA12 (compile-time patch-stack fingerprint);
+changes on any binary change -> auto-invalidates stale PCM. Header also pins
+song basename (collision guard; org names <=8 chars -> 8.3-safe), sample_rate,
+internal (Q-SAFE) rate, loop_start/end. IO read+write bracketed to the
+gameplay-IO audit as op=music_pcm_cache + allowlisted -> io-gate load-band.
+fopen rb/wb only (DJGPP text-mode trap). Cache dir = getBasePath()+CACHE,
+mkdir best-effort; write failure logged + ignored (RAM buffer still plays).
+_org_cache_store takes the buffer by ref so patch 0209's deferred cache can
+reuse it for a temp Song.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/sound/Organya.cpp | 163 +++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 160 insertions(+), 3 deletions(-)
+
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index 1f329620..26a0b82a 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -18,7 +18,9 @@
+ #include <SDL3/SDL.h>
+ #include <SDL3_mixer/SDL_mixer.h>
+ #include <cmath>
++#include <cstdio>     // patch 0208: FILE*/fopen/fread/fwrite for the PCM disk cache
+ #include <cstring>
++#include <sys/stat.h> // patch 0208: mkdir for the CACHE dir
+ 
+ // patch 0180 (SFXPAUSE-013) IO-audit hooks from main.cpp.
+ extern "C" bool io_audit_enabled(void);
+@@ -474,11 +476,149 @@ static void _org_render_song(Song &song, uint32_t H, int decim,
+   SAMPLE_RATE = saved_rate;           // restore native BEFORE anything else reads it
+ }
+ 
++// ============================================================================
++// patch 0208 (#31 v1.0.8): on-disk PCM cache for the pre-render buffer. The
++// first time a song is rendered (a ~10-14 s synth pass on the 486) the result
++// is written to CACHE\<NAME>.PCM; every subsequent play fast-loads the PCM from
++// CF (a few hundred ms). The render becomes a one-time-per-song-ever cost. A
++// cache HIT short-circuits the trigger gate at ANY phase, so a cached boss song
++// plays real-time instantly with no freeze (this is what makes the patch-0206
++// live-synth fallback a one-time event).
++//
++// VERSION KEY = DOSKUTSU_BUILD_SHA12, the compile-time fingerprint over the
++// applied patch stack (Makefile -D). Changes on ANY binary change, so a
++// synth-affecting code change auto-invalidates every cached PCM -> re-render +
++// overwrite. The header also pins the song basename (hash-free collision guard;
++// org names are all <=8 chars so CACHE\<NAME>.PCM is 8.3-safe directly),
++// sample_rate, internal (Q-SAFE) rate, loop_start/end -- any mismatch = stale.
++//
++// IO phase: read+write are reported to the gameplay-IO audit (patch 0180) as
++// op="music_pcm_cache" + allowlisted, so the io-gate treats them as load-band.
++// fopen "rb"/"wb" ONLY (DJGPP text-mode CRLF trap).
++#define _DOSKUTSU_ORGCACHE_STRINGIFY(x) #x
++#define _DOSKUTSU_ORGCACHE_STR(x) _DOSKUTSU_ORGCACHE_STRINGIFY(x)
++#ifndef DOSKUTSU_BUILD_SHA12
++#define DOSKUTSU_BUILD_SHA12 UNKNOWN_____
++#endif
++
++struct OrgPcmHeader
++{
++  char     magic[4];        // "OPC1"
++  char     build[16];       // DOSKUTSU_BUILD_SHA12 (12 + nul pad)
++  char     song[16];        // org basename (collision guard)
++  uint32_t sample_rate;     // native playback rate
++  uint32_t internal_rate;   // Q-SAFE internal synth rate; == sample_rate when not oversampled
++  uint32_t loop_start;
++  uint32_t loop_end;
++  uint32_t loopstart_frame; // mono-frame wrap target
++  uint32_t nframes;         // int16 mono sample count in the buffer
++};
++
++// 8.3-safe uppercase basename from the resolved .org path: strip dir + ".org".
++static std::string _org_cache_name(const std::string &path)
++{
++  size_t slash = path.find_last_of("/\\");
++  std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
++  size_t dot = base.find_last_of('.');
++  if (dot != std::string::npos) base = base.substr(0, dot);
++  if (base.size() > 8) base = base.substr(0, 8);
++  for (size_t i = 0; i < base.size(); ++i)
++    base[i] = (char)SDL_toupper((unsigned char)base[i]);
++  return base;
++}
++
++static std::string _org_cache_dir()
++{
++  return ResourceManager::getInstance()->getBasePath() + "CACHE";
++}
++
++static std::string _org_cache_path(const std::string &name)
++{
++  return _org_cache_dir() + "/" + name + ".PCM";
++}
++
++// Fast-load + validate into g_org_prerender_buf. Returns true on a validated
++// hit; false (buffer cleared) on miss/stale/short-read so the caller renders.
++static bool _org_cache_try_load(const std::string &name, uint32_t native, uint32_t H,
++                                uint32_t loop_start, uint32_t loop_end)
++{
++  const std::string path = _org_cache_path(name);
++  const bool _ioa = io_audit_enabled();
++  const Uint64 _t0 = _ioa ? SDL_GetTicksNS() : 0;
++  FILE *fp = fopen(path.c_str(), "rb");
++  if (!fp)
++    return false;
++  OrgPcmHeader h;
++  bool ok = (fread(&h, 1, sizeof h, fp) == sizeof h)
++            && h.magic[0] == 'O' && h.magic[1] == 'P' && h.magic[2] == 'C' && h.magic[3] == '1'
++            && strncmp(h.build, _DOSKUTSU_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12), sizeof h.build) == 0
++            && strncmp(h.song, name.c_str(), sizeof h.song) == 0
++            && h.sample_rate == native && h.internal_rate == H
++            && h.loop_start == loop_start && h.loop_end == loop_end
++            && h.nframes > 0 && h.loopstart_frame <= h.nframes;
++  if (ok)
++  {
++    g_org_prerender_buf.clear();
++    g_org_prerender_buf.resize(h.nframes);
++    ok = (fread(g_org_prerender_buf.data(), sizeof(int16_t), h.nframes, fp) == h.nframes);
++    if (ok)
++      g_org_prerender_loopstart = (size_t)h.loopstart_frame;
++    else
++      g_org_prerender_buf.clear();
++  }
++  fclose(fp);
++  if (_ioa)
++    io_audit_emit("music_pcm_cache", path.c_str(),
++                  ok ? (long)(g_org_prerender_buf.size() * sizeof(int16_t)) : 0,
++                  (unsigned long long)((SDL_GetTicksNS() - _t0) / 1000ull));
++  return ok;
++}
++
++// Persist a rendered buffer. Best-effort: a write failure (full / read-only CF)
++// is logged + ignored (the in-RAM buffer still plays).
++static void _org_cache_store(const std::string &name, uint32_t native, uint32_t H,
++                             uint32_t loop_start, uint32_t loop_end,
++                             const std::vector<int16_t> &buf, size_t loopstart_frame)
++{
++  if (buf.empty())
++    return;
++  mkdir(_org_cache_dir().c_str(), 0777); // best-effort; EEXIST is fine
++  const std::string path = _org_cache_path(name);
++  const bool _ioa = io_audit_enabled();
++  const Uint64 _t0 = _ioa ? SDL_GetTicksNS() : 0;
++  FILE *fp = fopen(path.c_str(), "wb");
++  if (!fp)
++  {
++    LOG_WARN("Organya pre-render: cache open-for-write failed for {}", path.c_str());
++    return;
++  }
++  OrgPcmHeader h;
++  memset(&h, 0, sizeof h);
++  h.magic[0] = 'O'; h.magic[1] = 'P'; h.magic[2] = 'C'; h.magic[3] = '1';
++  snprintf(h.build, sizeof h.build, "%s", _DOSKUTSU_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12));
++  snprintf(h.song, sizeof h.song, "%s", name.c_str());
++  h.sample_rate     = native;
++  h.internal_rate   = H;
++  h.loop_start      = loop_start;
++  h.loop_end        = loop_end;
++  h.loopstart_frame = (uint32_t)loopstart_frame;
++  h.nframes         = (uint32_t)buf.size();
++  bool ok = (fwrite(&h, 1, sizeof h, fp) == sizeof h)
++            && (fwrite(buf.data(), sizeof(int16_t), h.nframes, fp) == h.nframes);
++  fclose(fp);
++  if (_ioa)
++    io_audit_emit("music_pcm_cache", path.c_str(),
++                  ok ? (long)(h.nframes * sizeof(int16_t)) : 0,
++                  (unsigned long long)((SDL_GetTicksNS() - _t0) / 1000ull));
++  if (!ok)
++    LOG_WARN("Organya pre-render: cache write failed for {}", path.c_str());
++}
++
+ // Decide the producer for a starting song. Returns true if the pre-render buffer
+ // is ready (the per-frame producer = memcpy); false -> the caller live-synths.
+-// 0206 policy: render the playback buffer ONLY inside the post-load window; a
+-// mid-gameplay miss -> live synth (no freeze). Patch 0208 adds the cache (a hit
+-// short-circuits at any phase); patch 0209 enqueues the live-played song for a
++// Policy: a cache HIT (patch 0208) short-circuits at ANY phase (no freeze); else
++// render the playback buffer ONLY inside the post-load window; a mid-gameplay
++// miss -> live synth (no freeze). Patch 0209 enqueues the live-played song for a
+ // deferred cache.
+ static bool _organya_prerender_decide(Song &song, int startBeat)
+ {
+@@ -486,9 +626,26 @@ static bool _organya_prerender_decide(Song &song, int startBeat)
+   int      decim = 1;
+   _org_prerender_geometry(song, H, decim, spb_native);
+   const bool in_window = _org_postload_consume();
++
++  // patch 0208: cache HIT short-circuits at any phase (fast-load, no freeze).
++  const std::string cname = _org_cache_name(g_org_prerender_song);
++  if (_org_cache_try_load(cname, SAMPLE_RATE, H, song.loop_start, song.loop_end))
++  {
++    g_org_prerender_pos = (startBeat > 0) ? (size_t)startBeat * spb_native : 0;
++    if (g_org_prerender_pos >= g_org_prerender_buf.size())
++      g_org_prerender_pos = g_org_prerender_loopstart;
++    LOG_INFO("Organya pre-render: cache HIT {} ({} bytes from CACHE; synth "
++             "skipped).", cname.c_str(),
++             (unsigned long long)(g_org_prerender_buf.size() * sizeof(int16_t)));
++    return true;
++  }
++
+   if (in_window)
+   {
+     _org_render_song(song, H, decim, g_org_prerender_buf, g_org_prerender_loopstart);
++    // patch 0208: persist so the next play of this song fast-loads.
++    _org_cache_store(cname, SAMPLE_RATE, H, song.loop_start, song.loop_end,
++                     g_org_prerender_buf, g_org_prerender_loopstart);
+     g_org_prerender_pos = (startBeat > 0) ? (size_t)startBeat * spb_native : 0;
+     if (g_org_prerender_pos >= g_org_prerender_buf.size())
+       g_org_prerender_pos = g_org_prerender_loopstart;
+-- 
+2.47.3
+

@@ -1,0 +1,305 @@
+From 03f6ba7b227bfc47ffe2531c82ee87b15e7bcec2 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 3 Jun 2026 18:57:54 -0700
+Subject: [PATCH] patch 0206 -- #31 v1.0.8 audio-delivery: Organya pre-render
+ producer (ship)
+
+Ship form of the head-to-head winner (A-minimal pre-render). DEFAULT-ON;
+killswitch SDL_HINT_DOSKUTSU_ORG_PRERENDER=0 reverts to the live synth-on-
+demand producer. The org loop [0..loop_end] is synthesized to a static mono
+PCM buffer; the per-frame producer is then a memcpy-from-static. Offloading
+the synth from the playback pull is what lets the 486 reach real-time organya
+tempo (g2k-proven ~19 fps real-time vs the live-synth ~47%-tempo wall).
+
+TRIGGER POLICY (freeze-avoidance, team-lead-directed): the at-start render is
+a ~10-14 s synth pass on the 486. At a stage entry that blends with the load
+pause; a MID-GAMEPLAY <CMU (boss/event, no preceding load) must NOT freeze.
+So the render only runs inside the POST-LOAD WINDOW (a flag armed at
+load_stage, consumed by the first song-start = the stage-entry song); a later
+mid-gameplay <CMU that is not a cache hit (patch 0208) falls back to LIVE
+SYNTH (no freeze, ~47%). Patch 0209 caches the live-played song at the next
+load so a re-encounter is real-time. Net: no mid-gameplay freeze ever;
+boss song slow-not-frozen first encounter, real-time after.
+
+Engages only when organya is the active backend (production default OPL3/WB
+never pre-renders). Bounded PCM (~1.3 MB/60s @ 11025 mono). Volume/fade at
+read time so fades/pause work. Exposes org_prerender_buffer_ready() for the
+0207 pump gate. Q-SAFE oversample opt-in default-OFF. Renderer factored
+(_org_render_song) for reuse by the 0209 deferred cache. map.cpp arms the
+window in the load_stage phase guard. Diag-free ship form of experiment 0204.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/map.cpp           |  10 ++
+ src/sound/Organya.cpp | 211 +++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 220 insertions(+), 1 deletion(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index e321ce9b..92084aaf 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1251,6 +1251,8 @@ struct FtAccumulatorGuard
+ // load_stage tag phase=load_stage; main-loop IO tags phase=gameplay;
+ // pre-first-stage IO (Sprites::init, title) tags phase=boot.
+ extern "C" void io_audit_set_phase(int phase);
++// patch 0206 (#31 v1.0.8): organya pre-render post-load window arm (Organya.cpp).
++extern "C" void org_arm_postload_window(void);
+ struct IoAuditPhaseGuard
+ {
+   IoAuditPhaseGuard()  { io_audit_set_phase(1); }
+@@ -1342,6 +1344,14 @@ bool load_stage(int stage_no)
+   // for the duration of this call; restores gameplay on every return.
+   IoAuditPhaseGuard _ioapg;
+ 
++  // patch 0206 (#31 v1.0.8): arm the organya pre-render POST-LOAD WINDOW. The
++  // first song-start after this load (the stage-entry <CMU) is allowed to
++  // pre-render (its ~10-14 s synth pass blends with the load pause); a later
++  // mid-gameplay <CMU outside the window falls back to live synth (no freeze).
++  // Unconditional + cheap (a bool set); organya-only effect (read in
++  // Organya::start). extern "C" defined in Organya.cpp.
++  org_arm_postload_window();
++
+   // patch 0175 per-cave-entry trace setup. _lst_cave is the monotonic
+   // counter for this call (always increments). _lst_t0_total anchors
+   // the TOTAL summary. _lst_phases counts emitted sub-phases. The
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index c90b5e3a..1f329620 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -336,8 +336,181 @@ void Song::Synth()
+   ++cur_beat;
+ }
+ 
++// ============================================================================
++// patch 0206 (#31 v1.0.8 audio-delivery): PRE-RENDER producer (ship form of the
++// head-to-head winner, A-minimal). DEFAULT-ON; killswitch SDL_HINT_DOSKUTSU_ORG_
++// PRERENDER=0 reverts to the live synth-on-demand producer (the v1.0.7 organya
++// path). When a song starts, the whole org loop [0..loop_end] is synthesized to
++// a static mono PCM buffer; the per-frame producer is then a memcpy-from-static
++// (no synth in the playback pull). Offloading the synth from the playback pull
++// is what lets the 486 reach real-time organya tempo (g2k-proven ~19 fps
++// real-time vs the live-synth ~47%-tempo wall) -- the patch-0207 pump becomes a
++// near-free memcpy.
++//
++// TRIGGER POLICY (the freeze-avoidance contract, team-lead-directed): the
++// at-start render is a ~10-14 s synth pass on the 486. At a STAGE ENTRY that
++// blends with the load pause (acceptable). But a MID-GAMEPLAY <CMU (a boss /
++// event music change with no preceding stage load) must NOT freeze. So the
++// render only runs inside the POST-LOAD WINDOW (a flag armed at load_stage,
++// consumed by the first song-start after the load = the stage-entry song); a
++// later mid-gameplay <CMU that is NOT a cache hit falls back to LIVE SYNTH (no
++// freeze, ~47% tempo) instead of rendering. The on-disk cache (patch 0208)
++// turns repeat encounters into instant cache hits at any phase, and the
++// deferred-cache (patch 0209) caches the live-played song at the next load so a
++// re-encounter is real-time. Net: NO mid-gameplay freeze ever; a boss song is
++// slow-not-frozen on its first encounter, real-time after.
++//
++// Engages only when organya is the active backend (the gate is read in
++// Organya::start / the music callback); production default backend is OPL3/WB,
++// so a default install never pre-renders. Org is a short-loop format, so the
++// resident PCM is bounded (~1.3 MB for a ~60 s loop at 11025 mono). Volume/fade
++// + music_volume are applied at read time so fades/pause still work. Q-SAFE
++// oversample stays OPT-IN default-OFF (SDL_HINT_DOSKUTSU_ORG_PRERENDER_RATE).
++static int                  g_org_prerender_decided   = -1;
++static int                  g_org_prerender_rate_dec  = -1;
++static std::vector<int16_t> g_org_prerender_buf;               // mono S16, native rate, unity-scaled (pre-volume)
++static size_t               g_org_prerender_pos        = 0;    // playback read cursor (mono-frame index)
++static size_t               g_org_prerender_loopstart  = 0;    // mono-frame index of loop_start (wrap target)
++static std::string          g_org_prerender_song;             // loaded .org name (basename for the disk cache, patch 0208)
++
++static bool org_prerender_active()
++{
++  if (g_org_prerender_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_ORG_PRERENDER");
++    g_org_prerender_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;  // default-ON killswitch
++  }
++  return g_org_prerender_decided == 1;
++}
++
++// Q-SAFE internal synth rate (0/unset = native SAMPLE_RATE = no oversample).
++static int org_prerender_rate()
++{
++  if (g_org_prerender_rate_dec < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_ORG_PRERENDER_RATE");
++    int v = (e && e[0]) ? SDL_atoi(e) : 0;
++    if (v < 0) v = 0;
++    g_org_prerender_rate_dec = v;
++  }
++  return g_org_prerender_rate_dec;
++}
++
++// patch 0207 (pump-to-target) consumes this to decide whether to engage the
++// deep per-frame ring pump: true ONLY when the pre-render buffer was populated
++// (organya active + a song pre-rendered). Keeps OPL3/WB + live-synth paths
++// byte-identical to v1.0.7 (empty buffer -> pump default stays off).
++extern "C" bool org_prerender_buffer_ready(void)
++{
++  return !g_org_prerender_buf.empty();
++}
++
++// POST-LOAD WINDOW: armed at load_stage (extern "C", called from map.cpp inside
++// the phase=load_stage guard window), consumed by the FIRST song-start after the
++// load (the stage-entry song). A render is allowed only inside this window, so a
++// mid-gameplay <CMU never triggers the ~14 s render freeze.
++static bool g_org_postload_armed = false;
++extern "C" void org_arm_postload_window(void) { g_org_postload_armed = true; }
++static bool _org_postload_consume(void)
++{
++  const bool was = g_org_postload_armed;
++  g_org_postload_armed = false;
++  return was;
++}
++
++// Resolve the Q-SAFE geometry (internal synth rate H, decimation, native
++// samples-per-beat) once so the cache key (patch 0208) and the render agree.
++static void _org_prerender_geometry(const Song &song, uint32_t &H, int &decim, uint32_t &spb_native)
++{
++  const uint32_t native = SAMPLE_RATE;
++  H     = native;
++  decim = 1;
++  const int reqrate = org_prerender_rate();
++  if (reqrate > (int)native && (reqrate % (int)native) == 0)
++  {
++    H     = (uint32_t)reqrate;
++    decim = reqrate / (int)native;
++  }
++  spb_native = (uint32_t)((uint64_t)song.ms_per_beat * native / 1000);
++}
++
++// Render the full org loop [0..loop_end] of `song` into outbuf (mono S16 at the
++// native rate; Q-SAFE oversample at H box-downsampled by decim). Captures the
++// exact loop_start frame for the wrap target. Runs single-threaded (at load or
++// at start, before the stream pulls) -- the brief SAMPLE_RATE swap is safe.
++// Reusable: the playback path (decide, below) fills g_org_prerender_buf; the
++// deferred cache (patch 0209) fills a local buffer for a temp Song.
++static void _org_render_song(Song &song, uint32_t H, int decim,
++                             std::vector<int16_t> &outbuf, size_t &out_loopstart)
++{
++  outbuf.clear();
++  out_loopstart = 0;
++  const uint32_t saved_rate = SAMPLE_RATE;
++  SAMPLE_RATE   = H;              // Synth reads SAMPLE_RATE as its synthesis rate
++  song.cur_beat = 0;
++  double acc = 0.0;
++  int    acc_n = 0;
++  for (uint32_t b = 0; b < song.loop_end; ++b)
++  {
++    if (b == song.loop_start)
++      out_loopstart = outbuf.size();   // exact wrap target
++    song.Synth();                      // fills song.samples (stereo float @ H)
++    const size_t pairs = song.samples.size() / 2;
++    for (size_t p = 0; p < pairs; ++p)
++    {
++      const double mono = ((double)song.samples[p * 2] + (double)song.samples[p * 2 + 1]) * 0.5;
++      acc += mono;
++      if (++acc_n >= decim)
++      {
++        int v = (int)lround((acc / (double)acc_n) * 32767.0);
++        if (v > 32767)       v = 32767;
++        else if (v < -32768) v = -32768;
++        outbuf.push_back((int16_t)v);
++        acc   = 0.0;
++        acc_n = 0;
++      }
++    }
++  }
++  SAMPLE_RATE = saved_rate;           // restore native BEFORE anything else reads it
++}
++
++// Decide the producer for a starting song. Returns true if the pre-render buffer
++// is ready (the per-frame producer = memcpy); false -> the caller live-synths.
++// 0206 policy: render the playback buffer ONLY inside the post-load window; a
++// mid-gameplay miss -> live synth (no freeze). Patch 0208 adds the cache (a hit
++// short-circuits at any phase); patch 0209 enqueues the live-played song for a
++// deferred cache.
++static bool _organya_prerender_decide(Song &song, int startBeat)
++{
++  uint32_t H = 0, spb_native = 0;
++  int      decim = 1;
++  _org_prerender_geometry(song, H, decim, spb_native);
++  const bool in_window = _org_postload_consume();
++  if (in_window)
++  {
++    _org_render_song(song, H, decim, g_org_prerender_buf, g_org_prerender_loopstart);
++    g_org_prerender_pos = (startBeat > 0) ? (size_t)startBeat * spb_native : 0;
++    if (g_org_prerender_pos >= g_org_prerender_buf.size())
++      g_org_prerender_pos = g_org_prerender_loopstart;
++    LOG_INFO("Organya pre-render: ENABLED (rendered loop [0..{}] to a {}-byte "
++             "static mono PCM buffer at load; producer = memcpy-from-static; "
++             "killswitch SDL_HINT_DOSKUTSU_ORG_PRERENDER=0).",
++             (unsigned long)song.loop_end,
++             (unsigned long long)(g_org_prerender_buf.size() * sizeof(int16_t)));
++    if (H != SAMPLE_RATE)
++      LOG_INFO("Organya pre-render: oversampled internal rate={} -> box-downsample "
++               "/{} to {} Hz (Q-SAFE).",
++               (unsigned long)H, decim, (unsigned long)SAMPLE_RATE);
++    return true;
++  }
++  LOG_INFO("Organya pre-render: mid-gameplay music change -- live synth (no "
++           "pre-render freeze).");
++  return false;
++}
++
+ bool Organya::load(const std::string &fname)
+ {
++  g_org_prerender_song = fname;  // patch 0206/0208: name -> disk-cache key
+   // patch 0180 (SFXPAUSE-013) IO-audit bracket. Organya .org load +
+   // synth-table setup. A mid-gameplay <CMU (boss music) tags
+   // phase=gameplay -- a candidate lazy-IO landmine if .org decode is
+@@ -455,6 +628,30 @@ void Organya::_musicCallback(void *udata, uint8_t *stream, uint32_t len)
+     return;
+   int16_t *str = reinterpret_cast<int16_t *>(stream);
+ 
++  // patch 0206 (A producer): memcpy from the pre-rendered static buffer -- NO
++  // synth in the playback pull. Volume/fade + music_volume applied at read time
++  // (the buffer holds raw pre-volume samples) so fades/pause still work. Loops
++  // [loop_start..end). Active only when the pre-render buffer was populated (the
++  // live-synth fallback clears it, so this branch is skipped there).
++  if (org_prerender_active() && !g_org_prerender_buf.empty())
++  {
++    const bool   mono_output = (::AUDIO_CHANNELS == 1);
++    const double mv          = (double)(settings->music_volume / 100.);
++    const uint32_t out_int16s = len / 2;
++    for (uint32_t i = 0; i < out_int16s;)
++    {
++      if (g_org_prerender_pos >= g_org_prerender_buf.size())
++        g_org_prerender_pos = g_org_prerender_loopstart;
++      int32_t s = (int32_t)lround((double)g_org_prerender_buf[g_org_prerender_pos++] * volume * mv);
++      if (s > 32767)       s = 32767;
++      else if (s < -32768) s = -32768;
++      str[i++] = (int16_t)s;
++      if (!mono_output && i < out_int16s)
++        str[i++] = (int16_t)s; // duplicate mono -> L/R for a stereo device
++    }
++    return;
++  }
++
+   // DOS-PORT (patch 0094, Phase 9 wave 21 Lever G fix). Bug surfaced
+   // post-W21A real-HW measurement: Tier-2 (AUDIO_CHANNELS=1) audio
+   // played slow + distorted because Song::Synth() ALWAYS produces
+@@ -546,7 +743,19 @@ bool Organya::start(int startBeat)
+   musicCallback
+       = std::bind(&Organya::_musicCallback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+   _setPlayPosition(startBeat);
+-  song.Synth();
++  // patch 0206: decide the producer. A pre-render (buffer ready) -> the per-frame
++  // producer memcpies from g_org_prerender_buf; otherwise (killswitch off, or a
++  // mid-gameplay <CMU outside the post-load window with no cache) fall back to
++  // the live synth-on-demand prime -- and CLEAR the buffer so the callback's
++  // memcpy branch is skipped (no stale audio from a prior song).
++  bool _prebuf = false;
++  if (org_prerender_active())
++    _prebuf = _organya_prerender_decide(song, startBeat);
++  if (!_prebuf)
++  {
++    g_org_prerender_buf.clear();
++    song.Synth();
++  }
+ 
+   // DOS-PORT: SDL2_mixer's Mix_HookMusic(callback, NULL) is replaced by
+   // the SDL3 AudioStream -> MIX_Track binding pattern. See the
+-- 
+2.47.3
+

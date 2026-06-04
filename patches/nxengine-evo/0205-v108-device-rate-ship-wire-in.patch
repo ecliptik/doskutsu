@@ -1,0 +1,75 @@
+From fb7f1b4ce8293713816ef8455c08299d6938482b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 3 Jun 2026 18:32:33 -0700
+Subject: [PATCH] patch 0205 -- #31 v1.0.8 audio-delivery: device-rate ship
+ wire-in
+
+SoundManager asks the SB16 backend to open the physical device at the
+engine FRAME rate (Tier-2 = 11025) via sdl's SDL_DOSAudioSetDeviceFrameRate
+(SDL/0090) instead of SDL core's 44100 quality floor. The v1.0.8 delivery
+foundation for the pre-render Organya path: each chunk carries 4x more
+real-time audio and the 4x resampler collapses to a channel-dup, so the
+patch-0207 per-frame pump reaches real-time tempo at near-free cost.
+
+One unconditional call before MIX_CreateMixerDevice + an init witness
+banner. Passes the frame rate (::SAMPLE_RATE), NOT *channels (the adjacent
+SetMasterRate uses int16-elements/s; this setter uses frames/s). Default-ON;
+killswitch is sdl's SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0.
+Precedence (backend): env hint > setter > 44100 floor. Production default
+OPL3/WB is out-of-band -> only the Organya/Pixtone PCM path is affected.
+Diag-free ship form of the experiment 0203.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index daa44296..c9ebd979 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -8,6 +8,7 @@
+ #include <SDL3/SDL_dosaudio_shutdown.h>
+ #include <SDL3/SDL_dosmidi_tick.h>  // patch 0168 (Lever 2b): SDL_DOSMidiTickRegister + IsrTickActive (sdl-engine SDL/0072)
+ #include <SDL3/SDL_dospixtone.h>  // patch 0169 (Bug 6 RATEDIV bake-in): SDL_DOSPixtoneSetMasterRate (sdl-engine SDL/0074)
++#include <SDL3/SDL_dosaudio_devicerate.h>  // patch 0205 (#31 v1.0.8): SDL_DOSAudioSetDeviceFrameRate (sdl-engine SDL/0090)
+ 
+ // patch 0168 (Lever 2b): extern "C" forward-decl for the engine-side
+ // tick_isr thunk defined in MidiScheduler.cpp. Address-of taken at
+@@ -388,6 +389,33 @@ bool SoundManager::init()
+            "(SDL/0074 computes shift_div from the resolved device freq).",
+            (unsigned long)(::SAMPLE_RATE * ::AUDIO_CHANNELS),
+            (unsigned long)::SAMPLE_RATE, (unsigned long)::AUDIO_CHANNELS);
++
++  // DOS-PORT (patch 0205, #31 v1.0.8 audio-delivery): ask the SB16 backend to
++  // open the PHYSICAL device at the engine FRAME rate (Tier-2 = 11025) instead
++  // of SDL core's 44100 quality floor. This is the v1.0.8 delivery foundation
++  // for the pre-render Organya path: each refilled chunk carries 4x more
++  // real-time audio and the 4x logical->physical resampler collapses to a
++  // channel-dup, so the patch-0207 per-frame pump reaches real-time tempo at
++  // near-free cost. PASS THE FRAME RATE (::SAMPLE_RATE), NOT
++  // SAMPLE_RATE*AUDIO_CHANNELS (the SetMasterRate call above wants
++  // int16-elements/s; this setter wants frames/s -- different unit).
++  // Default-ON: the call is UNCONDITIONAL; the killswitch lives on sdl's side
++  // (SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0 makes the backend ignore
++  // it -> 44100 floor). Precedence in the backend: env hint
++  // SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE > this setter > 44100 floor, so a
++  // per-config override still wins. MUST run BEFORE MIX_CreateMixerDevice (the
++  // device opens there). Production default is OPL3/WB (out-of-band MIDI,
++  // PCM-DMA-untouched) -> this only affects the Organya + Pixtone PCM path.
++  // Banner says "requesting" -- it proves the CALL fired, NOT that the rate
++  // took effect; rate-took-effect is sdl's SDL/0090 banner + SDL/0073 dev_freq.
++  SDL_DOSAudioSetDeviceFrameRate((int)::SAMPLE_RATE);
++  LOG_INFO("Sound system: device frame-rate: requesting {} Hz match to master "
++           "(SDL_DOSAudioSetDeviceFrameRate; SB16 opens at the engine frame rate "
++           "instead of SDL's 44100 floor -- 4x less PCM/s + no resampler on the "
++           "Organya/Pixtone path; killswitch SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_"
++           "RATE_DEFAULT=0).",
++           (unsigned long)::SAMPLE_RATE);
++
+   spec.channels = ::AUDIO_CHANNELS;
+   spec.freq     = ::SAMPLE_RATE;
+ 
+-- 
+2.47.3
+

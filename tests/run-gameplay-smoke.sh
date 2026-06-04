@@ -99,24 +99,45 @@ log "make stage..."
 make -C "$REPO_ROOT" stage >>"$RESULTS" 2>&1
 
 # PLAY.TAS sanity check (catches the wave-44 stub regression). When a
-# PLAY.TAS is present at the stage root, it must be a real recording, not
-# the 28-byte DTASv1-header-only stub that auto-exits at tick 1 the moment
-# TAS replay engages. Absence is OK -- existing gameplay smoke does not
-# require TAS replay (it drives input via xdotool). But a sub-1000-byte
-# PLAY.TAS is the wave-44 bug shape and must be loud, not silent.
-# scripts/stage-tas.sh (called from `make stage`) is responsible for
-# staging the canonical 1932-byte recording.
+# PLAY.TAS is present at the stage root, it must be a STRUCTURALLY VALID
+# DTASv1 recording, not a header-only stub that auto-exits immediately the
+# moment TAS replay engages. Absence is OK -- existing gameplay smoke does
+# not require TAS replay (it drives input via xdotool).
+#
+# This is a DTASv1 STRUCTURAL check, NOT a byte floor. The original wave-44
+# guard used ">1000 bytes", which predated the segmented-TAS era (patch 0191)
+# and FALSE-REJECTED valid segmented recordings (the canonical Mimiga organya
+# calib segment is only ~220 bytes = 20-byte header + 25 events). That false
+# reject caused a real landmine: make stage's stage-tas.sh fell back to a
+# WRONG 1932-byte TAS that happened to clear the floor. Per docs/TAS.md the
+# format is: 20-byte header (magic "DTASv1\n"(7) + version(1) + prng_seed(4)
+# + flags(4) + n_events(4); n_events=0xFFFFFFFF = stream mode, NOT a literal
+# count -- so validate by SIZE, not the field) then 8-byte events (tick u32 +
+# mask u32) to EOF. VALID = magic present AND size >= 28 (header + >=1 event)
+# AND (size-20) is a whole number of 8-byte events. The stub to catch = a
+# header-only file (20 bytes, 0 events) -> fails size>=28.
 STAGED_TAS="$REPO_ROOT/build/stage/PLAY.TAS"
 if [[ -f "$STAGED_TAS" ]]; then
   TAS_BYTES=$(stat -c%s "$STAGED_TAS")
-  if (( TAS_BYTES < 1000 )); then
-    log "FAIL: $STAGED_TAS is $TAS_BYTES bytes (< 1000 = stub regression)."
+  # Hex-compare the 7-byte magic "DTASv1\n" (44 54 41 53 76 31 0a). Do NOT use
+  # $(head -c7) string compare -- command substitution strips the trailing \n,
+  # so the magic's final 0x0a byte would be lost and the compare always fails.
+  TAS_MAGIC_HEX=$(head -c 7 "$STAGED_TAS" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+  TAS_EVENT_BYTES=$(( TAS_BYTES - 20 ))
+  if [[ "$TAS_MAGIC_HEX" != "4454415376310a" ]]; then
+    log "FAIL: $STAGED_TAS bad DTASv1 magic (hex '$TAS_MAGIC_HEX', want 4454415376310a) -- not a TAS recording."
     log "      Fix: run ./scripts/stage-tas.sh or set DOSKUTSU_TAS_SRC."
-    log "      See scripts/stage-tas.sh header for the wave-44 rationale."
     exit 5
   fi
+  if (( TAS_BYTES < 28 || TAS_EVENT_BYTES % 8 != 0 )); then
+    log "FAIL: $STAGED_TAS is $TAS_BYTES bytes -- DTASv1 header-only/truncated stub"
+    log "      (need magic + >=1 whole 8-byte event = >=28 bytes, (size-20)%8==0)."
+    log "      This is the wave-44 stub shape. Fix: ./scripts/stage-tas.sh or DOSKUTSU_TAS_SRC."
+    exit 5
+  fi
+  TAS_EVENTS=$(( TAS_EVENT_BYTES / 8 ))
   TAS_SHA=$(sha256sum "$STAGED_TAS" | awk '{print $1}')
-  log "staged PLAY.TAS: $TAS_BYTES bytes, sha ${TAS_SHA:0:12}"
+  log "staged PLAY.TAS: $TAS_BYTES bytes, $TAS_EVENTS events, sha256 ${TAS_SHA:0:12}"
 else
   log "note: no PLAY.TAS at $STAGED_TAS (TAS replay unavailable; xdotool drive only)"
 fi
@@ -334,6 +355,19 @@ BANNER_REGEX=(
   "load_stage: entry-music preload (ENABLED \(default\)|DISABLED \(killswitch\))"
   "title: eager-title-IO phase tag (ENABLED \(default\)|DISABLED \(killswitch\))"
   "blitPatternAcross src-clamp (ENABLED \(default\)|DISABLED \(killswitch\))"
+  "backdrop-before-music reorder (ENABLED|disabled \(default\))"
+  "exit-(pre-return|atexit-first|atexit-last)"
+  "DEV WARP: new game -> stage [0-9]+"
+  "starve-diag: (ENABLED \(opt-in\)|DISABLED \(default\))"
+  "title backdrop pre-decode: (ENABLED \(opt-in\)|DISABLED \(default\))"
+  "title audio pump \(run_tick\): (ENABLED \(opt-in\)|DISABLED \(default\))"
+  "audio: SDL/0082 STARVE_DIAG=1 -- Bug-5 ring/silent-IRQ starve markers ENABLED \(snd: layer\)"
+  "audio: SDL/0086 in-band COOP_YIELD ENABLED \(default-ON\) -- Bug-5 organya cooperative-scheduler monopoly fix"
+  "audio: SDL/0090 device-rate setter default: [0-9]+ -> [0-9]+ Hz"
+  "org-stream-diag: ORG_STREAM_DIAG=1 -- Bug-5 organya stream production metrics ENABLED"
+  "org-lookahead: ORG_LOOKAHEAD=1 -- Bug-5 organya stream look-ahead buffer ENABLED"
+  "audio tick-boundary pump CAP: [0-9]+ "
+  "Sound system: device frame-rate: requesting [0-9]+ Hz match to master"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -415,8 +449,21 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
+  "optional"
 )
-# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 79 entries;
+# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 92 entries;
 # the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
 # add a BANNER_REGEX + BANNER_SEVERITY entry, add a matching BANNER_LABEL line at the same
 # index. (v1.0.5 #16 re-aligned these -- v1.0.4 had a 2-entry tail gap from the P2 banners,
@@ -503,6 +550,19 @@ BANNER_LABEL=(
   "0185 P2 FIX-2 entry-music preload (PRELOAD_STAGE_MUSIC default-ON; optional -- BANNER_REGEX idx 76)"
   "0184 P2 FIX-1 eager-title-IO phase tag (EAGER_TITLE_IO default-ON; optional -- BANNER_REGEX idx 77)"
   "0186 P1b BLITPATTERN_CLAMP src-clamp decision banner (default-ON v1.0.6; optional -- LOG_INFO via _blitpattern_src_clamp() narrating ENABLED (default) vs DISABLED (killswitch). INFO-level so present only on tagged/verbose runs, absent on a plain untagged WARN boot which is expected not a failure. ENABLED (default) confirms the layered-pattern-blit source-height clamp is active -- the v1.0.5 cache-OFF title cloud OOB-read fix, flipped default-ON for v1.0.6 since the OFF state was production-byte-identical and PLAY1 confirmed it clean on g2k. SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=0 emits DISABLED (killswitch) + restores the unclamped read. See docs/internal/BOOT.md + patches/nxengine-evo/0186 commit message. BANNER_REGEX idx 78.)"
+  "0188 #31 backdrop-before-music reorder banner (env-gated SDL_HINT_DOSKUTSU_BACKDROP_BEFORE_MUSIC, DEFAULT-OFF; optional -- LOG_INFO at first title_init narrating 'disabled (default)' vs 'ENABLED'. Rides the #37 DX2-66 iter (PLAY0=disabled/repro, PLAY1==1/fix) + a v1.0.7 ship candidate if g2k confirms #31 Bug-5. OPTIONAL not required: the permanent gate must also pass against shipped v1.0.6 + cf80c15-swept release binaries which LACK 0188 -- a required entry would regression-trap them. Promote to required at the v1.0.7 ship-gate when 0188 goes default-ON (the BLITPATTERN_CLAMP precedent). BANNER_REGEX idx 79.)"
+  "0187 #32 exit-bracket diagnostic chain (DEFAULT-ON shutdown diag, no env; optional -- doskutsu_dbg_log markers at clean main()-return: exit-pre-return -> exit-atexit-first -> exit-atexit-last (+ raw co-witness exit-atexit-last-raw, fsync'd). Emits ONLY on a clean quit (boot-only/force-killed smoke won't show them, expected). A log that ends before these on quit = the #32(b) post-SDL_Quit DOS-exit hang caught. OPTIONAL: a pure diagnostic, never ships in a release; absent on release binaries which lack 0187. BANNER_REGEX idx 80.)"
+  "0190 #38 DEV-WARP dev/QA warp tool (CONDITIONAL on DOSKUTSU_WARP_STAGE>0; optional -- emits 'DEV WARP: new game -> stage N spawn (x,y) ...' at InitNewGame when the warp is requested. Default smoke leaves WARP_STAGE unset so this is ABSENT (the warp is a runtime no-op, behavior-identical to production) -- expected, not a failure. The 0190 warp-smoke cell (DOSKUTSU_WARP_STAGE=13) SETs it + is where this is witnessed (the 2-witness runtime half for 0190; strings-embed is the other). OPTIONAL: dev-only tool, relocates to _disabled/ before ship; WARP_STAGE-absent in ship binaries stays the absent-gate. Supersedes the crude 0189 (curated D1 spawn + map_focus camera + forced FADE_IN, vs 0189's drowned 10,8). BANNER_REGEX idx 81.)"
+  "0192 #31 Bug-5 STARVE_DIAG eng-side decision banner (env-gated SDL_HINT_DOSKUTSU_STARVE_DIAG, DEFAULT-OFF; optional -- LOG_INFO 'starve-diag: ENABLED (opt-in)' vs 'DISABLED (default)' at the engine instrumentation init. Gates the eng: title run_tick load-bracket breadcrumbs. Default smoke leaves the hint unset so the DISABLED variant emits on a verbose/tagged run (ABSENT on a plain untagged WARN boot, expected). OPTIONAL: diag-only lever for the DX2-66 Bug-5 localize iter, never ships in a release; absent on release binaries which lack 0192. BANNER_REGEX idx 82.)"
+  "0192 #31 Bug-5 TITLE_PREDECODE fix-lever decision banner (env-gated SDL_HINT_DOSKUTSU_TITLE_PREDECODE, DEFAULT-OFF; optional -- LOG_INFO 'title backdrop pre-decode: ENABLED (opt-in)' vs 'DISABLED (default)'. Cell C candidate fix: pre-decode title backdrops at boot. Default smoke leaves the hint unset so DISABLED emits (verbose/tagged only); the PLAY1 cell SETs it to 1 -> ENABLED. OPTIONAL: diag/fix lever for the Bug-5 iter, absent on release binaries which lack 0192. BANNER_REGEX idx 83.)"
+  "0192 #31 Bug-5 TITLE_AUDIO_PUMP fix-lever decision banner (env-gated SDL_HINT_DOSKUTSU_TITLE_AUDIO_PUMP, DEFAULT-OFF; optional -- LOG_INFO 'title audio pump (run_tick): ENABLED (opt-in)' vs 'DISABLED (default)'. Cell B candidate fix: drive SDL_DOSAudioPump from the title run_tick (which otherwise has no audio pump -- the Bug-5 root cause). Default smoke leaves the hint unset so DISABLED emits (verbose/tagged only); the PLAY2 cell SETs it to 1 -> ENABLED. OPTIONAL: diag/fix lever for the Bug-5 iter, absent on release binaries which lack 0192. BANNER_REGEX idx 84.)"
+  "SDL/0082 #31 Bug-5 snd-side starve-diag engage banner (env-gated SDL_HINT_DOSKUTSU_STARVE_DIAG -- same hint as eng idx 82, the SDL-audio-side witness; optional -- 'audio: SDL/0082 STARVE_DIAG=1 ... ENABLED (snd: layer)' fires on the first PlayDevice call (entry-placement, before the SDL/0054 silence-skip early-return) and gates the per-100-call + LOW-edge 'starve-diag/snd:' ring-state markers. Default smoke leaves the hint unset so this is ABSENT (expected). In DOSBox the PlayDevice ring path IS exercised on the organya title so the markers witness (64-marker confirm, build ce2164c0); on g2k the real SB16 PlayDevice fires them. OPTIONAL: diag-only, absent on release binaries which lack SDL/0082. BANNER_REGEX idx 85.)"
+  "SDL/0086 #31 Bug-5 in-band COOP_YIELD fix banner (the confirmed-root-cause fix; default-ON, killswitch SDL_HINT_DOSKUTSU_DOS_AUDIO_COOP_YIELD=0; optional -- 'audio: SDL/0086 in-band COOP_YIELD ENABLED (default-ON) ...' emits unconditionally at SB16 OpenDevice on the SDL-log channel (<TAG>SDL.LOG / SDLDBG.LOG, NOT engine DEBUG.LOG). OPTIONAL like the sibling 0069 OpenDevice banner: present only when the SB16 audio device opens + the SDL-log channel is active (typically present under DOSBox-X with SB16 emulated; ABSENT is not a failure -- the embed side of the two-witness pattern is strings|grep 'in-band COOP_YIELD' on the binary). Killswitch=0 emits the DISABLED variant instead (not matched by this regex by design). Unlike SDL/0082 (diag-only, env-gated) this lever SHIPS in v1.0.7 default-ON; promote this entry to required once g2k+DOSBox confirm reliable emit at ship-prep. BANNER_REGEX idx 86.)"
+  "SDL/0090 #31 v1.0.8 device-rate setter default banner (always-on in DEFAULT config when the setter applies: SoundManager calls SDL_DOSAudioSetDeviceFrameRate at SB16 OpenDevice -> 'audio: SDL/0090 device-rate setter default: 44100 -> 11025 Hz'. OPTIONAL by the SDL/0086 precedent -- emits on the SDL-log channel only when the SB16 device opens + the SDL-log channel is active (typically present under DOSBox-X w/ SB16 emulated; ABSENT is not a failure -- embed witness = nm/strings SDL_DOSAudioSetDeviceFrameRate). Suppressed by killswitch SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0 or any DEVICE_RATE env hint (the SDL/0087 hint line emits instead) -- so gate it in DEFAULT-config smoke only. Promote to required at ship-prep once DOSBox+g2k confirm reliable emit. BANNER_REGEX idx 87.)"
+  "0196 #31 Bug-5 bug5pmp ORG_STREAM_DIAG organya stream-production probe (env-gated SDL_HINT_DOSKUTSU_ORG_STREAM_DIAG, DEFAULT-OFF; optional -- one-shot 'org-stream-diag: ORG_STREAM_DIAG=1 ... ENABLED' on the FIRST organyaStreamCallback when the hint=1 AND the Organya backend is active, then a per-100-callback [org-stream-stat] line. Default smoke runs the OPL3 backend (wave-46 default) with the hint unset, so the organya callback never runs and this is ABSENT -- expected, not a failure (embed witness = strings|grep org-stream-stat). The realhw PMP0/1/2 cells (organya + ORG_STREAM_DIAG=1) are the runtime witness. OPTIONAL: diag-only probe for the Bug-5 gameplay-audio residual iter, absent on release binaries which lack 0196. BANNER_REGEX idx 88.)"
+  "0197 #31 Bug-5 bug5pmp ORG_LOOKAHEAD organya stream look-ahead buffer (env-gated SDL_HINT_DOSKUTSU_ORG_LOOKAHEAD, DEFAULT-OFF; optional -- one-shot 'org-lookahead: ORG_LOOKAHEAD=1 ... ENABLED (target=4096 bytes cap=16 iters)' on the FIRST organyaStreamCallback when the hint=1 AND the Organya backend is active. The candidate-fix lever for the gameplay residual: the callback over-produces to a target stream-queue depth so a flip-park drains the buffer instead of starving. Default smoke runs OPL3 + hint-unset so the callback never runs and this is ABSENT -- expected, not a failure (embed witness = strings|grep org-lookahead). The realhw PMP2 cell (organya + ORG_LOOKAHEAD=1 + ORG_STREAM_DIAG=1) is the runtime witness. OPTIONAL: candidate-fix lever for the Bug-5 gameplay-audio iter, default-OFF; promote to required only if it ships default-ON in v1.0.7. BANNER_REGEX idx 89.)"
+  "0198 #31 Bug-5 bug5pmp TICKPUMP_CAP bound-the-pump lever (env-gated SDL_HINT_DOSKUTSU_TICKPUMP_CAP=N, DEFAULT 0/unbounded; optional -- one-shot 'audio tick-boundary pump CAP: N (...)' on the first capped TICKPUMP, which fires ONLY when SDL_HINT_DOSKUTSU_AUDIO_TICKPUMP=1 (the cap reader sits inside the tickpump_active() gate). Default smoke leaves AUDIO_TICKPUMP unset so the pump never runs and this is ABSENT -- expected, not a failure (embed witness = strings|grep 'tick-boundary pump CAP'). The realhw CAP=1/CAP=2 cells (TICKPUMP=1 + TICKPUMP_CAP=N) are the runtime witness. Bounds the unbounded SDL_DOSAudioPump while-loop to N frames/tick so the proven pump feeds organya without stealing main. OPTIONAL: candidate-fix lever for the Bug-5 gameplay-audio iter, default-unbounded preserves pre-0198 behavior. BANNER_REGEX idx 90.)"
+  "0203 #31 v1.0.8 device-rate ENGINE wire-in banner (always-on every boot: SoundManager unconditionally calls SDL_DOSAudioSetDeviceFrameRate(SAMPLE_RATE) -> 'Sound system: device frame-rate: requesting <hz> Hz match to master ...'. OPTIONAL -- banner-emit proves the engine CALL fired, NOT that the rate took effect (the SDL-side killswitch DEVICE_RATE_DEFAULT=0 makes the backend ignore the call while the engine still emits this banner); rate-took-effect witness = SDL/0090 banner + SDL/0073 dev_freq line. Redundant device-rate witness alongside SDL/0090 (optional per nx handoff; embed witness = strings _SDL_DOSAudioSetDeviceFrameRate). BANNER_REGEX idx 91.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
@@ -521,7 +581,7 @@ log "=== Banner-emit gate (proves runtime invocation, not just embed) ==="
 for i in "${!BANNER_REGEX[@]}"; do
   regex="${BANNER_REGEX[$i]}"
   severity="${BANNER_SEVERITY[$i]}"
-  label="${BANNER_LABEL[$i]:-}"   # set-u-safe guard (belt-and-suspenders; arrays aligned 79=79 as of #33 v1.0.6 0186 default-ON banner); display-only, gate keys on regex+severity
+  label="${BANNER_LABEL[$i]:-}"   # set-u-safe guard (belt-and-suspenders; arrays aligned 92=92=92 as of v1.0.8 SDL/0090+0203 device-rate banners -- realigned after SDL/0090 regex-only insert left them 91/90/90); display-only, gate keys on regex+severity
 
   hit_total=0
   hit_source=""

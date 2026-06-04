@@ -1,0 +1,251 @@
+From 43d972b04cf5096bb6350f8aecb64320772ba3fc Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 3 Jun 2026 08:29:40 -0700
+Subject: [PATCH 3/3] dos: patch 0090 -- device-rate setter (productionize 0087
+ as default-ON)
+
+SDL/0087 landed the device-rate lever only as an env hint. This adds the ship
+path so the SB16 PCM device opens at the content rate by default with no env
+var, closing the v1.0.8 organya-delivery productionization.
+
+New export SDL_DOSAudioSetDeviceFrameRate(int hz) on a new header
+SDL_dosaudio_devicerate.h. SoundManager calls it with SAMPLE_RATE before
+MIX_CreateMixerDevice (alongside SDL_DOSPixtoneSetMasterRate); the backend
+caches it and applies it in OpenDevice. Opening at the content rate (11025
+Tier-2) instead of SDL core's 44100 quality floor cuts the DMA ring drain 4x
+and collapses the SDL logical->physical resampler to a cheap channel-dup --
+the root of the organya slow-tempo/underrun behaviour on the 486 (delivery-
+bound, not synth-bound; see docs/internal/V108-MUSIC-RETROSPECTIVE.md).
+
+Precedence in OpenDevice: env hint SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE
+(0087) WINS (per-cell sweep override) > setter default > 44100 floor. A
+killswitch SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0 (strict-"0")
+disables the setter default for a clean A/B baseline cell. Out-of-band music
+backends (OPL3/WaveBlaster) never touch this PCM path, so default-backend
+audio is unchanged. Blast radius is the organya + Pixtone PCM path only.
+Workspace-local; never upstreamed.
+---
+ include/SDL3/SDL_dosaudio_devicerate.h | 106 +++++++++++++++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c        |  63 ++++++++++++++-
+ 2 files changed, 167 insertions(+), 2 deletions(-)
+ create mode 100644 include/SDL3/SDL_dosaudio_devicerate.h
+
+diff --git a/include/SDL3/SDL_dosaudio_devicerate.h b/include/SDL3/SDL_dosaudio_devicerate.h
+new file mode 100644
+index 000000000..7f3b5a74b
+--- /dev/null
++++ b/include/SDL3/SDL_dosaudio_devicerate.h
+@@ -0,0 +1,106 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/**
++ * # CategoryDOSAudioDeviceRate
++ *
++ * **DOSKUTSU local addition (patches/SDL/0090, never upstreamed.)** This
++ * header exports a single SDL3-DOS audio-backend setter that lets the engine
++ * choose the SB16 PCM device frame rate before the device opens.
++ *
++ * ## Why this exists
++ *
++ * SDL core FLOORS every physical playback device to
++ * max(DEFAULT_AUDIO_PLAYBACK_FREQUENCY=44100, requested) at PrepareAudioFormat
++ * (a quality-floor policy, not a hardware constraint). So the engine's
++ * 11025-mono Tier-2 mixer request lands on the LOGICAL device while the
++ * PHYSICAL SB16 opens at 44100, and SDL inserts a logical->physical
++ * SDL_AudioStream that resamples 11025 mono -> 44100 stereo (a 4x upsample of
++ * empty bandwidth) on every pump. The SB16 then drains its DMA ring 4x faster
++ * than the content needs. That over-delivery is the root of the organya slow-
++ * tempo / underrun behaviour on the 486 (the synth itself has ~5.65x headroom;
++ * the problem is DELIVERY, not throughput -- see
++ * docs/internal/V108-MUSIC-RETROSPECTIVE.md).
++ *
++ * SDL_audio.c explicitly licenses the backend to change device->spec.freq in
++ * OpenDevice ("These are just requests! The backend may change any of these
++ * values during OpenDevice method!") and re-honors a backend change via a
++ * second SDL_UpdatedAudioDeviceFormat. The SB16 supports 5000..44100 Hz via
++ * DSP command 0x41. SDL_DOSAudioSetDeviceFrameRate() tells the backend to open
++ * the PCM device at the engine's content frame rate (e.g. 11025 in Tier-2),
++ * collapsing the resampler to a cheap channel-dup and cutting the ring drain
++ * 4x.
++ *
++ * ## Precedence (resolved in DOSSOUNDBLASTER_OpenDevice)
++ *
++ * 1. Env hint SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE (the SDL/0087 sweep
++ *    override) -- WINS when present, so a per-cell sweep can pin any rate.
++ * 2. This setter's value -- the shipped default path (no env var needed).
++ * 3. The SDL-core 44100 floor -- when neither of the above applies, or when
++ *    the killswitch SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0 disables
++ *    the setter default for a clean A/B baseline cell.
++ *
++ * Out-of-band music backends (OPL3 / WaveBlaster, MPU-401 / OPL-chip) never
++ * touch this PCM DMA path, so production audio under the default backend is
++ * unaffected; the lever only changes the organya + Pixtone PCM path.
++ */
++
++#ifndef SDL_dosaudio_devicerate_h_
++#define SDL_dosaudio_devicerate_h_
++
++#include <SDL3/SDL_stdinc.h>
++
++#include <SDL3/SDL_begin_code.h>
++/* Set up for C function definitions, even when using C++ */
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Request the SB16 PCM device frame rate, in Hz.
++ *
++ * Call from the engine main thread BEFORE the audio device opens (e.g. in
++ * SoundManager, alongside SDL_DOSPixtoneSetMasterRate, just before
++ * MIX_CreateMixerDevice). Pass SAMPLE_RATE (the PCM frame rate, e.g. 11025 in
++ * Tier-2), NOT SAMPLE_RATE * AUDIO_CHANNELS.
++ *
++ * The value is cached and consumed once at OpenDevice. An hz outside the SB16
++ * DSP range [5000, 44100] (or <= 0) is treated as "unset" (the SDL-core 44100
++ * floor stands). The env hint SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE overrides
++ * this setter; the killswitch SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0
++ * disables it.
++ *
++ * \param hz the requested device frame rate in Hz, or 0 / out-of-range to
++ *           leave the device at the SDL-core 44100 floor.
++ *
++ * \threadsafety Call from the engine main thread before the device opens; a
++ *               plain int store, not touched by interrupt context.
++ *
++ * \since This function is available since SDL/0090 (doskutsu workspace-local).
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSAudioSetDeviceFrameRate(int hz);
++
++#ifdef __cplusplus
++}
++#endif
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_dosaudio_devicerate_h_ */
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 9d4092049..ef73f955e 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -29,6 +29,7 @@
+ #include "SDL_dosaudio_sb.h"
+ #include <SDL3/SDL_dosaudio_shutdown.h> /* DOSKUTSU patch 0053: engine-callable SDL_DOSAudioBeginShutdown export */
+ #include <SDL3/SDL_dosaudio_pump.h>     /* DOSKUTSU patch 0067: engine-callable SDL_DOSAudioPump export (audio mid-gap-service); SDL/0088 adds the ring-fill + capacity queries here */
++#include <SDL3/SDL_dosaudio_devicerate.h> /* DOSKUTSU patch 0090: engine-callable SDL_DOSAudioSetDeviceFrameRate export (device-rate productionization) */
+ #include <SDL3/SDL_dospixtone.h>        /* DOSKUTSU patch 0071: engine-callable SDL_DOSPixtone* channel-pool API (Lever 3 IRQ-5 ISR mix) */
+ #include <SDL3/SDL_dosmidi_tick.h>      /* DOSKUTSU patch 0072: engine-registered IRQ-5 MIDI tick callback (Lever 2b MidiScheduler ISR piggyback) */
+ 
+@@ -329,6 +330,17 @@ static SDL_AudioDevice * volatile g_dos_audio_device = NULL;
+    a device opens; the query funcs return 0 in that case. */
+ static int g_dos_ring_bytes_per_frame = 0;
+ 
++/* DOSKUTSU patch (SDL/0090): device-rate productionization state.
++   g_dos_audio_device_rate_setter: the engine's requested PCM device frame
++   rate (Hz), set via SDL_DOSAudioSetDeviceFrameRate() from SoundManager
++   BEFORE the device opens (alongside SDL_DOSPixtoneSetMasterRate). 0 = unset
++   (no setter default; the SDL-core 44100 floor stands). Consumed once at
++   OpenDevice. The SDL/0087 env hint (SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE)
++   WINS over this setter when both are present, so flush-instr's sweep cells
++   can override the default per-cell. Resolved precedence in OpenDevice:
++   env hint > setter default > 44100 floor. Not ISR-read; no DPMI lock. */
++static int g_dos_audio_device_rate_setter = 0;
++
+ /* DOSKUTSU patch (Phase 11 patch 0068, v2): cooperative-scheduler-
+    starvation backstop for SDL_DOSAudioPump (the 0067 v2 export). v2
+    wraps the outer SDL_LockMutex(device->lock) acquisition introduced
+@@ -950,6 +962,30 @@ int SDL_DOSAudioRingCapacityMs(void)
+     return (int)(((Sint64)cap_frames * 1000) / freq);
+ }
+ 
++/* ========================================================================
++ * DOSKUTSU patch (SDL/0090): device-rate setter (productionization of 0087)
++ * ========================================================================
++ * Engine-callable (main thread, BEFORE the device opens). SoundManager calls
++ * this with SAMPLE_RATE (the PCM frame rate, e.g. 11025 Tier-2) alongside
++ * SDL_DOSPixtoneSetMasterRate, so the SB16 PCM device opens at the content
++ * rate by default: 4x less ring drain + the SDL logical->physical resampler
++ * collapses to a channel-dup (see the SDL/0087 block in OpenDevice +
++ * V108-MUSIC-RETROSPECTIVE.md sec.5.4).
++ *
++ * Precedence resolved at OpenDevice: the env hint
++ * SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE WINS over this setter (per-cell
++ * sweep override); the killswitch SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0
++ * disables the setter default entirely (reverts to the SDL-core 44100 floor)
++ * for a clean A/B baseline cell.
++ *
++ * hz out of the SB16 DSP range [5000,44100] (or <= 0) is stored as 0 = unset
++ * (the floor stands); re-checked at consumption. Not ISR-touched; plain int
++ * store, no lock. */
++void SDL_DOSAudioSetDeviceFrameRate(int hz)
++{
++    g_dos_audio_device_rate_setter = (hz >= 5000 && hz <= 44100) ? hz : 0;
++}
++
+ /* ========================================================================
+  * DOSKUTSU patch (Phase 11 patch 0072): Lever 2b -- MidiScheduler tick
+  * from the SB16 IRQ-5 ISR
+@@ -2209,7 +2245,14 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+        killswitch). Hint wins over the setter when both are present. */
+     {
+         const char *dr_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE");
++        /* DOSKUTSU patch (SDL/0090): killswitch for the setter-default. Strict-"0"
++           per CLAUDE.md; only literal "0" disables the setter default (reverts to
++           the SDL-core 44100 floor) for a clean A/B baseline cell. Does NOT affect
++           the SDL/0087 env hint above, which still wins when present. */
++        const char *dr_ks = SDL_GetHint("SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT");
++        const bool dr_default_disabled = (dr_ks && dr_ks[0] == '0' && dr_ks[1] == '\0');
+         if (dr_hint && dr_hint[0] != '\0') {
++            /* Highest precedence: the SDL/0087 env hint (per-cell sweep override). */
+             const int dr = SDL_atoi(dr_hint);
+             if (dr >= 5000 && dr <= 44100) {
+                 const int dr_prev = device->spec.freq;
+@@ -2225,9 +2268,25 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+                                  "%d Hz out of SB16 range [5000,44100] -- staying "
+                                  "at %d Hz", dr, device->spec.freq);
+             }
++        } else if (!dr_default_disabled &&
++                   g_dos_audio_device_rate_setter >= 5000 &&
++                   g_dos_audio_device_rate_setter <= 44100) {
++            /* Next precedence: the SDL/0090 setter default (productionization). The
++               engine called SDL_DOSAudioSetDeviceFrameRate(SAMPLE_RATE) before open.
++               This is the SHIPPED default path -- the PCM device opens at the content
++               rate (e.g. 11025 Tier-2) instead of the 44100 floor, with no env var. */
++            const int dr_prev = device->spec.freq;
++            device->spec.freq = g_dos_audio_device_rate_setter;
++            doskutsu_dbg_log("audio: SDL/0090 device-rate setter default: %d -> %d Hz "
++                             "(SDL_DOSAudioSetDeviceFrameRate from SoundManager; SB16 DSP "
++                             "0x41 will program %d; resampler collapses to channel-dup; "
++                             "set SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0 to "
++                             "revert to the 44100 floor)",
++                             dr_prev, g_dos_audio_device_rate_setter,
++                             g_dos_audio_device_rate_setter);
+         }
+-        /* default (hint unset): no change. device->spec.freq stays the SDL-floored
+-           value (44100) -- byte-identical to pre-0087. */
++        /* default (no hint, no setter, or killswitch set): no change. device->spec.freq
++           stays the SDL-floored value (44100) -- byte-identical to pre-0087/0090. */
+     }
+ 
+     device->sample_frames = SDL_GetDefaultSampleFramesFromFreq(device->spec.freq);
+-- 
+2.47.3
+

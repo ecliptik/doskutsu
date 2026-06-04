@@ -1,0 +1,211 @@
+From 4380d835759831b30b99eee94bd2f4a1d3a2024e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 3 Jun 2026 08:26:42 -0700
+Subject: [PATCH 2/3] dos: patch 0088 -- ring-fill query export (engine
+ depth-setpoint pump input)
+
+The v1.0.8 organya-delivery work needs the engine's depth-setpoint pump
+(nxengine-evo/0202) to hold the SB16 ring at a wall-clock buffer depth
+instead of the open-loop chunk-count cap of nxengine-evo/0198 (which still
+walled at ~47% real-time -- the bound was never the missing piece, the
+device rate was; see docs/internal/V108-MUSIC-RETROSPECTIVE.md sec.5.1).
+A closed-loop depth setpoint needs to read the current ring fill each frame.
+
+Exports three lock-free main-thread queries on SDL_dosaudio_pump.h:
+  SDL_DOSAudioRingFillFrames() / SDL_DOSAudioRingFillMs() / SDL_DOSAudioRingCapacityMs()
+computed from the producer's authoritative monotonic ring cursors
+(isr_ring_write - isr_ring_read; single aligned reads are atomic on the
+DJGPP/x86 target, no lock). Bytes-per-frame + device frame-rate are cached
+at OpenDevice. The pump clamps its target below CapacityMs (which also
+tracks the SDL/0089 RING_CHUNKS lever, so it must be read, not hardcoded).
+
+Inert on its own -- no behaviour change until the engine calls the queries.
+Workspace-local; never upstreamed.
+---
+ include/SDL3/SDL_dosaudio_pump.h | 66 +++++++++++++++++++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c  | 71 +++++++++++++++++++++++++++++++-
+ 2 files changed, 136 insertions(+), 1 deletion(-)
+
+diff --git a/include/SDL3/SDL_dosaudio_pump.h b/include/SDL3/SDL_dosaudio_pump.h
+index 207c553f6..586423fcf 100644
+--- a/include/SDL3/SDL_dosaudio_pump.h
++++ b/include/SDL3/SDL_dosaudio_pump.h
+@@ -244,6 +244,72 @@ extern "C" {
+  */
+ extern SDL_DECLSPEC bool SDLCALL SDL_DOSAudioPump(void);
+ 
++/**
++ * Current fill of the SB16 audio ring, in frames.
++ *
++ * **DOSKUTSU local addition (patches/SDL/0088, never upstreamed.)**
++ *
++ * Snapshot of (producer write cursor - ISR drain cursor) / bytes-per-frame.
++ * Both cursors are the producer's authoritative monotonic ints (the write
++ * cursor is advanced under DOS_DisableInterrupts in PlayDevice; the read
++ * cursor is the ISR's drain position); a single aligned read is atomic on
++ * the DJGPP/x86 target, so this is safe to call from the engine main thread
++ * with no lock. A concurrent ISR drain only makes the returned fill an
++ * instant smaller, which is safe for a setpoint that re-samples each frame.
++ *
++ * \returns the current ring fill in frames, or 0 if no device is open.
++ *
++ * \threadsafety Safe to call from the engine main thread; lock-free.
++ *
++ * \since This function is available since SDL/0088 (doskutsu workspace-local).
++ *
++ * \sa SDL_DOSAudioRingFillMs
++ * \sa SDL_DOSAudioRingCapacityMs
++ * \sa SDL_DOSAudioPump
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioRingFillFrames(void);
++
++/**
++ * Current fill of the SB16 audio ring, in milliseconds of playback.
++ *
++ * **DOSKUTSU local addition (patches/SDL/0088, never upstreamed.)**
++ *
++ * SDL_DOSAudioRingFillFrames() converted to ms via the open device's frame
++ * rate. This is the input to the engine depth-setpoint pump
++ * (nxengine-evo/0202): pump SDL_DOSAudioPump() until this reaches a target
++ * depth (clamp the target below SDL_DOSAudioRingCapacityMs()).
++ *
++ * \returns the current ring fill in integer ms, or 0 if no device is open.
++ *
++ * \threadsafety Safe to call from the engine main thread; lock-free.
++ *
++ * \since This function is available since SDL/0088 (doskutsu workspace-local).
++ *
++ * \sa SDL_DOSAudioRingCapacityMs
++ * \sa SDL_DOSAudioPump
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioRingFillMs(void);
++
++/**
++ * Total capacity of the SB16 audio ring, in milliseconds of playback.
++ *
++ * **DOSKUTSU local addition (patches/SDL/0088, never upstreamed.)**
++ *
++ * The ring depth (RING_CHUNKS x chunk frames) converted to ms via the open
++ * device's frame rate. Changes with both the device rate and the
++ * SDL_HINT_DOSKUTSU_AUDIO_RING_CHUNKS lever (SDL/0089 adds a 32-chunk option),
++ * so the depth-setpoint pump should read this rather than hardcode a ceiling.
++ *
++ * \returns the ring capacity in integer ms, or 0 if no device is open.
++ *
++ * \threadsafety Safe to call from the engine main thread; lock-free.
++ *
++ * \since This function is available since SDL/0088 (doskutsu workspace-local).
++ *
++ * \sa SDL_DOSAudioRingFillMs
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioRingCapacityMs(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index cde248f53..9d4092049 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -28,7 +28,7 @@
+ #include "../../video/dos/SDL_dosdbg.h" /* DOSKUTSU patch 0041: doskutsu_dbg_log routing */
+ #include "SDL_dosaudio_sb.h"
+ #include <SDL3/SDL_dosaudio_shutdown.h> /* DOSKUTSU patch 0053: engine-callable SDL_DOSAudioBeginShutdown export */
+-#include <SDL3/SDL_dosaudio_pump.h>     /* DOSKUTSU patch 0067: engine-callable SDL_DOSAudioPump export (audio mid-gap-service) */
++#include <SDL3/SDL_dosaudio_pump.h>     /* DOSKUTSU patch 0067: engine-callable SDL_DOSAudioPump export (audio mid-gap-service); SDL/0088 adds the ring-fill + capacity queries here */
+ #include <SDL3/SDL_dospixtone.h>        /* DOSKUTSU patch 0071: engine-callable SDL_DOSPixtone* channel-pool API (Lever 3 IRQ-5 ISR mix) */
+ #include <SDL3/SDL_dosmidi_tick.h>      /* DOSKUTSU patch 0072: engine-registered IRQ-5 MIDI tick callback (Lever 2b MidiScheduler ISR piggyback) */
+ 
+@@ -321,6 +321,14 @@ static volatile bool g_dos_audio_hard_park = false;
+    a time anyway. */
+ static SDL_AudioDevice * volatile g_dos_audio_device = NULL;
+ 
++/* DOSKUTSU patch (SDL/0088): ring-fill query export state. Bytes-per-frame
++   of the open device's DMA format (SB16 S16 stereo = 4), cached at OpenDevice
++   from SDL_AUDIO_FRAMESIZE(device->spec). Used by SDL_DOSAudioRingFill*() to
++   convert the byte-domain ring cursors (isr_ring_write - isr_ring_read) into
++   frames/ms for the engine's depth-setpoint pump (nxengine-evo/0202). 0 until
++   a device opens; the query funcs return 0 in that case. */
++static int g_dos_ring_bytes_per_frame = 0;
++
+ /* DOSKUTSU patch (Phase 11 patch 0068, v2): cooperative-scheduler-
+    starvation backstop for SDL_DOSAudioPump (the 0067 v2 export). v2
+    wraps the outer SDL_LockMutex(device->lock) acquisition introduced
+@@ -885,6 +893,63 @@ static void dos_pixtone_recompute_ratediv(void)
+                          "shift_div=%d", d, devf, master, e);
+     }
+ }
++
++/* ========================================================================
++ * DOSKUTSU patch (SDL/0088): ring-fill query export
++ * ========================================================================
++ * Engine-callable (main thread) snapshot of the SB16 ring's current fill +
++ * capacity, consumed by the engine depth-setpoint pump (nxengine-evo/0202):
++ * the engine runs SDL_DOSAudioPump() until SDL_DOSAudioRingFillMs() reaches a
++ * target depth (clamped < SDL_DOSAudioRingCapacityMs()), holding the ring at a
++ * wall-clock setpoint instead of the open-loop chunk-count cap of
++ * nxengine-evo/0198 (which still walled at ~47% -- the bound was never the
++ * missing piece; the device rate was; see
++ * docs/internal/V108-MUSIC-RETROSPECTIVE.md sec.5.1).
++ *
++ * Cursors: isr_ring_write is the producer's authoritative monotonic write
++ * position (advanced under DOS_DisableInterrupts in PlayDevice, mirrored from
++ * hidden->ring_write); isr_ring_read is the ISR's monotonic drain position.
++ * Their difference is the current fill in bytes, always in [0, ring_size].
++ * Both are plain int; a single aligned read is atomic on the DJGPP/x86 target,
++ * so a main-thread reader gets a consistent snapshot (a concurrent ISR drain
++ * only makes the fill an instant smaller -- safe for a per-frame-resampled
++ * setpoint). No lock needed. Returns 0 when no device is open. */
++int SDL_DOSAudioRingFillFrames(void)
++{
++    if (g_dos_audio_device == NULL) {
++        return 0;
++    }
++    const int bpf = g_dos_ring_bytes_per_frame;
++    if (bpf <= 0) {
++        return 0;
++    }
++    const int fill_bytes = isr_ring_write - isr_ring_read;
++    if (fill_bytes <= 0) {
++        return 0;
++    }
++    return fill_bytes / bpf;
++}
++
++int SDL_DOSAudioRingFillMs(void)
++{
++    const int freq = g_dos_pixtone_dev_freq; /* device frame rate, cached at OpenDevice */
++    if (freq <= 0) {
++        return 0;
++    }
++    return (int)(((Sint64)SDL_DOSAudioRingFillFrames() * 1000) / freq);
++}
++
++int SDL_DOSAudioRingCapacityMs(void)
++{
++    const int freq = g_dos_pixtone_dev_freq;
++    const int bpf  = g_dos_ring_bytes_per_frame;
++    if (freq <= 0 || bpf <= 0) {
++        return 0;
++    }
++    const int cap_frames = isr_ring_size / bpf;
++    return (int)(((Sint64)cap_frames * 1000) / freq);
++}
++
+ /* ========================================================================
+  * DOSKUTSU patch (Phase 11 patch 0072): Lever 2b -- MidiScheduler tick
+  * from the SB16 IRQ-5 ISR
+@@ -2210,6 +2275,10 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+        is cached unconditionally so a late SetMasterRate call can still
+        recompute. Per BUG6-BALANCE-AND-SHIP-FIX-DESIGN.md Part 1. */
+     g_dos_pixtone_dev_freq = device->spec.freq;
++    /* DOSKUTSU patch (SDL/0088): cache bytes-per-frame for the ring-fill query.
++       SB16 path forced S16 stereo above -> 4; computed generically so the
++       pre-SB16 U8 mono/stereo paths are correct too. */
++    g_dos_ring_bytes_per_frame = (int)SDL_AUDIO_FRAMESIZE(device->spec);
+     if (g_dos_pixtone_irq_mix_active) {
+         const char *rd_hint =
+             SDL_GetHint("SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV");
+-- 
+2.47.3
+

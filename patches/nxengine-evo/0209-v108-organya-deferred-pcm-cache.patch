@@ -1,0 +1,148 @@
+From 7944d7ff6f12292966e0d062af6f57461ea5c074 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 3 Jun 2026 19:02:04 -0700
+Subject: [PATCH] patch 0209 -- #31 v1.0.8 audio-delivery: deferred organya PCM
+ cache
+
+Freeze-avoidance self-heal (team-lead-directed). A mid-gameplay <CMU that fell
+back to live synth (cache miss outside the post-load window, patch 0206) is
+recorded in a 1-deep pending slot; at the NEXT load_stage the song is rendered
+to its CACHE\<NAME>.PCM during the load pause (phase=load_stage), so a later
+re-encounter is an instant cache HIT (real-time, no freeze). Net: a boss/event
+song is slow-not-frozen on its FIRST encounter, then self-heals to real-time
+after the next load -- and NEVER a mid-gameplay freeze.
+
+The deferred render uses a TEMP Song + a LOCAL buffer -- it never touches the
+active playback buffer (g_org_prerender_buf). A header-only _org_cache_valid
+probe skips an already-cached song without clobbering the active buffer.
+Reuses 0206's _org_render_song + 0208's _org_cache_store. map.cpp drains the
+slot in the load_stage phase guard window (cache write is load-band). No-op
+when the slot is empty or pre-render is killswitched.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/map.cpp           |  9 ++++++
+ src/sound/Organya.cpp | 72 ++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 80 insertions(+), 1 deletion(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 92084aaf..04bb3fec 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1253,6 +1253,8 @@ struct FtAccumulatorGuard
+ extern "C" void io_audit_set_phase(int phase);
+ // patch 0206 (#31 v1.0.8): organya pre-render post-load window arm (Organya.cpp).
+ extern "C" void org_arm_postload_window(void);
++// patch 0209 (#31 v1.0.8): drain the 1-deep deferred organya cache (Organya.cpp).
++extern "C" void org_drain_pending_cache(void);
+ struct IoAuditPhaseGuard
+ {
+   IoAuditPhaseGuard()  { io_audit_set_phase(1); }
+@@ -1352,6 +1354,13 @@ bool load_stage(int stage_no)
+   // Organya::start). extern "C" defined in Organya.cpp.
+   org_arm_postload_window();
+ 
++  // patch 0209 (#31 v1.0.8): drain the 1-deep deferred organya cache. If a
++  // boss/event song played live-synth on a mid-gameplay <CMU (cache miss outside
++  // the post-load window), it is rendered + cached HERE, during this load pause
++  // (phase=load_stage), so a re-encounter is an instant cache HIT. No-op when the
++  // slot is empty / pre-render killswitched. extern "C" defined in Organya.cpp.
++  org_drain_pending_cache();
++
+   // patch 0175 per-cave-entry trace setup. _lst_cave is the monotonic
+   // counter for this call (always increments). _lst_t0_total anchors
+   // the TOTAL summary. _lst_phases counts emitted sub-phases. The
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index 26a0b82a..1eeefa08 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -614,6 +614,73 @@ static void _org_cache_store(const std::string &name, uint32_t native, uint32_t
+     LOG_WARN("Organya pre-render: cache write failed for {}", path.c_str());
+ }
+ 
++// ============================================================================
++// patch 0209 (#31 v1.0.8): DEFERRED cache. A mid-gameplay <CMU that fell back to
++// live synth (cache miss outside the post-load window, patch 0206) is recorded
++// here (1-deep); at the NEXT load_stage the song is rendered to its
++// CACHE\<NAME>.PCM during the load pause, so a later re-encounter is an instant
++// cache HIT (real-time, no freeze). The render uses a TEMP Song + a LOCAL buffer
++// -- it never touches the active playback buffer (g_org_prerender_buf). Net: a
++// boss/event song is slow-not-frozen on its FIRST encounter, then self-heals to
++// real-time after the next load -- and never a mid-gameplay freeze.
++static std::string g_org_pending_cache_path;   // 1-deep: resolved .org path awaiting a deferred render
++
++static void _org_pending_cache_enqueue(const std::string &path)
++{
++  g_org_pending_cache_path = path;   // keep only the most recent
++}
++
++// Header-only cache validity probe (does NOT touch g_org_prerender_buf, unlike
++// _org_cache_try_load) -- so the deferred drain can skip an already-cached song
++// without clobbering the active playback buffer.
++static bool _org_cache_valid(const std::string &name, uint32_t native, uint32_t H,
++                             uint32_t loop_start, uint32_t loop_end)
++{
++  FILE *fp = fopen(_org_cache_path(name).c_str(), "rb");
++  if (!fp)
++    return false;
++  OrgPcmHeader h;
++  bool ok = (fread(&h, 1, sizeof h, fp) == sizeof h)
++            && h.magic[0] == 'O' && h.magic[1] == 'P' && h.magic[2] == 'C' && h.magic[3] == '1'
++            && strncmp(h.build, _DOSKUTSU_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12), sizeof h.build) == 0
++            && strncmp(h.song, name.c_str(), sizeof h.song) == 0
++            && h.sample_rate == native && h.internal_rate == H
++            && h.loop_start == loop_start && h.loop_end == loop_end && h.nframes > 0;
++  fclose(fp);
++  return ok;
++}
++
++// Drain the 1-deep deferred-cache slot. Called from map.cpp load_stage (inside
++// the phase=load_stage guard window, so the render + cache write are load-band).
++// Renders the pending song via a temp Song + local buffer and writes its cache.
++extern "C" void org_drain_pending_cache(void)
++{
++  if (g_org_pending_cache_path.empty())
++    return;
++  const std::string path = g_org_pending_cache_path;
++  g_org_pending_cache_path.clear();   // 1-deep: clear regardless of outcome
++  if (!org_prerender_active())
++    return;                           // killswitch off -> no caching
++  const std::string cname = _org_cache_name(path);
++  Song tmp;
++  if (!tmp.Load(path))
++  {
++    LOG_WARN("Organya deferred cache: load failed for {}", path.c_str());
++    return;
++  }
++  uint32_t H = 0, spb = 0;
++  int      decim = 1;
++  _org_prerender_geometry(tmp, H, decim, spb);
++  if (_org_cache_valid(cname, SAMPLE_RATE, H, tmp.loop_start, tmp.loop_end))
++    return;                           // already cached -> skip the render
++  std::vector<int16_t> buf;
++  size_t ls = 0;
++  _org_render_song(tmp, H, decim, buf, ls);
++  _org_cache_store(cname, SAMPLE_RATE, H, tmp.loop_start, tmp.loop_end, buf, ls);
++  LOG_INFO("Organya deferred cache: rendered + cached {} at load (was live-synth "
++           "on first encounter; real-time on re-encounter).", cname.c_str());
++}
++
+ // Decide the producer for a starting song. Returns true if the pre-render buffer
+ // is ready (the per-frame producer = memcpy); false -> the caller live-synths.
+ // Policy: a cache HIT (patch 0208) short-circuits at ANY phase (no freeze); else
+@@ -660,8 +727,11 @@ static bool _organya_prerender_decide(Song &song, int startBeat)
+                (unsigned long)H, decim, (unsigned long)SAMPLE_RATE);
+     return true;
+   }
++  // patch 0209: enqueue this song for a deferred render+cache at the next load,
++  // so a re-encounter is an instant cache HIT (real-time).
++  _org_pending_cache_enqueue(g_org_prerender_song);
+   LOG_INFO("Organya pre-render: mid-gameplay music change -- live synth (no "
+-           "pre-render freeze).");
++           "pre-render freeze; queued for deferred cache at next load).");
+   return false;
+ }
+ 
+-- 
+2.47.3
+

@@ -5,6 +5,49 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.0.8] - 2026-06-04
+
+Audio release: 486-class Organya music now plays at real-time tempo, as an opt-in
+backend. The v1.0.7 note called Organya gameplay "tempo-limited by synthesizer
+throughput" -- calibration on the reference 486 showed that was a misdiagnosis. The
+synthesizer has roughly 5.65x headroom; the bottleneck was audio DELIVERY. The SB16
+PCM device was running at 44100 Hz (an SDL quality-floor policy) while the Organya
+content is 11025 Hz, so the DMA ring drained 4x too fast through a 4x upsampling
+resampler. This release opens the device at the content rate and pre-renders each
+song to a cached PCM buffer so the playback pull is a near-free memory copy.
+
+### Added / Changed
+
+- **Organya device-rate fix (SDL3-DOS).** The SB16 PCM device now opens at the engine
+  content rate (11025 Hz in Tier-2) instead of the SDL 44100 floor, removing a 4x ring
+  drain and a 4x logical-to-physical resampler. Default-ON; killswitch
+  `SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0` restores the 44100 floor.
+  (`patches/SDL/0087`, `0088`, `0090`; `patches/nxengine-evo/0205`.)
+- **Organya pre-render with on-disk PCM cache.** Each Organya song loop is synthesized
+  once to a static PCM buffer (the per-frame producer is then a memory copy, with no
+  synthesis in the playback pull) and written to `CACHE\<NAME>.PCM`, so the first-render
+  cost is paid one time per song ever; subsequent plays fast-load from the CF card. A
+  song that changes mid-gameplay before it has been cached falls back to live synthesis
+  (slower, never a freeze) and is cached at the next stage load so the re-encounter is
+  real-time. Default-ON; killswitch `SDL_HINT_DOSKUTSU_ORG_PRERENDER=0` reverts to the
+  v1.0.7 live-synth path. The cache is version-keyed on the build fingerprint and
+  auto-invalidates on any binary change. (`patches/nxengine-evo/0206`, `0207`, `0208`,
+  `0209`.) Confirmed on the reference 486 (DX2-66): real-time Organya tempo at playable
+  framerate, with cache write-then-fast-load verified across reboots.
+
+### Notes
+
+- **`opl3` / MIDI remains the recommended default backend** for 486 gameplay
+  (`SDL_HINT_DOSKUTSU_AUDIO_BACKEND=opl3`); it is unchanged from v1.0.7 and has the best
+  performance. Organya is an opt-in alternative. The OPL3 and WaveBlaster paths are
+  byte-identical to v1.0.7 -- the pre-render pump engages only when Organya is the
+  active backend.
+- Two known Organya caveats on 486-class hardware: the 11025 Hz output has audible
+  high-frequency "scratch" (a bandwidth limit of the playback rate itself, not the
+  synthesizer -- internal oversampling does not change it), and the first time each song
+  plays it renders for roughly 10-25 seconds (a one-time pause, then cached). Both are
+  noted for the README polish pass.
+
 ## [1.0.7] - 2026-06-02
 
 Bugfix release: the 486-class Organya music hang (Bug 5) is fixed. This is the

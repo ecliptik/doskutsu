@@ -1,0 +1,145 @@
+From d50ad933fdc49e42b09088883385c8e610f866c8 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 3 Jun 2026 18:36:09 -0700
+Subject: [PATCH] patch 0207 -- #31 v1.0.8 audio-delivery: pump-to-target depth
+ setpoint (ship)
+
+Amount-bounded / depth-regulated per-frame ring refill (fires once per
+displayed frame, same cadence as 0164; bounded by a closed-loop ring-fill
+DEPTH setpoint that self-corrects across a varying fps). Viable because of
+the 11025 device rate (patch 0205 / SDL/0090): each chunk is worth ~23 ms +
+the 4x resampler is gone, so ~2-3 chunks/frame reaches real-time at near-free
+cost. Consumes sdl's SDL_DOSAudioRingFillMs / RingCapacityMs (SDL/0088).
+
+DEFAULT gating (production-safety contract): the 186 ms depth default engages
+ONLY when org_prerender_buffer_ready() (patch 0206) is true -- organya active
++ pre-render buffer populated. For OPL3/WB (production default) and the
+live-synth organya killswitch path the buffer is empty -> target 0 -> pump
+OFF -> SFX-ring latency byte-identical to v1.0.7. Explicit
+SDL_HINT_DOSKUTSU_ORG_PUMP_TARGET_MS env always overrides. The buffer-derived
+default is re-evaluated LIVE per frame (not cached-on-first-call) because the
+first TICKPUMP() can precede Organya::start()'s buffer fill. MAX_CHUNKS
+default 4.
+
+Diag-free ship form of the experiment 0202 (no [pump-stat]/[tas-det]
+counters, no _calib_exit_emit dependency). Strictly audio-refill path; the
+wave-36 drawcall-coupling trap does not apply (post-catch-up, no tick_state,
+no drawcall submit).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/main.cpp | 98 +++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 97 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 7ddfeda8..9241b7c9 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -371,7 +371,103 @@ static bool tickpump_active()
+   }
+   return g_tickpump_decided == 1;
+ }
+-#define TICKPUMP() do { if (tickpump_active()) while (SDL_DOSAudioPump()) { } } while (0)
++// DOS-PORT (patch 0207, #31 v1.0.8 audio-delivery): PUMP-TO-TARGET depth
++// setpoint -- the ship form of the head-to-head delivery pump. AMOUNT-BOUNDED /
++// DEPTH-REGULATED, NOT render-decoupled: TICKPUMP() still fires exactly ONCE per
++// displayed frame (same call site + cadence as the 0164 unbounded pump); it is
++// decoupled only in the AMOUNT it delivers (pump until the ring holds a target
++// depth), not in WHEN it fires. The bound is a closed-loop ring-fill DEPTH
++// setpoint that self-corrects across a varying fps.
++//
++// The pump family is viable because of the 11025 device rate (patch 0205 / sdl
++// SDL/0090): at 11025 each pumped chunk is worth ~23 ms (vs ~6 ms at 44100) and
++// the 4x logical->physical resampler is gone, so ~2-3 chunks/frame reaches
++// real-time tempo at near-free cost. Consumes sdl's SDL_DOSAudioRingFillMs() /
++// SDL_DOSAudioRingCapacityMs() (SDL/0088). Cooperative model only; strictly on
++// the audio-refill path -- no thread, no ISR-mixer, nothing that touches the
++// logic tick / RNG / entity state.
++//
++// DEFAULT gating (the production-safety contract): the 186 ms depth default
++// engages ONLY when org_prerender_buffer_ready() is true -- i.e. organya is the
++// active backend AND the pre-render buffer was populated (patch 0206). For the
++// production-default OPL3/WB path (and the live-synth organya killswitch path)
++// the buffer is empty -> target 0 -> the pump stays OFF and SFX-ring latency is
++// byte-identical to v1.0.7. An explicit SDL_HINT_DOSKUTSU_ORG_PUMP_TARGET_MS
++// env always overrides (any config can force a depth).
++extern "C" bool org_prerender_buffer_ready(void);
++#define ORG_PUMP_DEFAULT_TARGET_MS 186
++
++// Env is cached once; the buffer-derived DEFAULT is re-evaluated LIVE every
++// frame until it engages. This matters: the first TICKPUMP() can run before
++// Organya::start() populates the pre-render buffer (stage music starts a few
++// ticks into load), so a cache-on-first-call default would latch 0 forever and
++// the pump would never engage. The .empty() probe is trivial; the banner logs
++// once on the transition to active.
++static int  g_org_pump_env    = -2;   // -2 undecided, -1 no-env, >=0 explicit env value
++static bool g_org_pump_logged = false;
++static int org_pump_target_ms()
++{
++  if (g_org_pump_env == -2)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_ORG_PUMP_TARGET_MS");
++    if (e && e[0]) { int v = SDL_atoi(e); if (v < 0) v = 0; g_org_pump_env = v; }
++    else           { g_org_pump_env = -1; }
++  }
++  int target;
++  if (g_org_pump_env >= 0)
++    target = g_org_pump_env;                                                   // explicit env (stable)
++  else
++    target = org_prerender_buffer_ready() ? ORG_PUMP_DEFAULT_TARGET_MS : 0;    // live default
++  if (target > 0 && !g_org_pump_logged)
++  {
++    g_org_pump_logged = true;
++    LOG_INFO("audio pump-to-target: ENABLED ({} ms depth setpoint; amount-"
++             "bounded depth-regulated ring refill per displayed frame; "
++             "killswitch SDL_HINT_DOSKUTSU_ORG_PUMP_TARGET_MS=0).",
++             target);
++  }
++  return target;
++}
++
++// Per-frame chunk CAP: (1) the render-starvation guard (a render spike must
++// never let the pump run away) and (2) a depth-frontier knob. Default 4 (the
++// ship setting: deep enough that the depth setpoint governs, not the cap).
++static int g_org_pump_max_chunks = -1;
++static int org_pump_max_chunks()
++{
++  if (g_org_pump_max_chunks < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_ORG_PUMP_MAX_CHUNKS");
++    int v = (e && e[0]) ? SDL_atoi(e) : 4;
++    if (v < 1) v = 1;
++    g_org_pump_max_chunks = v;
++  }
++  return g_org_pump_max_chunks;
++}
++
++static void _audio_tick_pump(void)
++{
++  const int target = org_pump_target_ms();
++  if (target > 0)
++  {
++    // Clamp the setpoint below the ring ceiling (leave ~1 chunk margin) so the
++    // loop never chases a depth the ring cannot hold. Read CapacityMs (NOT a
++    // hardcode) so sdl's ring depth is respected.
++    int tgt = target;
++    const int capms = SDL_DOSAudioRingCapacityMs();
++    if (capms > 0 && tgt > capms - 8) tgt = capms - 8;
++    if (tgt < 1) tgt = 1;
++    const int cap = org_pump_max_chunks();
++    int n = 0;
++    while (n < cap && SDL_DOSAudioRingFillMs() < tgt && SDL_DOSAudioPump()) ++n;
++  }
++  else if (tickpump_active())
++  {
++    // Legacy v1.0.7 UNBOUNDED tick pump (opt-in killswitch path): pump to full.
++    while (SDL_DOSAudioPump()) { }
++  }
++}
++#define TICKPUMP() _audio_tick_pump()
+ 
+ // DOS-PORT (patch 0179, SFXPAUSE diagnostic): frame-spike anomaly
+ // detector. NO fixed window -- emits a [frame-spike] line every time
+-- 
+2.47.3
+
