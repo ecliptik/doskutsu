@@ -368,6 +368,9 @@ BANNER_REGEX=(
   "org-lookahead: ORG_LOOKAHEAD=1 -- Bug-5 organya stream look-ahead buffer ENABLED"
   "audio tick-boundary pump CAP: [0-9]+ "
   "Sound system: device frame-rate: requesting [0-9]+ Hz match to master"
+  "eager action sheets: (ENABLED \(default\)|DISABLED \(killswitch =0\))"
+  "organya render quiesce: (ENABLED \(default\)|DISABLED \(killswitch =0\))"
+  "\[org-precache\] TOTAL rate=[0-9]+ channels=[0-9]+ rendered=[0-9]+ skipped=[0-9]+ failed=[0-9]+ bytes=[0-9]+"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -429,6 +432,9 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
+  "optional"
+  "optional"
   "optional"
   "optional"
   "optional"
@@ -563,6 +569,9 @@ BANNER_LABEL=(
   "0197 #31 Bug-5 bug5pmp ORG_LOOKAHEAD organya stream look-ahead buffer (env-gated SDL_HINT_DOSKUTSU_ORG_LOOKAHEAD, DEFAULT-OFF; optional -- one-shot 'org-lookahead: ORG_LOOKAHEAD=1 ... ENABLED (target=4096 bytes cap=16 iters)' on the FIRST organyaStreamCallback when the hint=1 AND the Organya backend is active. The candidate-fix lever for the gameplay residual: the callback over-produces to a target stream-queue depth so a flip-park drains the buffer instead of starving. Default smoke runs OPL3 + hint-unset so the callback never runs and this is ABSENT -- expected, not a failure (embed witness = strings|grep org-lookahead). The realhw PMP2 cell (organya + ORG_LOOKAHEAD=1 + ORG_STREAM_DIAG=1) is the runtime witness. OPTIONAL: candidate-fix lever for the Bug-5 gameplay-audio iter, default-OFF; promote to required only if it ships default-ON in v1.0.7. BANNER_REGEX idx 89.)"
   "0198 #31 Bug-5 bug5pmp TICKPUMP_CAP bound-the-pump lever (env-gated SDL_HINT_DOSKUTSU_TICKPUMP_CAP=N, DEFAULT 0/unbounded; optional -- one-shot 'audio tick-boundary pump CAP: N (...)' on the first capped TICKPUMP, which fires ONLY when SDL_HINT_DOSKUTSU_AUDIO_TICKPUMP=1 (the cap reader sits inside the tickpump_active() gate). Default smoke leaves AUDIO_TICKPUMP unset so the pump never runs and this is ABSENT -- expected, not a failure (embed witness = strings|grep 'tick-boundary pump CAP'). The realhw CAP=1/CAP=2 cells (TICKPUMP=1 + TICKPUMP_CAP=N) are the runtime witness. Bounds the unbounded SDL_DOSAudioPump while-loop to N frames/tick so the proven pump feeds organya without stealing main. OPTIONAL: candidate-fix lever for the Bug-5 gameplay-audio iter, default-unbounded preserves pre-0198 behavior. BANNER_REGEX idx 90.)"
   "0203 #31 v1.0.8 device-rate ENGINE wire-in banner (always-on every boot: SoundManager unconditionally calls SDL_DOSAudioSetDeviceFrameRate(SAMPLE_RATE) -> 'Sound system: device frame-rate: requesting <hz> Hz match to master ...'. OPTIONAL -- banner-emit proves the engine CALL fired, NOT that the rate took effect (the SDL-side killswitch DEVICE_RATE_DEFAULT=0 makes the backend ignore the call while the engine still emits this banner); rate-took-effect witness = SDL/0090 banner + SDL/0073 dev_freq line. Redundant device-rate witness alongside SDL/0090 (optional per nx handoff; embed witness = strings _SDL_DOSAudioSetDeviceFrameRate). BANNER_REGEX idx 91.)"
+  "0213 v1.0.8.1 eager action-sheet load decision (default-ON; LOG_INFO at first load_stage; pre-loads weapon bullet + hit/muzzle/trail caret sheets so the first fire/impact does not lazy-decode mid-gameplay; killswitch SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS=0. OPTIONAL: INFO-level, present on verbose/tagged runs. BANNER_REGEX idx 92.)"
+  "0214 v1.0.8.1 organya render-window quiesce decision (default-ON; emits on an organya COLD-RENDER; zeroes the SB16 ring so the DMA loops silence not stale music during the blocking synth pass; killswitch SDL_HINT_DOSKUTSU_ORG_RENDER_QUIESCE=0. OPTIONAL: cold-render-only, absent in a warm-cache smoke. BANNER_REGEX idx 93.)"
+  "0215 v1.0.8.1 batch org-precache total (OPTIONAL -- emits ONLY under DOSKUTSU_ORG_PRECACHE_ALL=1, the deployable-cache one-shot; reports rate/channels/rendered/skipped/failed/bytes for CF sizing; absent in a normal gameplay smoke. BANNER_REGEX idx 94.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

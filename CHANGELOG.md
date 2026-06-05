@@ -5,6 +5,53 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.0.8.1] - 2026-06-05
+
+Quality release for the opt-in 486 Organya backend: removes the remaining gameplay
+hitches around weapon-fire and song changes, and adds a deploy-once PCM cache so the
+per-song cold-render no longer stalls play on the reference 486. The default backend
+is still OPL3/WaveBlaster (auto-detect), unchanged.
+
+### Fixed
+
+- **Polar Star first-fire pause.** The weapon bullet + hit/muzzle/trail caret sprite
+  sheets were lazy-decoded from the CF card on the first shot/impact of a session -- a
+  one-time hitch on the 486. They are now eager-loaded into the stage-load band so the
+  first fire does not decode mid-gameplay. Default-ON; killswitch
+  `SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS=0`. (`patches/nxengine-evo/0213`.)
+- **Organya cold-render stale-music blip.** When an Organya song is cold-rendered (the
+  first play of an uncached song), the blocking synth pass briefly starves the audio
+  pull; the SB16 ring previously looped stale music for that window. The ring and the
+  DMA double-buffer are now zero-flushed before the render, so the gap is clean silence
+  instead of a stutter or click. Default-ON; killswitch
+  `SDL_HINT_DOSKUTSU_ORG_RENDER_QUIESCE=0`.
+  (`patches/nxengine-evo/0214`, `patches/SDL/0092`.)
+
+### Added
+
+- **Organya pre-render-to-cache batch mode.** A one-shot mode renders every Organya
+  song to its PCM cache up front, eliminating the ~13-30 s per-song cold-render that
+  otherwise occurs on first play on the 486. Run the game once with
+  `DOSKUTSU_ORG_PRECACHE_ALL=1` to generate the cache (tier-scoped, e.g.
+  `CACHE\11025_1\` for the 11025 Hz mono Tier-2 set -- ~46 MB across 41 songs), then
+  copy that cache directory onto the CF card alongside the game; subsequent plays
+  fast-load every song with no render stall. The cache is version-keyed to the build,
+  so it is regenerated when the binary changes. (`patches/nxengine-evo/0215`.)
+  - Cache generation currently runs the DOS binary on a fast machine (DOSBox-X
+    headless). A host-native generator that removes the DOSBox dependency is a planned
+    fast-follow.
+
+### Known issues
+
+- The 11025 Hz Organya output has an audible high-frequency "scratch" -- a bandwidth
+  limit of the playback rate itself, not the synthesizer (internal oversampling does
+  not change it). The opt-in 22050 Hz stereo quality tier (planned, v1.0.9) removes it.
+- An intermittent hang on quit-to-DOS, in the DOS runtime exit AFTER the SDL audio and
+  video teardown completes -- dormant (not reproducing on the reference 486 DX2-66) and
+  not yet root-caused (long-standing issue #18). Does not affect gameplay.
+- Under Fixed-Timestep (the default), the save-select / stage-select menu slide-in
+  animations play at about half speed -- cosmetic.
+
 ## [1.0.8] - 2026-06-04
 
 Audio release: 486-class Organya music now plays at real-time tempo, as an opt-in

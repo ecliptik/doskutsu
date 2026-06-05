@@ -48,7 +48,7 @@ Required on the dev host (Linux or WSL):
 - `git`, `make`, standard POSIX build tools (`bash`, `awk`, `patch`)
 - `python3` -- the asset extractor
 - `unzip` -- the bootstrap may unpack a downloaded `Doukutsu.exe` zip
-- `dosbox-x` -- `sudo apt install dosbox-x` on Debian/Ubuntu (only needed to test in emulation)
+- `dosbox-x` -- `sudo apt install dosbox-x` on Debian/Ubuntu. **Required** for the automated correctness gates: `make smoke` / `make smoke-fast` run the built `DOSKUTSU.EXE` under DOSBox-X to verify it boots, reaches the title, and passes the gameplay-smoke banner gate (Phases 1 + 5). There is no byte-identical oracle for an interactive game, so DOSBox-X execution **is** the build-verification gate. It is also used to generate the Organya pre-render PCM cache (`DOSKUTSU_ORG_PRECACHE_ALL=1` runs the shipped `DOSKUTSU.EXE` headless under DOSBox-X to render the cache on a fast machine before deploying to the CF). Not needed at runtime.
 - `scrot`, `xdotool` -- for visible DOSBox-X automation (optional, only needed for playtest + screenshots)
 - `zip` -- for `make dist`
 

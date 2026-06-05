@@ -49,7 +49,7 @@ esac
 norm() { printf '%s' "${1#[vV]}"; }
 
 # all "## [x.y.z]" versions, in file order (top-most first)
-mapfile -t ENTRIES < <(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' "$CHANGELOG" | sed -E 's/^## \[([0-9.]+)\]/\1/')
+mapfile -t ENTRIES < <(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?\]' "$CHANGELOG" | sed -E 's/^## \[([0-9.]+)\]/\1/')
 if [[ ${#ENTRIES[@]} -eq 0 ]]; then
   echo "[changelog-gate] FAIL: no '## [x.y.z]' version entries found in CHANGELOG.md"
   echo "[changelog-gate]   expected Keep-a-Changelog form, e.g.: ## [1.0.6] - 2026-06-01"
@@ -60,8 +60,8 @@ TOP="${ENTRIES[0]}"
 # ----- MODE A: explicit version must be present --------------------------------
 if [[ -n "${1:-}" ]]; then
   WANT="$(norm "$1")"
-  if [[ ! "$WANT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "[changelog-gate] usage error: version '$1' is not x.y.z (with optional leading v)"
+  if [[ ! "$WANT" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "[changelog-gate] usage error: version '$1' is not x.y.z[.w] (with optional leading v)"
     exit 2
   fi
   for v in "${ENTRIES[@]}"; do

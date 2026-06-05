@@ -1,0 +1,217 @@
+From e335d751cbe72ba1490f7ccb2144fb48a38ec5fb Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 4 Jun 2026 18:07:54 -0700
+Subject: [PATCH] patch 0214 -- Item 3 / v1.0.8.1: organya render-window
+ quiesce
+
+Fixes the mid-gameplay stall the operator heard as "tempo tanked /
+something broke" entering a new area on a fresh cache. Mechanism
+(flush-instr-confirmed, render-window): the organya cold-render
+(_org_render_song) is a ~10-14 s BLOCKING synth pass on DOS's single
+cooperative thread, so while it runs the 0207 audio pump never executes.
+The SB16 in auto-init DMA then LOOPS whatever is physically in the ring
+for the whole window -- mid-gameplay that is the currently-playing song's
+stale ~372 ms tail = the stutter. (At the title nothing is playing yet,
+so it never bit there -- why this is a v1.0.8.1 follow-up, not a v1.0.8
+regression.)
+
+Fix: immediately before each cold-render, zero the ENTIRE physical ring
+(software ring + DMA double-buffer) so the SB16 loops SILENCE -- a clean
+quiet load window reads as "loading", not a broken stutter. The
+producer/pump cannot do this (SDL/0054 silence-detect skips a silent
+ring write; the DMA double-buffer is ISR-only), so it calls the
+dedicated export SDL_DOSAudioFlushRingSilence() (SDL/0092) as the LAST
+audio op before the blocking render (no pump/producer write between, or
+the ring re-fills with music). Two sites, both in the load_stage band:
+the 0209 deferred-cache drain (a previous song is playing -> stop it
+first) and the 0206 post-load entry render (start() already marked the
+new song playing -> flush only, no stop).
+
+organya-only (the prerender family is organya-gated; OPL3/WB drive their
+own hardware with no software ring to starve). Default-ON; killswitch
+SDL_HINT_DOSKUTSU_ORG_RENDER_QUIESCE=0 reverts to the v1.0.8 behavior.
+Confirm diagnostics (the [org-quiesce] witness block) ride a separate
+opt-in gate SDL_HINT_DOSKUTSU_ORG_QUIESCE_DIAG=1 (default-OFF, excised at
+ship). Witness PASS = quiesce_fired=1 AND flush_return_frames >=
+phys_capacity_frames AND ring_fill ~0, where phys_capacity_frames comes
+from SDL_DOSAudioPhysicalCapacityFrames() (SDL/0092 -- the TRUE Stage2+
+Stage3 depth, NOT 0088 RingCapacityMs which omits the DMA buffer and
+would false-pass).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+---
+ src/sound/Organya.cpp | 137 +++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 135 insertions(+), 2 deletions(-)
+
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index 1eeefa0..dcb52b0 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -16,6 +16,7 @@
+ #include "SoundManager.h"
+ 
+ #include <SDL3/SDL.h>
++#include <SDL3/SDL_dosaudio_pump.h>  // patch 0214: SDL_DOSAudioFlushRingSilence (SDL/0092) + ring queries (SDL/0088)
+ #include <SDL3_mixer/SDL_mixer.h>
+ #include <cmath>
+ #include <cstdio>     // patch 0208: FILE*/fopen/fread/fwrite for the PCM disk cache
+@@ -650,6 +651,125 @@ static bool _org_cache_valid(const std::string &name, uint32_t native, uint32_t
+   return ok;
+ }
+ 
++// ============================================================================
++// patch 0214 (Item 3 / v1.0.8.1): render-window quiesce. The cold-render
++// (_org_render_song) is a ~10-14 s BLOCKING synth pass on the single
++// cooperative thread, so while it runs the 0207 audio pump never executes and
++// the SB16 auto-init DMA LOOPS whatever is physically in the ring for the whole
++// window. Mid-gameplay (a CURRENTLY-playing song + a cold-render of the next
++// song on a fresh cache) that means the ring's stale ~372 ms of music loops =
++// the "tempo tanked / something broke" stutter the operator heard entering a
++// new area. (At the title nothing is playing yet, so it never bit there.)
++//
++// Fix: immediately BEFORE the blocking render, zero the ENTIRE physical ring so
++// the SB16 loops SILENCE (a clean quiet load window, reads as "loading", not a
++// stutter). The producer/pump CANNOT do this -- SDL/0054 silence-detect skips a
++// silent ring write and the DMA double-buffer is ISR-only -- so this calls the
++// dedicated sdl-engine export SDL_DOSAudioFlushRingSilence() (SDL/0092), which
++// zeroes the software ring + the DMA double-buffer + collapses the cursors and
++// returns the zeroed frame count (>0 == both fully zeroed, by construction).
++// It MUST be the LAST audio op before the render (no pump/producer write
++// between the flush and the blocking loop, or the ring re-fills with music).
++//
++// organya-only path (the prerender family is organya-gated); OPL3/WB drive their
++// own hardware, no software ring to starve. Default-ON; killswitch
++// SDL_HINT_DOSKUTSU_ORG_RENDER_QUIESCE=0 reverts to the v1.0.8 no-quiesce
++// behavior (stutter returns). Diagnostics (the [org-quiesce] witness block for
++// flush-instr's confirm) ride a SEPARATE opt-in gate
++// SDL_HINT_DOSKUTSU_ORG_QUIESCE_DIAG=1 (default-OFF, excised at ship -- the
++// production binary stays provenance-clean).
++static int  g_org_render_quiesce_decided = -1;
++static bool org_render_quiesce_active()
++{
++  if (g_org_render_quiesce_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_ORG_RENDER_QUIESCE");
++    // Default-ON: disabled ONLY by the literal "0" killswitch.
++    g_org_render_quiesce_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    LOG_INFO("organya render quiesce: {} (cold-render zeroes the SB16 ring so the "
++             "DMA loops silence not stale music during the blocking synth pass; "
++             "set SDL_HINT_DOSKUTSU_ORG_RENDER_QUIESCE=0 to restore the v1.0.8 "
++             "no-quiesce behavior)",
++             g_org_render_quiesce_decided ? "ENABLED (default)"
++                                          : "DISABLED (killswitch =0)");
++  }
++  return g_org_render_quiesce_decided == 1;
++}
++
++static int  g_org_quiesce_diag_decided = -1;
++static bool org_quiesce_diag_active()
++{
++  if (g_org_quiesce_diag_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_ORG_QUIESCE_DIAG");
++    g_org_quiesce_diag_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    if (g_org_quiesce_diag_decided)
++      LOG_INFO("organya quiesce diag: ENABLED (opt-in SDL_HINT_DOSKUTSU_ORG_QUIESCE_"
++               "DIAG=1; emits one [org-quiesce] witness block per cold-render; "
++               "default OFF)");
++  }
++  return g_org_quiesce_diag_decided == 1;
++}
++
++// Boot-cached TRUE physical loop depth in frames = the software ring (Stage 2)
++// PLUS the SB16 DMA double-buffer (Stage 3), via sdl-engine's SDL/0092
++// SDL_DOSAudioPhysicalCapacityFrames(). This is the witness DENOMINATOR -- NOT
++// SDL_DOSAudioRingCapacityMs() (0088), which counts the software ring ONLY and
++// would FALSE-PASS while the DMA buffer still loops music. On a full flush,
++// SDL_DOSAudioFlushRingSilence() returns exactly this; a partial flush returns
++// less -> flush-instr's PASS = flush_return_frames >= phys_capacity_frames.
++static int g_org_phys_cap_frames = -1;
++static int org_phys_cap_frames()
++{
++  if (g_org_phys_cap_frames < 0)
++    g_org_phys_cap_frames = SDL_DOSAudioPhysicalCapacityFrames();
++  return g_org_phys_cap_frames;
++}
++
++// RAII quiesce around a cold-render. Constructor (before the render): optionally
++// stops the currently-playing song, then zeroes the whole ring via SDL/0092 as
++// the LAST audio op. Destructor (after the render): emits flush-instr's
++// [org-quiesce] witness block when ORG_QUIESCE_DIAG is on. site = "drain"
++// (0209 deferred-cache drain: a previous song is still playing -> stop it) or
++// "entry" (0206 post-load entry render: start() has already marked the NEW song
++// playing -> do NOT stop it, just flush the stale tail).
++struct OrgRenderQuiesce
++{
++  const char *_site;
++  std::string _name;
++  bool        _on;
++  bool        _diag;
++  int         _flushed;
++  int         _fill_at_entry;
++  Uint64      _t0;
++  OrgRenderQuiesce(const char *site, bool stop_current, const std::string &name)
++      : _site(site), _name(name), _on(org_render_quiesce_active()),
++        _diag(org_quiesce_diag_active()), _flushed(0), _fill_at_entry(0), _t0(0)
++  {
++    if (_on)
++    {
++      if (stop_current)
++        Organya::getInstance()->stop();          // halt the outgoing producer
++      _flushed = SDL_DOSAudioFlushRingSilence();  // LAST op before the render
++    }
++    if (_diag)
++    {
++      _fill_at_entry = SDL_DOSAudioRingFillMs();   // expect ~0 post-flush
++      _t0            = SDL_GetTicksNS();
++    }
++  }
++  ~OrgRenderQuiesce()
++  {
++    if (!_diag)
++      return;
++    const Uint64 render_ms = _t0 ? (SDL_GetTicksNS() - _t0) / 1000000ull : 0;
++    LOG_INFO("[org-quiesce site={} song={}] quiesce_fired={} flush_return_frames={} "
++             "phys_capacity_frames={} ring_fill_ms_at_render_entry={} t_render_ms={}",
++             _site, _name.c_str(), _on ? 1 : 0, _flushed, org_phys_cap_frames(),
++             _fill_at_entry, (unsigned long long)render_ms);
++  }
++};
++
+ // Drain the 1-deep deferred-cache slot. Called from map.cpp load_stage (inside
+ // the phase=load_stage guard window, so the render + cache write are load-band).
+ // Renders the pending song via a temp Song + local buffer and writes its cache.
+@@ -675,7 +795,13 @@ extern "C" void org_drain_pending_cache(void)
+     return;                           // already cached -> skip the render
+   std::vector<int16_t> buf;
+   size_t ls = 0;
+-  _org_render_song(tmp, H, decim, buf, ls);
++  {
++    // patch 0214: a previous song is still playing during this load-band drain
++    // -> stop it, then zero the ring so the SB16 loops silence (not its stale
++    // tail) for the whole blocking render. RAII emits the diag witness on exit.
++    OrgRenderQuiesce _q("drain", /*stop_current=*/true, cname);
++    _org_render_song(tmp, H, decim, buf, ls);
++  }
+   _org_cache_store(cname, SAMPLE_RATE, H, tmp.loop_start, tmp.loop_end, buf, ls);
+   LOG_INFO("Organya deferred cache: rendered + cached {} at load (was live-synth "
+            "on first encounter; real-time on re-encounter).", cname.c_str());
+@@ -709,7 +835,14 @@ static bool _organya_prerender_decide(Song &song, int startBeat)
+ 
+   if (in_window)
+   {
+-    _org_render_song(song, H, decim, g_org_prerender_buf, g_org_prerender_loopstart);
++    {
++      // patch 0214: start() has already marked THIS (new) song playing, so do
++      // NOT stop it -- just zero the ring so the SB16 loops silence (not any
++      // stale outgoing-song tail) during the blocking entry render. RAII emits
++      // the diag witness on exit.
++      OrgRenderQuiesce _q("entry", /*stop_current=*/false, cname);
++      _org_render_song(song, H, decim, g_org_prerender_buf, g_org_prerender_loopstart);
++    }
+     // patch 0208: persist so the next play of this song fast-loads.
+     _org_cache_store(cname, SAMPLE_RATE, H, song.loop_start, song.loop_end,
+                      g_org_prerender_buf, g_org_prerender_loopstart);
+-- 
+2.47.3
+

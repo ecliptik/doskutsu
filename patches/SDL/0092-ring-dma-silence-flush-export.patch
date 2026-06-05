@@ -1,0 +1,298 @@
+From 88582f9fb6577593678ed1fdc53a0c260d38506d Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 4 Jun 2026 17:53:30 -0700
+Subject: [PATCH] dos: patch 0092 -- ring + DMA-buffer silence-flush export
+ (V108 render-window CPU-steal stall)
+
+DOS needs this because the engine has no way to silence the SB16 physical
+audio path before a long fully-blocking synth render. The organya cold-render
+(_org_render_song, ~13.6 s, no cooperative yield) parks the SDL audio thread,
+the only ring producer; the producer write cursor freezes. The SB16 auto-init
+DMA keeps physically looping the DMA double-buffer and the IRQ-5 ISR keeps
+refilling DMA halves from whatever STALE music bytes remain in the software
+ring -- so the last music fragment buzzes / tempo-tanks for the whole render
+window on slow 486-class HW (Task #7).
+
+The existing exports cannot do this from the engine: SDL/0088 RingFill*() are
+read-only cursor queries; SDL_DOSAudioPump() (SDL/0067) is mix-then-commit and
+writes whatever the mixer produced -- and if the engine stops the song first so
+the mix is silent, the SDL/0054 Shape A silence-detect SKIPS the ring write
+entirely, leaving the stale bytes resident. No engine-reachable path memsets
+the ring, and none reaches the DMA double-buffer (ISR-only).
+
+SDL_DOSAudioFlushRingSilence() zeroes BOTH physical buffers (software ring +
+DMA double-buffer) and collapses the ring cursors to empty under a brief
+ISR-atomic cli window, so the silence takes effect immediately even if IRQ-5
+refill is delayed during the blocking render (the DX2-class regime DOSBox-X
+cannot reproduce). Returns the silence frames flushed (== ring capacity) for
+the flush-instr witness silence_frames_flushed >= ring_capacity_frames.
+
+Unconditional from SDL's side (mirrors SDL_DOSAudioPump); the engine gates the
+call with a killswitch hint at the nxengine-evo/0206 + 0209 cold-render sites
+(correctness fix, default-ON + killswitch). Workspace-local; never upstreamed.
+---
+ include/SDL3/SDL_dosaudio_pump.h |  94 ++++++++++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c  | 142 +++++++++++++++++++++++++++++++
+ 2 files changed, 236 insertions(+)
+
+diff --git a/include/SDL3/SDL_dosaudio_pump.h b/include/SDL3/SDL_dosaudio_pump.h
+index 586423fcf..44ead6553 100644
+--- a/include/SDL3/SDL_dosaudio_pump.h
++++ b/include/SDL3/SDL_dosaudio_pump.h
+@@ -310,6 +310,100 @@ extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioRingFillMs(void);
+  */
+ extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioRingCapacityMs(void);
+ 
++/**
++ * Hard-silence the SB16 physical audio path: zero the entire software ring
++ * AND the DMA double-buffer, and collapse the ring cursors to empty.
++ *
++ * **DOSKUTSU local addition (patches/SDL/0092, never upstreamed.)**
++ *
++ * Called by the engine immediately BEFORE a long fully-blocking synth render
++ * (the organya cold-render `_org_render_song`, ~13.6 s with no cooperative
++ * yield: nxengine-evo/0206 post-load entry render + nxengine-evo/0209
++ * deferred-cache drain). During that window the SDL audio thread never runs
++ * (`DOSSOUNDBLASTER_PlayDevice` is the only ring producer and it is parked),
++ * so the producer write cursor is frozen; the SB16 auto-init DMA keeps
++ * physically looping the DMA double-buffer, and the IRQ-5 ISR keeps refilling
++ * DMA halves from whatever STALE music bytes remain in the software ring.
++ * On slow 486-class hardware the last music fragment buzzes / tempo-tanks for
++ * the whole render window (the V108 render-window CPU-steal stall, Task #7).
++ *
++ * ## Why the existing exports cannot do this from the engine
++ *
++ * - `SDL_DOSAudioRingFillFrames` / `...Ms` / `...CapacityMs` (SDL/0088) are
++ *   READ-ONLY cursor queries.
++ * - `SDL_DOSAudioPump` (SDL/0067) is a mix-then-commit path: it writes
++ *   whatever the MIXER produced. If the current song is still mixing it writes
++ *   MORE music; if the engine first stops the song so the mix is silent, the
++ *   SDL/0054 Shape A silence-detect SKIPS the ring write entirely (the
++ *   `all_silence` branch in `DOSSOUNDBLASTER_PlayDevice`) -- so the stale song
++ *   bytes already resident in the ring are never overwritten. No engine-
++ *   reachable path memsets the ring, and NONE reaches the DMA double-buffer
++ *   (it is touched only by the IRQ-5 ISR).
++ *
++ * This export zeroes BOTH physical buffers so the silence takes effect
++ * immediately even if IRQ-5 servicing is delayed during the blocking render
++ * (the DX2-class timing regime DOSBox-X cannot reproduce). The DMA double-
++ * buffer is zeroed directly so the auto-init DMA hardware loops silence on its
++ * next sample fetch, not on the next successful ISR refill; the ring is zeroed
++ * and its cursors collapsed so the ISR underruns to its silence-memset path.
++ *
++ * ## Engine-side gate
++ *
++ * Unconditional from SDL's side (mirrors `SDL_DOSAudioPump`): the export always
++ * silences when called. The decision to call lives engine-side, gated by the
++ * engine's killswitch hint at the nxengine-evo/0206 + 0209 call sites
++ * (correctness fix, default-ON + killswitch). No SDL-side env var.
++ *
++ * \returns the total silence frames flushed across BOTH physical buffers
++ *          (software ring + DMA double-buffer) on success -- equal to
++ *          SDL_DOSAudioPhysicalCapacityFrames(). A **nonzero return guarantees
++ *          BOTH buffers were fully zeroed** (self-contained PASS: the caller's
++ *          test is simply `return > 0`, no cross-channel denominator math).
++ *          Returns **0 on any failure/partial path**: no device open, the DMA
++ *          double-buffer (the buffer the SB16 actually loops) not allocated, or
++ *          unknown frame size -- in which case NOTHING is partially zeroed.
++ *
++ * \threadsafety Call from the engine main thread only -- not from the audio
++ *               thread and not from an interrupt context. The cursor collapse
++ *               is performed under a brief DOS_DisableInterrupts window so it
++ *               is ISR-atomic; the bulk buffer memsets run outside that window
++ *               (a concurrent ISR or DMA fetch at worst observes a one-chunk
++ *               silence transition, which is the intended effect).
++ *
++ * \since This function is available since SDL/0092 (doskutsu workspace-local).
++ *
++ * \sa SDL_DOSAudioPhysicalCapacityFrames
++ * \sa SDL_DOSAudioPump
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioFlushRingSilence(void);
++
++/**
++ * True total physical capacity that can hold stale music between the engine
++ * producer and the DAC, in frames -- the denominator for the flush-instr
++ * silence witness (`silence_frames_flushed >= ring_capacity_frames`).
++ *
++ * **DOSKUTSU local addition (patches/SDL/0092, never upstreamed.)**
++ *
++ * This is the software ring (`isr_ring_size`) PLUS the DMA double-buffer (the
++ * buffer the SB16 auto-init DMA physically cycles), converted to frames. It is
++ * deliberately NOT `SDL_DOSAudioRingCapacityMs()` / `SDL_DOSAudioRingFillFrames()`
++ * (SDL/0088): those report the SOFTWARE ring ONLY and miss the DMA double-
++ * buffer, which would let the silence witness FALSE-PASS while the SB16 still
++ * loops the music left in the DMA buffer. Bind the witness denominator to this
++ * value. `SDL_DOSAudioFlushRingSilence()` returns a count equal to this on a
++ * full flush.
++ *
++ * \returns the total physical silence-flush capacity in frames, or 0 when no
++ *          device is open.
++ *
++ * \threadsafety Safe to call from the engine main thread; lock-free.
++ *
++ * \since This function is available since SDL/0092 (doskutsu workspace-local).
++ *
++ * \sa SDL_DOSAudioFlushRingSilence
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioPhysicalCapacityFrames(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index ef73f955e..6019cfa2b 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -962,6 +962,148 @@ int SDL_DOSAudioRingCapacityMs(void)
+     return (int)(((Sint64)cap_frames * 1000) / freq);
+ }
+ 
++/* ========================================================================
++ * DOSKUTSU patch (SDL/0092): ring + DMA-buffer silence-flush export
++ * ========================================================================
++ * Engine-callable (main thread) hard-silence of the SB16 physical audio path,
++ * called by the engine immediately BEFORE a long fully-blocking synth render
++ * (the organya cold-render _org_render_song, ~13.6 s with no cooperative
++ * yield: nxengine-evo/0206 post-load entry render + nxengine-evo/0209
++ * deferred-cache drain). During that window the SDL audio thread never runs
++ * (DOSSOUNDBLASTER_PlayDevice is the only ring producer and it is parked), so
++ * isr_ring_write is frozen; the SB16 auto-init DMA keeps physically looping
++ * the DMA double-buffer, and the IRQ-5 ISR keeps refilling DMA halves from
++ * whatever STALE music bytes remain in the software ring. On slow 486-class
++ * HW the last music fragment buzzes / tempo-tanks for the whole render window
++ * (V108 render-window CPU-steal stall; Task #7).
++ *
++ * Why the existing exports cannot do this from the engine:
++ *   - SDL/0088 SDL_DOSAudioRingFill*() are READ-ONLY cursor queries.
++ *   - SDL_DOSAudioPump() (SDL/0067) is a mix-then-commit path: it writes
++ *     whatever the MIXER produced. If the current song is still mixing it
++ *     writes MORE music; if the engine first stops the song so the mix is
++ *     silent, the SDL/0054 Shape A silence-detect SKIPS the ring write
++ *     entirely (the all_silence branch in DOSSOUNDBLASTER_PlayDevice) -- the
++ *     stale song bytes already resident in the ring are never overwritten.
++ *     There is no engine-reachable path that memsets the ring, and NONE that
++ *     reaches the DMA double-buffer (isr_dma_buffer is touched only by the ISR).
++ *
++ * This export zeroes BOTH physical buffers so the silence takes effect
++ * immediately even if IRQ-5 servicing is delayed during the blocking render
++ * (the DX2-class regime DOSBox-X cannot reproduce -- [[dosbox_not_proxy]]):
++ *   1. memset the entire software ring to the device silence value, so any
++ *      subsequent ISR RingCopyOut pulls silence.
++ *   2. memset the entire DMA double-buffer to silence, so the auto-init DMA
++ *      hardware loops silence on its next sample fetch -- not on the next
++ *      successful IRQ refill. (The DMA controller reads independent of CPU
++ *      interrupts, so a cli would not make this atomic vs the hardware anyway;
++ *      a one-sample click at the silence transition is intended.)
++ *   3. collapse the cursors ISR-atomically (isr_ring_read = isr_ring_write,
++ *      mirrored into the hidden producer cursors) so avail == 0 and the ISR
++ *      takes its underrun-silence memset path regardless of ring content.
++ *
++ * Returns the number of silence frames flushed across the software ring
++ * (== ring capacity in frames; the flush-instr witness asserts
++ * silence_frames_flushed >= ring_capacity_frames). 0 when no device is open.
++ *
++ * Unconditional from SDL's side (mirrors SDL_DOSAudioPump): the export always
++ * silences when called; the decision to call lives engine-side, gated by the
++ * engine's killswitch hint at the nxengine-evo/0206 + 0209 call sites
++ * (correctness fix, default-ON + killswitch per [[iter_discipline]]).
++ * Workspace-local; never upstreamed. */
++int SDL_DOSAudioFlushRingSilence(void)
++{
++    SDL_AudioDevice *device = g_dos_audio_device;
++    if (device == NULL || isr_ring_buffer == NULL) {
++        return 0;
++    }
++    const int bpf = g_dos_ring_bytes_per_frame;
++    /* Self-contained witness contract (flush-instr): a NONZERO return must
++     * GUARANTEE that BOTH the software ring AND the DMA double-buffer were
++     * fully zeroed. So if the DMA double-buffer (the buffer the SB16 actually
++     * loops -- the load-bearing zero) is not allocated, or the frame size is
++     * unknown, return 0 (failure) BEFORE doing any partial work. The caller's
++     * PASS test is simply "return > 0"; no cross-channel denominator math. */
++    if (isr_dma_buffer == NULL || isr_dma_halfdma <= 0 || bpf <= 0) {
++        doskutsu_dbg_log("audio: SDL/0092 FlushRingSilence -- NO-OP / FAIL "
++                         "(dma_buffer=%p dma_halfdma=%d bpf=%d; returning 0 = "
++                         "DMA not fully zeroable -- partial-coverage fail)",
++                         (void *)isr_dma_buffer, isr_dma_halfdma, bpf);
++        return 0;
++    }
++    struct SDL_PrivateAudioData *hidden = device->hidden;
++    const Uint8 sil = isr_silence_value;
++
++    /* 1. Zero the whole software ring (the staging buffer the ISR drains from).
++     * No cli: a concurrent ISR RingCopyOut at worst pulls one mixed
++     * stale/silence chunk this IRQ; the cursor collapse below makes the ISR
++     * underrun to silence on every IRQ after. */
++    SDL_memset(isr_ring_buffer, sil, isr_ring_size);
++
++    /* 2. Zero the entire DMA double-buffer -- the PHYSICAL buffer the SB16
++     * auto-init DMA cycles end-to-end, and the buffer the DAC actually reads on
++     * underrun. Zeroing it directly makes the HW loop silence on its next
++     * sample fetch even if IRQ-5 refill is delayed during the blocking render.
++     * isr_dma_halfdma is half the DMA buffer; full == x2. Guarded non-NULL
++     * above, so this always runs to completion on the nonzero-return path. */
++    SDL_memset(isr_dma_buffer, sil, isr_dma_halfdma * 2);
++
++    /* 3. Collapse the cursors ISR-atomically: align the ISR drain position to
++     * the frozen producer write position so avail == 0 -> the ISR takes its
++     * underrun-silence memset path. Mirror into the hidden producer cursors so
++     * the audio thread's own bookkeeping stays coherent when it resumes. */
++    DOS_DisableInterrupts();
++    isr_ring_read = isr_ring_write;
++    if (hidden) {
++        hidden->ring_read = isr_ring_write;
++        hidden->ring_write = isr_ring_write;
++    }
++    DOS_EnableInterrupts();
++
++    const int ring_frames = isr_ring_size / bpf;
++    const int dma_frames  = (isr_dma_halfdma * 2) / bpf;
++    const int total_frames = ring_frames + dma_frames;
++    doskutsu_dbg_log("audio: SDL/0092 FlushRingSilence -- ring+DMA zeroed "
++                     "(silence_frames_flushed=%d = ring_frames=%d + "
++                     "dma_frames=%d; ring_bytes=%d dma_bytes=%d) "
++                     "pre-cold-render quiesce",
++                     total_frames, ring_frames, dma_frames,
++                     isr_ring_size, isr_dma_halfdma * 2);
++    /* Nonzero == both buffers fully zeroed (== PhysicalCapacityFrames()). */
++    return total_frames;
++}
++
++/* DOSKUTSU patch (SDL/0092): true total physical silence-flush capacity, in
++ * frames. This is the denominator for the flush-instr witness
++ * silence_frames_flushed >= ring_capacity_frames: the FULL physical depth that
++ * can hold stale music between the engine producer and the DAC -- the software
++ * ring (PlayDevice -> ISR staging, isr_ring_size) PLUS the DMA double-buffer
++ * (the buffer the SB16 auto-init DMA physically cycles, isr_dma_halfdma * 2).
++ *
++ * Deliberately NOT SDL_DOSAudioRingCapacityMs()/RingFillFrames (SDL/0088):
++ * those report the SOFTWARE ring ONLY and miss the DMA double-buffer, which
++ * would let the witness FALSE-PASS while the SB16 still loops the music left
++ * in the DMA buffer. Bind the witness denominator to THIS, not to 0088.
++ *
++ * SDL_DOSAudioFlushRingSilence() returns a frame count equal to this on a full
++ * flush (equal by construction); it returns LESS only if a buffer is
++ * unallocated, which is exactly the partial-coverage signal the witness must
++ * catch. (The upstream SDL mixer output_stream FIFO is not counted: during the
++ * blocking cold-render the audio thread is parked, so nothing advances that
++ * FIFO into the ring -- it cannot reach the DAC within the render window.)
++ * 0 when no device is open. */
++int SDL_DOSAudioPhysicalCapacityFrames(void)
++{
++    if (g_dos_audio_device == NULL || isr_ring_buffer == NULL) {
++        return 0;
++    }
++    const int bpf = g_dos_ring_bytes_per_frame;
++    if (bpf <= 0) {
++        return 0;
++    }
++    return (isr_ring_size + isr_dma_halfdma * 2) / bpf;
++}
++
+ /* ========================================================================
+  * DOSKUTSU patch (SDL/0090): device-rate setter (productionization of 0087)
+  * ========================================================================
+-- 
+2.47.3
+

@@ -1,0 +1,171 @@
+From 7709f95977904d686cac97932284e90617327925 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 4 Jun 2026 17:50:31 -0700
+Subject: [PATCH] patch 0213 -- Item 3 v1.0.8.1: eager-load action sprite
+ sheets
+
+Eliminates the residual ONE-TIME first-fire/first-impact hitch on the
+486: the v1.0.3 0178 skip-sheet-flush fix keeps sprite sheets resident
+across caves (no per-cave re-decode) but the very FIRST fire in a
+session still lazy-decodes the bullet + hit/muzzle/trail caret PNGs
+from CF at draw time -- a mid-gameplay stall a hitch-sensitive operator
+feels. DOS reads sprite sheets from a CF card, so a deferred PNG decode
+mid-gameplay is a visible pause, not the sub-ms it is on a modern disk.
+
+Fix: at load_stage (in the load band, where a brief pause reads as
+loading) eager-load exactly the sheets the action sprites live on,
+resolved at runtime via sprites[id].spritesheet over a representative
+action-sprite set that spans every weapon family's bullet + the shared
+effect carets -- so it covers the first fire of ANY weapon, not just the
+Polar Star, without the blunt all-sheets cost of 0177. _loadSheetIfNeeded
+dedups, so re-entry on later caves is a no-op. Net steady-state RAM
+delta ~0 (these sheets load on first fire anyway; only front-loaded).
+
+Default-ON; killswitch SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS=0 for any
+low-RAM edge. Validated via SDL_HINT_DOSKUTSU_SHEETLOAD_TRACE=1 (0176):
+pre-fix [sheet-load] at phase=gameplay on first fire; post-fix in the
+load band.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+---
+ src/graphics/Sprites.cpp | 78 ++++++++++++++++++++++++++++++++++++++++
+ src/graphics/Sprites.h   | 13 +++++++
+ src/map.cpp              |  9 +++++
+ 3 files changed, 100 insertions(+)
+
+diff --git a/src/graphics/Sprites.cpp b/src/graphics/Sprites.cpp
+index f8d4bdf..3bd9619 100644
+--- a/src/graphics/Sprites.cpp
++++ b/src/graphics/Sprites.cpp
+@@ -269,6 +269,84 @@ void Sprites::eagerLoadAllSheets()
+            (unsigned long long)_esr_dt_ms);
+ }
+ 
++// DOS-PORT (patch 0213, Item 3 v1.0.8.1): TARGETED eager-load of the action
++// sprite sheets. The 0178 skip-flush fix keeps sheets resident across caves
++// (no per-cave re-decode), but the very FIRST fire/impact in a session still
++// lazy-decodes the bullet + hit/muzzle/trail caret PNGs at draw time (a
++// one-time mid-gameplay hitch the operator -- hitch-sensitive -- can feel).
++// This pre-loads exactly the sheets the action sprites live on, during the
++// load_stage band, so that first decode is folded into the load pause.
++//
++// Scope (NOT whack-a-mole): the list spans EVERY weapon family's bullet +
++// the shared hit/muzzle/trail effect carets, so it covers the first fire of
++// any weapon, not just the Polar Star. Sheets are resolved at runtime via
++// sprites[id].spritesheet (follows the .sif assignment -- in stock data all
++// bullets -> Bullet sheet, all these carets -> Caret sheet, so this resolves
++// to ~2 sheets) and _loadSheetIfNeeded() dedups, so re-entry on later caves
++// is a cheap no-op (the sheets are already resident). Net steady-state RAM
++// delta ~0: these sheets load on first fire anyway; this only front-loads
++// them. Default-ON; killswitch SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS=0 (for
++// any low-RAM edge -- see docs/internal/BOOT.md).
++static int  g_eager_action_sheets_decided = -1;
++static bool eager_action_sheets_active()
++{
++  if (g_eager_action_sheets_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS");
++    // Default-ON: disabled ONLY by the literal "0" killswitch.
++    g_eager_action_sheets_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    LOG_INFO("eager action sheets: {} (first-fire hitch fix: pre-loads the "
++             "weapon bullet + hit/muzzle/trail caret sheets at stage load so "
++             "the first fire/impact does not lazy-decode mid-gameplay; set "
++             "SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS=0 to restore lazy load)",
++             g_eager_action_sheets_decided ? "ENABLED (default)"
++                                           : "DISABLED (killswitch =0)");
++  }
++  return g_eager_action_sheets_decided == 1;
++}
++
++// Representative action sprites covering all weapon-bullet + effect-caret
++// sheets. One per weapon family + the shared effect carets is enough --
++// _loadSheetIfNeeded dedups by sheet, so listing extras is harmless.
++static const int _action_sprites[] = {
++    // weapon bullets (all families -> the Bullet sheet in stock data)
++    SPR_SHOT_POLARSTAR, SPR_SHOT_MGUN_L1, SPR_SHOT_MISSILE1,
++    SPR_SHOT_SUPERMISSILE13, SPR_SHOT_FIREBALL1, SPR_SHOT_FIREBALL23,
++    SPR_SHOT_BLADE_L1, SPR_SHOT_BLADE_L3, SPR_SHOT_SNAKE_L1,
++    SPR_SHOT_NEMESIS_L1, SPR_SHOT_BUBBLER_L1, SPR_BUBBLER_SHARP, SPR_SPUR,
++    // shared hit / muzzle / trail effect carets (-> the Caret sheet)
++    SPR_STAR_SOLID, SPR_STAR_POOF, SPR_SMOKE_CLOUD, SPR_SMOKETRAIL,
++    SPR_BOOMFLASH, SPR_MISSILEHITSMOKE, SPR_SPUR_HIT,
++};
++
++void Sprites::eagerLoadActionSheets()
++{
++  if (!eager_action_sheets_active())
++    return;
++
++  const Uint64 _eas_t0 = SDL_GetTicksNS();
++  int _eas_loaded = 0;
++  for (size_t i = 0; i < sizeof(_action_sprites) / sizeof(_action_sprites[0]); i++)
++  {
++    const int sheet = sprites[_action_sprites[i]].spritesheet;
++    if (sheet < 0 || sheet >= MAX_SPRITESHEETS)
++      continue;
++    if (!_spritesheets[sheet])  // count only sheets this call actually decodes
++      ++_eas_loaded;
++    _loadSheetIfNeeded(sheet);
++  }
++  // Emit only when something was actually decoded (first stage of a session);
++  // on later caves the sheets are already resident -> _eas_loaded == 0, no log
++  // spam, byte-cheap.
++  if (_eas_loaded > 0)
++  {
++    const Uint64 _eas_dt_ms = (SDL_GetTicksNS() - _eas_t0) / 1000000ull;
++    LOG_INFO("[eager-action-sheets] cave={} sheets={} wall_ms={}",
++             loadstage_current_cave(), _eas_loaded,
++             (unsigned long long)_eas_dt_ms);
++  }
++}
++
+ // ensure the given spritesheet is loaded
+ void Sprites::_loadSheetIfNeeded(int sheetno)
+ {
+diff --git a/src/graphics/Sprites.h b/src/graphics/Sprites.h
+index e67fbc8..5de062a 100644
+--- a/src/graphics/Sprites.h
++++ b/src/graphics/Sprites.h
+@@ -38,6 +38,19 @@ public:
+   // the fire-frame pause for a per-cave load-band re-decode.
+   void eagerLoadAllSheets();
+ 
++  // patch 0213 (Item 3, v1.0.8.1): TARGETED eager-load of the action
++  // sprite sheets (weapon bullets + their hit/muzzle/trail carets) in the
++  // load_stage band, so the FIRST-ever fire/impact in a session does not
++  // lazy-decode those PNGs mid-gameplay (the residual first-fire hitch the
++  // 0178 skip-flush fix leaves -- 0178 stops the per-cave RE-decode but not
++  // the initial first-visit load). Unlike eagerLoadAllSheets() (0177, the
++  // blunt low-RAM-hostile all-sheets variant), this loads ONLY the sheets
++  // the action sprites live on (Bullet + Caret in stock data), resolved at
++  // runtime via sprites[id].spritesheet so it follows the .sif assignment;
++  // _loadSheetIfNeeded() dedups, so it is cheap on re-entry. Gated on
++  // SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS (default ON; "=0" killswitch).
++  void eagerLoadActionSheets();
++
+   void blitSprite(int x, int y, int s, int frame, uint8_t dir, int xoff, int yoff, int wd, int ht, int alpha = 255);
+   void blitSpriteMirrored(int x, int y, int s, int frame, uint8_t dir, int xoff, int yoff, int wd, int ht, int alpha = 255);
+ 
+diff --git a/src/map.cpp b/src/map.cpp
+index 04bb3fe..355ed9a 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1405,6 +1405,15 @@ bool load_stage(int stage_no)
+   // [eager-sheet-reload] banner.
+   Renderer::getInstance()->sprites.eagerLoadAllSheets();
+ 
++  // patch 0213 (Item 3, v1.0.8.1): TARGETED eager-load of the action sprite
++  // sheets (weapon bullets + hit/muzzle/trail carets) in this load_stage band
++  // so the FIRST-ever fire/impact in a session does not lazy-decode them
++  // mid-gameplay (the residual first-fire hitch the 0178 skip-flush fix
++  // leaves). Default-ON; killswitch SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS=0.
++  // Lighter than eagerLoadAllSheets() above (which is the OFF-by-default
++  // all-sheets low-RAM alternative): only ~2 sheets, dedup'd on re-entry.
++  Renderer::getInstance()->sprites.eagerLoadActionSheets();
++
+   MIDGAP_PUMP(); // patch 0162 Leg A seam 1: post-graphics-drop, pre-tileset.load
+ 
+   const Uint64 _lst_t_tileset = _lst_active ? SDL_GetTicksNS() : 0;
+-- 
+2.47.3
+

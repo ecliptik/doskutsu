@@ -1,0 +1,325 @@
+From ee08b8e9fdbb228c21b6c953319404458dea3e6e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 5 Jun 2026 00:41:36 -0700
+Subject: [PATCH] patch 0215 -- v1.0.8.1: batch org-precache + tier-scoped dual
+ cache
+
+Lets the deployable organya PCM cache be pre-built ONCE on a fast machine
+so the 486 target only ever cache-HITs -- it never cold-renders a song
+in-game (the ~10-30 s/song DX2-66 synth pass). SUPERSEDES
+render-across-frames: eliminates the render-duration stall instead of
+spreading it. The 0214 render-window quiesce stays as the cleared/missing
+-cache safety net.
+
+Parts:
+1. BATCH MODE (DOSKUTSU_ORG_PRECACHE_ALL=1, default-OFF): main() one-shot
+   hooked right after SoundManager::init() (Organya wavetable/drums +
+   track list loaded; SAMPLE_RATE + AUDIO_CHANNELS set by the tier) --
+   renders EVERY org to the cache via SoundManager::precacheAllOrgs() +
+   org_precache_one (reusing the 0206 render + 0208 store helpers), logs
+   the exact TOTAL bytes for CF sizing, then EXITS before the renderer/
+   game loop. Device-INDEPENDENT (Song::Synth is pure DSP + file I/O) ->
+   runs headless; intended use is the shipped exe under DOSBox-X max-cycles.
+2. TIER-SCOPED DUAL CACHE: the cache dir is now CACHE\<rate>_<channels>\
+   <NAME>.PCM (was flat), keyed on rate AND channels, + a channels field
+   in OrgPcmHeader checked by the validators -- so the LQ set (Tier-2 =
+   11025 MONO) and the HQ set (Tier-1 = 22050 STEREO) coexist without
+   clobbering. Subdir (not filename tag) keeps the basename 8.3. All cache
+   paths funnel through _org_cache_dir(), so playback + the 0206/0208/0209
+   paths tier-scope consistently. Nested mkdir.
+3. SELECTOR + batch tier = the EXISTING SDL_HINT_DOSKUTSU_AUDIO_TIER2 (it
+   sets both SAMPLE_RATE + AUDIO_CHANNELS), so the resolved (rate,channels)
+   names the subdir at playback AND determines what the batch renders. No
+   new selector env; the setup.exe quality toggle writes AUDIO_TIER2.
+
+Ships the LQ (11025-mono Tier-2) foundation. The HQ (22050-STEREO Tier-1)
+set needs a stereo render path (_org_render_song currently DOWNMIXES to
+mono) + a stereo playback producer -- the well-scoped follow-on; until it
+lands precacheAllOrgs GUARDS against a stereo tier (warns + skips rather
+than write a mono-content cache tagged channels=2).
+
+Cache-trust unchanged + safe: the header version-keys on
+DOSKUTSU_BUILD_SHA12 + song/rate/channels/loop, so a pre-built cache is
+accepted ONLY by the binary that produced it. LICENSING: ship the batch
+MODE, never the PCM (derived from the user's extracted .org); the user
+generates CACHE\ themselves + deploys it.
+
+Default boot path byte-identical (one getenv in main; the cache-dir change
+is transparent -- old caches re-render once into the tier subdir).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+---
+ src/main.cpp               | 26 ++++++++++++++
+ src/sound/Organya.cpp      | 72 +++++++++++++++++++++++++++++++++----
+ src/sound/SoundManager.cpp | 73 ++++++++++++++++++++++++++++++++++++++
+ src/sound/SoundManager.h   |  5 +++
+ 4 files changed, 170 insertions(+), 6 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 9241b7c..71a40e1 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1502,6 +1502,32 @@ int main(int argc, char *argv[])
+     return 1;
+   }
+ 
++  // DOS-PORT (patch 0215, v1.0.8.1 batch precache): one-shot mode -- render
++  // EVERY org in the music set to the TIER-scoped PCM cache
++  // (CACHE\<rate>_<channels>\) then EXIT before the renderer/game loop. Built for
++  // the deploy workflow: run the shipped exe with this flag on a fast machine
++  // (DOSBox-X max-cycles) to populate the cache, copy CACHE\ to the CF, then the
++  // target only ever cache-HITs (never cold-renders in-game). The output tier =
++  // whatever SDL_HINT_DOSKUTSU_AUDIO_TIER2 resolved (Tier-2 11025 mono / Tier-1
++  // 22050 stereo) -- the SAME config that selects the cache at playback; run
++  // once per tier for coexisting sets. Default-OFF: only the strict "1" triggers
++  // it; the normal boot path is byte-identical. Hooked here so Organya
++  // (wavetable/drums) + the track list are loaded and SAMPLE_RATE/AUDIO_CHANNELS
++  // are set, but before any renderer/game/tsc init (none of which the render
++  // needs).
++  {
++    const char *pc = std::getenv("DOSKUTSU_ORG_PRECACHE_ALL");
++    if (pc && pc[0] == '1' && pc[1] == '\0')
++    {
++      LOG_INFO("DOSKUTSU_ORG_PRECACHE_ALL=1 -- batch-rendering all org songs to "
++               "the tier-scoped PCM cache, then exiting (no gameplay).");
++      const long total = SoundManager::getInstance()->precacheAllOrgs();
++      LOG_INFO("[org-precache] done; total {} bytes (~{} MB). Exiting.",
++               total, (unsigned long)(total / (1024 * 1024)));
++      return 0;
++    }
++  }
++
+   if (trig_init())
+   {
+     fatal("Failed trig module init.");
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index dcb52b0..f238b50 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -511,8 +511,9 @@ struct OrgPcmHeader
+   uint32_t internal_rate;   // Q-SAFE internal synth rate; == sample_rate when not oversampled
+   uint32_t loop_start;
+   uint32_t loop_end;
+-  uint32_t loopstart_frame; // mono-frame wrap target
+-  uint32_t nframes;         // int16 mono sample count in the buffer
++  uint32_t loopstart_frame; // frame wrap target
++  uint32_t nframes;         // int16 sample count in the buffer
++  uint32_t channels;        // patch 0215: 1=mono(Tier-2) / 2=stereo(Tier-1); part of the key
+ };
+ 
+ // 8.3-safe uppercase basename from the resolved .org path: strip dir + ".org".
+@@ -528,11 +529,28 @@ static std::string _org_cache_name(const std::string &path)
+   return base;
+ }
+ 
+-static std::string _org_cache_dir()
++// patch 0215: TIER-SCOPED cache subdir so multiple audio-tier cache sets coexist
++// without clobbering -- the LQ set (Tier-2 = 11025 MONO) + the HQ set (Tier-1 =
++// 22050 STEREO, the original Cave Story fidelity). The key is rate AND channels
++// (NOT rate alone -- an 11025-mono and a hypothetical 11025-stereo are different
++// PCM), so the subdir is CACHE\<rate>_<channels>\ e.g. CACHE\11025_1\ (LQ) +
++// CACHE\22050_2\ (HQ). The active tier is set by SDL_HINT_DOSKUTSU_AUDIO_TIER2
++// (it sets BOTH SAMPLE_RATE + AUDIO_CHANNELS), so at playback the resolved
++// (rate,channels) auto-selects the matching set; the precache batch renders
++// whichever tier AUDIO_TIER2 resolves to. Basename stays 8.3 (tagging the
++// FILENAME would overflow 8 chars on names like FANFALE1); the subdir
++// ("11025_1"/"22050_2") is <=7 chars = 8.3-safe.
++static std::string _org_cache_base_dir()
+ {
+   return ResourceManager::getInstance()->getBasePath() + "CACHE";
+ }
+ 
++static std::string _org_cache_dir()
++{
++  return _org_cache_base_dir() + "/" + std::to_string((unsigned long)SAMPLE_RATE)
++         + "_" + std::to_string((unsigned long)::AUDIO_CHANNELS);
++}
++
+ static std::string _org_cache_path(const std::string &name)
+ {
+   return _org_cache_dir() + "/" + name + ".PCM";
+@@ -554,7 +572,7 @@ static bool _org_cache_try_load(const std::string &name, uint32_t native, uint32
+             && h.magic[0] == 'O' && h.magic[1] == 'P' && h.magic[2] == 'C' && h.magic[3] == '1'
+             && strncmp(h.build, _DOSKUTSU_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12), sizeof h.build) == 0
+             && strncmp(h.song, name.c_str(), sizeof h.song) == 0
+-            && h.sample_rate == native && h.internal_rate == H
++            && h.sample_rate == native && h.internal_rate == H && h.channels == (uint32_t)::AUDIO_CHANNELS
+             && h.loop_start == loop_start && h.loop_end == loop_end
+             && h.nframes > 0 && h.loopstart_frame <= h.nframes;
+   if (ok)
+@@ -583,7 +601,9 @@ static void _org_cache_store(const std::string &name, uint32_t native, uint32_t
+ {
+   if (buf.empty())
+     return;
+-  mkdir(_org_cache_dir().c_str(), 0777); // best-effort; EEXIST is fine
++  // patch 0215: nested mkdir -- CACHE then CACHE\<rate> (mkdir makes no parents).
++  mkdir(_org_cache_base_dir().c_str(), 0777); // best-effort; EEXIST is fine
++  mkdir(_org_cache_dir().c_str(), 0777);      // best-effort; EEXIST is fine
+   const std::string path = _org_cache_path(name);
+   const bool _ioa = io_audit_enabled();
+   const Uint64 _t0 = _ioa ? SDL_GetTicksNS() : 0;
+@@ -604,6 +624,7 @@ static void _org_cache_store(const std::string &name, uint32_t native, uint32_t
+   h.loop_end        = loop_end;
+   h.loopstart_frame = (uint32_t)loopstart_frame;
+   h.nframes         = (uint32_t)buf.size();
++  h.channels        = (uint32_t)::AUDIO_CHANNELS; // patch 0215: tier key (mono/stereo)
+   bool ok = (fwrite(&h, 1, sizeof h, fp) == sizeof h)
+             && (fwrite(buf.data(), sizeof(int16_t), h.nframes, fp) == h.nframes);
+   fclose(fp);
+@@ -645,7 +666,7 @@ static bool _org_cache_valid(const std::string &name, uint32_t native, uint32_t
+             && h.magic[0] == 'O' && h.magic[1] == 'P' && h.magic[2] == 'C' && h.magic[3] == '1'
+             && strncmp(h.build, _DOSKUTSU_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12), sizeof h.build) == 0
+             && strncmp(h.song, name.c_str(), sizeof h.song) == 0
+-            && h.sample_rate == native && h.internal_rate == H
++            && h.sample_rate == native && h.internal_rate == H && h.channels == (uint32_t)::AUDIO_CHANNELS
+             && h.loop_start == loop_start && h.loop_end == loop_end && h.nframes > 0;
+   fclose(fp);
+   return ok;
+@@ -807,6 +828,45 @@ extern "C" void org_drain_pending_cache(void)
+            "on first encounter; real-time on re-encounter).", cname.c_str());
+ }
+ 
++// DOS-PORT (patch 0215, v1.0.8.1 batch precache): render + cache ONE org at the
++// current tier (-> CACHE\<rate>_<channels>\<NAME>.PCM). Used by the batch driver
++// (SoundManager::precacheAllOrgs) to populate the deployable cache on a fast
++// build machine, so the target only ever cache-HITs (never cold-renders
++// in-game). Device-INDEPENDENT (Song::Synth is pure DSP + file I/O), so it runs
++// headless. Reuses the 0206/0208 helpers verbatim. Returns: >0 = bytes freshly
++// rendered+cached; 0 = already cached at this rate (skipped); -1 = load failure.
++// `org_path` must be a RESOLVED path (the caller applies ResourceManager::getPath).
++extern "C" long org_precache_one(const char *org_path)
++{
++  if (!org_path || !org_path[0])
++    return -1;
++  const std::string path  = org_path;
++  const std::string cname = _org_cache_name(path);
++  Song tmp;
++  if (!tmp.Load(path))
++  {
++    LOG_WARN("[org-precache] song={} load FAILED ({})", cname.c_str(), path.c_str());
++    return -1;
++  }
++  uint32_t H = 0, spb = 0;
++  int      decim = 1;
++  _org_prerender_geometry(tmp, H, decim, spb);
++  if (_org_cache_valid(cname, SAMPLE_RATE, H, tmp.loop_start, tmp.loop_end))
++  {
++    LOG_INFO("[org-precache] song={} rate={} cached=hit (skip)",
++             cname.c_str(), (unsigned long)SAMPLE_RATE);
++    return 0;
++  }
++  std::vector<int16_t> buf;
++  size_t ls = 0;
++  _org_render_song(tmp, H, decim, buf, ls);
++  _org_cache_store(cname, SAMPLE_RATE, H, tmp.loop_start, tmp.loop_end, buf, ls);
++  const long bytes = (long)(buf.size() * sizeof(int16_t));
++  LOG_INFO("[org-precache] song={} rate={} cached=new bytes={}",
++           cname.c_str(), (unsigned long)SAMPLE_RATE, bytes);
++  return bytes;
++}
++
+ // Decide the producer for a starting song. Returns true if the pre-render buffer
+ // is ready (the per-frame producer = memcpy); false -> the caller live-synths.
+ // Policy: a cache HIT (patch 0208) short-circuits at ANY phase (no freeze); else
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index c9ebd97..5ec2b60 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -1542,5 +1542,78 @@ void SoundManager::_reloadTrackList()
+   }
+ }
+ 
++// patch 0215: forward-decl of the Organya batch-precache helper (defined
++// extern "C" at file scope in Organya.cpp). MUST be at namespace/file scope --
++// an extern "C" linkage-spec is ill-formed at function/block scope.
++extern "C" long org_precache_one(const char *org_path);
++
++// DOS-PORT (patch 0215, v1.0.8.1 batch precache): render EVERY org in the music
++// set to the TIER-scoped PCM cache (CACHE\<rate>_<channels>\) so the target
++// machine only ever cache-HITs -- it never cold-renders a song in-game
++// (eliminates the ~10-30 s/song DX2-66 render-duration stall, superseding
++// render-across-frames; the 0214 quiesce stays as the cleared/missing-cache
++// safety net). Headless: org_precache_one is pure synth + file I/O (no audio
++// device). Called from main() when DOSKUTSU_ORG_PRECACHE_ALL=1, which then
++// exits (no gameplay).
++//
++// The output TIER (rate + channels) = whatever SDL_HINT_DOSKUTSU_AUDIO_TIER2
++// resolved at SoundManager::init -- Tier-2 (11025 MONO) or Tier-1 (22050
++// STEREO). So the operator builds each tier's cache by running the batch once
++// per tier setting (the SAME config that selects the cache at playback). The
++// resolved (SAMPLE_RATE, AUDIO_CHANNELS) names the CACHE\<rate>_<channels>\
++// subdir. Returns total bytes freshly rendered this run; logs the exact total
++// for CF sizing.
++//
++// STEREO GUARD: the pre-render path (org_precache_one -> _org_render_song)
++// currently downmixes to MONO. So this base form only renders the MONO tier
++// correctly; rendering a STEREO tier would write a mono-content PCM tagged
++// channels=2 (wrong). Until the stereo render+producer follow-on lands, refuse
++// a stereo tier with a clear message rather than write a bad HQ cache.
++long SoundManager::precacheAllOrgs()
++{
++  if (_music_names.size() < 2)
++  {
++    LOG_WARN("[org-precache] music track list empty -- nothing to render "
++             "(was SoundManager::init skipped? do not combine with NO_AUDIO)");
++    return 0;
++  }
++
++  if ((int)::AUDIO_CHANNELS != 1)
++  {
++    LOG_WARN("[org-precache] STEREO tier (channels={}, rate={}) NOT yet "
++             "supported -- the pre-render path is mono-only; the 22050-stereo "
++             "HQ set is a follow-on (stereo render + producer). Set "
++             "SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 (11025 mono) to build the LQ set.",
++             (int)::AUDIO_CHANNELS, (unsigned long)::SAMPLE_RATE);
++    return 0;
++  }
++
++  LOG_INFO("[org-precache] START rate={} channels={} songs={} -> CACHE\\{}_{}\\",
++           (unsigned long)::SAMPLE_RATE, (int)::AUDIO_CHANNELS,
++           (int)(_music_names.size() - 1),
++           (unsigned long)::SAMPLE_RATE, (int)::AUDIO_CHANNELS);
++
++  long total_bytes = 0;
++  int  rendered = 0, skipped = 0, failed = 0;
++  for (size_t i = 1; i < _music_names.size(); ++i) // [0] is the "" sentinel
++  {
++    if (_music_names[i].empty())
++      continue;
++    const std::string p = ResourceManager::getInstance()->getPath(
++        _music_dirs.at(0) + _music_names[i] + ".org", false);
++    const long b = org_precache_one(p.c_str());
++    if (b > 0)       { total_bytes += b; ++rendered; }
++    else if (b == 0) { ++skipped; }
++    else             { ++failed; }
++  }
++
++  LOG_INFO("[org-precache] TOTAL rate={} channels={} rendered={} skipped={} "
++           "failed={} bytes={} (~{} MB) -> CACHE\\{}_{}\\",
++           (unsigned long)::SAMPLE_RATE, (int)::AUDIO_CHANNELS, rendered, skipped,
++           failed, total_bytes, (unsigned long)(total_bytes / (1024 * 1024)),
++           (unsigned long)::SAMPLE_RATE, (int)::AUDIO_CHANNELS);
++  return total_bytes;
++}
++
+ } // namespace Sound
+ } // namespace NXE
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index 7eaf494..7e29c35 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -172,6 +172,11 @@ public:
+   void enableMusic(int newstate);
+   void setNewmusic(int newstate);
+ 
++  // patch 0215 (v1.0.8.1 batch precache): render every org in the music set to
++  // the rate-scoped PCM cache (CACHE\<rate>\) then return total bytes. Driven by
++  // main()'s DOSKUTSU_ORG_PRECACHE_ALL one-shot (headless; exits after).
++  long precacheAllOrgs();
++
+   uint32_t currentSong();
+   uint32_t lastSong();
+   void fadeMusic();
+-- 
+2.47.3
+
