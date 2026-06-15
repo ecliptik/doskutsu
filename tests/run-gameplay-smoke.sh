@@ -152,6 +152,18 @@ rm -f "$REPO_ROOT/build/stage/LOGS/DEBUG.LOG" \
       "$REPO_ROOT/build/stage/DOSKUTSU/SDLDBG.LOG" \
       "$REPO_ROOT/build/stage/debug.log" "$REPO_ROOT/build/stage/sdldbg.log"
 
+# Clear any stray DOSKUTSU.CFG left in the stage by a prior ad-hoc run (a tempo
+# capture, a per-backend audio probe, etc). The DEFAULT gameplay gate expects NO
+# CFG -- patch 0216's config shim then emits the "no DOSKUTSU.CFG, using built-in
+# defaults" variant and the compiled-default levers fire (e.g. SDL/0074 mixer
+# balance master=31 voice=31 fm=28, a REQUIRED banner the gate pins by value). A
+# leftover CFG (e.g. SB16_FM_VOL=31) silently shifts those values -> the required
+# banner reads a different value -> false GATE FAIL that looks like a code
+# regression but is pure stage contamination. make stage does NOT write/clear a
+# CFG, so clear it here. (A future CFG-driven smoke variant must write its CFG
+# AFTER this point.)
+rm -f "$REPO_ROOT/build/stage/DOSKUTSU.CFG"
+
 log "launching DOSBox-X (flags: ${LAUNCHER_FLAGS[*]})"
 "$LAUNCHER" "${LAUNCHER_FLAGS[@]}" >"$OUT_DIR/launcher.log" 2>&1 &
 LAUNCH_PID=$!
@@ -371,6 +383,7 @@ BANNER_REGEX=(
   "eager action sheets: (ENABLED \(default\)|DISABLED \(killswitch =0\))"
   "organya render quiesce: (ENABLED \(default\)|DISABLED \(killswitch =0\))"
   "\[org-precache\] TOTAL rate=[0-9]+ channels=[0-9]+ rendered=[0-9]+ skipped=[0-9]+ failed=[0-9]+ bytes=[0-9]+"
+  "config: (loaded DOSKUTSU.CFG \([0-9]+ keys\)|no DOSKUTSU.CFG, using built-in defaults)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -468,6 +481,7 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "optional"
+  "required"
 )
 # BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 92 entries;
 # the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
@@ -539,6 +553,7 @@ BANNER_LABEL=(
   "nxengine-evo/0171 OPL3 wub-wub fix banner (REQUIRED in builds carrying patch 0171 -- the 4-byte PATCH_ORGAN/PATCH_MALLET RR=0->RR=8 fix emits this LOG_INFO at MidiBackendOpl3 init confirming the fixed-bytes constexpr table linked. Default-ON, no killswitch; banner is unconditional in the new binary. Absence on a post-0171 build = build linked pre-fix bytes (regression / stale cache). Pairs with the SDL/0079 shutdown-sweep banner for the wub-wub residual fix bundle.)"
   "SDL/0079 OPL3 shutdown TL=0x3F sweep banner (REQUIRED on clean-quit in builds carrying SDL/0079 -- the SDL_DOSOpl3Shutdown TL=0x3F sweep zeroes all 18 voices x 2 ops before KEY-OFF-all, killing the post-quit envelope output. Default-ON, no killswitch; emits when engine destructor runs at clean quit (smoke's TAS-EOF auto-exit path triggers it). Absence = SDL/0079 not linked OR smoke didn't reach clean quit. Pairs with the nx-0171 engine-init banner.)"
   "SDL/0080 mpu401 direct-port default banner (optional -- emits at SDL_DOSMpu401Init when the WB MIDI dispatch path engages, which is gated on either the auto-detect chain selecting WB or AUDIO_BACKEND=wb explicitly. Default smoke runs without AUDIO_BACKEND set and the auto-detect chain falls through WB -> OPL3 on DOSBox-X (no DreamBlaster S2 daughterboard emulated) so this banner is typically ABSENT under DOSBox-X. The runtime-witness side of the two-witness pattern for the patch-0080 default-flip: the strings|grep on the binary proves embed (\"mpu401: direct-port init at port_base=\"), and this banner regex proves runtime invocation if/when WB is selected. Real-HW iters with AUDIO_BACKEND=wb on g2k Vibra16S + S2 are the path where the banner actually emits and where the WBTEST-006 H20 confirmation lands. Killswitch path (SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=0) emits the \"DSP-mediated fallback init at port_base=\" banner instead -- not covered by this regex by design, since the default-config gate cares about the default-path banner. See patches/SDL/0080 commit message + docs/internal/WBTEST-001-FINDINGS.md rev-8.)"
+  "SDL/0098 mpu401 cold-init DEFAULT-ON banner (optional -- WB-only. Emits at SDL_DOSMpu401Init when the WB backend is selected (AUDIO_BACKEND=wb) AND the engine cold-init reorder (SoundManager patch 0220 / T68) armed WB before the SB16 open. The T66 ship-flip (patches/SDL/0098 + nxengine-evo/0220) makes cold-init + the timed-delay pace DEFAULT-ON for WB; killswitches are SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=0 and SDL_HINT_DOSKUTSU_AUDIO_WB_TX_DELAY=0. Default smoke runs without AUDIO_BACKEND set (auto-detect falls through WB -> OPL3 on DOSBox-X, no DreamBlaster S2 emulated) so this banner is typically ABSENT in the default gate -- it is NOT a required default-smoke banner. Two-witness embed side = strings|grep on the binary (\"mpu401: cold-init DEFAULT-ON at port_base=\"); the runtime banner + its pace=TIMED-DELAY field emit under AUDIO_BACKEND=wb + the default-on cold-init. If reached HOT (SB16 already open, engine reorder absent), the defensive guard emits \"mpu401: cold-init DEFAULT-ON but SB16 already open\" and DECLINES -> organya fallback (never wedges). Real-HW WB iters on g2k Vibra16S + S2 are where it actually emits + the operator EAR confirms wavetable. See patches/SDL/0098 + patches/nxengine-evo/0220 commit messages.)"
   "0178 SFXPAUSE-007 load-stage trace decision banner (optional -- LOG_INFO emitted on the first loadstage_trace_active() call when the probe gate is set, narrating ENABLED variant only; DISABLED state has no emit. INFO-level so it appears only on tagged runs or DOSKUTSU_LOG_VERBOSE=1. The runtime witness that the patch 0178 probe is wired and the cached gate parser engaged. Default smoke leaves SDL_HINT_DOSKUTSU_LOADSTAGE_TRACE unset so this banner is ABSENT, which is expected not a failure; SFXPAUSE-007 iter cells SET it to 1 to engage. Pairs with the per-emit [load-stage-phase] regex below. This probe is the diagnostic for the CORRECTED Bug 1 mechanism per SFXPAUSE-006 (audio-thread catch-up hypothesis invalidated; main-thread load_stage cost on POD83 + CF card is the remaining suspect).)"
   "0178 SFXPAUSE-007 load-stage per-phase emit (optional -- one [load-stage-phase] line per sub-loader inside load_stage (8 lines: sheets_flush, tileset_load, load_map, load_tileattr, load_entities, tsc_load, backdrop_set, load_meta) + one TOTAL summary line at success exit. Default smoke leaves SDL_HINT_DOSKUTSU_LOADSTAGE_TRACE unset so this is ABSENT, which is expected. SFXPAUSE-007 iter cells will accumulate 9 lines per cave entry; the dominant sub-phase wall_ms tells flush-instr which load_stage path to drill into next. Error-path returns emit per-phase lines up to the failure point but NO TOTAL -- parser detects error path by absence-of-TOTAL for a given cave=N. See docs/internal/BOOT.md for the full field semantics + patches/nxengine-evo/0178 commit message.)"
   "0182 SFXPAUSE-010 frame-spike detect decision banner (optional -- LOG_INFO emitted on the first frame_spike_detect_active() call when SDL_HINT_DOSKUTSU_FRAME_SPIKE_DETECT=1; DISABLED state has no emit. Default smoke leaves the hint unset so this banner is ABSENT, which is expected not a failure. SFXPAUSE-010 iter cells SET it to 1 to capture session-wide inter-frame > 50 ms events. Pairs with [frame-spike] regex below.)"
@@ -572,6 +587,7 @@ BANNER_LABEL=(
   "0213 v1.0.8.1 eager action-sheet load decision (default-ON; LOG_INFO at first load_stage; pre-loads weapon bullet + hit/muzzle/trail caret sheets so the first fire/impact does not lazy-decode mid-gameplay; killswitch SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS=0. OPTIONAL: INFO-level, present on verbose/tagged runs. BANNER_REGEX idx 92.)"
   "0214 v1.0.8.1 organya render-window quiesce decision (default-ON; emits on an organya COLD-RENDER; zeroes the SB16 ring so the DMA loops silence not stale music during the blocking synth pass; killswitch SDL_HINT_DOSKUTSU_ORG_RENDER_QUIESCE=0. OPTIONAL: cold-render-only, absent in a warm-cache smoke. BANNER_REGEX idx 93.)"
   "0215 v1.0.8.1 batch org-precache total (OPTIONAL -- emits ONLY under DOSKUTSU_ORG_PRECACHE_ALL=1, the deployable-cache one-shot; reports rate/channels/rendered/skipped/failed/bytes for CF sizing; absent in a normal gameplay smoke. BANNER_REGEX idx 94.)"
+  "0216 DOSKUTSU.CFG config-file setenv shim (REQUIRED -- emits every boot after Logger::init: 'config: loaded DOSKUTSU.CFG (N keys)' when DOSKUTSU.CFG is present in the program dir, else 'config: no DOSKUTSU.CFG, using built-in defaults'. SETUP.EXE writes the file; the shim setenv's each user-facing key BEFORE any getenv/SDL_GetHint read, overwrite=0 so precedence is env > file > built-in default. Two-witness with the consuming lever's own banner -- e.g. a CFG with PERF_MODE=1 yields 'perf-mode: level=1'; a BAT 'SET SDL_HINT_DOSKUTSU_PERF_MODE=0' over the same CFG yields 'perf-mode: level=0' (env wins). Default smoke stages NO CFG so the 'no DOSKUTSU.CFG' variant matches. NOTE the BANNER_LABEL array carries a pre-existing display-only gap vs REGEX/SEVERITY, so this label's index is not load-bearing.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

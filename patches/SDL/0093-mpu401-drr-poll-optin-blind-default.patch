@@ -1,0 +1,146 @@
+From dc17cd82951eaebbad442ae00f328fff8cfb7ec7 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 9 Jun 2026 07:43:43 -0700
+Subject: [PATCH] dos: patch 0093 -- MPU-401 DRR poll opt-in (blind-default,
+ un-stallable)
+
+WHY DOS NEEDS THIS: on real Vibra16S + DreamBlaster S2, patch 0080's bit-6
+DRR poll reads the MPU status register at port_base+1 HOT -- after the SB16
+device is open with autoinit-DMA running + IRQ-5 hooked. When the WaveBlaster
+is absent / unpowered / wedged, the chip (or the undecoded ISA port) holds
+IOCHRDY low and the `inportb` STALLS the CPU mid-instruction -> hard freeze
+requiring a reboot. Confirmed on g2k 2026-06-08 (T23): both SETUP's WB test
+(WBSETUP.LOG dead-ends at the mpu401 init) and the in-game WB path (WB.LOG)
+wedge exactly here. The existing 10000-iter cap is irrelevant -- iteration 0's
+inportb never retires, so no software cap or wall-clock timeout can break a
+hardware bus wait-state. The only safe option is to not issue the read.
+
+Gate ALL port_base+1 status reads behind a new strict-"1" hint
+SDL_HINT_DOSKUTSU_AUDIO_WB_DRR_POLL, default OFF. OFF =>
+SDL_DOSMpu401WaitDRR returns "ready" with no inportb, so init + every byte
+write are blind -- patch-0044's proven-safe "fail-to-silence beats
+fail-to-lockup" semantics, un-stallable on any hardware. ON => today's capped
+bit-6 poll, for hardware where the status read is confirmed safe (it shipped
+working on the Pentium-class g2k per wb_midi_shipped_v1_0_2, where the read
+retires). Single choke point covers both the init poll and the per-byte poll;
+the opt-in PROBE_MPU401 path is untouched (already opt-in + lockup-flagged).
+
+Init now emits a port-bearing marker on both paths ("mpu401: blind init at
+port_base=0xNNNN" / "mpu401: direct-port init at port_base=0xNNNN") so the
+SETUP E2E port-resolution assertions anchor regardless of the poll mode.
+
+Pairs with an engine-side change (SoundManager auto-detect drops the WB
+probe; WB opt-in only via AUDIO_BACKEND=wb) so auto/default never issues the
+cold WB read either.
+---
+ src/core/dos/SDL_dos_audio_synth.c | 84 +++++++++++++++++++++++-------
+ 1 file changed, 64 insertions(+), 20 deletions(-)
+
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 2d7a4db71..301e39438 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -169,8 +169,38 @@ bool SDL_DOSMpu401Init(uint16_t port_base)
+    operator has a clear next step. Per docs/internal/WBTEST-001-FINDINGS.md
+    rev-8 (H20 confirmation chain). */
+ static bool s_mpu401_drr_cap_warned = false;
++
++/* DOSKUTSU patch (SDL/0093): DRR-poll opt-in gate. Default OFF.
++   Resolved once at SDL_DOSMpu401Init_DirectPort() from
++   SDL_HINT_DOSKUTSU_AUDIO_WB_DRR_POLL (strict-"1").
++
++   Why this exists: the bit-6 DRR poll (patch 0080) READS the MPU status
++   register at port_base+1. On real Vibra16S+S2 that read is issued HOT --
++   AFTER the SB16 device is open with autoinit-DMA running and IRQ-5 hooked
++   -- and when the WaveBlaster is absent / unpowered / wedged, the chip (or
++   the undecoded port) holds the ISA IOCHRDY line low and the `inportb`
++   STALLS the CPU mid-instruction (the W22-WB-D / T23 g2k hard-freeze; both
++   SETUP's twb test and the in-game pwb path wedged exactly here). The
++   existing 10000-iter cap is irrelevant: iteration 0's inportb never
++   retires, so no software cap or wall-clock timeout can break a hardware
++   bus wait-state. The ONLY safe option is to not issue the read.
++
++   Default OFF restores patch-0044's blind init/blind-write semantics
++   ("fail-to-silence beats fail-to-lockup"): never reads the status port,
++   so it cannot stall on any hardware. The bit-6 poll (which shipped working
++   on the Pentium-class g2k per wb_midi_shipped_v1_0_2, where the read does
++   retire) is available opt-in for hardware where the status read is
++   confirmed safe. */
++static bool s_mpu401_drr_poll_enabled = false;
++
+ static bool SDL_DOSMpu401WaitDRR(uint16_t port_base)
+ {
++    /* SDL/0093: when the opt-in is OFF (default), skip the status-register
++       read entirely -- a blind "ready" so callers blind-write. This is what
++       makes the WB path un-stallable. */
++    if (!s_mpu401_drr_poll_enabled) {
++        return true;
++    }
+     const Uint16 status_port = (Uint16)(port_base + 1);
+     for (int iter = 0; iter < 10000; iter++) {
+         if ((inportb(status_port) & 0x40) == 0) {
+@@ -234,27 +264,41 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+     const char *probe_env = SDL_getenv("SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401");
+     const bool do_probe = (probe_env && probe_env[0] == '1' && probe_env[1] == 0);
+ 
++    /* DOSKUTSU patch (SDL/0093): resolve the DRR-poll opt-in once. Default
++       OFF => blind init (no status-register read; cannot stall the ISA bus).
++       See SDL_DOSMpu401WaitDRR for the full HOT-read / IOCHRDY rationale. */
++    {
++        const char *drr = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_DRR_POLL");
++        s_mpu401_drr_poll_enabled = (drr && drr[0] == '1' && drr[1] == 0);
++    }
++
+     if (!do_probe) {
+-        doskutsu_dbg_log("mpu401: direct-port init at port_base=0x%04x "
+-                         "(default since patch 0080; bit-6 DRR polling "
+-                         "before UART entry + every byte write per "
+-                         "WBTEST-006 H20 confirmation; probe path "
+-                         "disabled, set SDL_HINT_DOSKUTSU_AUDIO_PROBE_MPU401=1 "
+-                         "to enable it with LOCKUP RISK on real Vibra16S+S2; "
+-                         "set SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=0 "
+-                         "to fall back to DSP-mediated path)",
+-                         (unsigned)port_base);
+-        /* DOSKUTSU patch (Phase 11 patch 0080): bit-6 DRR poll before
+-           UART entry write. A capped-out poll at init is a strong "this
+-           chip variant does not honor bit 6" signal -- the helper logs
+-           it once-per-process; we fail-soft and write the byte anyway
+-           so chips that work without polling still get the same blind
+-           init the patch-0044 path provided. */
+-        (void)SDL_DOSMpu401WaitDRR(port_base);
+-        /* UART mode entry. After this, all writes to the data port pass
+-           directly to the MIDI bus. Status bit 6 (0x40) = DRR (Data
+-           Ready to Receive); the helper above gates this write on it
+-           per DOSMID source (mpu401_uart in MPU401.C). */
++        if (s_mpu401_drr_poll_enabled) {
++            doskutsu_dbg_log("mpu401: direct-port init at port_base=0x%04x "
++                             "(DRR poll ON via SDL_HINT_DOSKUTSU_AUDIO_WB_DRR_POLL=1; "
++                             "bit-6 DRR polling before UART entry + every byte "
++                             "write per WBTEST-006 H20. ONLY enable on HW where "
++                             "the MPU status read is confirmed safe -- the read "
++                             "stalls the ISA bus when the chip is absent/wedged. "
++                             "Unset for blind init)",
++                             (unsigned)port_base);
++            /* bit-6 DRR poll before UART entry (opt-in path). */
++            (void)SDL_DOSMpu401WaitDRR(port_base);
++        } else {
++            doskutsu_dbg_log("mpu401: blind init at port_base=0x%04x "
++                             "(DRR poll OFF by default since SDL/0093 -- no MPU "
++                             "status-register read, cannot stall the ISA bus; "
++                             "patch-0044 fail-to-silence policy. Set "
++                             "SDL_HINT_DOSKUTSU_AUDIO_WB_DRR_POLL=1 to re-enable "
++                             "bit-6 DRR polling on HW where the status read is "
++                             "confirmed safe. Set "
++                             "SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=0 for the "
++                             "DSP-mediated path)",
++                             (unsigned)port_base);
++        }
++        /* UART mode entry -- blind write (no read) to port_base+1. After
++           this, writes to the data port pass directly to the MIDI bus.
++           Status bit 6 (0x40) = DRR; gated above only on the opt-in path. */
+         outportb((Uint16)(port_base + 1), 0x3F);
+         s_mpu401_port_base = (int)port_base;
+         return true;
+-- 
+2.47.3
+

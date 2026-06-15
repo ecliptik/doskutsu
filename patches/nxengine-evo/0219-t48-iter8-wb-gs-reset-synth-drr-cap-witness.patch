@@ -1,0 +1,280 @@
+From a7bda7d2be086dc4137e410f4bad705f4e15d054 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 12 Jun 2026 19:34:46 -0700
+Subject: [PATCH] patch 0219 -- T48 iter-8: WB GS-reset synth (opt-in) +
+ DRR-cap witness + teardown banner fix
+
+iter-7 proved the cold-init reorder kills the WaveBlaster freeze on the
+g2k DX2-66 (159 s no-wedge). iter-8 is the audio-COHERENCE layer. This is
+the engine half (Lever B + the shared witnesses); sdl-engine's SDL/0097
+is Lever A (per-byte bit-6 DRR poll restore + the drr_cap counters).
+
+LEVER B -- GS-reset synth (opt-in, default OFF): the Dream SAM2695's
+power-up voice map is not GM-grand-piano ("cowbell/wrong voice", the H11
+boot map). A GM/GS/XG reset SysEx switches it, but MidiScheduler discards
+stream SysEx (MidiScheduler.cpp:976-991) so none from the .mid ever
+reaches the daughterboard. New hint SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET
+= gs|xg|gm|none (default none): at on_song_start the WB backend
+synthesizes the chosen reset SysEx (GS lead = F0 41 10 42 12 40 00 7F 00
+41 F7) FIRST, before the all-notes-off and the song's program-changes, so
+the chip is on the requested map when those program-changes land. The
+emit is pacing-agnostic -- it writes via SDL_DOSMpu401WriteByte, so it
+composes with whichever SDL pacing (DRR poll OR timed-delay) is active.
+Resets were "ignored" in WBTEST-003 only under the no-poll OVERRUN regime;
+SDL/0097's pacing removes the overrun, so they may now land.
+
+WITNESSES (flush-instr iter-8 CONTRACT):
+- 2.2 GS-reset landed-witness: "WB GS-reset: K bytes SysEx + P
+  program-changes sent to 0x330, drr_cap_hits_during_reset=R" once at
+  song-start. K = sysex length (GS=11). P=0 (the lever sends only the
+  reset; the .mid's own program-changes select voices). R = drr_cap_hits
+  delta across the reset -- R~0 = landed cleanly (Lever B creditable),
+  R high = the reset overran (INVALID-for-B). (Under timed-delay pacing
+  drr_cap_hits stays 0, so R=0 is trivial there -- the dispatch climb +
+  ear are the landed-proof on that path.)
+- 2.1 drr_cap_hits dispatch tail: appended to the existing N=8 main-line
+  dispatch line -- "...; drr_cap_hits=C (pct% of bytes capped, cap=B)".
+  ~0% = the restored poll paces cleanly; ~100% = chip persistently busy =
+  latency-drag (looks like a hang without being a true wedge). Reads
+  sdl-engine SDL/0097's doskutsu_mpu_drr_cap_hits + doskutsu_mpu_drr_cap.
+
+LEVER C cosmetic (sdl-engine's diagnosis): silence_for_shutdown's
+"via DSP cmd 0x38" banner was a stale patch-0136 hardcoded string -- the
+CC123 actually routes via the direct-port transport (s_mpu401_use_dsp is
+false through teardown), the SAME as play. The wave-41 hanging note was
+the H20 blind-write overrun, fixed for free by the poll, NOT a transport
+mismatch. Corrected the banner text; no behavior change.
+
+Combined-build symbols: doskutsu_mpu_drr_cap_hits + doskutsu_mpu_drr_cap
+from SDL/0097 (links clean against the rebuilt sysroot).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp   |  18 ++++++-
+ src/sound/MidiBackendWB.cpp | 102 ++++++++++++++++++++++++++++++++++--
+ src/sound/MidiBackendWB.h   |  12 +++++
+ 3 files changed, 127 insertions(+), 5 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index a3249309..d8a858d1 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -2044,6 +2044,14 @@ extern "C" {
+   // symbol: a standalone nxengine link fails until sdl-engine's SDL patch
+   // exporting it lands alongside (W22A combined-review pattern).
+   extern volatile std::uint32_t doskutsu_mpu_write_count;
++  // patch 0219 (T48 iter-8): bounded bit-6 DRR-poll cap-hit counter + the cap
++  // value itself (sdl-engine SDL/0097). Appended to the periodic dispatch line
++  // as the Lever-A pacing-health signal (CONTRACT 2.1): ~0% of bytes capped =
++  // the restored poll is pacing cleanly; ~100% = chip persistently busy =
++  // latency-drag (music drags / audio starves; looks like a hang without being
++  // a true wedge). Combined-build symbols (resolve when SDL/0097 lands).
++  extern volatile std::uint32_t doskutsu_mpu_drr_cap_hits;
++  extern volatile std::uint32_t doskutsu_mpu_drr_cap;
+ }
+ 
+ // patch 0218 (T48): main-line WB MPU-dispatch-count witness. flush-instr's
+@@ -2080,11 +2088,17 @@ void _maybe_flush_wb_dispatch_witness()
+              (unsigned long)n, (unsigned long long)SDL_GetTicks(), _flip_total);
+   }
+   if ((_flip_total % _wb_dispatch_every_flips) != 0) return;
++  // patch 0219: append the Lever-A pacing-health tail (drr_cap_hits + pct + cap).
++  const std::uint32_t caps = doskutsu_mpu_drr_cap_hits;
++  const unsigned pct = (n > 0)
++      ? (unsigned)(((std::uint64_t)caps * 100ull) / n) : 0u;
+   LOG_INFO("WB MPU dispatch: {} bytes written to 0x330 (cumulative, main-line, "
+            "every {} flips, t={}ms flip={}) -- CLIMBING across blocks = sustained "
+            "wavetable note traffic; frozen = cold-init cleared then wedged/silent "
+-           "at first hot note", (unsigned long)n, _wb_dispatch_every_flips,
+-           (unsigned long long)SDL_GetTicks(), _flip_total);
++           "at first hot note; drr_cap_hits={} ({}% of bytes capped, cap={})",
++           (unsigned long)n, _wb_dispatch_every_flips,
++           (unsigned long long)SDL_GetTicks(), _flip_total,
++           (unsigned long)caps, pct, (unsigned long)doskutsu_mpu_drr_cap);
+ }
+ 
+ void _maybe_flush_phase_timing_audit()
+diff --git a/src/sound/MidiBackendWB.cpp b/src/sound/MidiBackendWB.cpp
+index d6f34d09..07d776be 100644
+--- a/src/sound/MidiBackendWB.cpp
++++ b/src/sound/MidiBackendWB.cpp
+@@ -5,7 +5,10 @@
+ 
+ #include "../Utils/Logger.h"
+ 
++#include <SDL3/SDL.h>
++
+ #include <cstdint>
++#include <cstring>
+ 
+ // Cross-vendor extern declarations for SDL/0037+ MPU-401 helpers.
+ // Public header lives at `vendor/SDL/src/core/dos/SDL_dos_audio_synth.h`
+@@ -24,6 +27,12 @@ extern "C" {
+   // reaches the dtor, so on a wedge the surviving witnesses are the flip()-side
+   // first-nonzero + periodic emits (Renderer.cpp), not this total.
+   extern volatile uint32_t doskutsu_mpu_write_count;
++  // patch 0219 (T48 iter-8): bounded-DRR-poll cap-hit counter (sdl-engine
++  // SDL/0097), bumped when the per-byte bit-6 poll reaches its cap without DRR
++  // going ready. The GS-reset witness reads its DELTA across the reset SysEx
++  // emit (R) -- R~0 = the multi-byte reset landed cleanly (Lever B creditable);
++  // R high = the reset itself overran (INVALID-for-B). Combined-build symbol.
++  extern volatile uint32_t doskutsu_mpu_drr_cap_hits;
+ }
+ 
+ namespace NXE
+@@ -42,6 +51,31 @@ static constexpr uint8_t MIDI_PROGRAM_CHANGE = 0xC0;
+ static constexpr uint8_t CC_ALL_SOUND_OFF = 0x78;  // 120 -- immediate cut
+ static constexpr uint8_t CC_ALL_NOTES_OFF = 0x7B;  // 123 -- graceful release
+ 
++// patch 0219 (T48 iter-8): reset SysEx literals (from WBTEST-001-FINDINGS rev
++// sections). Synthesized at song-start to switch the Dream SAM2695 off its
++// non-GM power-up voice map. GS is the lead candidate (Dream chips honor the
++// Roland GS-mode engagement -> program 0 = acoustic grand piano, ch9 = GS drum
++// kit). All three were "ignored" in WBTEST-003 -- but under the no-poll OVERRUN
++// regime, where multi-byte messages corrupted; SDL/0097's per-byte DRR poll
++// removes the overrun, so these may now LAND. Opt-in A/B lever decides.
++static const uint8_t WB_SYSEX_GM[] = { 0xF0, 0x7E, 0x7F, 0x09, 0x01, 0xF7 };
++static const uint8_t WB_SYSEX_GS[] = { 0xF0, 0x41, 0x10, 0x42, 0x12, 0x40,
++                                       0x00, 0x7F, 0x00, 0x41, 0xF7 };
++static const uint8_t WB_SYSEX_XG[] = { 0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00,
++                                       0x7E, 0x00, 0xF7 };
++
++// patch 0219: resolve the opt-in reset mode from the env hint (strict match;
++// default OFF). 0=none 1=gm 2=gs 3=xg.
++static int _resolve_wb_reset_mode()
++{
++  const char *v = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET");
++  if (v == nullptr) return 0;
++  if (std::strcmp(v, "gm") == 0) return 1;
++  if (std::strcmp(v, "gs") == 0) return 2;
++  if (std::strcmp(v, "xg") == 0) return 3;
++  return 0; // "none", empty, or unrecognized -> OFF
++}
++
+ MidiBackendWaveBlaster::MidiBackendWaveBlaster()
+ {
+   // Resolve the MPU-401 port from the BLASTER env var's Pxxxx field
+@@ -79,6 +113,18 @@ MidiBackendWaveBlaster::MidiBackendWaveBlaster()
+              "header.",
+              _port_base);
+   }
++
++  // patch 0219 (T48 iter-8): resolve the opt-in song-start reset mode once.
++  _reset_mode = _resolve_wb_reset_mode();
++  if (_reset_mode != 0)
++  {
++    static const char *const names[] = { "none", "GM", "GS", "XG" };
++    LOG_INFO("wb backend: song-start reset = {} (SDL_HINT_DOSKUTSU_AUDIO_WB_"
++             "VOICE_RESET; synthesizes a reset SysEx at each song-start to switch "
++             "the Dream SAM2695 voice map, since the scheduler discards stream "
++             "SysEx). Opt-in A/B lever; SDL/0097's DRR poll paces the bytes.",
++             names[_reset_mode]);
++  }
+ }
+ 
+ MidiBackendWaveBlaster::~MidiBackendWaveBlaster()
+@@ -163,6 +209,37 @@ void MidiBackendWaveBlaster::program_change(int channel, int program)
+ void MidiBackendWaveBlaster::on_song_start()
+ {
+   if (!_ready) return;
++  // patch 0219 (T48 iter-8): synthesize the opt-in reset SysEx FIRST -- the
++  // .mid's own SysEx is discarded by the scheduler, so this is the only way a
++  // GM/GS/XG reset reaches the Dream SAM2695. Emitted before the all-notes-off
++  // and before the song's first program_change events, so the chip is on the
++  // requested voice map when those program-changes land. Default OFF (mode 0).
++  if (_reset_mode != 0)
++  {
++    const uint8_t *sx = nullptr;
++    int k = 0;
++    switch (_reset_mode)
++    {
++      case 1: sx = WB_SYSEX_GM; k = (int)sizeof(WB_SYSEX_GM); break;
++      case 2: sx = WB_SYSEX_GS; k = (int)sizeof(WB_SYSEX_GS); break;
++      case 3: sx = WB_SYSEX_XG; k = (int)sizeof(WB_SYSEX_XG); break;
++      default: break;
++    }
++    if (sx)
++    {
++      // R = drr_cap_hits delta ACROSS the reset emit -- the Lever B landed-
++      // witness (CONTRACT 2.2). P=0: the lever sends only the reset SysEx; the
++      // song's own program-changes follow via normal dispatch and select voices
++      // on the now-reset voice map (no source for "correct" PCs at song-start).
++      const uint32_t cap0 = doskutsu_mpu_drr_cap_hits;
++      _send_sysex(sx, k);
++      const uint32_t r = doskutsu_mpu_drr_cap_hits - cap0;
++      LOG_INFO("WB GS-reset: {} bytes SysEx + {} program-changes sent to 0x330, "
++               "drr_cap_hits_during_reset={} (R~0 = reset landed cleanly, Lever B "
++               "creditable; R high = reset overran -> INVALID-for-B)",
++               k, 0, (unsigned long)r);
++    }
++  }
+   // Clean state for the new song: silence any sustaining voices left
+   // over from a prior song or from the engine's prior boot state.
+   // GM program defaults (channel 0-15 = piano on most GM synths) are
+@@ -173,6 +250,19 @@ void MidiBackendWaveBlaster::on_song_start()
+   LOG_INFO("wb backend: on_song_start");
+ }
+ 
++// patch 0219 (T48 iter-8): emit a raw SysEx byte stream to the MPU-401. Each
++// byte goes through SDL_DOSMpu401WriteByte, so under SDL/0097 the per-byte DRR
++// poll paces the stream and the chip does not overrun mid-message (the cause of
++// WBTEST-003's dropped resets). No 7-bit masking -- SysEx framing bytes 0xF0 /
++// 0xF7 are above 0x7F by design, and the manufacturer/data bytes are already
++// in-range in the canonical reset literals.
++void MidiBackendWaveBlaster::_send_sysex(const uint8_t *bytes, int n)
++{
++  if (!_ready) return;
++  for (int i = 0; i < n; ++i)
++    SDL_DOSMpu401WriteByte(bytes[i]);
++}
++
+ void MidiBackendWaveBlaster::on_song_stop()
+ {
+   if (!_ready) return;
+@@ -226,9 +316,15 @@ void MidiBackendWaveBlaster::silence_for_shutdown()
+     SDL_DOSMpu401WriteByte(CC_ALL_NOTES_OFF);
+     SDL_DOSMpu401WriteByte(0x00);
+   }
+-  LOG_INFO("wb backend: silence_for_shutdown (CC 123 on all 16 ch via "
+-           "DSP cmd 0x38; pre-SoundManager-teardown coverage for "
+-           "wave-41 hanging-note bug)");
++  // patch 0219 (T48 iter-8): corrected the stale transport claim. This CC123
++  // goes through SDL_DOSMpu401WriteByte, which on the cold-init path routes via
++  // the DIRECT-PORT transport -- the SAME one the play path used (s_mpu401_use_
++  // dsp stays false through teardown; sdl-engine confirmed). The wave-41 hanging
++  // note was NOT a transport mismatch but the H20 blind-write overrun of the
++  // CC123 triples; iter-8's per-byte DRR poll lands them = fixed.
++  LOG_INFO("wb backend: silence_for_shutdown (CC 123 on all 16 ch via the active "
++           "play transport (direct-port on the cold-init path); teardown silence "
++           "coverage)");
+ }
+ 
+ }  // namespace Sound
+diff --git a/src/sound/MidiBackendWB.h b/src/sound/MidiBackendWB.h
+index a42ffa55..3220e047 100644
+--- a/src/sound/MidiBackendWB.h
++++ b/src/sound/MidiBackendWB.h
+@@ -73,8 +73,20 @@ private:
+   // sounding on the WaveBlaster).
+   void _all_notes_off_all_channels();
+ 
++  // patch 0219 (T48 iter-8): emit a raw SysEx byte stream to the MPU-401
++  // (each byte via SDL_DOSMpu401WriteByte, so SDL/0097's per-byte DRR poll
++  // paces it -- the no-poll overrun regime is what made WBTEST-003's resets
++  // get dropped). Used at song-start to synthesize a GM/GS/XG reset, since
++  // MidiScheduler discards stream SysEx (MidiScheduler.cpp:976-991) so no
++  // reset from the .mid ever reaches the daughterboard. The Dream SAM2695's
++  // power-up voice map is not GM-grand-piano; a GS/XG reset switches it.
++  void _send_sysex(const uint8_t *bytes, int n);
++
+   bool _ready = false;
+   uint16_t _port_base = 0;
++  // patch 0219: resolved once in the ctor from SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET
++  // (gs|xg|gm|none; default none = OFF, opt-in A/B lever). 0=none 1=gm 2=gs 3=xg.
++  int _reset_mode = 0;
+ };
+ 
+ }  // namespace Sound
+-- 
+2.47.3
+

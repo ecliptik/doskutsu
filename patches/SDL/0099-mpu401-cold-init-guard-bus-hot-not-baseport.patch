@@ -1,0 +1,191 @@
+From 7325628c7e9407efeb26070a669ad07db4dbb0f7 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 14 Jun 2026 09:47:26 -0700
+Subject: [PATCH] dos: patch 0099 -- MPU-401 cold-init guard: key on bus-HOT,
+ not base_port (T72)
+
+The SDL/0098 cold-init guard declined on SDL_DOSAudioSB_IsInitialized()
+(soundblaster_base_port >= 0). But base_port is set at DETECTION --
+IsSoundBlasterPresent() runs from the SB AudioBootStrap .Init at
+SDL_Init(SDL_INIT_AUDIO) -- which ALWAYS precedes any cold-init call. So the
+guard fired at the safe pre-MIX window every time and the WaveBlaster fell back
+to organya: the in-game WB default+manual paths AND SETUP's WBS3 cold-init (the
+latter worse -- a declined cold-init leaves SETUP's WB test on a hot bus = the
+original hot-MPU wedge the campaign fixed). base_port>=0 is "SB detected", not
+"bus hot".
+
+Fix: add SDL_DOSAudioSB_IsDeviceHot() -- a true hot-bus predicate (g_dos_sb
+_device_open) set at DOSSOUNDBLASTER_OpenDevice success (after the IRQ-5 hook +
+autoinit DMA start) and cleared at CloseDevice. Key the cold-init guard on it.
+At the pre-MIX window it is false -> cold-init proceeds (iter-7 g2k 159 s clean +
+iter-8 DOSBox armed both prove the detected-but-not-hot bus is safe to cold-init);
+on a genuinely hot bus (cold-init reached after the SB16 open) it is true ->
+decline -> organya (fail-to-silence, never freeze). Wedge defense preserved; the
+by-default + manual + SETUP cold-init paths are unblocked.
+
+Also corrects the stale SDL_DOSAudioSB_IsInitialized() comment that claimed
+base_port is set "during OpenDevice" (it is set at detection) -- the wrong
+mental model that produced the 0098 guard. The DSP-mediated fallback's
+IsInitialized() check (DIRECT_PORT=0 path) is left unchanged; it genuinely wants
+"detected".
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c    | 40 ++++++++++++++++++++++++--
+ src/core/dos/SDL_dos_audio_synth.c | 46 +++++++++++++++++++-----------
+ src/core/dos/SDL_dos_audio_synth.h |  7 +++++
+ 3 files changed, 73 insertions(+), 20 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 6019cfa2b..ba8929843 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -52,6 +52,14 @@ extern SDL_DOSIdlePauseCallback g_dos_audio_idle_pause_cb;
+ #define FORCE_SB_8BIT 0
+ 
+ static int soundblaster_base_port = -1;
++/* DOSKUTSU patch (SDL/0099): TRUE "bus is hot" predicate. soundblaster_base_port
++   goes >= 0 at DETECTION (IsSoundBlasterPresent, run from the AudioBootStrap
++   .Init at SDL_Init(SDL_INIT_AUDIO)) -- long before the bus is hot -- so it is the
++   WRONG signal for "do not touch the MPU." The bus only goes hot when OpenDevice
++   hooks IRQ-5 + starts the autoinit DMA. This flag is set at OpenDevice success
++   and cleared at CloseDevice, and SDL_DOSAudioSB_IsDeviceHot() exports it for the
++   MPU-401 cold-init guard (the iter-6 wedge is DMA+IRQ active, NOT mere detect). */
++static volatile bool g_dos_sb_device_open = false;
+ static int soundblaster_irq = -1;
+ static int soundblaster_dma_channel = -1;
+ static int soundblaster_highdma_channel = -1;
+@@ -579,12 +587,28 @@ static void WriteSoundBlasterDSP(const Uint8 val)
+    intentionally engine-side because we don't track frame count here. */
+ bool SDL_DOSAudioSB_IsInitialized(void)
+ {
+-    /* soundblaster_base_port is initialized to -1 at file scope and
+-       set to a real port by DetectSoundBlaster() during DOSSOUNDBLASTER_
+-       OpenDevice. Non-negative => OpenDevice ran to completion. */
++    /* SDL/0099 comment correction: soundblaster_base_port is set to a real port
++       by IsSoundBlasterPresent() (BLASTER env parse), which the SB AudioBootStrap
++       .Init (DOSSOUNDBLASTER_Init) runs at SDL_Init(SDL_INIT_AUDIO) DETECTION --
++       NOT at OpenDevice. So non-negative means "SB DETECTED", NOT "device opened
++       / bus hot". The prior comment claiming "OpenDevice ran to completion" was
++       wrong and led the SDL/0098 cold-init guard to decline at the (safe) pre-MIX
++       window. For the "is the bus actually hot" check, use
++       SDL_DOSAudioSB_IsDeviceHot() instead. */
+     return soundblaster_base_port >= 0;
+ }
+ 
++/* DOSKUTSU patch (SDL/0099): true "the SB16 bus is HOT" predicate -- the IRQ-5
++   handler is hooked AND the autoinit DMA is running (set at OpenDevice success,
++   cleared at CloseDevice). Distinct from SDL_DOSAudioSB_IsInitialized() (mere
++   detection, true from SDL_Init(AUDIO) on). The MPU-401 cold-init guard keys on
++   THIS: a cold-init on a not-yet-hot detected bus is safe (iter-7 g2k 159 s clean,
++   iter-8 DOSBox armed); a cold-init on a hot bus is the iter-6 wedge. */
++bool SDL_DOSAudioSB_IsDeviceHot(void)
++{
++    return g_dos_sb_device_open;
++}
++
+ void SDL_DOSAudioSB_DSPMidiEnterUART(void)
+ {
+     /* No precondition gate -- caller (synth.c MPU init) checks
+@@ -2886,6 +2910,12 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+             MaybeServiceIdlePauseRequests();
+         }
+     }
++    /* SDL/0099: the bus is now HOT -- IRQ-5 hooked (DOS_HookInterrupt above) +
++       autoinit DMA started (DSP 0xB6/0x1C above). Mark it so the MPU-401 cold-init
++       guard declines a (genuinely unsafe) hot-bus cold-init from here on. Cleared
++       at CloseDevice. The single OpenDevice success exit; the early failure return
++       is before any IRQ/DMA arm so the flag correctly stays false there. */
++    g_dos_sb_device_open = true;
+     return true;
+ }
+ 
+@@ -3748,6 +3778,10 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
+ {
+     struct SDL_PrivateAudioData *hidden = device->hidden;
++    /* SDL/0099: bus is going cold (teardown begins). Clear the hot flag first so a
++       cold-init after this close sees a cold bus again. Unconditional (safe even
++       if hidden is NULL -- then nothing was hot anyway). */
++    g_dos_sb_device_open = false;
+     if (hidden) {
+         /* DOSKUTSU patch (Phase 10 patch 0043): force-DSP-pause hard-
+            reset teardown path. Supersedes the patch 0040 amend's
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 56a880e63..e3431f9f3 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -423,23 +423,35 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+             int ack = -1;
+             int via_dsr = 0;
+ 
+-            /* SDL/0098 DEFENSIVE GUARD: the whole point of cold-init is to touch
+-               the MPU on a COLD bus (before the SB16 opens). The engine reorder
+-               (SoundManager 0220/T68) calls us BEFORE MIX_CreateMixerDevice so
+-               the bus is cold. If we are reached while the SB16 is ALREADY open
+-               (engine reorder absent/failed, or WB armed late), the 0xFF reset +
+-               0x3F entry below would hit a HOT 0x331 = the iter-6 wedge. So if the
+-               SB16 is already up, DECLINE -- do NOT touch the bus, return false
+-               -> the engine falls back to organya (fail-to-silence, never
+-               freeze). This makes the default-ON flip wedge-proof regardless of
+-               engine ordering. */
+-            if (SDL_DOSAudioSB_IsInitialized()) {
+-                doskutsu_dbg_log("mpu401: cold-init DEFAULT-ON but SB16 already "
+-                                 "open at port_base=0x%04x -- engine reorder "
+-                                 "(0220/T68) did NOT arm WB before the SB16 open; "
+-                                 "DECLINING to avoid the hot-bus wedge (no 0x331 "
+-                                 "touch) -> WB falls back to organya. WB-by-default "
+-                                 "needs the engine cold-init reorder; set "
++            /* SDL/0099 DEFENSIVE GUARD (supersedes the SDL/0098 hunk): the point
++               of cold-init is to touch the MPU on a COLD bus (before the SB16's
++               IRQ-5 + autoinit DMA go live). The engine reorder (SoundManager
++               0218/0220) and SETUP's device_open both call us BEFORE
++               MIX_CreateMixerDevice, so the bus is cold there.
++
++               SDL/0098 keyed this guard on SDL_DOSAudioSB_IsInitialized()
++               (soundblaster_base_port >= 0) -- but that is set at DETECTION
++               (SDL_Init(SDL_INIT_AUDIO) bootstrap), which ALWAYS runs before any
++               cold-init call, so the guard declined every time -> WB fell to
++               organya (T72 ship regression; base_port>=0 is NOT "bus hot").
++
++               Fix: key on the TRUE hot condition -- SDL_DOSAudioSB_IsDeviceHot()
++               (IRQ-5 hooked + autoinit DMA running, set only at OpenDevice
++               success). At the pre-MIX window it is FALSE -> cold-init proceeds
++               (iter-7 g2k 159 s clean + iter-8 DOSBox armed both prove this is
++               safe). If we are somehow reached AFTER the SB16 is open (engine
++               reorder absent/failed, or WB armed late), it is TRUE -> the 0xFF
++               reset + 0x3F entry below would hit a HOT 0x331 = the iter-6 wedge,
++               so DECLINE -> fall back to organya (fail-to-silence, never freeze).
++               Wedge-proof AND lets the by-default + manual cold-init through. */
++            if (SDL_DOSAudioSB_IsDeviceHot()) {
++                doskutsu_dbg_log("mpu401: cold-init but SB16 bus is HOT "
++                                 "(IRQ-5 hooked + autoinit DMA running) at "
++                                 "port_base=0x%04x -- WB armed AFTER the SB16 "
++                                 "open (engine/SETUP reorder absent or late); "
++                                 "DECLINING to avoid the hot-0x331 wedge (no bus "
++                                 "touch) -> WB falls back to organya. Cold-init "
++                                 "must run BEFORE MIX_CreateMixerDevice; set "
+                                  "SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=0 to disable "
+                                  "cold-init entirely.", (unsigned)port_base);
+                 return false;
+diff --git a/src/core/dos/SDL_dos_audio_synth.h b/src/core/dos/SDL_dos_audio_synth.h
+index c34669240..4eddd360a 100644
+--- a/src/core/dos/SDL_dos_audio_synth.h
++++ b/src/core/dos/SDL_dos_audio_synth.h
+@@ -110,6 +110,13 @@ extern uint16_t SDL_DOSMpu401GetBLASTERPort(void);
+ // serviced at least one frame before WB init (per analysis hard-no #3).
+ extern bool SDL_DOSAudioSB_IsInitialized(void);
+ 
++// SDL/0099: true "the SB16 bus is HOT" -- IRQ-5 hooked + autoinit DMA running
++// (set at OpenDevice success, cleared at CloseDevice). Distinct from
++// SDL_DOSAudioSB_IsInitialized() (mere detection, true from SDL_Init(AUDIO) on).
++// The MPU-401 cold-init guard keys on THIS: cold-init on a detected-but-not-hot
++// bus is safe (the pre-MIX window); cold-init on a hot bus is the iter-6 wedge.
++extern bool SDL_DOSAudioSB_IsDeviceHot(void);
++
+ // Issues DSP cmd 0x34 to enter MPU-401 UART MIDI mode. Subsequent MIDI
+ // byte writes go through SDL_DOSAudioSB_DSPMidiWriteByte. No IRQ is
+ // generated (probe section 11 confirmed). Caller must IsInitialized()
+-- 
+2.47.3
+

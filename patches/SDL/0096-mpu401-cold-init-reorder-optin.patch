@@ -1,0 +1,188 @@
+From a266e17e40c1e7c98ac6ed23e1ba614257568cbf Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 12 Jun 2026 16:54:26 -0700
+Subject: [PATCH] dos: patch 0096 -- MPU-401 DOOM-shape cold-init reorder
+ (opt-in)
+
+WHY DOS NEEDS THIS: on the g2k DX2-66 the in-game WaveBlaster path
+hard-freezes at MPU-401 init -- iter-6 confirmed even stock v1.0.8.1
+wedges, so this is not a branch regression. The freeze is the FIRST
+0x331 access (the UART-entry write) issued HOT: after MIX_CreateMixerDevice
+opened the SB16 with autoinit-DMA + IRQ-5 live, the hot ISA-bus access to
+the WaveBlaster-header MPU decode holds IOCHRDY and stalls the CPU
+mid-instruction (the T23/W22-WB-D class, CPU-tier-correlated -- POD-83
+retired it, the DX2-66 does not). Hot DATA writes to an ALREADY-entered
+chip are probe-validated safe (iter-5 PROBEP: cold UART entry then hot
+data/status/reset survived). DOOM plays WaveBlaster+SB concurrently on
+this exact board, so the hardware combo works -- the difference is
+bring-up ORDER.
+
+Add an opt-in cold-init: SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=1
+(strict-"1", default OFF). The engine calls SDL_DOSMpu401Init BEFORE the
+SB16 opens, so the whole MPU bring-up runs on a cold bus: 0xFF reset ->
+bounded DSR-capped ACK drain (bit-7 lies on this Vibra16S CT2490 -- cap
+then drain one byte, never an unbounded wait) -> 0x3F UART entry -> 0095
+entry-ACK drain. The reset is required by MPU-401 protocol, not a DOOM
+citation: a 0x3F sent to a chip already in UART mode (a prior program can
+leave it there) is read as MIDI DATA, not a command, so a plain 0x3F-only
+entry may never (re-)establish clean UART state.
+
+CRITICAL: the cold path does NOT enable the bit-6 DRR poll -- per-byte
+PLAY writes stay blind (outportb 0x330 only). Enabling the poll (as the
+0094 reset-init path does) would reissue a hot 0x331 READ on every note
+byte = the exact wedge class. Cold clean entry + blind hot data writes is
+the correct composition. Default OFF -> byte-identical to today; flips
+ON-for-wb only after the g2k play-through gate.
+
+Also export doskutsu_mpu_write_count (incremented per byte in
+SDL_DOSMpu401WriteByte, atomic 32-bit, ISR + main-line safe): the engine
+logs it main-line every N frames as the cold-init play-vs-silent-wedge
+witness (climbing = a song is dispatching through the WB; flat after
+cold-init = a re-wedge or silent fallback).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/core/dos/SDL_dos_audio_synth.c | 87 ++++++++++++++++++++++++++++++
+ src/core/dos/SDL_dos_audio_synth.h | 14 +++++
+ 2 files changed, 101 insertions(+)
+
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 02d33076d..db7a81098 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -344,6 +344,79 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+     }
+ 
+     if (!do_probe) {
++        /* DOSKUTSU patch (SDL/0096): opt-in DOOM-shape COLD-INIT for the
++           WaveBlaster. SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=1 (strict-"1",
++           default OFF). The engine (SoundManager) calls SDL_DOSMpu401Init
++           BEFORE MIX_CreateMixerDevice opens the SB16, so the WHOLE MPU-401
++           bring-up runs on a COLD ISA bus -- no autoinit-DMA + IRQ-5
++           contention. The g2k iter-6 wedge was the FIRST 0x331 access (the
++           UART-entry write) issued HOT; hot DATA writes to an ALREADY-entered
++           chip are probe-validated safe (iter-5 PROBEP: cold entry then hot
++           data/status/reset survived). So enter UART mode cold, then all hot
++           traffic is the safe data-write class.
++
++           Sequence (all on the cold bus): 0xFF reset -> bounded DSR-capped ACK
++           drain (bit-7 lies on this Vibra16S CT2490, so cap then drain one byte
++           unconditionally -- never an unbounded wait) -> 0x3F UART entry ->
++           0095 entry-ACK drain.
++
++           Reset rationale (MPU-401 protocol, not a DOOM citation): a 0x3F sent
++           to a chip ALREADY in UART mode is interpreted as MIDI DATA, not a
++           command. A prior program (the operator runs DOOM + PicoGUS) can leave
++           the chip in UART mode, so a plain 0x3F-only entry may never establish
++           clean UART state; the 0xFF reset returns it to a known command state
++           first.
++
++           CRITICAL: this path does NOT enable the bit-6 DRR poll. Per-byte PLAY
++           writes stay BLIND (outportb 0x330 only). Enabling the poll (as the
++           0094 reset-init path does) would reissue a HOT 0x331 READ on every
++           note byte = exactly the wedge class on the DX2-66. Cold clean entry +
++           blind hot data writes is the correct composition. Default OFF; flips
++           ON-for-wb only after the g2k play-through gate confirms. */
++        const char *cold = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT");
++        if (cold && cold[0] == '1' && cold[1] == 0) {
++            int cap = 60000;
++            int ack = -1;
++            int via_dsr = 0;
++
++            /* 1. RESET to a known command state. */
++            outportb((Uint16)(port_base + 1), 0xFF);
++
++            /* 2. Drain the 0xFE reset-ACK, HARD-BOUNDED (bit-7 lie tolerant).
++               Cold bus -> the data-port read is the provably-safe cold-access
++               class. */
++            while (cap-- > 0) {
++                if ((inportb((Uint16)(port_base + 1)) & 0x80) == 0) { /* DSR low = data ready */
++                    ack = inportb((Uint16)port_base);
++                    via_dsr = 1;
++                    break;
++                }
++            }
++            if (!via_dsr) {
++                ack = inportb((Uint16)port_base);
++            }
++
++            doskutsu_dbg_log("mpu401: cold-init at port_base=0x%04x "
++                             "(SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=1; MPU UART "
++                             "entered on the COLD bus BEFORE the SB16 open -- "
++                             "0xFF reset -> bounded ACK drain -> 0x3F UART entry; "
++                             "per-byte PLAY writes stay BLIND, no hot 0x331 DRR "
++                             "poll -- the DX2-66 hot-UART-entry wedge fix). "
++                             "reset_ack=0x%02X via=%s (via-DSR + 0xFE = clean "
++                             "reset+ack; uncond = bit-7 lie)",
++                             (unsigned)port_base, (unsigned)(ack & 0xFF),
++                             via_dsr ? "DSR" : "uncond");
++
++            /* 3. UART mode entry (cold). */
++            outportb((Uint16)(port_base + 1), 0x3F);
++            /* 4. Drain the 0x3F entry-ACK (0095), cold. Deliberately leaves
++               s_mpu401_drr_poll_enabled at its default (OFF) -- blind per-byte
++               hot writes. */
++            mpu401_drain_entry_ack(port_base, "cold-init path");
++            s_mpu401_port_base = (int)port_base;
++            return true;
++        }
++
+         /* DOSKUTSU patch (SDL/0094): opt-in DOOM/DMX-sequence reset init.
+            SDL_HINT_DOSKUTSU_AUDIO_WB_RESET_INIT=1 (default OFF). g2k iter-3/4/5
+            wedged at MPU init where DOOM's DreamBlaster MIDI plays fine on the
+@@ -499,6 +572,12 @@ void SDL_DOSMpu401WriteByte(uint8_t byte)
+         return; /* not initialized; silent no-op per docs */
+     }
+ 
++    /* DOSKUTSU patch (SDL/0096): WB MIDI byte-dispatch witness. One atomic
++       32-bit increment per dispatched byte (any transport). Read main-line by
++       the engine every N frames -- a climbing count proves a song is actually
++       reaching the WaveBlaster (the cold-init play-vs-silent-wedge witness). */
++    doskutsu_mpu_write_count++;
++
+     /* DOSKUTSU patch (Phase 10 patch 0047): dispatch via DSP-mediated
+        path when default; via direct-port when SDL_HINT_DOSKUTSU_AUDIO_
+        WB_DIRECT_PORT=1 was set at init time. */
+@@ -916,6 +995,14 @@ volatile uint32_t doskutsu_audio_irq_wall_us = 0;
+ volatile uint32_t doskutsu_audio_irq_count = 0;
+ volatile uint32_t doskutsu_audio_sfx_active_count = 0;
+ 
++/* DOSKUTSU patch (SDL/0096): cumulative WaveBlaster MIDI byte-dispatch
++   counter (T48 cold-init play-vs-silent-wedge witness). Incremented once per
++   SDL_DOSMpu401WriteByte from BOTH main-line and IRQ-5-ISR (Lever 2b) context;
++   the single 32-bit volatile increment is atomic on x86 so no cli/sti is
++   needed. The engine reads it from the MAIN LOOP and logs it every N frames.
++   Declared extern in SDL_dos_audio_synth.h. */
++volatile uint32_t doskutsu_mpu_write_count = 0;
++
+ /* DOSKUTSU patch (Phase 11 patch 0069): cumulative silent-IRQ counter
+    for the Pixtone multi-source probe (hypothesis C: cooperative-
+    scheduler audio-thread starvation during rapid-fire SFX). The
+diff --git a/src/core/dos/SDL_dos_audio_synth.h b/src/core/dos/SDL_dos_audio_synth.h
+index c0e92b3b8..4a4b4818a 100644
+--- a/src/core/dos/SDL_dos_audio_synth.h
++++ b/src/core/dos/SDL_dos_audio_synth.h
+@@ -364,6 +364,20 @@ extern volatile uint32_t doskutsu_audio_sfx_active_count;
+    probe contract. */
+ extern volatile uint32_t doskutsu_audio_silent_irq_count;
+ 
++/* DOSKUTSU patch (SDL/0096): cumulative WaveBlaster MIDI byte-dispatch
++   counter. Incremented once per SDL_DOSMpu401WriteByte (every MIDI byte
++   handed to the WB transport -- direct-port 0x330 or DSP-mediated). Single
++   32-bit volatile increment = atomic on x86 (kbd-counter precedent), so it
++   is safe to bump from BOTH main-line and the IRQ-5 ISR (Lever 2b MIDI
++   dispatch) with no cli/sti; the READER must be main-line. The engine reads
++   it from the main loop and logs it every N frames as the cold-init
++   play-vs-silent-wedge witness: a climbing count = a song is actually
++   dispatching through the WaveBlaster; a count that goes flat right after
++   the cold-init banners = cold-init established clean state but dispatch is
++   blocked/silent (a re-wedge at the first hot ISR note, or a silent
++   fallback). Per the T48 cold-init witness contract (flush-instr). */
++extern volatile uint32_t doskutsu_mpu_write_count;
++
+ /* ------------------------------------------------------------------------
+  * Phase 11 patch 0071 -- SDL_DOSPixtone* channel-pool API for Lever 3
+  * ------------------------------------------------------------------------
+-- 
+2.47.3
+

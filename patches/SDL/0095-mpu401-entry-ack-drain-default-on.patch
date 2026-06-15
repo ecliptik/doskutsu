@@ -1,0 +1,160 @@
+From 9f7b25927000f381faea3d9882d226013d3a362a Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 12 Jun 2026 11:16:02 -0700
+Subject: [PATCH] dos: patch 0095 -- MPU-401 UART-entry (0x3F) ACK-drain
+ (default-ON)
+
+The UART-entry command (0x3F written to the MPU command port port_base+1)
+makes the MPU place a 0xFE ACK byte in its 0x330 output buffer and assert
+DSR/IRQ. Our blind and poll init paths never read that byte, so the MPU
+holds the output-buffer-full / IRQ line asserted. On the live SB16 IRQ-5
+ring that perturbs audio service: wbhot cell-P p5 measured 3 hot MPU
+writes stalling the DAC stream ~1.8 s (transient, recovered), and the
+blind/poll engine WB path wedges at "Loading" where cell-P -- which drains
+the ACK -- plays clean. Draining the entry ACK removes that source.
+
+This adds a shared bounded drain, default-ON with a strict-"0" killswitch
+SDL_HINT_DOSKUTSU_AUDIO_WB_ENTRY_ACK_DRAIN, called after the 0x3F write on
+BOTH the blind/poll direct-port path and the 0094 opt-in reset-init path
+(which otherwise ended with the same undrained ACK). Bounded + DSR-capped
+exactly like 0094's reset-ACK drain: poll bit-7 (DSR) up to a hard cap,
+read 0x330 on data-ready (via=DSR), else drain one byte unconditionally
+after the cap (via=uncond; tolerate-no-ACK -- the cap is correctness for
+the W22-WB-F bit-7 lie, never an unbounded wait). A banner records
+drain=1/0, the drained ack byte, and via=DSR|uncond.
+
+HONEST ATTRIBUTION: this is FORWARD ROBUSTNESS on the cell-P / p5
+IRQ-starvation evidence, NOT a v1.0.8.1 restoration. v1.0.8.1's 0080 init
+body is byte-identical to ours and never drained the entry ACK either,
+yet WB worked there -- the works->hangs regression is engine-side (the
+0216/0217 surrounding-path delta), tracked separately. The proof
+obligation is iter-6's killswitch A/B: the default-ON drain cell should
+play where the killswitch=0 undrained-baseline cell hangs, co-witnessed by
+wbhot-v3 p9.
+
+BLIND-PATH NOTE: the one-time entry drain reads 0x331 (bounded) + 0x330
+even on the blind path -- draining the ACK is mandatory for IRQ-5 health,
+so skipping it is the bug. Safe to require because WB is opt-in
+(AUDIO_BACKEND=wb asserts a present chip), so the T23 absent-chip stall is
+not the governing case here; per-byte blind semantics are unchanged.
+wbhot-v3 p9 settles whether a pure unconditional 0x330 read (zero 0x331)
+suffices for the blind drain.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/core/dos/SDL_dos_audio_synth.c | 78 ++++++++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
+
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 080f6299c..02d33076d 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -221,6 +221,69 @@ static bool SDL_DOSMpu401WaitDRR(uint16_t port_base)
+     return false;
+ }
+ 
++/* DOSKUTSU patch (SDL/0095): MPU-401 UART-entry (0x3F) ACK-drain.
++   Default ON; strict-"0" killswitch SDL_HINT_DOSKUTSU_AUDIO_WB_ENTRY_ACK_DRAIN.
++
++   FORWARD ROBUSTNESS -- NOT a v1.0.8.1 restoration. v1.0.8.1's 0080 init body is
++   byte-identical to ours and never drained the entry ACK either, yet WB worked;
++   the works->hangs regression is elsewhere (engine-side -- 0216/0217 surrounding
++   path), tracked separately. This drain stands on the cell-P / p5 evidence: the
++   UART-entry command (0x3F to port_base+1) makes the MPU place a 0xFE ACK in its
++   0x330 output buffer and assert DSR/IRQ. Left unread, the MPU holds the output-
++   buffer-full / IRQ line asserted; on the LIVE SB16 IRQ-5 ring that perturbs
++   audio service -- wbhot cell-P p5 measured 3 hot MPU writes stalling the DAC
++   ~1.8 s (transient, recovered). cell-P (which drains the ACK) plays clean where
++   blind/poll production (which never drains) wedges at "Loading". Draining the
++   entry ACK removes that perturbation source.
++
++   Bounded + DSR-capped exactly like the 0094 reset-ACK drain: poll bit-7 (DSR)
++   up to a hard cap, read 0x330 on data-ready (via=DSR), else drain one byte
++   UNCONDITIONALLY after the cap (via=uncond; tolerate-no-ACK -- the cap is
++   correctness for the W22-WB-F bit-7 lie, never an unbounded wait).
++
++   BLIND-PATH NOTE: this one-time entry drain DOES read the 0x331 status port
++   (bounded) + the 0x330 data port even on the blind path -- draining the ACK is
++   mandatory for IRQ-5 health, so skipping it is the bug. Safe to require because
++   WB is opt-in (AUDIO_BACKEND=wb asserts a present chip), so the T23 absent-chip
++   stall is not the governing case here; the per-byte blind semantics (no DRR
++   poll before each note) are unchanged. wbhot-v3 p9 settles whether a pure
++   unconditional 0x330 read (zero 0x331) suffices for the blind drain; if so a
++   follow-up tightens it. */
++static bool s_mpu401_entry_ack_drain_enabled = true;
++
++static void mpu401_drain_entry_ack(uint16_t port_base, const char *path_label)
++{
++    if (!s_mpu401_entry_ack_drain_enabled) {
++        doskutsu_dbg_log("mpu401: entry-ack drain SKIPPED at port_base=0x%04x "
++                         "(%s; SDL_HINT_DOSKUTSU_AUDIO_WB_ENTRY_ACK_DRAIN=0 -- "
++                         "undrained 0x3F ACK baseline; IRQ-5 starvation risk on "
++                         "live SB16)",
++                         (unsigned)port_base, path_label);
++        return;
++    }
++    {
++        int cap = 60000;
++        int ack = -1;
++        int via_dsr = 0;
++        while (cap-- > 0) {
++            if ((inportb((Uint16)(port_base + 1)) & 0x80) == 0) { /* DSR low = data ready */
++                ack = inportb((Uint16)port_base);                 /* read the 0xFE entry-ACK */
++                via_dsr = 1;
++                break;
++            }
++        }
++        if (!via_dsr) {
++            ack = inportb((Uint16)port_base); /* unconditional drain (bit-7 lie) */
++        }
++        doskutsu_dbg_log("mpu401: entry-ack drain at port_base=0x%04x "
++                         "(%s; drain=1 ack=0x%02X via=%s; SDL/0095 "
++                         "mandatory-for-IRQ-5-health; killswitch "
++                         "SDL_HINT_DOSKUTSU_AUDIO_WB_ENTRY_ACK_DRAIN=0)",
++                         (unsigned)port_base, path_label,
++                         (unsigned)(ack & 0xFF), via_dsr ? "DSR" : "uncond");
++    }
++}
++
+ /* DOSKUTSU patch (Phase 10 patch 0047): direct-port path extracted from
+    the patch-0044 SDL_DOSMpu401Init body. Entry guarded behind the
+    SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=1 hint. Body unchanged from
+@@ -272,6 +335,14 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+         s_mpu401_drr_poll_enabled = (drr && drr[0] == '1' && drr[1] == 0);
+     }
+ 
++    /* DOSKUTSU patch (SDL/0095): resolve the entry-ACK-drain killswitch once.
++       Default ON; only the literal "0" disables (the undrained baseline used by
++       the iter-6 A/B control cell). See mpu401_drain_entry_ack for rationale. */
++    {
++        const char *ead = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_ENTRY_ACK_DRAIN");
++        s_mpu401_entry_ack_drain_enabled = !(ead && ead[0] == '0' && ead[1] == 0);
++    }
++
+     if (!do_probe) {
+         /* DOSKUTSU patch (SDL/0094): opt-in DOOM/DMX-sequence reset init.
+            SDL_HINT_DOSKUTSU_AUDIO_WB_RESET_INIT=1 (default OFF). g2k iter-3/4/5
+@@ -327,6 +398,10 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+ 
+             /* 3. UART mode entry. */
+             outportb((Uint16)(port_base + 1), 0x3F);
++            /* SDL/0095: drain the 0x3F entry-ACK (DOOM drains it too; without
++               this the reset-init path ends with the same undrained ACK as the
++               blind/poll paths -- the IRQ-5 starvation source). */
++            mpu401_drain_entry_ack(port_base, "reset-init path");
+             s_mpu401_port_base = (int)port_base;
+             return true;
+         }
+@@ -358,6 +433,9 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+            this, writes to the data port pass directly to the MIDI bus.
+            Status bit 6 (0x40) = DRR; gated above only on the opt-in path. */
+         outportb((Uint16)(port_base + 1), 0x3F);
++        /* SDL/0095: drain the 0x3F entry-ACK on both the blind and poll paths
++           (default-ON; killswitch=0 is the undrained baseline). */
++        mpu401_drain_entry_ack(port_base, s_mpu401_drr_poll_enabled ? "direct-port poll path" : "blind path");
+         s_mpu401_port_base = (int)port_base;
+         return true;
+     }
+-- 
+2.47.3
+

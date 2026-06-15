@@ -1,0 +1,74 @@
+From 7d9965dbd1b426fd70f5ca2c3a3e4ccbfba1c81d Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 14 Jun 2026 16:04:26 -0700
+Subject: [PATCH] dos: patch 0100 -- SB16 CT1745 WaveBlaster-header channel
+ boost (Line-In/CD), opt-in (T74)
+
+The DreamBlaster S2 on the SB16 WaveBlaster header is analog-mixed through one of
+the CT1745 inputs SDL/0074 leaves at the card power-on default -- Line-In
+(0x38/0x39) or CD (0x36/0x37) -- which sits below fm=28, so WaveBlaster music
+plays significantly quieter than OPL3 (FM) and SFX (PCM Voice) on g2k (operator
+iter-9).
+
+Extend the SDL/0074 mixer-balance family with two INDEPENDENT, default-UNSET
+knobs under the existing SDL_HINT_DOSKUTSU_SB16_MIXER_PROGRAM killswitch:
+  SDL_HINT_DOSKUTSU_SB16_LINEIN_VOL -> CT1745 0x38/0x39 (Line-In), 0..31
+  SDL_HINT_DOSKUTSU_SB16_CD_VOL     -> CT1745 0x36/0x37 (CD),      0..31
+UNSET = not programmed = byte-identical to SDL/0074 (no regression, no guess
+shipped). The exact CT1745 input the WB header feeds is Vibra16S-CT2490-specific
+and not determinable from source/logs/DOSBox (no S2), so these let an iter-10 A/B
+pin it on g2k: one cell boosts Line-In, another boosts CD, while WB plays --
+whichever raises the WB level (with no added hum) is the channel. The confirmed
+channel then ships default-ON ~31 to match voice/fm. Mic (0x3A) intentionally
+untouched (mic-path boost = hum). Scoped to is_sb16.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index ba8929843..7cc422c06 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -2839,6 +2839,37 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+                                  "voice=%d fm=%d (CT1745 0x30/32/34; tune "
+                                  "SDL_HINT_DOSKUTSU_SB16_FM_VOL=0..31)",
+                                  voice_vol, fm_vol);
++                /* DOSKUTSU patch (SDL/0100, T74): optional WaveBlaster-header
++                   channel boost. The DreamBlaster S2 on the SB16 WaveBlaster
++                   header is analog-mixed through one of the CT1745 inputs SDL/0074
++                   leaves at the card power-on default -- Line-In (0x38/0x39) or CD
++                   (0x36/0x37) -- which sits below fm=28, so WB music plays quieter
++                   than OPL3/SFX (operator iter-9 g2k). Two INDEPENDENT, default-
++                   UNSET knobs (value 0..31, level<<3 like the rest) let an iter A/B
++                   pin which input the WB feeds (boost one, hear if WB rises) WITHOUT
++                   shipping a register guess; the confirmed channel then ships
++                   default-ON. UNSET = not programmed = byte-identical to SDL/0074.
++                   Mic (0x3A) intentionally untouched (mic-path boost = hum). Scoped
++                   to is_sb16 + the same SDL_HINT_DOSKUTSU_SB16_MIXER_PROGRAM
++                   killswitch as the rest of this block. */
++                {
++                    const char *li = SDL_GetHint("SDL_HINT_DOSKUTSU_SB16_LINEIN_VOL");
++                    const char *cd = SDL_GetHint("SDL_HINT_DOSKUTSU_SB16_CD_VOL");
++                    if (li && li[0] != '\0') {
++                        int lv = SDL_atoi(li); lv = (lv < 0) ? 0 : (lv > 31) ? 31 : lv;
++                        outportb(mixer_addr, 0x38); outportb(mixer_data, (Uint8)(lv << 3)); // Line-In L
++                        outportb(mixer_addr, 0x39); outportb(mixer_data, (Uint8)(lv << 3)); // Line-In R
++                        doskutsu_dbg_log("audio: SDL/0100 SB16 line-in vol=%d "
++                                         "(CT1745 0x38/0x39; WB-header channel-pin A/B)", lv);
++                    }
++                    if (cd && cd[0] != '\0') {
++                        int cv = SDL_atoi(cd); cv = (cv < 0) ? 0 : (cv > 31) ? 31 : cv;
++                        outportb(mixer_addr, 0x36); outportb(mixer_data, (Uint8)(cv << 3)); // CD L
++                        outportb(mixer_addr, 0x37); outportb(mixer_data, (Uint8)(cv << 3)); // CD R
++                        doskutsu_dbg_log("audio: SDL/0100 SB16 cd vol=%d "
++                                         "(CT1745 0x36/0x37; WB-header channel-pin A/B)", cv);
++                    }
++                }
+             } else {
+                 doskutsu_dbg_log("audio: SDL/0074 SB16 mixer balance: DISABLED "
+                                  "(SDL_HINT_DOSKUTSU_SB16_MIXER_PROGRAM=0; CT1745 "
+-- 
+2.47.3
+

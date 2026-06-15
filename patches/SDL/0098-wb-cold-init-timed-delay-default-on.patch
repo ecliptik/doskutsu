@@ -1,0 +1,123 @@
+From 3f114ba1e98dcdbfcbc59263b6d4a6c06d61acfc Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 13 Jun 2026 17:02:08 -0700
+Subject: [PATCH] dos: patch 0098 -- WB cold-init + timed-delay DEFAULT-ON (T66
+ ship-flip)
+
+The g2k iter-8 operator verdict GO'd the WaveBlaster ship (2026-06-13). Make
+the iter-8 fix the default when the WB backend is selected (SDL_DOSMpu401Init is
+only reached for WB):
+- cold-init DEFAULT-ON: the cold reset/entry/drain sequence engages unless the
+  strict-"0" killswitch SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=0. cold-init is the
+  DOOM-faithful MPU-before-SB16 reorder -- safe/better on every CPU incl. POD-83.
+- timed-delay pace DEFAULT 320 us (31250-baud MIDI wire-byte time): freeze-proof
+  (zero hot 0x331 reads) + fixes the H20 garble. Killswitch
+  SDL_HINT_DOSKUTSU_AUDIO_WB_TX_DELAY=0 falls to the bit-6 DRR poll. GS-reset
+  (VOICE_RESET / 0219) STAYS default-OFF -- the ear proved it an audible no-op.
+
+DEFENSIVE GUARD: cold-init only works on a COLD bus (engine reorder calls us
+before MIX). If reached while the SB16 is ALREADY open (IsInitialized()), the
+reset/0x3F would hit a hot 0x331 = the iter-6 wedge -- so DECLINE (return false,
+no bus touch) -> WB falls back to organya (fail-to-silence, never freeze). This
+makes the default-ON flip wedge-proof regardless of engine ordering. WB-by-
+default requires the engine cold-init reorder (SoundManager 0220/T68) to also
+default-ON, which it does in lockstep. Boot banner states the new default.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/core/dos/SDL_dos_audio_synth.c | 58 ++++++++++++++++++++++++------
+ 1 file changed, 47 insertions(+), 11 deletions(-)
+
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 030965e31..56a880e63 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -407,14 +407,44 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+            bit-6 degrades to a blind write, never an unbounded spin). The cold
+            ENTRY above stays poll-free (raw reset/0x3F/drains) regardless -- only
+            the per-byte PLAY writes (SDL_DOSMpu401WriteByte) gain the poll.
+-           Nested under the opt-in cold-init path, so this is NOT default-on
+-           pre-g2k; the cold-init ship-flip still waits on the iter-8 audible. */
++           SDL/0098 (T66 ship-flip): cold-init is now DEFAULT-ON when the WB
++           backend is selected (SDL_DOSMpu401Init is only reached for WB). The
++           g2k iter-8 operator verdict GO'd it -- cold-init is the DOOM-faithful
++           MPU-before-SB16 reorder (safe/better on every CPU incl. POD-83) and
++           the timed-delay pace is freeze-proof by construction. Strict-"0"
++           killswitch (SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=0) restores the legacy
++           late/blind init (the escape hatch). The engine half (the actual
++           MPU-before-MIX reorder, SoundManager patch 0220/T68) defaults-ON in
++           lockstep; without it the guard below declines to avoid a hot wedge. */
+         const char *cold = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT");
+-        if (cold && cold[0] == '1' && cold[1] == 0) {
++        const bool cold_on = !(cold && cold[0] == '0' && cold[1] == 0);
++        if (cold_on) {
+             int cap = 60000;
+             int ack = -1;
+             int via_dsr = 0;
+ 
++            /* SDL/0098 DEFENSIVE GUARD: the whole point of cold-init is to touch
++               the MPU on a COLD bus (before the SB16 opens). The engine reorder
++               (SoundManager 0220/T68) calls us BEFORE MIX_CreateMixerDevice so
++               the bus is cold. If we are reached while the SB16 is ALREADY open
++               (engine reorder absent/failed, or WB armed late), the 0xFF reset +
++               0x3F entry below would hit a HOT 0x331 = the iter-6 wedge. So if the
++               SB16 is already up, DECLINE -- do NOT touch the bus, return false
++               -> the engine falls back to organya (fail-to-silence, never
++               freeze). This makes the default-ON flip wedge-proof regardless of
++               engine ordering. */
++            if (SDL_DOSAudioSB_IsInitialized()) {
++                doskutsu_dbg_log("mpu401: cold-init DEFAULT-ON but SB16 already "
++                                 "open at port_base=0x%04x -- engine reorder "
++                                 "(0220/T68) did NOT arm WB before the SB16 open; "
++                                 "DECLINING to avoid the hot-bus wedge (no 0x331 "
++                                 "touch) -> WB falls back to organya. WB-by-default "
++                                 "needs the engine cold-init reorder; set "
++                                 "SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=0 to disable "
++                                 "cold-init entirely.", (unsigned)port_base);
++                return false;
++            }
++
+             /* 1. RESET to a known command state. */
+             outportb((Uint16)(port_base + 1), 0xFF);
+ 
+@@ -453,7 +483,12 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+                 const char *txd = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_TX_DELAY");
+                 const char *drr = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_DRR_POLL");
+                 const char *cap = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_DRR_CAP");
+-                s_mpu401_tx_delay_us = (txd && txd[0]) ? (uint32_t)SDL_atoi(txd) : 0;
++                /* SDL/0098 (T66 ship-flip): timed-delay pace DEFAULT 320 us (the
++                   31250-baud MIDI wire-byte time; freeze-proof + fixes H20 garble;
++                   g2k iter-8 ear GO'd delay-only). Killswitch TX_DELAY=0 -> falls
++                   to the bit-6 DRR poll (the other valid pace; +DRR_POLL=0 for the
++                   blind baseline). */
++                s_mpu401_tx_delay_us = (txd && txd[0]) ? (uint32_t)SDL_atoi(txd) : 320u;
+                 if (s_mpu401_tx_delay_us > MPU401_TX_DELAY_MAX_US) {
+                     s_mpu401_tx_delay_us = MPU401_TX_DELAY_MAX_US;
+                 }
+@@ -475,15 +510,16 @@ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base)
+                 }
+             }
+ 
+-            doskutsu_dbg_log("mpu401: cold-init at port_base=0x%04x "
+-                             "(SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=1; MPU UART "
++            doskutsu_dbg_log("mpu401: cold-init DEFAULT-ON at port_base=0x%04x "
++                             "(SDL/0098 ship-flip; killswitch "
++                             "SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=0; MPU UART "
+                              "entered on the COLD bus BEFORE the SB16 open -- "
+                              "0xFF reset -> bounded ACK drain -> 0x3F UART entry; "
+-                             "per-byte PLAY pace=%s -- SDL/0097 H20 garble fix; "
+-                             "TX_DELAY=%u us [0=off]; DRR poll restores SDL/0080 "
+-                             "bit-6 flow-control (cap=%u, =0 forces blind). "
+-                             "reset_ack=0x%02X via=%s (via-DSR + 0xFE = clean "
+-                             "reset+ack; uncond = bit-7 lie)",
++                             "per-byte PLAY pace=%s DEFAULT (SDL/0098) -- H20 "
++                             "garble fix; TX_DELAY=%u us [default 320, =0 falls to "
++                             "poll]; DRR poll = SDL/0080 bit-6 flow-control "
++                             "(cap=%u). reset_ack=0x%02X via=%s (via-DSR + 0xFE = "
++                             "clean reset+ack; uncond = bit-7 lie)",
+                              (unsigned)port_base,
+                              (s_mpu401_tx_delay_us > 0) ? "TIMED-DELAY(freeze-proof,no 0x331 read)"
+                                  : (s_mpu401_drr_poll_enabled ? "DRR-POLL(ON)" : "BLIND(off)"),
+-- 
+2.47.3
+

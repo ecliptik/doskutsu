@@ -1,0 +1,129 @@
+From 8280d37b2f3ffd8ac5a4a9b6287cf0d0c22c1f37 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 9 Jun 2026 18:43:28 -0700
+Subject: [PATCH] patch 0217 -- auto-detect: drop WaveBlaster probe (OPL3 ->
+ Organya)
+
+DOS: the auto-detect chain probed WaveBlaster FIRST. Two real-HW hazards
+make that wrong now:
+ 1. The MPU-401 status read stalls the ISA bus when the SB16 block is live
+    and the chip is absent/wedged (the hot 0x331 read -- title/PWB freeze).
+ 2. _try_install_wb_backend's MPU init is now BLIND: SDL_DOSMpu401Init
+    returns ready=true unconditionally (the status-ACK probe is gated behind
+    PROBE_MPU401=1, default off, precisely because the hot read hangs). So
+    auto would force-pick WB and could NEVER fall back -> silent music on a
+    box with no wavetable.
+
+Fix: SoundManager auto_select no longer probes WB -- the chain is OPL3 ->
+Organya. WaveBlaster is opt-in only via AUDIO_BACKEND=wb, confirmed audible
+with the SETUP audio test. The engine default (unset AUDIO_BACKEND) was
+already opl3, so no default flip is needed. Narration in AudioBackend.cpp
+(auto case) and the stale bounded-probe comments in MidiBackendWB.cpp are
+updated to match the blind-init reality. Pairs with sdl-engine SDL/0093.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/sound/AudioBackend.cpp  | 17 ++++++++---------
+ src/sound/MidiBackendWB.cpp | 15 +++++++++++----
+ src/sound/SoundManager.cpp  | 25 ++++++++++++++-----------
+ 3 files changed, 33 insertions(+), 24 deletions(-)
+
+diff --git a/src/sound/AudioBackend.cpp b/src/sound/AudioBackend.cpp
+index 51f7f2df..5de79533 100644
+--- a/src/sound/AudioBackend.cpp
++++ b/src/sound/AudioBackend.cpp
+@@ -69,15 +69,14 @@ void selectBackendFromEnv()
+   else if (std::strcmp(value, "auto") == 0)
+   {
+     selected = NXE::Diag::AudioBackend::auto_select;
+-    LOG_INFO("audio backend: auto (explicit; Phase 10 Stage 5 auto-detect "
+-             "chain; SoundManager::init will probe WB -> OPL3 -> Organya "
+-             "in sequence and select the first backend whose probe "
+-             "succeeds). NOTE: WB probe is known-broken on real "
+-             "DreamBlaster S2 hardware as of 2026-05-06 (sdl-engine "
+-             "SDL/0042+ fix in flight); operators with S2 may want to "
+-             "use AUDIO_BACKEND=opl3 instead until that fix lands. "
+-             "Pixtone SFX continues on SB16 DAC unchanged regardless "
+-             "of which music backend is selected.");
++    LOG_INFO("audio backend: auto (explicit; SoundManager::init runs the "
++             "auto-detect chain OPL3 -> Organya). WaveBlaster is NOT "
++             "auto-probed (patch 0217): the MPU-401 status read stalls the "
++             "ISA bus when the SB16 block is live and the chip is absent/"
++             "wedged, and blind MPU init cannot confirm presence, so auto "
++             "could force-pick an absent WB -> silent music. WB is opt-in "
++             "only via AUDIO_BACKEND=wb. Pixtone SFX continues on SB16 DAC "
++             "unchanged regardless of which music backend is selected.");
+   }
+   else if (std::strcmp(value, "organya") == 0)
+   {
+diff --git a/src/sound/MidiBackendWB.cpp b/src/sound/MidiBackendWB.cpp
+index 6b9a19d6..0309ce50 100644
+--- a/src/sound/MidiBackendWB.cpp
++++ b/src/sound/MidiBackendWB.cpp
+@@ -45,10 +45,17 @@ MidiBackendWaveBlaster::MidiBackendWaveBlaster()
+   _port_base = SDL_DOSMpu401GetBLASTERPort();
+   LOG_INFO("wb backend probing port 0x{:04x} for MPU-401...", _port_base);
+ 
+-  // SDL_DOSMpu401Init returns true on probe success (sends MPU-401
+-  // reset 0xFF, waits for ACK 0xFE, sends UART-mode entry 0x3F).
+-  // Per SDL_dos_audio_synth.c implementation: ~10 ms wall-clock
+-  // worst case if the chip is absent (init bails after status timeout).
++  // patch 0217 NOTE: SDL_DOSMpu401Init is now BLIND -- it returns true
++  // UNCONDITIONALLY (sends the MPU-401 reset + UART-mode entry without
++  // reading the status port). The status-ACK probe is gated behind
++  // PROBE_MPU401=1 (default off) because the hot status read stalls the
++  // ISA bus when the SB16 block is live and the chip is absent/wedged
++  // (the real-HW hang). Consequence: _ready is effectively always true,
++  // so WB presence CANNOT be detected here -- which is exactly why the
++  // engine no longer auto-selects WB (SoundManager auto_select, patch
++  // 0217). WB is opt-in via AUDIO_BACKEND=wb; the user confirms audible
++  // output with the SETUP audio test. The else branch below is retained
++  // as defensive narration but is unreachable under blind init.
+   _ready = SDL_DOSMpu401Init(_port_base);
+   if (_ready)
+   {
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 5ec2b600..77e82cf2 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -622,23 +622,26 @@ bool SoundManager::init()
+       break;
+ 
+     case NXE::Diag::AudioBackend::auto_select:
+-      LOG_INFO("Sound system: auto-detect chain running (Phase 10 Stage 5; "
+-               "trying WB -> OPL3 -> Organya in sequence; first probe "
+-               "success wins).");
+-      LOG_INFO("auto-detect: probing wb...");
+-      if (_try_install_wb_backend())
+-      {
+-        LOG_INFO("auto-detect: wb selected.");
+-        break;
+-      }
+-      LOG_INFO("auto-detect: wb probe failed, trying opl3...");
++      // patch 0217: WaveBlaster is NO LONGER auto-probed. The MPU-401 status
++      // read stalls the ISA bus when the SB16 block is live and the chip is
++      // absent/wedged (the hot 0x331 read), AND _try_install_wb_backend's
++      // blind init returns ready=true UNCONDITIONALLY (presence cannot be
++      // detected), so auto would force-pick WB and could never fall back ->
++      // silent music on a box without a wavetable. WB is opt-in only via
++      // AUDIO_BACKEND=wb. Auto-chain is now OPL3 -> Organya.
++      LOG_INFO("Sound system: auto-detect chain running (OPL3 -> Organya; "
++               "WaveBlaster is NOT auto-probed -- the MPU-401 status read "
++               "stalls the ISA bus when the SB16 block is live and the chip "
++               "is absent/wedged, and blind init cannot detect presence, so "
++               "WB is opt-in only via AUDIO_BACKEND=wb).");
++      LOG_INFO("auto-detect: probing opl3...");
+       if (_try_install_opl3_backend())
+       {
+         LOG_INFO("auto-detect: opl3 selected.");
+         break;
+       }
+       LOG_INFO("auto-detect: opl3 probe failed, falling back to organya.");
+-      _narrate_organya_fallback("auto-detect chain (WB + OPL3 both)");
++      _narrate_organya_fallback("auto-detect chain (OPL3)");
+       break;
+ 
+     case NXE::Diag::AudioBackend::organya:
+-- 
+2.47.3
+

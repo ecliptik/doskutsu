@@ -9,7 +9,7 @@ DOSKUTSU
 
 A few rules apply to all of them:
 
-- **On/off flags use a strict `=1` match.** `=0`, an empty value, or leaving the variable unset all mean "off". (Two variables carry a value instead of a flag - `PERF_MODE` takes a level, `AUDIO_DEVICE_SAMPLE_FRAMES` takes a frame count.)
+- **On/off flags use a strict `=1` match.** `=0`, an empty value, or leaving the variable unset all mean "off". (A few variables carry a value instead of a flag - `PERF_MODE` takes a level, `AUDIO_DEVICE_SAMPLE_FRAMES` takes a frame count, `AUDIO_WB_VOICE_RESET` takes a reset type.)
 - **Every option is read once at startup** and cached, so toggling one has no per-frame cost.
 - **The default DOS environment block is small** (256 bytes). If `SET` reports `Out of environment space`, enlarge it in `CONFIG.SYS` and reboot once:
   ```
@@ -44,6 +44,8 @@ SET SDL_HINT_DOSKUTSU_PERF_MODE=1        REM drop decorative foreground detail
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi`, `orgmid` | `wiimidi` | Which MIDI set the `opl3` / `wb` backends play. `wiimidi`: the WiiWare arrangement. `orgmid`: the Hart legacy `.mid` set. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | unset | Picks an `org2mid`-converted General MIDI variant. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_TIER2` | `0` (to disable) | on | On (default): 11025 Hz mono audio. `=0`: 22050 Hz stereo, the original 2004 audio quality. | `=0` costs ~11 fps in music-heavy scenes |
+| `SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT` | `0` (to disable) | on | WaveBlaster (`wb` backend) only. On (default): brings the MPU-401 up (reset + UART entry + ACK drain) BEFORE the Sound Blaster opens, on a quiet bus -- this is what lets WaveBlaster music start cleanly on 486-class boards that otherwise stall at load. `=0` restores the old late init (only if the legacy behavior is needed). | None |
+| `SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET` | `gs`, `xg`, `gm`, `none` | `none` | WaveBlaster (`wb` backend) only. Sends a synthesizer reset at the start of each song so the daughterboard uses the right instrument map. Try `gs` first if WaveBlaster music plays the correct tune but with wrong instruments (e.g. a cowbell where a piano belongs). `none` (default) sends nothing. | None |
 | `SDL_AUDIO_DEVICE_SAMPLE_FRAMES` | frame count | `1024` | Audio chunk size. Larger values cost less CPU but add SFX latency; smaller values do the reverse. | Minor - larger values cost slightly less CPU |
 
 ```

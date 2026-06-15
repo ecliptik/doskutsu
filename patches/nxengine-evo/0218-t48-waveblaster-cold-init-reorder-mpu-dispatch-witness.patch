@@ -1,0 +1,267 @@
+From 490a5624c86724cdb0b89762b487973ee93591ea Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 12 Jun 2026 16:54:53 -0700
+Subject: [PATCH] patch 0218 -- T48: WaveBlaster cold-init reorder (opt-in) +
+ MPU-dispatch witness
+
+WHY DOS NEEDS THIS: on the g2k 486 DX2-66 the WaveBlaster (DreamBlaster S2
+on the SB16 MPU header, 0x330) wedges at music load. Our own evidence
+(iter-5/6 + the wbhot probes) isolates it to the FIRST MPU access -- the
+hot UART-entry touch on a not-yet-UART chip -- landing while the SB16
+DMA+IRQ-5 block is already live. Cold-bus MPU access of every kind is
+probe-proven safe, and hot DATA writes to an already-entered chip are
+safe; only the hot ENTRY is fatal. (No DOOM citation: our archived DMX
+doc does not document its MPU bring-up order; this is our cold-survives/
+hot-entry-wedges split plus MPU-401 UART protocol -- a 0x3F sent to a
+chip already in UART mode is read as data, not a command, so a chip the
+operator's DOOM/PicoGUS left in UART needs a reset first.)
+
+FIX (engine half): resolve the music backend (selectBackendFromEnv, a
+pure env->enum->log call with no mixer dependency) BEFORE
+MIX_CreateMixerDevice opens the SB16, and -- when backend==wb AND the
+opt-in hint SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT is strict-"1" -- arm the
+WaveBlaster backend THERE, on the cold bus. The full cold sequence (reset
++ ACK drain + UART entry + entry-ACK drain, hot writes kept blind) lives
+in sdl-engine's SDL_DOSMpu401Init under the same hint; the engine only
+moves the call earlier. The post-open dispatch switch's wb case then
+skips (wb_cold_installed). Opt-in, default-OFF (an iter-4 cold-touch
+wedge confound is weakened but not zero, so opt-in until the g2k play-
+through gate passes); the hint UNSET = today's late-install order = the
+faithful control. Blast radius is wb-only: auto no longer resolves to wb
+(patch 0217); OPL3/Organya/auto init order is byte-unchanged.
+
+WITNESS (flush-instr's locked PASS gate): a cleared init banner cannot
+tell "WB truly played" from "cold-init clean, then silently wedged at the
+first hot note". Renderer::flip() logs a MAIN-LINE MPU-dispatch witness
+reading sdl-engine's ISR-bumped doskutsu_mpu_write_count:
+  - a FIRST-NONZERO one-shot (t/flip stamped) -- the discrete "at least
+    one hot note dispatched" alive signal;
+  - a cumulative line every 8 flips (=~0.5 s at the DX2-66's 12-19 fps,
+    fine enough for the 1-2 s re-wedge window; a DEDICATED cadence, NOT
+    the shared 100-flip audit constant);
+  - a clean-exit teardown-total in the WB dtor (whole-session bytes; a
+    hard freeze never reaches it, so a wedge verdict leans on the first-
+    nonzero + periodic emits).
+Climbing count = sustained wavetable; frozen after first byte = a
+1-2 s-in re-wedge; no first-byte line = silent. The counter is bumped
+ISR-side but only ever read/logged main-line.
+
+Combined-build symbol: doskutsu_mpu_write_count is exported by
+sdl-engine's SDL cold-path patch; a standalone nxengine link fails until
+it lands alongside (W22A combined-review pattern).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp   | 55 +++++++++++++++++++++++++++
+ src/sound/MidiBackendWB.cpp | 14 ++++++-
+ src/sound/SoundManager.cpp  | 75 ++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 141 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 587ab923..a3249309 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -2035,6 +2035,56 @@ extern "C" {
+   extern volatile std::uint32_t doskutsu_kbd_irq_install_ticks;
+   extern volatile std::uint32_t doskutsu_kbd_irq_vector_at_install;
+   extern volatile std::uint32_t doskutsu_kbd_pic1_mask_at_install;
++  // patch 0218 (T48): cumulative count of bytes written to the MPU-401 data
++  // port (0x330), bumped per byte in SDL_DOSMpu401WriteByte (sdl-engine's
++  // cold-init series). Atomic 32-bit, same linkage class as the audio-IRQ
++  // counters above. The WB MIDI dispatch path runs in the timer ISR, so the
++  // count is INCREMENTED ISR-side but must only ever be READ + logged main-
++  // line (here, from flip()); never log/fsync from the ISR. Combined-build
++  // symbol: a standalone nxengine link fails until sdl-engine's SDL patch
++  // exporting it lands alongside (W22A combined-review pattern).
++  extern volatile std::uint32_t doskutsu_mpu_write_count;
++}
++
++// patch 0218 (T48): main-line WB MPU-dispatch-count witness. flush-instr's
++// gate for the cold-init fix: a cleared init banner alone cannot distinguish
++// "WB truly played" from "cold-init clean, then silently wedged at the first
++// hot note". MAIN-LINE only (called from flip(), never the ISR that bumps the
++// counter). Stays quiet on non-WB runs (the counter is only ever bumped by WB
++// MPU writes, so it reads 0 and we emit nothing). Independent of FLIP_INSTR --
++// this witness must appear in the plain iter-7 run.
++//
++// Cadence = 8 flips (flush-instr's signed-off N, NOT _dc_tally_every_flips=100):
++// the DX2-66 renders ~12-19 fps, so 100 flips would be 5-8 s between emits --
++// far coarser than the 1-2 s re-wedge window this witness exists to localize;
++// 8 flips =~ 0.5 s resolution. (Dedicated constant -- must not perturb the
++// shared 100-flip audit cadence.)
++//
++// Plus a FIRST-NONZERO one-shot: the discrete "at least one hot note actually
++// dispatched on the cold-init'd MPU" signal -- it separates FAIL-WEDGE-1-2s-in
++// (first byte logged, then the periodic count freezes) from SILENT-BUT-ALIVE
++// (no first-byte line at all).
++constexpr int _wb_dispatch_every_flips = 8;
++void _maybe_flush_wb_dispatch_witness()
++{
++  const std::uint32_t n = doskutsu_mpu_write_count;
++  if (n == 0) return; // no MPU traffic -> not a WaveBlaster run; stay silent
++  static bool _wb_first_dispatch_logged = false;
++  if (!_wb_first_dispatch_logged)
++  {
++    _wb_first_dispatch_logged = true;
++    LOG_INFO("WB MPU dispatch: FIRST byte to 0x330 (count={} t={}ms flip={}) -- "
++             "at least one hot note dispatched on the cold-init'd MPU (the "
++             "discrete alive signal; if the cumulative line below then freezes, "
++             "that is a 1-2 s-in re-wedge, not silent-from-the-start)",
++             (unsigned long)n, (unsigned long long)SDL_GetTicks(), _flip_total);
++  }
++  if ((_flip_total % _wb_dispatch_every_flips) != 0) return;
++  LOG_INFO("WB MPU dispatch: {} bytes written to 0x330 (cumulative, main-line, "
++           "every {} flips, t={}ms flip={}) -- CLIMBING across blocks = sustained "
++           "wavetable note traffic; frozen = cold-init cleared then wedged/silent "
++           "at first hot note", (unsigned long)n, _wb_dispatch_every_flips,
++           (unsigned long long)SDL_GetTicks(), _flip_total);
+ }
+ 
+ void _maybe_flush_phase_timing_audit()
+@@ -5544,6 +5594,11 @@ void Renderer::flip()
+   _bd_dispatch_ns_this_flip  = 0;
+   _bd_innerloop_ns_this_flip = 0;
+   _maybe_flush_phase_timing_audit();
++  // patch 0218 (T48): main-line WB MPU-dispatch-count witness (every 8 flips +
++  // a first-nonzero one-shot, WB-only). The cold-init fix's PASS gate -- proves
++  // sustained hot note traffic vs cold-init-cleared-then-wedged. Counter is
++  // bumped ISR-side; read + logged here, main-line.
++  _maybe_flush_wb_dispatch_witness();
+   // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-
+   // tick split (per-100-flip cadence; reads counters bumped by RAII
+   // helpers in Organya.cpp + game.cpp).
+diff --git a/src/sound/MidiBackendWB.cpp b/src/sound/MidiBackendWB.cpp
+index 0309ce50..d6f34d09 100644
+--- a/src/sound/MidiBackendWB.cpp
++++ b/src/sound/MidiBackendWB.cpp
+@@ -18,6 +18,12 @@ extern "C" {
+   void SDL_DOSMpu401WriteByte(uint8_t byte);
+   void SDL_DOSMpu401Shutdown(void);
+   uint16_t SDL_DOSMpu401GetBLASTERPort(void);
++  // patch 0218 (T48): cumulative MPU-401 byte count (bumped per byte in
++  // SDL_DOSMpu401WriteByte). Read main-line only; here it backs the clean-exit
++  // teardown-total in the dtor below. flush-instr note: a hard freeze never
++  // reaches the dtor, so on a wedge the surviving witnesses are the flip()-side
++  // first-nonzero + periodic emits (Renderer.cpp), not this total.
++  extern volatile uint32_t doskutsu_mpu_write_count;
+ }
+ 
+ namespace NXE
+@@ -84,7 +90,13 @@ MidiBackendWaveBlaster::~MidiBackendWaveBlaster()
+     // application that touches the chip.
+     _all_notes_off_all_channels();
+     SDL_DOSMpu401Shutdown();
+-    LOG_INFO("wb backend shutdown (MPU-401 reset issued)");
++    // patch 0218 (T48): clean-exit teardown-total (flush-instr's locked witness
++    // set). Witnesses the whole-session MPU dispatch on a NORMAL exit; on a hard
++    // freeze the process never reaches here, so the verdict on a wedge leans on
++    // the flip()-side first-nonzero + periodic(N=8) emits instead.
++    LOG_INFO("wb backend shutdown (MPU-401 reset issued); session MPU dispatch "
++             "total = {} bytes to 0x330 (teardown-total, clean-exit only)",
++             (unsigned long)doskutsu_mpu_write_count);
+   }
+ }
+ 
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 77e82cf2..40b0b69f 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -416,6 +416,65 @@ bool SoundManager::init()
+            "RATE_DEFAULT=0).",
+            (unsigned long)::SAMPLE_RATE);
+ 
++  // DOS-PORT (patch 0218, T48 -- WaveBlaster cold-init reorder): resolve the
++  // music backend BEFORE the SB16 device opens, and -- when the resolved backend
++  // is WaveBlaster AND the cold-init hint is set -- arm the MPU-401 on a COLD ISA
++  // bus, before MIX_CreateMixerDevice brings up the SB16 DSP/DMA + IRQ-5.
++  //
++  // Evidence (OUR own, not a DOOM citation): the g2k DX2-66 wedge is the FIRST
++  // MPU access -- specifically the hot UART-ENTRY 0x331 touch on a not-yet-UART
++  // chip -- landing while the SB16 DMA+IRQ-5 block is live; cold-bus MPU access
++  // of every kind is probe-proven safe (iter-5 PROBEP), and hot DATA writes to an
++  // already-entered chip are safe. So entering UART mode + draining the entry-ACK
++  // COLD reclassifies all later traffic into the safe hot-data-write class. The
++  // full cold sequence (0xFF reset -> bounded ACK drain -> 0x3F UART entry ->
++  // 0095 entry-ACK drain, hot writes kept BLIND) lives entirely in sdl-engine's
++  // SDL_DOSMpu401Init under the COLD_INIT hint -- the engine just MOVES the call
++  // earlier. selectBackendFromEnv() is pure (env -> enum -> log, no mixer
++  // dependency) so it is safe to hoist here from its original post-open position.
++  //
++  // OPT-IN, default-OFF (team-lead, per the author-flagged-caveat rule -- an
++  // iter-4 cold-touch wedge confound is weakened but not zero, so opt-in until
++  // the g2k play-through gate passes): the hint SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_
++  // INIT is strict-"1" to ENGAGE. WCI1 sets it =1 (cold path); WCI0 leaves it
++  // UNSET = today's late-install order = the faithful wedge control (no killswitch
++  // gymnastics). Blast radius is wb-only: auto_select no longer resolves to wb
++  // (patch 0217), and OPL3 / Organya / auto init order is byte-unchanged (their
++  // installs stay in the post-open dispatch switch below).
++  selectBackendFromEnv();
++  bool wb_cold_installed = false;
++  {
++    const char *ci = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT");
++    const bool cold_on = ci && ci[0] == '1' && ci[1] == '\0'; // strict-"1" opt-in
++    if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb &&
++        cold_on)
++    {
++      LOG_INFO("Sound system: WB COLD-INIT engaged -- arming MPU-401 BEFORE the "
++               "SB16 opens (the g2k wedge is the hot UART-entry MPU access while "
++               "the SB16 block is live; cold-bus access is probe-safe). The full "
++               "cold reset/entry/drain sequence runs in SDL_DOSMpu401Init under "
++               "SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT; opt-in (=1), unset = today's "
++               "late-install control. Entry-ACK result follows in the SDL WB "
++               "banner (SDL/0095).");
++      if (_try_install_wb_backend())
++      {
++        wb_cold_installed = true;
++        LOG_INFO("Sound system: WB cold-init SUCCEEDED -- MidiBackendWaveBlaster "
++                 "armed on the cold bus; SB16 DSP/DMA opens next. Sustained "
++                 "wavetable is proven by the main-loop MPU-dispatch-count witness "
++                 "(bytes to 0x330 CLIMBING once play reaches hot note traffic), "
++                 "NOT by this init banner.");
++      }
++      else
++      {
++        // Blind init makes this effectively unreachable, but stay defensive:
++        // roll the enum to organya so the post-open dispatch switch no-ops and
++        // music still plays (matches the switch's wb-probe-fail narration).
++        _narrate_organya_fallback("WB cold-init");
++      }
++    }
++  }
++
+   spec.channels = ::AUDIO_CHANNELS;
+   spec.freq     = ::SAMPLE_RATE;
+ 
+@@ -461,7 +520,11 @@ bool SoundManager::init()
+   // organya implementation; wb/opl3/tracker selections log as
+   // "requested but not available" and fall back to organya. Stage
+   // 2/3/4 (patches 0101+) plug the actual backend implementations.
+-  selectBackendFromEnv();
++  //
++  // patch 0218 (T48): selectBackendFromEnv() is now called ABOVE, before
++  // MIX_CreateMixerDevice, so the WB cold-init can arm the MPU-401 on a cold
++  // bus. The enum is already resolved by the time we reach here -- the call is
++  // NOT repeated.
+ 
+   // DOS-PORT (patch 0107, Phase 10 W22-WB-E A/B): resolve MIDI source
+   // directory once per process. Default = "midi" (data/midi/, the
+@@ -612,7 +675,15 @@ bool SoundManager::init()
+       break;
+ 
+     case NXE::Diag::AudioBackend::wb:
+-      if (!_try_install_wb_backend())
++      // patch 0218 (T48): the default path already armed WB via cold-init above
++      // (before the SB16 opened) -- this is then a no-op. Only the killswitch=0
++      // control reaches the LATE install here, which is today's hot-bus order
++      // preserved as the A/B wedge baseline. (On a cold-init FAILURE the enum
++      // was rolled to organya, so this wb case is not reached in that case.)
++      if (wb_cold_installed)
++        LOG_INFO("Sound system: WB already armed by cold-init (patch 0218); "
++                 "skipping the post-open late install.");
++      else if (!_try_install_wb_backend())
+         _narrate_organya_fallback("WB");
+       break;
+ 
+-- 
+2.47.3
+

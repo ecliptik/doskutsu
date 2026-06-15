@@ -52,6 +52,10 @@ Usage: dosbox-launch.sh [--fast] [--kill-first] [--stage] [--exe PATH]
   --exe PATH         Path to an .exe to auto-run. Without --stage, PATH is
                      relative to repo root. With --stage, PATH should be a
                      bare DOS-side filename (e.g. DOSKUTSU.EXE).
+  --keep-running     Accepted no-op: this launcher already backgrounds DOSBox-X
+                     and never auto-exits, so the window stays open for manual
+                     review / xdotool driving. Provided so documented review
+                     commands that pass it do not error.
   -h, --help         Show this help
 USAGE
 }
@@ -62,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --kill-first|-k) KILL_FIRST=1; shift ;;
     --stage|-s)      STAGE=1; shift ;;
     --exe)           EXE="$2"; shift 2 ;;
+    --keep-running)  shift ;;   # no-op: default behavior already keeps the window open
     -h|--help)       usage; exit 0 ;;
     *) echo "dosbox-launch.sh: unknown arg: $1" >&2; usage; exit 2 ;;
   esac

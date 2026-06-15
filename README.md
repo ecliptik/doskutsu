@@ -18,8 +18,10 @@ DOSKUTSU exists for preservation and the engineering challenge of running Cave S
 | **Title Screen** | **Opening Transmission** |
 | <img src="docs/screenshots/doskutsu-first-room.png" alt="First lab room with Quote and the broken teleporter" width="100%"> | <img src="docs/screenshots/doskutsu-first-cave.png" alt="First Cave with Quote, HUD, and a Heart pickup" width="100%"> |
 | **First Lab Room** | **First Cave** |
+| <img src="docs/screenshots/setup-main-menu.png" alt="SETUP.EXE main menu with detected system profile" width="100%"> | <img src="docs/screenshots/setup-sound.png" alt="SETUP.EXE sound configuration" width="100%"> |
+| **SETUP.EXE Main Menu** | **SETUP.EXE Sound Configuration** |
 
-<p align="center">captures from DOSBox-X running <code>DOSKUTSU.EXE</code></p>
+<p align="center">captures from DOSBox-X running <code>DOSKUTSU.EXE</code> and <code>SETUP.EXE</code></p>
 
 ---
 
@@ -116,7 +118,9 @@ The same posture applies as the broader Cave Story port community ([NXEngine-evo
 ```
 C:\DOSKUTSU\
   DOSKUTSU.EXE     the game
+  SETUP.EXE        hardware / sound configurator (run once before first play)
   CWSDPMI.EXE      the DPMI host - must sit beside DOSKUTSU.EXE
+  DOSKUTSU.CFG     written by SETUP.EXE (optional; the game runs without it)
   DATA\            Cave Story assets, user-extracted (see Game Assets)
 ```
 
@@ -128,10 +132,13 @@ Quick setup:
 4. Copy the whole directory to the DOS machine.
 5. The DOS machine needs a standard DJGPP-compatible boot environment: `HIMEM.SYS` loaded, `NOEMS`, a SB16-compatible `BLASTER` variable set, and a VESA 1.2+ video BIOS (a software VESA driver works as a fallback).
 
-Run it from the game directory:
+Before the first play, run `SETUP` (or `SETUP.BAT`) to detect your hardware and
+configure sound -- see [Configuration](#configuration). Then run the game from
+the game directory:
 
 ```
-C:\DOSKUTSU> DOSKUTSU
+C:\DOSKUTSU> SETUP          (once, to configure)
+C:\DOSKUTSU> DOSKUTSU       (play)
 ```
 
 The title screen appears within a few seconds. Controls follow NXEngine-evo's defaults:
@@ -151,9 +158,33 @@ The title screen appears within a few seconds. Controls follow NXEngine-evo's de
 
 ## Configuration
 
-DOSKUTSU is configured through DOS environment variables - the music backend, the Fixed-Timestep game-speed mode, audio quality, and hardware-compatibility fallbacks. Set them with `SET` in `AUTOEXEC.BAT` or at the DOS prompt.
+The easy way is `SETUP.EXE` - a classic DOS-style configurator. Run it before
+your first play (or whenever your hardware changes):
 
-[docs/CONFIG.md](./docs/CONFIG.md) is the complete reference: every option with its values, defaults, usage examples, and performance impact.
+```
+C:\DOSKUTSU> SETUP
+```
+
+SETUP detects your machine (CPU, memory, sound card from your `BLASTER`
+variable, WaveBlaster / OPL3, video), recommends settings, and lets you choose
+the music backend and volumes, the Sound Blaster port / IRQ / DMA, performance
+mode, and the joystick. It can play the **real Polar Star sound effect and
+Title theme** through your chosen backend so you can confirm sound works before
+launching the game, then writes `DOSKUTSU.CFG`, which the game loads at startup.
+
+Auto-detect recommends **OPL3** FM music (works on any Sound Blaster); a
+WaveBlaster daughterboard is never selected automatically - pick it yourself in
+SETUP if you have one. Settings precedence is **environment variable >
+`DOSKUTSU.CFG` > built-in default**, with one deliberate exception: a `BLASTER`
+line written by SETUP is authoritative and overrides an ambient `SET BLASTER`.
+[docs/SETUP.md](./docs/SETUP.md) is the full SETUP + `DOSKUTSU.CFG` reference.
+
+You can also skip SETUP and configure DOSKUTSU directly through DOS environment
+variables - the music backend, the Fixed-Timestep game-speed mode, audio
+quality, and hardware-compatibility fallbacks - set with `SET` in `AUTOEXEC.BAT`
+or at the DOS prompt. [docs/CONFIG.md](./docs/CONFIG.md) is the complete
+environment-variable reference: every option with its values, defaults, usage
+examples, and performance impact.
 
 ---
 
@@ -171,7 +202,12 @@ cd doskutsu
 ./scripts/apply-patches.sh      # apply DOS-port patches
 make                            # orchestrate all four build stages
 make smoke-fast                 # headless DOSBox-X smoke (fast config)
+make setup                      # build SETUP.EXE (the configurator)
+make setup-test                 # host-side SETUP unit tests
 ```
+
+`make dist` bundles the game, `CWSDPMI.EXE`, and the live-audio `SETUP.EXE`
+(built with its audio backend linked in) into a ready-to-deploy archive.
 
 ---
 

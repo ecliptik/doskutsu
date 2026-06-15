@@ -169,6 +169,8 @@ help:
 	@echo "  make sdl3-image                  stage 3: SDL3_image (PNG)"
 	@echo "  make nxengine                    stage 4: NXEngine-evo -> build/doskutsu.exe"
 	@echo "  make all                         stages 1-4 end to end (default)"
+	@echo "  make setup                       build SETUP.EXE -> build/setup/setup.exe"
+	@echo "  make setup-test                  SETUP host unit tests (config loader + recommend)"
 	@echo
 	@echo "Test:"
 	@echo "  make hello                       build tests/smoketest/hello.exe"
@@ -501,6 +503,46 @@ $(BUILD_DIR)/doskutsu.exe: $(SYSROOT)/lib/libSDL3_mixer.a $(SYSROOT)/lib/libSDL3
 	$(STUBEDIT) $@ minstack=$(MINSTACK)
 	@echo "built $@ ($$(stat -c '%s' $@) bytes)"
 
+# --- SETUP.EXE (DOS configurator) --------------------------------------------
+#
+# setup/ is a standalone DJGPP C source tree with its own setup/Makefile
+# (`make -C setup`). The top-level `setup` target delegates to it so there is
+# a single build recipe (and one place that owns the stubedit minstack bump).
+# build/setup/setup.exe is produced; it is stubedited to minstack=2048k by the
+# sub-make (ready for the SDL3 + mixer + synth audio stack that audiotest_sdl.c
+# links in T3 -- harmless on the current no-SDL scaffold).
+#
+# The sub-make inherits this Makefile's exported PATH (DJGPP prepended), which
+# is what its DOS cross-build wants. The host unit-test target (`setup-test`)
+# below resets PATH to a host default so the host cc does not pick up DJGPP's
+# assembler -- same trap org2mid solves (see the org2mid recipe note).
+
+SETUP_DIR := $(REPO_ROOT)/setup
+SETUP_EXE := $(BUILD_DIR)/setup/setup.exe
+
+.PHONY: setup
+setup: | djgpp-check
+	@$(MAKE) -C $(SETUP_DIR)
+
+# Release flavor of SETUP.EXE: forces AUDIOTEST=1 so the SHIPPED configurator
+# has the live SDL3 audio-test backend linked in (the dev `setup`/`stage`
+# default is the no-SDL scaffold, kept dependency-free + green). `dist` depends
+# on THIS, not `setup`, so a release can never accidentally package the
+# scaffold. The setup/Makefile flag-stamp guarantees the binary is rebuilt when
+# the AUDIOTEST value differs from the last build, so flipping dev<->release
+# never leaves a stale artifact. Requires the four-stage cross-build to have
+# produced build/sysroot/lib/libSDL3*.a.
+.PHONY: setup-release
+setup-release: | djgpp-check
+	@$(MAKE) -C $(SETUP_DIR) AUDIOTEST=1
+
+# Host-side unit tests for SETUP's config loader + recommend matrix (no DJGPP,
+# no DOSBox, no network). Wired into `make smoke` below as a fast logic gate.
+# PATH reset to host-default so host cc avoids DJGPP `as` (org2mid trap).
+.PHONY: setup-test
+setup-test:
+	@PATH=/usr/local/bin:/usr/bin:/bin $(MAKE) -C $(SETUP_DIR) test
+
 # --- Phase 0 smoke: tests/smoketest/hello.exe ---------------------------------
 
 HELLO_EXE := $(BUILD_DIR)/hello.exe
@@ -519,7 +561,7 @@ smoke-fast: $(HELLO_EXE)
 	tests/run-smoke.sh --exe $(HELLO_EXE) --fast
 
 .PHONY: smoke
-smoke: $(HELLO_EXE) changelog-gate io-gate
+smoke: $(HELLO_EXE) changelog-gate setup-test io-gate
 	tests/run-smoke.sh --exe $(HELLO_EXE)
 
 # --- CHANGELOG-presence ship-gate (v1.0.6) ----------------------------------
@@ -1266,6 +1308,36 @@ PROBE_QHEXIT_EXE := $(PROBES_DIR)/qhexit.exe
 PROBE_QHEXITP_SRC := tests/probes/qhexitp.c
 PROBE_QHEXITP_EXE := $(PROBES_DIR)/qhexitp.exe
 
+# P38 -- T20: SETUP.EXE audio-test HARD-FREEZE A/B confirmation probe.
+#   SDL3-linked (raw SDL_OpenAudioDeviceStream, single -lSDL3 -- sdl-engine
+#   confirmed the wedge mechanism lives in DOSSOUNDBLASTER_OpenDevice +
+#   SDL_DOSAudioPump, producer-agnostic, so no SDL3_mixer link is needed). Three
+#   cells via argv[1]: A1 (game cfg 11025/mono/256, no service -> expect g2k
+#   wedge), B1 (game cfg, serviced = the fix -> clean), A2 (broken cfg
+#   44100/stereo/default, no service). Writes LOGS\<TAG>PROBE.LOG (honors
+#   DOSKUTSU_LOG_TAG, per-line fsync so the wedge cell's last line survives).
+#   REAL-HW-only confirmation: mode A runs clean under DOSBox-X (structural
+#   smoke only). Bundles in the T19 iter alongside the fixed SETUP.EXE. sha12
+#   stamped into the log header for provenance (source content sha, gitignored
+#   tree -- same approach as HWINV).
+PROBE_SBPUMP_SRC   := tests/probes/sbpump.c
+PROBE_SBPUMP_EXE   := $(PROBES_DIR)/sbpump.exe
+PROBE_SBPUMP_SHA12 := $(shell sha256sum $(PROBE_SBPUMP_SRC) 2>/dev/null | cut -c1-12)
+
+# P39 -- T41/task #16: WBHOT -- WB-on-486 HOT MPU-401 access discriminator.
+#   Decides whether WaveBlaster MIDI is salvageable on the g2k 486DX2-66:
+#   cell M = cold MPU init + cold note, SB16 brought HOT via the real SDL
+#   path (SBPUMP-faithful), then THE decisive blind data writes to 0x330
+#   (per-byte MARK pre/post), then known-wedge positive controls (hot 0x331
+#   read + 0xFF write) LAST. Cell D = production DSP-mediated MIDI transport
+#   (SDL_DOSAudioSB_DSPMidi* exports, cmd 0x34/0x38) hot. Writes
+#   LOGS\<TAG>PROBE.LOG (DOSKUTSU_LOG_TAG, per-line fsync -- the last MARK
+#   line IS the verdict on a hard freeze). REAL-HW-only verdict: DOSBox-X
+#   does not reproduce the ISA IOCHRDY stall (structural smoke only).
+PROBE_WBHOT_SRC   := tests/probes/wbhot.c
+PROBE_WBHOT_EXE   := $(PROBES_DIR)/wbhot.exe
+PROBE_WBHOT_SHA12 := $(shell sha256sum $(PROBE_WBHOT_SRC) 2>/dev/null | cut -c1-12)
+
 # Generic build rule for any probe .c with no library deps (P0/P1/P3-pure).
 $(PROBES_DIR)/%.exe: tests/probes/%.c | djgpp-check
 	@mkdir -p $(PROBES_DIR)
@@ -1352,6 +1424,24 @@ $(PROBE_SDLPROB1_EXE): $(PROBE_SDLPROB1_SRC) $(PROBE_SDLPROB1_HDR) $(SYSROOT)/li
 	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
 	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
 
+# P38 SBPUMP (T20) -- SDL3-linked; explicit dep on the SDL_dosaudio_pump.h export
+# header (in sysroot) + sha12 stamp. Same PROBES_SDL_* recipe as YIELD/AUDBUF.
+$(PROBE_SBPUMP_EXE): $(PROBE_SBPUMP_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -DSBPUMP_SHA12=\"$(PROBE_SBPUMP_SHA12)\" -o $@ $< $(PROBES_SDL_LDLIBS)
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
+# P39 WBHOT (T41/T48) -- SDL3-linked; same PROBES_SDL_* recipe + sha12 stamp
+# as SBPUMP, PLUS -lSDL3_mixer (v2: cells P/D bring the SB16 hot via the
+# production MIX_CreateMixerDevice path mirroring setup/audiotest_sdl.c --
+# the raw-stream open does not prime at 11025 mono on real HW). Calls
+# SDL_DOSAudioSB_DSPMidi* production exports (mirrored extern prototypes;
+# private header not in sysroot). Mixer lib must precede -lSDL3 on the line.
+$(PROBE_WBHOT_EXE): $(PROBE_WBHOT_SRC) $(SYSROOT)/lib/libSDL3.a $(SYSROOT)/lib/libSDL3_mixer.a | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_SDL_CFLAGS) -DWBHOT_SHA12=\"$(PROBE_WBHOT_SHA12)\" -o $@ $< $(PROBE_SDL_STUBS_SRC) -L$(SYSROOT)/lib -lSDL3_mixer -lSDL3 -lm
+	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
+
 # OPAQUE + BLTFILL are pure DJGPP (use the generic %.exe pattern rule above).
 # No explicit rules needed; the pattern handles them.
 
@@ -1422,7 +1512,7 @@ $(PROBE_QHEXIT_EXE): $(PROBE_QHEXIT_SRC) $(SYSROOT)/lib/libSDL3.a | djgpp-check
 	$(CC) $(PROBES_SDL_CFLAGS) -o $@ $< $(PROBES_SDL_LDLIBS)
 	$(STUBEDIT) $@ minstack=$(PROBES_SDL_MINSTK)
 
-.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi wbtest wbtest2 wbtest3 hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 s3blt s3blt-dosbox-smoke probes-p25 probes-s3blt dactest dactest-dosbox-smoke probes-p26 s3vram s3ckey s3vram-dosbox-smoke s3ckey-dosbox-smoke probes-p27 probes-p28 s3crtc probes-p29 s3wedge probes-p30 s3alias probes-p31 probes-p32 probes-p33 probes-p34 wbtest4 probes-p35 wbtest6 probes-p36 qhexit qhexitp probes-p37
+.PHONY: dacprog hwlog dpmithn l1fill partial yield cffsync irqrate membw membw-dosbox-smoke mpuwbprobe mpusdlprobe tileprobe pixprobe audbuf idleprob opaque bltfill chipid bltasync bltvar lfbnear mode13h bltpat audrq mixbench orgsynth wbmidi wbtest wbtest2 wbtest3 hwinv hwinv-dosbox-smoke crtcswap bandcomp blttile sdlprob2 probes probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 s3blt s3blt-dosbox-smoke probes-p25 probes-s3blt dactest dactest-dosbox-smoke probes-p26 s3vram s3ckey s3vram-dosbox-smoke s3ckey-dosbox-smoke probes-p27 probes-p28 s3crtc probes-p29 s3wedge probes-p30 s3alias probes-p31 probes-p32 probes-p33 probes-p34 wbtest4 probes-p35 wbtest6 probes-p36 qhexit qhexitp probes-p37 sbpump probes-p38 sbpump-dosbox-smoke probes-wbhot probes-p39 wbhot-dosbox-smoke
 dacprog: $(PROBE_DACPROG_EXE)
 	@echo "Built $(PROBE_DACPROG_EXE) -- ship via real-HW iter (DOSBox-X is correctness-only)."
 
@@ -1792,6 +1882,37 @@ qhexit: $(PROBE_QHEXIT_EXE) $(PROBE_QHEXITP_EXE)
 probes-p37: $(PROBE_QHEXIT_EXE) $(PROBE_QHEXITP_EXE)
 	@echo "Built P37 probe set: qhexit.exe (cell A) + qhexitp.exe (cells U/B) -- DOS-exit hang isolation"
 
+probes-sbpump probes-p38: $(PROBE_SBPUMP_EXE)
+	@echo "Built P38 probe: sbpump.exe -- SETUP audio-test HARD-FREEZE A/B confirmation (T20)"
+	@echo "  Cells: SBPUMP A1 (game cfg, no service -> expect g2k WEDGE)"
+	@echo "         SBPUMP B1 (game cfg, serviced = fix -> CLEAN)"
+	@echo "         SBPUMP A2 (broken 44100/stereo cfg, no service)"
+	@echo "  Log: LOGS\\<TAG>PROBE.LOG (set DOSKUTSU_LOG_TAG distinct per cell: PA1/PB1/PA2)"
+	@echo "  REAL-HW only: mode A runs CLEAN under DOSBox-X (structural smoke). Bundle in T19 + CWSDPMI.EXE."
+
+# DOSBox-X correctness-only smoke for SBPUMP (all 3 cells). The real-SB16 wedge
+# is g2k-only (T19); this gates emit-structure + clean-exit only.
+sbpump-dosbox-smoke: $(PROBE_SBPUMP_EXE) $(CWSDPMI_EXE)
+	@tests/run-sbpump-smoke.sh
+
+probes-wbhot probes-p39: $(PROBE_WBHOT_EXE)
+	@echo "Built P39 probe: wbhot.exe v3 -- WB HOT MPU access discriminator (T41/T48)"
+	@echo "  Cells: WBHOT M (direct-MPU: cold init -> SB16 HOT -> decisive 0x330 data"
+	@echo "                  writes -> known-wedge controls LAST; DELIBERATE FREEZE RISK)"
+	@echo "         WBHOT D (production DSP-mediated MIDI transport, cmd 0x34/0x38, hot)"
+	@echo "         WBHOT P (POLLED direct-port differential, v1.0.3/0080 pattern)"
+	@echo "         WBHOT 9 (v3 P9: hot-0x3F ACK undrained-vs-drained mechanism +"
+	@echo "                  fix-shape differential; FREEZE RISK in phase p9b)"
+	@echo "  Log: LOGS\\<TAG>PROBE.LOG (DOSKUTSU_LOG_TAG per cell: WM1/WD1/WP1/WP9);"
+	@echo "  per-line fsync -- on a hard freeze the last MARK line IS the verdict."
+	@echo "  REAL-HW only: every cell runs CLEAN under DOSBox-X (structural smoke)."
+	@echo "  Own boot per cell; power-cycle after a wedge. Bundle + CWSDPMI.EXE."
+
+# DOSBox-X correctness-only smoke for WBHOT (both cells). The ISA IOCHRDY stall
+# is g2k-DX2-66-only; this gates marker-structure + clean-exit only.
+wbhot-dosbox-smoke: $(PROBE_WBHOT_EXE) $(CWSDPMI_EXE)
+	@tests/run-wbhot-smoke.sh
+
 # P21 -- Phase 11 wave-41 task #10: HW-inventory snapshot.
 hwinv: $(PROBE_HWINV_EXE)
 	@echo "Built $(PROBE_HWINV_EXE) -- phase11 wave-41 task #10 (HW-inventory MVP)."
@@ -1962,7 +2083,7 @@ s3ckey-dosbox-smoke: $(PROBE_S3CKEY_EXE) $(CWSDPMI_EXE)
 probes-p23: $(PROBE_BANDCOMP_EXE)
 	@echo "Built P23 probe set: bandcomp.exe (wave-52/53 -- banded-composition resid_frac gate)"
 
-probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 probes-p25 probes-p26 probes-p27 probes-p28 probes-p37
+probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 probes-p25 probes-p26 probes-p27 probes-p28 probes-p37 probes-p38
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
 	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (fopen-direct)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"
@@ -2033,7 +2154,14 @@ HOW TO RUN
     e.g.  SET BLASTER=A220 I5 D1 H5 T6
  5. Load a VESA 1.2+ BIOS driver if your video card doesn't provide one
     in its firmware (UNIVBE as fallback).
- 6. Run:
+ 6. (Optional) Run SETUP first to detect your hardware and write a tuned
+    DOSKUTSU.CFG (sound backend, mixer levels, performance mode):
+        C:\>CD \DOSKUTSU
+        C:\DOSKUTSU>SETUP
+    DOSKUTSU runs fine with no DOSKUTSU.CFG (built-in defaults); SETUP just
+    makes the settings explicit and tunable. A real environment SET still
+    overrides the file.
+ 7. Run:
         C:\>CD \DOSKUTSU
         C:\DOSKUTSU>DOSKUTSU
 
@@ -2101,6 +2229,8 @@ dist-list:
 	@printf '   target zip: %s\n\n' "$(CF_ZIP)"
 	@printf 'top-level files:\n'
 	@$(call _dist_list_entry,DOSKUTSU.EXE,$(BUILD_DIR)/doskutsu.exe,binary (rename to upper-case))
+	@$(call _dist_list_entry,SETUP.EXE,$(SETUP_EXE),DOS configurator (writes DOSKUTSU.CFG))
+	@printf '  %-22s %-55s %s\n' "SETUP.BAT" "(generated)" "SETUP.EXE launcher [CRLF]"
 	@$(call _dist_list_entry,CWSDPMI.EXE,$(CWSDPMI_EXE),DPMI host (vendored in repo))
 	@$(call _dist_list_entry,CWSDPMI.DOC,$(CWSDPMI_DOC),CWSDPMI redistribution terms)
 	@$(call _dist_list_entry,LICENSE.TXT,$(REPO_ROOT)/LICENSE,MIT - repo source [CRLF])
@@ -2141,8 +2271,9 @@ define _dist_list_entry
 endef
 
 .PHONY: dist
-dist: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
+dist: $(BUILD_DIR)/doskutsu.exe setup-release | fetch-binaries
 	@test -f "$(CWSDPMI_EXE)"   || (echo "error: $(CWSDPMI_EXE) missing -- run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
+	@test -f "$(SETUP_EXE)"     || (echo "error: $(SETUP_EXE) missing -- 'make setup-release' failed?" >&2; exit 1)
 	@test -f "$(CWSDPMI_DOC)"   || (echo "error: $(CWSDPMI_DOC) missing" >&2; exit 1)
 	@test -f "$(NX_LICENSE)"    || (echo "error: $(NX_LICENSE) missing -- run scripts/fetch-sources.sh" >&2; exit 1)
 	@test -d "$(NX_DATA_SRC)"   || (echo "error: $(NX_DATA_SRC) missing -- run scripts/fetch-sources.sh" >&2; exit 1)
@@ -2151,8 +2282,11 @@ dist: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 	@rm -rf "$(CF_STAGE)" "$(CF_ZIP)"
 	@mkdir -p "$(CF_STAGE)"
 	@install -m 0644 $(BUILD_DIR)/doskutsu.exe "$(CF_STAGE)/DOSKUTSU.EXE"
+	@install -m 0644 $(SETUP_EXE)             "$(CF_STAGE)/SETUP.EXE"
 	@install -m 0644 $(CWSDPMI_EXE)            "$(CF_STAGE)/CWSDPMI.EXE"
 	@install -m 0644 $(CWSDPMI_DOC)            "$(CF_STAGE)/CWSDPMI.DOC"
+	@# SETUP.BAT launcher (CRLF) so users can `SETUP` to configure before play.
+	@printf '@ECHO OFF\nSETUP.EXE\n' | $(CRLF) > "$(CF_STAGE)/SETUP.BAT"
 	@$(CRLF) < LICENSE           > "$(CF_STAGE)/LICENSE.TXT"
 	@$(CRLF) < $(NX_LICENSE)     > "$(CF_STAGE)/GPLV3.TXT"
 	@$(CRLF) < THIRD-PARTY.md    > "$(CF_STAGE)/3RDPARTY.TXT"
@@ -2191,8 +2325,9 @@ dist: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 STAGE_DIR := $(BUILD_DIR)/stage
 
 .PHONY: stage
-stage: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
+stage: $(BUILD_DIR)/doskutsu.exe setup | fetch-binaries
 	@test -f "$(CWSDPMI_EXE)" || (echo "error: $(CWSDPMI_EXE) missing -- run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
+	@test -f "$(SETUP_EXE)"   || (echo "error: $(SETUP_EXE) missing -- 'make setup' failed?" >&2; exit 1)
 	@mkdir -p "$(STAGE_DIR)"
 	@# SDL/0024 routes SDL_Log to /DOSKUTSU/sdldbg.log (or /DOSKUTSU/<TAG>SDL.LOG
 	@# when DOSKUTSU_LOG_TAG is set). Under the staged layout DOSBox-X mounts
@@ -2204,6 +2339,10 @@ stage: $(BUILD_DIR)/doskutsu.exe | fetch-binaries
 	@mkdir -p "$(STAGE_DIR)/DOSKUTSU"
 	@install -m 0644 $(BUILD_DIR)/doskutsu.exe "$(STAGE_DIR)/DOSKUTSU.EXE"
 	@install -m 0644 $(CWSDPMI_EXE)            "$(STAGE_DIR)/CWSDPMI.EXE"
+	@# SETUP.EXE + launcher next to the game so the E2E suite (which mounts
+	@# STAGE_DIR as C:) can drive SETUP.EXE then DOSKUTSU.EXE from one root.
+	@install -m 0644 $(SETUP_EXE)             "$(STAGE_DIR)/SETUP.EXE"
+	@printf '@ECHO OFF\r\nSETUP.EXE\r\n' > "$(STAGE_DIR)/SETUP.BAT"
 	@if [ -d "$(REPO_ROOT)/data" ]; then \
 	    rm -f "$(STAGE_DIR)/data" "$(STAGE_DIR)/DATA"; \
 	    ln -s "$(REPO_ROOT)/data" "$(STAGE_DIR)/data"; \

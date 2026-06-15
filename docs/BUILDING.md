@@ -144,6 +144,18 @@ build/
 
 Re-running `make nxengine` after an edit in NXEngine-evo source only rebuilds NXEngine, not the SDL stack. `make clean` wipes everything under `build/`; `make distclean` also drops the cloned upstream trees under `vendor/` (keeping only the manifest).
 
+### SETUP.EXE (the configurator)
+
+`SETUP.EXE` is a separate DOS program that writes `DOSKUTSU.CFG` (see [SETUP.md](./SETUP.md)). It has its own `setup/Makefile`, which the top-level `setup` target delegates to:
+
+```bash
+make setup                 # build build/setup/setup.exe (scaffold, no SDL link)
+make -C setup AUDIOTEST=1   # build the live-audio SETUP.EXE (links the built SDL3 stack)
+make setup-test            # host-side unit tests (config loader + recommend matrix)
+```
+
+`make setup` builds the no-SDL scaffold (enough to drive the TUI and the `DOSKUTSU.CFG` round-trip); the `AUDIOTEST=1` flavor links the already-built `build/sysroot` SDL3 + SDL3_mixer libraries so SETUP can play the real audio test, and is the flavor `make dist` and `make stage` ship. `make setup-test` runs with the host compiler -- no DOS toolchain or emulator needed.
+
 ---
 
 ## Test
@@ -229,6 +241,17 @@ Both configs are otherwise identical: 48 MB RAM, SB16 on IRQ 5 / DMA 1/5 / base 
 4. Both must pass before the patch is considered shipped.
 
 **After patch application, force a clean rebuild.** CMake's incremental build can silently link a stale `.obj` against the latest source. `make distclean && make` or an explicit `touch vendor/<name>/src/**/*.cpp` chain before `cmake --build` is required after every `make patches`. The smoke-gate catches this latent failure downstream; forced rebuild prevents it upstream.
+
+### SETUP.EXE tests
+
+```bash
+make setup-test            # host unit tests: config loader (precedence,
+                           # presence-checked skip, authoritative BLASTER) +
+                           # the recommend matrix. No DOS toolchain / emulator.
+tests/run-setup-e2e.sh     # headless end-to-end: SETUP.EXE -> DOSKUTSU.EXE
+```
+
+`tests/run-setup-e2e.sh` spawns its own Xvfb + DOSBox-X, drives the real `SETUP.EXE` CP437 TUI by keystroke through each scenario to write a `DOSKUTSU.CFG`, launches `DOSKUTSU.EXE`, and asserts the engine's startup banners reflect the configured values (config-load count, perf-mode, fixed-timestep, SB16 mixer balance, the authoritative `BLASTER` MPU-401 port, audio-device open). It needs `Xvfb` and `dosbox-x` on `PATH` and a staged tree (`make stage`, which installs `SETUP.EXE` + `SETUP.BAT` beside the game). See [SETUP.md](./SETUP.md) for the full configurator reference.
 
 ---
 

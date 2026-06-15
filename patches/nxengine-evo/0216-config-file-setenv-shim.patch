@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 5 Jun 2026 09:00:00 -0700
+Subject: [PATCH] patch 0216 -- DOSKUTSU.CFG config-file setenv shim
+
+Loads a line-based KEY=VALUE config file (DOSKUTSU.CFG) into the process
+environment at top-of-main(), BEFORE any getenv / SDL_GetHint read of a
+config key. SETUP.EXE writes the file; the engine consumes it. Every
+user-facing lever already reads a fixed env/hint name and SDL_GetHint
+falls back to the env var of the same name, so one setenv(env_name,
+value, 0) per key satisfies all of them -- the file is a NEW SOURCE for
+the SAME keys, no existing lever changes.
+
+Precedence env > file > built-in default (setenv overwrite=0, so a real
+DOS `SET` always wins). No file -> doskutsu_cfg_load() returns -1 and the
+binary is byte-identical to the no-config build. Loader + shared key
+registry are header-only in include/doskutsu_config*.h (already on the
+engine -I path), so SETUP shares the exact key list and the parser is
+unit-testable. Banner ("config: loaded DOSKUTSU.CFG (N keys)" /
+"config: no DOSKUTSU.CFG, using built-in defaults") emits after
+Logger::init for the smoke-gate banner check.
+
+Slot note: the shim is independent and applies LAST; the numeric slot
+only sets apply order. Regenerate against live main.cpp at integration
+time (3 unique anchors) if the stack shifts.
+
+Workspace-local; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+---
+ src/main.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 9241b7c..147ebe2 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -22,6 +22,7 @@
+ #include "tas.h"
+ #include "trig.h"
+ #include "tsc.h"
++#include "doskutsu_config.h"  // patch 0216: DOSKUTSU.CFG -> env setenv shim (shared with SETUP.EXE)
+ 
+ // Patch 0138 (wave 43 RUNMANIFEST): shared schema-v1 emit helper from
+ // probe-engineer's task #16 handoff. Header-only C; `extern "C"` guards
+@@ -1192,6 +1193,14 @@ int main(int argc, char *argv[])
+   // Logged at engine exit via emit_run_manifest().
+   _runmanifest_boot_time = std::time(nullptr);
+ 
++  // DOS-PORT (patch 0216): load DOSKUTSU.CFG into the environment before any
++  // getenv / SDL_GetHint read of a config key (SDL_GetHint falls back to the
++  // env var of the same name). The file is an alternate source for the SAME
++  // keys SETUP.EXE manages; setenv overwrite=0 keeps a real DOS `SET`
++  // authoritative (env > file > built-in default). No file = no-op =
++  // byte-identical to the no-config build. Banner emitted after Logger::init.
++  int _cfg_keys_loaded = doskutsu_cfg_load(NULL);
++
+   bool error            = false;
+   bool freshstart;
+ 
+@@ -1251,6 +1260,13 @@ int main(int argc, char *argv[])
+     _log_basename = std::string(_log_tag) + ".LOG";
+   }
+   Logger::init(ResourceManager::getInstance()->getPrefPath(_log_basename));
++
++  // patch 0216: config-file load banner (smoke-gate anchor). Emitted here
++  // because Logger is now live; the load itself ran at top-of-main().
++  if (_cfg_keys_loaded >= 0)
++    LOG_INFO("config: loaded DOSKUTSU.CFG ({} keys)", _cfg_keys_loaded);
++  else
++    LOG_INFO("config: no DOSKUTSU.CFG, using built-in defaults");
+ //  SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+ 
+   // TAS subsystem init (patch 0135, wave 41). Runs AFTER Logger::init
+-- 
+2.39.0
+

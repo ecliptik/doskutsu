@@ -5,6 +5,45 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.1.0] - 2026-06-15
+
+Feature release: a DOS SETUP.EXE configurator and in-game WaveBlaster (hardware-MIDI)
+music, plus a SETUP music-test tempo fix and an SFX/music volume rebalance. Validated
+on the reference 486 DX2-66 (SB16 + DreamBlaster S2).
+
+### Added
+
+- **SETUP.EXE configurator.** A period-style DOS setup tool: pick the audio backend
+  (auto / OPL3 / WaveBlaster / Organya), set SFX and Music volume, run a hardware
+  profiler (CPU / RAM / SB16 / video), and test SFX + each music backend before
+  launching. Writes DOSKUTSU.CFG; ships in the dist zip alongside the game.
+- **WaveBlaster (hardware-MIDI / MPU-401) music in-game.** Selecting the WaveBlaster
+  backend plays the music through a wavetable daughterboard (e.g. DreamBlaster S2 on
+  the SB16 header), default-on (cold-init + paced) when chosen. Killswitch
+  `SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=0`.
+
+### Fixed
+
+- **WaveBlaster hard-freeze on the 486.** The first hot MPU-401 access while the SB16
+  DMA + IRQ-5 were live stalled the ISA bus (DX2-66 class). Fixed with a DOOM-faithful
+  cold-init reorder -- the MPU UART is entered on the cold bus before the SB16 opens.
+  (`patches/SDL/0096`, `patches/nxengine-evo/0218`+`0220`; device-hot guard
+  `patches/SDL/0099`.)
+- **WaveBlaster garbled music.** Without per-byte flow control the wavetable chip's rx
+  buffer overran (dropped program-changes -> wrong instruments). Fixed with a
+  freeze-proof timed-delay pacing on the cold-init write path. (`patches/SDL/0097`.)
+- **SETUP music-test tempo (draggy on real hardware).** The MIDI / WaveBlaster test
+  serviced the sequencer only a few times a second off the menu loop on the 486,
+  clumping notes; it now runs off the SB16 IRQ-5 tick (~43 Hz) like the game.
+- **SETUP polish:** UniVBE boot-spawn memory, SB16 DSP-version readout, screen flicker,
+  the settings-edit model, and the obsolete "WaveBlaster may freeze" warning removed.
+
+### Changed
+
+- **Default SFX (SB16 voice) level 31 -> 28**, matching the FM/OPL3 level so SFX no
+  longer overpowers the music out of the box. (`patches/SDL/0101` + SETUP config
+  defaults.)
+
 ## [1.0.8.1] - 2026-06-05
 
 Quality release for the opt-in 486 Organya backend: removes the remaining gameplay

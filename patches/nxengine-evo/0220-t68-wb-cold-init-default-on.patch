@@ -1,0 +1,87 @@
+From 6ab85d1c42eb8eb92080b0220e81e5ea2bb4f686 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 13 Jun 2026 16:55:14 -0700
+Subject: [PATCH] patch 0220 -- T68: flip WB cold-init reorder to DEFAULT-ON
+ (strict-"0" killswitch)
+
+iter-7 g2k-PROVED the cold-init reorder (patch 0218) kills the WaveBlaster
+freeze on the DX2-66 (159 s no-wedge). The iter-4 cold-touch confound that
+kept 0218 opt-in/default-OFF is resolved, so the reorder is promoted to the
+production default for the wb backend.
+
+Engine half of the shared default-flip: SoundManager's cold-init gate goes
+from strict-"1" opt-in (`cold_on = ci && ci[0]=='1'`) to a strict-"0"
+KILLSWITCH (`cold_on = !(ci && ci[0]=='0')`): unset / anything-but-"0" =
+cold-init ON; explicit "0" forces the old late/blind (hot-bus) init for A/B
++ fallback. New slot (NOT an edit of frozen 0218) per cascade discipline.
+
+LOCKSTEP REQUIREMENT (why this lands FIRST): the cold-init has two halves on
+the one hint SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT -- (1) this engine REORDER
+(call SDL_DOSMpu401Init BEFORE MIX_CreateMixerDevice so the bus is COLD) and
+(2) sdl-engine's SDL reset/entry/pace sequence. If only the SDL side flips
+default-ON without this engine reorder, the default config inits the MPU LATE
+(hot bus) and the cold sequence runs HOT = the iter-6 wedge. So the engine
+flip must be in the tree before the SDL default flip (sdl T66/0098).
+
+GS-reset (0219) stays default-OFF -- unchanged. Blast radius wb-only
+(auto no longer resolves to wb, 0217). Banner "WB COLD-INIT engaged" anchor
+preserved for the smoke gate; text updated to say default-ON + killswitch.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 28 ++++++++++++++++------------
+ 1 file changed, 16 insertions(+), 12 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 40b0b69f..4e1aebca 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -433,19 +433,23 @@ bool SoundManager::init()
+   // earlier. selectBackendFromEnv() is pure (env -> enum -> log, no mixer
+   // dependency) so it is safe to hoist here from its original post-open position.
+   //
+-  // OPT-IN, default-OFF (team-lead, per the author-flagged-caveat rule -- an
+-  // iter-4 cold-touch wedge confound is weakened but not zero, so opt-in until
+-  // the g2k play-through gate passes): the hint SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_
+-  // INIT is strict-"1" to ENGAGE. WCI1 sets it =1 (cold path); WCI0 leaves it
+-  // UNSET = today's late-install order = the faithful wedge control (no killswitch
+-  // gymnastics). Blast radius is wb-only: auto_select no longer resolves to wb
+-  // (patch 0217), and OPL3 / Organya / auto init order is byte-unchanged (their
+-  // installs stay in the post-open dispatch switch below).
++  // DEFAULT-ON (patch 0220, T68): iter-7 g2k-PROVED cold-init kills the WB freeze
++  // (159 s no-wedge), so the iter-4 cold-touch confound that kept this opt-in is
++  // resolved and the reorder is now the production default for the wb backend.
++  // The hint SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT is now a strict-"0" KILLSWITCH:
++  // unset (or anything but "0") = cold-init ON; explicit "0" forces the old
++  // late/blind (hot-bus) init for A/B + fallback. CRITICAL: this flips in lockstep
++  // with sdl-engine's SDL-side cold default (the two halves share the one hint) --
++  // SDL alone default-ON WITHOUT this engine reorder would run the cold sequence
++  // on a HOT bus = the iter-6 wedge, which is why T68 (this engine flip) lands
++  // BEFORE the SDL default flip. Blast radius is wb-only: auto_select no longer
++  // resolves to wb (patch 0217), and OPL3 / Organya / auto init order is
++  // byte-unchanged (their installs stay in the post-open dispatch switch below).
+   selectBackendFromEnv();
+   bool wb_cold_installed = false;
+   {
+     const char *ci = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT");
+-    const bool cold_on = ci && ci[0] == '1' && ci[1] == '\0'; // strict-"1" opt-in
++    const bool cold_on = !(ci && ci[0] == '0' && ci[1] == '\0'); // 0220: default-ON, strict-"0" killswitch
+     if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb &&
+         cold_on)
+     {
+@@ -453,9 +457,9 @@ bool SoundManager::init()
+                "SB16 opens (the g2k wedge is the hot UART-entry MPU access while "
+                "the SB16 block is live; cold-bus access is probe-safe). The full "
+                "cold reset/entry/drain sequence runs in SDL_DOSMpu401Init under "
+-               "SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT; opt-in (=1), unset = today's "
+-               "late-install control. Entry-ACK result follows in the SDL WB "
+-               "banner (SDL/0095).");
++               "SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT; DEFAULT-ON (patch 0220), "
++               "killswitch =0 restores the old late/blind init. Entry-ACK result "
++               "follows in the SDL WB banner (SDL/0095).");
+       if (_try_install_wb_backend())
+       {
+         wb_cold_installed = true;
+-- 
+2.47.3
+
