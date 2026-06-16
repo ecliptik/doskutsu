@@ -207,6 +207,24 @@ static const dkt_key_t DKT_KEYS[] =
     DKT_ENUM, DKC_PERF, "notset", 0, 0, dkt_speed_vals,
     "Speed class",
     "SETUP-only record of the chosen System Speed preset; ignored by the engine", 0 },
+
+  /* MIDI music-set choice (backlog #39). env_name is the hint the engine reads
+   * once at init to pick the MIDI source set (SoundManager.cpp:545-640). The
+   * engine maps a CLOSED SET of LOGICAL values, NOT directory names:
+   *   "" / "wiimidi" -> data/midi/   (WiiWare arrangements; the default)
+   *   "orgmid"       -> data/orgmid/ (ORGMID note-for-note transcription)
+   *   anything else  -> data/midi/   (unrecognized -> fallback + a warn log)
+   * Default is "wiimidi" -- the byte-neutral value (== the engine's no-hint
+   * behavior, data/midi/) that does NOT trip the unrecognized-fallback warning
+   * a literal "midi" would. DKT_STR (the value space is logical, not a free
+   * directory). SETUP's Music screen offers only the known sets actually
+   * present on disk (setup/midiset.c); the orgmid1/orgmid2 GM_VARIANT dev sets
+   * are deliberately NOT exposed (Q-A2). Only meaningful for a MIDI backend
+   * (wb / opl3); Organya ignores it. */
+  { "MIDI_SET", "SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE",
+    DKT_STR, DKC_SOUND, "wiimidi", 0, 0, NULL,
+    "MIDI music set",
+    "Which MIDI music set the MIDI backend plays: wiimidi (WiiWare) or orgmid (ORGMID)", 0 },
 };
 
 #define DKT_KEY_COUNT ((int)(sizeof(DKT_KEYS) / sizeof(DKT_KEYS[0])))

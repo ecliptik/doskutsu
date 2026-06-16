@@ -10,18 +10,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h> /* getcwd -- compose the DOS path a MIDI set loads from (#39) */
 
 #include "tui.h"
 #include "setupcfg.h"
 #include "profile.h"
 #include "recommend.h"
 #include "audiotest.h"
+#include "midiset.h"
 
 #define CFG_PATH "DOSKUTSU.CFG"
 
 static scfg_t      g_cfg;
 static sysprofile_t g_prof;
 static int          g_dirty; /* unsaved changes */
+
+/* MIDI music sets discovered on disk (backlog #39). Rescanned on entry to the
+ * Music screen; the conditional "MIDI music set" row + its picker read these. */
+static midiset_t g_midi_sets[MIDISET_MAX];
+static int       g_midi_nsets;
 
 /* ---- value formatting / editing ------------------------------------- */
 
@@ -148,7 +155,7 @@ typedef struct { const char *key; const char *desc; } helprow_t;
 /* Per-line help for the Music backend row (replaces the paragraph blob).
  * Each description starts with a capital letter; no ";" (round-6 item 2). */
 static const helprow_t BACKEND_HELP[] = {
-  { "Auto",        "Detect the best the card supports." },
+  { "Auto",        "Detect the best option the card supports." },
   { "WaveBlaster", "Wavetable MIDI daughterboard, best quality." },
   { "OPL3",        "FM synth on any Sound Blaster, classic sound." },
   { "Organya",     "Cave Story's own synth, most faithful (more demanding on CPU)." }
@@ -255,6 +262,22 @@ static int help_list(int x, int y, int keyw, int descw, int maxper,
     used += (lines > 0) ? lines : 1;
   }
   return used;
+}
+
+/* Vertically center a menu/option box of height box_h in the open region
+ * between region_top (the first content row -- just under the title bar, or
+ * just under a fixed top panel like SYSTEM PROFILE) and desc_top (the top row
+ * of the bottom-anchored DESCRIPTION box), so the vertical margin above and
+ * below the box is equal. Phase-1 DF-UX layout: every list screen computes its
+ * option-box top with this instead of hardcoding a top-anchored row, which
+ * removes the big gap between a top-anchored box and the bottom DESCRIPTION
+ * box. Clamps to region_top so the box never rides up over the title/panel. */
+static int menu_box_top(int region_top, int desc_top, int box_h)
+{
+  int avail = desc_top - region_top;          /* rows between the two anchors */
+  int y = region_top + (avail - box_h) / 2;   /* equal top/bottom margin      */
+  if (y < region_top) y = region_top;
+  return y;
 }
 
 /* Is a category key currently selectable? Some keys are only relevant in
@@ -367,8 +390,10 @@ static void edit_index_list(const int *idxs, int n, const char *title)
   for (;;)
   {
     int k, j;
+    /* D: center the option box between the title bar and the DESCRIPTION box. */
+    int boxy = menu_box_top(3, TUI_DESC_TOP(7), n + 4);
     tui_titlebar(title); /* round-7 item 2: every screen shows its page title */
-    tui_box(9, 3, 64, n + 4, title); /* R-O: x=9 centers a 64-wide box (8/8 margins) */
+    tui_box(9, boxy, 64, n + 4, title); /* R-O: x=9 centers a 64-wide box (8/8 margins) */
     for (i = 0; i < n; ++i)
     {
       char row[80], val[24];
@@ -381,8 +406,8 @@ static void edit_index_list(const int *idxs, int n, const char *title)
       /* item 1: the highlight covers the WHOLE line (full box interior width).
        * Box x=9 w=64 -> interior 62 cells from col 10. */
       snprintf(row, sizeof(row), " %-61.61s", DKT_KEYS[idxs[i]].label);
-      tui_at(10, 4 + i, lblfg, bg, row);
-      tui_at(10 + 28, 4 + i, valfg, bg, val);
+      tui_at(10, boxy + 1 + i, lblfg, bg, row);
+      tui_at(10 + 28, boxy + 1 + i, valfg, bg, val);
     }
     /* per-item help: multi-option keys get a per-line keyed list (item 3);
      * single-concept keys stay wrapped prose. */
@@ -483,6 +508,7 @@ static void screen_advanced(void)
 enum
 {
   SND_BACKEND = 0, /* AUDIO_BACKEND, friendly names                 */
+  SND_MIDISET,     /* MIDI_SET, shown only for a MIDI backend + >=2 sets (#39) */
   SND_PRERENDER,   /* ORG_PRERENDER, active only for Organya        */
   SND_QUALITY,     /* AUDIO_TIER2                                    */
   SND_NROWS
@@ -493,6 +519,7 @@ static int snd_key_idx(int row)
   switch (row)
   {
     case SND_BACKEND:   return scfg_index("AUDIO_BACKEND");
+    case SND_MIDISET:   return scfg_index("MIDI_SET");
     case SND_PRERENDER: return scfg_index("ORG_PRERENDER");
     case SND_QUALITY:   return scfg_index("AUDIO_TIER2");
     default:            return -1;
@@ -504,6 +531,7 @@ static const char *snd_label(int row)
   switch (row)
   {
     case SND_BACKEND:   return "Music backend";
+    case SND_MIDISET:   return "MIDI music set";
     case SND_PRERENDER: return "Organya pre-render";
     case SND_QUALITY:   return "Audio quality";
     default:            return "";
@@ -518,12 +546,24 @@ static const char *snd_backend_name(const char *v)
   return "Auto (detect)"; /* "auto" or anything unrecognized */
 }
 
+/* Friendly label of the currently-selected MIDI set (the value stored in
+ * MIDI_SET, mapped to its discovered set's label). Falls back to the raw value
+ * when the configured set is not present on disk. */
+static const char *snd_midiset_name(const char *v)
+{
+  int si = midiset_index_by_value(g_midi_sets, g_midi_nsets, v);
+  if (si >= 0) return g_midi_sets[si].label;
+  return (v && v[0]) ? v : MIDISET_DEFAULT_VALUE;
+}
+
 static void snd_value(int row, char *out, int cap)
 {
   int idx = snd_key_idx(row);
   const char *v = scfg_get(&g_cfg, idx);
   if (row == SND_BACKEND)
     snprintf(out, (size_t)cap, "%s", snd_backend_name(v));
+  else if (row == SND_MIDISET)
+    snprintf(out, (size_t)cap, "%s", snd_midiset_name(v));
   else if (row == SND_QUALITY)
     /* T45: show the actual sample rate, not On/Off. AUDIO_TIER2=1 is the
      * default half rate (11025Hz), =0 the original 22050Hz. */
@@ -542,8 +582,13 @@ static const char *snd_help(int row)
              "daughterboard: best quality, needs that hardware. MIDI (OPL3) = "
              "FM synth built into most Sound Blasters: works everywhere, the "
              "classic sound. Organya = Cave Story's original synth: most "
-             "faithful (more demanding on CPU). Auto = pick the best the card "
-             "supports.";
+             "faithful (more demanding on CPU). Auto = pick the best option the "
+             "card supports.";
+    case SND_MIDISET:
+      return "Which set of MIDI music the WaveBlaster / OPL3 backend plays. "
+             "WiiWare = polished re-arrangements (Yann van der Cruyssen). "
+             "OrgMIDI = note-for-note transcription of the original Organya "
+             "music. Only sets you have installed under data appear here.";
     case SND_PRERENDER:
       return "Organya only. The first time each song plays it is rendered to a "
              "disk cache so playback stays smooth afterward. Costs a few seconds "
@@ -559,26 +604,175 @@ static const char *snd_help(int row)
 
 /* A row is selectable when its preconditions hold; others render dimmed and
  * are skipped by navigation. Pre-render + Audio quality are Organya-only (the
- * MIDI backends are chip-synthesized, so the PCM device rate does not apply). */
+ * MIDI backends are chip-synthesized, so the PCM device rate does not apply).
+ * The MIDI music-set row is the mirror image: applicable only to a MIDI
+ * backend (anything but Organya). */
 static int snd_active(int row)
 {
   int organya = strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND")),
                        "organya") == 0;
+  if (row == SND_MIDISET)   return !organya;
   if (row == SND_PRERENDER) return organya;
   if (row == SND_QUALITY)   return organya;
   return 1;
 }
 
-/* Move the selection by dir, skipping inactive (greyed) rows. */
+/* A row is VISIBLE (rendered at all) when it is meaningful on this machine.
+ * The MIDI music-set row is omitted entirely unless at least two MIDI sets are
+ * installed on disk -- a first-timer with one set never sees a dead choice
+ * (#39 sec.4). Every other row is always present (greying handles the rest). */
+static int snd_visible(int row)
+{
+  if (row == SND_MIDISET) return g_midi_nsets >= 2;
+  return 1;
+}
+
+/* Move the selection by dir, skipping rows that are not both visible AND
+ * active (greyed or omitted rows). */
 static int snd_step(int sel, int dir)
 {
   int i, r = sel;
   for (i = 0; i < SND_NROWS; ++i)
   {
     r = (r + dir + SND_NROWS) % SND_NROWS;
-    if (snd_active(r)) return r;
+    if (snd_visible(r) && snd_active(r)) return r;
   }
   return sel;
+}
+
+/* Cycle MIDI_SET among the discovered sets (Space / Left / Right on the row). */
+static void snd_midiset_cycle(int dir)
+{
+  int idx = scfg_index("MIDI_SET");
+  int cur;
+  if (g_midi_nsets <= 0) return;
+  cur = midiset_index_by_value(g_midi_sets, g_midi_nsets, scfg_get(&g_cfg, idx));
+  if (cur < 0) cur = 0;
+  cur = (cur + dir + g_midi_nsets) % g_midi_nsets;
+  if (strcmp(scfg_get(&g_cfg, idx), g_midi_sets[cur].value) != 0)
+  {
+    scfg_set(&g_cfg, idx, g_midi_sets[cur].value);
+    g_dirty = 1;
+  }
+}
+
+/* Compose the absolute DOS path a MIDI set loads from: <cwd>\DATA\<DIR>,
+ * uppercased with backslashes (e.g. C:\DOSKUTSU\DATA\MIDI). SETUP runs in the
+ * game directory, so getcwd() yields the install root the engine resolves data
+ * against. Falls back to a bare DATA\<DIR> if the cwd cannot be read. */
+static void midiset_dos_path(const char *dir, char *out, int cap)
+{
+  char cwd[96];
+  char up[MIDISET_DIR_MAX];
+  int  i, n;
+
+  if (getcwd(cwd, sizeof(cwd)) == NULL || cwd[0] == '\0')
+    cwd[0] = '\0';
+  for (i = 0; cwd[i]; ++i)
+  {
+    if (cwd[i] == '/') cwd[i] = '\\';
+    else if (cwd[i] >= 'a' && cwd[i] <= 'z') cwd[i] = (char)(cwd[i] - 'a' + 'A');
+  }
+  n = (int)strlen(cwd);
+  /* strip a trailing backslash unless it is a bare drive root "X:\" */
+  if (n >= 1 && cwd[n - 1] == '\\' && !(n == 3 && cwd[1] == ':'))
+    cwd[--n] = '\0';
+  for (i = 0; dir[i] && i < (int)sizeof(up) - 1; ++i)
+    up[i] = (dir[i] >= 'a' && dir[i] <= 'z') ? (char)(dir[i] - 'a' + 'A') : dir[i];
+  up[i] = '\0';
+
+  if (n == 0)
+    snprintf(out, (size_t)cap, "DATA\\%s", up);
+  else if (cwd[n - 1] == '\\')          /* root already ends with a backslash */
+    snprintf(out, (size_t)cap, "%sDATA\\%s", cwd, up);
+  else
+    snprintf(out, (size_t)cap, "%s\\DATA\\%s", cwd, up);
+}
+
+/* #39 A: build the per-set DESCRIPTION list shown when the MIDI-music-set row
+ * is highlighted -- one row per installed set (matching the Music-backend help
+ * style): friendly name in the keyword column, then the DOS path it loads from
+ * + its track count, and an incomplete-set warning when it has fewer tracks
+ * than the fullest installed set. No "=" sign. descbuf rows must be >= 128.
+ * Returns the number of rows filled; *keyw gets the keyword-column width. */
+static int snd_midiset_help(helprow_t *rows, char descbuf[][192], int cap,
+                            int *keyw)
+{
+  int i, n = (g_midi_nsets < cap) ? g_midi_nsets : cap;
+  int refcount = 0, kw = 9;
+
+  for (i = 0; i < n; ++i)
+  {
+    int w = (int)strlen(g_midi_sets[i].label) + 2;
+    if (g_midi_sets[i].mid_count > refcount) refcount = g_midi_sets[i].mid_count;
+    if (w > kw) kw = w;
+  }
+  for (i = 0; i < n; ++i)
+  {
+    char path[64];
+    int  miss = refcount - g_midi_sets[i].mid_count;
+    midiset_dos_path(g_midi_sets[i].dir, path, sizeof(path));
+    if (miss > 0)
+      snprintf(descbuf[i], 192,
+               "%s, %d tracks -- %d fewer than the fullest set; those songs "
+               "play no music.", path, g_midi_sets[i].mid_count, miss);
+    else
+      snprintf(descbuf[i], 192, "%s, %d tracks.", path,
+               g_midi_sets[i].mid_count);
+    rows[i].key  = g_midi_sets[i].label;
+    rows[i].desc = descbuf[i];
+  }
+  *keyw = kw;
+  return n;
+}
+
+/* Modal pick-list of the discovered MIDI sets (Enter on the row). Tags the
+ * current set "(current)"; the DESCRIPTION shows each set's track count and an
+ * incomplete-set WARNING when it has fewer tracks than the fullest installed
+ * set (#39 Q-A4). Writes MIDI_SET on a change. Returns 1 (a list was shown). */
+static int snd_pick_midiset(void)
+{
+  const char *items[MIDISET_MAX];
+  const char *tags[MIDISET_MAX];
+  const char *descs[MIDISET_MAX];
+  char        dbuf[MIDISET_MAX][192];
+  int idx = scfg_index("MIDI_SET");
+  int i, choice, start = 0, refcount = 0;
+
+  if (g_midi_nsets <= 0) return 0;
+
+  for (i = 0; i < g_midi_nsets; ++i)
+    if (g_midi_sets[i].mid_count > refcount) refcount = g_midi_sets[i].mid_count;
+
+  i = midiset_index_by_value(g_midi_sets, g_midi_nsets, scfg_get(&g_cfg, idx));
+  if (i >= 0) start = i;
+
+  for (i = 0; i < g_midi_nsets; ++i)
+  {
+    int  miss = refcount - g_midi_sets[i].mid_count;
+    char path[64];
+    midiset_dos_path(g_midi_sets[i].dir, path, sizeof(path));
+    items[i] = g_midi_sets[i].label;
+    tags[i]  = (i == start) ? "(current)" : "";
+    if (miss > 0)
+      snprintf(dbuf[i], sizeof(dbuf[i]),
+               "%s, %d tracks -- %d fewer than the fullest set; those songs "
+               "play no music.", path, g_midi_sets[i].mid_count, miss);
+    else
+      snprintf(dbuf[i], sizeof(dbuf[i]), "%s, %d tracks.", path,
+               g_midi_sets[i].mid_count);
+    descs[i] = dbuf[i];
+  }
+
+  choice = tui_picklist("MIDI music set", 0, 0, items, tags, descs,
+                        g_midi_nsets, start, 0, NULL, NULL, 0);
+  if (choice >= 0 && choice < g_midi_nsets &&
+      strcmp(scfg_get(&g_cfg, idx), g_midi_sets[choice].value) != 0)
+  {
+    scfg_set(&g_cfg, idx, g_midi_sets[choice].value);
+    g_dirty = 1;
+  }
+  return 1;
 }
 
 static void screen_sound(void)
@@ -587,26 +781,42 @@ static void screen_sound(void)
   scfg_t snap = g_cfg;          /* T52: entry snapshot for the ESC revert path */
   int dirty_snap = g_dirty;
 
+  /* #39: discover the MIDI music sets present on disk (data/midi/, data/orgmid/).
+   * Rescan once on entry -- the on-disk set list does not change mid-screen. */
+  g_midi_nsets = midiset_scan("data", g_midi_sets, MIDISET_MAX);
+
   tui_clear(); /* T45: clear ONCE on entry; the loop repaints in place (no flash) */
   for (;;)
   {
-    int i, k, hy;
-    tui_titlebar("MUSIC");
-    tui_box(9, 3, 64, SND_NROWS + 2, "MUSIC"); /* R-O: centered (8/8 margins) */
+    int i, k, hy, p, nvis = 0, vis[SND_NROWS], boxy;
+
+    /* Build the visible-row list (the MIDI-set row is omitted entirely unless
+     * >=2 sets are installed), so omitted rows leave no gap. */
     for (i = 0; i < SND_NROWS; ++i)
+      if (snd_visible(i)) vis[nvis++] = i;
+
+    /* D: vertically center the option box between the title bar and the
+     * bottom-anchored DESCRIPTION box (no more top-anchored gap). */
+    hy = TUI_DESC_TOP(8);
+    boxy = menu_box_top(3, hy, nvis + 2);
+
+    tui_titlebar("MUSIC");
+    tui_box(9, boxy, 64, nvis + 2, "MUSIC"); /* R-O: centered (8/8 margins) */
+    for (p = 0; p < nvis; ++p)
     {
       char row[80], val[28];
-      int active = snd_active(i);
-      int selrow = (active && i == sel);
+      int  ri = vis[p];
+      int active = snd_active(ri);
+      int selrow = (active && ri == sel);
       int lblfg = !active ? PAL->dim : (selrow ? PAL->sel_fg : PAL->body);
       int bg = selrow ? PAL->sel_bg : PAL->bg;
       int valfg = !active ? PAL->dim : (selrow ? PAL->sel_fg : PAL->value);
-      snd_value(i, val, (int)sizeof(val));
+      snd_value(ri, val, (int)sizeof(val));
       /* item 1: highlight the WHOLE line (full box interior width). Full-width
        * label bar, then overpaint the value in its column. */
-      snprintf(row, sizeof(row), " %-61.61s", snd_label(i));
-      tui_at(10, 4 + i, lblfg, bg, row);
-      tui_at(10 + 26, 4 + i, valfg, bg, val);
+      snprintf(row, sizeof(row), " %-61.61s", snd_label(ri));
+      tui_at(10, boxy + 1 + p, lblfg, bg, row);
+      tui_at(10 + 26, boxy + 1 + p, valfg, bg, val);
     }
 
     /* per-item help: multi-option rows get a per-line keyed list, each desc
@@ -617,13 +827,21 @@ static void screen_sound(void)
      * separate NOTE box) prints as a trailing warn-colored line at the bottom.
      * tui_box repaints the interior each frame, so a vanished advisory leaves
      * no residue. */
-    hy = TUI_DESC_TOP(8);
     tui_box(TUI_DESC_X, hy, TUI_DESC_W, 8, "DESCRIPTION");
     {
       int oh_n, oh_kw;
-      const helprow_t *oh =
-        opt_help_for(DKT_KEYS[snd_key_idx(sel)].cfg_key, &oh_n, &oh_kw);
-      if (oh)
+      const helprow_t *oh;
+      if (sel == SND_MIDISET && g_midi_nsets > 0)
+      {
+        /* #39 A: list each installed set on its own line (DOS path + count),
+         * matching the Music-backend help style. */
+        helprow_t mrows[MIDISET_MAX];
+        char      mbuf[MIDISET_MAX][192];
+        int       mkw, mn = snd_midiset_help(mrows, mbuf, MIDISET_MAX, &mkw);
+        help_list(TUI_DESC_TX, hy + 1, mkw, TUI_DESC_TW - mkw, 2, mrows, mn);
+      }
+      else if ((oh = opt_help_for(DKT_KEYS[snd_key_idx(sel)].cfg_key,
+                                  &oh_n, &oh_kw)) != NULL)
         help_list(TUI_DESC_TX, hy + 1, oh_kw, TUI_DESC_TW - oh_kw, 2, oh, oh_n);
       else
         tui_wrap(TUI_DESC_TX, hy + 1, TUI_DESC_TW, 4, PAL->desc, PAL->bg, snd_help(sel));
@@ -652,7 +870,12 @@ static void screen_sound(void)
       /* T62: only Space / Left / Right cycle the highlighted row's value. */
       if (snd_active(sel))
       {
-        cycle_value(snd_key_idx(sel), (k == TUI_KEY_LEFT) ? -1 : +1);
+        if (sel == SND_MIDISET)
+          /* #39: MIDI_SET is a DKT_STR over the discovered logical sets, so it
+           * has its own cycle (the generic cycle_value does not handle STR). */
+          snd_midiset_cycle((k == TUI_KEY_LEFT) ? -1 : +1);
+        else
+          cycle_value(snd_key_idx(sel), (k == TUI_KEY_LEFT) ? -1 : +1);
         /* T8 auto-suggest: choosing Organya on a sub-Pentium CPU enables the
          * v1.0.8 PCM pre-render cache (the user can toggle it back off). The
          * explanatory Note box renders from the same condition (T22 item 4). */
@@ -665,7 +888,14 @@ static void screen_sound(void)
       /* R-I: Enter opens a pick-list for the highlighted row; R-H: full-clear
        * after it closes (no overlay residue). Organya auto-suggest rides along
        * on a backend change, same as the cycle path. */
-      if (snd_active(sel) && pick_value(snd_key_idx(sel)))
+      int shown;
+      if (!snd_active(sel))
+        shown = 0;
+      else if (sel == SND_MIDISET)
+        shown = snd_pick_midiset(); /* #39: dedicated set picker (STR key) */
+      else
+        shown = pick_value(snd_key_idx(sel));
+      if (shown)
       {
         if (sel == SND_BACKEND)
           recommend_org_prerender(&g_cfg, &g_prof);
@@ -969,8 +1199,10 @@ static void screen_hardware(void)
   for (;;)
   {
     int k;
+    /* D: center the option box between the title bar and the DESCRIPTION box. */
+    int boxy = menu_box_top(3, TUI_DESC_TOP(5), HW_NFIELDS + 6);
     tui_titlebar("SOUND HARDWARE");
-    tui_box(9, 3, 64, HW_NFIELDS + 6, "SOUND"); /* R-O: centered (8/8 margins) */
+    tui_box(9, boxy, 64, HW_NFIELDS + 6, "SOUND"); /* R-O: centered (8/8 margins) */
 
     /* Rows 0..N-1: the BLASTER fields. R-M: always editable (no override). */
     for (i = 0; i < HW_NFIELDS; ++i)
@@ -982,14 +1214,14 @@ static void screen_hardware(void)
       int  vfg = selrow ? PAL->sel_fg : PAL->value;
       hw_fmt(&HW_FIELDS[i], cur[i], val, (int)sizeof(val));
       snprintf(row, sizeof(row), " %-61.61s", HW_FIELDS[i].label);
-      tui_at(10, 4 + i, fg, bg, row);
-      tui_at(10 + 28, 4 + i, vfg, bg, val);
+      tui_at(10, boxy + 1 + i, fg, bg, row);
+      tui_at(10 + 28, boxy + 1 + i, vfg, bg, val);
     }
     /* Rows after the fields (R-B): Sound on/off + the SB16 mixer volume levels,
      * edited live; the two volume rows grey when sound is disabled. */
     {
       static const char *xlabel[3] = { "Sound", "SFX volume", "Music volume" };
-      int base = 4 + HW_NFIELDS, xi;
+      int base = boxy + 1 + HW_NFIELDS, xi;
       for (xi = 0; xi < 3; ++xi)
       {
         int rowno  = HW_ROW_SOUND + xi;
@@ -1237,41 +1469,74 @@ static void draw_profile_panel(int x, int y, int w)
   }
 }
 
-/* System Speed screen (T47 plan 3.4): a DF-style centered pick-list of the
- * speed classes + an Auto-detect row, each with a plain-language description.
- * Selecting a class applies its macro to the session; ESC / Cancel leaves the
- * settings unchanged (T44 session model -- main-menu save commits). */
+/* System Speed screen (T47 plan 3.4): a list of the speed classes + an
+ * Auto-detect row, each with a plain-language description. Selecting a class
+ * applies its macro to the session; ESC leaves the settings unchanged (T44
+ * session model -- main-menu save commits).
+ *
+ * Round-2 review fix: renders with the SAME layout as every other list screen
+ * -- a vertically-centered option box (menu_box_top) above a standard
+ * bottom-anchored, full-width DESCRIPTION box (TUI_DESC geometry) -- instead of
+ * the old self-contained pick-list whose narrow help bar sat smushed directly
+ * under the list and diverged from the other screens. */
 static void screen_speed(void)
 {
-  const char *items[SPEED_NROWS + 1];
-  const char *descs[SPEED_NROWS + 1];
-  const char *tags[SPEED_NROWS + 1];
-  char        tagbuf[SPEED_NROWS][16];
   const char *cls = scfg_get(&g_cfg, scfg_index("SPEED_CLASS"));
   int cur = speed_row_index(cls);
   int rec = speed_row_for_cpu(&g_prof);
-  int i, start, choice;
+  int nrows = SPEED_NROWS + 1;            /* the classes + an Auto-detect row */
+  int sel = (cur >= 0) ? cur : rec;
+  const int descy = TUI_DESC_TOP(4);     /* standard DESCRIPTION box geometry */
 
-  for (i = 0; i < SPEED_NROWS; ++i)
+  tui_clear(); /* T45: clear ONCE on entry; the loop repaints in place */
+  for (;;)
   {
-    items[i] = SPEED_ROWS[i].label;
-    descs[i] = SPEED_ROWS[i].desc;
-    if      (i == cur) snprintf(tagbuf[i], sizeof(tagbuf[i]), "(current)");
-    else if (i == rec) snprintf(tagbuf[i], sizeof(tagbuf[i]), "(recommended)");
-    else               tagbuf[i][0] = '\0';
-    tags[i] = tagbuf[i][0] ? tagbuf[i] : NULL;
-  }
-  items[SPEED_NROWS] = "Auto-detect";
-  descs[SPEED_NROWS] = "Set the speed class that matches the detected CPU.";
-  tags[SPEED_NROWS]  = NULL;
+    int i, k, boxy = menu_box_top(3, descy, nrows + 2);
+    const char *d;
+    tui_titlebar("SYSTEM SPEED");
+    tui_box(19, boxy, 44, nrows + 2, "SYSTEM SPEED"); /* x=19 centers a 44-wide box */
+    for (i = 0; i < nrows; ++i)
+    {
+      const char *label = (i < SPEED_NROWS) ? SPEED_ROWS[i].label : "Auto-detect";
+      const char *tag = NULL;
+      int selrow = (i == sel);
+      int fg  = selrow ? PAL->sel_fg : PAL->body;
+      int bg  = selrow ? PAL->sel_bg : PAL->bg;
+      int vfg = selrow ? PAL->sel_fg : PAL->value;
+      char row[46];
+      if (i < SPEED_NROWS)
+      {
+        if      (i == cur) tag = "(current)";
+        else if (i == rec) tag = "(recommended)";
+      }
+      snprintf(row, sizeof(row), " %-41.41s", label);
+      tui_at(20, boxy + 1 + i, fg, bg, row);
+      if (tag)
+      {
+        int tl = (int)strlen(tag);
+        int tx = 19 + 44 - 1 - tl;        /* right-aligned in the box interior */
+        tui_at(tx, boxy + 1 + i, vfg, bg, tag);
+      }
+    }
+    /* standard bottom-anchored, full-width DESCRIPTION box (same as every
+     * other screen): the selected row's plain-language help. */
+    tui_box(TUI_DESC_X, descy, TUI_DESC_W, 4, "DESCRIPTION");
+    d = (sel < SPEED_NROWS) ? SPEED_ROWS[sel].desc
+                            : "Set the speed class that matches the detected CPU.";
+    tui_wrap(TUI_DESC_TX, descy + 1, TUI_DESC_TW, 2, PAL->desc, PAL->bg, d);
+    tui_status("Enter Select   ESC Back");
 
-  start = (cur >= 0) ? cur : rec;
-  tui_clear();
-  tui_titlebar("SYSTEM SPEED");
-  choice = tui_picklist("SYSTEM SPEED", 0, 0, items, tags, descs,
-                        SPEED_NROWS + 1, start, 0, NULL, NULL, 0);
-  if (choice < 0) return;                 /* ESC / Cancel -> no change */
-  speed_apply(choice == SPEED_NROWS ? rec : choice);
+    k = tui_getkey();
+    if (k == TUI_KEY_UP)        sel = (sel + nrows - 1) % nrows;
+    else if (k == TUI_KEY_DOWN) sel = (sel + 1) % nrows;
+    else if (k == TUI_KEY_HOME) sel = 0;
+    else if (k == TUI_KEY_ENTER)
+    {
+      speed_apply(sel == SPEED_NROWS ? rec : sel); /* apply class (or auto) */
+      return;
+    }
+    else if (k == TUI_KEY_ESC) return;             /* T44: no change on ESC */
+  }
 }
 
 static void screen_autodetect(void)
@@ -1587,10 +1852,12 @@ static void screen_input(void)
   for (;;)
   {
     int i, k, active[R_N];
+    /* D: center the option box between the title bar and the DESCRIPTION box. */
+    int boxy = menu_box_top(3, TUI_DESC_TOP(4), R_N + 2);
     active[R_JOY] = 1; active[R_KBD] = 0; active[R_JOYCFG] = 0;
     active[R_RESTORE] = 0; active[R_BACK] = 1; /* Configure/Restore = Phase 3 */
     tui_titlebar("INPUT");
-    tui_box(19, 6, 44, R_N + 2, "INPUT"); /* R-O: centered (18/18 margins) */
+    tui_box(19, boxy, 44, R_N + 2, "INPUT"); /* R-O: centered (18/18 margins) */
     for (i = 0; i < R_N; ++i)
     {
       int selrow = (active[i] && i == sel);
@@ -1598,11 +1865,11 @@ static void screen_input(void)
       int bg     = selrow ? PAL->sel_bg : PAL->bg;
       char row[46];
       snprintf(row, sizeof(row), " %-41.41s", labels[i]);
-      tui_at(20, 7 + i, lblfg, bg, row);
+      tui_at(20, boxy + 1 + i, lblfg, bg, row);
       if (i == R_JOY)
       {
         int vfg = selrow ? PAL->sel_fg : PAL->value;
-        tui_at(20 + 28, 7 + i, vfg, bg,
+        tui_at(20 + 28, boxy + 1 + i, vfg, bg,
                strcmp(scfg_get(&g_cfg, joyidx), "1") == 0 ? "On" : "Off");
       }
     }

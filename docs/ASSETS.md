@@ -452,6 +452,40 @@ build + run on user's machine) precisely because the absence of an
 explicit license means we make no claim on usage rights; the user's
 interaction with rnhart.net handles that.
 
+### Choosing the MIDI music set (a second, optional set)
+
+The MIDI backends (`wb` / `opl3`) can play more than one music set. The
+engine resolves the set from `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` (see
+`docs/CONFIG.md`), and SETUP exposes the choice as the **MIDI music set**
+row on the Sound -> Music screen. The row appears only when a MIDI backend
+is selected AND at least two sets are installed; with a single set the
+default (WiiWare) is used and the row is hidden.
+
+Two sets are supported today:
+
+- **WiiWare** (`data/midi/`, hint value `wiimidi`, the default) -- the
+  polished re-arrangements installed by `scripts/fetch-cs-midi.py` above.
+- **OrgMIDI** (shown as "OrgMIDI" in SETUP; `data/orgmid/`, hint value
+  `orgmid`) -- a note-for-note transcription of Pixel's original Organya
+  music, generated locally by:
+
+  ```bash
+  python3 scripts/build-cs-midi-orgmid.py data/
+  ```
+
+  Same fetch-and-pin, user-fetches-locally posture as the WiiWare script
+  (it downloads + builds Robert Hart's ORGMID converter in a tempdir and
+  runs it against your local `data/org/*.org`; the `.mid` output stays on
+  your machine and is never redistributed from this repo). After it runs,
+  re-launch SETUP and the **MIDI music set** row offers WiiWare vs OrgMIDI.
+
+If a set is missing some of the 41 engine tracks (e.g. a partial fetch),
+SETUP flags it in the picker's description ("`N` fewer than the fullest
+set; those songs will play no music"), and the engine warns + skips the
+missing track at play time. Note: the engine only recognizes the two
+logical set values above -- an arbitrary user-named drop-in directory is
+not selectable without an engine change (tracked separately).
+
 ---
 
 ## Step 5: test

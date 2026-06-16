@@ -14,11 +14,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>   /* mkdir for the midiset scan fixture */
 
 #include "doskutsu_config.h"   /* engine loader */
 #include "setupcfg.h"          /* SETUP model   */
 #include "profile.h"
 #include "recommend.h"
+#include "midiset.h"           /* MIDI music-set discovery (#39) */
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { \
@@ -305,6 +308,90 @@ static void test_speed_class(void)
         "round-trip SPEED_CLASS preset");
 }
 
+/* #39 / T1: the MIDI_SET key. Default is the byte-neutral "wiimidi" (the value
+ * that maps to data/midi/ WITHOUT tripping the engine's unrecognized-fallback
+ * warning a literal "midi" would). It round-trips through the SETUP model and
+ * the engine loader publishes it to the MIDI-source hint. */
+static void test_midiset_key(void)
+{
+  const char *path = "/tmp/DKT_MIDISET.CFG";
+  scfg_t a, b;
+  int idx;
+
+  idx = scfg_index("MIDI_SET");
+  CHECK(idx >= 0, "MIDI_SET is a known SETUP key");
+
+  scfg_defaults(&a);
+  CHECK(strcmp(scfg_get(&a, idx), "wiimidi") == 0,
+        "MIDI_SET default is wiimidi (byte-neutral, no fallback warning)");
+
+  scfg_set(&a, idx, "orgmid");
+  CHECK(scfg_save(&a, path) == 0, "scfg_save with MIDI_SET ok");
+  scfg_load(&b, path);
+  CHECK(strcmp(scfg_get(&b, scfg_index("MIDI_SET")), "orgmid") == 0,
+        "round-trip MIDI_SET=orgmid");
+
+  /* the engine loader maps MIDI_SET -> SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE */
+  unsetenv("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE");
+  write_file(path, "MIDI_SET=orgmid\r\n");
+  doskutsu_cfg_load(path);
+  CHECK(getenv("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE") &&
+        strcmp(getenv("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE"), "orgmid") == 0,
+        "MIDI_SET mapped to its hint name (SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE)");
+  unsetenv("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE");
+}
+
+/* #39 / T2: midiset_scan() lists ONLY the known logical sets whose data subdir
+ * is present and holds >=1 .mid, mapping dir -> logical hint value + label. */
+static void test_midiset_scan(void)
+{
+  const char *base2 = "/tmp/dkt_ms_two";       /* both midi/ + orgmid/ present */
+  const char *data2 = "/tmp/dkt_ms_two/data";
+  const char *base1 = "/tmp/dkt_ms_one";       /* only midi/ present           */
+  const char *data1 = "/tmp/dkt_ms_one/data";
+  midiset_t sets[MIDISET_MAX];
+  int n, wi, oi;
+
+  mkdir(base2, 0777); mkdir(data2, 0777);
+  mkdir("/tmp/dkt_ms_two/data/midi", 0777);
+  mkdir("/tmp/dkt_ms_two/data/orgmid", 0777);
+  write_file("/tmp/dkt_ms_two/data/midi/curly.mid", "MThd");
+  write_file("/tmp/dkt_ms_two/data/midi/access.mid", "MThd");
+  write_file("/tmp/dkt_ms_two/data/orgmid/curly.mid", "MThd");
+  /* a non-.mid file must NOT be counted */
+  write_file("/tmp/dkt_ms_two/data/midi/readme.txt", "x");
+
+  n = midiset_scan(data2, sets, MIDISET_MAX);
+  CHECK(n == 2, "midiset_scan: both sets present -> 2");
+  wi = midiset_index_by_value(sets, n, "wiimidi");
+  oi = midiset_index_by_value(sets, n, "orgmid");
+  CHECK(wi >= 0 && strcmp(sets[wi].label, "WiiWare") == 0 &&
+        strcmp(sets[wi].dir, "midi") == 0 && sets[wi].mid_count == 2,
+        "midiset_scan: wiimidi -> data/midi, label WiiWare, 2 .mid (txt ignored)");
+  CHECK(oi >= 0 && strcmp(sets[oi].label, "OrgMIDI") == 0 &&
+        strcmp(sets[oi].dir, "orgmid") == 0 && sets[oi].mid_count == 1,
+        "midiset_scan: orgmid -> data/orgmid, label OrgMIDI, 1 .mid");
+
+  /* index_by_value: empty/NULL -> default wiimidi; unknown -> -1 */
+  CHECK(midiset_index_by_value(sets, n, "") == wi,
+        "midiset_index_by_value: empty -> default wiimidi");
+  CHECK(midiset_index_by_value(sets, n, NULL) == wi,
+        "midiset_index_by_value: NULL -> default wiimidi");
+  CHECK(midiset_index_by_value(sets, n, "nope") == -1,
+        "midiset_index_by_value: unknown value -> -1");
+
+  /* single-set case: only midi/ present -> 1 (the Music row would be omitted) */
+  mkdir(base1, 0777); mkdir(data1, 0777);
+  mkdir("/tmp/dkt_ms_one/data/midi", 0777);
+  write_file("/tmp/dkt_ms_one/data/midi/curly.mid", "MThd");
+  n = midiset_scan(data1, sets, MIDISET_MAX);
+  CHECK(n == 1, "midiset_scan: only midi/ present -> 1 (row hidden when <2)");
+
+  /* no data dir at all -> 0 */
+  n = midiset_scan("/tmp/dkt_ms_does_not_exist", sets, MIDISET_MAX);
+  CHECK(n == 0, "midiset_scan: absent data dir -> 0");
+}
+
 int main(void)
 {
   test_loader();
@@ -315,6 +402,8 @@ int main(void)
   test_authoritative();
   test_org_prerender_suggest();
   test_speed_class();
+  test_midiset_key();
+  test_midiset_scan();
   printf("\n%s (%d failures)\n", g_fail ? "TESTS FAILED" : "ALL TESTS PASSED", g_fail);
   return g_fail ? 1 : 0;
 }

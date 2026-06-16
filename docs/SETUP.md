@@ -24,8 +24,9 @@ SETUP opens a full-screen menu:
   card (from your `BLASTER` variable), WaveBlaster / OPL3 availability, and
   video / VBE.
 - **Sound setup** -- music backend (WaveBlaster MIDI / OPL3 FM / Organya
-  synth / auto-detect), sound on/off, audio quality, SB16 mixer levels,
-  Organya pre-render.
+  synth / auto-detect), MIDI music set (when a MIDI backend is selected and
+  more than one set is installed), sound on/off, audio quality, SB16 mixer
+  levels, Organya pre-render.
 - **Sound hardware** -- I/O port, IRQ, 8-bit DMA, 16-bit DMA, MPU-401 /
   WaveBlaster MIDI port, and card type (all via the one `BLASTER` line; see
   "Sound Hardware screen" below).
@@ -84,6 +85,7 @@ FIXED_TIMESTEP=1
 | Key | Values | Meaning |
 |---|---|---|
 | `AUDIO_BACKEND` | auto / wb / opl3 / organya | Music backend (auto = detect). `auto` is omitted from the file so the engine's detection runs. |
+| `MIDI_SET` | wiimidi / orgmid | Which MIDI music set the `wb` / `opl3` MIDI backends play: `wiimidi` (shown as "WiiWare", the WiiWare arrangements, `data/midi/`; default) or `orgmid` (shown as "OrgMIDI", the note-for-note transcription, `data/orgmid/`). SETUP only shows the **MIDI music set** row when a MIDI backend is selected AND at least two sets are installed on disk; otherwise the default applies. Ignored by the Organya backend. |
 | `AUDIO_OFF` | 0 / 1 | Disable all audio. |
 | `AUDIO_TIER2` | 0 / 1 | Audio sample rate: 1 = 11025 Hz (default, lighter on the CPU), 0 = 22050 Hz. Shown as the rate (`11025Hz` / `22050Hz`) on the Sound setup screen. |
 | `SB16_VOICE_VOL` | 0-31 | SB16 mixer voice (PCM/SFX) level. |

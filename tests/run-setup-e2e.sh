@@ -648,6 +648,12 @@ DOSKUTSU_PRESENT=0
 #   [SKIP unless organya]. Sound on/off + SFX/Music volume MOVED to Custom setup.
 #   With backend!=organya, only row0 is live (rows 1,2 greyed) -> Home lands on
 #   backend; Down wraps back to row0.
+#   #39: a conditional "MIDI music set" row inserts at index 1 ONLY when a MIDI
+#   backend is selected AND >=2 MIDI sets are installed (data/midi + data/orgmid).
+#   The E2E stage ships at most one set, so the row stays HIDDEN here and the
+#   indices above are unchanged. (If a future scenario stages two sets, the row
+#   appears at index 1 and pushes pre-render/quality to 2/3 -- but these
+#   scenarios only Home+Right on row0, so they are unaffected either way.)
 #
 # CUSTOM SETUP rows (R-M removed the override row -- fields always editable):
 # 0 I/O port, 1 IRQ, 2 DMA channel, 3 MPU port, 4 Card type, 5 Sound

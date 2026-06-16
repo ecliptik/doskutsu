@@ -41,7 +41,7 @@ SET SDL_HINT_DOSKUTSU_PERF_MODE=1        REM drop decorative foreground detail
 | Variable | Values | Default | Effect | FPS impact |
 |---|---|---|---|---|
 | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `opl3`, `organya`, `wb` | `opl3` | Music synthesizer. `opl3`: the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: a WaveBlaster daughterboard. | `organya` is ~9 fps slower than MIDI; `opl3` / `wb` run music off the CPU |
-| `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi`, `orgmid` | `wiimidi` | Which MIDI set the `opl3` / `wb` backends play. `wiimidi`: the WiiWare arrangement. `orgmid`: the Hart legacy `.mid` set. | None |
+| `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi`, `orgmid` | `wiimidi` | Which MIDI set the `opl3` / `wb` backends play. `wiimidi`: the WiiWare arrangement (`data/midi/`). `orgmid`: the Hart legacy `.mid` set (`data/orgmid/`). SETUP exposes this as the **MIDI music set** row (writing the `MIDI_SET` DOSKUTSU.CFG key) when both sets are installed. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | unset | Picks an `org2mid`-converted General MIDI variant. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_TIER2` | `0` (to disable) | on | On (default): 11025 Hz mono audio. `=0`: 22050 Hz stereo, the original 2004 audio quality. | `=0` costs ~11 fps in music-heavy scenes |
 | `SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT` | `0` (to disable) | on | WaveBlaster (`wb` backend) only. On (default): brings the MPU-401 up (reset + UART entry + ACK drain) BEFORE the Sound Blaster opens, on a quiet bus -- this is what lets WaveBlaster music start cleanly on 486-class boards that otherwise stall at load. `=0` restores the old late init (only if the legacy behavior is needed). | None |

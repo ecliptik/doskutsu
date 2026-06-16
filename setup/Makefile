@@ -73,8 +73,8 @@ else
   LIBS        :=
 endif
 
-SRCS := main.c tui.c setupcfg.c recommend.c profile.c audiotest_progress.c \
-        $(AUDIOTEST_SRC)
+SRCS := main.c tui.c setupcfg.c recommend.c profile.c midiset.c \
+        audiotest_progress.c $(AUDIOTEST_SRC)
 
 # Flag-stamp: make tracks timestamps, not flag values, so flipping AUDIOTEST
 # (e.g. dev scaffold <-> `dist` release) would otherwise leave a stale setup.exe
@@ -109,5 +109,5 @@ clean:
 test: | $(OUT_DIR)
 	PATH="$(ORIG_PATH)" cc -std=gnu11 -Wall -Wextra -Werror \
 	   -I$(REPO_ROOT)/include -I. \
-	   tests/test_config.c setupcfg.c recommend.c profile.c \
+	   tests/test_config.c setupcfg.c recommend.c profile.c midiset.c \
 	   -o $(OUT_DIR)/test_config_host && $(OUT_DIR)/test_config_host
