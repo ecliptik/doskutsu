@@ -82,11 +82,26 @@ static int g_titlebar = 1;               /* default = full-width title bar */
 #define POPUP_FILL   3  /* fill the modal body with a distinct bg    */
 static int g_popup_style = POPUP_DIM; /* operator pick (review-11) */
 
+/* R-E: a dark cave/rock textured backdrop behind the menus, filled into the
+ * screen background by tui_clear() (boxes paint over it, so text stays legible).
+ * SHIPPED DEFAULT = rock3 (operator pick, R-L): a solid flat cave wall. Override
+ * at startup via DOSKUTSU_SETUP_BG=<rock1|rock2|rock3|rock4|rock5|none>; "none"
+ * turns the texture off. CP437 shade glyphs are NUMERIC ESCAPES (\xB0 etc) --
+ * 7-bit source. */
+#define BG_NONE  0
+#define BG_ROCK1 1  /* sparse light-shade specks (subtle)            */
+#define BG_ROCK2 2  /* denser 2-tone rock (medium + light shade)     */
+#define BG_ROCK3 3  /* solid uniform light shade (flat cave wall)    */
+#define BG_ROCK4 4  /* speckled granite (dark specks on light shade) */
+#define BG_ROCK5 5  /* horizontal strata bands (light / medium)      */
+static int g_bg = BG_ROCK3; /* shipped default */
+
 static void tui__load_env(void)
 {
   const char *p = getenv("DOSKUTSU_SETUP_PALETTE");
   const char *t = getenv("DOSKUTSU_SETUP_TITLEBAR");
   const char *u = getenv("DOSKUTSU_SETUP_POPUP");
+  const char *b = getenv("DOSKUTSU_SETUP_BG");
   if (p && (strcmp(p, "classic") == 0 || strcmp(p, "CLASSIC") == 0))
     g_pal = &PAL_CLASSIC;
   else
@@ -96,6 +111,12 @@ static void tui__load_env(void)
   else if (u && strcmp(u, "shadow") == 0) g_popup_style = POPUP_SHADOW;
   else if (u && strcmp(u, "fill")   == 0) g_popup_style = POPUP_FILL;
   else                                    g_popup_style = POPUP_DIM; /* default + "dim" */
+  if      (b && strcmp(b, "none")  == 0) g_bg = BG_NONE;
+  else if (b && strcmp(b, "rock1") == 0) g_bg = BG_ROCK1;
+  else if (b && strcmp(b, "rock2") == 0) g_bg = BG_ROCK2;
+  else if (b && strcmp(b, "rock4") == 0) g_bg = BG_ROCK4;
+  else if (b && strcmp(b, "rock5") == 0) g_bg = BG_ROCK5;
+  else                                   g_bg = BG_ROCK3; /* default (R-L pick) */
 }
 
 const palette_t *tui_pal(void)       { return g_pal; }
@@ -224,13 +245,49 @@ void tui_shutdown(void)
   clrscr();
 }
 
+/* CP437 shade glyphs (numeric escapes -> 7-bit source). */
+#define BG_SH_LIGHT ((char)0xB0) /* light shade  */
+#define BG_SH_MED   ((char)0xB1) /* medium shade */
+#define BG_SH_DARK  ((char)0xB2) /* dark shade   */
+
+/* The backdrop glyph for cell (x,y) under the active BG_* style -- a cheap
+ * deterministic function so the pattern is stable (no per-frame flicker).
+ * Returns ' ' for plain cells. */
+static char bg_glyph(int x, int y)
+{
+  unsigned h;
+  switch (g_bg)
+  {
+    case BG_ROCK1: /* sparse light-shade specks */
+      return (((x * 5) ^ (y * 3)) & 3) == 0 ? BG_SH_LIGHT : ' ';
+    case BG_ROCK2: /* chunkier two-tone rock face */
+      h = (unsigned)(x * 7 + y * 131 + (x ^ y) * 17) & 7u;
+      return (h < 1u) ? BG_SH_MED : (h < 4u) ? BG_SH_LIGHT : ' ';
+    case BG_ROCK3: /* solid uniform light shade -- a flat cave wall */
+      return BG_SH_LIGHT;
+    case BG_ROCK4: /* speckled granite: dark specks scattered on light shade */
+      return ((x * 3 + y * 7) % 6 == 0) ? BG_SH_DARK : BG_SH_LIGHT;
+    case BG_ROCK5: /* horizontal strata bands (alternating light / medium) */
+      return ((y / 2) & 1) ? BG_SH_MED : BG_SH_LIGHT;
+    default:
+      return ' ';
+  }
+}
+
 void tui_clear(void)
 {
-  int attr = TUI_ATTR(g_pal->body, g_pal->bg);
+  int plain = TUI_ATTR(g_pal->body, g_pal->bg);
+  int tex   = TUI_ATTR(TUI_DKGREY, g_pal->bg); /* dim shade on the bg */
   int x, y;
   for (y = 0; y < SCR_H; ++y)
     for (x = 0; x < SCR_W; ++x)
-      vga_putc(x, y, attr, ' ');
+    {
+      if (g_bg == BG_NONE) { vga_putc(x, y, plain, ' '); continue; }
+      {
+        char g = bg_glyph(x, y);
+        vga_putc(x, y, g == ' ' ? plain : tex, g);
+      }
+    }
 }
 
 void tui_at(int x, int y, int fg, int bg, const char *s)
@@ -489,8 +546,8 @@ int tui_menu(int x, int y, int w, const char *title,
     if (helps)
     {
       int hby = y + h + 1; /* one row below the menu box */
-      tui_box(8, hby, 64, 5, "HELP");
-      tui_wrap(10, hby + 1, 60, 3, g_pal->desc, g_pal->bg,
+      tui_box(TUI_DESC_X, hby, TUI_DESC_W, 5, "DESCRIPTION");
+      tui_wrap(TUI_DESC_TX, hby + 1, TUI_DESC_TW, 3, g_pal->desc, g_pal->bg,
                helps[sel] ? helps[sel] : "");
     }
     tui_status(status ? status : "Enter Select   ESC Back");
@@ -597,4 +654,164 @@ int tui_yesno(const char *title, const char *question, int default_no)
 int tui_confirm(const char *question)
 {
   return tui_yesno("Confirm", question, 1);
+}
+
+/* ---- tui_picklist: DF-style modal pick-list popup (Phase-1 primitive) ---- *
+ * The one new reusable widget the SETUP-DF-UX redesign needs (plan Part 3):
+ * a modal list that shows ALL legal values at once (vs Left/Right cycling one
+ * into view), with an optional tag column ("(detected)"/"(default)"/"(current)")
+ * and an optional per-entry DESCRIPTION help bar. Powers the Sound Hardware
+ * fields (3.3a) and the System Speed screen (3.4). Built only on the portable
+ * primitives, so it works on both the DJGPP and the host builds. */
+
+/* Modal free-entry sub-field used by tui_picklist's "Other..." row. Draws a
+ * small centered prompt box over the current screen and edits buf in place:
+ * printable ASCII appends (up to cap-1), Backspace/DEL deletes, Enter accepts
+ * (returns 1), ESC cancels (returns 0). Arrow / function keys are ignored. The
+ * caller repaints afterward. tui_picklist does NOT validate the result -- the
+ * caller checks it and may re-open on a bad entry (per plan 3.3a). */
+static int tui__free_entry(const char *prompt, char *buf, int cap)
+{
+  int w = 44, h = 7, x, y, len;
+  if (cap < 1) return 0;
+  if (w > SCR_W - 2) w = SCR_W - 2;
+  x = (SCR_W - w) / 2 + 1;
+  y = (SCR_H - h) / 2 + 1;
+  if (y < 1) y = 1;
+  len = (int)strlen(buf);
+  if (len > cap - 1) { len = cap - 1; buf[len] = '\0'; }
+
+  for (;;)
+  {
+    int k, fw = w - 4;
+    char shown[SCR_W + 1];
+    int sl;
+    tui_box(x, y, w, h, "Enter value");
+    tui_wrap(x + 2, y + 1, w - 4, 2, g_pal->desc, g_pal->bg,
+             prompt ? prompt : "Type a value, then press Enter.");
+    /* input field: clear it, then draw the (right-clipped) buffer + a cursor. */
+    if (fw > SCR_W) fw = SCR_W;
+    for (sl = 0; sl < fw && sl < (int)sizeof(shown) - 1; ++sl) shown[sl] = ' ';
+    shown[sl] = '\0';
+    tui_at(x + 2, y + 4, g_pal->value, g_pal->bg, shown);
+    sl = len;
+    if (sl > fw - 1) sl = fw - 1; /* keep one cell for the cursor */
+    if (sl < 0) sl = 0;
+    memcpy(shown, buf + (len - sl), (size_t)sl);
+    shown[sl] = '_';
+    shown[sl + 1] = '\0';
+    tui_at(x + 2, y + 4, g_pal->value, g_pal->bg, shown);
+    tui_popup_decorate(x, y, w, h);
+    tui_status("Enter Accept   Backspace Delete   ESC Cancel");
+
+    k = tui_getkey();
+    if (k == TUI_KEY_ENTER) { buf[len] = '\0'; return 1; }
+    if (k == TUI_KEY_ESC)   return 0;
+    if (k == '\b' || k == 0x7f) { if (len > 0) buf[--len] = '\0'; continue; }
+    if (k >= 0x20 && k <= 0x7e && len < cap - 1)
+    { buf[len++] = (char)k; buf[len] = '\0'; }
+  }
+}
+
+int tui_picklist(const char *title, int ax, int ay,
+                 const char *const *items, const char *const *tags,
+                 const char *const *descs, int n, int start_sel,
+                 int allow_other, const char *otherprompt,
+                 char *other_buf, int other_cap)
+{
+  static const char *OTHER_LABEL = "Other...";
+  int total = n + (allow_other ? 1 : 0);
+  int sel = (start_sel >= 0 && start_sel < total) ? start_sel : 0;
+  int has_desc = (descs != NULL);
+  int i, maxlab = 0, maxtag = 0, iw, w, lh, x, y, ho;
+
+  if (total < 1) return -1;
+
+  /* width: longest label (+tag column), the title, and a sane minimum. */
+  for (i = 0; i < n; ++i)
+  {
+    int l = (int)strlen(items[i]);
+    if (l > maxlab) maxlab = l;
+    if (tags && tags[i] && tags[i][0])
+    {
+      int t = (int)strlen(tags[i]);
+      if (t > maxtag) maxtag = t;
+    }
+  }
+  if (allow_other && (int)strlen(OTHER_LABEL) > maxlab)
+    maxlab = (int)strlen(OTHER_LABEL);
+  iw = maxlab + (maxtag ? maxtag + 2 : 0) + 2; /* +2: lead space + a gap */
+  if (title) { int tl = (int)strlen(title) + 2; if (tl > iw) iw = tl; }
+  if (iw < 18) iw = 18;
+  /* with a DESCRIPTION box, widen so the help bar wraps in a couple of lines
+   * (a narrow list would chop a long description). */
+  if (has_desc && iw < 44) iw = 44;
+  if (iw > SCR_W - 4) iw = SCR_W - 4;
+  w  = iw + 2;
+  lh = total + 2;       /* list box height (borders + rows) */
+  ho = has_desc ? 5 : 0; /* DESCRIPTION box height when present */
+
+  /* position: center unless anchored; clamp the whole composite on-screen. */
+  x = (ax > 0) ? ax : (SCR_W - w) / 2 + 1;
+  y = (ay > 0) ? ay : (SCR_H - lh - ho) / 2 + 1;
+  if (x < 1) x = 1;
+  if (x + w - 1 > SCR_W) x = SCR_W - w + 1;
+  if (y + lh + ho - 1 > SCR_H - 1) y = SCR_H - lh - ho; /* keep status row free */
+  if (y < 2) y = 2; /* leave the title-bar row */
+
+  for (;;)
+  {
+    int k;
+    tui_box(x, y, w, lh, title);
+    for (i = 0; i < total; ++i)
+    {
+      const char *lab = (i < n) ? items[i] : OTHER_LABEL;
+      const char *tag = (tags && i < n && tags[i] && tags[i][0]) ? tags[i] : NULL;
+      int selrow = (i == sel);
+      int fg  = selrow ? g_pal->sel_fg : g_pal->body;
+      int bg  = selrow ? g_pal->sel_bg : g_pal->bg;
+      int vfg = selrow ? g_pal->sel_fg : g_pal->value;
+      char row[SCR_W + 2];
+      snprintf(row, sizeof(row), " %-*.*s", iw - 1, iw - 1, lab);
+      tui_at(x + 1, y + 1 + i, fg, bg, row);
+      if (tag)
+      {
+        int tl = (int)strlen(tag);
+        int tx = x + 1 + iw - 1 - tl;        /* right-aligned in the interior */
+        int minx = x + 1 + (int)strlen(lab) + 1;
+        if (tx < minx) tx = minx;
+        tui_at(tx, y + 1 + i, vfg, bg, tag);
+      }
+    }
+    if (has_desc)
+    {
+      const char *d = (sel < n)
+        ? (descs[sel] ? descs[sel] : "")
+        : (otherprompt ? otherprompt : "Enter a value that is not in the list.");
+      tui_box(x, y + lh, w, ho, "DESCRIPTION");
+      tui_wrap(x + 2, y + lh + 1, iw - 2, 3, g_pal->desc, g_pal->bg, d);
+    }
+    tui_popup_decorate(x, y, w, lh + ho);
+    tui_status("Up/Down Select   Enter Choose   ESC Cancel");
+
+    k = tui_getkey();
+    if (k == TUI_KEY_UP)        sel = (sel + total - 1) % total;
+    else if (k == TUI_KEY_DOWN) sel = (sel + 1) % total;
+    else if (k == TUI_KEY_HOME) sel = 0;
+    else if (k == TUI_KEY_ENTER)
+    {
+      if (allow_other && sel == n)
+      {
+        /* Other... -> free entry; empty/cancelled returns to the list. */
+        if (other_buf && other_cap > 0)
+        {
+          other_buf[0] = '\0';
+          if (tui__free_entry(otherprompt, other_buf, other_cap) && other_buf[0])
+            return TUI_PICK_OTHER;
+        }
+      }
+      else return sel;
+    }
+    else if (k == TUI_KEY_ESC) return -1;
+  }
 }

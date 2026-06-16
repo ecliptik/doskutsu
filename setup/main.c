@@ -73,7 +73,7 @@ static void cycle_value(int idx, int dir)
  * saving" discards. There is no per-screen save (the old F10-per-screen save was
  * the operator's confusion). F10 stays only on the main menu as the
  * Save-and-exit accelerator. Home = top. */
-#define EDIT_STATUS "Space/Left-Right Change   Enter Save+Next   ESC Back"
+#define EDIT_STATUS "Enter Open list   Space/Left-Right Change   ESC Back"
 #define MENU_STATUS "Enter Select   F10 Save and Exit   ESC Quit without Saving"
 
 /* Write the in-memory config to disk and show a modal result. Used by the
@@ -148,7 +148,7 @@ typedef struct { const char *key; const char *desc; } helprow_t;
 /* Per-line help for the Music backend row (replaces the paragraph blob).
  * Each description starts with a capital letter; no ";" (round-6 item 2). */
 static const helprow_t BACKEND_HELP[] = {
-  { "Auto",        "Detect the best your card supports." },
+  { "Auto",        "Detect the best the card supports." },
   { "WaveBlaster", "Wavetable MIDI daughterboard, best quality." },
   { "OPL3",        "FM synth on any Sound Blaster, classic sound." },
   { "Organya",     "Cave Story's own synth, most faithful (more demanding on CPU)." }
@@ -167,7 +167,7 @@ static const helprow_t PERF_HELP[] = {
  * line (the 70-advanced "blob" complaint), matching the backend list above --
  * not a prose paragraph. Each table is the value choices the row cycles
  * through, key in the palette value color, one-sentence description after it.
- * Int rows (volumes) have no discrete options and stay wrapped prose. */
+ * Int rows (volume levels) have no discrete options and stay wrapped prose. */
 static const helprow_t H_ONOFF_WB[] = {
   { "On",  "Write the MPU-401 MIDI port directly (default, fastest)." },
   { "Off", "Route through the Sound Blaster DSP as a fallback." }
@@ -257,22 +257,6 @@ static int help_list(int x, int y, int keyw, int descw, int maxper,
   return used;
 }
 
-/* Overwrite a w x h cell rectangle at 1-based (x,y) with blanks in the body
- * color -- a LOCALIZED clear (not a full-screen tui_clear, so no VGA flash).
- * Used to erase a conditional box (e.g. the Sound NOTE) when it is not shown,
- * now that the interactive loops repaint in place rather than full-clearing
- * every keypress (T45 flicker fix). */
-static void blank_region(int x, int y, int w, int h)
-{
-  char sp[82];
-  int r, i;
-  if (w > 80) w = 80;
-  if (w < 0)  w = 0;
-  for (i = 0; i < w; ++i) sp[i] = ' ';
-  sp[w] = '\0';
-  for (r = 0; r < h; ++r) tui_at(x, y + r, PAL->body, PAL->bg, sp);
-}
-
 /* Is a category key currently selectable? Some keys are only relevant in
  * certain states; otherwise they render greyed and navigation skips them
  * (T17 greying, the same mechanism the T16 Sound screen uses). */
@@ -287,17 +271,93 @@ static int cat_active(int idx)
   return 1;
 }
 
-/* Edit every key in a category in place. Space/Left/Right change the value,
- * edits apply live to the session config; ESC returns to the menu keeping them
- * (T44). Greyed rows are skipped by navigation. */
-static void edit_category(dkt_category_t cat, const char *title)
+/* R-I: open a modal pick-list for registry key `idx` and apply the chosen value
+ * to the session (live). Friendly labels per key (backend names, Enabled/
+ * Disabled, sample rates, perf-mode names). Returns 1 if a list was shown
+ * (the caller then full-clears -- R-H), 0 if the key has no sensible discrete
+ * list (a wide INT like the 0-31 volume levels -- caller keeps Left/Right). */
+static int pick_value(int idx)
 {
-  int idxs[DKT_KEY_COUNT], n = 0, sel = 0, i;
+  const dkt_key_t *k = &DKT_KEYS[idx];
+  const char *items[8], *raw[8];
+  char buf[8][24], rbuf[8][8];
+  int n = 0, i, choice, start = 0;
+  const char *cur = scfg_get(&g_cfg, idx);
+
+  if (k->type == DKT_ENUM && k->enum_vals)
+  {
+    int is_backend = dkt_key_ieq(k->cfg_key, "AUDIO_BACKEND", 13);
+    for (i = 0; k->enum_vals[i] && n < 8; ++i)
+    {
+      const char *e = k->enum_vals[i];
+      raw[n] = e;
+      if (is_backend)
+        snprintf(buf[n], sizeof(buf[n]), "%s",
+                 strcmp(e, "wb") == 0      ? "MIDI (WaveBlaster)" :
+                 strcmp(e, "opl3") == 0    ? "MIDI (OPL3)" :
+                 strcmp(e, "organya") == 0 ? "Organya" : "Auto (detect)");
+      else
+        snprintf(buf[n], sizeof(buf[n]), "%s", e);
+      items[n] = buf[n];
+      if (strcmp(cur, e) == 0) start = n;
+      ++n;
+    }
+  }
+  else if (k->type == DKT_BOOL)
+  {
+    const char *l0, *v0, *l1, *v1;
+    if (dkt_key_ieq(k->cfg_key, "AUDIO_OFF", 9))
+      { l0 = "Enabled"; v0 = "0"; l1 = "Disabled"; v1 = "1"; }
+    else if (dkt_key_ieq(k->cfg_key, "AUDIO_TIER2", 11))
+      { l0 = "11025Hz"; v0 = "1"; l1 = "22050Hz"; v1 = "0"; }
+    else
+      { l0 = "On"; v0 = "1"; l1 = "Off"; v1 = "0"; }
+    snprintf(buf[0], sizeof(buf[0]), "%s", l0); items[0] = buf[0]; raw[0] = v0;
+    snprintf(buf[1], sizeof(buf[1]), "%s", l1); items[1] = buf[1]; raw[1] = v1;
+    n = 2;
+    start = (strcmp(cur, v0) == 0) ? 0 : 1;
+  }
+  else if (k->type == DKT_INT && (k->imax - k->imin) >= 0 && (k->imax - k->imin) <= 7)
+  {
+    int is_perf = dkt_key_ieq(k->cfg_key, "PERF_MODE", 9);
+    for (i = k->imin; i <= k->imax && n < 8; ++i)
+    {
+      if (is_perf)
+        snprintf(buf[n], sizeof(buf[n]), "%d %s", i,
+                 i == 0 ? "Faithful" : i == 1 ? "Smooth" : "Fast");
+      else
+        snprintf(buf[n], sizeof(buf[n]), "%d", i);
+      snprintf(rbuf[n], sizeof(rbuf[n]), "%d", i);
+      items[n] = buf[n]; raw[n] = rbuf[n];
+      if (atoi(cur) == i) start = n;
+      ++n;
+    }
+  }
+  else
+    return 0; /* wide INT (e.g. 0-31 volume) -> caller keeps Left/Right */
+
+  choice = tui_picklist(k->label, 0, 0, items, NULL, NULL, n, start,
+                        0, NULL, NULL, 0);
+  if (choice >= 0 && choice < n &&
+      strcmp(scfg_get(&g_cfg, idx), raw[choice]) != 0)
+  {
+    scfg_set(&g_cfg, idx, raw[choice]);
+    g_dirty = 1;
+  }
+  return 1;
+}
+
+/* Edit an explicit list of registry indices in place (the generic row editor).
+ * Space/Left/Right change the value AND Enter opens a pick-list (R-I); edits
+ * apply live to the session config, ESC returns keeping them (T44); greyed rows
+ * are skipped by navigation. The Advanced screen (3.6) builds a two-category
+ * index list and calls this. */
+static void edit_index_list(const int *idxs, int n, const char *title)
+{
+  int sel = 0, i;
   scfg_t snap;        /* T52: entry snapshot for the ESC "revert this screen" path */
   int dirty_snap;
-  for (i = 0; i < DKT_KEY_COUNT; ++i)
-    if (DKT_KEYS[i].category == cat) idxs[n++] = i;
-  if (n == 0) return;
+  if (n <= 0) return;
   snap = g_cfg;
   dirty_snap = g_dirty;
   while (sel < n && !cat_active(idxs[sel])) ++sel; /* start on a live row */
@@ -308,7 +368,7 @@ static void edit_category(dkt_category_t cat, const char *title)
   {
     int k, j;
     tui_titlebar(title); /* round-7 item 2: every screen shows its page title */
-    tui_box(8, 3, 64, n + 4, title);
+    tui_box(9, 3, 64, n + 4, title); /* R-O: x=9 centers a 64-wide box (8/8 margins) */
     for (i = 0; i < n; ++i)
     {
       char row[80], val[24];
@@ -319,22 +379,21 @@ static void edit_category(dkt_category_t cat, const char *title)
       int  valfg = !active ? PAL->dim : (selrow ? PAL->sel_fg : PAL->value);
       fmt_value(idxs[i], val, (int)sizeof(val));
       /* item 1: the highlight covers the WHOLE line (full box interior width).
-       * Paint the full-width label bar, then overpaint the value in its column.
-       * Box x=8 w=64 -> interior 62 cells from col 9. */
+       * Box x=9 w=64 -> interior 62 cells from col 10. */
       snprintf(row, sizeof(row), " %-61.61s", DKT_KEYS[idxs[i]].label);
-      tui_at(9, 4 + i, lblfg, bg, row);
-      tui_at(9 + 28, 4 + i, valfg, bg, val);
+      tui_at(10, 4 + i, lblfg, bg, row);
+      tui_at(10 + 28, 4 + i, valfg, bg, val);
     }
     /* per-item help: multi-option keys get a per-line keyed list (item 3);
      * single-concept keys stay wrapped prose. */
-    tui_box(8, n + 8, 64, 7, "HELP");
+    tui_box(TUI_DESC_X, TUI_DESC_TOP(7), TUI_DESC_W, 7, "DESCRIPTION");
     {
-      int oh_n, oh_kw;
+      int oh_n, oh_kw, hy = TUI_DESC_TOP(7) + 1;
       const helprow_t *oh = opt_help_for(DKT_KEYS[idxs[sel]].cfg_key, &oh_n, &oh_kw);
       if (oh)
-        help_list(10, n + 9, oh_kw, 60 - oh_kw, 2, oh, oh_n);
+        help_list(TUI_DESC_TX, hy, oh_kw, TUI_DESC_TW - oh_kw, 2, oh, oh_n);
       else
-        tui_wrap(10, n + 9, 60, 4, PAL->desc, PAL->bg,
+        tui_wrap(TUI_DESC_TX, hy, TUI_DESC_TW, 4, PAL->desc, PAL->bg,
                  ui_help(DKT_KEYS[idxs[sel]].cfg_key, DKT_KEYS[idxs[sel]].help));
     }
     tui_status(EDIT_STATUS);
@@ -362,21 +421,17 @@ static void edit_category(dkt_category_t cat, const char *title)
     }
     else if (k == TUI_KEY_ENTER)
     {
-      /* T62: Enter commits the current row -- advance the revert baseline so a
-       * later ESC "Save setting?" never offers to undo it -- then moves to the
-       * next live row. No prompt. */
-      snap = g_cfg; dirty_snap = g_dirty;
-      for (j = 0; j < n; ++j)
-      {
-        sel = (sel + 1) % n;
-        if (cat_active(idxs[sel])) break;
-      }
+      /* R-I: Enter opens a pick-list for the highlighted row (the discoverable
+       * path). R-H: full-clear after it closes so no overlay residue remains.
+       * (void j -- the cursor stays put; navigation is Up/Down.) */
+      if (cat_active(idxs[sel]) && pick_value(idxs[sel]))
+        tui_clear();
+      (void)j;
     }
     else if (k == TUI_KEY_ESC)
     {
-      /* T52/T62: if rows changed since the last commit, ask Save setting? Y =
-       * keep in the session, N = revert to the baseline. Unchanged -> silent
-       * back. The baseline starts at entry and advances on each Enter. */
+      /* T52: if rows changed since entry, ask Save setting? Y = keep in the
+       * session, N = revert to the entry baseline. Unchanged -> silent back. */
       if (scfg_differs(&g_cfg, &snap) &&
           !tui_yesno("Save setting?", "Save setting?", 0))
       {
@@ -387,6 +442,23 @@ static void edit_category(dkt_category_t cat, const char *title)
     /* F10 is intentionally inert on subscreens (T44): saving is a main-menu
      * decision only, never a per-screen action. */
   }
+}
+
+/* Advanced / troubleshooting (T47 plan 3.6): the COMPAT keys, plus the two
+ * former Performance rows (PERF_MODE, FIXED_TIMESTEP) at the TOP -- this is
+ * where "Advanced overrides freely" lives. SETUP-only keys (NULL env_name,
+ * e.g. SPEED_CLASS) are excluded so the System Speed provenance record never
+ * shows up as an editable row. */
+static void screen_advanced(void)
+{
+  int idxs[DKT_KEY_COUNT], n = 0, i;
+  for (i = 0; i < DKT_KEY_COUNT; ++i)
+    if (DKT_KEYS[i].category == DKC_PERF && DKT_KEYS[i].env_name)
+      idxs[n++] = i;
+  for (i = 0; i < DKT_KEY_COUNT; ++i)
+    if (DKT_KEYS[i].category == DKC_COMPAT && DKT_KEYS[i].env_name)
+      idxs[n++] = i;
+  edit_index_list(idxs, n, "ADVANCED");
 }
 
 /* ---- Sound Setup screen (operator redesign, T16) -------------------- *
@@ -405,14 +477,14 @@ static void edit_category(dkt_category_t cat, const char *title)
  * is omitted so a first-timer is never pointed at a directory their disk lacks.
  */
 
+/* R-B: the "Music" screen holds only the music-playback choices (backend,
+ * Organya pre-render, audio quality). Sound enable/disable + the SFX/Music
+ * volume levels moved to Custom setup (the Sound Hardware screen). */
 enum
 {
-  SND_ENABLED = 0, /* AUDIO_OFF, shown inverted as Enabled/Disabled */
-  SND_BACKEND,     /* AUDIO_BACKEND, friendly names                 */
+  SND_BACKEND = 0, /* AUDIO_BACKEND, friendly names                 */
   SND_PRERENDER,   /* ORG_PRERENDER, active only for Organya        */
   SND_QUALITY,     /* AUDIO_TIER2                                    */
-  SND_VOICEVOL,    /* SB16_VOICE_VOL                                 */
-  SND_FMVOL,       /* SB16_FM_VOL                                    */
   SND_NROWS
 };
 
@@ -420,12 +492,9 @@ static int snd_key_idx(int row)
 {
   switch (row)
   {
-    case SND_ENABLED:   return scfg_index("AUDIO_OFF");
     case SND_BACKEND:   return scfg_index("AUDIO_BACKEND");
     case SND_PRERENDER: return scfg_index("ORG_PRERENDER");
     case SND_QUALITY:   return scfg_index("AUDIO_TIER2");
-    case SND_VOICEVOL:  return scfg_index("SB16_VOICE_VOL");
-    case SND_FMVOL:     return scfg_index("SB16_FM_VOL");
     default:            return -1;
   }
 }
@@ -434,12 +503,9 @@ static const char *snd_label(int row)
 {
   switch (row)
   {
-    case SND_ENABLED:   return "Sound";
     case SND_BACKEND:   return "Music backend";
     case SND_PRERENDER: return "Organya pre-render";
     case SND_QUALITY:   return "Audio quality";
-    case SND_VOICEVOL:  return "SFX volume";
-    case SND_FMVOL:     return "Music volume";
     default:            return "";
   }
 }
@@ -456,9 +522,7 @@ static void snd_value(int row, char *out, int cap)
 {
   int idx = snd_key_idx(row);
   const char *v = scfg_get(&g_cfg, idx);
-  if (row == SND_ENABLED)
-    snprintf(out, (size_t)cap, "%s", strcmp(v, "1") == 0 ? "Disabled" : "Enabled");
-  else if (row == SND_BACKEND)
+  if (row == SND_BACKEND)
     snprintf(out, (size_t)cap, "%s", snd_backend_name(v));
   else if (row == SND_QUALITY)
     /* T45: show the actual sample rate, not On/Off. AUDIO_TIER2=1 is the
@@ -473,16 +537,12 @@ static const char *snd_help(int row)
 {
   switch (row)
   {
-    case SND_ENABLED:
-      return "Turn all game audio on or off. Disabled means no music and no "
-             "sound effects (less demanding on CPU). Most players want this "
-             "Enabled.";
     case SND_BACKEND:
       return "How music is played. MIDI (WaveBlaster) = wavetable music from a "
              "daughterboard: best quality, needs that hardware. MIDI (OPL3) = "
              "FM synth built into most Sound Blasters: works everywhere, the "
              "classic sound. Organya = Cave Story's original synth: most "
-             "faithful (more demanding on CPU). Auto = pick the best your card "
+             "faithful (more demanding on CPU). Auto = pick the best the card "
              "supports.";
     case SND_PRERENDER:
       return "Organya only. The first time each song plays it is rendered to a "
@@ -491,32 +551,21 @@ static const char *snd_help(int row)
     case SND_QUALITY:
       return "On = 11025 Hz mono mixing (default, lighter on the CPU). Off = a "
              "higher legacy sample rate (heavier, only a marginal gain). Leave "
-             "On unless you have CPU headroom to spare.";
-    case SND_VOICEVOL:
-      return "Sound Blaster 16 mixer level for digital sound effects (0-31). "
-             "Lower it if the effects drown out the music.";
-    case SND_FMVOL:
-      return "Sound Blaster 16 mixer level for OPL3 FM music (0-31). Lower it "
-             "if the music is too loud next to the sound effects.";
+             "On unless there is CPU headroom to spare.";
     default:
       return "";
   }
 }
 
 /* A row is selectable when its preconditions hold; others render dimmed and
- * are skipped by navigation (operator: grey out, do not let the cursor land). */
+ * are skipped by navigation. Pre-render + Audio quality are Organya-only (the
+ * MIDI backends are chip-synthesized, so the PCM device rate does not apply). */
 static int snd_active(int row)
 {
-  int sound_on = strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_OFF")), "1") != 0;
-  int organya  = strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND")),
-                        "organya") == 0;
-  if (row == SND_ENABLED) return 1;
-  if (!sound_on) return 0;
+  int organya = strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND")),
+                       "organya") == 0;
   if (row == SND_PRERENDER) return organya;
-  /* T57: Audio quality (the device sample rate) only affects the Organya PCM
-   * music path; for the MIDI backends (OPL3 / WaveBlaster) the music is chip-
-   * synthesized, so grey it out there. */
-  if (row == SND_QUALITY) return organya;
+  if (row == SND_QUALITY)   return organya;
   return 1;
 }
 
@@ -534,7 +583,7 @@ static int snd_step(int sel, int dir)
 
 static void screen_sound(void)
 {
-  int sel = snd_active(SND_BACKEND) ? SND_BACKEND : SND_ENABLED;
+  int sel = SND_BACKEND;
   scfg_t snap = g_cfg;          /* T52: entry snapshot for the ESC revert path */
   int dirty_snap = g_dirty;
 
@@ -542,8 +591,8 @@ static void screen_sound(void)
   for (;;)
   {
     int i, k, hy;
-    tui_titlebar("SOUND SETUP");
-    tui_box(8, 3, 64, SND_NROWS + 2, "AUDIO");
+    tui_titlebar("MUSIC");
+    tui_box(9, 3, 64, SND_NROWS + 2, "MUSIC"); /* R-O: centered (8/8 margins) */
     for (i = 0; i < SND_NROWS; ++i)
     {
       char row[80], val[28];
@@ -556,62 +605,48 @@ static void screen_sound(void)
       /* item 1: highlight the WHOLE line (full box interior width). Full-width
        * label bar, then overpaint the value in its column. */
       snprintf(row, sizeof(row), " %-61.61s", snd_label(i));
-      tui_at(9, 4 + i, lblfg, bg, row);
-      tui_at(9 + 26, 4 + i, valfg, bg, val);
+      tui_at(10, 4 + i, lblfg, bg, row);
+      tui_at(10 + 26, 4 + i, valfg, bg, val);
     }
 
     /* per-item help: multi-option rows get a per-line keyed list, each desc
      * wrapped + clipped inside the box with indented continuation (item 4);
      * single-concept rows stay wrapped prose. */
-    hy = SND_NROWS + 6; /* = 12 */
-    tui_box(8, hy, 64, 8, "HELP");
+    /* R-J/R-N: ONE bottom-anchored DESCRIPTION box (rows 16-23). The per-row
+     * keyed help fills the top; the Organya advisory (R-N: folded in here, no
+     * separate NOTE box) prints as a trailing warn-colored line at the bottom.
+     * tui_box repaints the interior each frame, so a vanished advisory leaves
+     * no residue. */
+    hy = TUI_DESC_TOP(8);
+    tui_box(TUI_DESC_X, hy, TUI_DESC_W, 8, "DESCRIPTION");
     {
       int oh_n, oh_kw;
       const helprow_t *oh =
         opt_help_for(DKT_KEYS[snd_key_idx(sel)].cfg_key, &oh_n, &oh_kw);
       if (oh)
-        help_list(10, hy + 1, oh_kw, 60 - oh_kw, 2, oh, oh_n);
+        help_list(TUI_DESC_TX, hy + 1, oh_kw, TUI_DESC_TW - oh_kw, 2, oh, oh_n);
       else
-        tui_wrap(10, hy + 1, 60, 6, PAL->desc, PAL->bg, snd_help(sel));
+        tui_wrap(TUI_DESC_TX, hy + 1, TUI_DESC_TW, 4, PAL->desc, PAL->bg, snd_help(sel));
     }
-
-    /* NOTE box -- Organya-context advisories, content follows the highlighted
-     * row. On the Audio quality row it explains the SETUP Organya test will not
-     * reflect the rate (T45 item 3); on the other rows, the slow-CPU pre-render
-     * advice. Shown only for the Organya backend; when no note applies the
-     * region is blanked (the loop no longer full-clears -- T45 flicker fix). */
     {
-      int ny = hy + 9; /* row 21, below the taller HELP box */
       const char *backend = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
       int is_org = strcmp(backend, "organya") == 0;
       const char *note = NULL;
-      /* T67: the WaveBlaster freeze-risk NOTE was removed -- WB is fixed + ships
-       * default-on (cold-init reorder nx 0218/0220 + SDL pacing 0097/0098), so
-       * there is no freeze advisory to show. The remaining notes are Organya-
-       * only. */
       if (is_org && sel == SND_QUALITY)
-        note = "Audio quality applies in the game. The SETUP Organya test "
-               "plays a pre-rendered clip, so it will not sound different.";
-      else if (is_org && g_prof.cpu_class != CPU_586)
-        note = (sel == SND_PRERENDER)
-          ? "Pre-render writes each song to a disk cache - recommended for "
-            "slower CPUs, increases load times."
-          : "Organya is demanding on this CPU - enabling Organya pre-render "
-            "is recommended.";
+        note = "Note: the SETUP Organya test plays a pre-rendered clip, so it "
+               "will not reflect this rate.";
+      else if (is_org && sel == SND_PRERENDER && g_prof.cpu_class != CPU_586)
+        note = "Note: pre-render is recommended for slower CPUs (uses a disk "
+               "cache, increases load times).";
       if (note)
-      {
-        tui_box(8, ny, 64, 4, "NOTE");
-        tui_wrap(10, ny + 1, 60, 2, PAL->warn_fg, PAL->warn_bg, note);
-      }
-      else
-        blank_region(8, ny, 64, 4);
+        tui_wrap(TUI_DESC_TX, hy + 5, TUI_DESC_TW, 2, PAL->warn_fg, PAL->bg, note);
     }
     tui_status(EDIT_STATUS);
 
     k = tui_getkey();
     if (k == TUI_KEY_UP)        sel = snd_step(sel, -1);
     else if (k == TUI_KEY_DOWN) sel = snd_step(sel, +1);
-    else if (k == TUI_KEY_HOME) sel = SND_ENABLED; /* always selectable */
+    else if (k == TUI_KEY_HOME) sel = SND_BACKEND; /* always selectable */
     else if (k == TUI_KEY_LEFT || k == TUI_KEY_RIGHT || k == TUI_KEY_SPACE)
     {
       /* T62: only Space / Left / Right cycle the highlighted row's value. */
@@ -627,15 +662,20 @@ static void screen_sound(void)
     }
     else if (k == TUI_KEY_ENTER)
     {
-      /* T62: Enter commits the current row (advance the revert baseline) and
-       * moves to the next live row. No prompt. */
-      snap = g_cfg; dirty_snap = g_dirty;
-      sel = snd_step(sel, +1);
+      /* R-I: Enter opens a pick-list for the highlighted row; R-H: full-clear
+       * after it closes (no overlay residue). Organya auto-suggest rides along
+       * on a backend change, same as the cycle path. */
+      if (snd_active(sel) && pick_value(snd_key_idx(sel)))
+      {
+        if (sel == SND_BACKEND)
+          recommend_org_prerender(&g_cfg, &g_prof);
+        tui_clear();
+      }
     }
     else if (k == TUI_KEY_ESC)
     {
-      /* T52/T62: changed since the last commit -> Save setting? (Y keep / N
-       * revert to baseline); else silent back. */
+      /* T52: changed since entry -> Save setting? (Y keep / N revert to the
+       * entry baseline); else silent back. */
       if (scfg_differs(&g_cfg, &snap) &&
           !tui_yesno("Save setting?", "Save setting?", 0))
       {
@@ -647,11 +687,23 @@ static void screen_sound(void)
   }
 }
 
-/* ---- Sound Hardware screen (BLASTER A/I/D/H/P/T) -------------------- */
+/* ---- Sound Hardware screen (BLASTER A/I/DMA/P/T; DMA derives D+H) --- */
 
-/* Allowed values per BLASTER field; index 0 is the conventional default.
- * A and P are hex (i/o ports); I/D/H/T are decimal. P value -1 == "none"
- * (omit the MPU-401 MIDI field entirely). */
+/* Traditional Sound Blaster family name for a BLASTER T-code. */
+static const char *sb_type_name(int t)
+{
+  return (t == 6) ? "Sound Blaster 16"
+       : (t == 4) ? "Sound Blaster Pro"
+       : (t == 3) ? "Sound Blaster Pro 2.0"
+       : (t == 2) ? "Sound Blaster 2.0"
+       : (t == 1) ? "Sound Blaster" : "?";
+}
+
+/* Allowed values per BLASTER field. A and P are hex (i/o ports); I/D/H/T are
+ * decimal. P value -1 == "none" (omit the MPU-401 MIDI field entirely). Value
+ * lists are in ASCENDING display order; `defval` marks the conventional value
+ * that the pick-list tags "(default)" (so the order is not tied to the tag).
+ * Sets are from the operator's Doom / iMUSE reference shots (R-A). */
 typedef struct
 {
   char        letter;  /* BLASTER field letter */
@@ -659,24 +711,61 @@ typedef struct
   const int  *vals;
   int         nvals;
   int         hex;     /* 1 -> render/emit as hex */
+  int         defval;  /* conventional value tagged "(default)" in the picker */
 } hwfield_t;
 
-static const int hw_port_vals[] = { 0x220, 0x240, 0x260, 0x280 };
-static const int hw_irq_vals[]  = { 5, 7, 2, 10 };
-static const int hw_dma_vals[]  = { 1, 0, 3 };
-static const int hw_hdma_vals[] = { 5, 6, 7 };
-static const int hw_midi_vals[] = { -1, 0x330, 0x300 };
-static const int hw_type_vals[] = { 6, 4, 3, 2, 1 };
+static const int hw_port_vals[] = { 0x210, 0x220, 0x230, 0x240, 0x250, 0x260, 0x280 };
+static const int hw_irq_vals[]  = { 2, 5, 7, 10 };
+/* R-A operator refinement: ONE "DMA channel" field (Doom/iMUSE do not split
+ * 8/16-bit). The single pick derives BOTH the SB16 D (8-bit) + H (16-bit)
+ * BLASTER slots in hw_compose: a low pick (0/1/3) is D (H defaults to 5); a
+ * high pick (5/6/7) is H (D defaults to 1). Invariant: D in {0,1,3},
+ * H in {5,6,7}, both always present + valid. */
+static const int hw_dma_vals[]  = { 0, 1, 3, 5, 6, 7 };
+static const int hw_midi_vals[] = { -1, 0x220, 0x230, 0x240, 0x250, 0x300,
+                                    0x320, 0x330, 0x332, 0x334, 0x336, 0x340, 0x360 };
+static const int hw_type_vals[] = { 1, 2, 3, 4, 6 };
 
+/* Field order is A, I, DMA, P, T (cur[] indices 0..4). The DMA field uses
+ * letter 'D' as a marker; hw_compose/hw_seed handle the D/H derivation. */
 static const hwfield_t HW_FIELDS[] = {
-  { 'A', "I/O port",          hw_port_vals, 4, 1 },
-  { 'I', "IRQ",               hw_irq_vals,  4, 0 },
-  { 'D', "8-bit DMA",         hw_dma_vals,  3, 0 },
-  { 'H', "16-bit DMA (HDMA)", hw_hdma_vals, 3, 0 },
-  { 'P', "MPU-401 MIDI port", hw_midi_vals, 3, 1 },
-  { 'T', "Card type",         hw_type_vals, 5, 0 }
+  { 'A', "I/O port",          hw_port_vals, 7,  1, 0x220 },
+  { 'I', "IRQ",               hw_irq_vals,  4,  0, 5     },
+  { 'D', "DMA channel",       hw_dma_vals,  6,  0, 1     },
+  { 'P', "MPU-401 MIDI port", hw_midi_vals, 13, 1, 0x330 },
+  { 'T', "Card type",         hw_type_vals, 5,  0, 6     }
 };
 #define HW_NFIELDS ((int)(sizeof(HW_FIELDS) / sizeof(HW_FIELDS[0])))
+#define HW_DMA_IDX 2 /* cur[] index of the single DMA field */
+
+/* R-M: the "Override AUTOEXEC.BAT" row is REMOVED -- the BLASTER fields are
+ * always editable and always composed into the saved config (no override gate,
+ * no AUTOEXEC language). Row layout: 0..HW_NFIELDS-1 BLASTER fields (A/I/DMA/
+ * P/T), then the three R-B live rows (Sound on/off + the two SB16 mixer volume
+ * levels, moved here from the Music screen). */
+#define HW_ROW_SOUND  (HW_NFIELDS)
+#define HW_ROW_SFXVOL (HW_NFIELDS + 1)
+#define HW_ROW_MUSVOL (HW_NFIELDS + 2)
+#define HW_NROWS      (HW_NFIELDS + 3)
+
+/* The scfg key for a live Custom-setup row (Sound/SFX/Music), or NULL. */
+static const char *hw_live_key(int row)
+{
+  if (row == HW_ROW_SOUND)  return "AUDIO_OFF";
+  if (row == HW_ROW_SFXVOL) return "SB16_VOICE_VOL";
+  if (row == HW_ROW_MUSVOL) return "SB16_FM_VOL";
+  return NULL;
+}
+
+/* Is a Custom-setup row selectable? R-M: the BLASTER fields are always live
+ * (no override gate). The two volume rows grey when sound is disabled; the
+ * field rows + the Sound on/off row are always live. */
+static int hw_row_active(int row)
+{
+  if (row < HW_NFIELDS)    return 1; /* A/I/DMA/P/T -- always editable */
+  if (row == HW_ROW_SOUND) return 1;
+  return strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_OFF")), "1") != 0; /* vols */
+}
 
 static int hw_find_index(const hwfield_t *f, int val)
 {
@@ -686,29 +775,26 @@ static int hw_find_index(const hwfield_t *f, int val)
   return 0;
 }
 
-static void hw_fmt(const hwfield_t *f, int idx, char *out, int cap)
+static void hw_fmt(const hwfield_t *f, int v, char *out, int cap)
 {
-  int v = f->vals[idx];
   if (f->letter == 'P' && v < 0) { snprintf(out, (size_t)cap, "none"); return; }
   if (f->letter == 'T')
   {
-    /* Traditional Sound Blaster family names (review-3 item 10). */
-    const char *nm = (v == 6) ? "Sound Blaster 16"
-                   : (v == 4) ? "Sound Blaster Pro"
-                   : (v == 3) ? "Sound Blaster Pro 2.0"
-                   : (v == 2) ? "Sound Blaster 2.0"
-                   : (v == 1) ? "Sound Blaster" : "?";
-    snprintf(out, (size_t)cap, "T%d (%s)", v, nm);
+    /* Traditional Sound Blaster family names, "Name (Tn)" format (R-A). */
+    snprintf(out, (size_t)cap, "%s (T%d)", sb_type_name(v), v);
     return;
   }
   if (f->hex) snprintf(out, (size_t)cap, "0x%X", v);
   else        snprintf(out, (size_t)cap, "%d", v);
 }
 
-/* Seed the per-field selection indices from an existing BLASTER string. */
+/* Seed the per-field VALUES from an existing BLASTER string. cur[] holds the
+ * actual field value (not a vals[] index), so an "Other..." port outside the
+ * standard list round-trips intact (T47 plan 3.3a). */
 static void hw_seed_from_str(const char *bl, int *cur)
 {
   const char *p = bl;
+  int dval = -1, hval = -1;
   while (*p)
   {
     char L;
@@ -720,46 +806,66 @@ static void hw_seed_from_str(const char *bl, int *cur)
     base = (L == 'A' || L == 'P') ? 16 : 10;
     v = (int)strtol(p, &endp, base);
     p = endp;
+    if (L == 'D') { dval = v; continue; } /* D + H collapse into the single */
+    if (L == 'H') { hval = v; continue; } /* DMA pick (derived below)       */
     for (fi = 0; fi < HW_NFIELDS; ++fi)
-      if (HW_FIELDS[fi].letter == L) { cur[fi] = hw_find_index(&HW_FIELDS[fi], v); break; }
+      if (HW_FIELDS[fi].letter == L) { cur[fi] = v; break; }
   }
+  /* Reconstruct the single DMA pick: an EXPLICIT high channel (H 6/7) wins;
+   * otherwise the 8-bit D (the default H5 case maps back to D, so the common
+   * D1 H5 reloads as pick 1). */
+  if (hval >= 6)      cur[HW_DMA_IDX] = hval;
+  else if (dval >= 0) cur[HW_DMA_IDX] = dval;
+  else if (hval >= 0) cur[HW_DMA_IDX] = hval;
 }
 
-/* Compose "A220 I5 D1 H5 P330 T6" from the selection indices (P omitted when
- * "none"). */
+/* Compose "A220 I5 D1 H5 P330 T6" from the field VALUES, deriving the SB16
+ * D (8-bit) + H (16-bit) slots from the single DMA pick (P omitted when
+ * "none"). Both D + H are always emitted, valid, and distinct. */
 static void hw_compose(const int *cur, char *out, int cap)
 {
-  int port = HW_FIELDS[0].vals[cur[0]];
-  int irq  = HW_FIELDS[1].vals[cur[1]];
-  int dma  = HW_FIELDS[2].vals[cur[2]];
-  int hdma = HW_FIELDS[3].vals[cur[3]];
-  int midi = HW_FIELDS[4].vals[cur[4]];
-  int type = HW_FIELDS[5].vals[cur[5]];
-  int n = snprintf(out, (size_t)cap, "A%X I%d D%d H%d", port, irq, dma, hdma);
+  int port    = cur[0];
+  int irq     = cur[1];
+  int dmapick = cur[HW_DMA_IDX];
+  int midi    = cur[3];
+  int type    = cur[4];
+  int d, h, n;
+  if (dmapick >= 5) { h = dmapick; d = 1; } /* high pick -> 16-bit H; D->1 */
+  else              { d = dmapick; h = 5; } /* low pick  -> 8-bit D;  H->5 */
+  n = snprintf(out, (size_t)cap, "A%X I%d D%d H%d", port, irq, d, h);
   if (midi >= 0 && n < cap) n += snprintf(out + n, (size_t)(cap - n), " P%X", midi);
   if (n < cap)              snprintf(out + n, (size_t)(cap - n), " T%d", type);
 }
 
-/* T39: the override row (row 0) describes two options, so its help renders as
- * the standard per-line keyed On/Off list (not inline prose) -- same scheme as
- * every other multi-option help. The single-concept field rows below stay
- * one-clause prose (they describe one field, not a set of options). */
-static const helprow_t H_ONOFF_OVERRIDE[] = {
-  { "On",  "Settings below replace the BLASTER line from AUTOEXEC.BAT." },
-  { "Off", "Keep the values from AUTOEXEC.BAT." }
-};
+/* R-M: write the composed BLASTER to the session live whenever a field is
+ * edited (no override gate -- the Custom-setup fields are always authoritative
+ * + always saved). */
+static void hw_save_blaster(const int *cur)
+{
+  char c[SCFG_VAL_MAX];
+  hw_compose(cur, c, (int)sizeof(c));
+  scfg_set(&g_cfg, scfg_index("BLASTER"), c);
+  g_dirty = 1;
+}
 
-/* First-timer help for the highlighted Sound Hardware FIELD row (sel >= 1) --
- * one short clause each (round-6 item 5: tighten, no ";"). Row 0 (override)
- * uses H_ONOFF_OVERRIDE via help_list, not this. */
+/* First-timer help for the highlighted Custom-setup row -- one short clause. */
 static const char *hw_help(int sel)
 {
-  switch (HW_FIELDS[sel - 1].letter)
+  if (sel == HW_ROW_SOUND)
+    return "Turn all game audio on or off. Disabled means no music and no "
+           "sound effects (less demanding on CPU). Most players want Enabled.";
+  if (sel == HW_ROW_SFXVOL)
+    return "Sound Blaster 16 mixer level for digital sound effects (0-31). "
+           "Lower it if the effects drown out the music.";
+  if (sel == HW_ROW_MUSVOL)
+    return "Sound Blaster 16 mixer level for OPL3 FM music (0-31). Lower it if "
+           "the music is too loud next to the sound effects.";
+  switch (HW_FIELDS[sel].letter) /* R-M: field rows are 0-based (no override) */
   {
     case 'A': return "Sound Blaster I/O port, almost always 0x220.";
     case 'I': return "Interrupt (IRQ) line, usually 5 or 7.";
-    case 'D': return "8-bit DMA channel, usually 1.";
-    case 'H': return "16-bit (high) DMA channel on SB16 cards, usually 5.";
+    case 'D': return "DMA channel. 0/1/3 are 8-bit, 5/6/7 are 16-bit; 1 is the "
+                     "usual default.";
     case 'P': return "MPU-401 MIDI port (usually 0x330), or none. Needed for "
                      "WaveBlaster music.";
     case 'T': return "Sound card type. Sound Blaster 16 works for most cards.";
@@ -767,159 +873,200 @@ static const char *hw_help(int sel)
   }
 }
 
+/* Per-field "Other..." hex validation (T47 plan Part 2): A = 0x200-0x2F0,
+ * P = 0x300-0x3F0, both a multiple of 0x10. IRQ/DMA/HDMA/type get NO Other
+ * (the ISA-valid set is fixed). Returns 1 + the parsed value when valid. */
+static int hw_other_valid(char letter, const char *s, int *out)
+{
+  char *endp;
+  long v = strtol(s, &endp, 16);
+  if (endp == s || (v % 0x10) != 0) return 0;
+  if (letter == 'A' && v >= 0x200 && v <= 0x2F0) { *out = (int)v; return 1; }
+  if (letter == 'P' && v >= 0x300 && v <= 0x3F0) { *out = (int)v; return 1; }
+  return 0;
+}
+
+/* DF-style pick-list for one BLASTER field (T47 plan 3.3a): show every legal
+ * value, tag the detected one "(detected)" (else the conventional f->defval
+ * "(default)"), and on the A / P ports offer an "Other..." hex free-entry
+ * (re-prompts on a bad value). Returns the chosen value, or `value` unchanged
+ * on ESC/cancel. detected = the profiled value, or -999 if none detected. */
+#define HW_PICK_MAX 16 /* >= max f->nvals (MPU list is 13) */
+static int hw_pick(int field, int value, int detected)
+{
+  const hwfield_t *f = &HW_FIELDS[field];
+  const char *items[HW_PICK_MAX], *tags[HW_PICK_MAX];
+  char labels[HW_PICK_MAX][28], tagbuf[HW_PICK_MAX][16], other[16];
+  int  allow_other = (f->letter == 'A' || f->letter == 'P');
+  int  i, start = hw_find_index(f, value), choice, nv = f->nvals;
+  const char *prompt = (f->letter == 'A')
+    ? "Type a hex I/O port 200-2F0 (multiple of 10), e.g. 220."
+    : "Type a hex MPU port 300-3F0 (multiple of 10), e.g. 330.";
+
+  if (nv > HW_PICK_MAX) nv = HW_PICK_MAX; /* defensive bound */
+  for (i = 0; i < nv; ++i)
+  {
+    hw_fmt(f, f->vals[i], labels[i], (int)sizeof(labels[i]));
+    items[i] = labels[i];
+    if (detected != -999 && f->vals[i] == detected)
+      snprintf(tagbuf[i], sizeof(tagbuf[i]), "(detected)");
+    else if (f->vals[i] == f->defval)
+      snprintf(tagbuf[i], sizeof(tagbuf[i]), "(default)");
+    else tagbuf[i][0] = '\0';
+    tags[i] = tagbuf[i][0] ? tagbuf[i] : NULL;
+  }
+
+  for (;;)
+  {
+    choice = tui_picklist(f->label, 0, 0, items, tags, NULL, nv, start,
+                          allow_other, prompt, other, (int)sizeof(other));
+    if (choice == TUI_PICK_OTHER)
+    {
+      int v;
+      if (hw_other_valid(f->letter, other, &v)) return v;
+      {
+        const char *lines[1];
+        lines[0] = (f->letter == 'A')
+          ? "Enter a hex port 200-2F0, a multiple of 10 (e.g. 220, 240)."
+          : "Enter a hex MPU port 300-3F0, a multiple of 10 (e.g. 330).";
+        tui_message("Invalid port", lines, 1);
+      }
+      continue; /* re-open the list */
+    }
+    if (choice >= 0 && choice < nv) return f->vals[choice];
+    return value; /* ESC / cancel -> unchanged */
+  }
+}
+
 static void screen_hardware(void)
 {
   int cur[HW_NFIELDS];
-  int entry_cur[HW_NFIELDS]; /* T54: entry snapshot for change detection */
-  int entry_override;
+  int det[HW_NFIELDS];   /* profiled value per field (for the (detected) tag) */
   int sel = 0, i;
-  int override_on;
   const char *cfgbl = scfg_get(&g_cfg, scfg_index("BLASTER"));
 
-  /* Seed from the profiler, then override from any existing cfg BLASTER. */
-  cur[0] = hw_find_index(&HW_FIELDS[0], g_prof.snd_base ? g_prof.snd_base : 0x220);
-  cur[1] = hw_find_index(&HW_FIELDS[1], g_prof.snd_irq  ? g_prof.snd_irq  : 5);
-  cur[2] = hw_find_index(&HW_FIELDS[2], g_prof.snd_dma);
-  cur[3] = hw_find_index(&HW_FIELDS[3], g_prof.snd_hdma ? g_prof.snd_hdma : 5);
-  cur[4] = g_prof.has_waveblaster ? hw_find_index(&HW_FIELDS[4], 0x330) : 0;
-  cur[5] = hw_find_index(&HW_FIELDS[5], g_prof.snd_type ? g_prof.snd_type : 6);
+  /* Seed actual VALUES from the profiler, then override from any cfg BLASTER.
+   * Fields: 0 A, 1 I, 2 DMA pick, 3 P, 4 T. The DMA pick derives from the
+   * detected channels (an explicit 16-bit hdma 6/7 wins, else the 8-bit dma). */
+  cur[0] = g_prof.snd_base ? g_prof.snd_base : 0x220;
+  cur[1] = g_prof.snd_irq  ? g_prof.snd_irq  : 5;
+  cur[HW_DMA_IDX] = (g_prof.snd_hdma >= 6) ? g_prof.snd_hdma : g_prof.snd_dma;
+  cur[3] = g_prof.has_waveblaster ? 0x330 : -1;
+  cur[4] = g_prof.snd_type ? g_prof.snd_type : 6;
   if (cfgbl[0]) hw_seed_from_str(cfgbl, cur);
 
-  /* Override defaults ON when a card was detected or a BLASTER is already
-   * configured; the user can flip it off to fall back to AUTOEXEC SET. */
-  override_on = (cfgbl[0] != '\0') || g_prof.snd_detected;
-
-  /* T54: snapshot the SEEDED entry state. The screen seeds cur[] from the
-   * detected card and defaults override_on ON, which composes to a non-empty
-   * BLASTER even when g_cfg's BLASTER was empty (auto) -- so comparing the
-   * composed value against g_cfg would falsely flag a change on a no-edit
-   * browse. Compare the current screen state to THIS entry snapshot instead, so
-   * the ESC "Save setting?" prompt fires only on a real user edit. */
-  memcpy(entry_cur, cur, sizeof(cur));
-  entry_override = override_on;
+  /* The detected value per field (or -999 when nothing was detected) drives the
+   * "(detected)" tag in the pick-list. */
+  det[0] = g_prof.snd_detected ? g_prof.snd_base : -999;
+  det[1] = g_prof.snd_detected ? g_prof.snd_irq  : -999;
+  det[HW_DMA_IDX] = g_prof.snd_detected
+                    ? ((g_prof.snd_hdma >= 6) ? g_prof.snd_hdma : g_prof.snd_dma)
+                    : -999;
+  det[3] = g_prof.has_waveblaster ? 0x330 : -999;
+  det[4] = g_prof.snd_detected ? g_prof.snd_type : -999;
 
   tui_clear(); /* T45: clear ONCE on entry; the loop repaints in place (no flash) */
   for (;;)
   {
     int k;
-    char composed[SCFG_VAL_MAX];
     tui_titlebar("SOUND HARDWARE");
-    tui_box(8, 3, 64, HW_NFIELDS + 6, "BLASTER");
+    tui_box(9, 3, 64, HW_NFIELDS + 6, "SOUND"); /* R-O: centered (8/8 margins) */
 
-    /* Row 0: the override toggle (always selectable). item 1: highlight the
-     * WHOLE line (full box interior width), value overpainted in its column. */
-    {
-      int sr = (sel == 0);
-      int fg = sr ? PAL->sel_fg : PAL->body;
-      int bg = sr ? PAL->sel_bg : PAL->bg;
-      int vfg = sr ? PAL->sel_fg : PAL->value;
-      char row[80];
-      /* T37: label renamed to "Override AUTOEXEC.BAT"; the value simplifies to a
-       * plain On/Off (the label + help now carry the meaning). */
-      const char *ov = override_on ? "On" : "Off";
-      snprintf(row, sizeof(row), " %-61.61s", "Override AUTOEXEC.BAT");
-      tui_at(9, 4, fg, bg, row);
-      tui_at(9 + 28, 4, vfg, bg, ov);
-    }
-    /* Rows 1..N: the BLASTER fields (greyed + skipped when override Off). */
+    /* Rows 0..N-1: the BLASTER fields. R-M: always editable (no override). */
     for (i = 0; i < HW_NFIELDS; ++i)
     {
       char row[80], val[28];
-      int  selrow = (override_on && sel == i + 1);
-      int  fg = !override_on ? PAL->dim : (selrow ? PAL->sel_fg : PAL->body);
-      int  bg = selrow ? PAL->sel_bg : PAL->bg;
-      int  vfg = !override_on ? PAL->dim : (selrow ? PAL->sel_fg : PAL->value);
+      int  selrow = (sel == i);
+      int  fg  = selrow ? PAL->sel_fg : PAL->body;
+      int  bg  = selrow ? PAL->sel_bg : PAL->bg;
+      int  vfg = selrow ? PAL->sel_fg : PAL->value;
       hw_fmt(&HW_FIELDS[i], cur[i], val, (int)sizeof(val));
       snprintf(row, sizeof(row), " %-61.61s", HW_FIELDS[i].label);
-      tui_at(9, 5 + i, fg, bg, row);
-      tui_at(9 + 28, 5 + i, vfg, bg, val);
+      tui_at(10, 4 + i, fg, bg, row);
+      tui_at(10 + 28, 4 + i, vfg, bg, val);
     }
-
-    /* per-item help ABOVE the resulting line. Row 0 (override) describes two
-     * options -> per-line keyed On/Off list (T39); the field rows are single-
-     * concept prose. Both stay inside the box. */
-    tui_box(8, HW_NFIELDS + 10, 64, 5, "HELP");
-    if (sel == 0)
-      help_list(10, HW_NFIELDS + 11, 6, 60 - 6, 2, H_ONOFF_OVERRIDE,
-                (int)(sizeof(H_ONOFF_OVERRIDE) / sizeof(H_ONOFF_OVERRIDE[0])));
-    else
-      tui_wrap(10, HW_NFIELDS + 11, 60, 3, PAL->desc, PAL->bg, hw_help(sel));
-
-    hw_compose(cur, composed, (int)sizeof(composed));
+    /* Rows after the fields (R-B): Sound on/off + the SB16 mixer volume levels,
+     * edited live; the two volume rows grey when sound is disabled. */
     {
-      char pv[80];
-      snprintf(pv, sizeof(pv), "BLASTER=%s", override_on ? composed : "(omitted)");
-      tui_box(8, HW_NFIELDS + 15, 64, 3, "RESULTING CONFIG LINE");
-      tui_at(10, HW_NFIELDS + 16, PAL->value, PAL->bg, pv);
+      static const char *xlabel[3] = { "Sound", "SFX volume", "Music volume" };
+      int base = 4 + HW_NFIELDS, xi;
+      for (xi = 0; xi < 3; ++xi)
+      {
+        int rowno  = HW_ROW_SOUND + xi;
+        int active = hw_row_active(rowno);
+        int selrow = (active && sel == rowno);
+        int fg  = !active ? PAL->dim : (selrow ? PAL->sel_fg : PAL->body);
+        int bg  = selrow ? PAL->sel_bg : PAL->bg;
+        int vfg = !active ? PAL->dim : (selrow ? PAL->sel_fg : PAL->value);
+        int kidx = scfg_index(hw_live_key(rowno));
+        char row[80], val[28];
+        if (rowno == HW_ROW_SOUND) /* AUDIO_OFF shown inverted */
+          snprintf(val, sizeof(val), "%s",
+                   strcmp(scfg_get(&g_cfg, kidx), "1") == 0 ? "Disabled" : "Enabled");
+        else
+          fmt_value(kidx, val, (int)sizeof(val));
+        snprintf(row, sizeof(row), " %-61.61s", xlabel[xi]);
+        tui_at(10, base + xi, fg, bg, row);
+        tui_at(10 + 28, base + xi, vfg, bg, val);
+      }
     }
-    tui_status(EDIT_STATUS);
+
+    /* R-N/R-J: one DESCRIPTION box, bottom-anchored. R-P: the RESULTING CONFIG
+     * preview box was removed (the BLASTER is still composed + written to the
+     * config on each field edit -- hw_save_blaster -- just no longer previewed
+     * on screen). With it gone, DESCRIPTION pins to the standard bottom. */
+    {
+      int helpy = TUI_DESC_TOP(5);
+      tui_box(TUI_DESC_X, helpy, TUI_DESC_W, 5, "DESCRIPTION");
+      tui_wrap(TUI_DESC_TX, helpy + 1, TUI_DESC_TW, 3, PAL->desc, PAL->bg, hw_help(sel));
+    }
+    tui_status("Enter Open list   Space/Left-Right Change   ESC Back");
 
     k = tui_getkey();
     if (k == TUI_KEY_UP || k == TUI_KEY_DOWN)
     {
-      /* sel 0 (override) is always live; the fields only when override on. */
-      int dir = (k == TUI_KEY_UP) ? -1 : +1, rows = HW_NFIELDS + 1, j;
-      for (j = 0; j < rows; ++j)
+      int dir = (k == TUI_KEY_UP) ? -1 : +1, j;
+      for (j = 0; j < HW_NROWS; ++j)
       {
-        sel = (sel + dir + rows) % rows;
-        if (sel == 0 || override_on) break;
+        sel = (sel + dir + HW_NROWS) % HW_NROWS;
+        if (hw_row_active(sel)) break;
       }
     }
-    else if (k == TUI_KEY_HOME) sel = 0; /* override row is always live */
+    else if (k == TUI_KEY_HOME) sel = 0;
     else if (k == TUI_KEY_LEFT || k == TUI_KEY_RIGHT || k == TUI_KEY_SPACE)
     {
-      /* T62: only Space / Left / Right cycle the highlighted field's value. */
+      /* Space / Left / Right cycle the highlighted value in place. A BLASTER
+       * field steps via the value index + writes the composed BLASTER live; the
+       * live rows (Sound/volume) cycle their scfg key directly. */
       int dir = (k == TUI_KEY_LEFT) ? -1 : +1;
-      if (sel == 0) override_on = !override_on;
-      else if (override_on)
+      if (sel < HW_NFIELDS)
       {
-        const hwfield_t *f = &HW_FIELDS[sel - 1];
-        cur[sel - 1] = (cur[sel - 1] + dir + f->nvals) % f->nvals;
+        const hwfield_t *f = &HW_FIELDS[sel];
+        int idx = (hw_find_index(f, cur[sel]) + dir + f->nvals) % f->nvals;
+        cur[sel] = f->vals[idx];
+        hw_save_blaster(cur);
       }
+      else if (hw_row_active(sel))
+        cycle_value(scfg_index(hw_live_key(sel)), dir);
     }
     else if (k == TUI_KEY_ENTER)
     {
-      /* T62: Enter commits the staged BLASTER to the session and advances the
-       * revert baseline (only when the user actually changed something since the
-       * last commit -- avoids a spurious * UNSAVED on a no-edit Enter, T54),
-       * then moves to the next live row. No prompt. */
-      int changed = (override_on != entry_override) ||
-                    memcmp(cur, entry_cur, sizeof(cur)) != 0;
-      int rows = HW_NFIELDS + 1, j;
-      if (changed)
+      /* R-I: Enter opens the pick-list. A field row -> the DF hardware picker
+       * (writes the composed BLASTER live); the Sound row -> Enabled/Disabled.
+       * R-H: full-clear after any pick-list closes (no overlay residue). */
+      if (sel < HW_NFIELDS)
       {
-        if (override_on) hw_compose(cur, composed, (int)sizeof(composed));
-        else             composed[0] = '\0';
-        scfg_set(&g_cfg, scfg_index("BLASTER"), composed);
-        g_dirty = 1;
-        entry_override = override_on;
-        memcpy(entry_cur, cur, sizeof(cur));
+        cur[sel] = hw_pick(sel, cur[sel], det[sel]);
+        hw_save_blaster(cur);
+        tui_clear();
       }
-      for (j = 0; j < rows; ++j)
+      else if (sel == HW_ROW_SOUND)
       {
-        sel = (sel + 1) % rows;
-        if (sel == 0 || override_on) break;
+        if (pick_value(scfg_index("AUDIO_OFF"))) tui_clear();
       }
     }
     else if (k == TUI_KEY_ESC)
-    {
-      /* T52/T54/T62: only when the USER changed the screen since the last commit
-       * (a field or the override toggle, vs the baseline) ask Save setting? Y =
-       * commit the composed BLASTER to the session, N = leave the baseline value.
-       * A no-edit browse backs out silently -- no spurious prompt. No disk write
-       * here. The baseline starts at the seeded entry state and advances on each
-       * Enter. */
-      int changed = (override_on != entry_override) ||
-                    memcmp(cur, entry_cur, sizeof(cur)) != 0;
-      if (changed && tui_yesno("Save setting?", "Save setting?", 0))
-      {
-        if (override_on) hw_compose(cur, composed, (int)sizeof(composed));
-        else             composed[0] = '\0';
-        scfg_set(&g_cfg, scfg_index("BLASTER"), composed);
-        g_dirty = 1;
-      }
-      return;
-    }
+      return; /* T44: edits are live in the session; main-menu save commits */
     /* F10 inert on subscreens (T44). */
   }
 }
@@ -944,17 +1091,100 @@ static void synth_list_str(char *out, int cap)
   else              snprintf(out, (size_t)cap, "none");
 }
 
-/* The configured MPU-401 MIDI port from the cfg BLASTER P-field, or -1 if no
- * P-field is set. Used to surface the WaveBlaster MIDI port in the profile
- * panel (round-6 item 11 amendment). The field letters are single uppercase
- * and values are hex/decimal digits, so a plain scan for 'P' is unambiguous. */
-static int cfg_mpu_port(void)
+/* Parse one BLASTER field (A/I/D/H/P/T) from the configured BLASTER string,
+ * returning `fallback` if absent. The field letters are single upper/lower
+ * case and values are hex (A/P) or decimal (I/D/H/T) digits. Used to surface
+ * the configured sound hardware in the profile panel (R-D) + the Sound submenu
+ * banner (R-C). */
+static int cfg_blaster_field(char letter, int fallback)
 {
   const char *p = scfg_get(&g_cfg, scfg_index("BLASTER"));
+  int base = (letter == 'A' || letter == 'P') ? 16 : 10;
+  char lower = (char)(letter + 32);
   for (; p && *p; ++p)
-    if (*p == 'P' || *p == 'p')
-      return (int)strtol(p + 1, NULL, 16);
+    if (*p == letter || *p == lower)
+      return (int)strtol(p + 1, NULL, base);
+  return fallback;
+}
+
+/* The configured card type (T-code), I/O base, IRQ, 8-bit DMA -- each from the
+ * cfg BLASTER, falling back to the detected profile value. */
+static int cfg_card_type(void) { return cfg_blaster_field('T', g_prof.snd_type ? g_prof.snd_type : 6); }
+static int cfg_io_port(void)   { return cfg_blaster_field('A', g_prof.snd_base ? g_prof.snd_base : 0x220); }
+static int cfg_irq(void)       { return cfg_blaster_field('I', g_prof.snd_irq  ? g_prof.snd_irq  : 5); }
+
+/* The single "DMA channel" pick reconstructed from the configured BLASTER D + H
+ * slots (matches the Custom-setup DMA field): an explicit 16-bit channel (6/7)
+ * wins, else the 8-bit D. */
+static int cfg_dma(void)
+{
+  int d = cfg_blaster_field('D', g_prof.snd_dma);
+  int h = cfg_blaster_field('H', g_prof.snd_hdma);
+  return (h >= 6) ? h : d;
+}
+
+/* Friendly name for the configured music backend (AUDIO_BACKEND). */
+static const char *cfg_backend_name(void)
+{
+  const char *b = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
+  if (strcmp(b, "wb") == 0)      return "WaveBlaster";
+  if (strcmp(b, "opl3") == 0)    return "OPL3";
+  if (strcmp(b, "organya") == 0) return "Organya";
+  return "Auto";
+}
+
+/* ---- System Speed presets (T47 plan 3.4) ---------------------------- *
+ * Selecting a class writes concrete values ONCE into the session and records
+ * the class name in the SETUP-only SPEED_CLASS key. Advanced may override the
+ * perf keys freely afterward; SPEED_CLASS is a record of provenance, not a
+ * constraint. The macro deliberately does NOT touch sound keys (those stay a
+ * Sound-menu decision). */
+typedef struct { const char *cls; const char *label; int perf; const char *desc; } speedrow_t;
+static const speedrow_t SPEED_ROWS[] = {
+  { "slow",     "Slow",      2,
+    "Good for a slow 486 (DX2-50 or below). Drops the most detail to keep play smooth." },
+  { "normal",   "Normal",    1,
+    "Good for a 486DX2-66 or Am5x86. Trims some decorative detail for speed." },
+  { "fast",     "Fast",      1,
+    "Good for a fast 486 with VLB video, or a Pentium. The tested sweet spot." },
+  { "veryfast", "Very Fast", 0,
+    "Good for a fast Pentium where full faithful detail is affordable." }
+};
+#define SPEED_NROWS ((int)(sizeof(SPEED_ROWS) / sizeof(SPEED_ROWS[0])))
+
+/* Index of a class string in SPEED_ROWS, or -1 (e.g. the "notset" sentinel). */
+static int speed_row_index(const char *cls)
+{
+  int i;
+  for (i = 0; i < SPEED_NROWS; ++i)
+    if (strcmp(SPEED_ROWS[i].cls, cls) == 0) return i;
   return -1;
+}
+
+/* Map the detected CPU to its recommended speed-class row (plan 3.4 / 3.7).
+ * The main-menu Auto-detect and this screen share it so they never disagree. */
+static int speed_row_for_cpu(const sysprofile_t *p)
+{
+  if (p->cpu_class == CPU_586)
+    return (p->cpu_mhz_est >= 90) ? 3 /* veryfast */ : 2 /* fast */;
+  if (p->cpu_class == CPU_486_MID) return 1; /* normal */
+  return 0;                                   /* CPU_486_SLOW -> slow */
+}
+
+/* Apply a speed-class macro to the session (writes the 4 perf/display keys +
+ * SPEED_CLASS). FIXED_TIMESTEP / DIRTY_RECTS / PIXEL_FORMAT_8 stay on for every
+ * class; only PERF_MODE + the recorded class vary. */
+static void speed_apply(int row)
+{
+  char b[8];
+  if (row < 0 || row >= SPEED_NROWS) return;
+  snprintf(b, sizeof(b), "%d", SPEED_ROWS[row].perf);
+  scfg_set(&g_cfg, scfg_index("PERF_MODE"),      b);
+  scfg_set(&g_cfg, scfg_index("FIXED_TIMESTEP"), "1");
+  scfg_set(&g_cfg, scfg_index("DIRTY_RECTS"),    "1");
+  scfg_set(&g_cfg, scfg_index("PIXEL_FORMAT_8"), "1");
+  scfg_set(&g_cfg, scfg_index("SPEED_CLASS"),    SPEED_ROWS[row].cls);
+  g_dirty = 1;
 }
 
 static void draw_profile_panel(int x, int y, int w)
@@ -979,43 +1209,83 @@ static void draw_profile_panel(int x, int y, int w)
     snprintf(v, sizeof(v), "unknown");
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Memory ...", v);
 
-  if (g_prof.snd_detected)
-    /* round-6 item 11: commas + capitalized "Type". HDMA is omitted from this
-     * at-a-glance summary (operator refinement -- it is an advanced detail,
-     * almost always 5, and lives editable on the Sound Hardware screen). */
-    snprintf(v, sizeof(v), "Port 0x%X, IRQ %d, DMA %d, Type T%d",
-             g_prof.snd_base, g_prof.snd_irq, g_prof.snd_dma,
-             g_prof.snd_type);
-  else
-    snprintf(v, sizeof(v), "no BLASTER variable set");
+  /* R-D: the panel's Sound line shows the configured card + music backend
+   * (replaces the old detail Sound line + the Synth presence line). Card from
+   * the configured BLASTER T-field (else the detected card); backend from
+   * AUDIO_BACKEND. The full Port/IRQ/DMA detail lives in the Sound submenu
+   * banner + Custom setup. */
+  snprintf(v, sizeof(v), "%s, %s", sb_type_name(cfg_card_type()), cfg_backend_name());
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Sound ....", v);
-
-  /* round-6 item 11 amendment: surface the MPU-401 MIDI port on the Synth row
-   * when a WaveBlaster is present (configured P-field, else the detected
-   * standard 0x330) so it is visible at a glance. */
-  synth_list_str(v, (int)sizeof(v));
-  if (g_prof.has_waveblaster)
-  {
-    int mpu = cfg_mpu_port();
-    char t[24];
-    snprintf(t, sizeof(t), " (MPU 0x%X)", mpu >= 0 ? mpu : 0x330);
-    strncat(v, t, sizeof(v) - strlen(v) - 1);
-  }
-  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Synth ....", v);
 
   snprintf(v, sizeof(v), "%s  VBE %x.%x %s", g_prof.video_desc,
            (g_prof.vbe_version >> 8) & 0xff, g_prof.vbe_version & 0xff,
            g_prof.vbe_lfb ? "(LFB)" : "");
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Video ....", v);
+
+  /* T47 plan 3.2: the Speed line mirrors DF's "Machine Speed: Fast (Fast
+   * Recommended)" -- the class the settings were last set FROM (SPEED_CLASS),
+   * plus the auto-detect recommendation in parens. "(not set)" until a class
+   * is chosen or Auto-detect runs. */
+  {
+    const char *cls = scfg_get(&g_cfg, scfg_index("SPEED_CLASS"));
+    int ci  = speed_row_index(cls);
+    int rec = speed_row_for_cpu(&g_prof);
+    snprintf(v, sizeof(v), "%s  (%s recommended)",
+             ci >= 0 ? SPEED_ROWS[ci].label : "(not set)",
+             SPEED_ROWS[rec].label);
+    tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Speed ....", v);
+  }
+}
+
+/* System Speed screen (T47 plan 3.4): a DF-style centered pick-list of the
+ * speed classes + an Auto-detect row, each with a plain-language description.
+ * Selecting a class applies its macro to the session; ESC / Cancel leaves the
+ * settings unchanged (T44 session model -- main-menu save commits). */
+static void screen_speed(void)
+{
+  const char *items[SPEED_NROWS + 1];
+  const char *descs[SPEED_NROWS + 1];
+  const char *tags[SPEED_NROWS + 1];
+  char        tagbuf[SPEED_NROWS][16];
+  const char *cls = scfg_get(&g_cfg, scfg_index("SPEED_CLASS"));
+  int cur = speed_row_index(cls);
+  int rec = speed_row_for_cpu(&g_prof);
+  int i, start, choice;
+
+  for (i = 0; i < SPEED_NROWS; ++i)
+  {
+    items[i] = SPEED_ROWS[i].label;
+    descs[i] = SPEED_ROWS[i].desc;
+    if      (i == cur) snprintf(tagbuf[i], sizeof(tagbuf[i]), "(current)");
+    else if (i == rec) snprintf(tagbuf[i], sizeof(tagbuf[i]), "(recommended)");
+    else               tagbuf[i][0] = '\0';
+    tags[i] = tagbuf[i][0] ? tagbuf[i] : NULL;
+  }
+  items[SPEED_NROWS] = "Auto-detect";
+  descs[SPEED_NROWS] = "Set the speed class that matches the detected CPU.";
+  tags[SPEED_NROWS]  = NULL;
+
+  start = (cur >= 0) ? cur : rec;
+  tui_clear();
+  tui_titlebar("SYSTEM SPEED");
+  choice = tui_picklist("SYSTEM SPEED", 0, 0, items, tags, descs,
+                        SPEED_NROWS + 1, start, 0, NULL, NULL, 0);
+  if (choice < 0) return;                 /* ESC / Cancel -> no change */
+  speed_apply(choice == SPEED_NROWS ? rec : choice);
 }
 
 static void screen_autodetect(void)
 {
   char cpu[48], snd[64], synth[48], perf[24];
   const char *bval, *pval, *pname;
-  int bw = 60, bh = 13, bx, by, x, y;
+  int bw = 60, bh = 14, bx, by, x, y, scls;
 
   recommend_apply(&g_cfg, &g_prof, NULL, 0); /* apply; we render our own lines */
+  /* T47 plan 3.7: Auto-detect also applies the System Speed class macro, using
+   * the SAME cpu->class mapping the System Speed screen uses (so the two never
+   * disagree). */
+  scls = speed_row_for_cpu(&g_prof);
+  speed_apply(scls);
   g_dirty = 1;
 
   bval = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
@@ -1041,7 +1311,7 @@ static void screen_autodetect(void)
   tui_titlebar("AUTO-DETECT"); /* round-7 item 2: page title on every screen */
   tui_box(bx, by, bw, bh, "AUTO-DETECT");
   y = by + 1;
-  tui_at(x, y, PAL->body, PAL->bg, "Recommended for your system:");
+  tui_at(x, y, PAL->body, PAL->bg, "Recommended for this system:");
   y += 2;
   /* each finding on its own line: label (key) and value in distinct roles. */
   tui_kv(x, y++, 16, PAL->title, PAL->body,  PAL->bg, "CPU", cpu);
@@ -1051,6 +1321,8 @@ static void screen_autodetect(void)
          "Music backend", snd_backend_name(bval));
   tui_kv(x, y++, 16, PAL->title, PAL->value, PAL->bg, "Performance", perf);
   tui_kv(x, y++, 16, PAL->title, PAL->value, PAL->bg, "Fixed timestep", "On (50 Hz)");
+  tui_kv(x, y++, 16, PAL->title, PAL->value, PAL->bg, "System speed",
+         SPEED_ROWS[scls].label);
   ++y;
   tui_at(x, y, PAL->desc, PAL->bg, "Review/override in the menus, then save.");
   ++y;
@@ -1151,89 +1423,214 @@ static const char *audiotest_badge(int res)
   }
 }
 
-static void screen_audiotest(void)
-{
-  int res[2]; /* [0] SFX, [1] music; -2 = not yet tested */
-  int sel = 0, i, k;
+/* NOTE (T47 plan 3.3): the standalone TEST SFX / MUSIC chooser screen was
+ * retired -- the two tests now live inline in the Sound submenu
+ * (screen_sound_menu + sound_inline_test), each with a result badge. */
 
-  /* Apply the user's Sound Hardware choice so the live audio test plays
-   * through the selected port/IRQ/DMA (the SDL audio backend reads BLASTER
-   * at init). overwrite=1 mirrors the engine loader's authoritative
-   * semantics; when left empty (auto), the ambient SET BLASTER is used. */
-  {
-    const char *bl = scfg_get(&g_cfg, scfg_index("BLASTER"));
-    if (bl && bl[0]) setenv("BLASTER", bl, 1);
-  }
-  tui_clear();
-  tui_titlebar("TEST SFX / MUSIC");
+static void screen_save(void)
+{
+  cfg_write_toast();
+}
+
+/* ---- Sound submenu (T47 plan 3.3) ----------------------------------- *
+ * Folds the three former top-level sound items (Sound setup / Sound hardware /
+ * Test SFX-Music) into one DF-style submenu, with the audio tests inline (a
+ * result badge beside each). Express setup's full one-key detect flow is a
+ * Phase-2 deliverable; in Phase 1 the row signposts it + points at Custom /
+ * Auto-detect. Custom = the Sound Hardware screen; Music = the music-playback
+ * screen (backend / pre-render / quality); volume + on/off live in Custom. */
+
+/* Run one inline audio test (plan 3.3 co-location): apply the session's Sound
+ * Hardware choice, bring the device up, run the modal test, tear it down.
+ * Returns 1 heard / 0 silent / -1 device error / -2 audio test not available
+ * (the default AUDIOTEST=0 scaffold build). Per-test open/close so a Custom
+ * setup edit is reflected on the next test. */
+static int sound_inline_test(int phase)
+{
+  int rc;
+  const char *bl = scfg_get(&g_cfg, scfg_index("BLASTER"));
   if (!audiotest_available())
   {
-    const char *lines[3];
+    const char *lines[2];
     lines[0] = audiotest_error();
-    lines[1] = "Save your settings and start the game to hear them,";
-    lines[2] = "or rebuild SETUP with the audio backend linked in.";
-    tui_message("TEST SFX / MUSIC", lines, 3);
-    return;
+    lines[1] = "Save the settings and start the game to hear them.";
+    tui_message("TEST", lines, 2);
+    return -2;
   }
+  if (bl && bl[0]) setenv("BLASTER", bl, 1);
   if (audiotest_init(&g_cfg) != 0)
   {
     const char *lines[1]; lines[0] = audiotest_error();
-    tui_message("TEST SFX / MUSIC", lines, 1);
-    return;
+    tui_message("TEST", lines, 1);
+    return -1;
   }
-  res[0] = res[1] = -2;
+  rc = audiotest_popup(phase);
+  audiotest_shutdown();
+  return rc;
+}
 
+/* R-C/R-G: a current-sound-settings banner at the top of the Sound submenu,
+ * formatted to MATCH the main-menu SYSTEM PROFILE panel exactly: titled
+ * "SOUND", one setting per row in a SINGLE aligned column with dotted leaders
+ * (Card / Port / IRQ / DMA / Backend). Sourced from the configured BLASTER +
+ * AUDIO_BACKEND. Box height 7 = 5 rows + borders, like the profile panel. */
+static void draw_sound_banner(int x, int y, int w)
+{
+  char v[40];
+  int  kx = x + 2, vw = 11, row = y + 1;
+  tui_box(x, y, w, 7, "SOUND");
+  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Card .....",
+         sb_type_name(cfg_card_type()));
+  snprintf(v, sizeof(v), "0x%X", cfg_io_port());
+  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Port .....", v);
+  snprintf(v, sizeof(v), "%d", cfg_irq());
+  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "IRQ ......", v);
+  snprintf(v, sizeof(v), "%d", cfg_dma());
+  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "DMA ......", v);
+  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Backend ..",
+         cfg_backend_name());
+}
+
+static void screen_sound_menu(void)
+{
+  static const char *items[] = {
+    "Express setup", "Custom setup", "Music",
+    "Test sound effects", "Test music", "Back"
+  };
+  static const char *helps[] = {
+    "Detect the sound card and set everything in one step.",
+    "Set the card, port, IRQ, DMA, volume, and sound on/off.",
+    "Choose the music backend, Organya pre-render, and audio quality.",
+    "Play a test sound effect to check the audio.",
+    "Play a test song to check the music.",
+    "Return to the main menu."
+  };
+  const int n = (int)(sizeof(items) / sizeof(items[0]));
+  const int my = 11; /* menu box top row (the SOUND banner occupies rows 3-9) */
+  int sel = 0, res_sfx = -2, res_music = -2;
+
+  tui_clear();
   for (;;)
   {
-    static const char *items[] = { "Test sound effects", "Test music", "Back" };
-    /* T45: no per-key clear (the loop repaints in place); the entry clear above
-     * and the post-popup clear below keep the screen clean without flashing. */
-    tui_titlebar("TEST SFX / MUSIC");
-    tui_box(18, 7, 44, 5, "CHOOSE A TEST");
-    for (i = 0; i < 3; ++i)
+    int i, k;
+    tui_titlebar("SOUND");
+    draw_sound_banner(TUI_DESC_X, 3, TUI_DESC_W);
+    tui_box(19, my, 44, n + 2, "SOUND"); /* R-O: x=19 centers a 44-wide box (18/18) */
+    for (i = 0; i < n; ++i)
     {
       int selrow = (i == sel);
       int fg = selrow ? PAL->sel_fg : PAL->body;
       int bg = selrow ? PAL->sel_bg : PAL->bg;
       char row[46];
-      /* item 1: highlight the WHOLE line (full box interior). Box x=18 w=44 ->
-       * interior 42 cells from col 19. */
       snprintf(row, sizeof(row), " %-41.41s", items[i]);
-      tui_at(19, 8 + i, fg, bg, row);
-      if (i < 2) /* the two tests carry a result badge; "Back" does not */
+      tui_at(20, my + 1 + i, fg, bg, row);
+      if (i == 3 || i == 4) /* the two test rows carry a result badge */
       {
         int vfg = selrow ? PAL->sel_fg : PAL->value;
-        tui_at(19 + 26, 8 + i, vfg, bg, audiotest_badge(res[i]));
+        tui_at(20 + 28, my + 1 + i, vfg, bg,
+               audiotest_badge(i == 3 ? res_sfx : res_music));
       }
     }
-    /* item 6: the ABOUT box shows ONLY the highlighted test's text. The backend
-     * resolves real-vs-fallback per phase (audiotest_about), which is where the
-     * "which sound played" info now lives (it was dropped from the result popup,
-     * item 8). "Back" has no test, so describe the action instead. */
-    tui_box(8, 14, 64, 5, "ABOUT THIS TEST");
-    tui_wrap(10, 15, 60, 3, PAL->desc, PAL->bg,
-             sel < 2 ? audiotest_about(sel) : "Return to the previous menu.");
-    tui_status("Enter Play   ESC Back");
+    tui_box(TUI_DESC_X, TUI_DESC_TOP(4), TUI_DESC_W, 4, "DESCRIPTION");
+    tui_wrap(TUI_DESC_TX, TUI_DESC_TOP(4) + 1, TUI_DESC_TW, 2, PAL->desc, PAL->bg, helps[sel]);
+    tui_status("Enter Select   ESC Back");
 
     k = tui_getkey();
-    if (k == TUI_KEY_UP)        sel = (sel + 3 - 1) % 3;
-    else if (k == TUI_KEY_DOWN) sel = (sel + 1) % 3;
+    if (k == TUI_KEY_UP)        sel = (sel + n - 1) % n;
+    else if (k == TUI_KEY_DOWN) sel = (sel + 1) % n;
     else if (k == TUI_KEY_HOME) sel = 0;
+    else if (k == TUI_KEY_ESC)  return;
     else if (k == TUI_KEY_ENTER)
     {
-      if (sel == 0)      res[0] = audiotest_popup(0);
-      else if (sel == 1) res[1] = audiotest_popup(1);
-      else break; /* Back */
-      tui_clear(); /* T45: the test popup overwrote the screen; wipe before repaint */
+      if (sel == 0)
+      {
+        const char *lines[3];
+        lines[0] = "Express one-key detect arrives in a later update.";
+        lines[1] = "For now use Custom setup below, or Auto-detect best";
+        lines[2] = "settings from the main menu.";
+        tui_message("Express setup", lines, 3);
+      }
+      else if (sel == 1) screen_hardware();
+      else if (sel == 2) screen_sound();
+      else if (sel == 3) res_sfx   = sound_inline_test(0);
+      else if (sel == 4) res_music = sound_inline_test(1);
+      else return; /* Back */
+      tui_clear(); /* a sub-screen / popup overwrote the screen; repaint clean */
     }
-    else if (k == TUI_KEY_ESC) break;
   }
-  audiotest_shutdown();
 }
 
-static void screen_save(void)
+/* ---- Input submenu (T47 plan 3.5) ----------------------------------- *
+ * Phase-1 shell: the live USE_JOYSTICK on/off row, plus the Configure /
+ * Restore rows shown greyed as signposts -- control remapping (the keyboard /
+ * joystick configure screens + calibration) is a Phase-3 deliverable that
+ * needs an engine-side binding surface. Greyed rows are skipped by navigation
+ * (the same mechanism the Sound + category editors use). */
+static void screen_input(void)
 {
-  cfg_write_toast();
+  enum { R_JOY = 0, R_KBD, R_JOYCFG, R_RESTORE, R_BACK, R_N };
+  static const char *labels[R_N] = {
+    "Joystick / gamepad", "Configure keyboard", "Configure joystick",
+    "Restore default controls", "Back"
+  };
+  static const char *helps[R_N] = {
+    "Read a joystick or gamepad on the PC game port. Off = keyboard only.",
+    "Remap keyboard controls. Arrives in a later update.",
+    "Assign joystick buttons. Arrives in a later update.",
+    "Reset all controls to defaults. Arrives in a later update.",
+    "Return to the main menu."
+  };
+  int joyidx = scfg_index("USE_JOYSTICK");
+  int sel = R_JOY;
+
+  tui_clear();
+  for (;;)
+  {
+    int i, k, active[R_N];
+    active[R_JOY] = 1; active[R_KBD] = 0; active[R_JOYCFG] = 0;
+    active[R_RESTORE] = 0; active[R_BACK] = 1; /* Configure/Restore = Phase 3 */
+    tui_titlebar("INPUT");
+    tui_box(19, 6, 44, R_N + 2, "INPUT"); /* R-O: centered (18/18 margins) */
+    for (i = 0; i < R_N; ++i)
+    {
+      int selrow = (active[i] && i == sel);
+      int lblfg  = !active[i] ? PAL->dim : (selrow ? PAL->sel_fg : PAL->body);
+      int bg     = selrow ? PAL->sel_bg : PAL->bg;
+      char row[46];
+      snprintf(row, sizeof(row), " %-41.41s", labels[i]);
+      tui_at(20, 7 + i, lblfg, bg, row);
+      if (i == R_JOY)
+      {
+        int vfg = selrow ? PAL->sel_fg : PAL->value;
+        tui_at(20 + 28, 7 + i, vfg, bg,
+               strcmp(scfg_get(&g_cfg, joyidx), "1") == 0 ? "On" : "Off");
+      }
+    }
+    tui_box(TUI_DESC_X, TUI_DESC_TOP(4), TUI_DESC_W, 4, "DESCRIPTION");
+    tui_wrap(TUI_DESC_TX, TUI_DESC_TOP(4) + 1, TUI_DESC_TW, 2, PAL->desc, PAL->bg, helps[sel]);
+    tui_status("Space Change   Enter Select   ESC Back");
+
+    k = tui_getkey();
+    if (k == TUI_KEY_UP || k == TUI_KEY_DOWN)
+    {
+      int dir = (k == TUI_KEY_UP) ? -1 : +1, j;
+      for (j = 0; j < R_N; ++j)
+      { sel = (sel + dir + R_N) % R_N; if (active[sel]) break; }
+    }
+    else if (k == TUI_KEY_HOME) sel = R_JOY;
+    else if (k == TUI_KEY_LEFT || k == TUI_KEY_RIGHT || k == TUI_KEY_SPACE)
+    {
+      if (sel == R_JOY) cycle_value(joyidx, +1); /* live toggle (session) */
+    }
+    else if (k == TUI_KEY_ENTER)
+    {
+      /* R-I: Enter on the Joystick row opens its On/Off pick-list (R-H clear
+       * after). Back exits the submenu. */
+      if (sel == R_JOY) { if (pick_value(joyidx)) tui_clear(); }
+      else if (sel == R_BACK) return;
+    }
+    else if (k == TUI_KEY_ESC) return; /* T44: live edits kept in the session */
+  }
 }
 
 int main(void)
@@ -1274,17 +1671,18 @@ int main(void)
    * (it is always visible in the panel). A custom navigation loop replaces
    * tui_menu here so the panel + menu + description can stack; keys are
    * identical (Up/Down/Home/Enter, F10 = Save and Quit, ESC = Quit). */
-#define MENU_X 21
+#define MENU_X 22 /* R-O: centers the 38-wide MAIN MENU box (21/21 margins) */
 #define MENU_W 38
 #define MENU_Y 10
   {
+    /* T47 plan 3.1: tightened from 9 items to 7. Sound x3 -> one Sound submenu
+     * (3.3); +System speed (3.4); Performance folded into Advanced (3.6);
+     * Input/joystick renamed Input (3.5). */
     static const char *items[] = {
-      "Sound setup",
-      "Sound hardware",
-      "Test SFX / Music",
-      "Input / joystick",
-      "Performance",
-      "Advanced / troubleshooting",
+      "Sound",
+      "System speed",
+      "Input",
+      "Advanced",
       "Auto-detect best settings",
       "Save and exit",
       "Quit without saving"
@@ -1292,15 +1690,13 @@ int main(void)
     /* item 7: one short sentence per item (the operator's review-3 example
      * "Choose how music and sound effects play."). */
     static const char *helps[] = {
-      "Choose how music and sound effects play.",
-      "Set your Sound Blaster's port, IRQ, and DMA.",
-      "Play a test sound effect and song to check your audio.",
-      "Turn a joystick or gamepad on or off.",
-      "Trade visual detail for speed.",
-      "Rarely needed compatibility switches.",
-      "Let SETUP pick settings for your detected hardware.",
-      "Write DOSKUTSU.CFG and leave SETUP.",
-      "Leave SETUP without saving changes."
+      "Setup sound card, music, sound effects and volume",
+      "Preset performance options depending on system speed",
+      "Keyboard, Joystick and gamepad configuration",
+      "Performance and compatibility options",
+      "Auto-detect hardware and best settings for this system",
+      "Save settings and quit to DOS",
+      "Discard changes without saving and quit to DOS"
     };
     const int nitems = (int)(sizeof(items) / sizeof(items[0]));
 
@@ -1330,9 +1726,10 @@ int main(void)
           tui_at(MENU_X + 1, MENU_Y + 1 + i, fg, bg, row);
         }
         /* round-7 item 3a: the DESCRIPTION box matches the SYSTEM PROFILE box
-         * width/position (x=5, w=72) so the two stacked boxes line up. */
-        tui_box(5, MENU_Y + nitems + 2, 72, 4, "DESCRIPTION");
-        tui_wrap(7, MENU_Y + nitems + 3, 68, 2, PAL->desc, PAL->bg, helps[sel]);
+         * width/position (x=5, w=72) so the two stacked boxes line up. T47: this
+         * is now the shared TUI_DESC geometry every screen's bottom box uses. */
+        tui_box(TUI_DESC_X, TUI_DESC_TOP(4), TUI_DESC_W, 4, "DESCRIPTION");
+        tui_wrap(TUI_DESC_TX, TUI_DESC_TOP(4) + 1, TUI_DESC_TW, 2, PAL->desc, PAL->bg, helps[sel]);
         /* T44: when the session has unsaved edits, flag it in the status bar so
          * the player knows "Save and exit" is needed to keep them. */
         tui_status(g_dirty ? MENU_STATUS "   * UNSAVED" : MENU_STATUS);
@@ -1346,16 +1743,14 @@ int main(void)
         else if (k == TUI_KEY_ESC)   { action = -1;  break; }
       }
 
-      if (action == 0)      screen_sound();
-      else if (action == 1) screen_hardware();
-      else if (action == 2) screen_audiotest();
-      else if (action == 3) edit_category(DKC_INPUT, "INPUT");
-      else if (action == 4) edit_category(DKC_PERF, "PERFORMANCE");
-      else if (action == 5) edit_category(DKC_COMPAT, "ADVANCED");
-      else if (action == 6) screen_autodetect();
-      else if (action == 7) { screen_save(); break; }   /* Save and exit       */
+      if (action == 0)      screen_sound_menu();
+      else if (action == 1) screen_speed();
+      else if (action == 2) screen_input();
+      else if (action == 3) screen_advanced();
+      else if (action == 4) screen_autodetect();
+      else if (action == 5) { screen_save(); break; }   /* Save and exit       */
       else if (action == -2) { screen_save(); break; }  /* F10 = Save and Exit */
-      else /* action == 8 (Quit without saving) or ESC (-1) */
+      else /* action == 6 (Quit without saving) or ESC (-1) */
       {
         /* T52: ALWAYS confirm before leaving to DOS (accident guard), even when
          * the session is clean. Default highlight No (destructive). Y = exit

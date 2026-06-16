@@ -119,7 +119,7 @@ int scfg_save(const scfg_t *c, const char *path)
   if (!f) return -1;
 
   fputs("; DOSKUTSU.CFG -- written by SETUP.EXE.\r\n", f);
-  fputs("; Edit by hand at your own risk. A real DOS `SET` overrides any line here.\r\n", f);
+  fputs("; Edit by hand with care. A real DOS `SET` overrides any line here.\r\n", f);
   fputs("; schema=1\r\n", f);
   fputs(";\r\n", f);
 

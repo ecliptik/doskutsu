@@ -240,35 +240,36 @@ launch_setup() {
 #               sdl-engine dd1ef08 audio-test progress/log-suppress)
 # ===========================================================================
 # Nav model (matches tests/run-setup-e2e.sh):
-#   - T25 DROPPED "System profile" from the menu -- it is now an always-on
-#     PANEL pinned ABOVE the menu (non-selectable). The main menu re-seeds the
-#     highlight to idx0 each entry; HOME anchors to idx0. Reach main item N =
-#     Home then Down x N, Enter. New indices:
-#       0 Sound setup  1 Sound hardware  2 Test SFX/Music  3 Input  4 Performance
-#       5 Advanced     6 Auto-detect     7 Save and exit    8 Quit
+#   - The SYSTEM PROFILE panel is pinned ABOVE the menu (non-selectable). The
+#     main menu re-seeds the highlight to idx0 each entry; HOME anchors to idx0.
+#     Reach main item N = Home then Down x N, Enter. T47 indices (9 -> 7):
+#       0 Sound (SUBMENU)   1 System speed   2 Input (SUBMENU)
+#       3 Advanced          4 Auto-detect    5 Save and exit   6 Quit
+#   - T47 STRUCTURE: "Sound" is a submenu -- 0 Express setup (Phase-1 STUB info
+#     message), 1 Custom setup (-> the Sound Hardware/BLASTER screen), 2 Music
+#     and volumes (-> the old "Sound setup" screen), 3 Test sound effects, 4 Test
+#     music, 5 Back. Its ESC backs out SILENTLY. "Performance" is GONE: PERF_MODE
+#     + FIXED_TIMESTEP are the first two rows of Advanced (idx3). "Input" (idx2)
+#     is a submenu: row0 Joystick on/off (live), rows 1-3 GREYED (Phase 3), 4
+#     Back; ESC silent. "System speed" (idx1) is a tui_picklist popup.
 #   - HOME anchors the first selectable row on every screen, so captures are
 #     deterministic regardless of where the cursor last sat.
-#   - Editing screens (Sound/Hardware/Input/Perf/Advanced): T62 (facea95) model --
-#     ONLY Space/Right cycle a value +1, Left -1; Enter NO LONGER cycles. Enter
-#     COMMITS the current row (advances the ESC revert baseline, no prompt) and
-#     moves to the next live row. The status bar reads "Space/Left-Right Change
-#     Enter Save+Next   ESC Back". T44 SESSION-EDIT MODEL: subscreen F10 does
-#     nothing; ESC asks "Save setting?" only if the screen changed SINCE THE LAST
-#     COMMIT (default Yes = keep), else silent back. Persistence is
-#     ONLY at the main menu (F10 / "Save and exit"). This is a REVIEW walk that
-#     NEVER saves (it leaves the live window without Save-and-exit, and
-#     ensure_stage rewrites the baseline each run), so capture-time edits never
-#     reach the CFG -- but they DO persist in-session, so any destructive edit
-#     (e.g. the Sound-setup note-demo) is reverted before a dependent later
-#     capture (the audio test needs the baseline backend).
-#   - Test SFX/Music (idx2): T24 chooser {Test SFX, Test music, Back}; Enter on a
-#     test pops the modal "Testing ..." popup (progress bar, auto-plays the
-#     bounded test), then repaints "Did you hear it?" as a Yes/No MENU (round-5/
-#     T27: default-Yes highlight, Left/Right/Up/Down toggle, Enter confirms, y/n
-#     immediate shortcuts, ESC=No). Answering -> back to chooser, setting a
-#     result badge (round-5: "Working" / "Not working" / "Not tested" -- was
-#     "Heard" / "No sound" / "Could not play" / "Not tested"). ESC -> main menu.
-#   - Message screens (Auto-detect) are modal tui_message boxes -- Return dismiss.
+#   - Editing screens (Music and volumes / Custom setup / Advanced): T62 model --
+#     ONLY Space/Right cycle a value +1, Left -1. On Music-and-volumes + Advanced
+#     Enter COMMITS the row + advances (no prompt). On Custom setup (T47) Enter
+#     OPENS a pick-list instead -- so this walk edits Custom fields with Right,
+#     never Enter. T44 SESSION-EDIT MODEL: subscreen F10 does nothing; ESC asks
+#     "Save setting?" only if the screen changed since the last commit (default
+#     Yes = keep), else silent back. Persistence is ONLY at the main menu (F10 /
+#     "Save and exit"). This REVIEW walk NEVER saves (ensure_stage rewrites the
+#     baseline each run), so capture-time edits never reach the CFG.
+#   - Tests (T47): inline rows of the Sound submenu (the separate chooser was
+#     retired). Enter on "Test sound effects" / "Test music" runs the test
+#     directly: opens the device, auto-plays the bounded/until-key test, then
+#     "Did you hear it?" Yes/No menu (default-Yes; y/n shortcuts; ESC=No) -> back
+#     to the submenu with a result badge (Working / Not working / Not tested).
+#   - System speed = a tui_picklist popup; Auto-detect = a modal tui_message box
+#     (Return dismiss).
 # Greyed rows are skipped by nav; we deliberately set the enabling state to
 # capture both the greyed and un-greyed appearances the operator asked to A/B.
 
@@ -279,178 +280,130 @@ walk() {
   send_keys Home Home
   shoot "00-main-menu"                 # idx0 highlighted + TOP PROFILE PANEL + help box
 
-  # --- Test SFX / Music (idx2): chooser + LIVE popup (AUDIOTEST=1) ---------
-  # CAPTURED FIRST, on the clean opl3 baseline (T44: edits are sticky now, so
-  # this must run before the destructive Sound note-demo or organya/disabled
-  # would leak into the music test). Baseline CFG = AUDIO_BACKEND=opl3, so the
-  # music cell plays the REAL Title theme via OPL3. Round-6 (T31): per-highlighted
-  # ABOUT box; result popup is question-only + VERTICAL Yes/No (y/n shortcuts).
-  # This is the FIRST real nav after boot -- absorb the first-keystroke race
-  # (Downs can drop on :0 right after the window appears) with a settle + a
-  # separate anchor batch BEFORE the Down-nav, so "item 2" lands reliably.
-  send_keys Home Home; sleep 1.0        # anchor + settle (race absorber)
-  send_keys Down Down; sleep 0.5        # -> item 2 (Test SFX/Music)
-  send_keys Return; sleep 1.5           # enter the chooser
-  shoot "40-audiotest-chooser-sfx-about"   # Test SFX highlighted -> SFX ABOUT (full-width highlight)
-  send_keys Return; sleep 1.5           # "Playing Sound Effect..." popup -> result popup
-  shoot "40b-sfx-result-yesno-vertical"  # question-only + VERTICAL Yes/No menu (no status line)
-  send_keys y; sleep 0.5                 # 'y' = Yes -> chooser (sel0)
-  send_keys Down; sleep 0.5             # chooser sel1 = Test music -> ABOUT switches to music text
-  shoot "40c-audiotest-chooser-music-about"  # Test music highlighted -> music ABOUT (OPL3)
-  send_keys Return                     # -> "Playing Music..." popup; real Title theme (OPL3) until-key
-  sleep 0.5; shoot "41-popup-playing-music"   # "Playing Music..." caption + progress bar
-  send_keys space; sleep 0.5            # stop the until-key play -> question-only result popup
-  shoot "42-music-result-yesno-vertical"   # question-only + VERTICAL Yes/No menu
-  send_keys y; sleep 0.8               # 'y' = Yes -> chooser, music badge -> Working
-  shoot "43-chooser-badge-working"      # both badges "Working"
-  send_keys Escape; sleep 0.5          # chooser -> main menu (clean baseline still intact)
+  # --- Sound submenu (idx0) -----------------------------------------------
+  send_keys Home Return; sleep 1        # main idx0 Sound -> submenu
+  shoot "10-sound-submenu"             # Express/Custom/Music+volumes/Test x2/Back + badges
 
-  # --- Sound setup (idx0): the T16 redesign + greying showcase ------------
-  send_keys Home Return; sleep 1
-  shoot "20-sound-default"             # Enabled, backend MIDI (OPL3), full names, help
-  send_keys Home;  shoot "21-sound-row-enabled-help"   # row0 help
-  send_keys Down;  shoot "22-sound-row-backend-help"   # row1 backend help (full names)
-  # Cycle backend opl3->organya (1 Right; list order Auto,WaveBlaster,OPL3,
-  # Organya) so Organya pre-render UN-greys; on a slow CPU this also pops the
-  # centered slow-CPU Note box (CPU-gated -- may not render under DOSBox-X's fast
-  # emulated CPU; the operator confirms on the 486).
+  # --- Inline audio tests (Sound submenu rows 3,4): LIVE popup (AUDIOTEST=1) --
+  # CAPTURED FIRST, on the clean opl3 baseline (edits are sticky; run before the
+  # destructive Music-and-volumes note-demo). T47: the tests are inline rows now
+  # (the separate chooser was retired) -- Enter on a test row opens the device +
+  # auto-plays, then "Did you hear it?" Yes/No (default-Yes; y/n shortcuts).
+  send_keys Home Down Down Down; sleep 0.5   # submenu row3 Test sound effects
+  send_keys Return; sleep 1.5           # run SFX test -> "Playing..." popup auto-plays
+  shoot "40-test-sfx-playing"
+  send_keys y; sleep 0.8                 # 'y' = Yes -> back to submenu (row3 badge)
+  shoot "41-test-sfx-badge-working"
+  send_keys Down; sleep 0.3             # submenu row4 Test music
+  send_keys Return; sleep 1.0           # run music test (real Title theme via OPL3, until-key)
+  shoot "42-test-music-playing"
+  send_keys space; sleep 0.5            # stop the until-key play -> "Did you hear it?"
+  send_keys y; sleep 0.8                 # 'y' = Yes -> back to submenu (row4 badge)
+  shoot "43-test-music-badge-working"
+
+  # --- Music (submenu row2): R-B trimmed it to backend / pre-render / quality
+  # (Sound on/off + volume moved to Custom setup). Rows: 0 backend, 1 Organya
+  # pre-render [grey unless organya], 2 Audio quality [grey unless organya].
+  send_keys Home Down Down Return; sleep 1   # submenu row2 Music -> screen_sound
+  shoot "20-music-default"             # backend MIDI (OPL3); pre-render+quality greyed
+  send_keys Home;  shoot "21-music-backend-help"   # row0 backend help (full names)
+  # Cycle backend opl3->organya (1 Right) so pre-render + Audio quality UN-grey;
+  # the NOTE box follows the highlighted row.
   send_keys Right; sleep 0.5
-  # The Sound NOTE box FOLLOWS the highlighted row. On the backend row (organya
-  # selected, NOT the pre-render row) the round-6 note reads "Organya is
-  # demanding on this CPU - enable Organya pre-render to improve performance."
-  # (round-6 items 2/3: ";" -> "-", "heavy" -> "demanding").
-  shoot "23-sound-organya-note-backend-row"   # reworded note on a NON-prerender row
-  # Step to the pre-render row: the note switches to the pre-render-specific text
-  # (note-follows-row A/B vs shot 23). Round-6 item 4: the keyed "On" help line
-  # now WRAPS indented inside the box (was overflowing outside).
-  send_keys Down;  shoot "24-sound-prerender-row-note"  # pre-render note + wrapped per-line help
-  # Audio quality row (row3): T45 changed the VALUE from "On"/"Off" to
-  # "11025Hz"/"22050Hz" (cfg key AUDIO_TIER2 unchanged) + added a conditional
-  # Organya NOTE here (visible because backend=organya right now). Capture the
-  # value at 11025Hz (baseline) + the new note, then Right->22050Hz + capture,
-  # then Left back to 11025Hz (restore baseline before the revert below).
-  send_keys Down; sleep 0.3; shoot "26-sound-audioquality-11025hz"   # value "11025Hz" + help + organya note
-  send_keys Right; sleep 0.3; shoot "27-sound-audioquality-22050hz"  # toggled value "22050Hz"
-  send_keys Left; sleep 0.3            # back to 11025Hz (baseline)
-  # Toggle Sound -> Disabled (Home=row0, Space=toggle): rows 1-5 GREY out.
-  # NOTE: xdotool's spacebar keysym is lowercase 'space' (capital 'Space' silently
-  # no-ops). This also visually confirms the T17 Space=change binding works.
-  send_keys Home space; sleep 0.5
-  shoot "25-sound-disabled-greys-others"
-  # T44: ESC now KEEPS edits. NO revert needed here -- the audio test (which
-  # needs the baseline opl3) runs EARLIER in the walk (before this destructive
-  # note-demo), and everything after this (hardware/input/perf/advanced/
-  # autodetect) is backend/sound-independent. The session-edit finale runs on
-  # the Performance screen (independent of the disabled-Sound state left here).
-  # The walk never saves + ensure_stage rewrites the baseline each run, so this
-  # in-session dirty state (organya + sound-disabled) reaches nothing it breaks.
-  # T52: ESC from this CHANGED Sound screen pops "Save setting?" (default Yes) --
-  # answer Return (Yes = keep). (The finale captures this modal; here we just
-  # answer it.) -> main menu (session dirty -- harmless, nothing after needs it).
+  shoot "22-music-organya-note-backend-row"
+  send_keys Down;  shoot "23-music-prerender-row-note"     # row1 pre-render note + help
+  send_keys Down; sleep 0.3; shoot "24-music-audioquality-11025hz"  # row2 "11025Hz" + organya note
+  send_keys Right; sleep 0.3; shoot "25-music-audioquality-22050hz" # toggled "22050Hz"
+  send_keys Left; sleep 0.3            # back to 11025Hz
+  # T52: ESC from this CHANGED screen (backend=organya) pops "Save setting?"
+  # (default Yes) -- Return keeps. -> Sound submenu, then ESC -> main. (Walk never
+  # saves + ensure_stage rewrites the baseline each run, so this is harmless.)
   send_keys Escape; sleep 0.5          # ESC (changed screen) -> "Save setting?"
-  send_keys Return; sleep 0.5          # Return = Yes = keep -> main menu
+  send_keys Return; sleep 0.5          # Return = Yes = keep -> Sound submenu
+  send_keys Escape; sleep 0.5          # Sound submenu -> main (silent)
 
-  # --- Sound hardware (idx1) ----------------------------------------------
-  # Round-5: Card Type values now carry traditional names ("T6 (Sound Blaster
-  # 16)", "T4 (Sound Blaster Pro)", ...). Rows: 0 Override AUTOEXEC.BAT (T37
-  # renamed from "Override AUTOEXEC BLASTER"), 1 I/O port, 2 IRQ,
-  # 3 8-bit DMA, 4 16-bit DMA, 5 MPU-401 port, 6 Card type (LAST). (Row 1 label
-  # is "I/O port" as of 6dd6fc6 -- was "Base I/O port".) The traditional name
-  # shows on EVERY shot (always rendered); we also land the highlight on the
-  # Card type row to capture its per-line help.
-  send_keys Home Down Return; sleep 1
-  shoot "30-sound-hardware"
-  send_keys Home; shoot "31-hw-override-help"      # row0 override + per-line help
-  send_keys Down; sleep 0.3; shoot "32-hw-ioport-full-width-highlight"   # row1 I/O port: round-6 full-width highlight (item 1 supersedes stop-at-value)
-  send_keys Down Down Down Down Down; sleep 0.4    # row1 -> row6 (Card type, last row)
-  shoot "33-hw-cardtype-traditional-name"          # Card type highlighted: "T6 (Sound Blaster 16)" + help
-  # T54 (c668d7b) FIXED the spurious-prompt bug: a NO-EDIT browse of the Sound
-  # Hardware screen now ESCs SILENTLY (it snapshots the seeded entry state and
-  # only prompts on a real field/override change). So NO workaround -- a bare ESC
-  # backs out to the main menu. This bare-ESC run IS the T54 regression witness:
-  # if browse+ESC ever pops "Save setting?" again, the walk desyncs = fix
-  # regressed. (HWBLASTER E2E scenario, which DOES change the BLASTER, is the
-  # positive control -- it still prompts + answers.)
-  send_keys Escape; sleep 0.5
-  shoot "34-hw-browse-esc-no-prompt"   # T54 witness: browse + ESC -> MAIN MENU, NO "Save setting?" modal
+  # --- Custom setup (Sound submenu row1 -> the BLASTER screen) ------------
+  # Rows (R-M removed the override row -- fields always editable): 0 I/O port,
+  # 1 IRQ, 2 DMA channel, 3 MPU-401 port, 4 Card type, then the R-B live rows
+  # 5 Sound, 6 SFX volume, 7 Music volume. R-I: Enter on a BLASTER field OPENS a
+  # DF pick-list (detected tagged, Other... on A / P); Right/Left cycle in place
+  # + write the composed BLASTER live. Card type carries the "Name (Tn)" name.
+  # ESC backs out SILENTLY (no Save-setting prompt -- edits are live).
+  send_keys Home Return; sleep 0.8      # main idx0 Sound -> submenu
+  send_keys Home Down Return; sleep 1   # submenu row1 Custom setup -> screen_hardware
+  shoot "30-sound-hardware"             # full screen incl. Sound + SFX/Music volume rows
+  send_keys Home; shoot "31-hw-ioport-row"         # row0 I/O port + DESCRIPTION
+  send_keys Return; sleep 0.8           # R-I: Enter opens the I/O port pick-list
+  shoot "35-hw-ioport-picklist"         # 0x220 (detected) + Other... popup, dimmed backdrop
+  send_keys Escape; sleep 0.4           # close the pick-list (no change), back on row0
+  send_keys Down Down Down Down; sleep 0.4         # row0 -> row4 (Card type)
+  shoot "33-hw-cardtype-traditional-name"          # "Sound Blaster 16 (T6)" + help
+  send_keys Escape; sleep 0.5           # browse + ESC -> submenu (silent)
+  shoot "34-hw-esc-clean"
+  send_keys Escape; sleep 0.5           # Sound submenu -> main
 
-  # (Audio test 40-43 captured earlier, right after the main menu, on the clean
-  # opl3 baseline -- before the destructive Sound note-demo.)
+  # --- System speed (idx1): DF-style pick-list ----------------------------
+  send_keys Home Down Return; sleep 1   # main idx1 System speed -> pick-list
+  shoot "55-system-speed-picklist"      # Slow/Normal/Fast/Very Fast/Auto-detect + (recommended) + DESCRIPTION
+  send_keys Escape; sleep 0.5           # ESC = cancel, no change -> main
 
-  # --- Input / joystick (idx3) --------------------------------------------
-  # Round-5: per-line On/Off help (was a prose blob). Capture row0 + row1 help
-  # to show the help text FOLLOWS the highlighted row.
+  # --- Input submenu (idx2) -----------------------------------------------
+  # T47 shell: row0 Joystick on/off (live), rows 1-3 (Configure keyboard /
+  # joystick / Restore defaults) GREYED as Phase-3 signposts, row4 Back. ESC
+  # backs out silently (live edit kept).
+  send_keys Home Down Down Return; sleep 1
+  shoot "50-input-submenu"              # row0 Joystick + greyed Configure/Restore rows
+  send_keys space; sleep 0.3; shoot "51-input-joystick-on"   # toggle Joystick On
+  send_keys space; sleep 0.3            # toggle back Off (baseline)
+  send_keys Escape; sleep 0.5           # submenu -> main (silent)
+
+  # --- Advanced / troubleshooting (idx3): PERF rows folded in -------------
+  # T47: PERF_MODE + FIXED_TIMESTEP are now the first two rows here (Performance
+  # is gone as a top-level item), followed by the compat rows.
   send_keys Home Down Down Down Return; sleep 1
-  shoot "50-input-joystick"                        # row0 + its per-line help
-  send_keys Down; sleep 0.3; shoot "51-input-row1-help"
-  send_keys Escape; sleep 0.5          # browse-only -> silent ESC (T54: no spurious prompt)
+  shoot "70-advanced"                   # row0 PERF_MODE + per-line help
+  send_keys Down; sleep 0.3; shoot "71-advanced-row1-help"   # row1 FIXED_TIMESTEP
+  send_keys Escape; sleep 0.5           # browse-only -> silent ESC
 
-  # --- Performance (idx4) -------------------------------------------------
+  # --- Auto-detect best settings (idx4): modal message box ----------------
   send_keys Home Down Down Down Down Return; sleep 1
-  shoot "60-performance"                           # row0 + its per-line help
-  send_keys Down; sleep 0.3; shoot "61-perf-row1-help"
-  send_keys Escape; sleep 0.5          # browse-only -> silent ESC (T54)
-
-  # --- Advanced / troubleshooting (idx5) ----------------------------------
-  send_keys Home Down Down Down Down Down Return; sleep 1
-  shoot "70-advanced"                              # row0 + its per-line help
-  send_keys Down; sleep 0.3; shoot "71-advanced-row1-help"
-  send_keys Escape; sleep 0.5          # browse-only -> silent ESC (T54)
-
-  # --- Auto-detect best settings (idx6): modal message box ----------------
-  # Round-5: the detected Sound line reads "Port 0x..." (was "base 0x..."),
-  # matching the Sound-hardware screen + main-menu profile panel wording.
-  send_keys Home Down Down Down Down Down Down Return; sleep 1
   shoot "80-autodetect-port"; send_keys Return; sleep 0.4
 
-  # --- T62 Enter=Save+Next then ESC=silent-back demo (team-lead review ask) ----
-  # Demonstrates the NEW interaction split on an editing screen. We use Advanced
-  # (idx5) because it has >=2 live rows, so the Enter cursor-ADVANCE is visible
-  # (the Input screen has a single live row, where the advance wraps in place).
-  #   1. Space/Right cycles a value (Enter no longer cycles).
-  #   2. Enter COMMITS the row + advances the cursor to the next live row, with
-  #      NO "Save setting?" prompt (it also advances the ESC revert baseline).
-  #   3. ESC right after that Enter is a SILENT back -- nothing is pending, so no
-  #      "Save setting?" modal (contrast shot 90b, where ESC follows an UNcommitted
-  #      edit and DOES prompt). The status bar "Space/Left-Right Change  Enter
-  #      Save+Next  ESC Back" is visible in every shot here.
-  # Advanced's in-session edit is harmless: the walk never saves + ensure_stage
-  # rewrites the baseline each run, and nothing after this depends on Advanced.
-  send_keys Home Down Down Down Down Down Return; sleep 1   # Advanced (idx5)
-  send_keys Home Right; sleep 0.3       # row0 edited via Right (Enter would NOT cycle)
-  shoot "85-t62-edit-via-right"         # row0 edit + new status bar (Enter Save+Next)
-  send_keys Return; sleep 0.4           # Enter = commit row0 + advance to row1, NO prompt
-  shoot "86-t62-enter-commit-advanced"  # highlight moved to row1; NO "Save setting?" modal
-  send_keys Escape; sleep 0.5           # ESC after a committed Enter = SILENT back (nothing pending)
-  shoot "87-t62-esc-silent-back"        # back at main menu, NO modal (contrast 90b)
+  # --- R-I Enter-opens-pick-list demo (editing-screen) --------------------
+  # On Advanced (idx3) Enter opens a modal pick-list for the highlighted row;
+  # Space/Left/Right still cycle in place. ESC closes the list with a full clean
+  # redraw (R-H -- no overlay/texture residue).
+  send_keys Home Down Down Down Return; sleep 1   # Advanced (idx3)
+  send_keys Home; sleep 0.3             # row0 PERF_MODE; status bar "Enter Open list ..."
+  shoot "85-advanced-perf-row"
+  send_keys Return; sleep 0.5           # Enter opens the PERF_MODE pick-list
+  shoot "86-advanced-perf-picklist"     # 0 Faithful / 1 Smooth / 2 Fast popup
+  send_keys Escape; sleep 0.5           # close list -> clean redraw (R-H), no residue
+  shoot "87-advanced-after-picklist-clean"
+  send_keys Escape; sleep 0.5           # no edit -> silent back to main
 
-  # --- T44 session-edit model demo (review-10): edit -> ESC KEEPS -> re-enter
-  #     shows the kept edit -> Save and exit. Demonstrates the new persistence
-  #     flow + the "* UNSAVED" dirty marker. Uses the PERFORMANCE screen so it's
-  #     independent of the Sound note-demo's left-disabled state. Done LAST (its
-  #     edit affects nothing after it). We do NOT press Save and exit -- the
-  #     window is left live + unsaved; ensure_stage rewrites the baseline each
-  #     run, so the staged CFG is untouched.
-  send_keys Home Down Down Down Down Return; sleep 1   # Performance (idx4)
-  send_keys Home Right; sleep 0.3       # row0 Performance mode: an edit (0 -> 1)
+  # --- T44 session-edit model demo: edit -> ESC KEEPS -> re-enter shows the
+  #     kept edit -> Save and exit highlight. Uses Advanced (idx3). We do NOT
+  #     press Save and exit -- the window is left live + unsaved; ensure_stage
+  #     rewrites the baseline each run, so the staged CFG is untouched.
+  send_keys Home Down Down Down Return; sleep 1   # Advanced (idx3)
+  send_keys Home Right; sleep 0.3       # row0 PERF_MODE: an edit
   shoot "90-sessionedit-made"           # the edit, in-screen
-  # T52: ESC from the CHANGED Performance screen pops the "Save setting?" modal
-  # (vertical Yes/No, default YES) -- this is now part of the session-edit flow.
   send_keys Escape; sleep 0.5           # ESC (changed) -> "Save setting?" modal
-  shoot "90b-save-setting-prompt"       # T52: "Save setting?" (default Yes) -- review-11 item
+  shoot "90b-save-setting-prompt"       # T52: "Save setting?" (default Yes)
   send_keys Return; sleep 0.5           # Return = default Yes = KEEP -> main menu
   shoot "91-sessionedit-menu-unsaved"   # main menu status now shows "* UNSAVED"
-  send_keys Home Down Down Down Down Return; sleep 1   # re-enter Performance
-  send_keys Home; sleep 0.3             # row0 Performance mode
-  shoot "92-sessionedit-kept"           # Performance mode STILL changed -> edit KEPT across ESC
-  send_keys Escape; sleep 0.5           # back to main menu (re-enter was view-only -> silent ESC, T54)
-  send_keys Home Down Down Down Down Down Down Down; sleep 0.3  # item 7 = "Save and exit"
-  shoot "93-sessionedit-save-and-exit"  # "Save and exit" highlighted (persist trigger; * UNSAVED in status)
+  send_keys Home Down Down Down Return; sleep 1   # re-enter Advanced
+  send_keys Home; sleep 0.3             # row0 PERF_MODE
+  shoot "92-sessionedit-kept"           # PERF_MODE STILL changed -> edit KEPT across ESC
+  send_keys Escape; sleep 0.5           # re-enter was view-only -> silent ESC
+  send_keys Home Down Down Down Down Down; sleep 0.3  # idx5 = "Save and exit"
+  shoot "93-sessionedit-save-and-exit"  # "Save and exit" highlighted (* UNSAVED in status)
   # T52 QUIT GUARD: ESC at the main menu ALWAYS pops "Quit without saving
   # settings?" (default NO), even when clean -- capture it, then ESC again = No =
   # STAY (a second ESC resolves to No, does NOT exit). Leaves the window live.
   send_keys Escape; sleep 0.5           # ESC at main menu -> quit guard
-  shoot "94-quit-without-saving-prompt" # T52: "Quit without saving settings?" (default No) -- review-11 item
+  shoot "94-quit-without-saving-prompt" # T52: "Quit without saving settings?" (default No)
   send_keys Escape; sleep 0.5           # ESC again = No = stay -> main menu
 
   shoot "99-main-menu-final"            # (session dirty -- left live, unsaved)

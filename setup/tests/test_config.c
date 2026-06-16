@@ -274,6 +274,37 @@ static void test_org_prerender_suggest(void)
 /* T67: test_wb_risky() removed with recommend_wb_risky() -- the WaveBlaster
  * freeze-risk advisory is gone (WB fixed + ships default-on). */
 
+/* Phase-1 / T5: SETUP-only keys (NULL env_name, e.g. SPEED_CLASS) must be
+ * SKIPPED by the engine loader -- never setenv (a NULL name would crash) --
+ * while engine-consumed keys on the same file still apply. SETUP itself must
+ * still round-trip the value through DOSKUTSU.CFG (it remembers the preset). */
+static void test_speed_class(void)
+{
+  const char *path = "/tmp/DKT_SPEED.CFG";
+  scfg_t a, b;
+  int idx;
+
+  unsetenv("SPEED_CLASS");
+  unsetenv("SDL_HINT_DOSKUTSU_PERF_MODE");
+  write_file(path, "SPEED_CLASS=fast\r\nPERF_MODE=1\r\n");
+  doskutsu_cfg_load(path);
+  CHECK(getenv("SPEED_CLASS") == NULL,
+        "SETUP-only SPEED_CLASS is NOT published to the environment");
+  CHECK(getenv("SDL_HINT_DOSKUTSU_PERF_MODE") &&
+        strcmp(getenv("SDL_HINT_DOSKUTSU_PERF_MODE"), "1") == 0,
+        "engine-consumed key past a SETUP-only key still applies");
+  unsetenv("SDL_HINT_DOSKUTSU_PERF_MODE");
+
+  idx = scfg_index("SPEED_CLASS");
+  CHECK(idx >= 0, "SPEED_CLASS is a known SETUP key");
+  scfg_defaults(&a);
+  scfg_set(&a, idx, "fast");
+  CHECK(scfg_save(&a, path) == 0, "scfg_save with SPEED_CLASS ok");
+  scfg_load(&b, path);
+  CHECK(strcmp(scfg_get(&b, scfg_index("SPEED_CLASS")), "fast") == 0,
+        "round-trip SPEED_CLASS preset");
+}
+
 int main(void)
 {
   test_loader();
@@ -283,6 +314,7 @@ int main(void)
   test_presence_checked();
   test_authoritative();
   test_org_prerender_suggest();
+  test_speed_class();
   printf("\n%s (%d failures)\n", g_fail ? "TESTS FAILED" : "ALL TESTS PASSED", g_fail);
   return g_fail ? 1 : 0;
 }

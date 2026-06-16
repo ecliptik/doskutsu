@@ -95,6 +95,13 @@ static int doskutsu_cfg_load(const char *path)
     if (entry == NULL)
       continue; /* unknown / non-user-facing key: ignore (forward-compat) */
 
+    /* SETUP-only keys carry a NULL env_name (e.g. SPEED_CLASS -- a provenance
+     * record for the System Speed preset). The engine never reads them, so
+     * skip here, and crucially never setenv(NULL, ...). Behavior-neutral for
+     * every engine-consumed key (all of those have a non-NULL env_name). */
+    if (entry->env_name == NULL)
+      continue;
+
     /* value = everything after '=', trimmed both ends */
     val_start = eq + 1;
     while (*val_start && dkt_is_space(*val_start)) ++val_start;

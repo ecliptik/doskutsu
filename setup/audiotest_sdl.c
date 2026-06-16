@@ -522,13 +522,13 @@ int audiotest_init(const scfg_t *c)
     case MUS_OPL3:
       SDL_strlcpy(g_msg,
         "The Sound Effects test plays the Polar Star shot. The Music test "
-        "plays the title theme on your sound card's FM synth (OPL3).",
+        "plays the title theme on the sound card's FM synth (OPL3).",
         sizeof(g_msg));
       break;
     case MUS_WB:
       SDL_strlcpy(g_msg,
         "The Sound Effects test plays the Polar Star shot. The Music test "
-        "plays the title theme on your WaveBlaster -- silent if none is "
+        "plays the title theme on the WaveBlaster -- silent if none is "
         "attached.", sizeof(g_msg));
       break;
     default:

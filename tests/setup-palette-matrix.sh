@@ -4,12 +4,12 @@
 # matrix for the operator's review-2 decision. Two SETUP-startup env toggles
 # (nx-engine, commit ed6faed) select all variants from ONE scaffold build, so
 # this re-launches SETUP once per variant with the env set, and shoots the two
-# decision screens (main menu + Sound setup) each time.
+# decision screens (main menu + Music and volumes) each time.
 #
 #   DOSKUTSU_SETUP_PALETTE  = cs (default) | classic
 #   DOSKUTSU_SETUP_TITLEBAR = 1 (default, full-width bar) | 0 (plain centered)
 #
-# Variants captured (main menu + Sound setup each = 8 PNGs):
+# Variants captured (main menu + Music and volumes each = 8 PNGs):
 #   csbar     CS palette + title bar      (default: no env)
 #   csnobar   CS palette, no title bar    (TITLEBAR=0)
 #   classicbar     classic palette + bar  (PALETTE=classic)
@@ -130,9 +130,14 @@ capture_variant() {
   for i in $(seq 1 10); do focus_dosbox && break; sleep 0.5; done
   sleep 8                              # SETUP boot
   shoot "${label}-1-main"
-  send_keys Home Down Return; sleep 1  # Home->idx0, Down->idx1 Sound setup, Enter
+  # T47: Sound is now a submenu; the palette-representative editing screen is
+  # "Music and volumes" (the old Sound setup). Home->idx0 Sound, Enter -> submenu;
+  # Home,Down x2 -> "Music and volumes", Enter.
+  send_keys Home Return; sleep 0.6
+  send_keys Home Down Down Return; sleep 1
   shoot "${label}-2-sound"
-  send_keys Escape                     # leave sound (discard)
+  send_keys Escape                     # leave sound screen
+  send_keys Escape                     # leave Sound submenu -> main
   kill_dosbox
 }
 

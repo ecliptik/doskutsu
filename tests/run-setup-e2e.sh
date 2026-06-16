@@ -576,18 +576,37 @@ DOSKUTSU_PRESENT=0
 # NAV MODEL after T24/T25 (nx-engine 58d0933/5065939/9cadca7). READ THIS before
 # editing any keystroke sequence below.
 # ===========================================================================
-# MAIN MENU (9 items, start_sel re-seeded to 0 on every entry). T25 DROPPED
-# "System profile" from the menu -- it is now an always-on display PANEL pinned
-# ABOVE the menu (draw_profile_panel; non-selectable, ZERO nav effect; it only
-# shifts the on-screen boxes down). The reach-counts below are therefore -1 Down
-# vs the pre-T25 model.
-#   0 Sound setup     1 Sound hardware  2 Test SFX/Music  3 Input/joystick
-#   4 Performance     5 Advanced        6 Auto-detect     7 Save and exit
-#   8 Quit without saving
+# MAIN MENU after T47 (the Dark Forces UX restructure): TIGHTENED 9 -> 7 items.
+# The SYSTEM PROFILE panel is still pinned above the menu (non-selectable, ZERO
+# nav effect). New item map (Home then Down x N):
+#   0 Sound               1 System speed    2 Input
+#   3 Advanced / troubleshooting            4 Auto-detect best settings
+#   5 Save and exit       6 Quit without saving
 # Enter selects; F10 = Save and Quit; ESC quits (discard-confirm if dirty).
-# (Main menu is now a custom nav loop, not tui_menu, but the main-menu keys are
-# IDENTICAL: Up/Down/Home/Enter/F10/ESC. Sub-screen internal nav CHANGED in T62 --
-# see the EDITING SCREENS block below for the new Enter=commit+advance semantics.)
+#
+# T47 STRUCTURE CHANGE -- the old top-level "Sound setup / Sound hardware /
+# Test SFX/Music / Performance" items are GONE. They moved:
+#   - "Sound" (idx 0) is now a SUBMENU; reach a sound screen via Sound -> row:
+#       0 Express setup        (Phase-1 STUB: an info message, no edit)
+#       1 Custom setup         -> the Sound Hardware (BLASTER) screen
+#       2 Music and volumes    -> the old "Sound setup" screen (rows below)
+#       3 Test sound effects   -> inline SFX test (badge)
+#       4 Test music           -> inline music test (badge)
+#       5 Back
+#     The submenu ESC backs out to the main menu SILENTLY (it is navigation, not
+#     an editing screen -- no "Save setting?" prompt).
+#   - "Performance" is GONE; PERF_MODE + FIXED_TIMESTEP are now the FIRST two
+#     rows of the Advanced screen (idx 3): 0 PERF_MODE, 1 FIXED_TIMESTEP, then
+#     the compat rows (AUDIO_WB_DIRECT_PORT [skip unless backend wb/auto],
+#     DIRTY_RECTS, PIXEL_FORMAT_8, FORCE_PUMP_YIELD, THRASH_FULLCOVER).
+#   - "Input" (idx 2) is a SUBMENU: row 0 Joystick on/off (live), rows 1-3
+#     (Configure keyboard / joystick / Restore defaults) GREYED + skipped
+#     (Phase-3), row 4 Back. Its ESC backs out SILENTLY (live edit kept).
+#   - System speed (idx 1) is a tui_picklist popup (Slow/Normal/Fast/Very Fast/
+#     Auto-detect); ESC cancels with no change.
+# (Main + submenus are custom nav loops; the keys are IDENTICAL:
+# Up/Down/Home/Enter/F10/ESC. The Custom-setup screen's Enter now OPENS a
+# pick-list -- scenarios still edit fields with Right/Left, never Enter.)
 #
 # HOME ANCHOR (key Home, DOS scan 0x47): jumps to the first selectable row on
 # EVERY screen (main menu -> idx0; editing screens -> first active row). We start
@@ -624,13 +643,19 @@ DOSKUTSU_PRESENT=0
 #   - Greyed rows are SKIPPED by Up/Down/Home (state-dependent). Enabling state
 #     must be set first (we set backend before reaching Organya pre-render, etc.)
 #
-# SOUND SETUP rows (greying-aware), top->bottom:
-#   0 Sound (Enabled/Disabled)  1 Music backend  2 Organya pre-render [SKIP
-#   unless backend==organya]  3 Audio quality  4 SFX volume  5 Music volume
-#   (T61 9e57d25 renamed rows 4/5 from "SB16 voice vol"/"SB16 FM vol"; the cfg
-#   keys SB16_VOICE_VOL / SB16_FM_VOL and the cycle behavior are unchanged.)
-#   With sound Enabled + backend!=organya, Down from Home(row0) visits 0,1,3,4,5
-#   (row2 skipped): Home,Down=row1(backend); +Down=row3; +Down=row4; +Down=row5.
+# MUSIC screen rows (R-B trimmed it to playback-only), top->bottom:
+#   0 Music backend  1 Organya pre-render [SKIP unless organya]  2 Audio quality
+#   [SKIP unless organya]. Sound on/off + SFX/Music volume MOVED to Custom setup.
+#   With backend!=organya, only row0 is live (rows 1,2 greyed) -> Home lands on
+#   backend; Down wraps back to row0.
+#
+# CUSTOM SETUP rows (R-M removed the override row -- fields always editable):
+# 0 I/O port, 1 IRQ, 2 DMA channel, 3 MPU port, 4 Card type, 5 Sound
+# (Enabled/Disabled), 6 SFX volume, 7 Music volume. Rows 6/7 grey when sound is
+# Disabled. ALL rows edit the session LIVE now (a BLASTER field writes the
+# composed BLASTER on each change; Sound/volume cycle their scfg key) and ESC
+# backs out SILENTLY -- there is no "Save setting?" prompt on this screen any
+# more. (The single DMA pick derives the SB16 D + H BLASTER slots.)
 #
 # BACKEND enum (Right/Space cycles fwd): auto(0)->wb(1)->opl3(2)->organya(3).
 # Saved cfg writes the raw value; "auto" is omitted from the file.
@@ -639,12 +664,14 @@ DOSKUTSU_PRESENT=0
 scenario_A() {
   local name="A"; SCN_RC=0
   log "=== Scenario $name: AUDIO_BACKEND=opl3 + PERF_MODE=1 ==="
-  # Sound setup (idx0): Home->main idx0, Enter; in-screen Home->row0, Down->
-  #   row1 backend, Right x2 (auto->wb->opl3); ESC back (keeps edit).
-  # Performance (idx4): Home,Down x4, Enter; Home->row0 PERF_MODE, Right (0->1);
-  #   ESC back. Then main-menu F10 = Save and Exit (writes CFG + exits).
-  SCN_KEYS=( Home Return   Home Down $(rep 2 Right) Escape Return
-             Home $(rep 4 Down) Return   Home Right Escape Return
+  # Sound(idx0)->submenu; Music(submenu row2): Home,Down x2,Enter -> screen_sound;
+  #   Home->row0 backend, Right x2 (auto->wb->opl3); ESC Return (keep) -> submenu;
+  #   ESC -> main (silent).
+  # Advanced(idx3): Home,Down x3,Enter; Home->row0 PERF_MODE, Right (0->1);
+  #   ESC Return. Then main-menu F10 = Save and Exit (writes CFG + exits).
+  SCN_KEYS=( Home Return   Home $(rep 2 Down) Return
+             Home $(rep 2 Right) Escape Return   Escape
+             Home $(rep 3 Down) Return   Home Right Escape Return
              F10 )
   run_setup_phase "$name"
   assert_cfg_line AUDIO_BACKEND opl3 || note_fail
@@ -669,13 +696,14 @@ scenario_A() {
 scenario_B() {
   local name="B"; SCN_RC=0
   log "=== Scenario $name: AUDIO_BACKEND=org + USE_JOYSTICK=1 ==="
-  # Sound setup (idx0): Home, Enter; Home->row0, Down->row1 backend, Right
-  #   x3 (auto->wb->opl3->organya); ESC back. (Picking Organya may pop a T8
-  #   pre-render auto-suggest Note box -- harmless to these asserts.)
-  # Input (idx3): Home,Down x3, Enter; Home->row0 USE_JOYSTICK, Right (0->1);
-  #   ESC back. Then main-menu F10 = Save and Exit (writes CFG + exits).
-  SCN_KEYS=( Home Return   Home Down $(rep 3 Right) Escape Return
-             Home $(rep 3 Down) Return   Home Right Escape Return
+  # Sound(idx0)->submenu; Music(row2): Home,Down x2,Enter; Home->row0 backend,
+  #   Right x3 (auto->wb->opl3->organya); ESC Return; ESC -> main. (Organya may
+  #   pop a T8 pre-render note -- harmless here.)
+  # Input(idx2)->submenu: Home,Down x2,Enter; Home->row0 Joystick, Right (0->1);
+  #   ESC (Input submenu backs out silently, edit kept). Then F10 = Save+Exit.
+  SCN_KEYS=( Home Return   Home $(rep 2 Down) Return
+             Home $(rep 3 Right) Escape Return   Escape
+             Home $(rep 2 Down) Return   Home Right Escape
              F10 )
   run_setup_phase "$name"
   assert_cfg_line AUDIO_BACKEND organya || note_fail
@@ -701,17 +729,16 @@ scenario_B() {
 scenario_C() {
   local name="C"; SCN_RC=0
   log "=== Scenario $name: SB16_FM_VOL=20 + FIXED_TIMESTEP=0 ==="
-  # Sound setup (idx0): Home, Enter; Home->row0, Down x3 -> row5 SB16 FM vol
-  #   (row0->1->4->5; rows 2 Organya-pre-render AND 3 Audio-quality both skipped
-  #   with backend=auto -- T57 greys Audio quality unless Organya, same as the
-  #   pre-render row); Left x8 (28->20); ESC back. (Backend untouched -> stays
-  #   auto -> omitted.) NOTE pre-T57 this was Down x4 (only row2 skipped); the
-  #   T57 grey-out of row3 removes one navigable row so it is now Down x3.
-  # Performance (idx4): Home,Down x4, Enter; Home->row0 PERF_MODE, Down->row1
-  #   FIXED_TIMESTEP, Right (1->0); ESC back. Then main-menu F10 = Save and Exit.
-  #   (Main-menu nav unaffected by T57 -- Audio quality is a Sound-screen row.)
-  SCN_KEYS=( Home Return   Home $(rep 3 Down) $(rep 8 Left) Escape Return
-             Home $(rep 4 Down) Return   Home Down Right Escape Return
+  # R-B/R-M: SB16 FM (Music) volume is Custom row 7 (no override row now).
+  #   Sound(idx0)->submenu; Custom(row1): Home,Down,Enter -> screen_hardware;
+  #   Home->row0 (I/O port), Down x7 -> row7 Music volume; Left x8 (28->20, live
+  #   edit); ESC (silent, no prompt) -> submenu; ESC -> main. (Backend untouched
+  #   -> auto -> omitted.)
+  # Advanced(idx3): Home,Down x3,Enter; Home->row0 PERF_MODE, Down->row1
+  #   FIXED_TIMESTEP, Right (1->0); ESC Return. Then main-menu F10 = Save+Exit.
+  SCN_KEYS=( Home Return   Home Down Return
+             Home $(rep 7 Down) $(rep 8 Left) Escape   Escape
+             Home $(rep 3 Down) Return   Home Down Right Escape Return
              F10 )
   run_setup_phase "$name"
   assert_cfg_line SB16_FM_VOL 20            || note_fail
@@ -737,9 +764,10 @@ scenario_AUDIO() {
   # select (proves SETUP's audio config brought the device up and selected the
   # configured backend). WAV-RMS non-silence is attempted as a best-effort
   # bonus (see assert_wav_nonsilent -- DOSBox-X headless recwave limitation).
-  # Sound setup (idx0): Home, Enter; Home->row0, Down->row1 backend,
-  #   Right x3 (->organya); ESC back. Then main-menu F10 = Save and Exit.
-  SCN_KEYS=( Home Return   Home Down $(rep 3 Right) Escape Return   F10 )
+  # Sound(idx0)->submenu; Music(row2): Home,Down x2,Enter; Home->row0 backend,
+  #   Right x3 (->organya); ESC Return; ESC -> main. Then F10 = Save and Exit.
+  SCN_KEYS=( Home Return   Home $(rep 2 Down) Return
+             Home $(rep 3 Right) Escape Return   Escape   F10 )
   run_setup_phase "$name"
   assert_cfg_line AUDIO_BACKEND organya || note_fail
   if [[ "$DOSKUTSU_PRESENT" == "1" ]]; then
@@ -786,38 +814,31 @@ scenario_SETUPAUDIO() {
   launch_dosbox "$CONF_FAST" -c 'SETUP.EXE' || { CAPTURE_AUDIO=0; pulse_sink_down; note_fail; return 1; }
   sleep 8                                  # SETUP boot (profile_detect + SDL link)
   shoot "${name}-01-setup-main"
-  # T24 flow: Home anchors idx0; Down x2 -> "Test SFX / Music" (idx 2). Enter
-  # opens the chooser {Test SFX(0), Test music(1), Back(2)}; audiotest_init
-  # opens the SB16 device on chooser entry (emits the mixer-balance banner).
-  send_keys Home Down Down Return          # enter audio test -> SB16 device opens, chooser
-  sleep 2
-  shoot "${name}-02-audio-chooser"
-  # chooser sel0 = Test sound effects: Enter -> popup auto-plays the bounded SFX
-  # (blocking), then asks "Did you hear it?" as a Yes/No MENU (round-5/T27:
-  # highlight defaults to Yes; Left/Right/Up/Down toggle; Enter confirms the
-  # highlight; Y/N keys are still immediate shortcuts; ESC = No). We press the
-  # 'y' shortcut -> Yes -> back to chooser. (The 'y' keystroke is unchanged by
-  # the round-5 menu conversion; Enter-with-default would also answer Yes now.)
-  send_keys Return                         # play SFX popup
+  # T47 flow: the tests are now inline rows in the Sound submenu (the separate
+  # chooser screen was retired). Home,Enter -> Sound submenu; Home,Down x3 ->
+  # "Test sound effects" (row 3); Enter runs sound_inline_test(0), which opens
+  # the SB16 device (emits the mixer-balance banner) and auto-plays the bounded
+  # SFX (blocking), then asks "Did you hear it?" (Yes/No; 'y' = immediate Yes).
+  send_keys Home Return                    # main -> Sound submenu
+  send_keys Home $(rep 3 Down) Return      # row3 Test sound effects -> SB16 opens + SFX plays
   sleep 2                                  # bounded SFX play
-  shoot "${name}-03-popup-sfx"
-  send_keys y                              # Yes/No menu -> 'y' shortcut = Yes -> chooser
+  shoot "${name}-02-popup-sfx"
+  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to submenu (row3)
   sleep 0.5
-  # chooser sel1 = Test music: capture window must overlap the music play, so
-  # start the host record BEFORE the Return that triggers it. T28: music is
-  # until-key now (this scenario uses AUDIO_BACKEND=organya -> the looping PCM
-  # tone, 10 s cap). The play stage consumes the stop key; the answer is a
-  # SEPARATE key -- let the tone fill the capture window, then 'space' stops the
+  # Test music is the next row (row 4). The capture window must overlap the play,
+  # so start the host record BEFORE the Return. Music is until-key (organya ->
+  # looping PCM tone, 10 s cap); the play stage consumes the stop key, the answer
+  # is a SEPARATE key -- let the tone fill the window, then 'space' stops the
   # play and 'y' answers.
-  send_keys Down                           # move to sel1 (Test music)
+  send_keys Down                           # row4 Test music
   local cap_pid=""
   if [[ "$captured" == "1" ]]; then ( pulse_record 6 "$wav" ) & cap_pid=$!; sleep 0.5; fi
   send_keys Return                         # play music popup; PCM tone loops until-key
   [[ -n "$cap_pid" ]] && wait "$cap_pid" 2>/dev/null   # ~6 s of tone fills the WAV
   send_keys space                          # stop the until-key play -> answer prompt
   sleep 0.5
-  send_keys y                              # Yes/No menu -> 'y' shortcut = Yes -> chooser
-  send_keys Escape                         # chooser -> main menu (audiotest_shutdown)
+  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to submenu (row4)
+  send_keys Escape                         # submenu -> main menu
   sleep 1
   CAPTURE_AUDIO=0; pulse_sink_down
   kill_dosbox
@@ -835,8 +856,8 @@ scenario_SETUPAUDIO() {
 # ===========================================================================
 
 # run_setup_audio <name> <backend> <conf> -- write a CFG for <backend>, drive
-# the AUDIOTEST=1 SETUP.EXE into Test SFX/Music (idx 2), Test music via the T24
-# popup flow, host-capture the output. Sets WAV_OUT + collects SETUP's SDLDBG.LOG.
+# the AUDIOTEST=1 SETUP.EXE into the Sound submenu's inline "Test music" row
+# (T47), host-capture the output. Sets WAV_OUT + collects SETUP's SDLDBG.LOG.
 run_setup_audio() {
   local name="$1" backend="$2" conf="$3"
   { printf '; T11 per-backend audio: %s\r\n' "$backend"
@@ -852,10 +873,11 @@ run_setup_audio() {
   log "[$name] SETUP audio test, backend=$backend, conf=$(basename "$conf")..."
   launch_dosbox "$conf" -c 'SETUP.EXE' || { CAPTURE_AUDIO=0; pulse_sink_down; note_fail; return 1; }
   sleep 8                                  # SETUP boot
-  send_keys Home Down Down Return          # Test SFX/Music (idx 2) -> chooser; device opens
-  sleep 2
-  shoot "${name}-02-audio-chooser"
-  send_keys Down                           # chooser sel1 = Test music
+  # T47: Test music is row 4 of the Sound submenu. Home,Enter -> submenu;
+  # Home,Down x4 -> "Test music". The device opens when Enter runs the test.
+  send_keys Home Return                    # main -> Sound submenu
+  send_keys Home $(rep 4 Down)             # row4 Test music (positioned, not yet entered)
+  shoot "${name}-02-sound-submenu"
   # T28 popup flow (audiotest_sdl.c): Test music = Enter -> the play stage runs
   # UNTIL-KEY now, not a bounded arpeggio. With the stage's data/midi/curly.mid
   # present the opl3/wb backends play the REAL Title theme (15 s cap); organya/
@@ -872,8 +894,8 @@ run_setup_audio() {
   [[ -n "$cap_pid" ]] && wait "$cap_pid" 2>/dev/null   # ~8 s of real song fills the WAV
   send_keys space                          # stop the until-key play -> answer prompt
   sleep 0.5
-  send_keys y                              # Yes/No menu -> 'y' = Yes -> chooser (sel1)
-  send_keys Escape                         # chooser -> main menu
+  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to submenu (row4)
+  send_keys Escape                         # submenu -> main menu
   sleep 1
   CAPTURE_AUDIO=0; pulse_sink_down
   kill_dosbox
@@ -955,15 +977,17 @@ scenario_HWBLASTER() {
     printf 'AUDIO_BACKEND=wb\r\n'
     printf 'BLASTER=A220 I5 D1 H5 P330 T6\r\n'
   } > "$STAGE_DIR/DOSKUTSU.CFG"
-  # Sound hardware (idx1): Home,Down, Enter -> screen (override row0 ON since a
-  #   BLASTER is seeded, so the A/I/D/H/P/T fields are active).
-  # In-screen: Home->row0 override, Down x5 -> P field (rows: 0 override, 1 A, 2 I,
-  #   3 D, 4 H, 5 P). Right (P330 idx1 -> P300 idx2).
-  # T44: the composed BLASTER commits to the SESSION on ESC-back (no per-screen
-  #   F10). So: edit the P field -> ESC back -> main-menu F10 (Save and Exit)
-  #   writes the cfg with the P300 BLASTER. (T62: we edit the P field with Right,
-  #   not Enter -- Enter would commit the row + advance, not cycle the value.)
-  SCN_KEYS=( Home Down Return   Home $(rep 5 Down) Right Escape Return   F10 )
+  # Sound(idx0)->submenu; Custom setup(submenu row1): Home,Down,Enter ->
+  #   screen_hardware (override row0 ON since a BLASTER is seeded, so the
+  #   A/I/D/H/P/T fields are active).
+  # In-screen (R-M: no override row): rows 0 A, 1 I, 2 DMA, 3 P, 4 T. Home->row0,
+  #   Down x3 -> P field. The R-A expanded MPU list is ascending (...0x300,
+  #   0x320, 0x330...), so from the seeded P330 a Left x2 lands on P300 (0x330 ->
+  #   0x320 -> 0x300). The edit writes the composed BLASTER LIVE; ESC backs out
+  #   SILENTLY (no prompt) -> submenu -> main; main-menu F10 writes P300. (Custom's
+  #   Enter OPENS a pick-list, so we edit the P field with Left/Right, not Enter.)
+  SCN_KEYS=( Home Return   Home Down Return
+             Home $(rep 3 Down) $(rep 2 Left) Escape   Escape   F10 )
   run_setup_phase "$name" keep_cfg
   assert_cfg_line BLASTER 'A220 I5 D1 H5 P300 T6' || note_fail
   if [[ "$DOSKUTSU_PRESENT" == "1" ]]; then

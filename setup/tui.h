@@ -62,6 +62,24 @@ typedef struct
 const palette_t *tui_pal(void);
 #define PAL (tui_pal())
 
+/* Shared geometry for the bottom Help / Description / NOTE box (operator
+ * requirement T47): every screen draws its bottom info box at this identical
+ * width + x-position, so the bottom panel never changes size or jumps left/
+ * right as you move between screens. Width 72 at x=5 matches the main-menu
+ * SYSTEM PROFILE panel; box interior text wraps at x=TUI_DESC_TX width
+ * TUI_DESC_TW (1-cell margins inside the 72-wide box). The y-position and the
+ * box HEIGHT stay per-screen (content-driven); only the width + x are fixed. */
+#define TUI_DESC_X   5   /* 1-based left column of the box      */
+#define TUI_DESC_W   72  /* box width (cols 5..76, 2-col margins) */
+#define TUI_DESC_TX  7   /* interior text x (x + 2)             */
+#define TUI_DESC_TW  68  /* interior text wrap width (W - 4)    */
+/* R-J: the bottom info box (Description/Help) is BOTTOM-ANCHORED on every screen
+ * so it never floats -- its bottom border sits at row TUI_DESC_BOTTOM (just
+ * above the status bar at row 25). A box of height h is drawn at y =
+ * TUI_DESC_TOP(h); its wrapped text starts one row below. */
+#define TUI_DESC_BOTTOM 23
+#define TUI_DESC_TOP(h) (TUI_DESC_BOTTOM - (h) + 1)
+
 /* 1 if the full-width title BAR variant is active (DOSKUTSU_SETUP_TITLEBAR,
  * default on); 0 = plain centered title text (T22 A/B). */
 int tui_titlebar_enabled(void);
@@ -152,5 +170,50 @@ int tui_yesno(const char *title, const char *question, int default_no);
 /* Yes/No confirm; returns 1 for yes. Back-compat shim over tui_yesno (No
  * default). New code should call tui_yesno directly. */
 int tui_confirm(const char *question);
+
+/* tui_picklist return sentinel: the user picked the optional "Other..." row and
+ * entered a free-form value (copied into other_buf). Distinct from any valid
+ * item index (>= 0) and from the ESC/cancel result (-1). */
+#define TUI_PICK_OTHER 0x2000
+
+/* DF-style modal pick-list popup (the one new Phase-1 primitive; per
+ * SETUP-DF-UX-PLAN Part 3). Draws a bordered list of n labeled items and
+ * blocks until the user chooses one or cancels. Self-documenting: every legal
+ * value is visible at once, instead of Left/Right cycling one value into view.
+ *
+ *   title       box title (NULL/"" -> untitled).
+ *   ax, ay      1-based top-left anchor for the list box; pass <= 0 for either
+ *               to CENTER on that axis (both <= 0 -> fully centered). When an
+ *               anchor would push the box off-screen it is clamped inward.
+ *   items       n item labels (required).
+ *   tags        optional parallel array; tags[i], when non-NULL and non-empty,
+ *               renders right-aligned on the item row in the value role (e.g.
+ *               "(detected)" / "(default)" / "(current)"). Pass NULL for none.
+ *   descs       optional parallel array; when non-NULL a DESCRIPTION box under
+ *               the list shows descs[sel] (wrapped) -- the DF "help bar". The
+ *               Other row, when present, uses otherprompt for its description.
+ *   n           item count.
+ *   start_sel   initially highlighted item [0,n); clamped.
+ *   allow_other when non-zero an extra "Other..." row is appended; selecting it
+ *               opens a free-entry field. The typed text (trimmed) is copied
+ *               into other_buf (other_cap bytes) and the call returns
+ *               TUI_PICK_OTHER. tui_picklist does NOT validate the value -- the
+ *               caller validates and may re-open on a bad entry.
+ *   otherprompt prompt shown in the free-entry box (NULL -> a default).
+ *   other_buf,
+ *   other_cap   destination for the Other value (may be NULL/0 when
+ *               allow_other == 0).
+ *
+ * Keys: Up/Down move (wrap), Home -> first row, Enter selects, ESC cancels.
+ * The popup is drawn over the current screen and decorated (T55); the caller
+ * repaints afterward. Every write is clipped to 80x25 (no scroll).
+ *
+ * Returns the chosen item index [0,n), or TUI_PICK_OTHER (Other entered), or
+ * -1 on ESC/cancel. */
+int tui_picklist(const char *title, int ax, int ay,
+                 const char *const *items, const char *const *tags,
+                 const char *const *descs, int n, int start_sel,
+                 int allow_other, const char *otherprompt,
+                 char *other_buf, int other_cap);
 
 #endif /* SETUP_TUI_H */

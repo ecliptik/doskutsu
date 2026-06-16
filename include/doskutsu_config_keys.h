@@ -94,6 +94,11 @@ typedef struct
  * runs unchanged. */
 static const char *dkt_backend_vals[] = { "auto", "wb", "opl3", "organya", NULL };
 
+/* System Speed preset classes (plan 3.4). "notset" is the provenance sentinel
+ * shown as "(not set)" until a class is chosen or Auto-detect runs. */
+static const char *dkt_speed_vals[] =
+  { "notset", "slow", "normal", "fast", "veryfast", NULL };
+
 static const dkt_key_t DKT_KEYS[] =
 {
   /* ---- Sound -------------------------------------------------------- */
@@ -187,6 +192,21 @@ static const dkt_key_t DKT_KEYS[] =
     "Sound hardware",
     "SB base/IRQ/DMA/MIDI-port (A/I/D/H/P/T); SETUP's value overrides AUTOEXEC SET BLASTER",
     DKT_F_AUTHORITATIVE },
+
+  /* ---- SETUP-only (engine-IGNORED) --------------------------------- */
+  /* APPEND-ONLY: new keys go at the END of this table. SPEED_CLASS records
+   * which System Speed preset the user last applied (plan 3.4). It is a
+   * SETUP-only provenance string: env_name is NULL, so the engine loader
+   * (doskutsu_config.h) SKIPS it (never setenv -- a NULL name would also be a
+   * crash). The preset's real effect is written through the existing
+   * PERF_MODE / FIXED_TIMESTEP / DIRTY_RECTS / PIXEL_FORMAT_8 keys; this only
+   * remembers the label for the profile panel + the System Speed screen's
+   * "(current)" tag. "notset" renders as "(not set)" until a class is chosen
+   * or Auto-detect runs. */
+  { "SPEED_CLASS", NULL,
+    DKT_ENUM, DKC_PERF, "notset", 0, 0, dkt_speed_vals,
+    "Speed class",
+    "SETUP-only record of the chosen System Speed preset; ignored by the engine", 0 },
 };
 
 #define DKT_KEY_COUNT ((int)(sizeof(DKT_KEYS) / sizeof(DKT_KEYS[0])))
