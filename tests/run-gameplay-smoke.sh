@@ -341,7 +341,7 @@ BANNER_REGEX=(
   "midi ISR tick: engine (registered tick_isr callback \(L2b active.*\)|skipped registration.*)"
   "audio: SDL/0073 rate-diag: req_freq="
   "audio: SDL/0074 RATEDIV auto: .*master_rate=11025"
-  "audio: SDL/0074 SB16 mixer balance: master=31 voice=31 fm=28"
+  "audio: SDL/0074 SB16 mixer balance: master=31 voice=28 fm=28"
   "audio: SDL/0071 pixtone IRQ-mix: ENABLED"
   "audio: SDL/0072 midi tick from ISR: ENABLED"
   "audio: SDL/0074 RATEDIV auto: dev_freq="
