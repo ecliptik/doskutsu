@@ -223,10 +223,16 @@ static void test_org_prerender_suggest(void)
 {
   scfg_t c; sysprofile_t p;
 
-  /* slow 486 + organya -> prerender auto-enabled (returns 1) */
+  /* The ORG_PRERENDER config-key default is now ON (1), matching the engine
+   * default-ON, so a default organya install uses the PCM cache. (Regression
+   * fix: a CFG default of 0 silently forced live synth via the 0216 shim.) */
   scfg_defaults(&c);
+  CHECK(strcmp(scfg_get(&c, scfg_index("ORG_PRERENDER")), "1") == 0,
+        "org-prerender: config-key default is ON (1)");
+
+  /* slow 486 + organya, forced off -> prerender auto-enabled (returns 1) */
   scfg_set(&c, scfg_index("AUDIO_BACKEND"), "organya");
-  scfg_set(&c, scfg_index("ORG_PRERENDER"), "0");
+  scfg_set(&c, scfg_index("ORG_PRERENDER"), "0"); /* force off to test the enable path */
   memset(&p, 0, sizeof(p)); p.cpu_class = CPU_486_SLOW;
   CHECK(recommend_org_prerender(&c, &p) == 1,
         "org-prerender suggest: slow 486 + organya -> enabled");
@@ -237,17 +243,20 @@ static void test_org_prerender_suggest(void)
   CHECK(recommend_org_prerender(&c, &p) == 0,
         "org-prerender suggest: idempotent when already on");
 
-  /* mid-tier 486 (DX2-66 / Am5x86) + organya -> also auto-enabled */
+  /* mid-tier 486 (DX2-66 / Am5x86) + organya, forced off -> also auto-enabled */
   scfg_defaults(&c);
   scfg_set(&c, scfg_index("AUDIO_BACKEND"), "organya");
+  scfg_set(&c, scfg_index("ORG_PRERENDER"), "0"); /* force off to test the enable path */
   memset(&p, 0, sizeof(p)); p.cpu_class = CPU_486_MID;
   CHECK(recommend_org_prerender(&c, &p) == 1 &&
         strcmp(scfg_get(&c, scfg_index("ORG_PRERENDER")), "1") == 0,
         "org-prerender suggest: mid-486 + organya -> enabled");
 
-  /* Pentium + organya -> NOT auto-enabled (live synth is real-time there) */
+  /* Pentium + organya -> recommend does NOT actively enable (live synth is
+   * real-time there); from an explicit off it leaves the value alone. */
   scfg_defaults(&c);
   scfg_set(&c, scfg_index("AUDIO_BACKEND"), "organya");
+  scfg_set(&c, scfg_index("ORG_PRERENDER"), "0"); /* explicit off: recommend must leave it */
   memset(&p, 0, sizeof(p)); p.cpu_class = CPU_586;
   CHECK(recommend_org_prerender(&c, &p) == 0,
         "org-prerender suggest: Pentium + organya -> NOT enabled");

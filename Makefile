@@ -185,6 +185,8 @@ help:
 	@echo "  make dist                        dist/doskutsu-cf.zip (CF-ready bundle)"
 	@echo "  make dist-list                   dry-run: print dist manifest, no staging"
 	@echo "  make install CF=/mnt/cf          copy payload to mounted CF card"
+	@echo "  make org-cache                   pre-render build-sha-keyed Organya PCM cache"
+	@echo "                                   (build/orgcache/CACHE/; operator-deploy only, NOT dist)"
 	@echo
 	@echo "Host tooling (Linux-only):"
 	@echo "  make org2mid                     build tools/org2mid/org2mid (Organya -> SMF)"
@@ -2359,6 +2361,30 @@ stage: $(BUILD_DIR)/doskutsu.exe setup | fetch-binaries
 	@$(REPO_ROOT)/scripts/stage-tas.sh --quiet 2>/dev/null \
 	  && echo "staged PLAY.TAS (canonical recording)" \
 	  || echo "note: no canonical PLAY.TAS staged -- gameplay smoke will boot-only"
+
+# --- org-cache: pre-render the build-sha-keyed Organya PCM cache ------------
+#
+# Runs the built DOSKUTSU.EXE headless under DOSBox-X (max cycles) with
+# DOSKUTSU_ORG_PRECACHE_ALL=1 over data/org -> build/orgcache/CACHE/<rate>_<ch>/
+# *.PCM. The cache is keyed (in each PCM header) to the rendering binary's
+# DOSKUTSU_BUILD_SHA12, so it only cache-HITs on that exact binary -- deploy it
+# to a target's game dir and the target never cold-renders a song in-game.
+#
+# Default renders build/doskutsu.exe at Tier-2 (11025 mono -> CACHE/11025_1/).
+# Override the binary (e.g. to render a shipped release exe) with ORGCACHE_EXE:
+#   make org-cache                                   # current build
+#   make org-cache ORGCACHE_EXE=/path/to/DOSKUTSU.EXE
+# build/doskutsu.exe is an ORDER-ONLY prereq: built only if absent, so an
+# ORGCACHE_EXE override does not trigger a spurious rebuild of the tree.
+#
+# LICENSING: the produced CACHE/ is Cave-Story-DERIVED (rendered from the user's
+# extracted .org files). It is a LOCAL / OPERATOR-DEPLOY artifact ONLY and is
+# DELIBERATELY NOT part of `make dist` (the public zip never ships game-derived
+# data). See docs/BUILDING.md + the DOSKUTSU_ORG_PRECACHE_ALL entry in
+# docs/internal/BOOT.md.
+.PHONY: org-cache
+org-cache: | $(BUILD_DIR)/doskutsu.exe fetch-binaries
+	@$(REPO_ROOT)/scripts/org-cache.sh
 
 .PHONY: install
 install: $(BUILD_DIR)/doskutsu.exe | fetch-binaries

@@ -285,6 +285,25 @@ make install CF=/mnt/cf
 
 Copies the same payload to `$CF/DOSKUTSU/`. If Cave Story data is present in the repo `data/` tree at install time, the Makefile also copies it directly to `$CF/DOSKUTSU/DATA/` -- for convenience only, not legal redistribution (the copy is happening on your own CF card, not being uploaded anywhere).
 
+### Pre-render the Organya PCM cache (`make org-cache`)
+
+On a slow 486-class target the organya backend cold-renders each song the first time it plays (the title song alone is ~57 s on a DX2-66 -- the historical "hang"). `make org-cache` does that rendering ONCE, here on the fast build host, so the target only ever cache-HITs:
+
+```bash
+make                 # build build/doskutsu.exe first
+make org-cache       # render every song -> build/orgcache/CACHE/11025_1/*.PCM
+```
+
+It runs the built `DOSKUTSU.EXE` headless under DOSBox-X (max cycles) with `DOSKUTSU_ORG_PRECACHE_ALL=1` + `SDL_HINT_DOSKUTSU_AUDIO_TIER2=1` over `data/org/`, producing `CACHE/<rate>_<channels>/*.PCM` (default Tier-2 = 11025 mono -> `CACHE/11025_1/`, ~46 MB / 41 songs). Each PCM is keyed in its header to the rendering binary's `DOSKUTSU_BUILD_SHA12`, so the cache only HITs on that exact binary. To pre-render a specific shipped release exe instead of the current build:
+
+```bash
+make org-cache ORGCACHE_EXE=/path/to/DOSKUTSU.EXE
+```
+
+Then deploy the produced `CACHE/` tree into the target's game dir next to `DOSKUTSU.EXE` (e.g. `$CF/DOSKUTSU/CACHE/`). Requires `data/org/` (Cave Story data, see `ASSETS.md`); errors cleanly if absent. The DOSBox run is `timeout`-bounded and the process is killed on exit (no orphan). The gameplay-facing counterpart that does this automatically on the target's first launch is `SDL_HINT_DOSKUTSU_ORG_AUTOCACHE` (default ON); see the `DOSKUTSU_ORG_PRECACHE_ALL` + `SDL_HINT_DOSKUTSU_ORG_AUTOCACHE` entries in `docs/internal/BOOT.md`.
+
+**LICENSING:** the produced `CACHE/` is Cave-Story-DERIVED (rendered from the user's extracted `.org` files). It is a LOCAL / OPERATOR-DEPLOY artifact ONLY and is DELIBERATELY excluded from `make dist` -- the public zip never ships game-derived data. Generate it on your own machine; never upload or redistribute it.
+
 ---
 
 ## Common errors

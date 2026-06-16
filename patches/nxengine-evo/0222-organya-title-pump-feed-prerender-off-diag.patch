@@ -1,0 +1,130 @@
+From e15fa10b462d628bd836826129357fbea80b37e3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 15 Jun 2026 18:05:41 -0700
+Subject: [PATCH] patch 0222 -- organya title/menu pump-feed + prerender-off
+ diagnostic
+
+The v1.0.8 organya depth-regulated audio pump (pump-to-target, the TICKPUMP()
+call) lived ONLY in run_tick_fixed, which gameloop() dispatches solely at
+game.mode==GM_NORMAL (gameplay). The TITLE/menu (and inventory, and every other
+mode) runs through the 1:1 run_tick() path, which had NO pump -- so at the title
+the organya prerender ring was fed only ~1 buffer-chunk per displayed frame
+(~23 ms audio per ~31 ms flip = ~74% real-time) -> the title music played slow +
+distorted. Gameplay's ~2.8 chunks/frame held the 186 ms setpoint; the title never
+got there. (Surfaced once the ORG_PRERENDER default-flip made organya prerender
+the default -- the title is the first thing a default organya install hears.)
+
+FIX: call the SAME bounded pump (_audio_tick_pump, the TICKPUMP() macro target)
+from run_tick() too, once per displayed frame, right before the flip -- mirroring
+run_tick_fixed's pump-before-render-submit placement. A forward declaration is
+added because run_tick() sits above the pump's file-scope definition.
+
+Why this is safe + correctly inert:
+- The pump is RENDER-coupled (fires once per displayed frame); gameloop()
+  dispatches run_tick() OR run_tick_fixed() once per loop iteration, so the title
+  pump cadence matches gameplay. The "different tick cadence" is the LOGIC cadence
+  (1:1 vs fixed-timestep catch-up), which does not touch the render-coupled pump.
+- SAME bound: 186 ms depth setpoint + the 4-chunk per-frame cap. The cap is the
+  load-bearing scheduler safety -- a bounded memcpy pump cannot monopolize the
+  cooperative thread, so this cannot reintroduce a Bug-5-style title stall (Bug-5
+  was a live-synth COLD-RENDER monopolizing the scheduler; this is a cache-HIT
+  bounded pump, the safe opposite).
+- INERT by construction off the organya prerender path: org_pump_target_ms()
+  returns 0 when org_prerender_buffer_ready() is false (OPL3/WB/live-synth/
+  uncached), so _audio_tick_pump no-ops -> byte-identical for those. Same
+  killswitch family (SDL_HINT_DOSKUTSU_ORG_PUMP_TARGET_MS=0).
+- No double-pump: run_tick_fixed keeps its single existing TICKPUMP(); gameloop
+  dispatches exactly one of the two paths per frame.
+- The pump never overlaps a 0214 render-quiesce / cold-render window: those are
+  blocking calls inside Organya::start / load_stage, during which run_tick is not
+  executing; the per-frame pump only runs on an already-populated buffer.
+- Bonus: also feeds inventory + any other 1:1/run_tick mode that plays organya
+  prerender music -- all self-gated.
+
+RIDE-ALONG (deferred from the def-flip fix, now free since this patch already
+moves BUILD_SHA12): a one-time diagnostic LOG at Organya::start's prerender-resolve
+site -- when organya is active but prerender resolves OFF (live synth), emit
+"organya: ORG_PRERENDER=0 -> live synth (slow on 486-class; set =1 ...)". The
+SILENT absence of the pre-render banners cost a full diagnostic cycle this
+campaign; this self-announces the slow path. No behavior change; killswitch intact.
+
+NOTE: this patch changes the patch-stack DOSKUTSU_BUILD_SHA12, so the previously
+deployed cache invalidates -- the 0222 binary needs a fresh make org-cache cache
+(or the on-target 0221 auto-precache rebuilds it). Expected for this fix.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp          | 22 ++++++++++++++++++++++
+ src/sound/Organya.cpp | 16 ++++++++++++++++
+ 2 files changed, 38 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 1d260925..d64f1dea 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -131,6 +131,12 @@ void update_fps()
+ // run_tick() line is byte-unchanged.
+ static int g_tick_count = 0;
+ 
++// patch 0222: forward-decl of the depth-regulated audio pump (defined below at
++// file scope alongside the TICKPUMP() macro). run_tick() sits ABOVE that
++// definition but needs to feed the organya prerender ring at the title/menu
++// (the 1:1 path) the same way run_tick_fixed feeds it at GM_NORMAL.
++static void _audio_tick_pump(void);
++
+ static inline void run_tick()
+ {
+   static bool can_tick       = true;
+@@ -217,6 +223,22 @@ static inline void run_tick()
+       can_tick = false;
+     }
+ 
++    // patch 0222: feed the organya prerender ring at the title/menu (+ inventory
++    // + any other 1:1/run_tick mode). The depth-regulated pump-to-target only
++    // lived in run_tick_fixed (GM_NORMAL, via TICKPUMP()), so the title ring
++    // underran (~1 pump per displayed frame = ~74% real-time -> slow + distorted
++    // title music; flush-instr g2k-quantified). This is the SAME bounded pump
++    // (186 ms depth setpoint + 4-chunk per-frame cap); the cap is the load-bearing
++    // scheduler safety -- it cannot monopolize the cooperative thread, so no
++    // Bug-5-style title stall (Bug-5 was live-synth cold-render; this is a
++    // cache-HIT bounded memcpy pump). INERT by construction off the organya
++    // prerender path: org_pump_target_ms() returns 0 when org_prerender_buffer_
++    // ready() is false (OPL3/WB/live-synth/uncached) -> _audio_tick_pump no-ops ->
++    // byte-identical there. Fires once per displayed frame (render-coupled, like
++    // run_tick_fixed); placed before the flip so the ring is topped up right
++    // before present. Same killswitch family (SDL_HINT_DOSKUTSU_ORG_PUMP_TARGET_MS=0).
++    _audio_tick_pump(); // == run_tick_fixed's TICKPUMP()
++
+     if (settings->show_fps)
+     {
+       update_fps();
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index 8ad46e28..ed8e41d0 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -1273,6 +1273,22 @@ bool Organya::start(int startBeat)
+   bool _prebuf = false;
+   if (org_prerender_active())
+     _prebuf = _organya_prerender_decide(song, startBeat);
++  else
++  {
++    // patch 0222 ride-along (task #15): organya is the active backend (Organya::
++    // start is organya-only -- opl3/wb route via MidiScheduler) but pre-render
++    // resolved OFF -> live synth, which is slow on 486-class HW and bypasses the
++    // PCM cache. Self-announce ONCE so a future ORG_PRERENDER=0 run is diagnosable
++    // straight from the log (the SILENT absence of the pre-render banners cost a
++    // full diagnostic cycle this campaign). No behavior change; killswitch intact.
++    static bool _warned_prerender_off = false;
++    if (!_warned_prerender_off)
++    {
++      _warned_prerender_off = true;
++      LOG_INFO("organya: ORG_PRERENDER=0 -> live synth (slow on 486-class; set "
++               "SDL_HINT_DOSKUTSU_ORG_PRERENDER=1 for cached real-time)");
++    }
++  }
+   if (!_prebuf)
+   {
+     g_org_prerender_buf.clear();
+-- 
+2.47.3
+

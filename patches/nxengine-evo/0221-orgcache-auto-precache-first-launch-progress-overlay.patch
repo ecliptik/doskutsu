@@ -1,0 +1,470 @@
+From 9efe1f09fd505ce14defec59f6dfbcee092723f3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 14 Jun 2026 21:52:50 -0700
+Subject: [PATCH] patch 0221 -- ORGCACHE-AUTO: auto-precache first launch +
+ cold-render overlay
+
+The organya backend cold-renders each .org -> PCM at song-start via a blocking
+single-CPU synth pass (~57 s for the title song on a 486 DX2-66). On the target
+that shows as a black screen / pegged CPU before the title menu -- the apparent
+"hang". The fix machinery (per-song disk cache 0208, render-window quiesce 0214,
+the host-side DOSKUTSU_ORG_PRECACHE_ALL batch + tier-scoped cache 0215) existed
+but the cache was never populated ON the target, so every song still cold-rendered
+once. The host/dist cannot pre-populate it: the PCM is Cave-Story-derived (not
+redistributable) and build-sha + tier keyed.
+
+This makes the SHIPPED game populate the cache itself, with feedback:
+
+A. AUTO-PRECACHE ON FIRST LAUNCH -- after SoundManager::init (renderer up + font
+   loaded, backend + tier resolved), if organya is the active backend and this
+   binary/tier's cache is not marked complete (no CACHE\<rate>_<channels>\READY.OK
+   sentinel whose stored sha matches this build), render ALL songs to the cache
+   behind a one-time progress screen, then write the sentinel. Subsequent boots
+   find the sentinel and skip straight to the title. ESC skips: abort the
+   in-flight render (partial discarded -- the _org_cache_store empty-buffer guard
+   prevents a truncated cache), stop the batch, write NO sentinel; the remaining
+   songs cold-render on demand behind overlay B and the batch resumes next launch.
+
+B. IN-GAME COLD-RENDER OVERLAY -- the SAME progress bar on ANY individual
+   cold-render (a cache miss: an uncached / stale / changed-data song that slips
+   past the sentinel and misses the per-song header validation), so a miss is
+   never again a silent black screen.
+
+Both share one mechanism: a per-beat callback (int return; nonzero = abort)
+threaded into _org_render_song's synth loop, NULL by default. main.cpp registers
+it ONLY after the headless host-batch block (which return 0s/exits first), so
+DOSKUTSU_ORG_PRECACHE_ALL renders with cb==NULL -> byte-identical to 0215. Organya
+stays decoupled from the Renderer (it only knows the function pointer); the
+progress UI (clearScreen + headline + coarse "song N/M" bar + intra-song bar,
+pixel-throttled flips, ESC poll) lives in main.cpp via the showLoadingScreen idiom.
+
+The sentinel is a fixed 8.3 name CACHE\<rate>_<channels>\READY.OK whose CONTENT is
+the full DOSKUTSU_BUILD_SHA12; the build key is in the content, NOT the filename.
+g2k is MS-DOS 6.22 (no LFN) and plain 8.3 FAT truncates an extension to 3 chars,
+so keying the sha in the name (READY.<sha>) would collapse it to 3 hex on disk (a
+~1/4096 cross-build false-match -> skipped batch -> silent degrade of the
+all-upfront choice to lazy in-game renders). present() reads the stored sha and
+strncmp's it vs this binary's DOSKUTSU_BUILD_SHA12 (not a mere fopen-exists), so a
+stale old-build sentinel is rejected and a fresh batch runs.
+
+Organya-only (g_p10_audio_backend_active == AudioBackend::organya): OPL3/WB
+dispatch to their chip in real-time and never cold-render, so a default install
+never engages. Mono-only batch (mirrors precacheAllOrgs' stereo guard -- the
+pre-render path is mono; a stereo tier is skipped, no sentinel). Default-ON
+killswitch SDL_HINT_DOSKUTSU_ORG_AUTOCACHE=0 disables both A and B (reverts to the
+v1.1.0 black-screen cold-render). Single lever / own binary. Documented in
+docs/internal/BOOT.md.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp               | 202 +++++++++++++++++++++++++++++++++++++
+ src/sound/Organya.cpp      | 102 +++++++++++++++++++
+ src/sound/SoundManager.cpp |  18 ++++
+ src/sound/SoundManager.h   |   9 ++
+ 4 files changed, 331 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 435d8d2e..1d260925 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1184,6 +1184,124 @@ void InitNewGame(bool with_intro)
+   fade.set_full(FADE_OUT);
+ }
+ 
++// ===========================================================================
++// ORGCACHE-AUTO (slot TBD): engine-side progress UI for the organya cold-render.
++// Two deliverables share ONE mechanism (the per-beat callback Organya invokes
++// from inside _org_render_song):
++//   A. AUTO-PRECACHE ON FIRST LAUNCH -- render ALL songs (R1) to the cache behind
++//      a one-time progress screen, then write the per-tier READY sentinel. ESC
++//      skips (R2): proceed into the game WITHOUT the sentinel; unrendered songs
++//      cold-render on demand behind overlay B; the batch resumes next launch.
++//   B. IN-GAME COLD-RENDER OVERLAY -- the SAME progress bar on ANY individual
++//      cache-miss cold-render, so a miss is never again a silent black screen.
++// Drawing uses the showLoadingScreen idiom (already proven pre-game): the
++// Renderer is up + font loaded (Renderer::init), so clearScreen + font.draw +
++// fillRect/drawRect + flip all work here, before intro/title. No new asset dep
++// (black + headline + two bars; a Loading.pbm backdrop is trivial future polish).
++extern "C" void org_set_render_beat_cb(int (*cb)(uint32_t, uint32_t));
++extern "C" bool org_autocache_active(void);
++extern "C" bool org_cache_sentinel_present(void);
++extern "C" bool org_cache_sentinel_write(void);
++extern "C" long org_precache_one(const char *org_path); // 0215: render+cache one org
++
++static bool        g_oc_batch_active  = false; // true during the first-launch batch (draw coarse N/M bar)
++static bool        g_oc_abort         = false; // R2: ESC pressed -> abort the batch (no sentinel)
++static int         g_oc_song_idx      = 0;     // 1-based current song (batch)
++static int         g_oc_song_total    = 0;     // song count excluding the [0] sentinel (batch)
++static std::string g_oc_song_name;             // current song basename
++static int         g_oc_last_inner_px = -1;    // flip-throttle: last drawn intra-song bar pixel
++
++// Readable basename for the coarse line: strip dir + ".org" extension.
++static std::string _oc_basename(const std::string &path)
++{
++  size_t slash = path.find_last_of("/\\");
++  std::string b = (slash == std::string::npos) ? path : path.substr(slash + 1);
++  size_t dot = b.find_last_of('.');
++  if (dot != std::string::npos)
++    b = b.substr(0, dot);
++  return b;
++}
++
++// R2 ESC-skip: drain pending SDL key events; ESC-down sets the batch abort flag.
++// Self-contained (the engine input system is not yet initialized at this pre-game
++// hook); SDL3 keycode lives directly on evt.key.key (see input.cpp).
++static void _oc_poll_esc(void)
++{
++  SDL_Event evt;
++  while (SDL_PollEvent(&evt))
++    if (evt.type == SDL_EVENT_KEY_DOWN && evt.key.key == SDLK_ESCAPE)
++      g_oc_abort = true;
++}
++
++static void _oc_draw_progress(uint32_t cur_beat, uint32_t total_beats)
++{
++  Renderer *r = Renderer::getInstance();
++  const int W = r->screenWidth;
++  const int H = r->screenHeight;
++  r->clearScreen(0, 0, 0);
++
++  const char *line1 = "Rendering music (one time)...";
++  r->font.draw((W - (int)r->font.getWidth(line1)) / 2, H / 2 - 30, line1, 0xFFFFFF, true);
++
++  const int bx0 = 40;
++  const int bx1 = W - 40;
++
++  // coarse "song N/M" bar -- batch mode only (single in-game renders have no N/M)
++  if (g_oc_batch_active && g_oc_song_total > 0)
++  {
++    char buf[80];
++    snprintf(buf, sizeof buf, "song %d/%d  %s", g_oc_song_idx, g_oc_song_total,
++             g_oc_song_name.c_str());
++    r->font.draw((W - (int)r->font.getWidth(buf)) / 2, H / 2 - 14, buf, 0xC0C0C0, true);
++    const int cy = H / 2 + 2;
++    r->drawRect(bx0, cy, bx1, cy + 6, 0x80, 0x80, 0x80);
++    const int span = bx1 - bx0 - 2;
++    const int fillw = (span * g_oc_song_idx) / g_oc_song_total;
++    if (fillw > 0)
++      r->fillRect(bx0 + 1, cy + 1, bx0 + 1 + fillw, cy + 5, 0x40, 0xFF, 0x40);
++  }
++
++  // intra-song bar -- driven by the per-beat callback
++  const int iy = H / 2 + 16;
++  r->drawRect(bx0, iy, bx1, iy + 6, 0x80, 0x80, 0x80);
++  if (total_beats > 0)
++  {
++    const int span  = bx1 - bx0 - 2;
++    const int fillw = (int)(((uint64_t)span * cur_beat) / total_beats);
++    if (fillw > 0)
++      r->fillRect(bx0 + 1, iy + 1, bx0 + 1 + fillw, iy + 5, 0x40, 0xC0, 0xFF);
++  }
++
++  r->flip();
++}
++
++// The per-beat callback Organya invokes from inside _org_render_song. Returns
++// nonzero to ABORT the render (R2 ESC-skip) -- ONLY during the first-launch batch
++// (g_oc_batch_active); in-game cold-renders (overlay B) always return 0 so ESC
++// stays the gameplay pause key, never a music-skip. Self-throttles the present:
++// only flips when the intra-song bar pixel advances (a cold render is hundreds of
++// beats -> ~one flip per bar pixel, not per beat). cur_beat dropping to 0 at the
++// start of a NEW render naturally differs from the prior high pixel -> auto-reset.
++static int _oc_progress_beat_cb(uint32_t cur_beat, uint32_t total_beats)
++{
++  if (g_oc_batch_active)
++  {
++    _oc_poll_esc();
++    if (g_oc_abort)
++      return 1; // abort now; _org_render_song discards the partial buffer
++  }
++  const int span = (Renderer::getInstance()->screenWidth - 80) - 2;
++  const int px   = (total_beats > 0)
++                       ? (int)(((uint64_t)span * cur_beat) / total_beats)
++                       : 0;
++  if (px != g_oc_last_inner_px)
++  {
++    g_oc_last_inner_px = px;
++    _oc_draw_progress(cur_beat, total_beats);
++  }
++  return 0;
++}
++
+ int main(int argc, char *argv[])
+ {
+   // Patch 0138 (wave 43 RUNMANIFEST): capture boot wall-clock at the very
+@@ -1544,6 +1662,90 @@ int main(int argc, char *argv[])
+     }
+   }
+ 
++  // ORGCACHE-AUTO (slot TBD): auto-precache-on-first-launch + in-game cold-render
++  // progress overlay. Organya backend ONLY (OPL3/WB dispatch to their chip in
++  // real-time and never cold-render). Default-ON killswitch
++  // SDL_HINT_DOSKUTSU_ORG_AUTOCACHE. Placed AFTER the headless host-batch block
++  // above so that batch renders with no beat cb registered = byte-identical. The
++  // Renderer is already up (init ~L1475, showLoadingScreen ~L1487) and the backend
++  // enum + tier are resolved (SoundManager::init above), so the progress screen
++  // can draw here, before any intro/title.
++  if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::organya
++      && org_autocache_active())
++  {
++    // Deliverable B: register the overlay cb persistently so ANY in-game
++    // cold-render (the 0206 entry render / the 0209 deferred-cache drain on a
++    // cache miss) draws a moving progress bar instead of a silent black screen.
++    g_oc_batch_active  = false;
++    g_oc_abort         = false;
++    g_oc_last_inner_px = -1;
++    org_set_render_beat_cb(_oc_progress_beat_cb);
++
++    // Deliverable A (R1 = ALL songs at first launch): if this binary+tier's cache
++    // is not marked complete (no READY sentinel), render every song to the cache
++    // behind the progress screen. R2 = ESC skips: _oc_progress_beat_cb sets
++    // g_oc_abort on ESC and aborts the in-flight render (partial discarded), the
++    // loop stops, and NO sentinel is written -> the remaining songs cold-render on
++    // demand behind overlay B and the batch resumes on the next launch. The
++    // sentinel is written ONLY on a full, unaborted pass.
++    if (::AUDIO_CHANNELS != 1)
++    {
++      // Mono-only, mirroring SoundManager::precacheAllOrgs' stereo guard: the
++      // pre-render path (_org_render_song) downmixes to mono, so rendering a
++      // STEREO tier would write mono content tagged channels=2 + falsely mark it
++      // complete. Skip the batch (no sentinel) until the stereo render follow-on
++      // lands; overlay B stays armed. The 486 production tier is 11025 mono.
++      LOG_INFO("organya auto-precache: stereo tier (channels={}) -- batch skipped "
++               "(pre-render path is mono-only; HQ stereo cache is a follow-on); "
++               "overlay armed, no sentinel written.", (unsigned)::AUDIO_CHANNELS);
++    }
++    else if (!org_cache_sentinel_present())
++    {
++      LOG_INFO("organya auto-precache: cache not marked complete for this "
++               "binary/tier -- rendering all songs to CACHE now (one-time; press "
++               "ESC to skip and let songs render on demand instead).");
++      g_oc_batch_active = true;
++      const int n = SoundManager::getInstance()->orgMusicCount();
++      g_oc_song_total = n - 1; // [0] is the "" stop sentinel entry
++      int rendered = 0, skipped = 0, failed = 0;
++      for (int i = 1; i < n && !g_oc_abort; ++i)
++      {
++        const std::string path = SoundManager::getInstance()->orgMusicPath(i);
++        if (path.empty())
++          continue;
++        g_oc_song_idx      = i;
++        g_oc_song_name     = _oc_basename(path);
++        g_oc_last_inner_px = -1;          // reset the intra-song bar for the new song
++        _oc_draw_progress(0, 0);          // coarse N/M update + empty inner bar + flip
++        _oc_poll_esc();                   // catch ESC pressed between songs
++        if (g_oc_abort)
++          break;
++        const long b = org_precache_one(path.c_str()); // beat cb fires inside
++        if (b > 0)       ++rendered;
++        else if (b == 0) ++skipped;       // already cached, or aborted (empty buffer)
++        else             ++failed;
++      }
++      g_oc_batch_active = false;
++      if (g_oc_abort)
++        LOG_INFO("organya auto-precache: ESC -- batch skipped (rendered={} "
++                 "skipped={} failed={}); remaining songs cold-render on demand "
++                 "behind the overlay; batch resumes next launch (no sentinel).",
++                 rendered, skipped, failed);
++      else
++      {
++        org_cache_sentinel_write();
++        LOG_INFO("organya auto-precache: COMPLETE (rendered={} skipped={} "
++                 "failed={}); READY sentinel written -- subsequent boots skip "
++                 "straight to title.", rendered, skipped, failed);
++      }
++    }
++    else
++    {
++      LOG_INFO("organya auto-precache: cache complete (sentinel present) -- "
++               "skipping batch; in-game overlay armed for any stray cache miss.");
++    }
++  }
++
+   if (trig_init())
+   {
+     fatal("Failed trig module init.");
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index f238b504..8ad46e28 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -376,6 +376,25 @@ static size_t               g_org_prerender_pos        = 0;    // playback read
+ static size_t               g_org_prerender_loopstart  = 0;    // mono-frame index of loop_start (wrap target)
+ static std::string          g_org_prerender_song;             // loaded .org name (basename for the disk cache, patch 0208)
+ 
++// ===========================================================================
++// ORGCACHE-AUTO (slot TBD): per-beat progress callback. Threaded INTO
++// _org_render_song's synth loop so the multi-second cold-render (the title is
++// ~57 s on the DX2-66) can drive a moving progress bar instead of a black
++// screen. The callback is a file-scope function pointer (NULL default), set by
++// the engine-side progress UI (main.cpp) AFTER the headless host batch
++// (DOSKUTSU_ORG_PRECACHE_ALL) has already run + exited -- so the host batch
++// renders with cb==NULL = BYTE-IDENTICAL headless path. Organya stays decoupled
++// from the Renderer: it only knows an int(*)(uint32_t cur_beat, uint32_t total).
++// RETURN: nonzero == ABORT this render (R2 ESC-skip during the first-launch
++// batch; in-game renders never abort -- the UI returns 0 there). On abort
++// _org_render_song discards the PARTIAL buffer so the caller never caches a
++// truncated song. Whether main.cpp registers a cb at all is gated by the
++// default-ON killswitch SDL_HINT_DOSKUTSU_ORG_AUTOCACHE (org_autocache_active,
++// below); this layer is only the mechanism.
++typedef int (*org_render_beat_cb_t)(uint32_t cur_beat, uint32_t total_beats);
++static org_render_beat_cb_t g_org_render_beat_cb = nullptr;
++extern "C" void org_set_render_beat_cb(org_render_beat_cb_t cb) { g_org_render_beat_cb = cb; }
++
+ static bool org_prerender_active()
+ {
+   if (g_org_prerender_decided < 0)
+@@ -455,6 +474,18 @@ static void _org_render_song(Song &song, uint32_t H, int decim,
+   int    acc_n = 0;
+   for (uint32_t b = 0; b < song.loop_end; ++b)
+   {
++    // ORGCACHE-AUTO (slot TBD): drive the progress overlay per beat. NULL on the
++    // headless host batch (cb is registered by main.cpp only AFTER that batch has
++    // exited) -> single null compare, byte-identical. The cb self-throttles flips
++    // and returns nonzero to ABORT (R2 ESC-skip, batch only). On abort, discard
++    // the partial buffer so the caller's _org_cache_store (buf.empty() guard)
++    // no-ops -- never a truncated cache.
++    if (g_org_render_beat_cb && g_org_render_beat_cb(b, song.loop_end))
++    {
++      outbuf.clear();
++      out_loopstart = 0;
++      break;
++    }
+     if (b == song.loop_start)
+       out_loopstart = outbuf.size();   // exact wrap target
+     song.Synth();                      // fills song.samples (stereo float @ H)
+@@ -556,6 +587,55 @@ static std::string _org_cache_path(const std::string &name)
+   return _org_cache_dir() + "/" + name + ".PCM";
+ }
+ 
++// ORGCACHE-AUTO (slot TBD): per-tier "cache is complete for THIS binary" sentinel
++// = CACHE\<rate>_<channels>\READY.OK. Written ONLY after a fully-successful
++// auto-precache batch. The build key is the FULL DOSKUTSU_BUILD_SHA12 stored in
++// the FILE CONTENT, NOT the filename: g2k is MS-DOS 6.22 (no LFN) and plain 8.3
++// FAT truncates an extension to 3 chars, so keying the sha in the NAME
++// (READY.<sha>) would collapse it to 3 hex on disk (a weak key + a ~1/4096
++// cross-build false-match that would silently skip the first-boot batch). The
++// fixed 8.3 name READY.OK + content-keying sidesteps truncation entirely and keys
++// on the full 12 chars. present() READS the stored sha and string-compares it to
++// THIS binary's DOSKUTSU_BUILD_SHA12 (a mere fopen-exists would NOT reject a stale
++// old-build sentinel) -> any mismatch reads as absent -> rebuild. The tier dir
++// keys rate+channels. Playback-side per-song header validation (_org_cache_try_load
++// / _org_cache_valid) remains the real trust guard, so even a falsely-present
++// sentinel serves no bad PCM (a changed song misses + cold-renders once in-game).
++static std::string _org_cache_sentinel_path()
++{
++  return _org_cache_dir() + "/READY.OK"; // fixed 8.3 name; build key is in CONTENT
++}
++
++extern "C" bool org_cache_sentinel_present(void)
++{
++  FILE *fp = fopen(_org_cache_sentinel_path().c_str(), "rb");
++  if (!fp)
++    return false;
++  const char  *sha  = _DOSKUTSU_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12);
++  const size_t slen = strlen(sha);
++  char         buf[24];
++  const size_t n = fread(buf, 1, sizeof buf - 1, fp);
++  fclose(fp);
++  buf[n] = '\0';
++  // present + VALID only if the stored sha matches THIS binary exactly; a stale
++  // old-build sentinel mismatches -> reads as absent -> the batch re-renders.
++  return n >= slen && strncmp(buf, sha, slen) == 0;
++}
++
++extern "C" bool org_cache_sentinel_write(void)
++{
++  // nested mkdir (CACHE then CACHE\<tier>); mkdir makes no parents. EEXIST is fine.
++  mkdir(_org_cache_base_dir().c_str(), 0777);
++  mkdir(_org_cache_dir().c_str(), 0777);
++  FILE *fp = fopen(_org_cache_sentinel_path().c_str(), "wb");
++  if (!fp)
++    return false;
++  const char *sha = _DOSKUTSU_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12);
++  const bool  ok  = (fwrite(sha, 1, strlen(sha), fp) == strlen(sha));
++  fclose(fp);
++  return ok;
++}
++
+ // Fast-load + validate into g_org_prerender_buf. Returns true on a validated
+ // hit; false (buffer cleared) on miss/stale/short-read so the caller renders.
+ static bool _org_cache_try_load(const std::string &name, uint32_t native, uint32_t H,
+@@ -717,6 +797,28 @@ static bool org_render_quiesce_active()
+   return g_org_render_quiesce_decided == 1;
+ }
+ 
++// ORGCACHE-AUTO (slot TBD): default-ON killswitch for auto-precache-on-first-
++// launch + the in-game cold-render progress overlay. Gates whether main.cpp runs
++// the first-boot batch AND registers the per-beat overlay cb. Only the literal
++// "0" disables (reverts to the v1.1.0 cold-render-with-black-screen behavior).
++// Mirrors org_render_quiesce_active's inline pattern (no shared helper). extern
++// "C" so main.cpp reads it without a header.
++static int g_org_autocache_decided = -1;
++extern "C" bool org_autocache_active(void)
++{
++  if (g_org_autocache_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_ORG_AUTOCACHE");
++    g_org_autocache_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    LOG_INFO("organya auto-precache: {} (first-launch precache + in-game cold-"
++             "render progress overlay; set SDL_HINT_DOSKUTSU_ORG_AUTOCACHE=0 to "
++             "disable -> v1.1.0 black-screen cold-render)",
++             g_org_autocache_decided ? "ENABLED (default)"
++                                      : "DISABLED (killswitch =0)");
++  }
++  return g_org_autocache_decided == 1;
++}
++
+ static int  g_org_quiesce_diag_decided = -1;
+ static bool org_quiesce_diag_active()
+ {
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 4e1aebca..370f686a 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -1693,5 +1693,23 @@ long SoundManager::precacheAllOrgs()
+   return total_bytes;
+ }
+ 
++// ORGCACHE-AUTO (slot TBD): read-only track-list accessors for the engine-side
++// progress UI (main.cpp) -- it drives the first-launch precache loop itself so
++// all Renderer + coarse "song N/M" state stays in main.cpp. Path resolution
++// mirrors precacheAllOrgs (the SAME _music_dirs[0] + name + ".org" key that
++// org_precache_one / the playback path use).
++int SoundManager::orgMusicCount() const
++{
++  return (int)_music_names.size();
++}
++
++std::string SoundManager::orgMusicPath(int i) const
++{
++  if (i < 1 || i >= (int)_music_names.size() || _music_names[i].empty())
++    return std::string();
++  return ResourceManager::getInstance()->getPath(
++      _music_dirs.at(0) + _music_names[i] + ".org", false);
++}
++
+ } // namespace Sound
+ } // namespace NXE
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index 7e29c358..f02aa847 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -177,6 +177,15 @@ public:
+   // main()'s DOSKUTSU_ORG_PRECACHE_ALL one-shot (headless; exits after).
+   long precacheAllOrgs();
+ 
++  // ORGCACHE-AUTO (slot TBD): read-only accessors so the engine-side progress UI
++  // (main.cpp) can drive the first-launch precache loop itself -- owning the
++  // Renderer + the coarse "song N/M" UI state -- without exposing the private
++  // track-list vectors. orgMusicCount() = number of music entries INCLUDING the
++  // [0] "" stop sentinel; orgMusicPath(i) = resolved CACHE-keyable .org path for
++  // entry i (i>=1; empty string for an out-of-range / empty entry).
++  int orgMusicCount() const;
++  std::string orgMusicPath(int i) const;
++
+   uint32_t currentSong();
+   uint32_t lastSong();
+   void fadeMusic();
+-- 
+2.47.3
+

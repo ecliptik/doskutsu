@@ -5,6 +5,37 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.1.1] - 2026-06-16
+
+Maintenance release: fixes an Organya pre-render regression and the title/menu
+music underrun on 486-class hardware, adds a build target to pre-generate the
+Organya PCM cache, and ships a redesigned SETUP.EXE interface. Validated on the
+reference 486 DX2-66 (SB16 + DreamBlaster S2).
+
+### Added
+
+- **`make org-cache` build target.** Pre-renders every Organya song to the
+  build-keyed PCM cache (`CACHE\<rate>_<channels>\`) by running the built
+  DOSKUTSU.EXE headless under DOSBox-X, so a slow target cache-HITs every song
+  instead of cold-rendering it in-game. The cache is Cave-Story-derived and is
+  deliberately excluded from `make dist` (operator-deploy only). See
+  `docs/BUILDING.md`.
+- **SETUP.EXE interface redesign.** A reorganized, period-style configurator
+  flow (Phase 1) with a System Speed preset screen; the chosen preset is
+  recorded in DOSKUTSU.CFG as a SETUP-only key (engine-ignored).
+
+### Fixed
+
+- **Organya pre-render defaulted off (regression).** SETUP.EXE wrote
+  `ORG_PRERENDER=0`, so the Organya backend fell back to live synthesis and
+  played choppy on 486-class CPUs even with a populated cache. The default is
+  now `ORG_PRERENDER=1`, so the cached real-time playback path engages.
+- **Organya title/menu music underrun.** The audio pre-render pump engaged only
+  during gameplay (`GM_NORMAL`), so the title / menu / inventory screens could
+  starve the audio ring -- choppy/slow title music on 486-class hardware. Patch
+  0222 extends the bounded pump-to-target to the title/menu loop (`run_tick`);
+  inert for OPL3 / WaveBlaster and uncached playback.
+
 ## [1.1.0] - 2026-06-15
 
 Feature release: a DOS SETUP.EXE configurator and in-game WaveBlaster (hardware-MIDI)

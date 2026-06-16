@@ -125,7 +125,7 @@ static const dkt_key_t DKT_KEYS[] =
     "SB16 mixer FM (OPL3 music) level, 0-31", 0 },
 
   { "ORG_PRERENDER", "SDL_HINT_DOSKUTSU_ORG_PRERENDER",
-    DKT_BOOL, DKC_SOUND, "0", 0, 0, NULL,
+    DKT_BOOL, DKC_SOUND, "1", 0, 0, NULL,
     "Organya pre-render",
     "1 pre-renders Organya music to a disk PCM cache (less demanding on CPU at playback)", 0 },
 

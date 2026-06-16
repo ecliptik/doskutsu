@@ -384,6 +384,7 @@ BANNER_REGEX=(
   "organya render quiesce: (ENABLED \(default\)|DISABLED \(killswitch =0\))"
   "\[org-precache\] TOTAL rate=[0-9]+ channels=[0-9]+ rendered=[0-9]+ skipped=[0-9]+ failed=[0-9]+ bytes=[0-9]+"
   "config: (loaded DOSKUTSU.CFG \([0-9]+ keys\)|no DOSKUTSU.CFG, using built-in defaults)"
+  "organya auto-precache: (ENABLED \(default\)|DISABLED \(killswitch =0\))"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -482,6 +483,7 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
 )
 # BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 92 entries;
 # the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
@@ -588,6 +590,7 @@ BANNER_LABEL=(
   "0214 v1.0.8.1 organya render-window quiesce decision (default-ON; emits on an organya COLD-RENDER; zeroes the SB16 ring so the DMA loops silence not stale music during the blocking synth pass; killswitch SDL_HINT_DOSKUTSU_ORG_RENDER_QUIESCE=0. OPTIONAL: cold-render-only, absent in a warm-cache smoke. BANNER_REGEX idx 93.)"
   "0215 v1.0.8.1 batch org-precache total (OPTIONAL -- emits ONLY under DOSKUTSU_ORG_PRECACHE_ALL=1, the deployable-cache one-shot; reports rate/channels/rendered/skipped/failed/bytes for CF sizing; absent in a normal gameplay smoke. BANNER_REGEX idx 94.)"
   "0216 DOSKUTSU.CFG config-file setenv shim (REQUIRED -- emits every boot after Logger::init: 'config: loaded DOSKUTSU.CFG (N keys)' when DOSKUTSU.CFG is present in the program dir, else 'config: no DOSKUTSU.CFG, using built-in defaults'. SETUP.EXE writes the file; the shim setenv's each user-facing key BEFORE any getenv/SDL_GetHint read, overwrite=0 so precedence is env > file > built-in default. Two-witness with the consuming lever's own banner -- e.g. a CFG with PERF_MODE=1 yields 'perf-mode: level=1'; a BAT 'SET SDL_HINT_DOSKUTSU_PERF_MODE=0' over the same CFG yields 'perf-mode: level=0' (env wins). Default smoke stages NO CFG so the 'no DOSKUTSU.CFG' variant matches. NOTE the BANNER_LABEL array carries a pre-existing display-only gap vs REGEX/SEVERITY, so this label's index is not load-bearing.)"
+  "0221 organya auto-precache decision (OPTIONAL -- organya-gated, emits ONLY on an organya run, one of 'ENABLED (default)' / 'DISABLED (killswitch =0)' via SDL_HINT_DOSKUTSU_ORG_AUTOCACHE; mirrors the 0214 render-quiesce banner. First-launch renders all songs behind a progress overlay + writes the per-tier READY.<sha> sentinel; subsequent boots skip on the sentinel; in-game cold-render overlay armed for stray misses. Absent under the default OPL3/WB backend (no cold-render) which is correct not a failure; the headless DOSKUTSU_ORG_PRECACHE_ALL=1 path returns before registration so it is also absent there -- byte-identical to 0215.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
