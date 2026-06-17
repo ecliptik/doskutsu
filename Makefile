@@ -301,6 +301,24 @@ patches:
 verify-patches-applied:
 	@$(REPO_ROOT)/scripts/verify-patches-applied.sh
 
+# Content-based staleness inputs for the build-stage artifacts. The .a / .exe
+# file targets below historically had ONLY an order-only `| djgpp-check`
+# prereq, so once an artifact existed `make` treated it up-to-date forever --
+# editing a patch (or this Makefile's headers / the manifest) did NOT trigger a
+# rebuild, and the workaround was to `rm` the artifact by hand (the recurring
+# "stale-binary / stale-lib trap"). Listing the patch series + manifest +
+# engine-consumed headers as real prerequisites makes `make` rebuild a stage
+# when its inputs change. (The vendor source itself is materialized by `make
+# patches`; verify-patches-applied gates that the series is actually applied,
+# so a patch edit forces `make patches` then a rebuild here.) The wildcards are
+# expanded at parse time; a newly-added patch file is a newer prereq -> rebuild.
+MANIFEST_FILE      := $(VENDOR_DIR)/sources.manifest
+SDL3_PATCHES       := $(wildcard $(REPO_ROOT)/patches/SDL/*.patch)
+SDL3_MIXER_PATCHES := $(wildcard $(REPO_ROOT)/patches/SDL_mixer/*.patch)
+SDL3_IMAGE_PATCHES := $(wildcard $(REPO_ROOT)/patches/SDL_image/*.patch)
+NXENGINE_PATCHES   := $(wildcard $(REPO_ROOT)/patches/nxengine-evo/*.patch)
+ENGINE_HEADERS     := $(wildcard $(REPO_ROOT)/include/*.h)
+
 # --- Stage 1: SDL3 ------------------------------------------------------------
 
 .PHONY: sdl3
@@ -318,7 +336,7 @@ sdl3: verify-patches-applied $(SYSROOT)/lib/libSDL3.a
 # apply-patches happened to run.
 SDL_REVISION_PIN := SDL-3.5.0-74a746281+doskutsu
 
-$(SYSROOT)/lib/libSDL3.a: | djgpp-check
+$(SYSROOT)/lib/libSDL3.a: $(SDL3_PATCHES) $(MANIFEST_FILE) | djgpp-check
 	@test -d "$(SDL3_SRC)" || (echo "error: $(SDL3_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
 	@test -f "$(TOOLCHAIN_FILE)" || (echo "error: $(TOOLCHAIN_FILE) not found -- PR #15377 not in this SDL checkout?" >&2; exit 1)
 	# SDL_TESTS=OFF -- skip SDL3's upstream test executables (loopwave /
@@ -357,7 +375,7 @@ sdl3-mixer: verify-patches-applied $(SYSROOT)/lib/libSDL3_mixer.a
 # at the top of this file for the full rationale. Per-stage CMAKE_C_FLAGS
 # overrides removed; they'd shadow the CMAKE_COMMON value.
 
-$(SYSROOT)/lib/libSDL3_mixer.a: $(SYSROOT)/lib/libSDL3.a
+$(SYSROOT)/lib/libSDL3_mixer.a: $(SYSROOT)/lib/libSDL3.a $(SDL3_MIXER_PATCHES)
 	@test -d "$(MIXER_SRC)" || (echo "error: $(MIXER_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
 	cmake -S $(MIXER_SRC) -B $(SDL3_MIXER_BUILD) $(CMAKE_COMMON) \
 	    -DSDLMIXER_VENDORED=ON \
@@ -397,7 +415,7 @@ SDL3_IMAGE_BUILD := $(BUILD_DIR)/sdl3-image
 .PHONY: sdl3-image
 sdl3-image: verify-patches-applied $(SYSROOT)/lib/libSDL3_image.a
 
-$(SYSROOT)/lib/libSDL3_image.a: $(SYSROOT)/lib/libSDL3.a
+$(SYSROOT)/lib/libSDL3_image.a: $(SYSROOT)/lib/libSDL3.a $(SDL3_IMAGE_PATCHES)
 	@test -d "$(IMAGE_SRC)" || (echo "error: $(IMAGE_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
 	cmake -S $(IMAGE_SRC) -B $(SDL3_IMAGE_BUILD) $(CMAKE_COMMON) \
 	    -DSDLIMAGE_VENDORED=ON \
@@ -487,7 +505,7 @@ MINSTACK := 2048k
 .PHONY: nxengine
 nxengine: verify-patches-applied $(BUILD_DIR)/doskutsu.exe
 
-$(BUILD_DIR)/doskutsu.exe: $(SYSROOT)/lib/libSDL3_mixer.a $(SYSROOT)/lib/libSDL3_image.a
+$(BUILD_DIR)/doskutsu.exe: $(SYSROOT)/lib/libSDL3_mixer.a $(SYSROOT)/lib/libSDL3_image.a $(NXENGINE_PATCHES) $(ENGINE_HEADERS) $(MANIFEST_FILE)
 	@test -d "$(NXENGINE_SRC)" || (echo "error: $(NXENGINE_SRC) not present" >&2; exit 1)
 	cmake -S $(NXENGINE_SRC) -B $(NXENGINE_BUILD) $(CMAKE_COMMON)
 	cmake --build $(NXENGINE_BUILD) -j$(NPROC)

@@ -47,6 +47,24 @@ if [[ ! -f "$MANIFEST" ]]; then
     exit 1
 fi
 
+# Serialize concurrent invocations within the same clone. apply_one() does
+# `git reset --hard` then `git am` on each vendor tree; two apply-patches runs
+# racing the same tree (e.g. two agents, or `make all` overlapping a manual
+# `make patches`) corrupt each other -- one run's reset can land mid-`git am`
+# of the other, leaving a half-applied series + a stuck .git/rebase-apply.
+# A per-clone flock makes the second invocation WAIT for the first to finish.
+# Separate clones have separate vendor/ trees (and separate lock files), so
+# they never contend. flock-absent (non-Linux) falls through unguarded.
+LOCKFILE="$REPO_ROOT/build/.apply-patches.lock"
+mkdir -p "$REPO_ROOT/build"
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCKFILE"
+    if ! flock 9; then
+        log "error: could not acquire apply-patches lock ($LOCKFILE)"
+        exit 1
+    fi
+fi
+
 apply_one() {
     local name="$1"
     local sha="$2"
