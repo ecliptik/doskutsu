@@ -45,6 +45,8 @@ SETUP_EXE="$REPO_ROOT/build/setup/setup.exe"
 CWSDPMI_DIR="$REPO_ROOT/vendor/cwsdpmi"
 CONF_PARITY="$REPO_ROOT/tools/dosbox-x.conf"
 CONF_FAST="$REPO_ROOT/tools/dosbox-x-fast.conf"
+# shellcheck source=../tools/dosbox-teardown.sh
+source "$REPO_ROOT/tools/dosbox-teardown.sh"   # dbx_kill_conf -- conf-scoped teardown
 
 XDISPLAY=":0"
 OUT_DIR="/tmp/setup-review"
@@ -125,7 +127,7 @@ send_keys() {
 }
 
 cleanup() {
-  if [[ "$KEEP" == "0" ]]; then pkill -x dosbox-x >/dev/null 2>&1 || true; fi
+  if [[ "$KEEP" == "0" ]]; then dbx_kill_conf "$CONF" >/dev/null 2>&1 || true; fi
   if [[ -n "$XVFB_PID" ]]; then kill "$XVFB_PID" >/dev/null 2>&1 || true; fi
 }
 trap cleanup EXIT

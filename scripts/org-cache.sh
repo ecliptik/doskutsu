@@ -19,6 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF_FAST="$REPO_ROOT/tools/dosbox-x-fast.conf"
 CWSDPMI="${CWSDPMI:-$REPO_ROOT/vendor/cwsdpmi/cwsdpmi.exe}"
+# shellcheck source=../tools/dosbox-teardown.sh
+source "$REPO_ROOT/tools/dosbox-teardown.sh"   # dbx_kill_conf -- conf-scoped teardown
 
 # --- inputs (overridable) --------------------------------------------------
 ORGCACHE_EXE="${ORGCACHE_EXE:-$REPO_ROOT/build/doskutsu.exe}"
@@ -75,7 +77,7 @@ rm -rf "$WORK/CACHE"
 LOG="$WORK/LOGS/PCACH.LOG"
 
 # --- run headless, poll for completion, never leave an orphan ---------------
-cleanup() { pkill -x dosbox-x 2>/dev/null || true; }
+cleanup() { dbx_kill_conf "$CONF_FAST" 2>/dev/null || true; }
 trap cleanup EXIT
 
 echo "[org-cache] rendering under DOSBox-X (max cycles, headless)..."
@@ -99,7 +101,7 @@ while kill -0 "$DBX" 2>/dev/null; do
   fi
   sleep 3; elapsed=$((elapsed + 3))
 done
-pkill -x dosbox-x 2>/dev/null || true
+dbx_kill_conf "$CONF_FAST" 2>/dev/null || true
 wait "$DBX" 2>/dev/null || true
 trap - EXIT
 

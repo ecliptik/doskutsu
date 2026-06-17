@@ -31,6 +31,8 @@ STAGE_DIR="$REPO_ROOT/build/stage"
 CWSDPMI_DIR="$REPO_ROOT/vendor/cwsdpmi"
 CONF_PARITY="$REPO_ROOT/tools/dosbox-x.conf"
 CONF_FAST="$REPO_ROOT/tools/dosbox-x-fast.conf"
+# shellcheck source=../tools/dosbox-teardown.sh
+source "$REPO_ROOT/tools/dosbox-teardown.sh"   # dbx_kill_conf -- conf-scoped teardown
 
 XDISPLAY=":0"
 OUT_DIR="/tmp/setup-review-2/matrix"
@@ -71,9 +73,9 @@ send_keys() {
   done
 }
 kill_dosbox() {
-  pkill -x dosbox-x >/dev/null 2>&1 || true
+  dbx_kill_conf "$CONF" >/dev/null 2>&1 || true
   local i; for i in $(seq 1 40); do pgrep -x dosbox-x >/dev/null 2>&1 || { sleep 0.5; return 0; }; sleep 0.5; done
-  pkill -9 -x dosbox-x >/dev/null 2>&1 || true; sleep 1
+  dbx_kill_conf "$CONF" KILL >/dev/null 2>&1 || true; sleep 1
 }
 cleanup() {
   kill_dosbox

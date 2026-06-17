@@ -41,6 +41,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF="$REPO/tools/dosbox-x-fast.conf"
 STAGE="$REPO/build/stage"
+# shellcheck source=../tools/dosbox-teardown.sh
+source "$REPO/tools/dosbox-teardown.sh"   # dbx_kill_conf -- conf-scoped teardown
 ALLOWLIST="$SCRIPT_DIR/io-audit-allowlist.txt"
 export DISPLAY="${DOSBOX_DISPLAY:-:0}"
 
@@ -94,9 +96,9 @@ SRC=""
 for cand in "$STAGE/LOGS/DEBUG.LOG" "$STAGE/DEBUG.LOG" "$STAGE/debug.log"; do
   [[ -f "$cand" ]] && { SRC="$cand"; break; }
 done
-[[ -n "$SRC" ]] || { echo "[io-gate] FAIL: no DEBUG.LOG captured"; pkill -x dosbox-x; exit 5; }
+[[ -n "$SRC" ]] || { echo "[io-gate] FAIL: no DEBUG.LOG captured"; dbx_kill_conf "$CONF"; exit 5; }
 LOG="/tmp/io-audit-gate-debug.log"; cp "$SRC" "$LOG"
-pkill -x dosbox-x; sleep 3; [[ -f "$SRC" ]] && cp "$SRC" "$LOG"; pkill -9 -x dosbox-x 2>/dev/null
+dbx_kill_conf "$CONF"; sleep 3; [[ -f "$SRC" ]] && cp "$SRC" "$LOG"; dbx_kill_conf "$CONF" KILL
 
 # Load allowlist rules (strip comments/blanks).
 mapfile -t RULES < <(grep -vE '^\s*(#|$)' "$ALLOWLIST")

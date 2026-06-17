@@ -60,6 +60,13 @@ CONF_FAST="$REPO_ROOT/tools/dosbox-x-fast.conf"
 # emulate the YMF262 so SETUP's FM register writes (port 0x388) produce
 # capturable output.
 CONF_OPL3=""   # set in ensure_stage
+# CURRENT_CONF tracks the conf the most recent launch_dosbox used, so kill_dosbox
+# can scope its teardown to that exact instance (this suite never runs two DOSBox-X
+# instances concurrently -- launch_dosbox kills any prior one first). Empty until the
+# first launch, which makes the cleanup-trap teardown a safe no-op if we exit early.
+CURRENT_CONF=""
+# shellcheck source=../tools/dosbox-teardown.sh
+source "$REPO_ROOT/tools/dosbox-teardown.sh"   # dbx_kill_conf -- conf-scoped teardown
 
 OUT_DIR="/tmp/setup-e2e"
 ONLY=""
@@ -95,7 +102,7 @@ pass() { echo "[setup-e2e]   PASS: $*" | tee -a "$RESULTS"; }
 fail() { echo "[setup-e2e]   FAIL: $*" | tee -a "$RESULTS"; }
 
 cleanup() {
-  pkill -x dosbox-x >/dev/null 2>&1 || true
+  dbx_kill_conf "$CURRENT_CONF" >/dev/null 2>&1 || true
   pulse_sink_down 2>/dev/null || true
   if [[ -n "$XVFB_PID" ]]; then kill "$XVFB_PID" >/dev/null 2>&1 || true; fi
 }
@@ -203,6 +210,7 @@ org_cache_absent()  { rm -f "$STAGE_DIR"/CACHE/*/CURLY.PCM 2>/dev/null || true; 
 DBX_LOG="$OUT_DIR/dosbox.log"
 launch_dosbox() {
   local conf="$1"; shift
+  CURRENT_CONF="$conf"   # remember for kill_dosbox's conf-scoped teardown
   # CLAUDE.md: never run two DOSBox-X instances at once (mount-cache races +
   # ambiguous xdotool search). The SDL-linked SETUP.EXE can take several
   # seconds to fully exit; if a prior instance is still alive, a concurrent
@@ -251,14 +259,14 @@ launch_dosbox() {
 # SETUP.EXE -- its SDL audio-device close lengthens shutdown, and a surviving
 # instance races the next launch on the build/stage mount.
 kill_dosbox() {
-  pkill -x dosbox-x >/dev/null 2>&1 || true
+  dbx_kill_conf "$CURRENT_CONF" >/dev/null 2>&1 || true
   local i
   for i in $(seq 1 40); do
     pgrep -x dosbox-x >/dev/null 2>&1 || { sleep 0.5; return 0; }  # gone (+ fs settle)
     sleep 0.5
   done
   # still alive after ~20s -- force it
-  pkill -9 -x dosbox-x >/dev/null 2>&1 || true
+  dbx_kill_conf "$CURRENT_CONF" KILL >/dev/null 2>&1 || true
   sleep 1
 }
 
