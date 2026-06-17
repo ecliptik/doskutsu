@@ -482,9 +482,39 @@ Two sets are supported today:
 If a set is missing some of the 41 engine tracks (e.g. a partial fetch),
 SETUP flags it in the picker's description ("`N` fewer than the fullest
 set; those songs will play no music"), and the engine warns + skips the
-missing track at play time. Note: the engine only recognizes the two
-logical set values above -- an arbitrary user-named drop-in directory is
-not selectable without an engine change (tracked separately).
+missing track at play time.
+
+### Bring your own MIDI set (custom drop-in)
+
+Beyond the two built-in sets you can supply your OWN MIDI arrangement:
+
+1. Make a directory under `data/` and drop your `.mid` files in it, each
+   named after the engine track it replaces (the same base names the
+   scripts above produce in `data/midi/`, e.g. `curly.mid`, `access.mid`,
+   `oside.mid`). On real DOS hardware the directory name must be 8.3-legal
+   -- 8 characters or fewer, letters/digits only is safest:
+
+   ```
+   data/mymidi/curly.mid
+   data/mymidi/access.mid
+   ...
+   ```
+
+2. Re-launch SETUP. The **MIDI music set** row now lists your directory as
+   `Custom (mymidi)` alongside WiiWare / OrgMIDI; pick it and save. (Or set
+   `MIDI_SET=mymidi` in `DOSKUTSU.CFG` / `SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=mymidi`
+   by hand -- see `docs/CONFIG.md`.)
+
+The engine accepts the directory only when the name is a single safe path
+segment and the directory holds at least one `.mid`; otherwise it falls
+back to WiiWare. Tracks you do not provide simply stay silent for those
+songs (same graceful skip as a partial built-in set). The killswitch
+`SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS=0` restricts selection back to the
+two built-in sets if you ever need the old behavior.
+
+**Provenance:** custom sets are entirely user-supplied -- we redistribute
+nothing and make no claim on your `.mid` files. Same user-fetches/supplies-
+locally posture as everything else in this step.
 
 ---
 

@@ -360,17 +360,36 @@ static void test_midiset_scan(void)
   write_file("/tmp/dkt_ms_two/data/orgmid/curly.mid", "MThd");
   /* a non-.mid file must NOT be counted */
   write_file("/tmp/dkt_ms_two/data/midi/readme.txt", "x");
+  /* #39b: an unknown subdir with >=1 .mid must surface as a custom drop-in */
+  mkdir("/tmp/dkt_ms_two/data/mymidi", 0777);
+  write_file("/tmp/dkt_ms_two/data/mymidi/curly.mid", "MThd");
+  write_file("/tmp/dkt_ms_two/data/mymidi/access.mid", "MThd");
+  /* #39b: an unknown subdir with NO .mid must NOT be offered */
+  mkdir("/tmp/dkt_ms_two/data/org", 0777);            /* .org source, no .mid */
+  write_file("/tmp/dkt_ms_two/data/org/curly.org", "Org-02");
 
-  n = midiset_scan(data2, sets, MIDISET_MAX);
-  CHECK(n == 2, "midiset_scan: both sets present -> 2");
-  wi = midiset_index_by_value(sets, n, "wiimidi");
-  oi = midiset_index_by_value(sets, n, "orgmid");
-  CHECK(wi >= 0 && strcmp(sets[wi].label, "WiiWare") == 0 &&
-        strcmp(sets[wi].dir, "midi") == 0 && sets[wi].mid_count == 2,
-        "midiset_scan: wiimidi -> data/midi, label WiiWare, 2 .mid (txt ignored)");
-  CHECK(oi >= 0 && strcmp(sets[oi].label, "OrgMIDI") == 0 &&
-        strcmp(sets[oi].dir, "orgmid") == 0 && sets[oi].mid_count == 1,
-        "midiset_scan: orgmid -> data/orgmid, label OrgMIDI, 1 .mid");
+  {
+    int ci;
+    n = midiset_scan(data2, sets, MIDISET_MAX);
+    CHECK(n == 3, "midiset_scan: 2 known + 1 custom drop-in -> 3 (empty dir ignored)");
+    wi = midiset_index_by_value(sets, n, "wiimidi");
+    oi = midiset_index_by_value(sets, n, "orgmid");
+    CHECK(wi >= 0 && strcmp(sets[wi].label, "WiiWare") == 0 &&
+          strcmp(sets[wi].dir, "midi") == 0 && sets[wi].mid_count == 2,
+          "midiset_scan: wiimidi -> data/midi, label WiiWare, 2 .mid (txt ignored)");
+    CHECK(oi >= 0 && strcmp(sets[oi].label, "OrgMIDI") == 0 &&
+          strcmp(sets[oi].dir, "orgmid") == 0 && sets[oi].mid_count == 1,
+          "midiset_scan: orgmid -> data/orgmid, label OrgMIDI, 1 .mid");
+    /* #39b custom drop-in: value=dir, label "Custom (<dir>)", appended AFTER
+     * the known sets (idx >= MIDISET_KNOWN count). */
+    ci = midiset_index_by_value(sets, n, "mymidi");
+    CHECK(ci >= 2 && strcmp(sets[ci].dir, "mymidi") == 0 &&
+          strcmp(sets[ci].label, "Custom (mymidi)") == 0 &&
+          sets[ci].mid_count == 2,
+          "midiset_scan: #39b mymidi -> Custom (mymidi), value mymidi, 2 .mid, after known sets");
+    CHECK(midiset_index_by_value(sets, n, "org") == -1,
+          "midiset_scan: #39b data/org (no .mid) not offered");
+  }
 
   /* index_by_value: empty/NULL -> default wiimidi; unknown -> -1 */
   CHECK(midiset_index_by_value(sets, n, "") == wi,

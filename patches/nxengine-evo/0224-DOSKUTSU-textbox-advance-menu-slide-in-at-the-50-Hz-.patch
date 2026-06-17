@@ -1,0 +1,228 @@
+From 46bc343f6a4258abbdae512d41085eaf434e969e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 15 Jun 2026 19:47:17 -0700
+Subject: [PATCH] [DOSKUTSU] textbox: advance menu slide-in at the 50 Hz logic
+ rate
+
+Why DOS needs this: FIXED_TIMESTEP (default-ON since v1.0.0) runs game
+logic at a fixed 50 Hz decoupled from the ~30 fps g2k render rate.
+Patches 0155/0158 moved onscreen-object + textbox STATE into
+Game::tick_state() so it advances at 50 Hz, but the menu slide-in STEP
+was left in the sub-prompt Draw() (the render half): the teleporter
+StageSelect "- WARP -" banner (fWarpY) and the save/load SaveSelect
+character pic (fPicXOffset) advance once per RENDER frame, so the slide
+plays visibly slow (render rate, not the authored 50 Hz).
+
+Fix (default-ON, strict-"0" killswitch SDL_HINT_DOSKUTSU_MENU_SLIDE_FT=0):
+move the slide step into the sub-prompt TickState() (the FT 50 Hz logic
+half, driven by textbox.TickState() under the GM_NORMAL split). A
+single-instance latch lets Draw() know the state half already stepped
+this frame so it does not double-step. Every non-FT-GM_NORMAL path --
+FT=0, the GM_TITLE load screen, inventory, which drive the textbox via
+the legacy textbox.Tick() rather than the accumulator -- keeps stepping
+in Draw() and stays byte-identical. The killswitch reverts to the
+pre-patch step-in-Draw-only behavior.
+
+menu_slide_ft_active() is a sentinel-cached killswitch sibling to
+fixed_timestep_active(); main.cpp force-evals it after textbox.Init so
+the build-qa banner fires at boot ("menu slide-in fixed-timestep:
+ENABLED (default; ...) | DISABLED (killswitch; ...)").
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/TextBox/SaveSelect.cpp  | 29 ++++++++++++++++++++++++++++-
+ src/TextBox/StageSelect.cpp | 32 +++++++++++++++++++++++++++++---
+ src/game.cpp                | 30 ++++++++++++++++++++++++++++++
+ src/game.h                  |  1 +
+ src/main.cpp                |  6 ++++++
+ 5 files changed, 94 insertions(+), 4 deletions(-)
+
+diff --git a/src/TextBox/SaveSelect.cpp b/src/TextBox/SaveSelect.cpp
+index af74ac17..3ee37ab9 100644
+--- a/src/TextBox/SaveSelect.cpp
++++ b/src/TextBox/SaveSelect.cpp
+@@ -28,6 +28,12 @@ using namespace NXE::Graphics;
+ static Profile fProfiles[MAX_SAVE_SLOTS];
+ static bool fHaveProfile[MAX_SAVE_SLOTS];
+ int fPicXOffset;
++// DOS-PORT (patch 0224, small-polish item 3): single-instance latch --
++// true when this frame's character-pic slide step already ran in
++// TickState() (the FT 50 Hz logic half) so DrawExtendedInfo() (render
++// half) does not step it again. Declared up here so DrawExtendedInfo()
++// (above TickState in this file) can see it. One textbox.SaveSelect only.
++static bool s_savesel_slid_state = false;
+ 
+ // I don't think it's possible to get 3-digit max life
+ // without hacking, but I accounted for it anyway.
+@@ -237,7 +243,12 @@ void TB_SaveSelect::DrawExtendedInfo()
+ 
+   if (fPicXOffset < 0)
+   {
+-    fPicXOffset += 8;
++    // DOS-PORT (patch 0224): step the slide here ONLY when the FT logic
++    // half (TickState) did not already do it this frame (killswitch=0 or a
++    // non-FT-GM_NORMAL path -- GM_TITLE load screen / FT=0). The setClip
++    // stays unconditional while sliding.
++    if (!menu_slide_ft_active() || !s_savesel_slid_state)
++      fPicXOffset += 8;
+     Renderer::getInstance()->setClip(((Renderer::getInstance()->screenWidth / 2) - (MSG_W / 2)) + 4, 0, Renderer::getInstance()->screenWidth, Renderer::getInstance()->screenHeight);
+   }
+ 
+@@ -369,6 +380,10 @@ void TB_SaveSelect::Draw(void)
+   // draw extended info for current selection
+   if (fHaveProfile[fCurSel])
+     DrawExtendedInfo();
++
++  // DOS-PORT (patch 0224): end of the render half -- clear the slide latch
++  // so the next frame's TickState/Draw arbitration starts fresh.
++  s_savesel_slid_state = false;
+ }
+ 
+ void TB_SaveSelect::Tick(void)
+@@ -396,4 +411,16 @@ void TB_SaveSelect::TickState(void)
+ 
+   // handle user input
+   Run_Input();
++
++  // DOS-PORT (patch 0224): advance the character-pic slide at the 50 Hz
++  // logic rate when the FT GM_NORMAL split drives the textbox (in-game
++  // save point). Mirrors the original DrawExtendedInfo() step condition.
++  // DrawExtendedInfo() skips its own step this frame (latch). Killswitch=0
++  // or non-FT paths (GM_TITLE load screen): no-op here; Draw keeps stepping.
++  if (menu_slide_ft_active())
++  {
++    s_savesel_slid_state = true;
++    if (fHaveProfile[fCurSel] && fPicXOffset < 0)
++      fPicXOffset += 8;
++  }
+ }
+diff --git a/src/TextBox/StageSelect.cpp b/src/TextBox/StageSelect.cpp
+index fd8b411e..df908a7e 100644
+--- a/src/TextBox/StageSelect.cpp
++++ b/src/TextBox/StageSelect.cpp
+@@ -86,6 +86,12 @@ void TB_StageSelect::Tick(void)
+ // TextBox::Draw() -> StageSelect.Draw(). Multi-run-safe: HandleInput()
+ // is pure justpushed() reads, and selection is guarded by fMadeSelection
+ // (wave-62 STOP-confirm-2: CLEAN).
++// DOS-PORT (patch 0224, small-polish item 3): single-instance latch --
++// true when this frame's slide step already ran in TickState() (the FT
++// 50 Hz logic half) so Draw() (the render half) does not step it again.
++// File-scope is safe: there is exactly one textbox.StageSelect instance.
++static bool s_stagesel_slid_state = false;
++
+ void TB_StageSelect::TickState(void)
+ {
+   if (!fVisible)
+@@ -93,6 +99,18 @@ void TB_StageSelect::TickState(void)
+ 
+   // handle user input
+   HandleInput();
++
++  // DOS-PORT (patch 0224): advance the "- WARP -" slide at the 50 Hz logic
++  // rate when the FT GM_NORMAL split drives the textbox via TickState().
++  // Draw() skips its own step this frame (latch). Killswitch=0: do nothing
++  // here -- Draw() keeps the legacy step.
++  if (menu_slide_ft_active())
++  {
++    fWarpY -= WARP_Y_SPEED;
++    if (fWarpY < WARP_Y)
++      fWarpY = WARP_Y;
++    s_stagesel_slid_state = true;
++  }
+ }
+ 
+ void TB_StageSelect::Draw(void)
+@@ -101,9 +119,17 @@ void TB_StageSelect::Draw(void)
+     return;
+ 
+   // draw "- WARP -" text
+-  fWarpY -= WARP_Y_SPEED;
+-  if (fWarpY < WARP_Y)
+-    fWarpY = WARP_Y;
++  // DOS-PORT (patch 0224): step the slide here ONLY when the FT logic half
++  // (TickState) did not already do it this frame -- i.e. killswitch=0, or
++  // any non-FT-GM_NORMAL path (FT=0 / GM_TITLE / inventory) where Draw() is
++  // the sole driver. Byte-identical to upstream in those paths.
++  if (!menu_slide_ft_active() || !s_stagesel_slid_state)
++  {
++    fWarpY -= WARP_Y_SPEED;
++    if (fWarpY < WARP_Y)
++      fWarpY = WARP_Y;
++  }
++  s_stagesel_slid_state = false;
+ 
+   Renderer::getInstance()->sprites.drawSprite(WARP_X, fWarpY, SPR_TEXT_WARP, 0);
+ 
+diff --git a/src/game.cpp b/src/game.cpp
+index bb089915..f5213912 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -427,6 +427,36 @@ bool fixed_timestep_active()
+   return g_fixed_timestep == 1;
+ }
+ 
++// DOS-PORT (patch 0224, small-polish item 3): killswitch for the menu
++// slide-in fixed-timestep fix. The teleporter (StageSelect "- WARP -"
++// banner, fWarpY) and the save/load screen (SaveSelect character pic,
++// fPicXOffset) advance their slide-in one step per call to the sub-prompt
++// Draw(). Patches 0155/0158 moved onscreen-object + textbox STATE into
++// Game::tick_state() so it runs at the fixed 50 Hz logic rate under
++// FIXED_TIMESTEP, but the slide-in STEP was left in Draw(), which runs
++// once per RENDER frame (~30 fps on g2k) -- so the slide plays at render
++// rate, noticeably slow vs the authored 50 Hz. This lever moves the slide
++// step into the sub-prompt TickState() (the 50 Hz logic half) when the FT
++// GM_NORMAL split is driving, and keeps it in Draw() for every other path
++// (FT=0, GM_TITLE load screen, inventory) so those stay byte-identical.
++// Default-ON; strict-"0" killswitch SDL_HINT_DOSKUTSU_MENU_SLIDE_FT=0
++// reverts to the pre-0224 step-in-Draw-only behavior. Sentinel-cached
++// (no per-frame getenv); first call emits the build-qa banner.
++static int g_menu_slide_ft = -1; // -1 undecided / 0 off / 1 on
++bool menu_slide_ft_active()
++{
++  if (g_menu_slide_ft < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_MENU_SLIDE_FT");
++    g_menu_slide_ft = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    LOG_INFO("menu slide-in fixed-timestep: {}",
++             g_menu_slide_ft
++                 ? "ENABLED (default; slide advances at 50 Hz logic rate)"
++                 : "DISABLED (killswitch; slide advances at render rate)");
++  }
++  return g_menu_slide_ft == 1;
++}
++
+ // DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): the logic
+ // half of the tick. debug_clear + (when not paused) TSC RunScripts +
+ // the esc-pause check + the per-mode logic. For GM_NORMAL the ModeSim
+diff --git a/src/game.h b/src/game.h
+index 31f57fc3..1f03da4d 100644
+--- a/src/game.h
++++ b/src/game.h
+@@ -230,6 +230,7 @@ void game_tick_normal_render(void);
+ // "=0" killswitch reverts to the wave-56 1:1 path, byte-identical to
+ // wave-37 production.
+ bool fixed_timestep_active();
++bool menu_slide_ft_active(); // patch 0224: menu slide-in 50 Hz fix killswitch
+ 
+ void AssignExtraSprites(void);
+ 
+diff --git a/src/main.cpp b/src/main.cpp
+index d64f1dea..507f24e0 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1779,6 +1779,12 @@ int main(int argc, char *argv[])
+     fatal("Failed to initialize textboxes.");
+     return 1;
+   }
++  // DOS-PORT (patch 0224, small-polish item 3): force the menu slide-in
++  // killswitch banner at boot. menu_slide_ft_active() is otherwise first
++  // called only when a teleporter/save menu is shown, so the build-qa
++  // two-witness banner would miss a boot-to-title smoke. Sentinel-cached;
++  // this is the only side effect of the first call.
++  (void)menu_slide_ft_active();
+   if (Carets::init())
+   {
+     fatal("Failed to initialize carets.");
+-- 
+2.47.3
+

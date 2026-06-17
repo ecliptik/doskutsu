@@ -1,0 +1,138 @@
+From 553a01ada984c4a95f5e6de544465d781526b91a Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 15 Jun 2026 19:49:26 -0700
+Subject: [PATCH] [DOSKUTSU] main: post-SDL_Quit exit-stage diagnostic markers
+ (no fix)
+
+Why DOS needs this: the intermittent quit-to-DOS hang (issues #18/#32)
+wedges in the DJGPP/DOS runtime exit AFTER SDL audio+video teardown +
+SDL_Quit complete -- distinct from the SDL/0066+0068 DestroyMixer
+teardown hang (two separate quit-hangs; do not conflate). Per
+dont_fix_on_unconfirmed_static_mechanism this is INSTRUMENTATION ONLY,
+no fix: the last marker before a g2k wedge names the wedging stage.
+
+Adds bracket markers around the post-SDL_Quit exit stages, gated behind
+SDL_HINT_DOSKUTSU_EXIT_MARKERS (strict "1"; default-OFF diag ride-along):
+
+  - exit-pre-return  : last log line from main() before returning into the
+                       DJGPP/libc exit path.
+  - exit-atexit-first: atexit-chain HEAD (handler registered last -> runs
+                       first), marks chain entry.
+  - exit-atexit-last : atexit-chain TAIL (handler registered before
+                       SDL_Init -> runs last), the deepest C-reachable
+                       point. After it, libc closes stdio then the DJGPP
+                       stub does CWSDPMI/DPMI teardown + interrupt-vector
+                       restore -- no C hook point. A wedge past this marker
+                       localizes to the DPMI/vector-restore stage (the
+                       prime suspect for #18/#32).
+
+Markers emit via doskutsu_dbg_log, which fsyncs per line (SDL_dosdbg.c,
+patch 0036 style) and reopens its FILE* lazily -- so they survive a hard
+wedge and work past SDL_Quit / during the atexit chain (the existing
+engine-shutdown[final] marker already uses it post-SDL_Quit). Marker
+strings match the existing optional smoke-gate regex
+'exit-(pre-return|atexit-first|atexit-last)'. Default-OFF: a production
+run emits nothing. Rides the g2k iter.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 69 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 69 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 507f24e0..ca50d3a9 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -61,6 +61,51 @@ using namespace NXE::Graphics;
+ extern "C" void doskutsu_dbg_log(const char *fmt, ...);
+ using namespace NXE::Utils;
+ 
++// DOS-PORT (patch 0225, small-polish item 2): post-SDL_Quit exit-stage
++// markers. The intermittent quit-to-DOS hang (issues #18/#32) wedges in
++// the DJGPP/DOS runtime exit AFTER SDL audio+video teardown + SDL_Quit
++// complete -- distinct from the SDL/0066+0068 DestroyMixer teardown hang
++// (do NOT conflate; two separate quit-hangs). Per
++// [[dont_fix_on_unconfirmed_static_mechanism]] this is markers ONLY, no
++// fix: the last marker before a g2k wedge names the wedging stage. Gated
++// behind SDL_HINT_DOSKUTSU_EXIT_MARKERS (strict "1"; default-OFF diag,
++// ride-along). doskutsu_dbg_log fsyncs per line (SDL_dosdbg.c) and
++// reopens its FILE* lazily, so markers survive a hard wedge and work past
++// SDL_Quit / during the atexit chain (the engine-shutdown[final] marker
++// already uses it post-SDL_Quit).
++static bool _exit_markers_on()
++{
++  static int v = -1;
++  if (v < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_EXIT_MARKERS");
++    v = (e && e[0] == '1' && e[1] == 0) ? 1 : 0; // strict "1"; default OFF
++  }
++  return v == 1;
++}
++// Registered LATE (just before return from main) so it runs FIRST in the
++// LIFO atexit chain -- marks the chain entry.
++static void _exit_marker_atexit_first(void)
++{
++  if (_exit_markers_on())
++    doskutsu_dbg_log("exit-atexit-first: libc began running the atexit chain "
++                     "(latest-registered handler)");
++}
++// Registered EARLY (before SDL_Init) so it runs LAST in the LIFO atexit
++// chain -- the deepest C-reachable point. After this, libc closes stdio
++// then the DJGPP stub does CWSDPMI/DPMI teardown + interrupt-vector
++// restore (no C hook point). A wedge AFTER this marker localizes to the
++// DPMI teardown / vector-restore stage -- the #18/#32 prime suspect.
++static void _exit_marker_atexit_last(void)
++{
++  if (_exit_markers_on())
++    doskutsu_dbg_log("exit-atexit-last: atexit chain tail reached "
++                     "(earliest-registered handler); next is libc stdio close "
++                     "then DJGPP/CWSDPMI DPMI teardown + interrupt-vector "
++                     "restore -- no further C hook; wedge past here = "
++                     "DPMI/vector stage");
++}
++
+ #if defined(__SWITCH__)
+ #include <switch.h>
+ #include <iostream>
+@@ -1409,6 +1454,15 @@ int main(int argc, char *argv[])
+     LOG_INFO("config: no DOSKUTSU.CFG, using built-in defaults");
+ //  SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+ 
++  // DOS-PORT (patch 0225, small-polish item 2): register the atexit-chain
++  // TAIL marker BEFORE SDL_Init so it is the earliest-registered atexit
++  // handler -> runs LAST (LIFO) -> the deepest C-reachable exit marker,
++  // immediately before the libc/CWSDPMI DPMI teardown + interrupt-vector
++  // restore that has no C hook. Registered unconditionally; the handler
++  // self-gates on SDL_HINT_DOSKUTSU_EXIT_MARKERS (diag, default-OFF) so a
++  // production run emits nothing. See the _exit_marker_* helpers above.
++  std::atexit(_exit_marker_atexit_last);
++
+   // TAS subsystem init (patch 0135, wave 41). Runs AFTER Logger::init
+   // so LOG_INFO / LOG_WARN / LOG_ERROR are usable for engagement
+   // banners + error narration. Runs BEFORE SDL_Init + game state
+@@ -1939,6 +1993,21 @@ shutdown:;
+   // field semantics + schema doc reference.
+   emit_run_manifest();
+ 
++  // DOS-PORT (patch 0225, small-polish item 2): register the atexit-chain
++  // HEAD marker as late as possible so it is the latest-registered atexit
++  // handler -> runs FIRST (LIFO), marking chain entry. Paired with the
++  // _exit_marker_atexit_last registered before SDL_Init. Then emit the
++  // pre-return marker: the last log line from main() itself, immediately
++  // before control leaves to the DJGPP/libc exit path (atexit chain ->
++  // stdio close -> CWSDPMI/DPMI teardown -> interrupt-vector restore ->
++  // return to DOS). Both self-gate on SDL_HINT_DOSKUTSU_EXIT_MARKERS.
++  std::atexit(_exit_marker_atexit_first);
++  if (_exit_markers_on())
++    doskutsu_dbg_log("exit-pre-return: engine teardown + SDL_Quit complete; "
++                     "returning from main() into the DJGPP/libc exit path "
++                     "(atexit chain -> stdio close -> CWSDPMI DPMI teardown -> "
++                     "interrupt-vector restore -> DOS)");
++
+   return error;
+ 
+ ingame_error:;
+-- 
+2.47.3
+

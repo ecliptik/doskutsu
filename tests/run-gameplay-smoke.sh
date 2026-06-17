@@ -385,6 +385,9 @@ BANNER_REGEX=(
   "\[org-precache\] TOTAL rate=[0-9]+ channels=[0-9]+ rendered=[0-9]+ skipped=[0-9]+ failed=[0-9]+ bytes=[0-9]+"
   "config: (loaded DOSKUTSU.CFG \([0-9]+ keys\)|no DOSKUTSU.CFG, using built-in defaults)"
   "organya auto-precache: (ENABLED \(default\)|DISABLED \(killswitch =0\))"
+  "Renderer::initVideo: DOS resolution-label lock (ENABLED \(default\)|DISABLED \(killswitch =0\))"
+  "menu slide-in fixed-timestep: (ENABLED \(default;.*\)|DISABLED \(killswitch;.*\))"
+  "MidiScheduler: MIDI source = custom drop-in dir"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -482,6 +485,9 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "optional"
+  "required"
+  "optional"
+  "required"
   "required"
   "optional"
 )
@@ -591,6 +597,9 @@ BANNER_LABEL=(
   "0215 v1.0.8.1 batch org-precache total (OPTIONAL -- emits ONLY under DOSKUTSU_ORG_PRECACHE_ALL=1, the deployable-cache one-shot; reports rate/channels/rendered/skipped/failed/bytes for CF sizing; absent in a normal gameplay smoke. BANNER_REGEX idx 94.)"
   "0216 DOSKUTSU.CFG config-file setenv shim (REQUIRED -- emits every boot after Logger::init: 'config: loaded DOSKUTSU.CFG (N keys)' when DOSKUTSU.CFG is present in the program dir, else 'config: no DOSKUTSU.CFG, using built-in defaults'. SETUP.EXE writes the file; the shim setenv's each user-facing key BEFORE any getenv/SDL_GetHint read, overwrite=0 so precedence is env > file > built-in default. Two-witness with the consuming lever's own banner -- e.g. a CFG with PERF_MODE=1 yields 'perf-mode: level=1'; a BAT 'SET SDL_HINT_DOSKUTSU_PERF_MODE=0' over the same CFG yields 'perf-mode: level=0' (env wins). Default smoke stages NO CFG so the 'no DOSKUTSU.CFG' variant matches. NOTE the BANNER_LABEL array carries a pre-existing display-only gap vs REGEX/SEVERITY, so this label's index is not load-bearing.)"
   "0221 organya auto-precache decision (OPTIONAL -- organya-gated, emits ONLY on an organya run, one of 'ENABLED (default)' / 'DISABLED (killswitch =0)' via SDL_HINT_DOSKUTSU_ORG_AUTOCACHE; mirrors the 0214 render-quiesce banner. First-launch renders all songs behind a progress overlay + writes the per-tier READY.<sha> sentinel; subsequent boots skip on the sentinel; in-game cold-render overlay armed for stray misses. Absent under the default OPL3/WB backend (no cold-render) which is correct not a failure; the headless DOSKUTSU_ORG_PRECACHE_ALL=1 path returns before registration so it is also absent there -- byte-identical to 0215.)"
+  "0223 small-polish item-4c DOS resolution-label lock (default-ON; killswitch SDL_HINT_DOSKUTSU_RES_LABEL_LOCK=0. Emits every DOS boot from Renderer::initVideo: 'Renderer::initVideo: DOS resolution-label lock ENABLED (default)' (or DISABLED (killswitch =0)). The actual behavior -- Video menu shows the locked 320x240 + Resolution scroll is a no-op -- lives in options.cpp and only runs when the menu is opened, so the boot banner is the two-witness runtime side; embed witness = strings|grep 'DOS resolution-label lock'. REQUIRED at the v1.1.2 ship-gate (default-ON, initVideo emits at every boot; g2k-validated). BANNER_REGEX idx 94.)"
+  "0224 small-polish item-3 menu slide-in fixed-timestep fix (default-ON; killswitch SDL_HINT_DOSKUTSU_MENU_SLIDE_FT=0. Forced boot eval in main.cpp after textbox.Init emits 'menu slide-in fixed-timestep: ENABLED (default; ...)' (or DISABLED (killswitch; ...)). Moves the StageSelect WARP-banner (fWarpY) + SaveSelect char-pic (fPicXOffset) slide STEP into the sub-prompt TickState() so it advances at 50 Hz under FT GM_NORMAL instead of render rate; non-FT paths (FT=0/GM_TITLE/inventory) keep stepping in Draw byte-identically. Embed witness = strings|grep 'menu slide-in fixed-timestep'. REQUIRED at the v1.1.2 ship-gate (default-ON, boot-forced eval emits at every boot; g2k-validated). BANNER_REGEX idx 95.)"
+  "0226 #39b custom MIDI drop-in dir resolution (OPTIONAL -- emits ONLY when MIDI_SET / SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE names a path-safe data/<dir>/ holding >=1 .mid that is NOT a known set (wiimidi/orgmid), AND the killswitch SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS is not '0'. Default smoke uses MIDI_SET=wiimidi so this is ABSENT -- correct, not a failure; embed witness = strings|grep 'custom drop-in dir'. The #39b DOSBox validation cell (MIDI_SET=mycustom + staged data/mycustom/*.mid) is the runtime witness; killswitch=0 falls back to wiimidi with no banner. BANNER_REGEX idx 95.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

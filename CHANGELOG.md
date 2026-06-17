@@ -5,6 +5,42 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.1.2] - 2026-06-17
+
+Small-polish + custom-MIDI release: three UI/correctness fixes plus user-supplied
+MIDI music sets. Default-ON with killswitches; the production render path is
+unchanged (the two fixes live in menus). Validated on the reference 486 DX2-66
+(SB16 + DreamBlaster S2).
+
+### Added
+
+- **Custom MIDI drop-in directories (#39b).** A user can drop their own General
+  MIDI set into `data/<name>/` (>=1 `.mid`) and select it -- via SETUP.EXE or
+  `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=<name>` -- instead of the bundled
+  `wiimidi` / `orgmid` sets. An unknown or empty name falls back to `wiimidi`
+  with no behavior change; killswitch `SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS=0`
+  disables the feature. SETUP's music-set picker scan now widens to list
+  drop-in dirs. See `docs/ASSETS.md` and `docs/CONFIG.md`.
+
+### Fixed
+
+- **Options menu resolution label (item 4c).** The Video options menu showed a
+  stale `640x480` while the DOS render mode is hard-locked to `320x240`; it now
+  reports the locked `320x240` and the Resolution scroll is acknowledged without
+  a spurious "Resolution change failed" popup. Killswitch
+  `SDL_HINT_DOSKUTSU_RES_LABEL_LOCK=0` restores the prior behavior.
+- **Menu slide-in animation speed (item 3).** The teleporter StageSelect "WARP"
+  banner and the save/load SaveSelect character pic slid in at the ~30 fps render
+  rate instead of the authored 50 Hz logic rate under fixed-timestep; the slide
+  step now advances in the 50 Hz logic half. Killswitch
+  `SDL_HINT_DOSKUTSU_MENU_SLIDE_FT=0` restores the prior behavior.
+
+### Internal
+
+- **Exit-stage diagnostic markers (item 2).** Opt-in shutdown-path diagnostic
+  (`SDL_HINT_DOSKUTSU_EXIT_MARKERS=1`, default-OFF) that brackets the
+  post-`SDL_Quit` teardown; no production behavior change. Diagnostic only.
+
 ## [1.1.1] - 2026-06-16
 
 Maintenance release: fixes an Organya pre-render regression and the title/menu

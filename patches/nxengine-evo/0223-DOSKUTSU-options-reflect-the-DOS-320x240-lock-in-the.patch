@@ -1,0 +1,136 @@
+From beaa4e54f940dc6564c695505dd45562c4c1464f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 15 Jun 2026 19:42:45 -0700
+Subject: [PATCH] [DOSKUTSU] options: reflect the DOS 320x240 lock in the Video
+ menu
+
+Why DOS needs this: patch 0005 hard-locks the actual render mode to
+320x240 in Renderer::initVideo but deliberately leaves
+settings->resolution untouched (so settings persistence keeps a valid
+index). settings.cpp can store resolution=2 ("640x480") as a "safe
+value", so the Video options menu -- which reads
+getResolutions()[settings->resolution].name -- can display "640x480"
+while the screen is locked at 320x240. Confusing on the reference
+hardware where 640x480 is not even negotiable.
+
+Fix (NXE_DOS-gated, default-ON, strict-"0" killswitch
+SDL_HINT_DOSKUTSU_RES_LABEL_LOCK=0): the Resolution menu label always
+reports the locked 320x240 entry (index 1 in getResolutions()), and
+Resolution scrolling is acknowledged with the menu-move sfx but does not
+attempt a setResolution() that cannot succeed (no spurious "Resolution
+change failed" popup). settings->resolution is left untouched, consistent
+with patch 0005's decision not to mutate it. The killswitch reverts to
+the upstream settings->resolution behavior.
+
+Boot banner emitted from Renderer::initVideo (the options code only runs
+when the user opens the menu, so the build-qa two-witness banner must
+fire at boot): "Renderer::initVideo: DOS resolution-label lock ENABLED
+(default) | DISABLED (killswitch =0)".
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 16 +++++++++++++
+ src/pause/options.cpp     | 49 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 65 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index d8a858d1..742d79d6 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -3806,6 +3806,22 @@ bool Renderer::initVideo()
+   screenHeight = 240;
+   screenWidth  = 320;
+   widescreen   = false;
++
++  // DOS-PORT (patch 0223, small-polish item 4c): boot banner for the
++  // DOS resolution-label lock. The actual label/index override lives in
++  // src/pause/options.cpp (_res_get / _res_change), which only runs when
++  // the user opens the Video options menu -- so emit the build-qa
++  // two-witness banner HERE, at boot, where it is guaranteed to fire.
++  // Default-ON; killswitch SDL_HINT_DOSKUTSU_RES_LABEL_LOCK=0 reverts to
++  // the upstream behavior where the menu shows whatever res index the
++  // settings file holds (which can read "640x480" while initVideo above
++  // has hard-locked the actual mode to 320x240 -- the bug). Same strict-0
++  // killswitch read happens independently in options.cpp; this is the
++  // banner-only mirror.
++  LOG_INFO("Renderer::initVideo: DOS resolution-label lock {}",
++           _strict_falsy_env("SDL_HINT_DOSKUTSU_RES_LABEL_LOCK")
++               ? "DISABLED (killswitch =0)"
++               : "ENABLED (default)");
+ #endif
+ 
+   if (_window)
+diff --git a/src/pause/options.cpp b/src/pause/options.cpp
+index f66a080e..fc47c21e 100644
+--- a/src/pause/options.cpp
++++ b/src/pause/options.cpp
+@@ -276,10 +276,47 @@ static void EnterSoundMenu(ODItem *item, int dir)
+ }
+ 
+ 
++// DOS-PORT (patch 0223, small-polish item 4c): the DOS build hard-locks
++// the actual render mode to 320x240 in Renderer::initVideo (patch 0005)
++// but deliberately leaves settings->resolution untouched so settings
++// persistence keeps a valid index. Consequence: the Video options menu
++// reads settings->resolution for its label and can show "640x480" (the
++// settings.cpp "safe value") while the screen is locked at 320x240. This
++// lock makes the menu reflect reality: the label always shows the locked
++// 320x240 entry (index 1 per Renderer.cpp getResolutions()) and Resolution
++// scrolling is a no-op (no spurious "Resolution change failed" popup from a
++// setResolution() that cannot succeed on the locked DOS backend). Strict
++// "0"-only killswitch (SDL_HINT_DOSKUTSU_RES_LABEL_LOCK=0) reverts to the
++// upstream settings->resolution behavior; default-ON. Lazy getenv, cached
++// for the run (the _strict_truthy_env idiom in Renderer.cpp; default-ON so
++// the test is inverted). The boot banner is emitted from initVideo.
++#ifdef NXE_DOS
++static const int DOS_LOCKED_RES_INDEX = 1; // getResolutions()[1] == "320x240"
++static bool _res_label_lock_on()
++{
++  static int v = -1;
++  if (v < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_RES_LABEL_LOCK");
++    v = (e && e[0] == '0' && e[1] == 0) ? 0 : 1; // strict "0" disables; default ON
++  }
++  return v == 1;
++}
++#endif
++
+ void _res_get(ODItem *item)
+ {
+   const gres_t *reslist = Renderer::getInstance()->getResolutions();
+ 
++#ifdef NXE_DOS
++  if (_res_label_lock_on())
++  {
++    // Report the actually-locked mode, not the persisted settings index.
++    strcpy(item->suffix, reslist[DOS_LOCKED_RES_INDEX].name);
++    return;
++  }
++#endif
++
+   if (settings->resolution < 0 || settings->resolution >= Renderer::getInstance()->getResolutionCount())
+   {
+     item->suffix[0] = 0;
+@@ -295,6 +332,18 @@ void _res_change(ODItem *item, int dir)
+   int numres = Renderer::getInstance()->getResolutionCount();
+   int newres;
+ 
++#ifdef NXE_DOS
++  if (_res_label_lock_on())
++  {
++    // Resolution is hard-locked to 320x240 on DOS (patch 0005); a real
++    // setResolution() here cannot succeed and would pop "Resolution change
++    // failed". Acknowledge the keypress with the menu-move sfx and leave
++    // settings->resolution alone -- the label stays the locked 320x240.
++    NXE::Sound::SoundManager::getInstance()->playSfx(NXE::Sound::SFX::SND_MENU_MOVE);
++    return;
++  }
++#endif
++
+   NXE::Sound::SoundManager::getInstance()->playSfx(NXE::Sound::SFX::SND_DOOR);
+ 
+   newres = (settings->resolution + dir);
+-- 
+2.47.3
+

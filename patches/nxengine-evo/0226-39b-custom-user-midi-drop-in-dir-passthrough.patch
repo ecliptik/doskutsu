@@ -1,0 +1,167 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 16 Jun 2026 11:53:24 -0700
+Subject: [PATCH] patch 0226 -- #39b custom user MIDI drop-in directory
+ passthrough
+
+#39 shipped the engine-neutral 2-set MIDI picker (wiimidi/orgmid), but the
+source resolver still maps a CLOSED set of logical hint values to fixed data
+subdirs: any unrecognized SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE value falls back
+to wiimidi. That blocks a user from dropping their OWN Standard-MIDI set into
+data/<name>/ and selecting it.
+
+This adds a passthrough in the unrecognized-value else branch, BEFORE the
+wiimidi fallback: accept <name> as a real drop-in dir iff it is path-safe
+(single relative segment of [A-Za-z0-9_.-], no leading dot, no "..", no
+/ \ : space or non-ASCII -- so it can never escape data/ or break DOS 8.3
+path building) AND <exe>/data/<name>/ exists with >=1 .mid. Per-track missing
+files keep degrading gracefully at play (warn+skip).
+
+Behavior-neutral by construction: when the value names no real MIDI dir, or
+the killswitch SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS is "0" (default-ON,
+strict-"0" disable), the engine falls back to wiimidi byte-identically to
+pre-#39b. DOS-PORT: ResourceManager::getPathForDir builds the same
+<basepath>/data/<dir> path the .mid load uses; the portable Glob walks it via
+DJGPP opendir/readdir.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 111 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 106 insertions(+), 5 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 370f686a..a394f339 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -17,6 +17,7 @@
+ extern "C" void midi_scheduler_tick_isr_thunk(Uint64 now_ms);
+ 
+ #include "../ResourceManager.h"
++#include "../common/glob.h"  // patch 0226 (#39b): scan a custom MIDI drop-in dir for >=1 .mid
+ #include "../common/misc.h"
+ #include "../Utils/Logger.h"
+ #include "../game.h"
+@@ -189,6 +190,68 @@ static void _narrate_organya_fallback(const char *which)
+            "this run.", which);
+ }
+ 
++// patch 0226 (#39b): custom user MIDI drop-in directory support. The MIDI
++// source resolver (SoundManager::init) maps a CLOSED set of logical hint
++// values (wiimidi/orgmid) to fixed data subdirs. #39b lets a user drop their
++// OWN Standard-MIDI set into data/<name>/ and select it via MIDI_SET=<name>
++// (SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE). Before the unrecognized-value
++// fallback to wiimidi, we accept <name> as a real drop-in dir iff the name is
++// path-safe AND <exe>/data/<name>/ holds >=1 .mid file. Behavior-neutral when
++// the name does not point at a real MIDI dir (still falls back to wiimidi).
++
++// Path-safety: a custom dir name must be a single relative path segment of
++// portable ASCII filename chars only. Rejects path traversal / absolute /
++// drive-letter / hidden-dotfile / non-ASCII names so the value can never
++// escape data/ or break DOS 8.3 path building. Allowed: [A-Za-z0-9_.-], no
++// leading dot, no ".." anywhere.
++static bool _midi_custom_dir_name_ok(const char *name)
++{
++  if (name == nullptr || name[0] == '\0')
++    return false;
++  if (name[0] == '.')  // no leading dot ("." / ".." / hidden)
++    return false;
++  bool has_prev_dot = false;
++  for (const char *p = name; *p; ++p)
++  {
++    const unsigned char c = (unsigned char)*p;
++    const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
++                    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
++    if (!ok)  // excludes '/', '\\', ':', space, and any non-ASCII byte
++      return false;
++    if (c == '.' && has_prev_dot)  // reject ".." run anywhere
++      return false;
++    has_prev_dot = (c == '.');
++  }
++  return true;
++}
++
++// True iff the directory at dirpath contains at least one .mid file. Uses the
++// engine's portable Glob (DJGPP/DOS: opendir+readdir; Win32: FindFirstFile).
++// We glob "*" and test the suffix case-insensitively rather than rely on
++// pattern case-folding -- DOS FAT 8.3 names can read back uppercased, so a
++// case-sensitive "*.mid" pattern could miss CURLY.MID. Returns false when the
++// dir is absent/unreadable (Glob opendir fails), which is the behavior-neutral
++// "not a real MIDI set -> fall back to wiimidi" outcome.
++static bool _midi_dir_has_mid(const std::string &dirpath)
++{
++  Glob search(dirpath + "/*");
++  while (search)
++  {
++    const std::string f = search.GetFileName();
++    if (f.size() >= 4)
++    {
++      const char *s = f.c_str() + (f.size() - 4);
++      if (s[0] == '.' &&
++          (s[1] == 'm' || s[1] == 'M') &&
++          (s[2] == 'i' || s[2] == 'I') &&
++          (s[3] == 'd' || s[3] == 'D'))
++        return true;
++    }
++    search.Next();
++  }
++  return false;
++}
++
+ SoundManager::SoundManager() {}
+ SoundManager::~SoundManager() {}
+ 
+@@ -635,11 +698,49 @@ bool SoundManager::init()
+     }
+     else
+     {
+-      _midi_source_dir = "midi";
+-      LOG_INFO("MidiScheduler: unrecognized SDL_HINT_DOSKUTSU_AUDIO_MIDI_"
+-               "SOURCE value '{}'; falling back to 'wiimidi' (data/midi/). "
+-               "Recognized values: wiimidi (default) | orgmid. Variant={} "
+-               "ignored in fallback path.", src, variant_str);
++      // patch 0226 (#39b): custom user MIDI drop-in dir passthrough. Before
++      // the historic wiimidi fallback, accept `src` as a real drop-in dir if
++      // (a) the killswitch SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS is not
++      // explicitly "0" (default-ON, strict-"0" disable), (b) the name is
++      // path-safe, and (c) <exe>/data/<src>/ exists with >=1 .mid. This keeps
++      // the engine byte-neutral when no real custom dir is named (still falls
++      // back to wiimidi) while letting a user supply their own MIDI set per
++      // docs/ASSETS.md. Per-track missing files still degrade gracefully
++      // (warn+skip at _start_mid_track, SoundManager.cpp).
++      // DOS-PORT: ResourceManager::getPathForDir builds <basepath>/data/<dir>
++      // (or the userpref override) the same way the .mid load path is built;
++      // Glob walks it via DJGPP opendir/readdir.
++      const char *cust_ks =
++          SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS");
++      const bool custom_enabled =
++          !(cust_ks && cust_ks[0] == '0' && cust_ks[1] == '\0');
++      bool custom_ok = false;
++      if (custom_enabled && _midi_custom_dir_name_ok(src))
++      {
++        const std::string dirpath =
++            ResourceManager::getInstance()->getPathForDir(src);
++        if (_midi_dir_has_mid(dirpath))
++        {
++          _midi_source_dir = src;
++          custom_ok = true;
++          LOG_INFO("MidiScheduler: MIDI source = custom drop-in dir '{}' "
++                   "(resolves to data/{}/<name>.mid; user-supplied set per "
++                   "docs/ASSETS.md; >=1 .mid present; missing tracks "
++                   "degrade gracefully). Killswitch: "
++                   "SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS=0.",
++                   src, _midi_source_dir);
++        }
++      }
++      if (!custom_ok)
++      {
++        _midi_source_dir = "midi";
++        LOG_INFO("MidiScheduler: unrecognized SDL_HINT_DOSKUTSU_AUDIO_MIDI_"
++                 "SOURCE value '{}'; falling back to 'wiimidi' (data/midi/). "
++                 "Recognized values: wiimidi (default) | orgmid | a "
++                 "path-safe data/<dir>/ holding >=1 .mid (custom-dirs={}). "
++                 "Variant={} ignored in fallback path.",
++                 src, custom_enabled ? "on" : "off", variant_str);
++      }
+     }
+ 
+     if (variant && variant[0] != '\0' && !variant_set)
