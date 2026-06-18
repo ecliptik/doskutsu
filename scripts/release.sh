@@ -14,11 +14,19 @@
 # A forge whose token/CLI is absent is warned-and-skipped, never fatal.
 #
 # Usage:
-#   ./scripts/release.sh v1.2.0         # release a specific tag
-#   ./scripts/release.sh                # release the latest vX.Y.Z tag
-#   ./scripts/release.sh --hierarchical # release every tag not yet on all forges
+#   ./scripts/release.sh v1.2.0           # release a specific tag
+#   ./scripts/release.sh                  # release the latest vX.Y.Z tag
+#   ./scripts/release.sh --hierarchical   # release every tag not yet on all forges
+#   ./scripts/release.sh --dry-run v1.2.0 # build the bundle + show what WOULD publish;
+#                                         # NO forge API calls, NO tag push, NO README
+#                                         # write. Use this to test: unsetting the Gitea
+#                                         # tokens is NOT enough -- an authenticated `gh`
+#                                         # would otherwise create a real GitHub release.
 
 set -e
+
+DRY_RUN=0
+if [ "$1" = "--dry-run" ]; then DRY_RUN=1; shift; fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 FORGEJO_URL="${FORGEJO_URL:-https://forgejo.ecliptik.com}"
@@ -188,10 +196,16 @@ do_release() {
     echo "  Artifact: $(basename "${RELEASE_FILES[0]}")"
 
     local name="DOSKUTSU $tag"
-    release_forgejo  "$tag" "$name" "$body"
-    release_codeberg "$tag" "$name" "$body"
-    release_github   "$tag" "$name" "$body"
-    update_readme_downloads "$tag"
+    if [ "$DRY_RUN" = 1 ]; then
+        echo "  [dry-run] built $(basename "${RELEASE_FILES[0]}"); skipping ALL publish."
+        echo "  [dry-run] would create release '$name' on Forgejo + Codeberg + GitHub,"
+        echo "  [dry-run] upload the artifact, push the tag, and set the README latest link."
+    else
+        release_forgejo  "$tag" "$name" "$body"
+        release_codeberg "$tag" "$name" "$body"
+        release_github   "$tag" "$name" "$body"
+        update_readme_downloads "$tag"
+    fi
     echo ""
 }
 

@@ -87,7 +87,14 @@ Prerequisites on the build host: `jq`, `gh` (for GitHub), `zip`, the DJGPP toolc
 
 Implemented at `scripts/release.sh` (adapted from `geomys/scripts/release.sh`). Run it
 with the tag: `./scripts/release.sh v1.2.0` (or no arg for the latest tag, or
-`--hierarchical` to backfill every tag not yet on all forges). What it does:
+`--hierarchical` to backfill every tag not yet on all forges).
+
+**Test first with `--dry-run`**: `./scripts/release.sh --dry-run v1.2.0` builds the
+bundle and prints what WOULD publish, touching no forge and not writing the README. A
+real dry run REQUIRES this flag -- unsetting `FORGEJO_TOKEN` / `CODEBERG_TOKEN` is NOT
+enough, because an authenticated `gh` will create a GitHub release regardless.
+
+What a real run does:
 
 - **Repo/URL vars**: `FORGEJO_REPO=ecliptik/doskutsu`, `CODEBERG_REPO=ecliptik/doskutsu`,
   `GITHUB_REPO=ecliptik/doskutsu`. Keep geomys's `FORGEJO_URL` / `CODEBERG_URL` defaults.
