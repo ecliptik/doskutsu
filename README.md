@@ -154,6 +154,11 @@ The title screen appears within a few seconds. Controls follow NXEngine-evo's de
 | Escape | Pause menu |
 | F11 | Toggle fullscreen (no-op on DOS; always fullscreen) |
 
+These are the defaults - keyboard keys are remappable and a gameport joystick /
+flightstick is supported (2 axes + 4 buttons). Configure both in `SETUP.EXE`
+under **Input**: remap keys, assign buttons, calibrate the stick, and invert the
+Y axis if its pitch reads backwards. (1.2.0+)
+
 ---
 
 ## Configuration
@@ -168,7 +173,8 @@ C:\DOSKUTSU> SETUP
 SETUP detects your machine (CPU, memory, sound card from your `BLASTER`
 variable, WaveBlaster / OPL3, video), recommends settings, and lets you choose
 the music backend and volumes, the Sound Blaster port / IRQ / DMA, performance
-mode, and the joystick. It can play the **real Polar Star sound effect and
+mode, and input (remap the keyboard, assign / calibrate a gameport joystick).
+It can play the **real Polar Star sound effect and
 Title theme** through your chosen backend so you can confirm sound works before
 launching the game, then writes `DOSKUTSU.CFG`, which the game loads at startup.
 
