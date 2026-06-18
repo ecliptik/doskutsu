@@ -266,16 +266,23 @@ make dist
 Produces `dist/doskutsu-cf.zip` containing:
 
 ```
-DOSKUTSU.EXE          the binary (DJGPP-built, stubedit'd)
-CWSDPMI.EXE           DPMI host (from vendor/cwsdpmi/)
+DOSKUTSU.EXE          the game binary (DJGPP-built, stubedit'd)
+SETUP.EXE             the hardware / sound configurator (live-audio build)
+SETUP.BAT             one-line launcher for SETUP.EXE
+CWSDPMI.EXE           DPMI host (fetched from upstream at a pinned checksum)
 CWSDPMI.DOC           CWSDPMI redistribution terms
 LICENSE.TXT           DOSKUTSU port MIT license
 GPLV3.TXT             NXEngine-evo GPLv3 (the dominant license of the binary)
 3RDPARTY.TXT          attribution matrix (CRLF)
 README.TXT            DOS-readable quick-start + how to obtain Cave Story data
+DATA\                 NXEngine-evo's GPLv3 engine support data ONLY -- fonts, UI,
+                      StgMeta, endpic. NO Cave Story content. (widescreen
+                      bk*480fix.pbm are stripped; unused at 320x240)
 ```
 
-`dist/doskutsu-cf.zip` does **not** include Cave Story game data. Users must extract it from the 2004 freeware `Doukutsu.exe` themselves -- see [ASSETS.md](./ASSETS.md).
+The bundle ships NXEngine-evo's GPLv3 engine support data, but **not** any Cave Story game content (maps, sprites, music, SFX). Users extract that from the 2004 freeware `Doukutsu.exe` themselves -- see [ASSETS.md](./ASSETS.md). This is the same posture as a Doom source port shipping the engine while the user supplies their own WAD.
+
+To publish this bundle as a tagged release on Forgejo / Codeberg / GitHub, see [RELEASING.md](./RELEASING.md).
 
 ### Direct install to a mounted CF card
 

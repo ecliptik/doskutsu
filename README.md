@@ -7,7 +7,7 @@ The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's o
 DOSKUTSU exists for preservation and the engineering challenge of running Cave Story on a 1990s MS-DOS PC.
 
 <p align="center">
-<a href="#status">Status</a> | <a href="#game-assets">Game Assets</a> | <a href="#requirements">Requirements</a> | <a href="#usage">Usage</a> | <a href="#configuration">Configuration</a> | <a href="#building">Building</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
+<a href="#status">Status</a> | <a href="#quickstart">Quickstart</a> | <a href="#download">Download</a> | <a href="#game-assets">Game Assets</a> | <a href="#requirements">Requirements</a> | <a href="#usage">Usage</a> | <a href="#configuration">Configuration</a> | <a href="#building">Building</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
 </p>
 
 ### Screenshots
@@ -73,6 +73,30 @@ MIDI plays through a hardware synthesizer, off the CPU. Two settings shape it:
 | Synthesizer | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto` (default), `wb`, `opl3`, `organya` | `auto`: probe WaveBlaster daughterboard first, fall back to OPL3 FM; explicit values force a specific backend. `wb`: WaveBlaster / DreamBlaster-class wavetable daughterboard on the SB16 WaveBlaster header (validated on Vibra16S CT2490 + DreamBlaster S2). `opl3`: the SB16 / Sound Blaster Pro 2 OPL3 FM chip. `organya`: software synthesis of Pixel's original Cave Story tracker format (higher CPU cost). |
 | MIDI source | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi` (default), `orgmid` | `wiimidi`: the WiiWare arrangement, which tracks the original closely. `orgmid`: the Hart legacy `.mid` set |
 | GM variant | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | an `org2mid`-converted General MIDI variant |
+
+---
+
+## Quickstart
+
+From nothing to playing, in five steps:
+
+1. **Get the binaries.** Download the latest `doskutsu-cf-<version>.zip` from [Download](#download) and unzip it -- or [build from source](#building). It gives you `DOSKUTSU.EXE`, `SETUP.EXE`, `CWSDPMI.EXE`, and the engine `DATA\`.
+2. **Add the game data.** DOSKUTSU ships no Cave Story content. Extract it from your own 2004 freeware `Doukutsu.exe` into `DATA\` -- the [quick path in ASSETS.md](docs/ASSETS.md#quick-path-most-people-want-this) is the shortest route. (Like a Doom source port: the engine is here, you bring the game data.)
+3. **Put it on a DOS system.** Copy the whole folder to a CF card or hard disk on a Pentium-class DOS PC -- or mount it in [DOSBox-X](https://dosbox-x.com/) to try it on a modern machine first.
+4. **Configure sound.** Run `SETUP` once; it detects your sound card and lets you test it before you play.
+5. **Play.** Run `DOSKUTSU`.
+
+More detail at each step: [Download](#download), [Game Assets](#game-assets), [Building](#building), [Usage](#usage), [Configuration](#configuration).
+
+---
+
+## Download
+
+Pre-built bundles are published on the **[Releases](https://forgejo.ecliptik.com/ecliptik/doskutsu/releases)** page (Forgejo, mirrored to Codeberg and GitHub).
+
+Each release is a single `doskutsu-cf-<version>.zip` containing `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, the license texts, and NXEngine-evo's GPLv3 engine support data. It does **not** include Cave Story game content -- the maps, sprites, music, and SFX come from your own copy of Pixel's 2004 freeware `Doukutsu.exe` (see [Game Assets](#game-assets)). The engine is the program; the game data is yours to supply, exactly the way a Doom source port ships without an IWAD.
+
+Prefer to build the exact source you see here? `make dist` produces the identical bundle -- see [Building](#building).
 
 ---
 

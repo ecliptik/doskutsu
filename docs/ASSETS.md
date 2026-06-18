@@ -575,7 +575,7 @@ If the title screen appears but stages don't load, the Cave Story content under 
 
 `make install CF=/mnt/cf` copies the binary + CWSDPMI + (if `data/` is present) the full extracted asset tree (Cave Story content + NXEngine-evo engine data) to `C:\DOSKUTSU\` on the mounted CF card. This is a convenience for your own use -- the assets are being copied onto your own storage, not uploaded or redistributed.
 
-`make dist` (for producing `dist/doskutsu-cf.zip` to share publicly) **does not include `data/`**. End users of the zip must follow this document themselves to assemble Cave Story assets.
+`make dist` (for producing `dist/doskutsu-cf.zip` to share publicly) bundles NXEngine-evo's GPLv3 engine support data (fonts, UI, StgMeta, endpic) but **not** any Cave Story game content (maps, sprites, music, SFX). End users of the zip must follow this document to assemble the Cave Story assets themselves -- the engine ships, the game data does not, exactly like a Doom port and its WAD.
 
 ---
 
