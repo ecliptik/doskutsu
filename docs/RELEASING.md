@@ -83,9 +83,11 @@ Prerequisites on the build host: `jq`, `gh` (for GitHub), `zip`, the DJGPP toolc
 6. **Verify** the download link on each forge resolves and the zip integrity (sha256)
    matches `dist/`.
 
-## scripts/release.sh (to implement -- adapt from geomys)
+## scripts/release.sh
 
-`geomys/scripts/release.sh` is ~90% reusable. The adaptation for DOSKUTSU:
+Implemented at `scripts/release.sh` (adapted from `geomys/scripts/release.sh`). Run it
+with the tag: `./scripts/release.sh v1.2.0` (or no arg for the latest tag, or
+`--hierarchical` to backfill every tag not yet on all forges). What it does:
 
 - **Repo/URL vars**: `FORGEJO_REPO=ecliptik/doskutsu`, `CODEBERG_REPO=ecliptik/doskutsu`,
   `GITHUB_REPO=ecliptik/doskutsu`. Keep geomys's `FORGEJO_URL` / `CODEBERG_URL` defaults.
@@ -107,9 +109,9 @@ Prerequisites on the build host: `jq`, `gh` (for GitHub), `zip`, the DJGPP toolc
 - Tokens absent -> warn-and-skip that forge (geomys's posture); never hard-fail the
   whole run because one forge is unconfigured.
 
-Until the script is dropped in, a release can be cut by hand: `make dist`, rename the
-zip, and create the release + upload the asset through each forge's web UI, pasting
-the CHANGELOG section as the body.
+If you'd rather not use the script, a release can be cut by hand: `make dist`, rename
+the zip to `doskutsu-cf-<ver>.zip`, and create the release + upload the asset through
+each forge's web UI, pasting the CHANGELOG section as the body.
 
 ## Notes
 

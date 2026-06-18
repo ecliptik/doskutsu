@@ -94,6 +94,9 @@ More detail at each step: [Download](#download), [Game Assets](#game-assets), [B
 
 Pre-built bundles are published on the **[Releases](https://forgejo.ecliptik.com/ecliptik/doskutsu/releases)** page (Forgejo, mirrored to Codeberg and GitHub).
 
+<!-- LATEST-RELEASE:START -->
+<!-- LATEST-RELEASE:END -->
+
 Each release is a single `doskutsu-cf-<version>.zip` containing `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, the license texts, and NXEngine-evo's GPLv3 engine support data. It does **not** include Cave Story game content -- the maps, sprites, music, and SFX come from your own copy of Pixel's 2004 freeware `Doukutsu.exe` (see [Game Assets](#game-assets)). The engine is the program; the game data is yours to supply, exactly the way a Doom source port ships without an IWAD.
 
 Prefer to build the exact source you see here? `make dist` produces the identical bundle -- see [Building](#building).
