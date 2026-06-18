@@ -147,6 +147,34 @@ void tui_status(const char *s);
 /* Blocking key read; returns a TUI_KEY_* code or a printable ASCII byte. */
 int tui_getkey(void);
 
+/* Non-blocking keypress check (DJGPP kbhit) -- used by the joystick-calibrate
+ * poll loop, which redraws the live axis/button readout while waiting. On the
+ * host build it returns 1 (a blocking getkey then drives flow tests). */
+int tui_kbhit(void);
+
+/* Pace a poll loop by ms milliseconds (no-op on the host build). */
+void tui_delay_ms(int ms);
+
+/* RAW key capture for the keyboard-remap screen (Phase 3): blocks for one
+ * keystroke and reports it unprocessed, so it can be decoded to an SDL keycode
+ * (scancode.h). On return *ext is 0 when *code is the ASCII byte of a printable
+ * key, or 1 when *code is the BIOS extended scancode of an arrow / nav key.
+ * Returns 1 if the keystroke was a bare Esc (the caller cancels the rebind),
+ * else 0. */
+int tui_capture_key(int *ext, int *code);
+
+/* RAW key capture that ALSO reports a lone modifier (Phase-3 rework issue 1).
+ * Polls the BIOS shift-flag byte (0040:0017) so a bare Shift/Ctrl/Alt press is
+ * captured -- the plain getch() path never delivers one. On return:
+ *   *mod  = a SETUP_MOD_* value (non-zero) when a lone modifier was captured;
+ *           ext and code are then 0.
+ *   *mod  = SETUP_MOD_NONE for an ordinary key, with ext/code holding the
+ *           getch() result exactly as tui_capture_key reports them.
+ * Returns 1 if the user cancelled with a bare Esc, else 0. The loop debounces:
+ * it waits for all modifiers + the keyboard buffer to clear before accepting a
+ * press, so a modifier still held from the row-confirm keystroke is ignored. */
+int tui_capture_key_mod(int *ext, int *code, int *mod);
+
 /* Vertical menu of n items inside a box at (x,y,w). Arrow keys move, Enter
  * selects, ESC cancels. start_sel is the initially highlighted row.
  * Returns the chosen index, or -1 on ESC. If helps is non-NULL it is a

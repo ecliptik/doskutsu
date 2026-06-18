@@ -1,0 +1,145 @@
+From 3f837946497ff26c24d18f2496456363c0ba3006 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 16 Jun 2026 11:55:51 -0700
+Subject: [PATCH] dos: patch 0102 -- persisted gameport joystick calibration
+ (SDL_HINT_DOSKUTSU_JOY_CAL)
+
+The DOS gameport driver auto-calibrates at runtime: SDL_GetJoystickAxis only
+reports a usable range after the stick has been swept to its extremes, so the
+player must swirl the stick on every boot. On the g2k reference machine the
+operator drives a spring-return flightstick whose electrical center is not the
+geometric midpoint of travel, so even after a swirl the neutral can read
+off-center.
+
+SETUP.EXE's Calibrate screen (Phase 3 / #40) captures the per-axis center +
+extremes once and stores them in DOSKUTSU.CFG; the CFG shim exports them as
+SDL_HINT_DOSKUTSU_JOY_CAL="xmin,xcenter,xmax,ymin,ycenter,ymax" before
+SDL_Init. This patch reads that hint at DOS_JoystickOpen and applies the stored
+range plus the explicit center directly, so the stick is fully calibrated from
+the first frame -- no swirl, and no "assume centered at launch" guess. The
+stored extremes still auto-widen if the stick later exceeds them.
+
+Killswitch-clean: with the hint unset/empty (the default), or malformed, or
+out-of-range, the driver falls back to the existing runtime auto-calibration,
+and that path is byte-identical to pre-0102. Read via SDL_GetHint only (the DOS
+backend never calls getenv); SDL_GetHint falls back to the same-named
+environment variable the shim sets.
+
+UNIT CONTRACT: the stored values are in BIOS INT 15h / AH=84h subfunction-1
+axis units -- the same source DOS_JoystickUpdate samples via ReadGameportAxes --
+NOT raw port-0x201 one-shot loop counts (which are CPU-speed dependent and on a
+different scale). SETUP must store values sampled through that same BIOS call
+for a stored cal to land correctly in this parser.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/joystick/dos/SDL_sysjoystick.c | 72 ++++++++++++++++++++++++++++++
+ 1 file changed, 72 insertions(+)
+
+diff --git a/src/joystick/dos/SDL_sysjoystick.c b/src/joystick/dos/SDL_sysjoystick.c
+index 4fde0f0f4..8d5497059 100644
+--- a/src/joystick/dos/SDL_sysjoystick.c
++++ b/src/joystick/dos/SDL_sysjoystick.c
+@@ -29,6 +29,11 @@
+ #include "../SDL_joystick_c.h"
+ #include "../SDL_sysjoystick.h"
+ 
++// DOSKUTSU patch (SDL/0102): persisted gameport calibration banner channel.
++// Routes to the shared SDL log (<TAG>SDL.LOG / SDLDBG.LOG) like the DOS audio
++// backend, so the SETUP-stored-calibration apply is greppable in the smoke log.
++#include "../../video/dos/SDL_dosdbg.h"
++
+ #define GAMEPORT 0x201
+ 
+ /* Gameport status byte button bits (active low) */
+@@ -115,6 +120,11 @@ static Sint16 CalibrateAxis(int raw, struct joystick_hwdata *hwdata, int axis)
+             hwdata->calibrated = true;
+         }
+     }
++    /* DOSKUTSU patch (SDL/0102): with a stored SETUP calibration the open path
++       sets calibrated=true + an explicit axis_center, so this block is skipped
++       and the stored center is honored; the axis_min/axis_max widen-on-exceed
++       above still applies. The auto-cal path (no stored cal) is byte-identical
++       to pre-0102. */
+ 
+     range = hwdata->axis_max[axis] - hwdata->axis_min[axis];
+     if (range < 10) {
+@@ -205,6 +215,63 @@ static SDL_JoystickID DOS_JoystickGetDeviceInstanceID(int device_index)
+     return 0;
+ }
+ 
++/*
++ * DOSKUTSU patch (SDL/0102): apply a persisted SETUP joystick calibration.
++ *
++ * SETUP.EXE's "Calibrate joystick" screen captures the gameport per-axis
++ * center + extents (3-step cal) and stores them in DOSKUTSU.CFG; the engine's
++ * CFG shim exports them before SDL_Init as
++ * SDL_HINT_DOSKUTSU_JOY_CAL="xmin,xcenter,xmax,ymin,ycenter,ymax". When present
++ * + sane we apply the stored range AND the explicit per-axis center, marking
++ * the stick fully calibrated from the first frame, so the player needn't swirl
++ * the stick each boot and there's no launch-time "assume centered" guess. This
++ * matters for a spring-return flightstick, whose electrical center is often not
++ * the geometric midpoint of its travel. The axis_min/axis_max still auto-widen
++ * if the stick later exceeds the stored extents (see CalibrateAxis).
++ *
++ * Absent / malformed / out-of-range hint -> returns false and today's runtime
++ * auto-calibration runs unchanged (behavior-neutral killswitch).
++ *
++ * Read via SDL_GetHint only (never getenv) per the DOSKUTSU SDL-backend rule;
++ * SDL_GetHint transparently falls back to the same-named environment variable.
++ */
++static bool DOS_ApplyStoredCalibration(struct joystick_hwdata *hwdata)
++{
++    const char *hint = SDL_GetHint("SDL_HINT_DOSKUTSU_JOY_CAL");
++    int xmin, xcen, xmax, ymin, ycen, ymax;
++
++    if (!hint || !*hint) {
++        return false; /* no stored cal -> auto-calibrate as before */
++    }
++
++    if (SDL_sscanf(hint, "%d,%d,%d,%d,%d,%d", &xmin, &xcen, &xmax, &ymin, &ycen, &ymax) != 6) {
++        doskutsu_dbg_log("[joycal] hint '%s' malformed (want xmin,xcenter,xmax,ymin,ycenter,ymax) -- using auto-cal", hint);
++        return false;
++    }
++
++    /* Reject nonsense: negative extents, a range too small to be a real cal
++       (mirrors the auto-cal >20 threshold), or a center outside its own
++       [min,max]. Any failure -> fall back to runtime auto-calibration. */
++    if (xmin < 0 || ymin < 0 ||
++        (xmax - xmin) < 20 || (ymax - ymin) < 20 ||
++        xcen < xmin || xcen > xmax || ycen < ymin || ycen > ymax) {
++        doskutsu_dbg_log("[joycal] hint x=[%d,%d,%d] y=[%d,%d,%d] out of range -- using auto-cal",
++                         xmin, xcen, xmax, ymin, ycen, ymax);
++        return false;
++    }
++
++    hwdata->axis_min[0] = xmin;
++    hwdata->axis_center[0] = xcen;
++    hwdata->axis_max[0] = xmax;
++    hwdata->axis_min[1] = ymin;
++    hwdata->axis_center[1] = ycen;
++    hwdata->axis_max[1] = ymax;
++    hwdata->calibrated = true; /* full cal (range + explicit center) from the stored SETUP values */
++    doskutsu_dbg_log("[joycal] applied stored cal x=[%d,%d,%d] y=[%d,%d,%d] (range auto-widens if exceeded)",
++                     xmin, xcen, xmax, ymin, ycen, ymax);
++    return true;
++}
++
+ static bool DOS_JoystickOpen(SDL_Joystick *joystick, int device_index)
+ {
+     struct joystick_hwdata *hwdata;
+@@ -222,6 +289,11 @@ static bool DOS_JoystickOpen(SDL_Joystick *joystick, int device_index)
+     hwdata->axis_center[1] = 0;
+     hwdata->calibrated = false;
+ 
++    /* DOSKUTSU patch (SDL/0102): seed from a stored SETUP calibration if one is
++       present. No-op (returns false) absent SDL_HINT_DOSKUTSU_JOY_CAL, leaving
++       the auto-calibration path untouched. */
++    DOS_ApplyStoredCalibration(hwdata);
++
+     joystick->hwdata = hwdata;
+     joystick->naxes = 2;
+     joystick->nbuttons = 4;
+-- 
+2.47.3
+

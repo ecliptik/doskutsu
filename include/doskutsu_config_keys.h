@@ -225,6 +225,86 @@ static const dkt_key_t DKT_KEYS[] =
     DKT_STR, DKC_SOUND, "wiimidi", 0, 0, NULL,
     "MIDI music set",
     "Which MIDI music set the MIDI backend plays: wiimidi (WiiWare) or orgmid (ORGMID)", 0 },
+
+  /* ---- Input bindings (Phase 3 / #40 -- patch nxengine-evo/0227) ----------
+   * Per-action keyboard / gameport-button remap. The engine's BIND_* loader
+   * (input.cpp input_apply_cfg_bindings) reads each DOSKUTSU_BIND_<ACTION> env
+   * var AFTER settings_load and overlays it onto the live mappings, so a
+   * SETUP-written binding WINS over settings.dat. Value grammar:
+   * "k:<sdlkeycode>[,b:<jbut>]" (k = SDL3 keycode, b = optional gameport button
+   * index). DKT_STR: SETUP composes / validates the string (a scancode->SDL
+   * keycode table lives in SETUP); the loader passes it through verbatim.
+   * Default "" -> SETUP omits the line so the action keeps its settings.dat /
+   * built-in default binding (killswitch: absent all BIND_* == today's
+   * controls). The 11 remappable player actions match input.h INPUTS
+   * LEFTKEY..MAPSYSTEMKEY, in that order. APPEND-ONLY: these sit at the end of
+   * the table so existing positional indices are unchanged. */
+  { "BIND_LEFT", "DOSKUTSU_BIND_LEFT",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Move Left", "Key/button bound to Move Left (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_RIGHT", "DOSKUTSU_BIND_RIGHT",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Move Right", "Key/button bound to Move Right (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_UP", "DOSKUTSU_BIND_UP",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Look Up", "Key/button bound to Up (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_DOWN", "DOSKUTSU_BIND_DOWN",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Crouch / Down", "Key/button bound to Down (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_JUMP", "DOSKUTSU_BIND_JUMP",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Jump", "Key/button bound to Jump (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_FIRE", "DOSKUTSU_BIND_FIRE",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Fire", "Key/button bound to Fire (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_STRAFE", "DOSKUTSU_BIND_STRAFE",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Strafe", "Key/button bound to Strafe (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_PREVWPN", "DOSKUTSU_BIND_PREVWPN",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Prev Weapon", "Key/button bound to Previous Weapon (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_NEXTWPN", "DOSKUTSU_BIND_NEXTWPN",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Next Weapon", "Key/button bound to Next Weapon (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_INVENTORY", "DOSKUTSU_BIND_INVENTORY",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Inventory", "Key/button bound to Inventory (k:<sdlkeycode>[,b:<jbut>])", 0 },
+  { "BIND_MAP", "DOSKUTSU_BIND_MAP",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Map", "Key/button bound to Map System (k:<sdlkeycode>[,b:<jbut>])", 0 },
+
+  /* Stored gameport joystick calibration (Phase 3 / #40). Consumed by the
+   * SDL3-DOS backend, NOT the engine: input-sdl's SDL patch reads
+   * SDL_HINT_DOSKUTSU_JOY_CAL via SDL_GetHint (which falls back to the env var
+   * the shim sets) at joystick init, so the player needn't re-swirl the stick
+   * each run. Value grammar (team-lead decision -- 6-value explicit per-axis
+   * centre, because a spring-return flightstick's electrical centre is often
+   * not the geometric midpoint): "xmin,xcenter,xmax,ymin,ycenter,ymax". The
+   * SDL3-DOS backend parses it (SDL_sscanf "%d,%d,%d,%d,%d,%d"); the engine
+   * never touches it. DKT_STR; SETUP's 3-step Calibrate screen composes it.
+   * Default "" -> SETUP omits the line -> SDL uses its built-in / auto
+   * calibration (behavior-neutral). RESERVED here so the SDL patch has a
+   * registered key without editing this table (engine-side owns the registry;
+   * see feat/input-remap contract). */
+  { "JOY_CAL", "SDL_HINT_DOSKUTSU_JOY_CAL",
+    DKT_STR, DKC_INPUT, "", 0, 0, NULL,
+    "Joystick calibration",
+    "Stored gameport calibration xmin,xcenter,xmax,ymin,ycenter,ymax (set by SETUP Calibrate)", 0 },
+
+  /* Invert the gameport Y axis (Phase 3 / #40 -- patch nxengine-evo/0229). A
+   * spring-return flightstick's pitch axis frequently reads opposite the
+   * platformer convention (push-forward = climb vs dive), so this lets the
+   * player flip UP <-> DOWN without re-wiring. Consumed by the engine BIND_*
+   * loader (input.cpp input_apply_cfg_bindings): AFTER settings_load it negates
+   * the axis1 (Y) sign on the live UP/DOWN mappings, so it wins over
+   * settings.dat like the BIND_* overlay. Default "0" (no inversion). Plain
+   * value-checked bool (loader setenv's "0"/"1"; engine tests == "1") -- NOT a
+   * presence key, so "0" correctly means off. Only meaningful with a joystick;
+   * the X axis is intentionally not invertible (left/right rarely needs it). */
+  { "JOY_INVERT_Y", "DOSKUTSU_JOY_INVERT_Y",
+    DKT_BOOL, DKC_INPUT, "0", 0, 0, NULL,
+    "Invert joystick Y",
+    "1 swaps the gameport stick up/down (for flightsticks with inverted pitch)", 0 },
 };
 
 #define DKT_KEY_COUNT ((int)(sizeof(DKT_KEYS) / sizeof(DKT_KEYS[0])))

@@ -1,0 +1,185 @@
+From decf3429fa9990e9e4330738f218883d915f5a67 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 16 Jun 2026 11:45:46 -0700
+Subject: [PATCH] patch 0227 -- DOSKUTSU.CFG BIND_* input remap loader (Phase 3
+ / #40)
+
+DOS needs a text-config surface for control remapping because the only
+existing persistence (settings.dat) is a raw binary dump of the C++
+Settings struct -- a C SETUP.EXE cannot safely byte-match that layout
+across toolchains. So SETUP writes BIND_<ACTION> keys into DOSKUTSU.CFG
+and the engine consumes them.
+
+The DOSKUTSU.CFG loader shim (patch 0216) already publishes each
+BIND_<ACTION> config key into the environment under the engine-consumed
+name DOSKUTSU_BIND_<ACTION> (registered in doskutsu_config_keys.h,
+category DKC_INPUT). This adds input_apply_cfg_bindings(), called from
+main() immediately AFTER settings_load(), which reads those env vars and
+overlays the parsed key/button onto the live mappings via
+input_set_mappings(). A SETUP-written binding therefore WINS over
+settings.dat for the actions it names, while every other action -- and
+the joystick hat/axis fields of a rebound action -- is left untouched.
+
+Value grammar: "k:<sdlkeycode>[,b:<jbut>]" (k = SDL3 keycode, b =
+optional gameport button index; order / whitespace tolerant). The 11
+remappable player actions are input.h INPUTS LEFTKEY..MAPSYSTEMKEY.
+
+Killswitch-clean: with no BIND_* keys in DOSKUTSU.CFG (or no file at
+all) input_apply_cfg_bindings() applies nothing, never calls
+input_set_mappings(), and controls are byte-identical to the no-config
+build. Smoke-gate anchor "[input-bind] applied=N" always emits (unique
+bracketed line format, never a banner/help substring).
+
+Slot 0227: lands after the in-flight v1.1.2 stack (0223-0225) and #39b
+(0226), since Phase 3 ships in its own iter after v1.1.2 (operator Q-B4).
+
+Workspace-local; never upstreamed. GPLv3 (derivative of NXEngine-evo).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/input.cpp | 93 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/input.h   |  4 +++
+ src/main.cpp  |  8 +++++
+ 3 files changed, 105 insertions(+)
+
+diff --git a/src/input.cpp b/src/input.cpp
+index 0ac2de1c..8e6a05c3 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -259,6 +259,99 @@ void input_set_mappings(in_action *array)
+   }
+ }
+ 
++// DOS-PORT (patch 0227, Phase 3 / #40): apply DOSKUTSU.CFG per-action key /
++// button bindings on top of settings.dat.
++//
++// The DOSKUTSU.CFG loader shim (patch 0216) publishes each BIND_<ACTION>
++// config key into the environment under the engine-consumed name
++// DOSKUTSU_BIND_<ACTION> (registered in include/doskutsu_config_keys.h,
++// category DKC_INPUT -- keep this table in sync with that registry). Called
++// from main() right AFTER settings_load(), this reads those env vars and
++// overlays them onto the live mappings, so a SETUP-written binding WINS over
++// settings.dat for the actions it names while every other action -- and the
++// joystick hat/axis fields of a rebound action -- is left untouched.
++//
++// Value grammar: "k:<sdlkeycode>[,b:<jbut>]" (k = SDL3 keycode, b = optional
++// gameport button index; order / whitespace tolerant). Absent all BIND_* env
++// vars -> no overlay, input_set_mappings is not called, behavior is
++// byte-identical to the no-config build (the killswitch is simply omitting
++// the BIND_* lines from DOSKUTSU.CFG).
++static const struct { int idx; const char *env; } _cfg_bind_tbl[] = {
++  { LEFTKEY,      "DOSKUTSU_BIND_LEFT"      },
++  { RIGHTKEY,     "DOSKUTSU_BIND_RIGHT"     },
++  { UPKEY,        "DOSKUTSU_BIND_UP"        },
++  { DOWNKEY,      "DOSKUTSU_BIND_DOWN"      },
++  { JUMPKEY,      "DOSKUTSU_BIND_JUMP"      },
++  { FIREKEY,      "DOSKUTSU_BIND_FIRE"      },
++  { STRAFEKEY,    "DOSKUTSU_BIND_STRAFE"    },
++  { PREVWPNKEY,   "DOSKUTSU_BIND_PREVWPN"   },
++  { NEXTWPNKEY,   "DOSKUTSU_BIND_NEXTWPN"   },
++  { INVENTORYKEY, "DOSKUTSU_BIND_INVENTORY" },
++  { MAPSYSTEMKEY, "DOSKUTSU_BIND_MAP"       },
++};
++
++// Parse one BIND_ value ("k:<int>[,b:<int>]") into *a (key / jbut fields
++// only; jhat/jaxis are preserved by the caller). Returns true if at least
++// one recognized field parsed.
++static bool _parse_cfg_bind(const char *val, in_action *a)
++{
++  bool got    = false;
++  const char *p = val;
++  while (*p)
++  {
++    while (*p == ',' || *p == ' ' || *p == '\t')
++      ++p;
++    if (*p == '\0')
++      break;
++    if ((*p == 'k' || *p == 'b') && p[1] == ':')
++    {
++      char field = *p;
++      char *end  = NULL;
++      long  v    = strtol(p + 2, &end, 10);
++      if (end != p + 2)
++      {
++        if (field == 'k') { a->key  = (int32_t)v; got = true; }
++        else              { a->jbut = (int32_t)v; got = true; }
++        p = end;
++        continue;
++      }
++    }
++    // unrecognized token: skip to the next separator and keep going
++    while (*p && *p != ',')
++      ++p;
++  }
++  return got;
++}
++
++int input_apply_cfg_bindings(void)
++{
++  in_action array[INPUT_COUNT];
++  for (int i = 0; i < INPUT_COUNT; i++)
++    array[i] = input_get_mapping(i); // seed from current (settings.dat / defaults)
++
++  int applied = 0;
++  for (size_t i = 0; i < sizeof(_cfg_bind_tbl) / sizeof(_cfg_bind_tbl[0]); i++)
++  {
++    const char *val = std::getenv(_cfg_bind_tbl[i].env);
++    if (val == NULL || val[0] == '\0')
++      continue;
++    in_action a = array[_cfg_bind_tbl[i].idx];
++    if (_parse_cfg_bind(val, &a))
++    {
++      array[_cfg_bind_tbl[i].idx] = a;
++      ++applied;
++    }
++  }
++
++  if (applied > 0)
++    input_set_mappings(array);
++
++  // Smoke-gate anchor: unique bracketed line FORMAT (never a substring of a
++  // banner / help text) per the grep-anchor-confound lesson. Always emits.
++  LOG_INFO("[input-bind] applied={}", applied);
++  return applied;
++}
++
+ /*
+ void c------------------------------() {}
+ */
+diff --git a/src/input.h b/src/input.h
+index 20c7f6a6..77a8018d 100644
+--- a/src/input.h
++++ b/src/input.h
+@@ -69,6 +69,10 @@ void input_remap(int keyindex, in_action sdl_key);
+ in_action input_get_mapping(int keyindex);
+ const std::string input_get_name(int index);
+ void input_set_mappings(in_action *array);
++// DOS-PORT (patch 0227): overlay DOSKUTSU.CFG BIND_* key/button bindings onto
++// the current mappings AFTER settings_load(). Returns the number of actions
++// rebound (0 == no BIND_* config present == today's behavior). See input.cpp.
++int input_apply_cfg_bindings(void);
+ void input_poll(void);
+ void input_close(void);
+ bool buttondown(void);
+diff --git a/src/main.cpp b/src/main.cpp
+index d64f1dea..c6c7be24 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1612,6 +1612,14 @@ int main(int argc, char *argv[])
+   // so we know the initial screen resolution.
+   settings_load();
+ 
++  // DOS-PORT (patch 0227, Phase 3 / #40): overlay DOSKUTSU.CFG BIND_* per-action
++  // key/button bindings AFTER settings_load, so a SETUP-written control remap
++  // WINS over settings.dat. No BIND_* keys in DOSKUTSU.CFG (or no file) =>
++  // input_apply_cfg_bindings is a no-op and controls are byte-identical to the
++  // no-config build. The BIND_* config keys were published to the environment
++  // by the doskutsu_cfg_load() shim (patch 0216) at top-of-main().
++  input_apply_cfg_bindings();
++
+   if (!Renderer::getInstance()->init(settings->resolution))
+   {
+     fatal("Failed to initialize graphics.");
+-- 
+2.47.3
+

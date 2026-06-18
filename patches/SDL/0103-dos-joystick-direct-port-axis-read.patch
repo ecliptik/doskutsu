@@ -1,0 +1,148 @@
+From 4e48de5959b9df6e5080e0beaa3462ae05e0d211 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 16 Jun 2026 18:30:45 -0700
+Subject: [PATCH 103/104] dos: patch 0103 -- bounded direct-port gameport axis
+ read (#20 fps fix)
+
+DOS_JoystickUpdate's BIOS read (INT 15h/AH=84h/DX=1) reads all four
+gameport axes; a 2-axis stick leaves joystick-2's axes electrically open,
+so the BIOS spins each open axis to its full cap-discharge timeout
+(~52-82 ms/call on the POD-83). That runs on the per-flip input_poll()
+hot path and collapses fps when the joystick is enabled (~33 -> ~12 on
+g2k). The existing wallclock throttle is useless: at 50 fps the frame
+interval already exceeds the 16 ms throttle, and once the poll dominates
+frame time the throttle never gates.
+
+Read only the two connected joystick-1 one-shots (port 0x201 bits 0/1)
+in a single tight timing loop with a hard iteration cap, so the open
+axes are never waited on. Interrupts are masked around the loop so the
+in-ISR mixer (PIXTONE_IRQ_MIX) cannot preempt mid-count and corrupt the
+discharge timing; the cap bounds the masked window.
+
+Killswitch SDL_HINT_DOSKUTSU_JOY_DIRECTREAD default ON; strict "0"
+reverts to the BIOS read AND skips the stored SETUP cal (captured in the
+direct-port count domain, which would mismatch a BIOS-domain live read).
+SETUP's calibration capture uses the identical primitive so the JOY_CAL
+domain stays consistent. Real-HW-gated (DOSBox cannot show the cost).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/joystick/dos/SDL_sysjoystick.c | 88 +++++++++++++++++++++++++++++-
+ 1 file changed, 85 insertions(+), 3 deletions(-)
+
+diff --git a/src/joystick/dos/SDL_sysjoystick.c b/src/joystick/dos/SDL_sysjoystick.c
+index 8d5497059..76c88b136 100644
+--- a/src/joystick/dos/SDL_sysjoystick.c
++++ b/src/joystick/dos/SDL_sysjoystick.c
+@@ -96,6 +96,75 @@ static void ReadGameportAxes(int *axis_x, int *axis_y)
+     }
+ }
+ 
++/* DOSKUTSU patch (SDL/0103): killswitch for the direct-port gameport read.
++ * Default ON (the fps fix). Strict "0" reverts to the BIOS INT 15h read AND
++ * makes the open path skip the stored SETUP calibration -- the stored cal is
++ * captured by SETUP in the direct-port poll-count domain, which would mismatch
++ * a BIOS AX/BX-domain live read, so when reverted we auto-calibrate instead.
++ * Read via SDL_GetHint only (never getenv) per the DOSKUTSU SDL-backend rule.
++ * Cached on first read; strict "0" match avoids the SET FOO= truthiness footgun. */
++static bool DOS_JoyDirectRead(void)
++{
++    static int cached = -1;
++    if (cached < 0) {
++        const char *h = SDL_GetHint("SDL_HINT_DOSKUTSU_JOY_DIRECTREAD");
++        cached = (h && h[0] == '0' && h[1] == '\0') ? 0 : 1;
++    }
++    return cached != 0;
++}
++
++/*
++ * DOSKUTSU patch (SDL/0103): direct gameport (port 0x201) bounded axis read.
++ *
++ * The BIOS path (ReadGameportAxes, INT 15h/AH=84h/DX=1) reads all FOUR
++ * gameport axes; a 2-axis stick leaves joystick-2's axes (bits 2,3)
++ * electrically open, so the BIOS spins each open axis to its full
++ * cap-discharge timeout -- ~52-82 ms / call on the POD-83. That lands on the
++ * per-flip input_poll() hot path and collapses fps (joystick ON ~33 -> ~12).
++ *
++ * This reads ONLY the two connected joystick-1 one-shots (bit0 = X, bit1 = Y)
++ * with a hard iteration cap, so the open axes are never waited on. Cost is
++ * bounded by the single longest connected-axis discharge (~1 ms worst case at
++ * full deflection), not a 4-axis timeout sum.
++ *
++ * The returned values are RAW one-shot poll counts -- a DIFFERENT domain than
++ * the BIOS AX/BX values. SETUP's calibration capture uses this exact same
++ * primitive so the stored JOY_CAL 6-tuple and the live in-game reads share one
++ * domain (coordinate any change to this loop with the SETUP side).
++ *
++ * Interrupts are masked around the tight loop (a few hundred us .. ~1 ms) so an
++ * SB16 IRQ -- which under PIXTONE_IRQ_MIX runs the mixer in-ISR and can be long
++ * -- cannot preempt mid-count and corrupt the discharge timing. The masked
++ * window is far inside the DMA buffer slack; the cap bounds the worst case.
++ */
++#define GAMEPORT_AXIS_X 0x01    /* bit 0: joystick-1 X one-shot output */
++#define GAMEPORT_AXIS_Y 0x02    /* bit 1: joystick-1 Y one-shot output */
++#define GAMEPORT_DIRECT_CAP 3000 /* hard iteration cap; open/stuck axis -> -1.
++                                    Covers ~3 ms of ISA-bound inportb (a real
++                                    100k-pot full-deflection discharge is ~1 ms
++                                    / ~1100 iters), bounding the cli window. */
++
++static void ReadGameportAxesDirect(int *axis_x, int *axis_y)
++{
++    unsigned long cx = 0, cy = 0;
++    unsigned long guard = 0;
++    unsigned char bits;
++
++    __asm__ __volatile__("cli");
++    outportb(GAMEPORT, 0); /* re-trigger all one-shots */
++    do {
++        bits = (unsigned char)inportb(GAMEPORT);
++        if (bits & GAMEPORT_AXIS_X) { cx++; }
++        if (bits & GAMEPORT_AXIS_Y) { cy++; }
++        ++guard;
++    } while ((bits & (GAMEPORT_AXIS_X | GAMEPORT_AXIS_Y)) && guard < GAMEPORT_DIRECT_CAP);
++    __asm__ __volatile__("sti");
++
++    /* A one-shot still set at the cap never discharged -> axis not connected. */
++    *axis_x = (bits & GAMEPORT_AXIS_X) ? -1 : (int)cx;
++    *axis_y = (bits & GAMEPORT_AXIS_Y) ? -1 : (int)cy;
++}
++
+ static Sint16 CalibrateAxis(int raw, struct joystick_hwdata *hwdata, int axis)
+ {
+     int range;
+@@ -291,8 +360,14 @@ static bool DOS_JoystickOpen(SDL_Joystick *joystick, int device_index)
+ 
+     /* DOSKUTSU patch (SDL/0102): seed from a stored SETUP calibration if one is
+        present. No-op (returns false) absent SDL_HINT_DOSKUTSU_JOY_CAL, leaving
+-       the auto-calibration path untouched. */
+-    DOS_ApplyStoredCalibration(hwdata);
++       the auto-calibration path untouched.
++       DOSKUTSU patch (SDL/0103): only honor the stored cal under the direct-port
++       read -- SETUP captures the cal in the direct-port poll-count domain, so
++       under the BIOS-read killswitch (SDL_HINT_DOSKUTSU_JOY_DIRECTREAD=0) the
++       stored values are the wrong domain; skip them and auto-calibrate. */
++    if (DOS_JoyDirectRead()) {
++        DOS_ApplyStoredCalibration(hwdata);
++    }
+ 
+     joystick->hwdata = hwdata;
+     joystick->naxes = 2;
+@@ -355,7 +430,14 @@ static void DOS_JoystickUpdate(SDL_Joystick *joystick)
+     }
+     dos_joystick_next_poll_ns = now + DOS_JOYSTICK_POLL_INTERVAL_NS;
+ 
+-    ReadGameportAxes(&axis_x, &axis_y);
++    /* DOSKUTSU patch (SDL/0103): default to the bounded direct-port read, which
++       only times the two connected axes -- the BIOS read (killswitch path) waits
++       on the open joystick-2 axes and costs ~52-82 ms/flip on real HW. */
++    if (DOS_JoyDirectRead()) {
++        ReadGameportAxesDirect(&axis_x, &axis_y);
++    } else {
++        ReadGameportAxes(&axis_x, &axis_y);
++    }
+ 
+     if (axis_x >= 0) {
+         Sint16 cal_x = CalibrateAxis(axis_x, hwdata, 0);
+-- 
+2.47.3
+

@@ -1,0 +1,75 @@
+From 8e1239421bfeb5d4eb84cb29c700592bcb71e595 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 16 Jun 2026 18:19:47 -0700
+Subject: [PATCH] patch 0228 -- DOS default gameport axis->action mappings
+ (Phase 3 / #40)
+
+Re-engage (P3-rework): the in-game flightstick could not MOVE the player
+(buttons worked). Root cause: the DOS default mapping table leaves
+jaxis=-1 for every action (input_init), and the no-saved-settings branch
+never calls input_set_mappings, so input_get_action_axis() never matched
+and the engine's in-game axis loop had nothing bound. BIND_* (patch
+0227) only parses k:/b:, never an axis -- so no path set a default axis.
+
+Fix: add DOS-only (__DJGPP__) default gameport axis->action mappings in
+input_init -- axis 0 (X) -/+ = LEFT/RIGHT, axis 1 (Y) -/+ = UP/DOWN on
+the 4 directional actions. input_get_action_axis() consults only the
+SIGN of jaxis_value, so +/-1 suffices; the existing in-game axis loop
+(SDL_GetJoystickAxis past the 20000 deadzone) is already correct and now
+has bindings. Scope: DEFAULT directional mappings only -- axis remapping
+is intentionally NOT exposed this round.
+
+Pairs with p3-sdl's CalibrateAxis per-side scaling fix (so an
+offset-center flightstick reaches full range past the 20000 deadzone);
+the engine reads SDL_GetJoystickAxis so the SDL read-method is
+transparent to this mapping.
+
+Caveat: an EXISTING settings.dat from before this patch carries jaxis=-1
+and input_set_mappings overwrites these defaults on load; a fresh run
+(no settings.dat) applies them and settings_save then persists them.
+
+Workspace-local; never upstreamed. GPLv3 (derivative of NXEngine-evo).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/input.cpp | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/src/input.cpp b/src/input.cpp
+index 8e6a05c..42aac1c 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -89,6 +89,30 @@ bool input_init(void)
+   mappings[ESCKEY].jbut       = 11; // -
+ #endif
+ 
++#if defined(__DJGPP__)
++  // DOS-PORT (patch 0228, Phase 3 / #40): default gameport axis->action
++  // mappings so an analog stick / flightstick moves the player out of the box.
++  // The base DOS default table leaves jaxis=-1 for every action, and the
++  // no-saved-settings branch (settings.cpp) never calls input_set_mappings, so
++  // without these defaults input_get_action_axis() never matches and the stick
++  // is DEAD in-game (buttons still work via jbut). The SDL3-DOS gameport
++  // reports 2 axes: axis 0 = X (left/right), axis 1 = Y (up/down); resting
++  // negative = left / up. input_get_action_axis() consults only the SIGN of
++  // jaxis_value, so +/-1 is sufficient. Directional actions only -- axis
++  // remapping is not exposed this round (BIND_* grammar stays k:/b:).
++  // NOTE: an EXISTING settings.dat from before this patch carries jaxis=-1 and
++  // input_set_mappings will overwrite these defaults on load; a fresh run (no
++  // settings.dat) applies them and settings_save then persists them.
++  mappings[LEFTKEY].jaxis        = 0;
++  mappings[LEFTKEY].jaxis_value  = -1;
++  mappings[RIGHTKEY].jaxis       = 0;
++  mappings[RIGHTKEY].jaxis_value = 1;
++  mappings[UPKEY].jaxis          = 1;
++  mappings[UPKEY].jaxis_value    = -1;
++  mappings[DOWNKEY].jaxis        = 1;
++  mappings[DOWNKEY].jaxis_value  = 1;
++#endif
++
+   mappings[F1KEY].key  = SDLK_F1;
+   mappings[F2KEY].key  = SDLK_F2;
+   mappings[F3KEY].key  = SDLK_F3;
+-- 
+2.47.3
+

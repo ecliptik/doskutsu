@@ -18,6 +18,9 @@
 #include "recommend.h"
 #include "audiotest.h"
 #include "midiset.h"
+#include "bindings.h"
+#include "scancode.h"
+#include "joyport.h"
 
 #define CFG_PATH "DOSKUTSU.CFG"
 
@@ -29,6 +32,19 @@ static int          g_dirty; /* unsaved changes */
  * Music screen; the conditional "MIDI music set" row + its picker read these. */
 static midiset_t g_midi_sets[MIDISET_MAX];
 static int       g_midi_nsets;
+
+/* Control-binding session (Phase 3). Loaded once from DOSKUTSU.CFG (BIND_*),
+ * edited live by the Configure Keyboard / Joystick screens, written back to the
+ * session config on every change. Held module-static so edits persist across
+ * screen visits even before the engine registry defines the BIND_* keys (then
+ * bindings_save is a no-op and this is purely the in-memory session). */
+static binding_t g_binds[BIND_COUNT];
+static int       g_binds_init;
+
+static void binds_ensure(void)
+{
+  if (!g_binds_init) { bindings_load(g_binds, &g_cfg); g_binds_init = 1; }
+}
 
 /* ---- value formatting / editing ------------------------------------- */
 
@@ -81,7 +97,7 @@ static void cycle_value(int idx, int dir)
  * the operator's confusion). F10 stays only on the main menu as the
  * Save-and-exit accelerator. Home = top. */
 #define EDIT_STATUS "Enter Open list   Space/Left-Right Change   ESC Back"
-#define MENU_STATUS "Enter Select   F10 Save and Exit   ESC Quit without Saving"
+#define MENU_STATUS "Enter Select   F10 Save and Exit   ESC Exit (prompts to save)"
 
 /* Write the in-memory config to disk and show a modal result. Used by the
  * F10 "save settings and return to the menu" action (T17) and the main-menu
@@ -93,8 +109,8 @@ static void cfg_write_toast(void)
   if (scfg_save(&g_cfg, CFG_PATH) == 0)
   {
     const char *lines[2];
-    lines[0] = "Settings written to " CFG_PATH;
-    lines[1] = "DOSKUTSU.EXE will load them on next launch.";
+    lines[0] = "Settings saved.";
+    lines[1] = "Run DOSKUTSU.EXE to play.";
     g_dirty = 0;
     tui_message("Saved", lines, 2);
   }
@@ -1825,37 +1841,541 @@ static void screen_sound_menu(void)
   }
 }
 
+/* ---- Configure keyboard (plan 3.5a) --------------------------------- *
+ * Two-column action/key list of the 11 player actions (engine INPUTS enum
+ * order), with two group blanks (after Down, after Strafe) per the mockup.
+ * Enter/Space on a row captures the next keypress and binds it; binding a key
+ * already used by another action SWAPS the two (Q-B1) and flashes both rows.
+ * Edits are live to the session binding model (g_binds) + written through to
+ * the config (BIND_* keys, once the engine registry defines them). */
+
+/* Display-row -> action index (0..10), or -1 for a group-separator blank. */
+static const int KBD_ROWS[] = { 0, 1, 2, 3, -1, 4, 5, 6, -1, 7, 8, 9, 10 };
+#define KBD_NROWS ((int)(sizeof(KBD_ROWS) / sizeof(KBD_ROWS[0])))
+#define KBD_BX 16   /* box left (centered: (80-50)/2+1) */
+#define KBD_BW 50
+
+static const char *keydisp(long keycode)
+{
+  const setup_key_t *k = scancode_by_keycode(keycode);
+  return k ? k->display : "(unbound)";
+}
+
+/* Draw one keyboard row. style: 0 normal, 1 selected, 2 flash (just-swapped). */
+static void kbd_draw_row(int by, int drow, int style)
+{
+  int action = KBD_ROWS[drow];
+  int y = by + 1 + drow;
+  int fg = (style == 1) ? PAL->sel_fg : (style == 2) ? PAL->warn_fg : PAL->body;
+  int bg = (style == 1) ? PAL->sel_bg : (style == 2) ? PAL->warn_bg : PAL->bg;
+  int vfg = (style == 1) ? PAL->sel_fg : (style == 2) ? PAL->warn_fg : PAL->value;
+  char row[KBD_BW - 1];
+  if (action < 0) { /* blank separator */
+    snprintf(row, sizeof(row), " %-*s", KBD_BW - 3, "");
+    tui_at(KBD_BX + 1, y, PAL->body, PAL->bg, row);
+    return;
+  }
+  snprintf(row, sizeof(row), " %-*s", KBD_BW - 3, "");
+  tui_at(KBD_BX + 1, y, fg, bg, row);                       /* row background */
+  tui_at(KBD_BX + 2, y, fg, bg, g_binds[action].name);      /* action name    */
+  tui_at(KBD_BX + 20, y, vfg, bg, keydisp(g_binds[action].keycode)); /* key   */
+}
+
+static void kbd_render(int by, int sel_drow)
+{
+  int i;
+  tui_titlebar("CONFIGURE KEYBOARD");
+  tui_box(KBD_BX, by, KBD_BW, KBD_NROWS + 2, "CONFIGURE KEYBOARD");
+  for (i = 0; i < KBD_NROWS; ++i)
+    kbd_draw_row(by, i, (i == sel_drow) ? 1 : 0);
+}
+
+/* Flash the two display rows whose actions were just swapped (Q-B1). */
+static void kbd_flash(int by, int da, int db, int sel_drow)
+{
+  int n;
+  for (n = 0; n < 3; ++n)
+  {
+    kbd_draw_row(by, da, 2); kbd_draw_row(by, db, 2);
+    tui_present(); tui_delay_ms(110);
+    kbd_draw_row(by, da, (da == sel_drow)); kbd_draw_row(by, db, (db == sel_drow));
+    tui_present(); tui_delay_ms(90);
+  }
+}
+
+static int action_to_drow(int action)
+{
+  int i;
+  for (i = 0; i < KBD_NROWS; ++i) if (KBD_ROWS[i] == action) return i;
+  return 0;
+}
+
+/* Centered "Press a key" capture popup (issue 3): replaces the old bottom-row
+ * status prompt with a modal box drawn over the screen, and captures one key --
+ * including a lone Shift/Ctrl/Alt via the BIOS shift byte (issue 1). Returns the
+ * captured key, or NULL with *cancel set when the player presses Esc. An
+ * unsupported key (Enter, a function key, ...) re-prompts in place. */
+static const setup_key_t *capture_key_popup(const char *action, int *cancel)
+{
+  char title[64];
+  int w = 52, h = 5;
+  int x = (80 - w) / 2 + 1;
+  int y = (25 - h) / 2;
+  int err = 0;
+
+  *cancel = 0;
+  snprintf(title, sizeof(title), "Press a key to map to %s", action);
+  for (;;)
+  {
+    int ext = 0, code = 0, mod = SETUP_MOD_NONE, cncl;
+    const setup_key_t *k;
+    char blank[52];
+    snprintf(blank, sizeof(blank), "%-*s", w - 4, "");
+    tui_box(x, y, w, h, "REMAP KEY");
+    tui_at(x + 2, y + 1, PAL->body, PAL->bg, blank);
+    tui_at(x + 2, y + 2, err ? PAL->warn_fg : PAL->desc, PAL->bg, blank);
+    tui_at(x + 2, y + 1, PAL->body, PAL->bg, title);
+    tui_at(x + 2, y + 2, err ? PAL->warn_fg : PAL->desc, PAL->bg,
+           err ? "Unsupported key -- try another.   ESC cancels."
+               : "Shift / Ctrl / Alt are allowed.   ESC cancels.");
+    tui_popup_decorate(x, y, w, h);
+    tui_present();
+
+    cncl = tui_capture_key_mod(&ext, &code, &mod);
+    if (cncl) { *cancel = 1; return NULL; }
+    if (mod != SETUP_MOD_NONE) return scancode_modifier(mod);
+    k = scancode_decode(ext, code);
+    if (!k) { err = 1; continue; }       /* Enter / F-key / nav -> re-prompt */
+    return k;
+  }
+}
+
+static void screen_keyboard(void)
+{
+  int by = menu_box_top(3, TUI_DESC_TOP(4), KBD_NROWS + 2);
+  int sel = 0; /* first display row is action 0 (Left) */
+
+  binds_ensure();
+  tui_clear();
+  for (;;)
+  {
+    int k, action = KBD_ROWS[sel];
+    kbd_render(by, sel);
+    tui_box(TUI_DESC_X, TUI_DESC_TOP(4), TUI_DESC_W, 4, "DESCRIPTION");
+    tui_wrap(TUI_DESC_TX, TUI_DESC_TOP(4) + 1, TUI_DESC_TW, 2, PAL->desc, PAL->bg,
+             "Select an action and press Enter, then press the key to bind to it. "
+             "Reusing a key swaps the two actions.");
+    tui_status("Up/Down Move   Enter Rebind   ESC Back");
+
+    k = tui_getkey();
+    if (k == TUI_KEY_UP || k == TUI_KEY_DOWN)
+    {
+      int dir = (k == TUI_KEY_UP) ? -1 : +1;
+      do { sel = (sel + dir + KBD_NROWS) % KBD_NROWS; } while (KBD_ROWS[sel] < 0);
+    }
+    else if (k == TUI_KEY_HOME) sel = 0;
+    else if (k == TUI_KEY_ENTER || k == TUI_KEY_SPACE)
+    {
+      int cancel;
+      const setup_key_t *nk = capture_key_popup(g_binds[action].name, &cancel);
+      tui_clear(); /* wipe the centered popup before the list repaints */
+      if (!cancel && nk)
+      {
+        int conflict = bindings_find_key(g_binds, nk->keycode, action);
+        if (conflict == action) { /* same key -> nothing to do */ }
+        else if (conflict >= 0)
+        {
+          long oldkey = g_binds[action].keycode;  /* SWAP (Q-B1) */
+          g_binds[action].keycode = nk->keycode;
+          g_binds[conflict].keycode = oldkey;
+          bindings_save(g_binds, &g_cfg); g_dirty = 1;
+          kbd_render(by, sel);                    /* repaint before flashing */
+          kbd_flash(by, sel, action_to_drow(conflict), sel);
+        }
+        else
+        {
+          g_binds[action].keycode = nk->keycode;
+          bindings_save(g_binds, &g_cfg); g_dirty = 1;
+        }
+      }
+    }
+    else if (k == TUI_KEY_ESC) return; /* T44: live edits kept in the session */
+  }
+}
+
+/* ---- Configure joystick (plan 3.5b) --------------------------------- *
+ * The SDL3-DOS gameport is 2 axes / 4 buttons / 0 hats: axes are fixed to
+ * movement (shown greyed as documentation), the 7 non-directional actions are
+ * button-assignable to Button 1-4 or <None> (4 buttons < 7 actions, so <None>
+ * is allowed -- Q-B2 defaults Jump/Fire/WpnPrev/WpnNext). Picking a button
+ * another action uses swaps the two (consistent with the keyboard screen). */
+
+/* Display rows: -1 = blank; -2/-3 = the fixed X/Y axis doc rows; >=0 = a
+ * button-assignable action index. */
+/* Row sentinels: -2/-3 = fixed-axis doc rows; -4 = the (selectable) Invert-Y
+ * toggle; -1 = blank separator; >=0 = remappable action index (button assign). */
+static const int JOY_ROWS[] = { -2, -3, -4, -1, 4, 5, 7, 8, 9, 10, 6 };
+#define JOY_NROWS ((int)(sizeof(JOY_ROWS) / sizeof(JOY_ROWS[0])))
+#define JOY_BX 16
+#define JOY_BW 50
+
+static void joybut_disp(int jbut, char *out, int cap)
+{
+  if (jbut < 0) snprintf(out, (size_t)cap, "<None>");
+  else          snprintf(out, (size_t)cap, "Button %d", jbut + 1); /* 1-based UI */
+}
+
+/* Centered "press a joystick button" capture popup (issue 4): replaces the old
+ * Button 1-4/<None> pick-list with a live poll of the game port -- the player
+ * assigns by PRESSING the physical button. Returns 0..3 for the button pressed,
+ * -1 for <None> (N / Backspace), or -2 on Esc cancel. Debounced: it waits for
+ * all buttons released before accepting a press, so a button still held from a
+ * prior action is not grabbed. */
+static int capture_jbut_popup(const char *action)
+{
+  char title[64];
+  int w = 54, h = 6;
+  int x = (80 - w) / 2 + 1;
+  int y = (25 - h) / 2;
+  int seen_clear = 0;
+
+  snprintf(title, sizeof(title), "Press a joystick button for %s", action);
+  for (;;)
+  {
+    unsigned btn = 0;
+    int present = joyport_sample(NULL, NULL, &btn);
+    char blank[56];
+    snprintf(blank, sizeof(blank), "%-*s", w - 4, "");
+    tui_box(x, y, w, h, "ASSIGN BUTTON");
+    tui_at(x + 2, y + 1, PAL->body, PAL->bg, blank);
+    tui_at(x + 2, y + 2, PAL->desc, PAL->bg, blank);
+    tui_at(x + 2, y + 3, PAL->dim,  PAL->bg, blank);
+    tui_at(x + 2, y + 1, PAL->body, PAL->bg, title);
+    tui_at(x + 2, y + 2, PAL->desc, PAL->bg,
+           "Press a button.   N = None.   ESC cancels.");
+    tui_at(x + 2, y + 3, present ? PAL->dim : PAL->warn_fg, PAL->bg,
+           present ? "Game port ready." : "No joystick detected on the game port.");
+    tui_popup_decorate(x, y, w, h);
+    tui_present();
+
+    if (!seen_clear) { if (btn == 0) seen_clear = 1; }
+    else if (btn)
+    {
+      int b;
+      for (b = 0; b < BIND_NJBUT; ++b) if (btn & (1u << b)) return b;
+    }
+
+    if (tui_kbhit())
+    {
+      int kk = tui_getkey();
+      if (kk == TUI_KEY_ESC) return -2;
+      if (kk == 'n' || kk == 'N' || kk == '\b') return -1; /* <None> */
+    }
+    else tui_delay_ms(30);
+  }
+}
+
+static void screen_joystick_cfg(void)
+{
+  int by = menu_box_top(3, TUI_DESC_TOP(4), JOY_NROWS + 2);
+  int sel = 2; /* first selectable row (Invert-Y toggle) */
+
+  binds_ensure();
+  tui_clear();
+  for (;;)
+  {
+    int i, k, action;
+    tui_titlebar("CONFIGURE JOYSTICK");
+    tui_box(JOY_BX, by, JOY_BW, JOY_NROWS + 2, "CONFIGURE JOYSTICK");
+    for (i = 0; i < JOY_NROWS; ++i)
+    {
+      int r = JOY_ROWS[i];
+      int y = by + 1 + i;
+      int selrow = (i == sel);
+      char val[24];
+      if (r == -1) continue;                       /* blank separator */
+      if (r == -2 || r == -3)                       /* fixed axis doc row */
+      {
+        tui_at(JOY_BX + 2, y, PAL->dim, PAL->bg,
+               r == -2 ? "Move Left/Right" : "Move Up/Down");
+        tui_at(JOY_BX + 20, y, PAL->dim, PAL->bg,
+               r == -2 ? "X Axis  (fixed)" : "Y Axis  (fixed)");
+        continue;
+      }
+      if (r == -4)                                  /* Invert-Y toggle (selectable) */
+      {
+        int ii  = scfg_index("JOY_INVERT_Y");
+        int fg  = selrow ? PAL->sel_fg : PAL->body;
+        int bg  = selrow ? PAL->sel_bg : PAL->bg;
+        int vfg = selrow ? PAL->sel_fg : PAL->value;
+        char rowbuf[JOY_BW - 1];
+        snprintf(rowbuf, sizeof(rowbuf), " %-*s", JOY_BW - 3, "");
+        tui_at(JOY_BX + 1, y, fg, bg, rowbuf);
+        tui_at(JOY_BX + 2, y, fg, bg, "Invert Y axis");
+        if (ii >= 0) fmt_value(ii, val, sizeof(val));
+        else         snprintf(val, sizeof(val), "Off");
+        tui_at(JOY_BX + 20, y, vfg, bg, val);
+        continue;
+      }
+      action = r;
+      {
+        int fg  = selrow ? PAL->sel_fg : PAL->body;
+        int bg  = selrow ? PAL->sel_bg : PAL->bg;
+        int vfg = selrow ? PAL->sel_fg : PAL->value;
+        char row[JOY_BW - 1];
+        snprintf(row, sizeof(row), " %-*s", JOY_BW - 3, "");
+        tui_at(JOY_BX + 1, y, fg, bg, row);
+        tui_at(JOY_BX + 2, y, fg, bg, g_binds[action].name);
+        joybut_disp(g_binds[action].jbut, val, sizeof(val));
+        tui_at(JOY_BX + 20, y, vfg, bg, val);
+      }
+    }
+    tui_box(TUI_DESC_X, TUI_DESC_TOP(4), TUI_DESC_W, 4, "DESCRIPTION");
+    tui_wrap(TUI_DESC_TX, TUI_DESC_TOP(4) + 1, TUI_DESC_TW, 2, PAL->desc, PAL->bg,
+             "Assign a game-port button to each action, or flip Invert Y axis if "
+             "your stick's up/down feels reversed. Pick <None> for unused actions.");
+    tui_status("Up/Down Move   Enter Toggle/Assign   ESC Back");
+
+    k = tui_getkey();
+    if (k == TUI_KEY_UP || k == TUI_KEY_DOWN)
+    {
+      int dir = (k == TUI_KEY_UP) ? -1 : +1;
+      /* -4 (Invert-Y toggle) is selectable; other negatives are skipped. */
+      do { sel = (sel + dir + JOY_NROWS) % JOY_NROWS; }
+      while (JOY_ROWS[sel] < 0 && JOY_ROWS[sel] != -4);
+    }
+    else if (k == TUI_KEY_HOME)
+    {
+      sel = 0;
+      while (JOY_ROWS[sel] < 0 && JOY_ROWS[sel] != -4) ++sel;
+    }
+    else if ((k == TUI_KEY_LEFT || k == TUI_KEY_RIGHT) && JOY_ROWS[sel] == -4)
+    {
+      int ii = scfg_index("JOY_INVERT_Y");
+      if (ii >= 0) cycle_value(ii, (k == TUI_KEY_RIGHT) ? +1 : -1);
+    }
+    else if (k == TUI_KEY_ENTER || k == TUI_KEY_SPACE)
+    {
+      if (JOY_ROWS[sel] == -4) /* toggle Invert Y axis */
+      {
+        int ii = scfg_index("JOY_INVERT_Y");
+        if (ii >= 0) cycle_value(ii, +1);
+      }
+      else
+      {
+        int newbut;
+        action = JOY_ROWS[sel];
+        newbut = capture_jbut_popup(g_binds[action].name); /* press-to-assign */
+        tui_clear();
+        if (newbut != -2 /* not cancelled */ && newbut != g_binds[action].jbut)
+        {
+          int conflict = bindings_find_jbut(g_binds, newbut, action);
+          if (conflict >= 0) /* swap: the other action takes our old button */
+            g_binds[conflict].jbut = g_binds[action].jbut;
+          g_binds[action].jbut = newbut;
+          bindings_save(g_binds, &g_cfg); g_dirty = 1;
+        }
+      }
+    }
+    else if (k == TUI_KEY_ESC) return;
+  }
+}
+
+/* ---- Calibrate joystick (plan 3.5c) --------------------------------- *
+ * The classic 3-step game-port calibration: center, upper-left, lower-right;
+ * then a verify screen with live readout + a button-test row. The captured
+ * min/max are written to the JOY_CAL config value so the engine need not
+ * auto-swirl at start (persistence rides the SDL joy-cal hint patch, task #10);
+ * if that config key is not yet defined the flow still runs as verify-only and
+ * says so. SETUP reads the game port directly (joyport.c, no SDL). */
+
+/* Live poll: redraw the readout each frame until the player presses ENTER to
+ * record the step (returns 1, fills *ox,*oy) or Esc cancels (returns 0).
+ * Issue 5: advancing is on an EXPLICIT keypress only -- stick movement and
+ * button presses NEVER auto-advance (the old behavior grabbed the first button
+ * press while the player was still centering). Buttons are not sampled here. */
+static int calib_capture(int by, const char *l1, const char *l2, int *ox, int *oy)
+{
+  int x = 0, y = 0;
+  int btn_armed = 0; /* button edge-detect: count a press only after a release */
+  tui_clear();
+  for (;;)
+  {
+    char rd[40];
+    unsigned btn  = 0;
+    int btn_press = 0;
+    int present = joyport_sample(&x, &y, &btn);
+    /* A joystick button records the step too (operator request), but ONLY on a
+     * fresh press edge -- armed after a release -- so a held / carried-over
+     * button never auto-advances while the player is still centering (issue-5). */
+    if (btn == 0) btn_armed = 1;
+    else if (btn_armed) { btn_press = 1; btn_armed = 0; }
+    /* 56-wide box centered on the 80-col screen ((80-56)/2 = 12); text at col 14.
+     * The longest line ("Connect a game-port stick, or press ESC to cancel.",
+     * ~50 chars) ends well inside the col-66 interior edge -- the old 40-wide box
+     * at col 20 clipped the prompts off the right border. */
+    tui_titlebar("CALIBRATE JOYSTICK");
+    tui_box(12, by, 56, 8, "CALIBRATE JOYSTICK");
+    tui_at(14, by + 1, PAL->body, PAL->bg, l1);
+    tui_at(14, by + 2, PAL->body, PAL->bg, l2);
+    snprintf(rd, sizeof(rd), present ? "X = %-6d  Y = %-6d" : "no joystick detected",
+             x, y);
+    tui_at(14, by + 4, PAL->value, PAL->bg, rd);
+    tui_at(14, by + 6, present ? PAL->desc : PAL->warn_fg, PAL->bg,
+           present ? "Position the stick, then press Enter or a button"
+                   : "Connect a game-port stick, or press ESC to cancel.");
+    tui_status("Enter/Button Record   ESC Cancel");
+    tui_present();
+
+    if (tui_kbhit())
+    {
+      int k = tui_getkey();
+      if (k == TUI_KEY_ESC) return 0;
+      /* Only record when a stick is actually present: a -1 (open one-shot) must
+       * never be stored -- input-sdl's validity gate rejects negative mins. */
+      if ((k == TUI_KEY_ENTER || k == TUI_KEY_SPACE) && present)
+        { *ox = x; *oy = y; return 1; }
+    }
+    else tui_delay_ms(40);
+    /* a debounced joystick-button press records the step as well */
+    if (btn_press && present) { *ox = x; *oy = y; return 1; }
+  }
+}
+
+static void screen_joystick_cal(void)
+{
+  int by = menu_box_top(3, TUI_DESC_TOP(4), 8);
+  int cx = 0, cy = 0, ulx = 0, uly = 0, lrx = 0, lry = 0;
+  int minx, miny, maxx, maxy;
+  int joyidx;
+  char val[48];
+
+  /* Capture the resting CENTER (a spring-return flightstick's electrical centre
+   * is often not the geometric midpoint -- measure it, do not compute it) and
+   * the two opposite corners. Samples are direct-port poll COUNTS (joyport.c,
+   * the in-game domain). Per-axis min/max are then min/max of the corner samples
+   * (robust to whichever travel direction makes the count rise), and the centre
+   * is clamped into [min,max] so the value passes input-sdl's validity gate
+   * (negative mins / range < 20 counts / centre outside [min,max] are rejected). */
+  if (!calib_capture(by, "Step 1 of 3:", "Center the stick, then press Enter.",
+                     &cx, &cy)) return;
+  if (!calib_capture(by, "Step 2 of 3:", "Move to the UPPER-LEFT corner, press Enter.",
+                     &ulx, &uly)) return;
+  if (!calib_capture(by, "Step 3 of 3:", "Move to the LOWER-RIGHT corner, press Enter.",
+                     &lrx, &lry)) return;
+
+  minx = (ulx < lrx) ? ulx : lrx; maxx = (ulx > lrx) ? ulx : lrx;
+  miny = (uly < lry) ? uly : lry; maxy = (uly > lry) ? uly : lry;
+  if (cx < minx) cx = minx;
+  if (cx > maxx) cx = maxx;
+  if (cy < miny) cy = miny;
+  if (cy > maxy) cy = maxy;
+
+  /* Persist the captured calibration NOW -- the operator completed the three
+   * deliberate capture steps, so the verify screen is review-only and a missed
+   * or flaky save-confirm can no longer silently drop the calibration (the v2
+   * g2k bug: JOY_CAL came back empty -> engine auto-cal -> stick dead). ESC on
+   * the verify screen reverts to the previous value. */
+  joyidx = scfg_index("JOY_CAL");
+  if (joyidx >= 0)
+  {
+    /* JOY_CAL grammar (engine registry / SDL patch sscanf): six values
+     * xmin,xcenter,xmax,ymin,ycenter,ymax. Persist NOW (capture-complete) so a
+     * just-finished calibration can never be silently dropped. */
+    snprintf(val, sizeof(val), "%d,%d,%d,%d,%d,%d", minx, cx, maxx, miny, cy, maxy);
+    scfg_set(&g_cfg, joyidx, val); g_dirty = 1;
+  }
+  tui_clear();
+  for (;;)
+  {
+    int x = 0, y = 0, b;
+    unsigned btn = 0;
+    char line[48];
+    joyport_sample(&x, &y, &btn);
+    tui_titlebar("CALIBRATE JOYSTICK");
+    tui_box(16, by, 48, 9, "CALIBRATE JOYSTICK");
+    snprintf(line, sizeof(line), "X  min %-6d  center %-6d  max %-6d", minx, cx, maxx);
+    tui_at(18, by + 1, PAL->body, PAL->bg, line);
+    snprintf(line, sizeof(line), "Y  min %-6d  center %-6d  max %-6d", miny, cy, maxy);
+    tui_at(18, by + 2, PAL->body, PAL->bg, line);
+    snprintf(line, sizeof(line), "Live   X = %-6d  Y = %-6d", x, y);
+    tui_at(18, by + 4, PAL->value, PAL->bg, line);
+    tui_at(18, by + 6, PAL->body, PAL->bg, "Buttons:");
+    for (b = 0; b < BIND_NJBUT; ++b)
+    {
+      char tag[4];
+      snprintf(tag, sizeof(tag), "%d", b + 1);
+      tui_at(27 + b * 3, by + 6, (btn & (1u << b)) ? PAL->warn_fg : PAL->dim,
+             PAL->bg, tag);
+    }
+    tui_box(TUI_DESC_X, TUI_DESC_TOP(4), TUI_DESC_W, 4, "DESCRIPTION");
+    tui_wrap(TUI_DESC_TX, TUI_DESC_TOP(4) + 1, TUI_DESC_TW, 2, PAL->desc, PAL->bg,
+             joyidx >= 0
+               ? "Calibration saved. Move the stick to verify the range and test "
+                 "the buttons. Enter or ESC keeps it; re-run to redo."
+               : "Verify the range and test the buttons. Saved calibration "
+                 "arrives with the engine update; ESC returns.");
+    tui_status("Enter/ESC Keep");
+    tui_present();
+
+    if (tui_kbhit())
+    {
+      int k = tui_getkey();
+      /* Both Enter and ESC KEEP the calibration -- it was already persisted on
+       * capture-complete above. (Previously ESC reverted to the prior value,
+       * which silently discarded a just-completed calibration when the operator
+       * pressed ESC to leave -- the g2k "JOY_CAL came back empty" trap.) To
+       * redo, re-run Calibrate joystick. */
+      if (k == TUI_KEY_ESC || k == TUI_KEY_ENTER || k == TUI_KEY_SPACE) return;
+    }
+    else tui_delay_ms(40);
+  }
+}
+
+/* ---- Restore default controls (plan 3.5) ---------------------------- */
+static void controls_restore_defaults(void)
+{
+  if (tui_yesno("Restore default controls",
+                "Reset all keyboard + joystick controls to the defaults?", 1))
+  {
+    binds_ensure();
+    bindings_defaults(g_binds);
+    bindings_save(g_binds, &g_cfg);
+    g_dirty = 1;
+  }
+}
+
 /* ---- Input submenu (T47 plan 3.5) ----------------------------------- *
- * Phase-1 shell: the live USE_JOYSTICK on/off row, plus the Configure /
- * Restore rows shown greyed as signposts -- control remapping (the keyboard /
- * joystick configure screens + calibration) is a Phase-3 deliverable that
- * needs an engine-side binding surface. Greyed rows are skipped by navigation
- * (the same mechanism the Sound + category editors use). */
+ * The live USE_JOYSTICK on/off row + the Phase-3 control screens. The two
+ * joystick rows grey out (navigation skips them) when the game port is Off. */
 static void screen_input(void)
 {
-  enum { R_JOY = 0, R_KBD, R_JOYCFG, R_RESTORE, R_BACK, R_N };
+  enum { R_JOY = 0, R_KBD, R_JOYCFG, R_JOYCAL, R_RESTORE, R_BACK, R_N };
   static const char *labels[R_N] = {
     "Joystick / gamepad", "Configure keyboard", "Configure joystick",
-    "Restore default controls", "Back"
+    "Calibrate joystick", "Restore default controls", "Back"
   };
   static const char *helps[R_N] = {
     "Read a joystick or gamepad on the PC game port. Off = keyboard only.",
-    "Remap keyboard controls. Arrives in a later update.",
-    "Assign joystick buttons. Arrives in a later update.",
-    "Reset all controls to defaults. Arrives in a later update.",
+    "Remap the keyboard controls for each game action.",
+    "Assign game-port buttons to actions (needs Joystick = On).",
+    "Calibrate the game-port stick range (needs Joystick = On).",
+    "Reset all keyboard + joystick controls to the defaults.",
     "Return to the main menu."
   };
   int joyidx = scfg_index("USE_JOYSTICK");
   int sel = R_JOY;
 
+  binds_ensure();
   tui_clear();
   for (;;)
   {
-    int i, k, active[R_N];
-    /* D: center the option box between the title bar and the DESCRIPTION box. */
+    int i, k, active[R_N], joy_on = (strcmp(scfg_get(&g_cfg, joyidx), "1") == 0);
     int boxy = menu_box_top(3, TUI_DESC_TOP(4), R_N + 2);
-    active[R_JOY] = 1; active[R_KBD] = 0; active[R_JOYCFG] = 0;
-    active[R_RESTORE] = 0; active[R_BACK] = 1; /* Configure/Restore = Phase 3 */
+    active[R_JOY] = 1; active[R_KBD] = 1;
+    active[R_JOYCFG] = joy_on; active[R_JOYCAL] = joy_on; /* grey when game port Off */
+    active[R_RESTORE] = 1; active[R_BACK] = 1;
+    if (!active[sel]) sel = R_JOY; /* never rest on a row that just greyed out */
     tui_titlebar("INPUT");
     tui_box(19, boxy, 44, R_N + 2, "INPUT"); /* R-O: centered (18/18 margins) */
     for (i = 0; i < R_N; ++i)
@@ -1869,8 +2389,7 @@ static void screen_input(void)
       if (i == R_JOY)
       {
         int vfg = selrow ? PAL->sel_fg : PAL->value;
-        tui_at(20 + 28, boxy + 1 + i, vfg, bg,
-               strcmp(scfg_get(&g_cfg, joyidx), "1") == 0 ? "On" : "Off");
+        tui_at(20 + 28, boxy + 1 + i, vfg, bg, joy_on ? "On" : "Off");
       }
     }
     tui_box(TUI_DESC_X, TUI_DESC_TOP(4), TUI_DESC_W, 4, "DESCRIPTION");
@@ -1891,10 +2410,12 @@ static void screen_input(void)
     }
     else if (k == TUI_KEY_ENTER)
     {
-      /* R-I: Enter on the Joystick row opens its On/Off pick-list (R-H clear
-       * after). Back exits the submenu. */
-      if (sel == R_JOY) { if (pick_value(joyidx)) tui_clear(); }
-      else if (sel == R_BACK) return;
+      if      (sel == R_JOY)     { if (pick_value(joyidx)) tui_clear(); }
+      else if (sel == R_KBD)     { screen_keyboard(); tui_clear(); }
+      else if (sel == R_JOYCFG)  { screen_joystick_cfg(); tui_clear(); }
+      else if (sel == R_JOYCAL)  { screen_joystick_cal(); tui_clear(); }
+      else if (sel == R_RESTORE) { controls_restore_defaults(); tui_clear(); }
+      else if (sel == R_BACK)    return;
     }
     else if (k == TUI_KEY_ESC) return; /* T44: live edits kept in the session */
   }
@@ -2019,10 +2540,23 @@ int main(void)
       else if (action == -2) { screen_save(); break; }  /* F10 = Save and Exit */
       else /* action == 6 (Quit without saving) or ESC (-1) */
       {
-        /* T52: ALWAYS confirm before leaving to DOS (accident guard), even when
-         * the session is clean. Default highlight No (destructive). Y = exit
-         * without writing; N = stay. */
-        if (tui_yesno("Quit", "Quit without saving settings?", 1))
+        /* Session model: every screen's edits live in the in-memory config and
+         * nothing is written until "Save and exit". The ONLY discard paths are
+         * this branch. ESC with unsaved edits OFFERS to save first (so leaving
+         * via ESC can't silently lose work); the explicit "Quit without saving"
+         * menu item skips the offer -- the user already chose to discard. */
+        if (action == -1 && g_dirty)
+        {
+          if (tui_yesno("Unsaved changes", "Save your changes before exiting?", 1))
+          {
+            screen_save(); /* Yes -> write the config, then exit */
+            break;
+          }
+          /* No -> fall through to the explicit discard confirm below. */
+        }
+        /* T52 accident guard before leaving to DOS; default highlight No. */
+        if (tui_yesno("Quit",
+                      g_dirty ? "Discard unsaved changes and quit?" : "Quit SETUP?", 1))
           break;
       }
     }

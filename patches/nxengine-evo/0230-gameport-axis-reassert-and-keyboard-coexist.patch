@@ -1,0 +1,135 @@
+From 24869fdc50a7508c71bfe7fde2fa1a9c2d10a7e0 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 18 Jun 2026 09:49:13 -0700
+Subject: [PATCH] patch 0230 -- gameport axis maps: re-assert post
+ settings_load + keyboard/button coexistence
+
+Two coupled fixes for the g2k dead-stick (axis read was already correct):
+(a) Re-assert the LEFT/RIGHT/UP/DOWN axis->action maps in input_apply_cfg_bindings
+    AFTER settings_load. 0228 set them in input_init, but settings_load overwrites
+    the live mappings from the saved settings.dat (jaxis=-1), so on any machine
+    with a settings.dat the axes were DEAD: g2k [eng-axis] showed
+    SDL_GetJoystickAxis()=+/-32767 but input_get_action_axis()=-1.
+(b) Coexist with the keyboard: the per-frame axis reset (if jaxis>=0 -> inputs=false)
+    now also wipes a HELD keyboard key on the same directional action (a held key
+    fires one KEY_DOWN edge; the at-rest axis never restores it). Only clear an
+    axis-mapped action when its bound key (SDL_GetKeyboardState) AND button
+    (SDL_GetJoystickButton) are not held, so key and axis OR together.
+Plus an [eng-axis] in-game poll trace gated on SDL_HINT_DOSKUTSU_JOY_DIAG.
+Banner: [input-bind] applied=N invert_y=M dos_axes=1. Axis fix g2k-confirmed;
+keyboard coexistence DOSBox-confirmed.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/input.cpp | 64 ++++++++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 58 insertions(+), 6 deletions(-)
+
+diff --git a/src/input.cpp b/src/input.cpp
+index 4be32df..7859fe6 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -353,6 +353,26 @@ int input_apply_cfg_bindings(void)
+   for (int i = 0; i < INPUT_COUNT; i++)
+     array[i] = input_get_mapping(i); // seed from current (settings.dat / defaults)
+ 
++  // DOS-PORT (patch 0230, Phase 3 / #40): re-assert the gameport axis->action
++  // mappings AFTER settings_load. 0228 sets these in input_init, but
++  // settings_load() overwrites the live mappings from any existing settings.dat
++  // -- which carries jaxis=-1 (from before 0228, or a prior save) -- so on a
++  // machine with a saved settings.dat the stick AXES were DEAD: g2k [eng-axis]
++  // showed SDL_GetJoystickAxis()=+/-32767 but input_get_action_axis()=-1 (no
++  // jaxis match). Re-applying here, on the same post-load overlay as BIND_* /
++  // invert-Y, makes the axes work regardless of settings.dat. Directional
++  // actions only; only the jaxis* fields are touched, so a key/button bound to
++  // these actions (set below or loaded from settings.dat) is preserved.
++#if defined(__DJGPP__)
++  array[LEFTKEY].jaxis  = 0; array[LEFTKEY].jaxis_value  = -1;
++  array[RIGHTKEY].jaxis = 0; array[RIGHTKEY].jaxis_value =  1;
++  array[UPKEY].jaxis    = 1; array[UPKEY].jaxis_value    = -1;
++  array[DOWNKEY].jaxis  = 1; array[DOWNKEY].jaxis_value  =  1;
++  const bool dos_axes = true;
++#else
++  const bool dos_axes = false;
++#endif
++
+   int applied = 0;
+   for (size_t i = 0; i < sizeof(_cfg_bind_tbl) / sizeof(_cfg_bind_tbl[0]); i++)
+   {
+@@ -384,12 +404,13 @@ int input_apply_cfg_bindings(void)
+         array[i].jaxis_value = -array[i].jaxis_value;
+   }
+ 
+-  if (applied > 0 || invert_y)
++  if (applied > 0 || invert_y || dos_axes)
+     input_set_mappings(array);
+ 
+   // Smoke-gate anchor: unique bracketed line FORMAT (never a substring of a
+   // banner / help text) per the grep-anchor-confound lesson. Always emits.
+-  LOG_INFO("[input-bind] applied={} invert_y={}", applied, invert_y ? 1 : 0);
++  LOG_INFO("[input-bind] applied={} invert_y={} dos_axes={}", applied, invert_y ? 1 : 0,
++           dos_axes ? 1 : 0);
+   return applied;
+ }
+ 
+@@ -570,23 +591,54 @@ void input_poll(void)
+   }
+ 
+   // handle gamepad sticks
+-
++  //
++  // DOS-PORT (patch 0230 cont., Phase 3 / #40): this per-frame reset clears axis-mapped
++  // actions so a released stick stops the direction. But after 0230 the
++  // directional actions ALSO carry a keyboard key (BIND_* / defaults), and a held
++  // key fires only ONE KEY_DOWN event -- so a blanket reset wipes it every frame
++  // and the at-rest axis never restores it (the keyboard-motion regression).
++  // Clear an axis-mapped action ONLY when its bound key / button is not currently
++  // held, so key and axis OR together on the shared inputs[] flag.
++  const bool *kbstate = SDL_GetKeyboardState(NULL);
+   for (int i = 0; i < INPUT_COUNT; i++)
+   {
+-    if (mappings[i].jaxis >= 0) // reset all mapped axises
++    if (mappings[i].jaxis >= 0) // axis-mapped action
+     {
+-      inputs[i] = false;
++      bool held = false;
++      if (mappings[i].key > 0 && kbstate &&
++          kbstate[SDL_GetScancodeFromKey(mappings[i].key, NULL)])
++        held = true; // its keyboard key is down this frame
++      if (!held && mappings[i].jbut != -1 && joy &&
++          SDL_GetJoystickButton(joy, mappings[i].jbut))
++        held = true; // or its gameport button is down
++      if (!held)
++        inputs[i] = false;
+     }
+   }
+ 
+   // now get current values of all axises
++  // DOSKUTSU diag (SDL_HINT_DOSKUTSU_JOY_DIAG=1 in the env): trace the in-game
++  // axis poll so a dead stick whose SDL-side calibration already reaches
++  // +/-32767 can be localized -- either SDL_GetJoystickAxis returns 0/stale (an
++  // SDL3-DOS SendAxis->GetAxis state disconnect) or input_get_action_axis returns
++  // -1 (the action mapping lost its jaxis). Rate-limited; LOG_INFO so it needs a
++  // tagged/verbose run (JDIAG.BAT sets DOSKUTSU_LOG_TAG, which forces INFO).
++  static int s_ax_diag = -1;
++  if (s_ax_diag < 0)
++    s_ax_diag = std::getenv("SDL_HINT_DOSKUTSU_JOY_DIAG") ? 1 : 0;
++  static unsigned s_ax_n = 0;
++  bool ax_log = s_ax_diag && ((s_ax_n++ % 15) == 0);
++
+   for (int ax = 0; ax < SDL_GetNumJoystickAxes(joy); ax++)
+   {
+     int value = SDL_GetJoystickAxis(joy, ax);
+     ino       = input_get_action_axis(ax, value); // this returns actual mapping for axis direction
+ 
+-    if (ino != -1 && (value > 20000 || value < -20000))
++    bool set = (ino != -1 && (value > 20000 || value < -20000));
++    if (set)
+       inputs[ino] = true;
++    if (ax_log)
++      LOG_INFO("[eng-axis] ax={} getaxis={} ino={} set={}", ax, value, ino, set ? 1 : 0);
+   }
+ }
+ 
+-- 
+2.47.3
+

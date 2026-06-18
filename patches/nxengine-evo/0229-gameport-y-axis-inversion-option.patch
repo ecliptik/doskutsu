@@ -1,0 +1,60 @@
+From 5ded0ac37d75b887eea70883f5acfdabc7e49ecc Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 17 Jun 2026 12:43:30 -0700
+Subject: [PATCH] patch 0229 -- gameport Y-axis inversion option (Phase 3 /
+ #40)
+
+A spring-return flightstick's pitch (Y) axis frequently reads opposite the
+platformer convention (push-forward = climb vs dive). Without a flip the
+player would aim/look the wrong vertical way and could not enter doors
+(UP-interact). JOY_INVERT_Y=1 (env DOSKUTSU_JOY_INVERT_Y, published by the
+config shim) negates the axis-1 sign on the live UP/DOWN mappings in
+input_apply_cfg_bindings -- AFTER settings_load, so it wins over settings.dat
+like the BIND_* overlay. Default OFF (strict "1" match); only entries still
+bound to axis 1 are flipped, so a future axis remap stays safe. X is left
+un-invertible on purpose (left/right rarely needs it).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/input.cpp | 21 +++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/src/input.cpp b/src/input.cpp
+index 42aac1c..4be32df 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -367,12 +367,29 @@ int input_apply_cfg_bindings(void)
+     }
+   }
+ 
+-  if (applied > 0)
++  // DOS-PORT (patch 0229, Phase 3 / #40): optional gameport Y-axis inversion.
++  // A spring-return flightstick's pitch axis often reads opposite the
++  // platformer convention; JOY_INVERT_Y=1 (env DOSKUTSU_JOY_INVERT_Y, published
++  // by the config shim) negates the axis 1 (Y) sign on the live UP/DOWN
++  // mappings. Applied HERE -- after settings_load -- so it wins over
++  // settings.dat like the BIND_* overlay above. Default OFF (absent / != "1" ->
++  // no change). Strict "1" match (the wave-13.2 truthiness footgun). Only the
++  // entries still bound to axis 1 are flipped, so a future axis remap is safe.
++  const char *invy_env = std::getenv("DOSKUTSU_JOY_INVERT_Y");
++  const bool invert_y = invy_env && invy_env[0] == '1' && invy_env[1] == 0;
++  if (invert_y)
++  {
++    for (int i = 0; i < INPUT_COUNT; i++)
++      if (array[i].jaxis == 1)
++        array[i].jaxis_value = -array[i].jaxis_value;
++  }
++
++  if (applied > 0 || invert_y)
+     input_set_mappings(array);
+ 
+   // Smoke-gate anchor: unique bracketed line FORMAT (never a substring of a
+   // banner / help text) per the grep-anchor-confound lesson. Always emits.
+-  LOG_INFO("[input-bind] applied={}", applied);
++  LOG_INFO("[input-bind] applied={} invert_y={}", applied, invert_y ? 1 : 0);
+   return applied;
+ }
+ 
+-- 
+2.47.3
+

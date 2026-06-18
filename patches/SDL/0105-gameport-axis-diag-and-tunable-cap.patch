@@ -1,0 +1,121 @@
+From 482a1d68bdc5b3f409d9e44147737357a8c8cb8d Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 18 Jun 2026 09:49:13 -0700
+Subject: [PATCH] patch 0105 -- gameport axis diag (JOY_DIAG) + runtime
+ discharge cap (JOY_CAP)
+
+Diagnostic + tunable-cap support added while root-causing the g2k dead-axis.
+SDL_HINT_DOSKUTSU_JOY_DIAG=1 logs raw+calibrated axis values; JOY_CAP makes the
+direct-port discharge cap runtime-tunable (default 3000). The read itself was
+proven correct (raw swung full range, cal hit +/-32767); kept as a shippable
+diag lever (default off, harmless).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/joystick/dos/SDL_sysjoystick.c | 56 +++++++++++++++++++++++++++---
+ 1 file changed, 52 insertions(+), 4 deletions(-)
+
+diff --git a/src/joystick/dos/SDL_sysjoystick.c b/src/joystick/dos/SDL_sysjoystick.c
+index b135c1b6c..1b95417f7 100644
+--- a/src/joystick/dos/SDL_sysjoystick.c
++++ b/src/joystick/dos/SDL_sysjoystick.c
+@@ -113,6 +113,38 @@ static bool DOS_JoyDirectRead(void)
+     return cached != 0;
+ }
+ 
++/* DOSKUTSU diag: SDL_HINT_DOSKUTSU_JOY_DIAG=1 periodically logs the raw +
++ * calibrated gameport axis values to the SDL debug log, so a dead in-game stick
++ * can be diagnosed from data instead of guesswork: raw=-1 means the read timed
++ * out (direct cap exceeded) or the BIOS call failed; a raw that never changes
++ * means the read is stuck; a cal that never reaches |>20000| means an auto-cal /
++ * deadzone problem. Default OFF. */
++static bool DOS_JoyDiag(void)
++{
++    static int cached = -1;
++    if (cached < 0) {
++        const char *h = SDL_GetHint("SDL_HINT_DOSKUTSU_JOY_DIAG");
++        cached = (h && h[0] == '1' && h[1] == '\0') ? 1 : 0;
++    }
++    return cached != 0;
++}
++
++/* DOSKUTSU: runtime-tunable discharge-count cap for the direct-port read
++ * (SDL/0103 default 3000). A flightstick whose pots discharge slower than 3000
++ * inportb iterations at full deflection reads -1 ("not connected") and goes
++ * dead; SDL_HINT_DOSKUTSU_JOY_CAP raises it to test/fix that without a rebuild.
++ * Keep SETUP's joyport.c cap in sync if this default ever changes. */
++static unsigned long DOS_GameportCap(void)
++{
++    static long cached = -1;
++    if (cached < 0) {
++        const char *h = SDL_GetHint("SDL_HINT_DOSKUTSU_JOY_CAP");
++        cached = (h && *h) ? SDL_atoi(h) : 3000;
++        if (cached < 100) cached = 100;
++    }
++    return (unsigned long)cached;
++}
++
+ /*
+  * DOSKUTSU patch (SDL/0103): direct gameport (port 0x201) bounded axis read.
+  *
+@@ -148,6 +180,7 @@ static void ReadGameportAxesDirect(int *axis_x, int *axis_y)
+ {
+     unsigned long cx = 0, cy = 0;
+     unsigned long guard = 0;
++    unsigned long cap = DOS_GameportCap();
+     unsigned char bits;
+ 
+     __asm__ __volatile__("cli");
+@@ -157,7 +190,7 @@ static void ReadGameportAxesDirect(int *axis_x, int *axis_y)
+         if (bits & GAMEPORT_AXIS_X) { cx++; }
+         if (bits & GAMEPORT_AXIS_Y) { cy++; }
+         ++guard;
+-    } while ((bits & (GAMEPORT_AXIS_X | GAMEPORT_AXIS_Y)) && guard < GAMEPORT_DIRECT_CAP);
++    } while ((bits & (GAMEPORT_AXIS_X | GAMEPORT_AXIS_Y)) && guard < cap);
+     __asm__ __volatile__("sti");
+ 
+     /* A one-shot still set at the cap never discharged -> axis not connected. */
+@@ -419,6 +452,7 @@ static void DOS_JoystickUpdate(SDL_Joystick *joystick)
+ {
+     struct joystick_hwdata *hwdata = joystick->hwdata;
+     int axis_x, axis_y;
++    Sint16 cal_x = 0, cal_y = 0;
+     Uint8 val;
+     Uint64 now;
+ 
+@@ -451,15 +485,29 @@ static void DOS_JoystickUpdate(SDL_Joystick *joystick)
+         ReadGameportAxes(&axis_x, &axis_y);
+     }
+ 
++    cal_x = (axis_x >= 0) ? CalibrateAxis(axis_x, hwdata, 0) : 0;
++    cal_y = (axis_y >= 0) ? CalibrateAxis(axis_y, hwdata, 1) : 0;
+     if (axis_x >= 0) {
+-        Sint16 cal_x = CalibrateAxis(axis_x, hwdata, 0);
+         SDL_SendJoystickAxis(0, joystick, 0, cal_x);
+     }
+-
+     if (axis_y >= 0) {
+-        Sint16 cal_y = CalibrateAxis(axis_y, hwdata, 1);
+         SDL_SendJoystickAxis(0, joystick, 1, cal_y);
+     }
++
++    /* DOSKUTSU diag (SDL_HINT_DOSKUTSU_JOY_DIAG=1): rate-limited raw+cal trace so
++     * a dead in-game stick is diagnosable from the SDL log. */
++    if (DOS_JoyDiag()) {
++        static unsigned diag_n = 0;
++        if ((diag_n++ % 15) == 0) {
++            doskutsu_dbg_log("[joy-axis] path=%s rawx=%d rawy=%d calx=%d caly=%d cald=%d "
++                             "x[%d/%d/%d] y[%d/%d/%d] cap=%lu",
++                             DOS_JoyDirectRead() ? "dir" : "bios",
++                             axis_x, axis_y, (int)cal_x, (int)cal_y, hwdata->calibrated ? 1 : 0,
++                             hwdata->axis_min[0], hwdata->axis_center[0], hwdata->axis_max[0],
++                             hwdata->axis_min[1], hwdata->axis_center[1], hwdata->axis_max[1],
++                             DOS_GameportCap());
++        }
++    }
+ }
+ 
+ static void DOS_JoystickClose(SDL_Joystick *joystick)
+-- 
+2.47.3
+

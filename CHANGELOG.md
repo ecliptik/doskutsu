@@ -5,6 +5,37 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.2.0] - 2026-06-18
+
+Input remapping + gameport joystick/flightstick support. Keyboard and joystick
+controls are now configurable in SETUP.EXE, and the SDL3-DOS gameport is usable
+for play. Joystick axis movement validated on the reference 486 DX2-66 (SB16
+gameport flightstick); keyboard + joystick coexistence validated under DOSBox-X.
+
+### Added
+
+- **Configurable controls (SETUP.EXE Input screens).** Remap keyboard keys and
+  assign gameport buttons per action, calibrate the gameport stick, and toggle
+  Invert Y axis. Settings persist to DOSKUTSU.CFG (`BIND_<ACTION>`, `JOY_CAL`,
+  `JOY_INVERT_Y`); see `docs/CONFIG.md`.
+- **Gameport joystick / flightstick support.** `DOSKUTSU_USE_JOYSTICK=1` enables
+  the 2-axis / 4-button gameport. A bounded direct-port (0x201) read keeps the
+  per-frame cost low (the legacy BIOS read cost ~80 ms/frame); killswitch
+  `SDL_HINT_DOSKUTSU_JOY_DIRECTREAD=0`. The stick drives movement (axes) and
+  actions (buttons) alongside the keyboard.
+- **Invert Y axis** (`DOSKUTSU_JOY_INVERT_Y=1`) for flightsticks whose pitch
+  reads opposite the platformer convention, plus a stored calibration
+  (`SDL_HINT_DOSKUTSU_JOY_CAL`) and a troubleshooting read cap
+  (`SDL_HINT_DOSKUTSU_JOY_CAP`).
+
+### Fixed
+
+- **SETUP save model.** The calibrate verify screen no longer silently discards a
+  just-completed calibration on ESC (Enter and ESC both keep it); the main menu
+  prompts to save when there are unsaved changes (discard only via "Quit without
+  saving"). The calibrate capture box was widened so its prompts no longer
+  overflow the frame.
+
 ## [1.1.2] - 2026-06-17
 
 Small-polish + custom-MIDI release: three UI/correctness fixes plus user-supplied

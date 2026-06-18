@@ -64,13 +64,34 @@ The `opl3` and `wb` backends play music on dedicated sound hardware, off the CPU
 
 | Variable | Values | Default | Effect | FPS impact |
 |---|---|---|---|---|
-| `DOSKUTSU_USE_JOYSTICK` | `0`, `1` | `0` | `1` opens the joystick / gamepad subsystem. | `=1` costs ~80 ms per frame on Sound Blaster gameports - severe |
+| `DOSKUTSU_USE_JOYSTICK` | `0`, `1` | `0` | `1` opens the joystick / gamepad subsystem. | small (bounded direct-port read; see `JOY_DIRECTREAD`) |
+| `DOSKUTSU_BIND_<ACTION>` | `k:<keycode>[,b:<button>]` | unset | Rebinds one player action to an SDL keycode and optional gameport button. `<ACTION>` is one of `LEFT`, `RIGHT`, `UP`, `DOWN`, `JUMP`, `FIRE`, `STRAFE`, `PREVWPN`, `NEXTWPN`, `INVENTORY`, `MAP`. Unset = the action keeps its saved (settings.dat) or built-in binding. | None |
+| `SDL_HINT_DOSKUTSU_JOY_CAL` | `xmin,xcenter,xmax,ymin,ycenter,ymax` | unset | Stored gameport calibration (per-axis minimum, resting centre, maximum), so the stick need not be re-centred each run. Unset = the SDL backend auto-calibrates. Values are in the direct-port read's units (see `JOY_DIRECTREAD`); written by SETUP and not meant for hand-editing. | None |
+| `SDL_HINT_DOSKUTSU_JOY_DIRECTREAD` | `0`, `1` | `1` | Killswitch for the bounded direct gameport (port 0x201) axis read. `1` (default) reads only the two connected joystick-1 axes with a hard iteration cap. `0` reverts to the legacy BIOS INT 15h read (which also waits on the open joystick-2 axes -- the historical ~80 ms/frame cost) AND ignores the stored `JOY_CAL` (its units differ from the BIOS read), auto-calibrating instead. | `=0` reintroduces the ~80 ms/frame BIOS cost - severe |
+| `DOSKUTSU_JOY_INVERT_Y` | `0`, `1` | `0` | `1` inverts the gameport stick's vertical (Y) axis, swapping up and down. Useful for a flightstick whose pitch axis reads opposite the platformer convention (push-forward = climb vs dive). Affects looking / aiming up vs down and the up-to-enter-doors interaction; the horizontal (X) axis is unaffected. Toggle it in `SETUP.EXE` -> Input -> Configure joystick. | None |
+| `SDL_HINT_DOSKUTSU_JOY_CAP` | iteration count | `3000` | Direct-port (`JOY_DIRECTREAD=1`) axis discharge-count cap. Raise it only if a high-resistance stick's full deflection reads as "not connected" and that direction stops responding near the extreme; most sticks never need it. | Minor - a larger cap slightly lengthens the worst-case axis read |
 
 ```
 SET DOSKUTSU_USE_JOYSTICK=1   REM only when a real joystick is on the gameport
 ```
 
-Leave this off unless a physical joystick is connected. On Sound Blaster cards the gameport is detected even with nothing plugged in, and polling it through the BIOS costs about 80 ms per frame on the reference PC - a severe frame-rate hit. Keyboard-only play is fully supported and is the default.
+Leave `DOSKUTSU_USE_JOYSTICK` off unless a physical joystick is connected. On Sound Blaster cards the gameport is detected even with nothing plugged in. The default read path (`SDL_HINT_DOSKUTSU_JOY_DIRECTREAD=1`) reads only the two connected axes directly off port 0x201 with a bounded timing loop, so the per-frame cost is small; the legacy BIOS read (`=0`) also waits on the open joystick-2 axes and costs about 80 ms per frame on the reference PC - a severe frame-rate hit. Keyboard-only play is fully supported and is the default.
+
+The `DOSKUTSU_BIND_*` and `SDL_HINT_DOSKUTSU_JOY_CAL` variables are normally written for you by `SETUP.EXE`'s Input screens (Configure keyboard / Configure joystick / Calibrate joystick), which store them in `DOSKUTSU.CFG`. You can also set them by hand. A binding value is `k:<keycode>` for keyboard, optionally `,b:<button>` to also map a gameport button (0-3); for example `SET DOSKUTSU_BIND_JUMP=k:122,b:0` binds Jump to the `Z` key and gameport button 0. A binding written here wins over the saved `settings.dat` mapping for that action; all other actions are left untouched. With no `DOSKUTSU_BIND_*` set, controls are exactly the default Cave Story layout.
+
+The `k:` value is a numeric SDL keycode. For a printable key it is simply the ASCII code of the lowercase character (letters `a`-`z` = 97-122, digits `0`-`9` = 48-57). Special keys use `1073741824 + scancode`. Common remappable keys:
+
+| Key | `k:` value | | Key | `k:` value |
+|---|---|---|---|---|
+| Left arrow | `1073741904` | | Space | `32` |
+| Right arrow | `1073741903` | | Enter / Return | `13` |
+| Up arrow | `1073741906` | | Tab | `9` |
+| Down arrow | `1073741905` | | Backspace | `8` |
+| `A` (97) `B` (98) `C` (99) | `97`-`99` | | Left Shift | `1073742049` |
+| `Q` (113) `S` (115) | `113` / `115` | | Left Ctrl | `1073742048` |
+| `W` (119) `X` (120) `Z` (122) | `119` / `120` / `122` | | Left Alt | `1073742050` |
+
+The Cave Story defaults are Left/Right/Up/Down = the arrow keys, Jump = `Z` (122), Fire = `X` (120), Strafe = `C` (99), Prev/Next Weapon = `A`/`S` (97/115), Inventory = `Q` (113), Map = `W` (119). Any other letter is its ASCII code (e.g. `D` = 100, `F` = 102).
 
 ---
 

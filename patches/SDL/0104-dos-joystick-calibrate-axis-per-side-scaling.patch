@@ -1,0 +1,76 @@
+From 5ddd884661a13927d0e857b6c84086e6ca08b38f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 16 Jun 2026 18:31:12 -0700
+Subject: [PATCH 104/104] dos: patch 0104 -- CalibrateAxis per-side half-range
+ scaling (#21 axes)
+
+The in-game axis-to-player path was dead for an offset-center stick.
+CalibrateAxis scaled both directions by the single full range
+(axis_max - axis_min), so when the electrical rest point is not the
+geometric midpoint (typical of a spring-return flightstick) a full
+deflection on the SHORT side mapped well below the engine's hardcoded
+20000 deadzone -- the axis appeared stuck at center and the player would
+not move that way.
+
+Scale each direction by its own half-range (axis_center..axis_max above
+center, axis_min..axis_center below) so both full deflections reach
++/-32767 regardless of where center sits. The auto-widen of
+axis_min/axis_max still applies, so a side's half grows if the stick
+later exceeds the stored extent. Pairs with the engine's default DOS
+axis->action mappings; real-HW-gated.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/joystick/dos/SDL_sysjoystick.c | 28 ++++++++++++++++++++--------
+ 1 file changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/src/joystick/dos/SDL_sysjoystick.c b/src/joystick/dos/SDL_sysjoystick.c
+index 76c88b136..b135c1b6c 100644
+--- a/src/joystick/dos/SDL_sysjoystick.c
++++ b/src/joystick/dos/SDL_sysjoystick.c
+@@ -167,7 +167,7 @@ static void ReadGameportAxesDirect(int *axis_x, int *axis_y)
+ 
+ static Sint16 CalibrateAxis(int raw, struct joystick_hwdata *hwdata, int axis)
+ {
+-    int range;
++    int half;
+     int centered;
+ 
+     if (raw < 0) {
+@@ -195,14 +195,26 @@ static Sint16 CalibrateAxis(int raw, struct joystick_hwdata *hwdata, int axis)
+        above still applies. The auto-cal path (no stored cal) is byte-identical
+        to pre-0102. */
+ 
+-    range = hwdata->axis_max[axis] - hwdata->axis_min[axis];
+-    if (range < 10) {
+-        range = 10; /* avoid division issues */
+-    }
+-
+-    /* Map to -32768..32767 */
++    /* DOSKUTSU patch (SDL/0104): per-side half-range scaling. The old code
++       scaled both directions by the single full range (axis_max - axis_min),
++       so an offset-center stick (electrical rest != geometric midpoint, common
++       on a spring-return flightstick) under-registered the SHORT side -- a full
++       deflection there mapped well below the engine's hardcoded 20000 deadzone
++       and the player wouldn't move that way ("axis collapses to center"). Scale
++       each side by its OWN half-range so both full deflections reach +/-32767
++       regardless of where center sits. axis_min/axis_max still auto-widen above,
++       so the half grows if the stick later exceeds the stored extent. */
+     centered = raw - hwdata->axis_center[axis];
+-    return (Sint16)SDL_clamp(((Sint64)centered * 65535) / range, -32768, 32767);
++    if (centered >= 0) {
++        half = hwdata->axis_max[axis] - hwdata->axis_center[axis]; /* above-center travel */
++    } else {
++        half = hwdata->axis_center[axis] - hwdata->axis_min[axis]; /* below-center travel */
++    }
++    if (half < 5) {
++        half = 5; /* avoid division issues on a not-yet-widened side */
++    }
++    /* Map to -32768..32767 (full scale at each side's own extent). */
++    return (Sint16)SDL_clamp(((Sint64)centered * 32767) / half, -32768, 32767);
+ }
+ 
+ static bool DOS_JoystickInit(void)
+-- 
+2.47.3
+

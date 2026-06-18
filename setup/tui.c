@@ -124,8 +124,12 @@ int tui_titlebar_enabled(void)       { return g_titlebar; }
 
 #if defined(__DJGPP__)
 
-#include <conio.h> /* textmode / _setcursortype / getch */
+#include <conio.h> /* textmode / _setcursortype / getch / kbhit */
 #include <pc.h>    /* ScreenPutChar -- direct, scroll-free screen writes */
+#include <unistd.h> /* usleep -- the calibrate-screen poll-loop pacing */
+#include <go32.h>      /* _dos_ds -- BIOS data-area selector */
+#include <sys/farptr.h>/* _farpeekb -- read 0040:0017 shift-flag byte */
+#include "scancode.h"  /* SETUP_MOD_* identities for tui_capture_key_mod */
 
 /* Pack fg/bg into a VGA text attribute byte. */
 #define TUI_ATTR(fg, bg) ((((bg) & 0x0f) << 4) | ((fg) & 0x0f))
@@ -367,6 +371,75 @@ int tui_getkey(void)
   return c;
 }
 
+int tui_kbhit(void)
+{
+  return kbhit();
+}
+
+void tui_delay_ms(int ms)
+{
+  if (ms > 0) usleep((unsigned)ms * 1000U);
+}
+
+int tui_capture_key(int *ext, int *code)
+{
+  int c;
+  tui_present(); /* flush the "Press the new key..." prompt before blocking */
+  c = getch();
+  if (c == 0 || c == 0xE0) /* extended key: prefix then the BIOS scancode */
+  {
+    *ext  = 1;
+    *code = getch();
+  }
+  else
+  {
+    *ext  = 0;
+    *code = c;
+  }
+  return (*ext == 0 && *code == 0x1b) ? 1 : 0; /* bare Esc cancels the capture */
+}
+
+/* BIOS shift-flag byte at 0040:0017 (linear 0x417). bit0 RShift, bit1 LShift,
+ * bit2 Ctrl, bit3 Alt. Map to a SETUP_MOD_* identity (priority order: a real
+ * lone modifier sets exactly one of these; the order only matters if two are
+ * physically held, in which case Shift is reported first). */
+static int bios_modifier(void)
+{
+  unsigned char sf = _farpeekb(_dos_ds, 0x417UL);
+  if (sf & 0x02) return SETUP_MOD_LSHIFT;
+  if (sf & 0x01) return SETUP_MOD_RSHIFT;
+  if (sf & 0x04) return SETUP_MOD_CTRL;
+  if (sf & 0x08) return SETUP_MOD_ALT;
+  return SETUP_MOD_NONE;
+}
+
+int tui_capture_key_mod(int *ext, int *code, int *mod)
+{
+  int seen_clear = 0;
+  tui_present(); /* flush the popup prompt before polling */
+  *ext = 0; *code = 0; *mod = SETUP_MOD_NONE;
+  for (;;)
+  {
+    int m = bios_modifier();
+    /* Debounce entry: wait until no modifier is held AND the keyboard buffer is
+     * empty, so a modifier still down from the row-confirm key is not grabbed. */
+    if (!seen_clear)
+    {
+      if (m == SETUP_MOD_NONE && !kbhit()) seen_clear = 1;
+      else { usleep(8000); continue; }
+    }
+    if (m != SETUP_MOD_NONE) { *mod = m; return 0; } /* lone modifier captured */
+    if (kbhit())
+    {
+      int c = getch();
+      if (c == 0 || c == 0xE0) { *ext = 1; *code = getch(); }
+      else                     { *ext = 0; *code = c; }
+      return (*ext == 0 && *code == 0x1b) ? 1 : 0; /* bare Esc cancels */
+    }
+    usleep(8000); /* ~8 ms poll pace */
+  }
+}
+
 #else /* host stdio fallback so main.c builds/runs off-target */
 
 void tui_init(void)     { tui__load_env(); }
@@ -394,6 +467,29 @@ int tui_getkey(void)
   if (c == 'S') return TUI_KEY_F10;  /* host stand-in for F10 (flow tests) */
   if (c == 'g') return TUI_KEY_HOME; /* host stand-in for Home             */
   return c;                          /* ' ' returns 0x20 == TUI_KEY_SPACE  */
+}
+
+int tui_kbhit(void)    { return 1; } /* host: always "key ready" (blocking read) */
+void tui_delay_ms(int ms) { (void)ms; } /* host: no pacing needed for flow tests */
+
+int tui_capture_key(int *ext, int *code)
+{
+  /* Host flow stand-in: one raw char from stdin; Esc cancels. No extended-key
+   * decoding off-target (the DJGPP build is where remap capture really runs). */
+  int c = getchar();
+  if (c == EOF) c = 0x1b; /* treat end-of-input as cancel */
+  *ext  = 0;
+  *code = c;
+  return (c == 0x1b) ? 1 : 0;
+}
+
+int tui_capture_key_mod(int *ext, int *code, int *mod)
+{
+  /* Host flow stand-in: no BIOS shift byte off-target, so modifiers are never
+   * synthesized here -- defer entirely to the plain getch path. The DJGPP build
+   * is where lone-modifier capture really runs. */
+  *mod = 0; /* SETUP_MOD_NONE */
+  return tui_capture_key(ext, code);
 }
 
 #endif /* __DJGPP__ */

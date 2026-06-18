@@ -22,6 +22,8 @@
 #include "profile.h"
 #include "recommend.h"
 #include "midiset.h"           /* MIDI music-set discovery (#39) */
+#include "scancode.h"          /* BIOS-scancode <-> SDL-keycode table (Phase 3) */
+#include "bindings.h"          /* control-binding session model (Phase 3)       */
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { \
@@ -411,6 +413,181 @@ static void test_midiset_scan(void)
   CHECK(n == 0, "midiset_scan: absent data dir -> 0");
 }
 
+/* Phase 3 / #40: the BIND_* per-action remap keys + the reserved JOY_CAL
+ * calibration key. The engine loader (input.cpp consumes the env vars; here we
+ * only verify the shim publishes them to the right names) maps BIND_<ACTION>
+ * to DOSKUTSU_BIND_<ACTION> and JOY_CAL to SDL_HINT_DOSKUTSU_JOY_CAL. Defaults
+ * are "" so SETUP omits the line at default (killswitch: absent == today's
+ * controls). The SETUP model must round-trip the value strings. */
+static void test_input_bindings(void)
+{
+  const char *path = "/tmp/DKT_BIND.CFG";
+  scfg_t a, b;
+  int idx;
+
+  /* keys are registered (engine-consumed, real env names) */
+  CHECK(scfg_index("BIND_JUMP") >= 0, "BIND_JUMP is a known key");
+  CHECK(scfg_index("BIND_MAP") >= 0, "BIND_MAP is a known key");
+  CHECK(scfg_index("JOY_CAL") >= 0, "JOY_CAL is a known key");
+
+  /* defaults are empty (so SETUP omits them -> behavior-neutral) */
+  scfg_defaults(&a);
+  CHECK(strcmp(scfg_get(&a, scfg_index("BIND_JUMP")), "") == 0,
+        "BIND_JUMP default is empty (killswitch: action keeps settings.dat binding)");
+  CHECK(strcmp(scfg_get(&a, scfg_index("JOY_CAL")), "") == 0,
+        "JOY_CAL default is empty (SDL uses auto-calibration)");
+
+  /* the engine loader publishes BIND_JUMP -> DOSKUTSU_BIND_JUMP (key+button)
+   * and JOY_CAL -> SDL_HINT_DOSKUTSU_JOY_CAL, verbatim value pass-through */
+  unsetenv("DOSKUTSU_BIND_JUMP");
+  unsetenv("DOSKUTSU_BIND_FIRE");
+  unsetenv("SDL_HINT_DOSKUTSU_JOY_CAL");
+  write_file(path,
+    "BIND_JUMP=k:122,b:0\r\n"   /* SDLK_Z + gameport button 0 */
+    "BIND_FIRE=k:120\r\n"       /* SDLK_X, no button           */
+    "JOY_CAL=12,250,14,248\r\n");
+  doskutsu_cfg_load(path);
+  CHECK(getenv("DOSKUTSU_BIND_JUMP") &&
+        strcmp(getenv("DOSKUTSU_BIND_JUMP"), "k:122,b:0") == 0,
+        "BIND_JUMP mapped to DOSKUTSU_BIND_JUMP (key+button verbatim)");
+  CHECK(getenv("DOSKUTSU_BIND_FIRE") &&
+        strcmp(getenv("DOSKUTSU_BIND_FIRE"), "k:120") == 0,
+        "BIND_FIRE mapped to DOSKUTSU_BIND_FIRE (key only)");
+  CHECK(getenv("SDL_HINT_DOSKUTSU_JOY_CAL") &&
+        strcmp(getenv("SDL_HINT_DOSKUTSU_JOY_CAL"), "12,250,14,248") == 0,
+        "JOY_CAL mapped to SDL_HINT_DOSKUTSU_JOY_CAL (SDL-consumed)");
+  unsetenv("DOSKUTSU_BIND_JUMP");
+  unsetenv("DOSKUTSU_BIND_FIRE");
+  unsetenv("SDL_HINT_DOSKUTSU_JOY_CAL");
+
+  /* SETUP model round-trip of a binding string */
+  idx = scfg_index("BIND_LEFT");
+  scfg_defaults(&a);
+  scfg_set(&a, idx, "k:1073741904");   /* SDLK_LEFT */
+  CHECK(scfg_save(&a, path) == 0, "scfg_save with BIND_LEFT ok");
+  scfg_load(&b, path);
+  CHECK(strcmp(scfg_get(&b, scfg_index("BIND_LEFT")), "k:1073741904") == 0,
+        "round-trip BIND_LEFT binding string");
+}
+
+/* Phase 3 / scancode table: BIOS getch() result -> SDL key identity. The
+ * table is built on fixed SDL facts so it is testable on the host. */
+static void test_scancode(void)
+{
+  const setup_key_t *k;
+  char tok[24];
+
+  /* lowercase + uppercase letters fold to the same (lowercase) keycode */
+  k = scancode_decode(0, 'z');
+  CHECK(k && k->keycode == 'z' && strcmp(k->sdl_name, "Z") == 0,
+        "scancode: 'z' -> SDLK_Z, name Z");
+  k = scancode_decode(0, 'Z');
+  CHECK(k && k->keycode == 'z', "scancode: shifted 'Z' folds to the 'z' keycode");
+
+  /* digit + unshifted/shifted punctuation (US layout) -> base physical key */
+  k = scancode_decode(0, '1');
+  CHECK(k && k->keycode == '1', "scancode: '1' -> SDLK_1");
+  k = scancode_decode(0, '!');
+  CHECK(k && k->keycode == '1', "scancode: shifted '!' folds to the '1' key");
+  k = scancode_decode(0, ':');
+  CHECK(k && k->keycode == ';', "scancode: shifted ':' folds to the ';' key");
+
+  /* extended (arrow) scancodes */
+  k = scancode_decode(1, 0x4B);
+  CHECK(k && strcmp(k->sdl_name, "Left") == 0 && k->keycode == (0x40000000L + 80),
+        "scancode: ext 0x4B -> Left arrow (SDLK_LEFT)");
+  k = scancode_decode(1, 0x48);
+  CHECK(k && strcmp(k->sdl_name, "Up") == 0, "scancode: ext 0x48 -> Up arrow");
+
+  /* issue 2: Enter is EXCLUDED from the bindable set (it is the row-confirm key)
+   * so getch() of '\r' decodes to NULL -> capture re-prompts, never binds it. */
+  CHECK(scancode_decode(0, '\r') == NULL,
+        "scancode: Enter ('\\r') excluded from the bindable set -> NULL");
+  CHECK(scancode_by_keycode('\r') == NULL,
+        "scancode: SDLK_RETURN not in the table (Enter unbindable)");
+  CHECK(scancode_decode(1, 0x3B) == NULL,
+        "scancode: F1 (ext 0x3B) not in remappable set -> NULL");
+
+  /* issue 1: lone modifiers resolve through scancode_modifier (captured from the
+   * BIOS shift byte, not getch). Ctrl/Alt fold to the LEFT variants. */
+  k = scancode_modifier(SETUP_MOD_LSHIFT);
+  CHECK(k && k->keycode == (0x40000000L + 225), "scancode_modifier: LShift -> SDLK_LSHIFT");
+  k = scancode_modifier(SETUP_MOD_RSHIFT);
+  CHECK(k && k->keycode == (0x40000000L + 229), "scancode_modifier: RShift -> SDLK_RSHIFT");
+  k = scancode_modifier(SETUP_MOD_CTRL);
+  CHECK(k && k->keycode == (0x40000000L + 224), "scancode_modifier: Ctrl -> SDLK_LCTRL");
+  k = scancode_modifier(SETUP_MOD_ALT);
+  CHECK(k && k->keycode == (0x40000000L + 226), "scancode_modifier: Alt -> SDLK_LALT");
+  CHECK(scancode_modifier(SETUP_MOD_NONE) == NULL,
+        "scancode_modifier: NONE -> NULL");
+  /* a modifier keycode round-trips through the display/bind-token path */
+  k = scancode_by_keycode(0x40000000L + 224);
+  scancode_bind_token(tok, sizeof(tok), k);
+  CHECK(strcmp(tok, "1073742048") == 0, "scancode_bind_token: LCtrl -> '1073742048'");
+
+  /* name lookup is case-insensitive (matches any contract spelling) */
+  CHECK(scancode_by_name("left") == scancode_by_name("Left"),
+        "scancode_by_name: case-insensitive");
+
+  /* the bind token is the DECIMAL SDL keycode (engine contract, patch 0227) */
+  k = scancode_by_name("Left");
+  scancode_bind_token(tok, sizeof(tok), k);
+  CHECK(strcmp(tok, "1073741904") == 0, "scancode_bind_token: Left -> '1073741904'");
+  k = scancode_by_keycode('z');
+  scancode_bind_token(tok, sizeof(tok), k);
+  CHECK(strcmp(tok, "122") == 0, "scancode_bind_token: SDLK_Z -> '122'");
+}
+
+/* Phase 3 / control bindings: the session model defaults + conflict detection.
+ * The full BIND_* config round-trip activates once input-eng adds the BIND_*
+ * registry keys (bindings_save/load are no-ops for keys the registry omits);
+ * until then these cover the contract-independent logic. */
+static void test_bindings(void)
+{
+  binding_t b[BIND_COUNT];
+  scfg_t c;
+  int written;
+
+  bindings_defaults(b);
+  /* action 0 = Left (arrow), action 4 = Jump (Z) per the engine defaults */
+  CHECK(strcmp(b[0].name, "Left") == 0 && b[0].keycode == (0x40000000L + 80),
+        "bindings: action 0 default = Left arrow");
+  CHECK(strcmp(b[4].name, "Jump") == 0 && b[4].keycode == 'z',
+        "bindings: Jump default = Z");
+  /* Q-B2 joystick defaults: Jump/Fire/WpnPrev/WpnNext = buttons 0..3 */
+  CHECK(b[4].jbut == 0 && b[5].jbut == 1 && b[7].jbut == 2 && b[8].jbut == 3,
+        "bindings: Q-B2 joystick button defaults");
+  CHECK(b[0].jbut == -1 && b[10].jbut == -1,
+        "bindings: non-default actions have <None> joystick button");
+
+  /* conflict detection (drives the Q-B1 keyboard swap) */
+  CHECK(bindings_find_key(b, 'z', 99) == 4, "bindings_find_key: 'z' -> Jump");
+  CHECK(bindings_find_key(b, 'z', 4) == -1, "bindings_find_key: skips the except row");
+  CHECK(bindings_find_jbut(b, 1, 99) == 5, "bindings_find_jbut: button 1 -> Fire");
+  CHECK(bindings_find_jbut(b, -1, 99) == -1, "bindings_find_jbut: <None> never matches");
+
+  /* save -> config (the registry now defines BIND_*): defaults write the
+   * numeric keycode token + the Q-B2 joystick button where set. */
+  scfg_defaults(&c);
+  written = bindings_save(b, &c);
+  CHECK(written == BIND_COUNT, "bindings_save: writes all 11 BIND_* keys");
+  CHECK(strcmp(scfg_get(&c, scfg_index("BIND_JUMP")), "k:122,b:0") == 0,
+        "bindings_save: Jump -> k:122,b:0 (SDLK_Z + button 0)");
+  CHECK(strcmp(scfg_get(&c, scfg_index("BIND_LEFT")), "k:1073741904") == 0,
+        "bindings_save: Left -> k:1073741904 (no button, <None>)");
+
+  /* load round-trip: a rebound Jump (X, no button) reads back correctly */
+  scfg_set(&c, scfg_index("BIND_JUMP"), "k:120");
+  {
+    binding_t b2[BIND_COUNT];
+    bindings_load(b2, &c);
+    CHECK(b2[4].keycode == 'x' && b2[4].jbut == -1,
+          "bindings_load: BIND_JUMP=k:120 -> keycode X, button cleared");
+    CHECK(b2[0].keycode == (0x40000000L + 80),
+          "bindings_load: BIND_LEFT round-trips to the Left-arrow keycode");
+  }
+}
+
 int main(void)
 {
   test_loader();
@@ -423,6 +600,9 @@ int main(void)
   test_speed_class();
   test_midiset_key();
   test_midiset_scan();
+  test_input_bindings();
+  test_scancode();
+  test_bindings();
   printf("\n%s (%d failures)\n", g_fail ? "TESTS FAILED" : "ALL TESTS PASSED", g_fail);
   return g_fail ? 1 : 0;
 }

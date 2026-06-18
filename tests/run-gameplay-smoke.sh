@@ -394,6 +394,8 @@ BANNER_REGEX=(
   "Renderer::initVideo: DOS resolution-label lock (ENABLED \(default\)|DISABLED \(killswitch =0\))"
   "menu slide-in fixed-timestep: (ENABLED \(default;.*\)|DISABLED \(killswitch;.*\))"
   "MidiScheduler: MIDI source = custom drop-in dir"
+  "\[input-bind\] applied=[0-9]+"
+  "\[joycal\] applied stored cal"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -496,8 +498,10 @@ BANNER_SEVERITY=(
   "required"
   "required"
   "optional"
+  "required"
+  "optional"
 )
-# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 100 entries;
+# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 102 entries;
 # the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
 # add a BANNER_REGEX + BANNER_SEVERITY entry, add a matching BANNER_LABEL line at the same
 # index. (v1.0.5 #16 re-aligned these -- v1.0.4 had a 2-entry tail gap from the P2 banners,
@@ -607,6 +611,8 @@ BANNER_LABEL=(
   "0223 small-polish item-4c DOS resolution-label lock (default-ON; killswitch SDL_HINT_DOSKUTSU_RES_LABEL_LOCK=0. Emits every DOS boot from Renderer::initVideo: 'Renderer::initVideo: DOS resolution-label lock ENABLED (default)' (or DISABLED (killswitch =0)). The actual behavior -- Video menu shows the locked 320x240 + Resolution scroll is a no-op -- lives in options.cpp and only runs when the menu is opened, so the boot banner is the two-witness runtime side; embed witness = strings|grep 'DOS resolution-label lock'. REQUIRED at the v1.1.2 ship-gate (default-ON, initVideo emits at every boot; g2k-validated). BANNER_REGEX idx 97.)"
   "0224 small-polish item-3 menu slide-in fixed-timestep fix (default-ON; killswitch SDL_HINT_DOSKUTSU_MENU_SLIDE_FT=0. Forced boot eval in main.cpp after textbox.Init emits 'menu slide-in fixed-timestep: ENABLED (default; ...)' (or DISABLED (killswitch; ...)). Moves the StageSelect WARP-banner (fWarpY) + SaveSelect char-pic (fPicXOffset) slide STEP into the sub-prompt TickState() so it advances at 50 Hz under FT GM_NORMAL instead of render rate; non-FT paths (FT=0/GM_TITLE/inventory) keep stepping in Draw byte-identically. Embed witness = strings|grep 'menu slide-in fixed-timestep'. REQUIRED at the v1.1.2 ship-gate (default-ON, boot-forced eval emits at every boot; g2k-validated). BANNER_REGEX idx 98.)"
   "0226 #39b custom MIDI drop-in dir resolution (OPTIONAL -- emits ONLY when MIDI_SET / SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE names a path-safe data/<dir>/ holding >=1 .mid that is NOT a known set (wiimidi/orgmid), AND the killswitch SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS is not '0'. Default smoke uses MIDI_SET=wiimidi so this is ABSENT -- correct, not a failure; embed witness = strings|grep 'custom drop-in dir'. The #39b DOSBox validation cell (MIDI_SET=mycustom + staged data/mycustom/*.mid) is the runtime witness; killswitch=0 falls back to wiimidi with no banner. BANNER_REGEX idx 99.)"
+  "0227/0230 Phase-3 input bindings + gameport axis maps (REQUIRED -- '[input-bind] applied=N invert_y=M dos_axes=1' emits every boot from input_apply_cfg_bindings; applied=count of BIND_* overlaid, dos_axes=1 = the DOS axis->action maps re-asserted post settings_load. Embed witness = strings|grep DOSKUTSU_BIND_. BANNER_REGEX idx 100.)"
+  "SDL/0102 gameport persisted-calibration applied (OPTIONAL -- SDL-log '[joycal] applied stored cal x=[..] y=[..]'; fires ONLY when SDL_HINT_DOSKUTSU_JOY_CAL is set + an emulated/real gameport is present, so ABSENT in the default no-joystick smoke is correct. Embed witness = strings|grep joycal. BANNER_REGEX idx 101.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
