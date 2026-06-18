@@ -102,9 +102,10 @@ FIXED_TIMESTEP=1
 | `BLASTER` | e.g. `A220 I5 D1 H5 P330 T6` | Sound hardware: base port / IRQ / 8-bit DMA / 16-bit DMA / MPU-401 MIDI port / card type. Set via the **Sound Hardware** screen. Omitted from the file unless you configure it (then it is AUTHORITATIVE -- see below). |
 
 These map one-to-one to the engine's existing environment variables /
-SDL hints (see `docs/internal/BOOT.md`); the config file is simply a more
-convenient place to set the player-facing subset. The many diagnostic /
-instrumentation variables are intentionally not exposed by SETUP.
+SDL hints (see [docs/CONFIG.md](./CONFIG.md) for the full player-facing
+reference); the config file is simply a more convenient place to set the
+player-facing subset. The many diagnostic / instrumentation variables are
+intentionally not exposed by SETUP.
 
 ### Precedence
 

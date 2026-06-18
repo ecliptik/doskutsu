@@ -198,12 +198,18 @@ examples, and performance impact.
 
 Full build documentation in [docs/BUILDING.md](./docs/BUILDING.md): prerequisites, DJGPP cross-compiler install, the four-stage build (SDL3, SDL3_mixer, SDL3_image, NXEngine-evo), DOSBox-X testing, common errors.
 
-Short version, once DJGPP is installed:
+Short version, once DJGPP is installed -- the one-command path:
 
 ```bash
 git clone ssh://git@forgejo.ecliptik.com/ecliptik/doskutsu.git
 cd doskutsu
-./scripts/setup-symlinks.sh     # one-time: link tools/djgpp to the emulators hub
+./scripts/bootstrap.sh          # verify prereqs, fetch upstreams, apply patches, build
+```
+
+Or run the stages yourself:
+
+```bash
+./scripts/setup-symlinks.sh     # one-time: link tools/djgpp (only if using the ~/emulators hub)
 ./scripts/fetch-sources.sh      # clone the upstream repos at pinned SHAs
 ./scripts/apply-patches.sh      # apply DOS-port patches
 make                            # orchestrate all four build stages

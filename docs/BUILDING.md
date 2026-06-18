@@ -72,7 +72,7 @@ DJGPP_PREFIX=$HOME/djgpp ./scripts/bootstrap.sh
 DJGPP_PREFIX=/path/to/djgpp ./scripts/bootstrap.sh
 ```
 
-**Option 3 -- use the shared `~/emulators/` hub** (sibling-project convention). If you already have `~/emulators/tools/djgpp/` from a related project (`vellm`, `geomys`, etc.), the bootstrap auto-symlinks `tools/djgpp` to it. No `DJGPP_PREFIX` needed.
+**Option 3 -- the shared `~/emulators/` hub (maintainer convenience; new users can ignore this).** This is the doskutsu author's local multi-project layout, not something you need to set up. If `~/emulators/tools/djgpp/` already exists (shared with sibling projects on the same dev host), the bootstrap auto-symlinks `tools/djgpp` to it and no `DJGPP_PREFIX` is needed. If you don't have that hub -- which is the normal case for a fresh clone -- use Option 1 or 2.
 
 Verify the toolchain is reachable:
 
@@ -300,7 +300,7 @@ It runs the built `DOSKUTSU.EXE` headless under DOSBox-X (max cycles) with `DOSK
 make org-cache ORGCACHE_EXE=/path/to/DOSKUTSU.EXE
 ```
 
-Then deploy the produced `CACHE/` tree into the target's game dir next to `DOSKUTSU.EXE` (e.g. `$CF/DOSKUTSU/CACHE/`). Requires `data/org/` (Cave Story data, see `ASSETS.md`); errors cleanly if absent. The DOSBox run is `timeout`-bounded and the process is killed on exit (no orphan). The gameplay-facing counterpart that does this automatically on the target's first launch is `SDL_HINT_DOSKUTSU_ORG_AUTOCACHE` (default ON); see the `DOSKUTSU_ORG_PRECACHE_ALL` + `SDL_HINT_DOSKUTSU_ORG_AUTOCACHE` entries in `docs/internal/BOOT.md`.
+Then deploy the produced `CACHE/` tree into the target's game dir next to `DOSKUTSU.EXE` (e.g. `$CF/DOSKUTSU/CACHE/`). Requires `data/org/` (Cave Story data, see `ASSETS.md`); errors cleanly if absent. The DOSBox run is `timeout`-bounded and the process is killed on exit (no orphan). The gameplay-facing counterpart that does this automatically on the target's first launch is `SDL_HINT_DOSKUTSU_ORG_AUTOCACHE` (default ON). (Both `DOSKUTSU_ORG_PRECACHE_ALL` and `SDL_HINT_DOSKUTSU_ORG_AUTOCACHE` are contributor/diagnostic flags, not part of the player-facing `docs/CONFIG.md` reference.)
 
 **LICENSING:** the produced `CACHE/` is Cave-Story-DERIVED (rendered from the user's extracted `.org` files). It is a LOCAL / OPERATOR-DEPLOY artifact ONLY and is DELIBERATELY excluded from `make dist` -- the public zip never ships game-derived data. Generate it on your own machine; never upload or redistribute it.
 

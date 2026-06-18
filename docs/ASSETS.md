@@ -6,6 +6,39 @@ This document tells you how to obtain and extract the assets yourself, and where
 
 ---
 
+## Quick path (most people want this)
+
+If you just want a working `data/` tree for DOSBox-X or a CF deploy, this is the shortest
+reliable route on a Linux/WSL dev host (from the repo root, after a successful `make`):
+
+```bash
+# 1. SFX params: downloads the SHA-pinned 2004 freeware bundle, extracts Doukutsu.exe to a
+#    tempdir, emits data/pxt/fx*.pxt, then cleans up (no freeware persists on disk):
+python3 scripts/fetch-cs-pxt.py data/
+
+# 2. Engine blobs (Organya wavetable, stage index, end picture) from a Doukutsu.exe you have:
+scripts/extract-engine-data.py /path/to/Doukutsu.exe data/
+
+# 3. Maps / sprites / music / .org: download cavestoryen.zip from cavestory.one and copy its
+#    data/* into ./data/ (or extract with doukutsu-rs, Option A below). Then add the engine
+#    support files (fonts, UI, metadata) that ship with NXEngine-evo:
+cp -r vendor/nxengine-evo/data/* data/
+
+# 4. Optional MIDI music (only for the opl3 / wb backends; skip if you only use organya):
+python3 scripts/fetch-cs-midi.py data/
+
+# 5. Normalize names to DOS 8.3 + build the render palette:
+scripts/rename-user-data-83.sh data
+python3 tools/build-master-palette.py data/
+```
+
+Verify with the checklist at the end of Step 4. The rest of this document explains each step
+in full, with the licensing posture and the alternatives. The internal "Phase / wave / Tier /
+Lever" labels in the headings below are development history -- safe to ignore if you are just
+assembling assets to play.
+
+---
+
 ## Target layout
 
 DOSKUTSU's NXEngine-evo source resolves assets via `data/<filename>` relative to the runtime base. **There is no `base/` subdirectory** -- all assets (Cave Story content + NXEngine engine support files) coexist under a single `data/` tree.
@@ -263,10 +296,10 @@ scripts/rename-user-data-83.sh data
 
 ---
 
-## Step 4: build the master palette (Phase 9 wave 16 / Lever 3)
+## Step 4: build the master palette
 
 Once `data/` contains the full extracted asset tree (Step 3 finished), build
-the 8bpp master palette and per-asset remap LUTs that the wave-16 INDEX8
+the 8bpp master palette and per-asset remap LUTs that DOSKUTSU's 8bpp indexed
 renderer consumes at boot:
 
 ```bash

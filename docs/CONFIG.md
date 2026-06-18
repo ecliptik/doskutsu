@@ -40,7 +40,7 @@ SET SDL_HINT_DOSKUTSU_PERF_MODE=1        REM drop decorative foreground detail
 
 | Variable | Values | Default | Effect | FPS impact |
 |---|---|---|---|---|
-| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `opl3`, `organya`, `wb` | `opl3` | Music synthesizer. `opl3`: the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: a WaveBlaster daughterboard. | `organya` is ~9 fps slower than MIDI; `opl3` / `wb` run music off the CPU |
+| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto`, `opl3`, `organya`, `wb` | `auto` | Music synthesizer. `auto` (default): probe for a WaveBlaster daughterboard first, fall back to OPL3 FM if none is found. `opl3`: force the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: force a WaveBlaster daughterboard. | `organya` is ~9 fps slower than MIDI; `auto` / `opl3` / `wb` run music off the CPU |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi`, `orgmid`, `<dir>` | `wiimidi` | Which MIDI set the `opl3` / `wb` backends play. `wiimidi`: the WiiWare arrangement (`data/midi/`). `orgmid`: the Hart legacy `.mid` set (`data/orgmid/`). Any other value is treated as a custom drop-in directory name: if `data/<dir>/` holds your own `.mid` tracks, the engine plays from there (see "Bring your own MIDI set" in `docs/ASSETS.md`). SETUP exposes this as the **MIDI music set** row (writing the `MIDI_SET` DOSKUTSU.CFG key) -- known sets show as WiiWare / OrgMIDI, drop-ins as `Custom (<dir>)`. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | unset | Picks an `org2mid`-converted General MIDI variant. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS` | `0` (to disable) | on | Whether `MIDI_SET` / `..._MIDI_SOURCE` may name a custom `data/<dir>/` drop-in set (see the row above). On (default): an unrecognized value naming a real `data/<dir>/` with at least one `.mid` plays from that dir. `=0`: only the built-in `wiimidi` / `orgmid` sets are accepted; any other value falls back to `wiimidi`. The dir name must be a single safe path segment (letters/digits/`_`/`-`/`.`, no `..`, no path separators); on real DOS hardware that means 8 characters or fewer. | None |
@@ -116,4 +116,4 @@ Each of these turns *off* an optimization that is on by default, so setting one 
 
 ## Developer and diagnostic flags
 
-DOSKUTSU has many more environment variables for instrumentation, profiling, TAS record/replay, and per-wave diagnostics. They are for contributors working on the port, not for playing the game, and are not covered here. Contributors: see `docs/internal/BOOT.md` for the full set.
+DOSKUTSU has many more environment variables for instrumentation, profiling, TAS record/replay, and per-wave diagnostics. They are for contributors working on the port, not for playing the game, and are not covered here. (Their full reference lives in the maintainers' internal notes, which are not part of the public repository.)
