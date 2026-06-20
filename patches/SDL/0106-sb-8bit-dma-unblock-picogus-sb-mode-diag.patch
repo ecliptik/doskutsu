@@ -1,0 +1,356 @@
+From 2b81db46ba2fb498b4d6ba51e7590d0fd5291f0d Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 20 Jun 2026 15:10:50 -0700
+Subject: [PATCH] dos: patch 0106 -- SB 8-bit-DMA unblock (PicoGUS-in-SB-mode)
+ + DMA-path diag
+
+g2k can run a PicoGUS card in Sound Blaster mode, but it is an 8-bit-DMA,
+SB2.0-class device with no high (16-bit) DMA channel. It still reports DSP
+4.x, so the pre-patch detection predicate (soundblaster_is_sb16 =
+!FORCE_SB_8BIT && version>=4) latched is_sb16=true and OpenDevice committed
+to a 16-bit transfer on the BLASTER H channel that the card cannot perform:
+it hard-errored ("No high (16-bit) DMA channel") when BLASTER had no H, or
+armed a 16-bit DMA whose IRQ-5 never fired. Because the Organya / OPL3 /
+WaveBlaster pumps all ride the SB DMA-IRQ callback, every backend died
+silent together (while Doom, which drives 8-bit D-channel DMA directly,
+worked on the same card).
+
+Why DOS needs this: there is no 16-bit DMA path on an 8-bit SB-class card,
+so "DSP version >= 4" is the wrong proxy for "use the 16-bit high-DMA path."
+This patch decouples them at the single detection site:
+
+  1. FORCE_SB_8BIT promoted to a runtime hint
+     SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT (strict-"1", default 0=OFF);
+     the compile-time #define is retained as an OR'd override.
+  2. is_sb16 now also requires soundblaster_highdma_channel >= 0 (a real H
+     token in BLASTER). A DSP-4.x card with no H GRACEFULLY falls back to
+     the existing 8-bit low-DMA D-channel path instead of OpenDevice's hard
+     SDL_SetError. The entire pre-SB16 path (format/channel, DMA pick, 8-bit
+     controller program, 0x40/0x48/0x1C DSP start, isr_is_16bit) is already
+     coherently keyed off this one flag, so the flip routes the whole open
+     down the working 8-bit path with no per-site edits.
+
+BYTE-IDENTICAL for the shipped Vibra16 + H5 case: real SB16 reports
+version>=4 AND BLASTER carries H5 (highdma=5>=0) AND the hint defaults OFF,
+so is_sb16 stays exactly !FORCE_SB_8BIT && (version>=4) == true -- the
+identical value the pre-patch predicate produced; every downstream is_sb16
+consumer takes the same branch. DOSBox-X (sbtype=sb16, emulates H5) holds
+is_sb16=true too. The new term only changes the result for a DSP-4.x card
+that lacks an H channel, or when the hint/override forces 8-bit.
+
+Diagnostics (all via doskutsu_dbg_log -> <TAG>SDL.LOG; positioned to answer
+"where does it die"):
+  - unconditional DMA-path decision banner at detection (is_sb16/force_8bit/
+    dsp_ver/highdma -> path), plus a loud graceful-fallback witness;
+  - OpenDevice DMA-programmed line (path, DMA channel + register family,
+    format, channels, rate, IRQ, ack port, silence value);
+  - DSP start-command-sequence witness in each of the 16-bit and 8-bit
+    branches;
+  - OpenDevice SUCCESS witness (path + IRQ count at open);
+  - CloseDevice run-end witness: total IRQ-5 fires (0 == DMA-IRQ never armed
+    -> silence is upstream of the ISR), reusing doskutsu_audio_irq_count;
+  - CloseDevice WB/MPU witness: doskutsu_mpu_write_count + the bit-6 DRR
+    poll-timeout count doskutsu_mpu_drr_cap_hits, to confirm/deny the
+    wave-40 REFUTE_MPU_TIMEOUT (DreamBlaster S2 output-busy-after-byte-1)
+    signature recurs on this card.
+
+Completion (SDL/0106, sdl-engine): adopted the above as the slot base and
+finished the contract: (a) synth.c WaveBlaster init-RESULT witness at the
+end of SDL_DOSMpu401Init (OK/FAILED + resolved DRR-poll state + drr_cap +
+running drr_cap_hits), the init-time companion of the sb.c CloseDevice
+WB/MPU run-end witness -- together they bracket the wave-40 REFUTE_MPU_TIMEOUT
+field; (b) refreshed the stale compile-time-only FORCE_SB_8BIT comment to
+document the runtime hint. Vibra16+H5 byte-identical property re-verified
+independently: hint-off + DSP>=4 + highdma>=0 yields the identical is_sb16
+value and the identical downstream branch; added code on that path is
+log-only (no register writes, no control-flow change).
+
+Workspace-local patch; not upstreamed (sdl_ai_policy).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c    | 172 ++++++++++++++++++++++++++++-
+ src/core/dos/SDL_dos_audio_synth.c |  28 ++++-
+ 2 files changed, 194 insertions(+), 6 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 578f7bf8a..842d14040 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -47,8 +47,15 @@ extern volatile bool g_dos_audio_pause_request;
+ extern volatile bool g_dos_audio_resume_request;
+ extern SDL_DOSIdlePauseCallback g_dos_audio_idle_pause_cb;
+ 
+-// Set to 1 to force 8-bit mono (pre-SB16) code path even on SB16 hardware.
+-// Useful for testing in DOSBox which always emulates an SB16 (DSP 4.x).
++// DOSKUTSU patch (SDL/0106): forcing the pre-SB16 8-bit / D-channel path is
++// now primarily a RUNTIME knob -- SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT (strict
++// "1", default OFF), resolved in IsSoundBlasterPresent() and OR'd with this
++// #define. The PicoGUS-in-SB-mode / SB2.0-class case (DSP 4.x but no 16-bit
++// high DMA) also reaches the 8-bit path automatically via the highdma>=0 term
++// there (graceful fallback), so this hint is mainly for forcing 8-bit on a card
++// that DOES advertise high DMA. This compile-time #define is retained as an
++// additional source-level override: set it to 1 to force 8-bit unconditionally
++// (e.g. a bisecting build), which still wins regardless of the runtime hint.
+ #define FORCE_SB_8BIT 0
+ 
+ static int soundblaster_base_port = -1;
+@@ -65,7 +72,7 @@ static int soundblaster_dma_channel = -1;
+ static int soundblaster_highdma_channel = -1;
+ static int soundblaster_version = -1;
+ static int soundblaster_version_minor = -1;
+-static bool soundblaster_is_sb16 = false; // false when FORCE_SB_8BIT or DSP < 4
++static bool soundblaster_is_sb16 = false; // SDL/0106: false when force-8bit (hint/#define), DSP < 4, or no high (16-bit) DMA channel
+ static Uint8 soundblaster_silence_value = 0;
+ 
+ /* DOSKUTSU patch (Phase 11 patch 0050): killswitch state for the
+@@ -2617,6 +2624,24 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+     // Cache the IRQ ack port so the ISR doesn't chase pointers.
+     isr_irq_ack_port = is_sb16 ? (soundblaster_base_port + 0x0F) : (soundblaster_base_port + 0x0E);
+ 
++    /* DOSKUTSU patch (SDL/0106): OpenDevice DMA-path diagnostic. Records the
++       path actually committed (chosen path, programmed DMA channel + page/
++       offset/count register family, resolved sample format + channels + rate,
++       IRQ + ack-port), so the PicoGUS-SB iter log shows exactly what the DMA
++       controller was programmed with. The DSP command sequence is logged
++       separately in each start branch below (SDL/0106). Always-on (read-only
++       snapshot at open; no killswitch). */
++    doskutsu_dbg_log("audio: SDL/0106 OpenDevice DMA programmed: path=%s "
++                     "dma_ch=%d (%s) dma_buflen=%d fmt=0x%X ch=%d freq=%d Hz "
++                     "irq=%d ack_port=0x%X silence=0x%02X",
++                     is_sb16 ? "16-bit-high-DMA" : "8-bit-low-DMA",
++                     hidden->dma_channel,
++                     is_sb16 ? "high/word ports 0xC0-0xDF" : "low/byte ports 0x00-0x0F",
++                     (int)hidden->dma_buflen,
++                     (unsigned)device->spec.format, device->spec.channels,
++                     device->spec.freq, soundblaster_irq,
++                     (unsigned)isr_irq_ack_port, soundblaster_silence_value);
++
+     // Set up the IRQ-driven ring buffer.
+     hidden->chunk_size = device->buffer_size; // one DMA half-buffer
+ 
+@@ -2791,6 +2816,13 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         WriteSoundBlasterDSP((Uint8)(block_size & 0xFF));
+         WriteSoundBlasterDSP((Uint8)(block_size >> 8));
+ 
++        /* DOSKUTSU patch (SDL/0106): DSP start-command-sequence witness for
++           the 16-bit (is_sb16) path. */
++        doskutsu_dbg_log("audio: SDL/0106 DSP start seq (16-bit): 0xD1(spkr-on) "
++                         "0x41 rate=%d 0xB6(autoinit/FIFO) 0x30(S16-stereo) "
++                         "block_size=%d (words-1)",
++                         device->spec.freq, block_size);
++
+         /* DOSKUTSU patch (Phase 11 patch 0074 Part 2): SB16 CT1745 analog
+            mixer balance lever. The SB16 driver historically programs only
+            the DSP rate + DMA (and the SB Pro 0x0E stereo bit on the pre-
+@@ -2908,6 +2940,18 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         // rare and would need single-cycle transfers re-triggered from the ISR.
+         // For now we use 0x1C anyway and hope for the best on DSP 1.x hardware.
+         WriteSoundBlasterDSP(0x1C); // 8-bit auto-init DMA playback
++
++        /* DOSKUTSU patch (SDL/0106): DSP start-command-sequence witness for
++           the 8-bit (pre-SB16 / PicoGUS-SB / SB2.0-class) path. This is the
++           sequence the PicoGUS-SB now reaches after the SDL/0106 graceful
++           fall-back; if IRQ-5 still never fires, the OpenDevice-DMA + this
++           line bracket exactly where the chip was last touched. */
++        doskutsu_dbg_log("audio: SDL/0106 DSP start seq (8-bit): 0xD1(spkr-on) "
++                         "0x40 tc=%d (rate=%d effective=%d) 0x48 block_size=%d "
++                         "(bytes-1) 0x1C(8-bit autoinit)%s",
++                         (int)time_constant, device->spec.freq, effective_rate,
++                         block_size,
++                         (soundblaster_version >= 3) ? " +mixer0x0E stereo-bit" : "");
+     }
+ 
+     SDL_Log("SoundBlaster opened!");
+@@ -2947,6 +2991,18 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+        at CloseDevice. The single OpenDevice success exit; the early failure return
+        is before any IRQ/DMA arm so the flag correctly stays false there. */
+     g_dos_sb_device_open = true;
++
++    /* DOSKUTSU patch (SDL/0106): single OpenDevice success witness. Pairs
++       with the per-early-return SDL_SetError strings (which the engine's
++       audio-init narration already surfaces on failure) so the iter log has
++       an unambiguous "the SB device opened on the %s path" marker. Snapshots
++       the IRQ-fire count at open (should be 0 here, before any IRQ has fired)
++       so the CloseDevice delta = IRQ-5 fires during the run. */
++    doskutsu_dbg_log("audio: SDL/0106 OpenDevice SUCCESS path=%s dma_ch=%d "
++                     "irq=%d irq_count_at_open=%lu",
++                     is_sb16 ? "16-bit-high-DMA" : "8-bit-low-DMA",
++                     hidden->dma_channel, soundblaster_irq,
++                     (unsigned long)doskutsu_audio_irq_count);
+     return true;
+ }
+ 
+@@ -3813,6 +3869,32 @@ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
+        cold-init after this close sees a cold bus again. Unconditional (safe even
+        if hidden is NULL -- then nothing was hot anyway). */
+     g_dos_sb_device_open = false;
++
++    /* DOSKUTSU patch (SDL/0106): IRQ-5-fire counter at CloseDevice. The
++       decisive "did the SB DMA IRQ ever fire" witness -- doskutsu_audio_irq_count
++       increments once per IRQ-5 in SoundBlasterIRQHandler. For a card whose
++       DMA-IRQ never armed (the pre-patch PicoGUS-SB failure shape) this reads
++       0 here, telling the analyst the silence is upstream of the ISR (the DMA
++       never started) rather than in the mix path. Logged before any teardown
++       so it reflects the whole run. */
++    doskutsu_dbg_log("audio: SDL/0106 CloseDevice: total IRQ-5 fires this run = "
++                     "%lu (0 == DMA-IRQ never armed; the pumps never ran)",
++                     (unsigned long)doskutsu_audio_irq_count);
++
++    /* DOSKUTSU patch (SDL/0106): WaveBlaster-path run-end witness. The MPU-401
++       init RESULT is logged at init time in SDL_dos_audio_synth.c (the
++       'mpu401: ... init at port_base=...' lines); here we surface the run-end
++       totals so a single CloseDevice block answers whether the wave-40
++       REFUTE_MPU_TIMEOUT signature recurs on this card: doskutsu_mpu_drr_cap_hits
++       is the bit-6 DRR (Data-Ready-to-Receive) poll-timeout count (the g2k
++       DreamBlaster S2 "output-buffer-busy stuck after byte 1" stall), and
++       doskutsu_mpu_write_count is the total MPU bytes pushed. drr_cap_hits>0
++       with write_count stalling near 1 == the MPU-output-busy wedge reproduced;
++       drr_cap_hits==0 with write_count climbing == MPU output is healthy. */
++    doskutsu_dbg_log("audio: SDL/0106 CloseDevice WB/MPU witness: "
++                     "mpu_write_count=%lu drr_poll_cap_hits=%lu",
++                     (unsigned long)doskutsu_mpu_write_count,
++                     (unsigned long)doskutsu_mpu_drr_cap_hits);
+     if (hidden) {
+         /* DOSKUTSU patch (Phase 10 patch 0043): force-DSP-pause hard-
+            reset teardown path. Supersedes the patch 0040 amend's
+@@ -4153,8 +4235,88 @@ static bool IsSoundBlasterPresent(void)
+     SDL_Log("SB: dma16=%d", soundblaster_highdma_channel);
+     SDL_Log("SB: version=%d.%d", soundblaster_version, soundblaster_version_minor);
+ 
+-    soundblaster_is_sb16 = !FORCE_SB_8BIT && (soundblaster_version >= 4);
+-    soundblaster_silence_value = soundblaster_is_sb16 ? 0x00 : 0x80; // S16LE silence is 0x00, U8 silence is 0x80
++    /* DOSKUTSU patch (SDL/0106): promote the compile-time FORCE_SB_8BIT
++       knob to a RUNTIME hint, and DECOUPLE "use the 16-bit high-DMA path"
++       from "DSP version >= 4".
++
++       Motivation (PicoGUS-card-in-SB-mode on g2k): a PicoGUS reports DSP
++       4.x (so the pre-patch predicate (version >= 4) latched is_sb16=true)
++       but is an 8-bit-DMA, SB2.0-class device -- it has NO high (16-bit)
++       DMA channel. The whole is_sb16 machinery in OpenDevice (format =
++       S16/stereo, dma_channel = soundblaster_highdma_channel, the 0xB6/0x30
++       16-bit autoinit DSP sequence, the 0xC0-0xDF high-DMA controller
++       programming, isr_is_16bit) then commits to a 16-bit transfer the card
++       cannot perform: OpenDevice either hard-errors at the "No high (16-bit)
++       DMA channel" SDL_SetError below (when BLASTER has no H token) or arms
++       a 16-bit DMA whose IRQ-5 never fires -- and since the Organya / OPL3 /
++       WaveBlaster pumps all ride that DMA-IRQ callback, every backend dies
++       silent together. Doom works on the same card because it drives 8-bit
++       DMA via the D channel + the WaveBlaster header directly.
++
++       Two independent levers:
++         1. force_8bit  -- SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT, strict-"1",
++            default 0 (OFF). =1 forces the pre-SB16 8-bit/D-channel path
++            regardless of DSP version (the old compile-time FORCE_SB_8BIT,
++            now runtime). FORCE_SB_8BIT (the #define) is retained as an OR'd
++            compile-time override so an explicit source flip still wins.
++         2. high-DMA availability -- is_sb16 now additionally requires a
++            high (16-bit) DMA channel to actually be present
++            (soundblaster_highdma_channel >= 0, i.e. BLASTER had an H token).
++            A DSP-4.x card with NO H GRACEFULLY falls back to the 8-bit
++            low-DMA D-channel path instead of the hard SDL_SetError in
++            OpenDevice. This is the structural unblock: the entire pre-SB16
++            path (format/channel select at ~2343, DMA pick at ~2566, the
++            8-bit controller program at ~2601, the 0x40/0x48/0x1C DSP start
++            at ~2879, isr_is_16bit) is already coherently keyed off this one
++            flag, so flipping it here routes the whole open down the working
++            8-bit path with no per-site edits.
++
++       BYTE-IDENTICAL for the shipped Vibra16 + H5 case: a real SB16 reports
++       version >= 4 AND BLASTER carries H5 (highdma_channel = 5 >= 0), and the
++       hint defaults OFF, so is_sb16 stays exactly !FORCE_SB_8BIT && (version
++       >= 4) == true -- the identical value the pre-patch predicate produced.
++       DOSBox-X (sbtype=sb16, emulates H5) likewise holds is_sb16=true. The
++       new term only changes the result for a DSP-4.x card that lacks an H
++       channel or when the hint/override forces 8-bit -- neither of which is
++       the Vibra16 default path. */
++    {
++        const char *f8_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT");
++        const bool force_8bit =
++            FORCE_SB_8BIT ||
++            (f8_hint && f8_hint[0] == '1' && f8_hint[1] == '\0');
++        const bool have_highdma = (soundblaster_highdma_channel >= 0);
++
++        soundblaster_is_sb16 = !force_8bit && (soundblaster_version >= 4) && have_highdma;
++        soundblaster_silence_value = soundblaster_is_sb16 ? 0x00 : 0x80; // S16LE silence is 0x00, U8 silence is 0x80
++
++        /* Unconditional decision banner (mirrors SDL/0073 always-on pattern):
++           routed via doskutsu_dbg_log to <TAG>SDL.LOG so the iter log shows
++           which DMA path this card resolved -- the decisive "where does it
++           die" witness for the PicoGUS-SB case. Required smoke banner. */
++        doskutsu_dbg_log("audio: SDL/0106 SB DMA-path decision: is_sb16=%d "
++                         "force_8bit=%d dsp_ver=%d highdma=%d -> %s path",
++                         soundblaster_is_sb16 ? 1 : 0,
++                         force_8bit ? 1 : 0,
++                         soundblaster_version,
++                         soundblaster_highdma_channel,
++                         soundblaster_is_sb16 ? "16-bit-high-DMA" : "8-bit-low-DMA");
++
++        /* Loud witness for the specific PicoGUS-SB shape: DSP claims SB16 but
++           there is no high-DMA channel, so we deliberately downshift to the
++           8-bit D-channel path that the pre-patch code would have hard-errored
++           on. Names the force-8bit hint for the operator. */
++        if ((soundblaster_version >= 4) && !have_highdma && !force_8bit) {
++            doskutsu_dbg_log("audio: SDL/0106 DSP %d.%d reports SB16 but BLASTER "
++                             "has no H (high/16-bit DMA) channel -- GRACEFUL "
++                             "fall back to the 8-bit low-DMA D-channel path "
++                             "(D=%d) instead of erroring; this is the "
++                             "PicoGUS-in-SB-mode / SB2.0-class unblock. Set "
++                             "SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT=1 to force "
++                             "this path on any card.",
++                             soundblaster_version, soundblaster_version_minor,
++                             soundblaster_dma_channel);
++        }
++    }
+ 
+     return true;
+ }
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index e3431f9f3..9dc29b6c3 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -82,6 +82,11 @@ static bool s_mpu401_use_dsp = false;
+    helper added by patch 0080. */
+ static bool SDL_DOSMpu401Init_DirectPort(uint16_t port_base);
+ static bool SDL_DOSMpu401WaitDRR(uint16_t port_base);
++/* SDL/0106: tentative declaration so the SDL_DOSMpu401Init init-result witness
++   (below, before the canonical definition) can report the resolved DRR-poll
++   state. The full rationale + initialized definition (= false) live with the
++   SDL/0093 DRR-poll opt-in block further down. */
++static bool s_mpu401_drr_poll_enabled;
+ 
+ bool SDL_DOSMpu401Init(uint16_t port_base)
+ {
+@@ -142,7 +147,28 @@ bool SDL_DOSMpu401Init(uint16_t port_base)
+ 
+     /* === Default path: direct-port MPU-401 + bit-6 DRR polling (patch 0080) === */
+     s_mpu401_use_dsp = false;
+-    return SDL_DOSMpu401Init_DirectPort(port_base);
++    const bool dp_ok = SDL_DOSMpu401Init_DirectPort(port_base);
++
++    /* DOSKUTSU patch (SDL/0106): WaveBlaster MPU-401 init-RESULT witness.
++       The companion of the sb.c CloseDevice WB/MPU run-end witness -- this
++       logs, at init time, whether the direct-port bring-up succeeded and the
++       resolved bit-6 DRR-poll configuration. drr_cap_hits is the running
++       poll-timeout counter (the wave-40 REFUTE_MPU_TIMEOUT field: the g2k
++       DreamBlaster S2 "output-buffer-busy stuck after byte 1" signature shows
++       as cap_hits climbing while writes stall); it is normally 0 here at init
++       and accumulates over the run. drr_poll_enabled=0 (the SDL/0093 default)
++       means the status port is never READ, so a poll-timeout cannot occur and
++       cap_hits stays 0 by construction -- in that mode the relevant signal is
++       sb.c's mpu_write_count climbing (bytes accepted) with audible output. */
++    doskutsu_dbg_log("mpu401: SDL/0106 WB init result=%s port_base=0x%04x "
++                     "drr_poll_enabled=%d drr_cap=%u drr_cap_hits=%lu "
++                     "(cap_hits>0 + write stall == wave-40 MPU-busy wedge recurs)",
++                     dp_ok ? "OK" : "FAILED",
++                     (unsigned)port_base,
++                     s_mpu401_drr_poll_enabled ? 1 : 0,
++                     (unsigned)doskutsu_mpu_drr_cap,
++                     (unsigned long)doskutsu_mpu_drr_cap_hits);
++    return dp_ok;
+ }
+ 
+ /* DOSKUTSU patch (Phase 11 patch 0080): bounded bit-6 DRR poll helper.
+-- 
+2.47.3
+

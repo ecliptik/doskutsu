@@ -397,6 +397,7 @@ BANNER_REGEX=(
   "\[input-bind\] applied=[0-9]+"
   "\[joycal\] applied stored cal"
   "\[org-hq\] stereo prerender rate=22050 ch=2"
+  "audio: SDL/0106 SB DMA-path decision: is_sb16=[01] force_8bit=[01] dsp_ver=-?[0-9]+ highdma=-?[0-9]+ -> (16-bit-high-DMA|8-bit-low-DMA) path"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -502,8 +503,9 @@ BANNER_SEVERITY=(
   "required"
   "optional"
   "optional"
+  "required"
 )
-# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 103 entries;
+# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 104 entries;
 # the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
 # add a BANNER_REGEX + BANNER_SEVERITY entry, add a matching BANNER_LABEL line at the same
 # index. (v1.0.5 #16 re-aligned these -- v1.0.4 had a 2-entry tail gap from the P2 banners,
@@ -616,6 +618,7 @@ BANNER_LABEL=(
   "0227/0230 Phase-3 input bindings + gameport axis maps (REQUIRED -- '[input-bind] applied=N invert_y=M dos_axes=1' emits every boot from input_apply_cfg_bindings; applied=count of BIND_* overlaid, dos_axes=1 = the DOS axis->action maps re-asserted post settings_load. Embed witness = strings|grep DOSKUTSU_BIND_. BANNER_REGEX idx 100.)"
   "SDL/0102 gameport persisted-calibration applied (OPTIONAL -- SDL-log '[joycal] applied stored cal x=[..] y=[..]'; fires ONLY when SDL_HINT_DOSKUTSU_JOY_CAL is set + an emulated/real gameport is present, so ABSENT in the default no-joystick smoke is correct. Embed witness = strings|grep joycal. BANNER_REGEX idx 101.)"
   "0231 v1.0.9 HQ Organya tier (optional -- emits ONLY when SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 resolves the 22050 stereo HQ tier; default smoke runs Tier-2 LQ so the line is ABSENT, expected not a failure; the HQ smoke cell sets AUDIO_TIER2=0 to witness it. Embed witness = strings|grep org-hq. BANNER_REGEX idx 102.)"
+  "SDL/0106 SB DMA-path decision (REQUIRED -- 'audio: SDL/0106 SB DMA-path decision: is_sb16=.. force_8bit=.. dsp_ver=.. highdma=.. -> (16-bit-high-DMA|8-bit-low-DMA) path' emits every boot at SB detection; the PicoGUS-in-SB-mode 8-bit-DMA unblock + DMA-path witness (patches/SDL/0106). Embed witness = strings|grep 'SDL/0106'. BANNER_REGEX idx 103.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
