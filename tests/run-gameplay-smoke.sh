@@ -398,6 +398,7 @@ BANNER_REGEX=(
   "\[joycal\] applied stored cal"
   "\[org-hq\] stereo prerender rate=22050 ch=2"
   "audio: SDL/0106 SB DMA-path decision: is_sb16=[01] force_8bit=[01] dsp_ver=-?[0-9]+ highdma=-?[0-9]+ -> (16-bit-high-DMA|8-bit-low-DMA) path"
+  "mpu401: SDL/0106 WB init result=(OK|FAILED) port_base=0x[0-9a-fA-F]+ drr_poll_enabled=[01] drr_cap=[0-9]+ drr_cap_hits=[0-9]+"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -504,8 +505,9 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
 )
-# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 104 entries;
+# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 105 entries;
 # the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
 # add a BANNER_REGEX + BANNER_SEVERITY entry, add a matching BANNER_LABEL line at the same
 # index. (v1.0.5 #16 re-aligned these -- v1.0.4 had a 2-entry tail gap from the P2 banners,
@@ -619,6 +621,7 @@ BANNER_LABEL=(
   "SDL/0102 gameport persisted-calibration applied (OPTIONAL -- SDL-log '[joycal] applied stored cal x=[..] y=[..]'; fires ONLY when SDL_HINT_DOSKUTSU_JOY_CAL is set + an emulated/real gameport is present, so ABSENT in the default no-joystick smoke is correct. Embed witness = strings|grep joycal. BANNER_REGEX idx 101.)"
   "0231 v1.0.9 HQ Organya tier (optional -- emits ONLY when SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 resolves the 22050 stereo HQ tier; default smoke runs Tier-2 LQ so the line is ABSENT, expected not a failure; the HQ smoke cell sets AUDIO_TIER2=0 to witness it. Embed witness = strings|grep org-hq. BANNER_REGEX idx 102.)"
   "SDL/0106 SB DMA-path decision (REQUIRED -- 'audio: SDL/0106 SB DMA-path decision: is_sb16=.. force_8bit=.. dsp_ver=.. highdma=.. -> (16-bit-high-DMA|8-bit-low-DMA) path' emits every boot at SB detection; the PicoGUS-in-SB-mode 8-bit-DMA unblock + DMA-path witness (patches/SDL/0106). Embed witness = strings|grep 'SDL/0106'. BANNER_REGEX idx 103.)"
+  "SDL/0106 WB MPU-401 init-result witness (OPTIONAL -- 'mpu401: SDL/0106 WB init result=(OK|FAILED) port_base=.. drr_poll_enabled=.. drr_cap=.. drr_cap_hits=..' emits at SDL_DOSMpu401Init, ONLY when the WB MIDI path engages (AUDIO_BACKEND=wb or auto-detect picks WB). Default DOSBox-X smoke falls through WB -> OPL3 (no DreamBlaster S2 emulated) so typically ABSENT -- expected, not a failure (same gating as the patch-0080 mpu401 direct-port banner). The init-time companion of the sb.c CloseDevice WB/MPU run-end witness; together they bracket the wave-40 REFUTE_MPU_TIMEOUT field (DreamBlaster S2 output-buffer-busy stuck after byte 1) for the PicoGUS case. Embed witness = strings|grep 'WB init result'. BANNER_REGEX idx 104.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
