@@ -1,0 +1,355 @@
+From 07f9910424a80e78e77c863cbc5ffd5065a30262 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 18 Jun 2026 10:47:29 -0700
+Subject: [PATCH] patch 0231 -- v1.0.9 HQ tier: true 22050 stereo Organya
+ pre-render
+
+DOS port. The opt-in HQ audio tier (SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 ->
+22050 Hz / 2ch) was only half-wired: the Organya pre-render path
+downmixed the synth's interleaved L/R to mono and the playback producer
+dual-mono-duplicated it onto the stereo device, so a Tier-1 device got
+dual-mono, not the org's true panning -- and the precache batch refused
+a stereo tier outright (it would write mono content tagged channels=2).
+The 11025-mono LQ tier is the 486 production default, but faster DOS
+hardware can afford the original Cave Story 2004 fidelity, which also
+resolves the known 11025 "scratch".
+
+Closes the stereo gaps end-to-end:
+- _org_render_song gains a channels arg; channels==2 pushes interleaved
+  L,R (per-channel box-decim, no average) so the synth panning survives
+  into the cache. Mono path byte-identical. Loop wrap target kept
+  frame-aligned (even) for stereo.
+- the pre-render producer reads interleaved L,R from a stereo buffer
+  instead of duplicating L; mono-buffer dual-mono path retained as the
+  fallback. startBeat seek accounts for channels.
+- both stereo-refusal guards (SoundManager::precacheAllOrgs + main.cpp
+  first-launch auto-precache) removed -- both tiers now render to the
+  tier-keyed cache (CACHE\22050_2\ for HQ).
+- cache header loopstart_frame documented as a buffer int16 index.
+
+Opt-in, default OFF (production stays Tier-2 LQ); real fps cost on
+486-class HW (4x SB16 output bandwidth). Distinct one-shot init banner
+[org-hq] for the smoke gate. See docs/internal/V109-AUDIO-MATRIX-DESIGN.md.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp               |  18 ++----
+ src/sound/Organya.cpp      | 122 ++++++++++++++++++++++++++++---------
+ src/sound/SoundManager.cpp |  31 +++++-----
+ 3 files changed, 114 insertions(+), 57 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 1ca15f27..5200132d 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1772,18 +1772,12 @@ int main(int argc, char *argv[])
+     // loop stops, and NO sentinel is written -> the remaining songs cold-render on
+     // demand behind overlay B and the batch resumes on the next launch. The
+     // sentinel is written ONLY on a full, unaborted pass.
+-    if (::AUDIO_CHANNELS != 1)
+-    {
+-      // Mono-only, mirroring SoundManager::precacheAllOrgs' stereo guard: the
+-      // pre-render path (_org_render_song) downmixes to mono, so rendering a
+-      // STEREO tier would write mono content tagged channels=2 + falsely mark it
+-      // complete. Skip the batch (no sentinel) until the stereo render follow-on
+-      // lands; overlay B stays armed. The 486 production tier is 11025 mono.
+-      LOG_INFO("organya auto-precache: stereo tier (channels={}) -- batch skipped "
+-               "(pre-render path is mono-only; HQ stereo cache is a follow-on); "
+-               "overlay armed, no sentinel written.", (unsigned)::AUDIO_CHANNELS);
+-    }
+-    else if (!org_cache_sentinel_present())
++    // DOS-PORT (patch 0231, v1.0.9): the prior stereo-tier skip here (mirroring
++    // precacheAllOrgs' old guard) is REMOVED -- _org_render_song now renders true
++    // interleaved stereo for AUDIO_CHANNELS==2, so the first-launch auto-batch
++    // populates CACHE\22050_2\ correctly at the HQ tier (TIER2=0) just as it does
++    // the LQ tier. The 486 production tier is still 11025 mono (TIER2 default).
++    if (!org_cache_sentinel_present())
+     {
+       LOG_INFO("organya auto-precache: cache not marked complete for this "
+                "binary/tier -- rendering all songs to CACHE now (one-time; press "
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index ed8e41d0..5a39095c 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -371,9 +371,10 @@ void Song::Synth()
+ // oversample stays OPT-IN default-OFF (SDL_HINT_DOSKUTSU_ORG_PRERENDER_RATE).
+ static int                  g_org_prerender_decided   = -1;
+ static int                  g_org_prerender_rate_dec  = -1;
+-static std::vector<int16_t> g_org_prerender_buf;               // mono S16, native rate, unity-scaled (pre-volume)
+-static size_t               g_org_prerender_pos        = 0;    // playback read cursor (mono-frame index)
+-static size_t               g_org_prerender_loopstart  = 0;    // mono-frame index of loop_start (wrap target)
++static std::vector<int16_t> g_org_prerender_buf;               // S16, native rate, unity-scaled (pre-volume); mono OR interleaved L,R (patch 0231)
++static size_t               g_org_prerender_pos        = 0;    // playback read cursor (buffer int16 index)
++static size_t               g_org_prerender_loopstart  = 0;    // buffer int16 index of loop_start (wrap target; EVEN when stereo)
++static int                  g_org_prerender_channels   = 1;    // patch 0231: 1=mono(LQ) / 2=interleaved stereo(HQ); how the live buffer was rendered/loaded
+ static std::string          g_org_prerender_song;             // loaded .org name (basename for the disk cache, patch 0208)
+ 
+ // ===========================================================================
+@@ -456,13 +457,24 @@ static void _org_prerender_geometry(const Song &song, uint32_t &H, int &decim, u
+   spb_native = (uint32_t)((uint64_t)song.ms_per_beat * native / 1000);
+ }
+ 
+-// Render the full org loop [0..loop_end] of `song` into outbuf (mono S16 at the
++// Render the full org loop [0..loop_end] of `song` into outbuf (S16 at the
+ // native rate; Q-SAFE oversample at H box-downsampled by decim). Captures the
+-// exact loop_start frame for the wrap target. Runs single-threaded (at load or
+-// at start, before the stream pulls) -- the brief SAMPLE_RATE swap is safe.
+-// Reusable: the playback path (decide, below) fills g_org_prerender_buf; the
+-// deferred cache (patch 0209) fills a local buffer for a temp Song.
+-static void _org_render_song(Song &song, uint32_t H, int decim,
++// exact loop_start wrap target. Runs single-threaded (at load or at start,
++// before the stream pulls) -- the brief SAMPLE_RATE swap is safe. Reusable: the
++// playback path (decide, below) fills g_org_prerender_buf; the deferred cache
++// (patch 0209) fills a local buffer for a temp Song.
++//
++// DOS-PORT (patch 0231, v1.0.9 HQ tier): `channels` selects the output format.
++// channels==1 (Tier-2 LQ, production default) box-DOWNMIXES the synth's
++// interleaved L/R to a single mono S16 per output frame (v1.0.8 behavior,
++// byte-identical). channels==2 (Tier-1 HQ, opt-in via AUDIO_TIER2=0) preserves
++// the synth's true stereo -- it pushes BOTH channels interleaved (L,R) with no
++// averaging, so the org's per-tone panning survives end-to-end. The box-decim
++// accumulator is kept PER-CHANNEL in the stereo case so the Q-SAFE oversample
++// composes orthogonally. out_loopstart is a BUFFER int16 index in both cases;
++// for stereo it must land on a frame boundary (even) so the producer's loop
++// wrap re-aligns L,R -- guaranteed by pair-wise pushes, guarded belt-and-braces.
++static void _org_render_song(Song &song, uint32_t H, int decim, int channels,
+                              std::vector<int16_t> &outbuf, size_t &out_loopstart)
+ {
+   outbuf.clear();
+@@ -470,7 +482,7 @@ static void _org_render_song(Song &song, uint32_t H, int decim,
+   const uint32_t saved_rate = SAMPLE_RATE;
+   SAMPLE_RATE   = H;              // Synth reads SAMPLE_RATE as its synthesis rate
+   song.cur_beat = 0;
+-  double acc = 0.0;
++  double accL  = 0.0, accR = 0.0;
+   int    acc_n = 0;
+   for (uint32_t b = 0; b < song.loop_end; ++b)
+   {
+@@ -487,20 +499,43 @@ static void _org_render_song(Song &song, uint32_t H, int decim,
+       break;
+     }
+     if (b == song.loop_start)
+-      out_loopstart = outbuf.size();   // exact wrap target
++    {
++      out_loopstart = outbuf.size();   // exact wrap target (buffer int16 index)
++      // patch 0231: stereo wrap target must be frame-aligned (even). Pushes are
++      // pair-wise so size() is already even here; guard belt-and-braces.
++      if (channels == 2 && (out_loopstart & 1))
++        --out_loopstart;
++    }
+     song.Synth();                      // fills song.samples (stereo float @ H)
+     const size_t pairs = song.samples.size() / 2;
+     for (size_t p = 0; p < pairs; ++p)
+     {
+-      const double mono = ((double)song.samples[p * 2] + (double)song.samples[p * 2 + 1]) * 0.5;
+-      acc += mono;
++      accL += (double)song.samples[p * 2];
++      accR += (double)song.samples[p * 2 + 1];
+       if (++acc_n >= decim)
+       {
+-        int v = (int)lround((acc / (double)acc_n) * 32767.0);
+-        if (v > 32767)       v = 32767;
+-        else if (v < -32768) v = -32768;
+-        outbuf.push_back((int16_t)v);
+-        acc   = 0.0;
++        if (channels == 2)
++        {
++          // Tier-1 HQ: push interleaved L,R (true stereo; no downmix).
++          int vl = (int)lround((accL / (double)acc_n) * 32767.0);
++          int vr = (int)lround((accR / (double)acc_n) * 32767.0);
++          if (vl > 32767)       vl = 32767;
++          else if (vl < -32768) vl = -32768;
++          if (vr > 32767)       vr = 32767;
++          else if (vr < -32768) vr = -32768;
++          outbuf.push_back((int16_t)vl);
++          outbuf.push_back((int16_t)vr);
++        }
++        else
++        {
++          // Tier-2 LQ: average the L/R pair into one mono sample (v1.0.8).
++          int v = (int)lround(((accL + accR) / (double)acc_n) * 0.5 * 32767.0);
++          if (v > 32767)       v = 32767;
++          else if (v < -32768) v = -32768;
++          outbuf.push_back((int16_t)v);
++        }
++        accL  = 0.0;
++        accR  = 0.0;
+         acc_n = 0;
+       }
+     }
+@@ -542,8 +577,8 @@ struct OrgPcmHeader
+   uint32_t internal_rate;   // Q-SAFE internal synth rate; == sample_rate when not oversampled
+   uint32_t loop_start;
+   uint32_t loop_end;
+-  uint32_t loopstart_frame; // frame wrap target
+-  uint32_t nframes;         // int16 sample count in the buffer
++  uint32_t loopstart_frame; // wrap target as a BUFFER int16 index (= frame*channels; EVEN for stereo, patch 0231)
++  uint32_t nframes;         // int16 sample count in the buffer (= frames*channels)
+   uint32_t channels;        // patch 0215: 1=mono(Tier-2) / 2=stereo(Tier-1); part of the key
+ };
+ 
+@@ -923,7 +958,7 @@ extern "C" void org_drain_pending_cache(void)
+     // -> stop it, then zero the ring so the SB16 loops silence (not its stale
+     // tail) for the whole blocking render. RAII emits the diag witness on exit.
+     OrgRenderQuiesce _q("drain", /*stop_current=*/true, cname);
+-    _org_render_song(tmp, H, decim, buf, ls);
++    _org_render_song(tmp, H, decim, (int)::AUDIO_CHANNELS, buf, ls); // patch 0231: tier channels
+   }
+   _org_cache_store(cname, SAMPLE_RATE, H, tmp.loop_start, tmp.loop_end, buf, ls);
+   LOG_INFO("Organya deferred cache: rendered + cached {} at load (was live-synth "
+@@ -961,7 +996,7 @@ extern "C" long org_precache_one(const char *org_path)
+   }
+   std::vector<int16_t> buf;
+   size_t ls = 0;
+-  _org_render_song(tmp, H, decim, buf, ls);
++  _org_render_song(tmp, H, decim, (int)::AUDIO_CHANNELS, buf, ls); // patch 0231: tier channels
+   _org_cache_store(cname, SAMPLE_RATE, H, tmp.loop_start, tmp.loop_end, buf, ls);
+   const long bytes = (long)(buf.size() * sizeof(int16_t));
+   LOG_INFO("[org-precache] song={} rate={} cached=new bytes={}",
+@@ -981,17 +1016,23 @@ static bool _organya_prerender_decide(Song &song, int startBeat)
+   int      decim = 1;
+   _org_prerender_geometry(song, H, decim, spb_native);
+   const bool in_window = _org_postload_consume();
++  // patch 0231: the active tier's channel count. The buffer is rendered/loaded
++  // at this width (cache validity keys on h.channels==AUDIO_CHANNELS), so a
++  // startBeat seek into the buffer is measured in (frame * channels) int16s.
++  const int channels = (int)::AUDIO_CHANNELS;
+ 
+   // patch 0208: cache HIT short-circuits at any phase (fast-load, no freeze).
+   const std::string cname = _org_cache_name(g_org_prerender_song);
+   if (_org_cache_try_load(cname, SAMPLE_RATE, H, song.loop_start, song.loop_end))
+   {
+-    g_org_prerender_pos = (startBeat > 0) ? (size_t)startBeat * spb_native : 0;
++    g_org_prerender_channels = channels; // patch 0231: validity guarantees the buffer matches the tier
++    g_org_prerender_pos = (startBeat > 0) ? (size_t)startBeat * spb_native * channels : 0;
+     if (g_org_prerender_pos >= g_org_prerender_buf.size())
+       g_org_prerender_pos = g_org_prerender_loopstart;
+-    LOG_INFO("Organya pre-render: cache HIT {} ({} bytes from CACHE; synth "
++    LOG_INFO("Organya pre-render: cache HIT {} ({} bytes from CACHE; {} ch; synth "
+              "skipped).", cname.c_str(),
+-             (unsigned long long)(g_org_prerender_buf.size() * sizeof(int16_t)));
++             (unsigned long long)(g_org_prerender_buf.size() * sizeof(int16_t)),
++             channels);
+     return true;
+   }
+ 
+@@ -1003,19 +1044,21 @@ static bool _organya_prerender_decide(Song &song, int startBeat)
+       // stale outgoing-song tail) during the blocking entry render. RAII emits
+       // the diag witness on exit.
+       OrgRenderQuiesce _q("entry", /*stop_current=*/false, cname);
+-      _org_render_song(song, H, decim, g_org_prerender_buf, g_org_prerender_loopstart);
++      _org_render_song(song, H, decim, channels, g_org_prerender_buf, g_org_prerender_loopstart);
+     }
++    g_org_prerender_channels = channels; // patch 0231: buffer was just rendered at the tier width
+     // patch 0208: persist so the next play of this song fast-loads.
+     _org_cache_store(cname, SAMPLE_RATE, H, song.loop_start, song.loop_end,
+                      g_org_prerender_buf, g_org_prerender_loopstart);
+-    g_org_prerender_pos = (startBeat > 0) ? (size_t)startBeat * spb_native : 0;
++    g_org_prerender_pos = (startBeat > 0) ? (size_t)startBeat * spb_native * channels : 0;
+     if (g_org_prerender_pos >= g_org_prerender_buf.size())
+       g_org_prerender_pos = g_org_prerender_loopstart;
+     LOG_INFO("Organya pre-render: ENABLED (rendered loop [0..{}] to a {}-byte "
+-             "static mono PCM buffer at load; producer = memcpy-from-static; "
++             "static {} PCM buffer at load; producer = memcpy-from-static; "
+              "killswitch SDL_HINT_DOSKUTSU_ORG_PRERENDER=0).",
+              (unsigned long)song.loop_end,
+-             (unsigned long long)(g_org_prerender_buf.size() * sizeof(int16_t)));
++             (unsigned long long)(g_org_prerender_buf.size() * sizeof(int16_t)),
++             channels == 2 ? "interleaved-stereo" : "mono");
+     if (H != SAMPLE_RATE)
+       LOG_INFO("Organya pre-render: oversampled internal rate={} -> box-downsample "
+                "/{} to {} Hz (Q-SAFE).",
+@@ -1160,6 +1203,12 @@ void Organya::_musicCallback(void *udata, uint8_t *stream, uint32_t len)
+     const bool   mono_output = (::AUDIO_CHANNELS == 1);
+     const double mv          = (double)(settings->music_volume / 100.);
+     const uint32_t out_int16s = len / 2;
++    // patch 0231 (v1.0.9 HQ tier): a TRUE-stereo buffer (rendered/loaded at
++    // channels==2) carries interleaved L,R -- pull R straight from the buffer
++    // (one buffer int16 per output int16) instead of duplicating the L sample.
++    // The v1.0.8 dual-mono path stays as the fallback for a mono buffer on a
++    // stereo device (e.g. ORG_PRERENDER mid-flight tier mismatch).
++    const bool stereo_buf = (!mono_output && g_org_prerender_channels == 2);
+     for (uint32_t i = 0; i < out_int16s;)
+     {
+       if (g_org_prerender_pos >= g_org_prerender_buf.size())
+@@ -1169,7 +1218,20 @@ void Organya::_musicCallback(void *udata, uint8_t *stream, uint32_t len)
+       else if (s < -32768) s = -32768;
+       str[i++] = (int16_t)s;
+       if (!mono_output && i < out_int16s)
+-        str[i++] = (int16_t)s; // duplicate mono -> L/R for a stereo device
++      {
++        if (stereo_buf)
++        {
++          // true stereo: the next buffer int16 is this frame's R channel.
++          if (g_org_prerender_pos >= g_org_prerender_buf.size())
++            g_org_prerender_pos = g_org_prerender_loopstart;
++          int32_t r = (int32_t)lround((double)g_org_prerender_buf[g_org_prerender_pos++] * volume * mv);
++          if (r > 32767)       r = 32767;
++          else if (r < -32768) r = -32768;
++          str[i++] = (int16_t)r;
++        }
++        else
++          str[i++] = (int16_t)s; // mono buffer -> duplicate L to R for a stereo device
++      }
+     }
+     return;
+   }
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index a394f339..d5ab9722 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -377,6 +377,18 @@ bool SoundManager::init()
+                "83 MHz) for full audio fidelity. Unset the env var to "
+                "go back to Tier-2 default.",
+                (unsigned long)::SAMPLE_RATE, (unsigned long)::AUDIO_CHANNELS);
++      // DOS-PORT (patch 0231, v1.0.9): distinct init banner for the opt-in HQ
++      // Organya tier. Emits ONLY on the TIER2=0 (HQ) path, so the smoke gate can
++      // witness HQ engagement (two-witness: strings-embed + this runtime line).
++      // The org pre-render path renders + plays TRUE interleaved stereo at this
++      // tier (CACHE\22050_2\); the 11025 "scratch" is gone, at a real 486 fps
++      // cost (4x SB16 output bandwidth). Keep the [org-hq] marker a UNIQUE line
++      // FORMAT so a stop/validity grep cannot false-match a banner substring.
++      LOG_INFO("[org-hq] stereo prerender rate={} ch={} (HQ Organya tier ACTIVE; "
++               "opt-in via SDL_HINT_DOSKUTSU_AUDIO_TIER2=0; cache CACHE\\{}_{}\\; "
++               "real fps cost on 486-class HW).",
++               (unsigned long)::SAMPLE_RATE, (int)::AUDIO_CHANNELS,
++               (unsigned long)::SAMPLE_RATE, (int)::AUDIO_CHANNELS);
+     }
+   }
+ 
+@@ -1743,11 +1755,10 @@ extern "C" long org_precache_one(const char *org_path);
+ // subdir. Returns total bytes freshly rendered this run; logs the exact total
+ // for CF sizing.
+ //
+-// STEREO GUARD: the pre-render path (org_precache_one -> _org_render_song)
+-// currently downmixes to MONO. So this base form only renders the MONO tier
+-// correctly; rendering a STEREO tier would write a mono-content PCM tagged
+-// channels=2 (wrong). Until the stereo render+producer follow-on lands, refuse
+-// a stereo tier with a clear message rather than write a bad HQ cache.
++// DOS-PORT (patch 0231, v1.0.9): the prior STEREO GUARD here is REMOVED. The
++// pre-render path (_org_render_song) now renders TRUE interleaved stereo when
++// AUDIO_CHANNELS==2, so a Tier-1 (22050 stereo) batch writes correct HQ PCM to
++// CACHE\22050_2\ (the producer plays it interleaved). Both tiers render here.
+ long SoundManager::precacheAllOrgs()
+ {
+   if (_music_names.size() < 2)
+@@ -1757,16 +1768,6 @@ long SoundManager::precacheAllOrgs()
+     return 0;
+   }
+ 
+-  if ((int)::AUDIO_CHANNELS != 1)
+-  {
+-    LOG_WARN("[org-precache] STEREO tier (channels={}, rate={}) NOT yet "
+-             "supported -- the pre-render path is mono-only; the 22050-stereo "
+-             "HQ set is a follow-on (stereo render + producer). Set "
+-             "SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 (11025 mono) to build the LQ set.",
+-             (int)::AUDIO_CHANNELS, (unsigned long)::SAMPLE_RATE);
+-    return 0;
+-  }
+-
+   LOG_INFO("[org-precache] START rate={} channels={} songs={} -> CACHE\\{}_{}\\",
+            (unsigned long)::SAMPLE_RATE, (int)::AUDIO_CHANNELS,
+            (int)(_music_names.size() - 1),
+-- 
+2.47.3
+

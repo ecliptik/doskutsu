@@ -286,6 +286,20 @@ walk() {
   send_keys Home Return; sleep 1        # main idx0 Sound -> submenu
   shoot "10-sound-submenu"             # Express/Custom/Music+volumes/Test x2/Back + badges
 
+  # --- Express setup (Sound submenu row0): DF-UX Phase 2 one-key detect ----
+  # T-DFUX-P2: red warning modal (DF 3328) -> re-run probes (brief video-bench
+  # flash) -> evidence modal w/ DSP version (DF 3329) -> "Test it now?" Y/N. We
+  # decline the test (n) so the walk stays deterministic; Express has written the
+  # detected BLASTER + opl3 to the session (review only -- never saved).
+  send_keys Home Return; sleep 1        # submenu row0 Express -> red DANGER modal
+  shoot "12-express-warning"           # DF 3328 red "DETECTING HARDWARE" modal
+  send_keys Return; sleep 2             # dismiss -> re-run probes (mode flash) -> evidence
+  shoot "13-express-evidence"          # DF 3329 "DETECTION COMPLETE" (DSP version found)
+  send_keys Return; sleep 0.6           # dismiss -> "Test it now?" Yes/No prompt
+  shoot "14-express-test-prompt"
+  send_keys n; sleep 0.6                # decline -> back to the Sound submenu
+  shoot "15-express-back-to-submenu"
+
   # --- Inline audio tests (Sound submenu rows 3,4): LIVE popup (AUDIOTEST=1) --
   # CAPTURED FIRST, on the clean opl3 baseline (edits are sticky; run before the
   # destructive Music-and-volumes note-demo). T47: the tests are inline rows now

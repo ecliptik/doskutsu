@@ -21,12 +21,23 @@ SETUP.EXE
 SETUP opens a full-screen menu:
 
 - **System profile** -- what SETUP detected: CPU + FPU, free memory, sound
-  card (from your `BLASTER` variable), WaveBlaster / OPL3 availability, and
-  video / VBE.
+  card (from your `BLASTER` variable), WaveBlaster / OPL3 availability,
+  video / VBE, and a measured video-memory fill speed in KB/s (re-measured
+  each launch, not stored; shows "(speed n/a)" if the benchmark cannot run).
+  The fill-speed benchmark is **on by default** (one brief graphics flash at
+  startup). An earlier version did a VBE linear-framebuffer mode-set that hung
+  real hardware (it wedged the S3 ViRGE memory controller); that path was
+  removed and the benchmark now does a safe mode-13h (320x200) memory fill,
+  validated no-hang on the S3 ViRGE, Cirrus CL-GD5430, and ATI Mach64. Disable
+  it with `DOSKUTSU_SETUP_VIDEOBENCH=0` (the profile then shows "(speed n/a)").
 - **Sound setup** -- music backend (WaveBlaster MIDI / OPL3 FM / Organya
   synth / auto-detect), MIDI music set (when a MIDI backend is selected and
   more than one set is installed), sound on/off, audio quality, SB16 mixer
-  levels, Organya pre-render.
+  levels, Organya pre-render. It also offers an **Express setup** that
+  auto-detects the sound hardware in one step: it warns, probes the card
+  (port / IRQ / DMA, DSP version, OPL3, WaveBlaster), shows what it found,
+  sets the card + music backend, and offers an immediate music test. Edits
+  are live in the session and are committed on Save.
 - **Sound hardware** -- I/O port, IRQ, 8-bit DMA, 16-bit DMA, MPU-401 /
   WaveBlaster MIDI port, and card type (all via the one `BLASTER` line; see
   "Sound Hardware screen" below).
@@ -59,8 +70,10 @@ while the session has changes you have not saved.
 
 On startup SETUP also writes its detected hardware to `LOGS\PROFILE.LOG`
 (CPU class + MHz estimate, physical RAM, the sound `BLASTER` fields, OPL3 /
-WaveBlaster presence, VBE) -- a plain `key=value` dump so a real-hardware
-profile can be captured without transcribing the screen.
+WaveBlaster presence, VBE, and the measured `video_speed_kbs` plus
+`video_speed_path` = 2 mode-13h / 3 text-B800 / 0 none) -- a plain
+`key=value` dump so a real-hardware profile can be captured without
+transcribing the screen.
 
 ## DOSKUTSU.CFG
 
@@ -87,7 +100,7 @@ FIXED_TIMESTEP=1
 | `AUDIO_BACKEND` | auto / wb / opl3 / organya | Music backend (auto = detect). `auto` is omitted from the file so the engine's detection runs. |
 | `MIDI_SET` | wiimidi / orgmid | Which MIDI music set the `wb` / `opl3` MIDI backends play: `wiimidi` (shown as "WiiWare", the WiiWare arrangements, `data/midi/`; default) or `orgmid` (shown as "OrgMIDI", the note-for-note transcription, `data/orgmid/`). SETUP only shows the **MIDI music set** row when a MIDI backend is selected AND at least two sets are installed on disk; otherwise the default applies. Ignored by the Organya backend. |
 | `AUDIO_OFF` | 0 / 1 | Disable all audio. |
-| `AUDIO_TIER2` | 0 / 1 | Audio sample rate: 1 = 11025 Hz (default, lighter on the CPU), 0 = 22050 Hz. Shown as the rate (`11025Hz` / `22050Hz`) on the Sound setup screen. |
+| `AUDIO_TIER2` | 0 / 1 | Audio quality tier: 1 = 11025 Hz mono (default, lighter on the CPU), 0 = 22050 Hz stereo (HQ -- true Organya stereo, and it removes the 11025 Hz Organya "scratch", but costs ~4x the SB16 output bandwidth = a real framerate cost on 486-class CPUs). The HQ Organya pre-render uses its own disk cache (`CACHE\22050_2\`, separate from the default `CACHE\11025_1\`); build it with `make org-cache TIER=1`. Shown as the rate (`11025Hz` / `22050Hz`) on the Sound setup screen. |
 | `SB16_VOICE_VOL` | 0-31 | SB16 mixer voice (PCM/SFX) level. |
 | `SB16_FM_VOL` | 0-31 | SB16 mixer FM (OPL3 music) level. |
 | `ORG_PRERENDER` | 0 / 1 | Pre-render Organya music to a disk PCM cache (helps slow 486 CPUs). SETUP auto-enables this if you pick the Organya backend on a sub-Pentium CPU; you can toggle it back off. |

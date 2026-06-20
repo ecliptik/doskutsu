@@ -690,56 +690,57 @@ static void midiset_dos_path(const char *dir, char *out, int cap)
     else if (cwd[i] >= 'a' && cwd[i] <= 'z') cwd[i] = (char)(cwd[i] - 'a' + 'A');
   }
   n = (int)strlen(cwd);
-  /* strip a trailing backslash unless it is a bare drive root "X:\" */
   if (n >= 1 && cwd[n - 1] == '\\' && !(n == 3 && cwd[1] == ':'))
     cwd[--n] = '\0';
   for (i = 0; dir[i] && i < (int)sizeof(up) - 1; ++i)
     up[i] = (dir[i] >= 'a' && dir[i] <= 'z') ? (char)(dir[i] - 'a' + 'A') : dir[i];
   up[i] = '\0';
 
-  if (n == 0)
-    snprintf(out, (size_t)cap, "DATA\\%s", up);
-  else if (cwd[n - 1] == '\\')          /* root already ends with a backslash */
-    snprintf(out, (size_t)cap, "%sDATA\\%s", cwd, up);
-  else
-    snprintf(out, (size_t)cap, "%s\\DATA\\%s", cwd, up);
+  if (n == 0)            snprintf(out, (size_t)cap, "DATA\\%s", up);
+  else if (cwd[n-1]=='\\') snprintf(out, (size_t)cap, "%sDATA\\%s", cwd, up);
+  else                   snprintf(out, (size_t)cap, "%s\\DATA\\%s", cwd, up);
 }
 
 /* #39 A: build the per-set DESCRIPTION list shown when the MIDI-music-set row
- * is highlighted -- one row per installed set (matching the Music-backend help
- * style): friendly name in the keyword column, then the DOS path it loads from
- * + its track count, and an incomplete-set warning when it has fewer tracks
- * than the fullest installed set. No "=" sign. descbuf rows must be >= 128.
- * Returns the number of rows filled; *keyw gets the keyword-column width. */
+ * is highlighted -- friendly name in the keyword column, then the DOS path it
+ * loads from + its track count. Built-in sets + ONE custom drop-in; further
+ * customs collapse to a "+N more" row (the picker still lists every set). The
+ * help renderer is capped at one line per row (see the help_list call), so the
+ * path + count never wraps past the box. Returns rows filled; *keyw = column. */
 static int snd_midiset_help(helprow_t *rows, char descbuf[][192], int cap,
                             int *keyw)
 {
-  int i, n = (g_midi_nsets < cap) ? g_midi_nsets : cap;
-  int refcount = 0, kw = 9;
+  int i, r = 0, kw = 9, custom_shown = 0, extra = 0;
 
-  for (i = 0; i < n; ++i)
+  for (i = 0; i < g_midi_nsets; ++i)
   {
     int w = (int)strlen(g_midi_sets[i].label) + 2;
-    if (g_midi_sets[i].mid_count > refcount) refcount = g_midi_sets[i].mid_count;
     if (w > kw) kw = w;
   }
-  for (i = 0; i < n; ++i)
+  for (i = 0; i < g_midi_nsets && r < cap; ++i)
   {
     char path[64];
-    int  miss = refcount - g_midi_sets[i].mid_count;
+    if (strncmp(g_midi_sets[i].label, "Custom", 6) == 0)
+    {
+      if (custom_shown) { extra++; continue; }
+      custom_shown = 1;
+    }
     midiset_dos_path(g_midi_sets[i].dir, path, sizeof(path));
-    if (miss > 0)
-      snprintf(descbuf[i], 192,
-               "%s, %d tracks -- %d fewer than the fullest set; those songs "
-               "play no music.", path, g_midi_sets[i].mid_count, miss);
-    else
-      snprintf(descbuf[i], 192, "%s, %d tracks.", path,
-               g_midi_sets[i].mid_count);
-    rows[i].key  = g_midi_sets[i].label;
-    rows[i].desc = descbuf[i];
+    snprintf(descbuf[r], 192, "%s (%d track%s)", path,
+             g_midi_sets[i].mid_count, g_midi_sets[i].mid_count == 1 ? "" : "s");
+    rows[r].key  = g_midi_sets[i].label;
+    rows[r].desc = descbuf[r];
+    r++;
+  }
+  if (extra > 0 && r < cap)
+  {
+    snprintf(descbuf[r], 192, "%d more -- open the list to choose", extra);
+    rows[r].key  = "+more";
+    rows[r].desc = descbuf[r];
+    r++;
   }
   *keyw = kw;
-  return n;
+  return r;
 }
 
 /* Modal pick-list of the discovered MIDI sets (Enter on the row). Tags the
@@ -753,30 +754,21 @@ static int snd_pick_midiset(void)
   const char *descs[MIDISET_MAX];
   char        dbuf[MIDISET_MAX][192];
   int idx = scfg_index("MIDI_SET");
-  int i, choice, start = 0, refcount = 0;
+  int i, choice, start = 0;
 
   if (g_midi_nsets <= 0) return 0;
-
-  for (i = 0; i < g_midi_nsets; ++i)
-    if (g_midi_sets[i].mid_count > refcount) refcount = g_midi_sets[i].mid_count;
 
   i = midiset_index_by_value(g_midi_sets, g_midi_nsets, scfg_get(&g_cfg, idx));
   if (i >= 0) start = i;
 
   for (i = 0; i < g_midi_nsets; ++i)
   {
-    int  miss = refcount - g_midi_sets[i].mid_count;
     char path[64];
     midiset_dos_path(g_midi_sets[i].dir, path, sizeof(path));
     items[i] = g_midi_sets[i].label;
     tags[i]  = (i == start) ? "(current)" : "";
-    if (miss > 0)
-      snprintf(dbuf[i], sizeof(dbuf[i]),
-               "%s, %d tracks -- %d fewer than the fullest set; those songs "
-               "play no music.", path, g_midi_sets[i].mid_count, miss);
-    else
-      snprintf(dbuf[i], sizeof(dbuf[i]), "%s, %d tracks.", path,
-               g_midi_sets[i].mid_count);
+    snprintf(dbuf[i], sizeof(dbuf[i]), "%s (%d track%s)", path,
+             g_midi_sets[i].mid_count, g_midi_sets[i].mid_count == 1 ? "" : "s");
     descs[i] = dbuf[i];
   }
 
@@ -791,6 +783,33 @@ static int snd_pick_midiset(void)
   return 1;
 }
 
+/* MIDI-set discovery is the slow part of opening the Music screen on real HW:
+ * midiset_scan() opendir()s every set dir and counts every .mid for the
+ * "(N tracks)" display. A built-in Cave Story set is ~90 .mid, so it is
+ * hundreds of DOS FindNext calls -- ~5-10 s on a CF-backed 486, growing with
+ * each custom drop-in dir. The on-disk set list cannot change during a SETUP
+ * run, so scan ONCE and cache for the rest of the session; later Music entries
+ * are then instant. Lazy (the first Music entry pays the one-time cost) so a
+ * SETUP run that never opens Music pays nothing. A brief popup covers the one
+ * scan so it reads as work-in-progress rather than a frozen screen. */
+static int g_midi_scanned = 0;
+static void midiset_scan_cached(void)
+{
+  int w = 50, h = 7;
+  int x = (80 - w) / 2 + 1;
+  int y = (25 - h) / 2 + 1;
+  if (g_midi_scanned) return;
+  tui_clear();
+  tui_titlebar("MUSIC");
+  tui_box(x, y, w, h, "Scanning Music Sets");
+  tui_wrap(x + 2, y + 2, w - 4, 3, PAL->body, PAL->bg,
+           "Reading MIDI set directories from disk...");
+  tui_popup_decorate(x, y, w, h);
+  tui_present(); /* flush the notice before the blocking scan (no getkey here) */
+  g_midi_nsets = midiset_scan("data", g_midi_sets, MIDISET_MAX);
+  g_midi_scanned = 1;
+}
+
 static void screen_sound(void)
 {
   int sel = SND_BACKEND;
@@ -798,8 +817,9 @@ static void screen_sound(void)
   int dirty_snap = g_dirty;
 
   /* #39: discover the MIDI music sets present on disk (data/midi/, data/orgmid/).
-   * Rescan once on entry -- the on-disk set list does not change mid-screen. */
-  g_midi_nsets = midiset_scan("data", g_midi_sets, MIDISET_MAX);
+   * Cached once per SETUP session -- the on-disk set list does not change
+   * mid-run, and the per-set track count is slow to recompute on a CF 486. */
+  midiset_scan_cached();
 
   tui_clear(); /* T45: clear ONCE on entry; the loop repaints in place (no flash) */
   for (;;)
@@ -854,7 +874,8 @@ static void screen_sound(void)
         helprow_t mrows[MIDISET_MAX];
         char      mbuf[MIDISET_MAX][192];
         int       mkw, mn = snd_midiset_help(mrows, mbuf, MIDISET_MAX, &mkw);
-        help_list(TUI_DESC_TX, hy + 1, mkw, TUI_DESC_TW - mkw, 2, mrows, mn);
+        /* one line per row (path + count is single-line; never wrap past the box) */
+        help_list(TUI_DESC_TX, hy + 1, mkw, TUI_DESC_TW - mkw, 1, mrows, mn);
       }
       else if ((oh = opt_help_for(DKT_KEYS[snd_key_idx(sel)].cfg_key,
                                   &oh_n, &oh_kw)) != NULL)
@@ -1465,9 +1486,18 @@ static void draw_profile_panel(int x, int y, int w)
   snprintf(v, sizeof(v), "%s, %s", sb_type_name(cfg_card_type()), cfg_backend_name());
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Sound ....", v);
 
-  snprintf(v, sizeof(v), "%s  VBE %x.%x %s", g_prof.video_desc,
-           (g_prof.vbe_version >> 8) & 0xff, g_prof.vbe_version & 0xff,
-           g_prof.vbe_lfb ? "(LFB)" : "");
+  /* T-DFUX-P2: the Video line carries the measured video-memory fill speed
+   * (KB/s) after the chip + VBE detail. g2k-only evidence; "(speed n/a)" when
+   * the bench could not run (no flat access). The path code (which fallback
+   * measured it) is in PROFILE.LOG, not crowded onto the panel line. */
+  if (g_prof.video_speed_kbs > 0)
+    snprintf(v, sizeof(v), "%s  VBE %x.%x %s  %d KB/s", g_prof.video_desc,
+             (g_prof.vbe_version >> 8) & 0xff, g_prof.vbe_version & 0xff,
+             g_prof.vbe_lfb ? "(LFB)" : "", g_prof.video_speed_kbs);
+  else
+    snprintf(v, sizeof(v), "%s  VBE %x.%x %s  (speed n/a)", g_prof.video_desc,
+             (g_prof.vbe_version >> 8) & 0xff, g_prof.vbe_version & 0xff,
+             g_prof.vbe_lfb ? "(LFB)" : "");
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Video ....", v);
 
   /* T47 plan 3.2: the Speed line mirrors DF's "Machine Speed: Fast (Fast
@@ -1772,6 +1802,93 @@ static void draw_sound_banner(int x, int y, int w)
          cfg_backend_name());
 }
 
+/* T-DFUX-P2: Express setup -- DF's one-key "Detect", reimagined. (1) a red
+ * DANGER modal (DF 3328: the probe pokes card ports; a misconfigured box can
+ * hang). (2) re-run the EXISTING profile.c probes (BLASTER parse / DSP reset +
+ * version 0xE1 / OPL3 timer / MPU-401 DRR -- all inside profile_detect). (3) an
+ * EVIDENCE modal (DF 3329: report the DSP version found, not just "ok"). (4)
+ * write the detected BLASTER + recommended backend to the SESSION (T44: live,
+ * ESC keeps, main-menu Save/F10 commits -- never a direct file write here).
+ * (5) offer the inline music test. Audio tier (AUDIO_TIER2 / ORG_PRERENDER) is
+ * deliberately NOT touched (operator default: the Speed/Express macros do not
+ * change audio fidelity). */
+static void screen_express(void)
+{
+  char bl[SCFG_VAL_MAX];
+  char l0[80], l1[80], l2[80], l3[80], l4[80];
+  const char *warn[4];
+  const char *ev[5];
+  const char *backend;
+
+  warn[0] = "Express setup will now probe your sound hardware.";
+  warn[1] = "It reads the card ports directly. If the screen stays";
+  warn[2] = "frozen for more than a few seconds the card settings are";
+  warn[3] = "wrong -- reboot and use Custom setup instead.";
+  tui_message_warn("DETECTING HARDWARE", warn, 4);
+
+  /* Re-run the probes (full re-detect; a brief video-bench flash is expected). */
+  profile_detect(&g_prof);
+  /* The probe's mode-flash + the prior warning modal leave residue (a text-page
+   * re-set does not reliably clear under every BIOS/DOSBox); clear before the
+   * evidence modal so it renders over a clean backdrop. */
+  tui_clear();
+
+  /* Compose the detected BLASTER + pick the recommended backend (OPL3 when a
+   * card/FM is present, else auto-detect chain). WaveBlaster is never
+   * auto-selected here (operator directive: WB is a manual Sound choice). */
+  if (g_prof.snd_base > 0)
+  {
+    int n = snprintf(bl, sizeof bl, "A%X I%d D%d H%d",
+                     g_prof.snd_base, g_prof.snd_irq,
+                     g_prof.snd_dma, g_prof.snd_hdma);
+    if (g_prof.snd_type > 0 && n > 0 && n < (int)sizeof bl)
+      snprintf(bl + n, sizeof bl - (size_t)n, " T%d", g_prof.snd_type);
+  }
+  else
+    bl[0] = '\0';
+  backend = (g_prof.has_opl3 || g_prof.snd_detected) ? "opl3" : "auto";
+
+  /* One fact per line, consistent "Label: Value", Title Case, no trailing
+   * periods (operator review). "(MIDI)" makes clear OPL3/WaveBlaster ARE the
+   * MIDI backends. */
+  if (g_prof.snd_detected)
+    snprintf(l0, sizeof l0, "Sound Blaster: Port 0x%X, IRQ %d, DMA %d",
+             g_prof.snd_base, g_prof.snd_irq, g_prof.snd_dma);
+  else
+    snprintf(l0, sizeof l0, "Sound Blaster: Not detected");
+  if (g_prof.dsp_major)
+    snprintf(l1, sizeof l1, "DSP Version: %d.%02d", g_prof.dsp_major, g_prof.dsp_minor);
+  else
+    snprintf(l1, sizeof l1, "DSP Version: None");
+  snprintf(l2, sizeof l2, "OPL3 FM: %s", g_prof.has_opl3 ? "Yes" : "No");
+  snprintf(l3, sizeof l3, "WaveBlaster: %s", g_prof.has_waveblaster ? "Yes" : "No");
+  {
+    const char *bname =
+        strcmp(backend, "opl3") == 0    ? "OPL3 FM (MIDI)" :
+        strcmp(backend, "wb") == 0      ? "WaveBlaster (MIDI)" :
+        strcmp(backend, "organya") == 0 ? "Organya" : "Auto-detect";
+    snprintf(l4, sizeof l4, "Music Backend: %s", bname);
+  }
+  ev[0] = l0; ev[1] = l1; ev[2] = l2; ev[3] = l3; ev[4] = l4;
+  tui_message("DETECTION COMPLETE", ev, 5);
+
+  /* Write the two keys to the SESSION (T44 live; main-menu Save commits). */
+  if (bl[0]) scfg_set(&g_cfg, scfg_index("BLASTER"), bl);
+  scfg_set(&g_cfg, scfg_index("AUDIO_BACKEND"), backend);
+  g_dirty = 1;
+
+  /* Clear the DETECTION COMPLETE modal first -- modals draw over whatever is on
+   * screen, so without this the next dialog stacks on top of it. */
+  tui_clear();
+  /* Do NOT auto-play a test here (operator review: the inline test's result was
+   * discarded so "Test music" still read "Not tested"). Point the user at the two
+   * Test rows in the Sound menu, which run the test AND record the Working badge. */
+  {
+    const char *done[1] = { "Test sound effects and music to confirm." };
+    tui_message("SOUND CONFIGURED", done, 1);
+  }
+}
+
 static void screen_sound_menu(void)
 {
   static const char *items[] = {
@@ -1823,14 +1940,7 @@ static void screen_sound_menu(void)
     else if (k == TUI_KEY_ESC)  return;
     else if (k == TUI_KEY_ENTER)
     {
-      if (sel == 0)
-      {
-        const char *lines[3];
-        lines[0] = "Express one-key detect arrives in a later update.";
-        lines[1] = "For now use Custom setup below, or Auto-detect best";
-        lines[2] = "settings from the main menu.";
-        tui_message("Express setup", lines, 3);
-      }
+      if (sel == 0)      screen_express();   /* T-DFUX-P2: real one-key detect */
       else if (sel == 1) screen_hardware();
       else if (sel == 2) screen_sound();
       else if (sel == 3) res_sfx   = sound_inline_test(0);
@@ -2451,6 +2561,20 @@ int main(void)
     char why[160];
     recommend_apply(&g_cfg, &g_prof, why, sizeof(why));
     g_dirty = 1;
+  }
+
+  /* System Speed: if no valid class is recorded yet -- a fresh config, OR a
+   * DOSKUTSU.CFG written by Express / before SPEED_CLASS existed (it has no
+   * SPEED_CLASS line) -- stamp the class the detected CPU maps to, so the main
+   * menu shows a real class (Slow / Normal / Fast / Very Fast) instead of
+   * "(not set)". Never overrides an explicit class. Session-only (no g_dirty):
+   * it persists on the next save and re-derives identically, so just opening
+   * SETUP does not flag a false "unsaved". */
+  {
+    const char *sc = scfg_get(&g_cfg, scfg_index("SPEED_CLASS"));
+    if (speed_row_index(sc ? sc : "") < 0)
+      scfg_set(&g_cfg, scfg_index("SPEED_CLASS"),
+               SPEED_ROWS[speed_row_for_cpu(&g_prof)].cls);
   }
 
   /* Main-menu screen (T25): an X-Wing-style layout -- the always-on system

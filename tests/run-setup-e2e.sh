@@ -433,6 +433,26 @@ assert_profile_mhz() {
   return 1
 }
 
+# assert_profile_video_speed -- DF-UX Phase 2: SETUP's startup profile bench
+# wrote a well-formed video_speed_kbs line. DETERMINISTIC, emulator-safe: assert
+# the line EXISTS + is a non-negative integer, NOT a value -- the KB/s under
+# DOSBox-X is meaningless (g2k-only, [[dosbox_not_proxy]]); 0 is a legitimate
+# "bench could not run" reading and still matches. Anchored to the unique line
+# FORMAT '^video_speed_kbs=<digits>$' (not a substring), per the calib-anchor
+# lesson. Pairs with the video_speed_path line (which fallback measured it).
+assert_profile_video_speed() {
+  if [[ ! -s "$PROFILE_LOG" ]]; then
+    fail "profile-log: LOGS\\PROFILE.LOG missing/empty after SETUP launch"
+    return 1
+  fi
+  if grep -qE '^video_speed_kbs=[0-9]+$' "$PROFILE_LOG"; then
+    pass "profile-log: video_speed_kbs present + well-formed ($(grep -m1 '^video_speed_kbs=' "$PROFILE_LOG"); $(grep -m1 '^video_speed_path=' "$PROFILE_LOG"))"
+    return 0
+  fi
+  fail "profile-log: no well-formed '^video_speed_kbs=<int>' line in LOGS\\PROFILE.LOG"
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # Scenario runner
 # ---------------------------------------------------------------------------
@@ -472,6 +492,7 @@ run_setup_phase() {
   # with a well-formed cpu_mhz_est line (realhw T30 calibration source-of-truth).
   collect_logs
   assert_profile_mhz || note_fail
+  assert_profile_video_speed || note_fail   # DF-UX Phase 2 startup bench witness
 }
 
 # run_doskutsu_phase <name> [capture] -- launch DOSKUTSU.EXE with the written
@@ -936,12 +957,14 @@ scenario_BKWB() {
   run_setup_audio "$name" wb "$CONF_FAST"
   assert_banner "setup-sb16-open" 'SB16 mixer balance:' || note_fail
   # The WB music path engaged SETUP's MPU-401 direct-port init (blind init).
-  # SDL/0093 (WB blind-default, dd1ef08) changed the default MPU init verb from
-  # "direct-port init" to "blind init" (no status-register read -> cannot stall
-  # the ISA bus; the T23B real freeze fix). The strict DRR-poll path still emits
-  # "direct-port init". Match either verb but keep the unique "mpu401: ... init
-  # at port_base=0x" line FORMAT as the anchor (grep_anchor_confound discipline).
-  assert_banner "setup-mpu401" 'mpu401:.*init at port_base=0x' || note_fail
+  # The WB MPU init banner proves the WaveBlaster path reached MPU programming.
+  # ANCHOR on the unique "mpu401: ... port_base=0x" line FORMAT only -- the init
+  # verb has drifted across SDL revisions (SDL/0093 "blind init" / "direct-port
+  # init", then SDL/0098 default-ON "cold-init DEFAULT-ON at" + "entry-ack drain
+  # at"); pinning the old "init at" verb stale-failed once cold-init went
+  # default-ON, so match any mpu401 line that programs a port_base
+  # (grep_anchor_confound discipline: anchor the stable FORMAT, not the verb).
+  assert_banner "setup-mpu401" 'mpu401:.*port_base=0x' || note_fail
   # DOSBox-X does not emulate the MPU-401/wavetable, so the MIDI arpeggio is
   # inaudible here -> documented skip; non-silence is the operator's real-HW check.
   assert_wav_nonsilent "$WAV_OUT"
@@ -1015,14 +1038,50 @@ scenario_HWBLASTER() {
     collect_logs
     assert_banner "config-load" 'config: loaded DOSKUTSU\.CFG \([0-9]+ keys\)' || note_fail
     # Authoritative override proven: the engine inits the MPU port on the CONFIG's
-    # P300, not the ambient P330. (SDL/0093 blind-default -> "blind init"; strict
-    # DRR-poll -> "direct-port init"; match either verb, keep the 0x0300 port
-    # anchor as the override discriminator -- a wrong P330 would read 0x0330.)
-    assert_banner "authoritative-mpu-port" 'mpu401:.*init at port_base=0x0300' || note_fail
+    # P300, not the ambient P330. ANCHOR on the 0x0300 port discriminator only --
+    # a wrong P330 would read 0x0330 (grep_anchor_confound: anchor to the unique
+    # value, not the verb). The init-verb prefix has drifted across SDL revisions
+    # ("blind init" / "direct-port init" / SDL/0098 "cold-init DEFAULT-ON at" /
+    # "entry-ack drain at"); pinning the old "init at" verb stale-failed once the
+    # WB cold-init went default-ON (SDL/0095/0098), so match any mpu401 line that
+    # programs port_base=0x0300.
+    assert_banner "authoritative-mpu-port" 'mpu401:.*port_base=0x0300' || note_fail
     assert_banner "wb-backend" 'MidiScheduler armed with MidiBackendWaveBlaster' || note_fail
   else
     log "  [SKIP] engine half (no build/doskutsu.exe)"
   fi
+  return $SCN_RC
+}
+
+# ---- Scenario EXPRESS: DF-UX Phase 2 one-key detect ----------------------
+# Sound submenu -> Express setup: a red warning modal, re-run the hardware
+# probes, an evidence modal (DSP version), then write the DETECTED BLASTER +
+# recommended backend to the session, offer the inline music test. The ambient
+# launch env sets BLASTER=A220 I5 D1 H5 T6 (launch_dosbox), so profile_detect
+# parses that exact card and Express composes it back into the session; the
+# recommended backend for a detected SB16 is opl3. We answer NO to the test
+# (the AUDIOTEST build's device bring-up is exercised by scenario_SETUPAUDIO;
+# here we assert the CFG write deterministically). The baseline CFG seeds a
+# DIFFERENT BLASTER so the assertion proves Express OVERWROTE it with detection.
+scenario_EXPRESS() {
+  local name="EXPRESS"; SCN_RC=0
+  log "=== Scenario $name: DF-UX Phase 2 Express one-key detect ==="
+  # Seed a deliberately-wrong baseline so the post-Express value proves detection.
+  { printf '; EXPRESS baseline (intentionally stale -- Express must overwrite)\r\n'
+    printf 'AUDIO_BACKEND=organya\r\n'
+    printf 'BLASTER=A240 I7 D3 H7 T1\r\n'
+  } > "$STAGE_DIR/DOSKUTSU.CFG"
+  # Sound(idx0)->submenu; Express(submenu row0): Home,Return.
+  #   screen_express: Return (dismiss red warning) -> profile_detect ->
+  #   Return (dismiss evidence) -> 'n' (decline the Test-it-now prompt).
+  #   -> submenu; Escape -> main; F10 = Save and Exit (writes CFG).
+  SCN_KEYS=( Home Return   Home Return   Return Return n   Escape   F10 )
+  run_setup_phase "$name" keep_cfg
+  # Express composed the DETECTED card (ambient A220 I5 D1 H5 T6) over the stale
+  # A240 baseline, and set the recommended SB16 backend opl3.
+  assert_cfg_line BLASTER 'A220 I5 D1 H5 T6' || note_fail
+  assert_cfg_line AUDIO_BACKEND opl3          || note_fail
+  # (assert_profile_video_speed already ran inside run_setup_phase.)
   return $SCN_RC
 }
 
@@ -1034,7 +1093,7 @@ require_tools
 ensure_stage
 start_xvfb
 
-ALL=(A B C AUDIO SETUPAUDIO HWBLASTER BKOPL3 BKWB BKORG BKORGCACHE)
+ALL=(A B C EXPRESS AUDIO SETUPAUDIO HWBLASTER BKOPL3 BKWB BKORG BKORGCACHE)
 if [[ -n "$ONLY" ]]; then ALL=("$ONLY"); fi
 
 OVERALL_RC=0
@@ -1043,6 +1102,7 @@ for s in "${ALL[@]}"; do
     A)          scenario_A ;;
     B)          scenario_B ;;
     C)          scenario_C ;;
+    EXPRESS)    scenario_EXPRESS ;;
     AUDIO)      scenario_AUDIO ;;
     SETUPAUDIO) scenario_SETUPAUDIO ;;
     HWBLASTER)  scenario_HWBLASTER ;;

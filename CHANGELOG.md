@@ -5,6 +5,43 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.3.0] - 2026-06-20
+
+High-quality audio tier and a Dark-Forces-style SETUP overhaul (Phase 2). All
+items validated on the reference 486 DX2-66 (S3 ViRGE / Cirrus / ATI Mach64).
+
+### Added
+
+- **Optional high-quality Organya tier.** `SDL_HINT_DOSKUTSU_AUDIO_TIER2=0`
+  switches Organya music to a 22050 Hz true-stereo pre-render (the default
+  stays the lighter 11025 Hz mono tier). The HQ tier costs noticeably more CPU
+  on a 486, so it is opt-in; build its cache with `make org-cache TIER=1`. See
+  `docs/CONFIG.md` / `docs/SETUP.md`.
+- **SETUP system profile + Express setup (Dark Forces UX Phase 2).** SETUP now
+  detects your CPU/MHz, RAM, sound hardware (SB16 port/IRQ/DMA, DSP version,
+  OPL3, WaveBlaster), and a video-speed benchmark, written to `LOGS\PROFILE.LOG`.
+  An Express path probes the hardware, shows a DETECTION COMPLETE summary, and
+  applies a recommended audio configuration in one step.
+- **Video-speed benchmark** in the SETUP system panel (on by default; disable
+  with `SET DOSKUTSU_SETUP_VIDEOBENCH=0`). Uses a mode-13h banked fill with a
+  text-mode fallback -- safe across S3 ViRGE, Cirrus, and ATI Mach64.
+
+### Changed
+
+- **SETUP Music screen.** The MIDI music-set list shows each set's DOS path and
+  track count; user drop-in sets collapse to one row plus "+N more" (the picker
+  still lists every set). The set scan now runs once per SETUP session and is
+  cached, so the Music screen opens instantly after the first entry instead of
+  re-scanning every directory.
+- **System Speed** auto-stamps the class your detected CPU maps to (e.g. a
+  DX2-66 reads Normal) instead of showing "(not set)".
+
+### Fixed
+
+- **SETUP display robustness.** The video-speed benchmark is run once and cached
+  so it cannot corrupt the live TUI mid-session; the DETECTION COMPLETE summary
+  is cleared before the follow-up dialog so modals no longer stack.
+
 ## [1.2.0] - 2026-06-18
 
 Input remapping + gameport joystick/flightstick support. Keyboard and joystick

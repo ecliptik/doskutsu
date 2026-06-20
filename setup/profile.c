@@ -65,6 +65,12 @@ int profile_write_log(const sysprofile_t *p)
   PL("vbe=%x.%x lfb=%d",
      (p->vbe_version >> 8) & 0xff, p->vbe_version & 0xff, p->vbe_lfb);
   PL("video_desc=%s", p->video_desc[0] ? p->video_desc : "unknown");
+  /* Phase 2 (DF-UX): timed video-memory fill. The KB/s is g2k-only evidence
+   * (DOSBox-X scaling is meaningless per dosbox_not_proxy); the line's mere
+   * presence + a non-negative value is the DOSBox witness. path records which
+   * fallback measured it (2 mode13h / 3 text-B800 / 0 none). */
+  PL("video_speed_kbs=%d", p->video_speed_kbs);
+  PL("video_speed_path=%d", p->video_speed_path);
 #undef PL
   fclose(fp);
   return 0;
@@ -160,7 +166,11 @@ static unsigned long long read_tsc(void)
 
 /* A fixed chunk of volatile work for the 486 fallback calibration. `k` is
  * volatile so -O2 cannot hoist or elide the loop out of the timing window. */
-static void busy_chunk(void)
+/* noinline + 16-byte aligned so this loop's address/alignment is PINNED: its
+ * 486 per-iteration cycle cost (and thus the MHz calibration below) no longer
+ * drifts when unrelated code changes shift the binary layout. (Removing the
+ * LFB bench code had shifted it and made a DX2-66 read ~78 instead of ~66.) */
+static void __attribute__((noinline, aligned(16))) busy_chunk(void)
 {
   volatile int k;
   for (k = 0; k < 1000; ++k) { /* volatile load/add/store/cmp/branch */ }
@@ -172,12 +182,13 @@ static void busy_chunk(void)
 
 /* 486 fallback: empirical chunks-per-window -> MHz divisor. busy_chunk is
  * ~1000 volatile-int iterations; chunks-per-window scale with the core clock.
- * CALIBRATION (g2k DX2-66 read 34 @ DIV 27000, 2026-06-11): the busy loop is
- * write-buffer / bus-bound and counts at ~half the core clock, so the raw
- * divisor over-reads by ~2x. Back-solved DIV' = 27000 * 34/66 ~ 13909; rounded
- * to a clean 13900. Post-fix a DX2-66 reads ~66, so the bucket threshold below
- * (>=60 -> MID) self-corrects and the panel shows "~66 MHz". */
-#define MHZ_486_LOOP_DIV 13900UL
+ * CALIBRATION: with busy_chunk now PINNED (noinline+aligned, see above) the
+ * count is layout-stable, so this constant stays valid across builds. The
+ * pre-pin DIV 13900 made a DX2-66 read ~78 once the loop shifted; recalibrated
+ * DIV' = 13900 * 78/66 ~ 16427 -> rounded to 16400 to bring it back to ~66.
+ * RE-CONFIRM the DX2-66 reading once on real HW and adjust this one constant if
+ * it is not ~66 -- it will then hold (the loop no longer drifts). */
+#define MHZ_486_LOOP_DIV 16400UL
 
 /* Estimate CPU MHz.
  *
@@ -456,6 +467,143 @@ static int mpu401_present(int base)
   return 0;
 }
 
+/* ---- Video Speed benchmark (DF-UX Phase 2) -------------------------------
+ *
+ * Timed REP STOSL fill of video memory -> KB/s, the "Machine Video Speed"
+ * figure (mirrors DF's installer speed read). Two paths, primary-then-fallback:
+ *   (2) mode 13h A000 -- set mode 13h (universal 320x200x8 VGA), fill the
+ *       64000-byte A000 page bounded by a BIOS-tick window, restore text mode 3
+ *       (one brief visible flash). Same banked-write class the game uses for its
+ *       banked copy-present, proven safe on the S3 ViRGE. This is the PRIMARY.
+ *   (3) text B800 fill -- no mode change, bus-width-only (NOT representative);
+ *       last resort if the mode 13h set fails.
+ * The old VBE-LFB path (path 1: a scattered 0x4F02 linear-framebuffer fill
+ * during scanout) was REMOVED -- it wedged the S3 ViRGE memory controller, a
+ * HW-IO failure DOSBox cannot reproduce, so it cannot be timeout-guarded. Both
+ * paths flat-access video RAM through __djgpp_nearptr (CWSDPMI maps the low
+ * 1 MB). Integer-only (no FPU assumption -- SETUP runs on no-FPU boxes to print
+ * the FPU warning), bounded by a fixed BIOS-tick window (never hangs), text mode
+ * 3 restored after the graphics path. The KB/s is g2k-only evidence; under
+ * DOSBox-X it just proves the path runs + a number is produced (dosbox_not_proxy).
+ * Runs once at startup BEFORE tui_init, so the mode flash precedes the TUI
+ * taking the screen. */
+
+#include <sys/nearptr.h>
+
+#define VBENCH_WIN_TICKS 4         /* ~219.7 ms fixed timing window           */
+#define VBENCH_US_PER_TICK 54925ULL /* 1 BIOS tick @ 18.2065 Hz = 54.925 ms   */
+
+/* REP STOSL `count` dwords of `val` to the flat linear address `dst` (valid as
+ * a near pointer with nearptr enabled: DS base 0, ES==DS). */
+static void vbench_fill(unsigned long dst, unsigned long val, unsigned long count)
+{
+  __asm__ __volatile__("cld\n\trep stosl"
+                       : "+D"(dst), "+c"(count)
+                       : "a"(val)
+                       : "memory");
+}
+
+/* Fill [base_flat, +region_bytes) repeatedly for VBENCH_WIN_TICKS BIOS ticks;
+ * return KB/s. region_bytes is rounded down to a dword multiple. 64-bit math so
+ * the byte*1e6 product cannot overflow a 32-bit long. */
+static int vbench_measure(unsigned long base_flat, unsigned long region_bytes)
+{
+  unsigned long dwords = region_bytes >> 2;
+  unsigned long passes = 0, val = 0;
+  long t0, t1;
+  int  ticks = 0;
+  unsigned long long total_bytes, elapsed_us;
+
+  if (dwords == 0) return 0;
+  t0 = biostime(0, 0L);
+  while ((t1 = biostime(0, 0L)) == t0) { /* align to a tick edge */ }
+  t0 = t1;
+  while (ticks < VBENCH_WIN_TICKS)
+  {
+    vbench_fill(base_flat, val, dwords);
+    val += 0x04040404UL;                  /* vary so it is a real fill        */
+    ++passes;
+    t1 = biostime(0, 0L);
+    if (t1 != t0) { t0 = t1; ++ticks; }
+  }
+  total_bytes = (unsigned long long)passes * (unsigned long long)(dwords << 2);
+  elapsed_us  = (unsigned long long)ticks * VBENCH_US_PER_TICK;
+  if (elapsed_us == 0) return 0;
+  return (int)((total_bytes * 1000000ULL) / elapsed_us / 1024ULL);
+}
+
+/* Set text mode 3 (80x25 color) -- restore after any graphics-mode bench. */
+static void vbench_restore_text(void)
+{
+  __dpmi_regs r;
+  memset(&r, 0, sizeof r);
+  r.x.ax = 0x0003;
+  __dpmi_int(0x10, &r);
+}
+
+/* Run the video-speed benchmark, filling p->video_speed_kbs + _path. */
+static void detect_video_speed(sysprofile_t *p)
+{
+  static int s_done = 0, s_kbs = 0, s_path = 0;
+  __dpmi_regs r;
+  const char *vbench;
+
+  /* Measure ONCE and cache. The result is fixed hardware, and re-running the
+   * mode-13h flash mid-session (profile_detect is re-called when Express
+   * re-probes) scrambles the live text screen -- the redraw afterward leaves a
+   * broken box border + patchy backdrop. So the one flash happens at startup
+   * (before tui_init); later calls reuse the cached value, no flash. */
+  if (s_done)
+  {
+    p->video_speed_kbs  = s_kbs;
+    p->video_speed_path = s_path;
+    return;
+  }
+  s_done = 1;   /* whatever happens below, never re-run the flash */
+
+  p->video_speed_kbs  = 0;
+  p->video_speed_path = 0;
+
+  /* DEFAULT ON. The old VBE-LFB path (scattered 0x4F02 linear-framebuffer fill
+   * during scanout) wedged the S3 ViRGE memory controller and was REMOVED; this
+   * bench uses only the safe mode-13h A000 fill (+ text-B800 fallback), the same
+   * banked-write class the game's banked copy-present uses. Validated no-hang
+   * with real KB/s on the S3 ViRGE, Cirrus CL-GD5430, and ATI Mach64 (operator,
+   * 2026-06-19), so it runs by default (one brief mode-13h flash at startup).
+   * Killswitch DOSKUTSU_SETUP_VIDEOBENCH=0 disables it -> panel "(speed n/a)". */
+  vbench = getenv("DOSKUTSU_SETUP_VIDEOBENCH");
+  if (vbench && strcmp(vbench, "0") == 0)
+    return;   /* killswitch: bench disabled (kbs=0/path=0) */
+
+  if (!__djgpp_nearptr_enable())
+    return;   /* DPMI host forbids flat access -> no representative bench */
+
+  /* (2) PRIMARY: mode 13h A000 -- universal 320x200x8 VGA, the same banked-
+   * write class the game's banked copy-present uses (proven safe on the S3).
+   * Set mode 13h, fill the 64000-byte A000 page bounded by the tick window,
+   * restore text mode 3. */
+  memset(&r, 0, sizeof r);
+  r.x.ax = 0x0013;
+  if (__dpmi_int(0x10, &r) >= 0)
+  {
+    p->video_speed_kbs  = vbench_measure(0xA0000UL + __djgpp_conventional_base, 63999UL & ~3UL);
+    p->video_speed_path = 2;
+    vbench_restore_text();
+  }
+
+  /* (3) FALLBACK: text B800 -- bus-width only, no mode change. Last resort if
+   * the mode 13h set above failed. */
+  if (p->video_speed_kbs <= 0)
+  {
+    p->video_speed_kbs  = vbench_measure(0xB8000UL + __djgpp_conventional_base, 0x8000UL);
+    p->video_speed_path = 3;
+  }
+
+  __djgpp_nearptr_disable();   /* restore memory protection */
+  s_kbs  = p->video_speed_kbs;   /* cache so re-probes never re-flash the screen */
+  s_path = p->video_speed_path;
+}
+
 void profile_detect(sysprofile_t *p)
 {
   int fm_base;
@@ -475,6 +623,10 @@ void profile_detect(sysprofile_t *p)
 
   /* SB16 DSP version (0xE1) on the BLASTER base port -- fixes dsp=0.0. */
   dsp_version(p);
+
+  /* Video Speed fill bench LAST (it leaves a mode flash; runs before tui_init
+   * which retakes the screen). DF-UX Phase 2. */
+  detect_video_speed(p);
 }
 
 #else /* host build: representative stub so logic stays testable */
@@ -500,7 +652,9 @@ void profile_detect(sysprofile_t *p)
   p->has_waveblaster = 1;
   p->vbe_version = 0x0102;
   p->vbe_lfb = 1;
-  strcpy(p->video_desc, "Cirrus CL-GD5430 (host stub)");
+  strcpy(p->video_desc, "S3 ViRGE (host stub)");
+  p->video_speed_kbs  = 17000; /* representative POD83 sysmem-ish fill (host) */
+  p->video_speed_path = 2;     /* mode13h -- the only graphics path now */
 }
 
 #endif /* __DJGPP__ */

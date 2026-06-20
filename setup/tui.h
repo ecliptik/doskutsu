@@ -189,6 +189,11 @@ int tui_menu(int x, int y, int w, const char *title,
 /* Modal message box; waits for a keypress. */
 void tui_message(const char *title, const char *const *lines, int n);
 
+/* Like tui_message, but the body lines render in the palette WARN role (red on
+ * the Cave-Story palette) -- the DF "Detect warning" (3328) danger modal shown
+ * before the Express hardware probe. Waits for a keypress. */
+void tui_message_warn(const char *title, const char *const *lines, int n);
+
 /* The standard Yes/No prompt (T52): a centered modal with a wrapped question
  * and a vertical Yes/No menu (Up/Down + Enter, Y / N shortcuts). default_no
  * sets the initial highlight (1 = No, for destructive prompts; 0 = Yes).

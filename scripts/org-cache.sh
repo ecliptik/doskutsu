@@ -43,8 +43,9 @@ ORGN="$(ls "$REPO_ROOT"/data/org/*.org 2>/dev/null | wc -l | tr -d ' ')"
 command -v dosbox-x >/dev/null || { echo "[org-cache] error: dosbox-x not on PATH" >&2; exit 1; }
 if pgrep -x dosbox-x >/dev/null; then echo "[org-cache] error: dosbox-x already running -- kill it first (no concurrent instances)" >&2; exit 1; fi
 if [ "$TIER" = "1" ]; then
-  echo "[org-cache] warning: Tier-1 (22050 stereo) render path is mono-only in patch 0215;" >&2
-  echo "           precacheAllOrgs guards + skips a stereo tier. Use TIER=2 for the shippable LQ set." >&2
+  echo "[org-cache] note: Tier-1 (22050 stereo) HQ set -- true interleaved-stereo render" >&2
+  echo "           (patch 0231, v1.0.9). Larger cache + real fps cost on 486-class HW;" >&2
+  echo "           TIER=2 is the lighter LQ (11025 mono) default. Both sets coexist." >&2
 fi
 
 echo "[org-cache] binary : $ORGCACHE_EXE"

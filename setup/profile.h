@@ -43,9 +43,11 @@ typedef struct
   int         has_opl3;       /* YMF262 timer test passed                */
 
   /* Video */
-  int         vbe_version;    /* BCD, e.g. 0x0200 == VBE 2.0; 0 unknown  */
-  int         vbe_lfb;        /* 1 if a linear framebuffer mode exists   */
-  char        video_desc[40]; /* OEM / chip string                       */
+  int         vbe_version;     /* BCD, e.g. 0x0200 == VBE 2.0; 0 unknown  */
+  int         vbe_lfb;         /* 1 if a linear framebuffer mode exists   */
+  char        video_desc[40];  /* OEM / chip string                       */
+  int         video_speed_kbs; /* timed video-mem fill, KB/s; 0 unknown   */
+  int         video_speed_path;/* 0 none / 1 VBE-LFB / 2 mode13h / 3 B800 */
 } sysprofile_t;
 
 /* Fill p by probing the host. Safe to call once at startup. */

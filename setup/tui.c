@@ -658,7 +658,11 @@ int tui_menu(int x, int y, int w, const char *title,
   }
 }
 
-void tui_message(const char *title, const char *const *lines, int n)
+/* Shared modal renderer: body lines in `body_fg`, then "Press a key..." +
+ * decorate + wait. tui_message uses the body role; tui_message_warn the warn
+ * (red) role for the DF 3328 danger modal. */
+static void tui_message_col(const char *title, const char *const *lines, int n,
+                            int body_fg)
 {
   int i, iw = (int)strlen(title);
   int x, y, w, rows = 0, ry;
@@ -686,12 +690,22 @@ void tui_message(const char *title, const char *const *lines, int n)
   ry = y + 1;
   for (i = 0; i < n; ++i)
   {
-    int c = tui_wrap(x + 2, ry, iw, rows, g_pal->body, g_pal->bg, lines[i]);
+    int c = tui_wrap(x + 2, ry, iw, rows, body_fg, g_pal->bg, lines[i]);
     ry += (c > 0) ? c : 1;
   }
   tui_at(x + 2, y + rows + 2, g_pal->title, g_pal->bg, "Press a key...");
   tui_popup_decorate(x, y, w, rows + 4); /* T55: differentiate from the backdrop */
   (void)tui_getkey();
+}
+
+void tui_message(const char *title, const char *const *lines, int n)
+{
+  tui_message_col(title, lines, n, g_pal->body);
+}
+
+void tui_message_warn(const char *title, const char *const *lines, int n)
+{
+  tui_message_col(title, lines, n, g_pal->warn_fg);
 }
 
 /* The single standard Yes/No prompt (T52): a centered modal box with a wrapped
