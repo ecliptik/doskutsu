@@ -400,6 +400,7 @@ BANNER_REGEX=(
   "audio: SDL/0106 SB DMA-path decision: is_sb16=[01] force_8bit=[01] dsp_ver=-?[0-9]+ highdma=-?[0-9]+ -> (16-bit-high-DMA|8-bit-low-DMA) path"
   "mpu401: SDL/0106 WB init result=(OK|FAILED) port_base=0x[0-9a-fA-F]+ drr_poll_enabled=[01] drr_cap=[0-9]+ drr_cap_hits=[0-9]+"
   "audio: SDL/0107 8-bit channel mode: ch=[12] \((MONO|STEREO)\) tc=-?[0-9]+ effective=[0-9]+ Hz stereo_bit=(yes|no) ring_silence_primed=yes"
+  "audio: SDL/0108 pixtone IRQ-mix format: (S16-stereo|U8-stereo|U8-mono) \(device is_16bit=[01] channels=[12]\)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -506,6 +507,7 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
   "optional"
   "optional"
 )
@@ -625,6 +627,7 @@ BANNER_LABEL=(
   "SDL/0106 SB DMA-path decision (REQUIRED -- 'audio: SDL/0106 SB DMA-path decision: is_sb16=.. force_8bit=.. dsp_ver=.. highdma=.. -> (16-bit-high-DMA|8-bit-low-DMA) path' emits every boot at SB detection; the PicoGUS-in-SB-mode 8-bit-DMA unblock + DMA-path witness (patches/SDL/0106). Embed witness = strings|grep 'SDL/0106'. BANNER_REGEX idx 103.)"
   "SDL/0106 WB MPU-401 init-result witness (OPTIONAL -- 'mpu401: SDL/0106 WB init result=(OK|FAILED) port_base=.. drr_poll_enabled=.. drr_cap=.. drr_cap_hits=..' emits at SDL_DOSMpu401Init, ONLY when the WB MIDI path engages (AUDIO_BACKEND=wb or auto-detect picks WB). Default DOSBox-X smoke falls through WB -> OPL3 (no DreamBlaster S2 emulated) so typically ABSENT -- expected, not a failure (same gating as the patch-0080 mpu401 direct-port banner). The init-time companion of the sb.c CloseDevice WB/MPU run-end witness; together they bracket the wave-40 REFUTE_MPU_TIMEOUT field (DreamBlaster S2 output-buffer-busy stuck after byte 1) for the PicoGUS case. Embed witness = strings|grep 'WB init result'. BANNER_REGEX idx 104.)"
   "SDL/0107 8-bit MONO + ring silence-prime witness (OPTIONAL -- 'audio: SDL/0107 8-bit channel mode: ch=1 (MONO) tc=.. effective=.. Hz stereo_bit=no ring_silence_primed=yes ...' emits at OpenDevice ONLY on the pre-SB16 8-bit DMA path. DOSBox-X emulates an SB16 (DSP 4.x + high DMA) so is_sb16=true and the 8-bit branch never runs -> ABSENT under the default smoke, expected, not a failure (same g2k-only gating as the wave-49 Cirrus-BLT banner). The g2k PicoGUS-in-SB-mode iter is the runtime witness: ch=1/MONO/no-stereo-bit confirms the SDL/0107 chipmunk-pitch fix; ring_silence_primed=yes confirms the U8 0x80 ring prime (loud-pop fix). Killswitch SDL_HINT_DOSKUTSU_AUDIO_SB_8BIT_STEREO=1 restores prior SB-Pro 8-bit STEREO (would emit ch=2/STEREO/yes). Embed witness = strings|grep 'SDL/0107'. BANNER_REGEX idx 105.)"
+  "SDL/0108 8-bit U8 Pixtone IRQ-mix format (OPTIONAL -- 'audio: SDL/0108 pixtone IRQ-mix format: (S16-stereo|U8-stereo|U8-mono) (device is_16bit=.. channels=..)' emits at OpenDevice ONLY when Lever-3 Pixtone IRQ-mix is active (default-ON; absent under AUDIO_BACKEND=organya or PIXTONE_IRQ_MIX=0). DOSBox-X emulates an SB16 so it emits the S16-stereo variant (byte-identical 16-bit path); g2k PicoGUS-in-SB-mode emits U8-mono -- the decisive witness that the SFX-distortion fix engaged (the ISR now writes U8 centered on 0x80 with the correct mono stride instead of S16-stereo into the U8 ring). No new env var (rides the existing PIXTONE_IRQ_MIX killswitch). Embed witness = strings|grep 'SDL/0108'. BANNER_REGEX idx 106.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
