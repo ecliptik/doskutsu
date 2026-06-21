@@ -1,0 +1,202 @@
+From 48b9400989adaf91613c6a82dde1956815c9f597 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 20 Jun 2026 22:03:55 -0700
+Subject: [PATCH] dos: patch 0107 -- SB 8-bit DMA path -> MONO output + ring
+ silence-prime
+
+The SDL/0106 graceful 8-bit-DMA fall-back unblocked audio on a PicoGUS in
+SB mode (g2k iter wpgsb1: IRQ-5 fires, the 8-bit low-DMA D-channel path is
+selected), but the 8-bit path itself opened the device SB-Pro STEREO: for a
+DSP >= 3 card it set channels=2, doubled the time-constant byte rate via the
+0x40 time constant, and wrote the SB-Pro 0x0E stereo mixer bit. A PicoGUS in
+SB mode and a real SB 2.0 report DSP 3.x/4.x but do NOT implement SB-Pro
+alternate-byte stereo demux, so that program plays at the wrong effective
+rate -- music came out ~an octave too high ("chipmunk") with distortion.
+Separately the software ring buffer is SDL_calloc-zeroed to 0x00, which is
+correct silence for S16 (16-bit) but is full-negative DC for U8 (8-bit), so
+on the 8-bit path the ring played a loud pop/"static-burst" before the
+loading screen until the first real fill landed.
+
+Why DOS needs this: the pre-SB16 8-bit path must not assume SB-Pro stereo.
+Two fixes, both scoped strictly to the 8-bit branch:
+
+  1. MONO by default. The 8-bit format/channel select now opens channels=1
+     (U8 mono). The shared effective_rate = channels*freq time-constant
+     formula then yields tc = 256 - 1000000/freq (no channel doubling;
+     11025 -> tc=166, effective=11025), and the 0x0E stereo mixer bit is
+     gated on the actual channels==2 so MONO leaves it unwritten. SDL's
+     logical->physical audiostream downmixes the engine's (mono-content)
+     app stream to the mono device losslessly.
+  2. Ring silence-prime. At OpenDevice, after the ring is allocated and
+     before the 0xD1 speaker-on + 0x1C auto-init DMA start, the software
+     ring is memset to soundblaster_silence_value (0x80 on this path).
+     Gated on !is_sb16.
+
+Killswitch SDL_HINT_DOSKUTSU_AUDIO_SB_8BIT_STEREO=1 (strict-"1", default 0)
+restores the prior SB-Pro 8-bit STEREO program (channels=2 + 0x0E bit) for a
+genuine SB Pro (DSP 3.x) that supports it; a DSP < 3 card has no SB-Pro
+stereo so the flag cannot force it there.
+
+BYTE-IDENTICAL for the 16-bit SB16 path (is_sb16==true, Vibra16): all SDL/0107
+code lives inside the `else` (8-bit) branch of the format/channel select and
+under `if (!is_sb16)` for the ring prime; the is_sb16 branch sets S16LE/ch=2
+exactly as before, no SDL_GetHint runs on that path, and no ring memset is
+added (its silence value is 0x00, already produced by the calloc). DOSBox-X
+emulates an SB16 so it stays on the 16-bit path and is unaffected.
+
+Diagnostics: a new always-on (8-bit-branch) banner
+  audio: SDL/0107 8-bit channel mode: ch=N (MONO|STEREO) tc=T effective=E Hz
+  stereo_bit=(yes|no) ring_silence_primed=yes ...
+lets build-qa/g2k witness ch=1 / MONO / no-stereo-bit / silence-primed. The
+existing SDL/0106 8-bit DSP-start-seq banner's stereo-bit suffix now keys on
+channels==2 (not DSP>=3) so it stays accurate. The new banner is an OPTIONAL
+smoke entry (8-bit-only; DOSBox-X SB16 never runs the branch).
+
+Workspace-local patch; not upstreamed (sdl_ai_policy).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 96 +++++++++++++++++++++++++++------
+ 1 file changed, 80 insertions(+), 16 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 842d14040..c72d4cf1a 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -2351,15 +2351,42 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         // SB16 (DSP >= 4): 16-bit stereo signed
+         device->spec.format = SDL_AUDIO_S16LE;
+         device->spec.channels = 2;
+-    } else if (soundblaster_version >= 3) {
+-        // SB Pro (DSP 3.x): 8-bit stereo unsigned.
+-        // Max 22050 Hz in stereo (hardware interleaves L/R at double the rate).
+-        device->spec.format = SDL_AUDIO_U8;
+-        device->spec.channels = 2;
+     } else {
+-        // SB 2.0 (DSP 2.x) and SB 1.x: 8-bit mono unsigned.
++        /* DOSKUTSU patch (SDL/0107): 8-bit (pre-SB16) channel mode. DEFAULT =
++           MONO. The pre-patch code opened SB-Pro alternate-byte STEREO whenever
++           the DSP reported >= 3 (channels=2 + the 2x-byte-rate time constant +
++           the 0x0E stereo mixer bit). A PicoGUS-in-SB-mode card and a real SB
++           2.0 report DSP 3.x/4.x but do NOT implement SB-Pro alternate-byte
++           stereo demux, so that stereo program plays at the wrong effective
++           rate (chipmunk pitch) + distortion on g2k. Open MONO instead: the
++           time constant becomes 256 - 1000000/freq (no channel doubling; the
++           shared effective_rate = channels*freq formula yields freq for ch=1),
++           the 0x0E stereo bit is left unwritten (below), and SDL's logical->
++           physical audiostream downmixes the (already mono-content) app stream
++           to the mono device losslessly.
++
++           Killswitch SDL_HINT_DOSKUTSU_AUDIO_SB_8BIT_STEREO=1 (strict-"1",
++           default 0) restores the prior SB-Pro 8-bit STEREO program for a
++           genuine SB Pro (DSP >= 3) that DOES support it. A DSP < 3 card has no
++           SB-Pro stereo at all, so the killswitch cannot force stereo there
++           (matches the pre-patch SB 2.0 / 1.x mono behavior). All SDL/0107 new
++           code lives inside this else (8-bit) branch -- the is_sb16 (16-bit)
++           path above is byte-identical to pre-0107. */
++        const char *sb8_stereo_hint =
++            SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_SB_8BIT_STEREO");
++        const bool sb_8bit_stereo =
++            (sb8_stereo_hint && sb8_stereo_hint[0] == '1' && sb8_stereo_hint[1] == '\0');
++
+         device->spec.format = SDL_AUDIO_U8;
+-        device->spec.channels = 1;
++        if (sb_8bit_stereo && soundblaster_version >= 3) {
++            // Killswitch ON: prior SB Pro (DSP 3.x) 8-bit STEREO (L/R interleaved
++            // at 2x the per-channel byte rate; the 0x0E stereo bit is set below).
++            device->spec.channels = 2;
++        } else {
++            // Default: 8-bit MONO -- correct effective rate on PicoGUS-SB /
++            // real SB 2.0 (no SB-Pro stereo demux); also the DSP < 3 mono path.
++            device->spec.channels = 1;
++        }
+     }
+ 
+     // Accept whatever frequency SDL3's audio layer passes in. For SB16 (DSP >= 4)
+@@ -2698,6 +2725,22 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+     isr_is_16bit = is_sb16;
+     isr_silence_value = soundblaster_silence_value;
+ 
++    /* DOSKUTSU patch (SDL/0107): silence-prime the software ring buffer on the
++       8-bit (U8) path BEFORE the speaker turns on (0xD1) and the auto-init DMA
++       starts (0x1C). SDL_calloc above zero-fills the ring to 0x00, which is the
++       correct silence value for S16LE (16-bit) but is FULL-NEGATIVE DC for U8
++       -- so on the 8-bit path any ring bytes consumed before the SDL audio
++       thread first fills real audio play as a loud pop/static burst (heard on
++       g2k before the loading screen). Re-prime to the U8 silence value (0x80,
++       == soundblaster_silence_value on this path). Gated on !is_sb16 so the
++       16-bit path is byte-identical to pre-0107 (its silence value is 0x00,
++       already produced by the calloc; no memset is added on that path). The
++       DMA double-buffer is separately primed to soundblaster_silence_value at
++       allocation above; this covers the ring that feeds it. */
++    if (!is_sb16) {
++        SDL_memset(hidden->ring_buffer, soundblaster_silence_value, hidden->ring_size);
++    }
++
+     // Lock all ISR code and data to prevent page faults during interrupts.
+     DOS_LockCode(SoundBlasterIRQHandler, SoundBlasterIRQHandler_End);
+     DOS_LockCode(RingCopyOut, RingCopyOut_End);
+@@ -2918,16 +2961,19 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         WriteSoundBlasterDSP(0x40); // set time constant
+         WriteSoundBlasterDSP(time_constant);
+ 
+-        // SB Pro (DSP 3.x): enable or disable stereo via mixer register 0x0E
+-        if (soundblaster_version >= 3) {
++        /* DOSKUTSU patch (SDL/0107): program the SB-Pro stereo mixer bit (0x0E)
++           ONLY when actually opening 8-bit STEREO (the SB_8BIT_STEREO killswitch
++           path on a genuine DSP >= 3 SB Pro -> channels == 2). The default MONO
++           path leaves 0x0E untouched: PicoGUS-in-SB-mode / real SB 2.0 do not
++           implement SB-Pro stereo and the register is meaningless to them.
++           For every pre-0107 code path channels == 2 iff the old `version >= 3`
++           gate selected stereo, so the genuine-SB-Pro stereo program is
++           byte-identical (select 0x0E, set bit 1). */
++        if (device->spec.channels == 2) {
+             const int mixer_addr = soundblaster_base_port + 0x04;
+             const int mixer_data = soundblaster_base_port + 0x05;
+             outportb(mixer_addr, 0x0E); // select output/stereo register
+-            if (device->spec.channels == 2) {
+-                outportb(mixer_data, inportb(mixer_data) | 0x02); // set bit 1 = stereo
+-            } else {
+-                outportb(mixer_data, inportb(mixer_data) & ~0x02); // clear bit 1 = mono
+-            }
++            outportb(mixer_data, inportb(mixer_data) | 0x02); // set bit 1 = stereo
+         }
+ 
+         // start 8-bit auto-initialize DMA mode
+@@ -2945,13 +2991,31 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+            the 8-bit (pre-SB16 / PicoGUS-SB / SB2.0-class) path. This is the
+            sequence the PicoGUS-SB now reaches after the SDL/0106 graceful
+            fall-back; if IRQ-5 still never fires, the OpenDevice-DMA + this
+-           line bracket exactly where the chip was last touched. */
++           line bracket exactly where the chip was last touched. SDL/0107: the
++           stereo-bit suffix now keys on the actual channel count (channels==2)
++           rather than DSP>=3, since the 8-bit path defaults to MONO. */
+         doskutsu_dbg_log("audio: SDL/0106 DSP start seq (8-bit): 0xD1(spkr-on) "
+                          "0x40 tc=%d (rate=%d effective=%d) 0x48 block_size=%d "
+                          "(bytes-1) 0x1C(8-bit autoinit)%s",
+                          (int)time_constant, device->spec.freq, effective_rate,
+                          block_size,
+-                         (soundblaster_version >= 3) ? " +mixer0x0E stereo-bit" : "");
++                         (device->spec.channels == 2) ? " +mixer0x0E stereo-bit" : "");
++
++        /* DOSKUTSU patch (SDL/0107): 8-bit channel-mode + silence-prime witness.
++           The decisive line for the PicoGUS-SB fix iter -- build-qa/g2k read it
++           to confirm the 8-bit device opened MONO (ch=1, effective == freq, no
++           0x0E stereo bit) and that the ring was silence-primed to U8 0x80.
++           Emits only on the 8-bit path (DOSBox-X emulates SB16 so it will not
++           fire under the default smoke -- optional banner; g2k PicoGUS-SB is
++           where it appears). Names the killswitch for the operator. */
++        doskutsu_dbg_log("audio: SDL/0107 8-bit channel mode: ch=%d (%s) tc=%d "
++                         "effective=%d Hz stereo_bit=%s ring_silence_primed=yes "
++                         "(killswitch SDL_HINT_DOSKUTSU_AUDIO_SB_8BIT_STEREO=1 "
++                         "restores SB-Pro stereo)",
++                         device->spec.channels,
++                         (device->spec.channels == 2) ? "STEREO" : "MONO",
++                         (int)time_constant, effective_rate,
++                         (device->spec.channels == 2) ? "yes" : "no");
+     }
+ 
+     SDL_Log("SoundBlaster opened!");
+-- 
+2.47.3
+
