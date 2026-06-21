@@ -1,0 +1,221 @@
+From 26893e1c73cae06ea67e75114fb4c9777ce4e285 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 21 Jun 2026 00:47:52 -0700
+Subject: [PATCH 1/2] patch 0232 -- opl3: honor patch[11] int8 transpose +
+ 8.3-safe bank filename
+
+The DOPL3v1 runtime patch-bank loader (patch 0141) carried two latent
+defects that only surface once a real bank is actually shipped:
+
+1. 8.3 filename. The loader fopen'd "opl3-patches.dat" -- a 12-char base
+   name that violates DOS 8.3. ResourceManager::getPath does no 8.3
+   translation, so on the real MS-DOS target (g2k, no LFN driver) the
+   engine asks for a name that cannot exist on an 8.3 FAT: the file is
+   reported "not found" and the engine silently falls back to the 8-patch
+   placeholder. Proven by DOSBox-X A/B (lfn=true loads 128; lfn=false
+   not-found). Renamed to the 8.3-valid "opl3bank.dat" (fopen name + all
+   log banners that print the filename).
+
+2. patch[11] transpose never implemented. The DOPL3v1 record byte [11] is
+   the engine-applied semitone transpose -- SDL_DOSOpl3VoiceWritePatch
+   deliberately does `(void)patch[11]` ("engine applies before NoteOn"),
+   but note_on ignored it. Real GM OPL banks (DMXOPL and every DMX/GENMIDI
+   bank) voice instruments expecting playednote = midinote + offset; ~110
+   of 128 programs carry -12. Without the transpose those play an octave
+   too high (brighter/thinner). note_on now reads patch[11] as int8 and
+   applies it to the value passed to the (fnum, block) calc only; the
+   tracked midi_note is unchanged so note_off / _find_voice matching is
+   unaffected.
+
+Default-ON, no killswitch: the 8-patch placeholder constexprs all have
+[11]=0, so with no opl3bank.dat present the transpose is 0 and behavior is
+byte-identical to pre-0232.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendOpl3.cpp | 57 +++++++++++++++++++++++------------
+ 1 file changed, 38 insertions(+), 19 deletions(-)
+
+diff --git a/src/sound/MidiBackendOpl3.cpp b/src/sound/MidiBackendOpl3.cpp
+index 04a7286f..b6bacc7f 100644
+--- a/src/sound/MidiBackendOpl3.cpp
++++ b/src/sound/MidiBackendOpl3.cpp
+@@ -33,7 +33,7 @@
+  * sound like noise envelopes. That's expected for the Stage 4
+  * baseline. Phase 10.5 follow-up may swap in a fuller community bank
+  * (e.g., libADLMIDI's wohlstand_default OPL3 bank, ~175 patches
+- * MIT-licensed) via the runtime `data/opl3-patches.dat` loader when
++ * MIT-licensed) via the runtime `data/opl3bank.dat` loader when
+  * operator-listening feedback identifies which Cave Story tracks need
+  * better timbral fidelity. team-lead's THIRD-PARTY.md backlog will
+  * track attribution for whichever full bank gets adopted; the
+@@ -229,7 +229,7 @@ static constexpr uint8_t PATCH_DRUM[12] = {
+ // in audibly-wrong patches (Shack scene MIDI-stop on PLAY3/PLAY4 of
+ // wave-44; operator report). The original Phase 10.5 plan called out the
+ // runtime-loader hook in the existing banner: "may swap in a fuller
+-// community bank via runtime data/opl3-patches.dat loader when operator
++// community bank via runtime data/opl3bank.dat loader when operator
+ // listening identifies tracks needing better timbre."
+ //
+ // This patch implements the loader path only. The .dat data file is a
+@@ -240,7 +240,7 @@ static constexpr uint8_t PATCH_DRUM[12] = {
+ // present + valid, per-program lookups consult the loaded 128-entry
+ // table instead.
+ //
+-// File format `data/opl3-patches.dat` (binary):
++// File format `data/opl3bank.dat` (binary):
+ //   offset  size  field
+ //   ------  ----  -----
+ //   0       8     magic: ASCII "DOPL3v1\n" (the \n is byte 0x0A)
+@@ -259,7 +259,7 @@ static constexpr uint8_t PATCH_DRUM[12] = {
+ //
+ // Loader behavior:
+ //   - At MidiBackendOpl3 ctor (after SDL_DOSOpl3Detect succeeds), try to
+-//     fopen data/opl3-patches.dat via ResourceManager::getPath.
++//     fopen data/opl3bank.dat via ResourceManager::getPath.
+ //   - On any failure (file missing, wrong magic, bad version, truncated
+ //     header, truncated payload, bad reserved field), LOG_WARN with
+ //     specific reason + leave _loaded_patch_bank_count = 0. Engine falls
+@@ -280,18 +280,18 @@ static int     _loaded_patch_bank_count = 0;  // 0 = not loaded; loader uses
+                                               // this as both "is-loaded" flag
+                                               // AND ceiling for fallback.
+ 
+-// Try to load data/opl3-patches.dat. Returns true on success (sets
++// Try to load data/opl3bank.dat. Returns true on success (sets
+ // _loaded_patch_bank + _loaded_patch_bank_count); false otherwise (state
+ // unchanged; engine falls back to 8-patch placeholder).
+ static bool _try_load_opl3_patches_dat(void)
+ {
+   const std::string path =
+       ResourceManager::getInstance()->getPath(
+-          "opl3-patches.dat", false);
++          "opl3bank.dat", false);
+   std::FILE *fp = std::fopen(path.c_str(), "rb");
+   if (!fp)
+   {
+-    LOG_INFO("opl3 backend: opl3-patches.dat not found at '{}'; "
++    LOG_INFO("opl3 backend: opl3bank.dat not found at '{}'; "
+              "falling back to 8-patch placeholder. (This is expected "
+              "in the wave-46 iter -- the .dat data file is ride-along "
+              "for a follow-on iter; the loader path itself is shipping.)",
+@@ -303,7 +303,7 @@ static bool _try_load_opl3_patches_dat(void)
+   uint8_t header[12];
+   if (std::fread(header, 1, sizeof header, fp) != sizeof header)
+   {
+-    LOG_WARN("opl3 backend: opl3-patches.dat header truncated "
++    LOG_WARN("opl3 backend: opl3bank.dat header truncated "
+              "(< 12 bytes); using 8-patch placeholder.");
+     std::fclose(fp);
+     return false;
+@@ -313,7 +313,7 @@ static bool _try_load_opl3_patches_dat(void)
+   };
+   if (std::memcmp(header, k_magic, 8) != 0)
+   {
+-    LOG_WARN("opl3 backend: opl3-patches.dat magic mismatch "
++    LOG_WARN("opl3 backend: opl3bank.dat magic mismatch "
+              "(expected 'DOPL3v1\\n'); using 8-patch placeholder.");
+     std::fclose(fp);
+     return false;
+@@ -324,7 +324,7 @@ static bool _try_load_opl3_patches_dat(void)
+   const uint8_t reserved_hi   = header[11];
+   if (version != 0x01)
+   {
+-    LOG_WARN("opl3 backend: opl3-patches.dat version {} unsupported "
++    LOG_WARN("opl3 backend: opl3bank.dat version {} unsupported "
+              "(this build expects v1); using 8-patch placeholder.",
+              (int)version);
+     std::fclose(fp);
+@@ -332,7 +332,7 @@ static bool _try_load_opl3_patches_dat(void)
+   }
+   if (num_programs == 0 || num_programs > 128)
+   {
+-    LOG_WARN("opl3 backend: opl3-patches.dat num_programs={} out of "
++    LOG_WARN("opl3 backend: opl3bank.dat num_programs={} out of "
+              "range [1..128]; using 8-patch placeholder.",
+              (int)num_programs);
+     std::fclose(fp);
+@@ -340,7 +340,7 @@ static bool _try_load_opl3_patches_dat(void)
+   }
+   if (reserved_lo != 0 || reserved_hi != 0)
+   {
+-    LOG_WARN("opl3 backend: opl3-patches.dat reserved field nonzero "
++    LOG_WARN("opl3 backend: opl3bank.dat reserved field nonzero "
+              "(forward-compat reject); using 8-patch placeholder.");
+     std::fclose(fp);
+     return false;
+@@ -350,7 +350,7 @@ static bool _try_load_opl3_patches_dat(void)
+   const std::size_t payload_bytes = (std::size_t)num_programs * 12u;
+   if (std::fread(_loaded_patch_bank, 1, payload_bytes, fp) != payload_bytes)
+   {
+-    LOG_WARN("opl3 backend: opl3-patches.dat payload truncated "
++    LOG_WARN("opl3 backend: opl3bank.dat payload truncated "
+              "(expected {} bytes for {} programs); using 8-patch "
+              "placeholder. Loaded buffer NOT used (zeroed via static-"
+              "init guard).",
+@@ -380,7 +380,7 @@ static bool _try_load_opl3_patches_dat(void)
+                        (unsigned long)sizeof(_loaded_patch_bank));
+ #endif
+ 
+-  LOG_INFO("opl3 backend: opl3-patches.dat loaded {} programs from '{}' "
++  LOG_INFO("opl3 backend: opl3bank.dat loaded {} programs from '{}' "
+            "(v1; {} bytes payload). Per-program GM patches now use the "
+            "runtime bank; programs >= {} fall back to 8-patch family "
+            "bucket. Drum channel (MIDI ch 9) unchanged (uses PATCH_DRUM "
+@@ -526,7 +526,7 @@ MidiBackendOpl3::MidiBackendOpl3()
+   _ready = true;
+ 
+   // Patch 0141 (wave 46 Phase 10.5): try to load runtime patch bank
+-  // from data/opl3-patches.dat. On absence/failure, falls back to the
++  // from data/opl3bank.dat. On absence/failure, falls back to the
+   // 8-patch placeholder above (existing behavior preserved). Banner
+   // narration happens inside the loader; engine doesn't need to log
+   // here. Loader is idempotent on this static state -- safe even if
+@@ -551,11 +551,11 @@ MidiBackendOpl3::MidiBackendOpl3()
+            "loaded_count fall back to 8-patch placeholder covering "
+            "GM family categories piano/mallet/organ/guitar/strings/"
+            "brass/reed/pad). Phase 10.5 path: ship a fuller community "
+-           "bank as data/opl3-patches.dat (DOPL3v1 format; 12-byte SBI "
++           "bank as data/opl3bank.dat (DOPL3v1 format; 12-byte SBI "
+            "records per GM program; loader at MidiBackendOpl3 ctor).",
+            _loaded_patch_bank_count > 0
+-               ? "runtime opl3-patches.dat ACTIVE"
+-               : "8-patch placeholder ACTIVE (no opl3-patches.dat loaded)",
++               ? "runtime opl3bank.dat ACTIVE"
++               : "8-patch placeholder ACTIVE (no opl3bank.dat loaded)",
+            _loaded_patch_bank_count);
+ 
+   // patch 0171 (wave-46/47 wub-wub correctness fix): smoke-gate banner
+@@ -749,10 +749,29 @@ void MidiBackendOpl3::note_on(int channel, int note, int velocity)
+   // patch on drum channel).
+   _apply_patch(voice, channel, _channel_program[channel & 0x0F]);
+ 
++  // patch 0232 (DOPL3v1 transpose): honor patch[11] as a SIGNED int8
++  // semitone offset, applied to the played note before the (fnum, block)
++  // calc. This finishes the half-built contract the SDL helper already
++  // documents -- SDL_DOSOpl3VoiceWritePatch does `(void)patch[11]` with the
++  // comment "engine applies before NoteOn" but MidiBackendOpl3 never did.
++  // The runtime opl3bank.dat (DMXOPL-derived; DMX/GENMIDI convention
++  // playednote = midinote + offset) carries a -12 octave offset on ~110 of
++  // 128 GM programs; without this, those instruments play an octave too
++  // high (brighter/thinner). We transpose only the value passed to the
++  // frequency calc; _voices[voice].midi_note keeps the ORIGINAL note so
++  // note_off / _find_voice matching is unaffected. INERT for the 8-patch
++  // placeholder: every PATCH_* constexpr has [11]=0, so with no .dat the
++  // offset is 0 and behavior is byte-identical to pre-0232 (no killswitch).
++  const std::uint8_t *_xpatch =
++      (channel == DRUM_CHANNEL)
++          ? PATCH_DRUM
++          : _program_to_patch(_channel_program[channel & 0x0F]);
++  const int _play_note = note + (int)(std::int8_t)_xpatch[11];
++
+   // Convert MIDI note to OPL3 (fnum, block) and trigger note-on.
+   std::uint16_t fnum  = 0;
+   std::uint8_t  block = 4;
+-  _midi_note_to_fnum_block(note, &fnum, &block);
++  _midi_note_to_fnum_block(_play_note, &fnum, &block);
+   SDL_DOSOpl3VoiceNoteOn(voice, fnum, block);
+ 
+   // Velocity, channel volume, and channel expression scale total level
+-- 
+2.47.3
+

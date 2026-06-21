@@ -15,6 +15,7 @@ Complete attribution and license matrix for everything DOSKUTSU touches, vendors
 | [SDL_image](https://github.com/libsdl-org/SDL_image) | `release-2.8.x` @ `67c8f53` | zlib | Yes (statically linked) | PNG loading |
 | stb_vorbis | bundled in SDL_mixer | **public domain / MIT** | Yes (via SDL_mixer) | OGG Vorbis decoder |
 | stb_image | bundled in SDL_image | **public domain / MIT** | Yes (via SDL_image) | PNG decoder |
+| [DMXOPL](https://github.com/sneakernets/DMXOPL) | `master` (GENMIDI.op2) | **MIT** (repo LICENSE; DoomWiki lists CC BY-SA 4.0 -- both GPLv3-compatible) | Yes (`data/opl3bank.dat`) | OPL3 General MIDI instrument bank for the `opl3` music backend |
 | [DJGPP libc](https://www.delorie.com/djgpp/) | 2.05+ (via GCC 12.2.0) | **GPL + runtime-library exception** | Yes (statically linked) | C runtime on DOS |
 | [CWSDPMI](https://sandmann.dotster.com/cwsdpmi/) | r7 | **freeware, redistribution permitted** | Yes (separate .exe, not linked) | DPMI host |
 | [Cave Story / Doukutsu Monogatari](https://www.cavestory.org/) | 2004 freeware EN | **freeware per Pixel's 2004 terms** | **No** -- user-extracted | Game content (maps, sprites, music, text) |
@@ -45,6 +46,30 @@ The source code in this repository is licensed MIT:
 - `patches/nxengine-evo/*.patch` -- **derivatives of a GPLv3 upstream**, therefore GPLv3. This does not conflict with the repo's `LICENSE` -- our MIT license correctly describes our original, non-derivative code, and the GPLv3 on patches is inherited by operation of copyright law, not by our choice.
 
 No conflicts. The MIT license on the repo is accurate.
+
+### DMXOPL OPL3 instrument bank (`data/opl3bank.dat`)
+
+The `opl3` music backend renders General MIDI through the YMF262 (OPL3) FM
+chip. It needs a bank of 128 GM instrument definitions; the engine's built-in
+8-patch family-bucket fallback sounds thin/clipped on real hardware. We ship a
+full 128-program bank as `data/opl3bank.dat`.
+
+- **Source:** [DMXOPL](https://github.com/sneakernets/DMXOPL) (DMXOPL3) by
+  ConSiGno -- a modern full-GM OPL3 FM patch set voiced to approximate the
+  Roland SC-55/SC-88.
+- **License:** the DMXOPL repository's `LICENSE` file is **MIT**. (DoomWiki
+  additionally describes the bank as CC BY-SA 4.0; both MIT and CC BY-SA 4.0
+  are GPLv3-compatible -- CC BY-SA 4.0 by the Creative Commons one-way
+  compatibility declaration -- so our GPLv3-as-a-whole `DOSKUTSU.EXE` + shipped
+  `.dat` are compliant under either reading.)
+- **Derivation:** `data/opl3bank.dat` is mechanically converted from DMXOPL's
+  upstream `GENMIDI.op2` (DMX OP2 format) by `scripts/gen-opl3-bank.py` -- it
+  takes voice #1 (primary 2-op) of each of the 128 GM melodic programs,
+  regroups the OPL register bytes into our DOPL3v1 per-operator record layout,
+  recombines KSL|TL, forces the OPL3 stereo bits, and carries the OP2 note
+  offset into the engine-applied transpose byte. The conversion is reproducible
+  from the MIT-licensed source; the resulting `.dat` is a derivative of MIT
+  material and is shipped under the binary's GPLv3 umbrella.
 
 ### CWSDPMI is separate
 
