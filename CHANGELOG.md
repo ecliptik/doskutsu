@@ -5,6 +5,38 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.4.0] - 2026-06-21
+
+PicoGUS in "Sound Blaster mode" (and other 8-bit Sound Blaster-class cards) is
+now a supported sound configuration. Validated on the reference hardware (g2k:
+PicoGUS jumpered IRQ 5 / DMA 1, DreamBlaster on its WaveBlaster header).
+
+### Added
+
+- **PicoGUS Sound Blaster mode / 8-bit Sound Blaster support.** A PicoGUS running
+  `pgusinit /mode sb` is an 8-bit-DMA, SB-2.0-class device that reports a DSP 4.x
+  version but has no 16-bit (high) DMA channel. DOSKUTSU now detects the missing
+  16-bit DMA and uses the 8-bit playback path automatically -- SFX, Organya,
+  OPL3 FM, and WaveBlaster MIDI all work. Real SB16 cards (e.g. Sound Blaster
+  Vibra16) are unaffected: their 16-bit path is byte-identical to before.
+- **`SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT`** -- force the 8-bit playback path
+  regardless of the card's reported DSP version (for an 8-bit card that still
+  reports DSP 4.x with an `H` token present in `BLASTER`). Default off. See
+  `docs/CONFIG.md`.
+- **`SDL_HINT_DOSKUTSU_AUDIO_SB_8BIT_STEREO`** -- restore the legacy SB Pro 8-bit
+  stereo output on the 8-bit path (the default is mono, which is correct for
+  SB-2.0-class cards). Default off.
+
+### Fixed
+
+- **8-bit Sound Blaster output: correct pitch, clean SFX, no startup burst.** On
+  the 8-bit path the device now opens in mono at the engine sample rate (it was
+  using SB Pro stereo at a doubled rate -> high-pitched "chipmunk" music), the
+  Pixtone sound-effect mixer writes the device's 8-bit format (it was writing
+  16-bit-stereo samples into the 8-bit buffer -> garbled SFX), and the DMA buffer
+  is primed to silence before the speaker is enabled (it was a loud burst before
+  the loading screen).
+
 ## [1.3.0] - 2026-06-20
 
 High-quality audio tier and a Dark-Forces-style SETUP overhaul (Phase 2). All
