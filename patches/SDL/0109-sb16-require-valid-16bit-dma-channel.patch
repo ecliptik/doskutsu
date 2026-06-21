@@ -1,0 +1,143 @@
+From 701f60255cd46f523cbdb42c8ec9b7d82e9734ab Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 21 Jun 2026 14:12:30 -0700
+Subject: [PATCH] dos: patch 0109 -- SB16 path requires a VALID 16-bit DMA
+ channel (5/6/7)
+
+g2k Vibra16 FROZE at "Loading" (iter opl3ec PLAY2). The SDL/0106 decision
+banner shows the cause: "is_sb16=1 force_8bit=0 dsp_ver=4 highdma=0 ->
+16-bit-high-DMA path", then OpenDevice programmed a 16-bit autoinit DMA on
+dma_ch=0 and the SB16 init hung.
+
+Root cause (a real latent bug in the SDL/0106 guard, not just a bad config):
+  soundblaster_is_sb16 = !force_8bit && version>=4 && (highdma_channel >= 0)
+A Sound Blaster 16-bit (high) DMA channel is PHYSICALLY only 5/6/7 (the
+word-wide 8237 controller #2). The (>= 0) test ALSO accepts 0..4, so a
+DSP-4.x card whose effective BLASTER carried a bogus/zero H (here: a stale
+CFG-authoritative BLASTER with no real H that defaulted the field to 0, which
+overrode the Vibra's true H5) latched is_sb16=true and armed a 16-bit transfer
+on channel 0 -- an 8-bit, byte-wide controller-#1 channel. The chip never
+raises IRQ-5 for a 16-bit transfer on an 8-bit channel, so the autoinit DMA
+never advances and every backend (Organya/OPL3/WaveBlaster all ride the
+DMA-IRQ pump) hangs silent at init. The hang is latent for ANY no-/bad-H
+DSP-4.x config, not specific to g2k.
+
+Why DOS needs this: 16-bit SB DMA cannot run on channels 0-4; "high DMA
+channel present (>=0)" is the wrong proxy for "usable 16-bit DMA channel."
+
+Fix: require a VALID 16-bit channel -- have_valid_highdma = (highdma in 5..7).
+Any other highdma (the -1 absent sentinel, the 0..4 low-DMA channels, or >7)
+declines the 16-bit path and falls through to the existing SDL/0106 graceful
+8-bit low-DMA D-channel path. We never program 16-bit DMA on a channel that
+cannot carry it. "Valid 16-bit DMA available" is now one consistent predicate
+(exactly {5,6,7}); everything else means "no usable high DMA."
+
+Sentinel note: the SDL BLASTER parser already leaves highdma_channel = -1 when
+there is no H token (consistent). A value of 0 means BLASTER carried an
+explicit (invalid) "H0" -- produced upstream when a CFG/SETUP-authoritative
+BLASTER with no real H defaults the field to 0. SDL now treats every non-5/6/7
+highdma uniformly as "no usable 16-bit DMA," so the SDL-side behavior is
+consistent regardless of how the bogus value arrived; fixing the upstream
+"H0 default" is an engine/SETUP follow-up. The raw highdma value is kept in the
+decision banner so the offending BLASTER H stays visible in the log.
+
+BYTE-IDENTICAL for the shipped Vibra16 + H5 case: highdma=5 is in {5,6,7} so
+have_valid_highdma=true; with the hint off and version>=4, is_sb16 stays
+exactly as SDL/0106 produced (true) and every downstream is_sb16 consumer takes
+the identical 16-bit branch. DOSBox-X (sbtype=sb16, H5) likewise unchanged. The
+new term only changes the result for a DSP-4.x card with highdma not in 5/6/7.
+
+Diagnostics: the required SDL/0106 decision banner is unchanged (still emits
+is_sb16/force_8bit/dsp_ver/highdma -> path). The graceful-fallback witness is
+retagged SDL/0109 and widened: it now fires for highdma not in {5,6,7} (was
+"no H at all") and prints the offending highdma value.
+
+Workspace-local patch; not upstreamed (sdl_ai_policy).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 52 +++++++++++++++++++++++----------
+ 1 file changed, 37 insertions(+), 15 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 7b666b21f..52ac07f20 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -72,7 +72,7 @@ static int soundblaster_dma_channel = -1;
+ static int soundblaster_highdma_channel = -1;
+ static int soundblaster_version = -1;
+ static int soundblaster_version_minor = -1;
+-static bool soundblaster_is_sb16 = false; // SDL/0106: false when force-8bit (hint/#define), DSP < 4, or no high (16-bit) DMA channel
++static bool soundblaster_is_sb16 = false; // SDL/0106+0109: false when force-8bit (hint/#define), DSP < 4, or no VALID 16-bit DMA channel (highdma not in 5/6/7)
+ static Uint8 soundblaster_silence_value = 0;
+ 
+ /* DOSKUTSU patch (Phase 11 patch 0050): killswitch state for the
+@@ -4418,9 +4418,28 @@ static bool IsSoundBlasterPresent(void)
+         const bool force_8bit =
+             FORCE_SB_8BIT ||
+             (f8_hint && f8_hint[0] == '1' && f8_hint[1] == '\0');
+-        const bool have_highdma = (soundblaster_highdma_channel >= 0);
+-
+-        soundblaster_is_sb16 = !force_8bit && (soundblaster_version >= 4) && have_highdma;
++        /* SDL/0109 FIX: a Sound Blaster 16-bit (high) DMA channel is PHYSICALLY
++           only 5, 6, or 7 (the word-wide 8237 controller #2). The SDL/0106
++           predicate used (highdma_channel >= 0), which ALSO accepted 0..4 -- so
++           a DSP-4.x card whose effective BLASTER carried a bogus/zero H (e.g. an
++           explicit "H0", or a stale CFG-authoritative BLASTER with no real H
++           that defaulted the field to 0) latched is_sb16=true, and OpenDevice
++           then armed a 16-bit autoinit transfer on DMA channel 0 -- an 8-bit,
++           byte-wide controller-#1 channel. On a real Vibra16 (g2k iter opl3ec
++           PLAY2) this WEDGED the SB16 init at "Loading": the chip never raises
++           IRQ-5 for a 16-bit transfer programmed on an 8-bit channel, and every
++           backend (all ride the DMA-IRQ pump) hung silent. Require a VALID
++           16-bit channel; any other highdma (the -1 absent sentinel, the 0..4
++           low-DMA channels, or >7) declines the 16-bit path and falls through to
++           the graceful 8-bit low-DMA path -- we NEVER program 16-bit DMA on a
++           channel that cannot carry it. (We keep the raw highdma value for the
++           decision banner so the offending BLASTER H is visible in the log.)
++           "Valid 16-bit DMA available" is now the single consistent predicate:
++           exactly {5,6,7} qualifies; everything else is "no usable high DMA." */
++        const bool have_valid_highdma =
++            (soundblaster_highdma_channel >= 5 && soundblaster_highdma_channel <= 7);
++
++        soundblaster_is_sb16 = !force_8bit && (soundblaster_version >= 4) && have_valid_highdma;
+         soundblaster_silence_value = soundblaster_is_sb16 ? 0x00 : 0x80; // S16LE silence is 0x00, U8 silence is 0x80
+ 
+         /* Unconditional decision banner (mirrors SDL/0073 always-on pattern):
+@@ -4435,19 +4454,22 @@ static bool IsSoundBlasterPresent(void)
+                          soundblaster_highdma_channel,
+                          soundblaster_is_sb16 ? "16-bit-high-DMA" : "8-bit-low-DMA");
+ 
+-        /* Loud witness for the specific PicoGUS-SB shape: DSP claims SB16 but
+-           there is no high-DMA channel, so we deliberately downshift to the
+-           8-bit D-channel path that the pre-patch code would have hard-errored
+-           on. Names the force-8bit hint for the operator. */
+-        if ((soundblaster_version >= 4) && !have_highdma && !force_8bit) {
+-            doskutsu_dbg_log("audio: SDL/0106 DSP %d.%d reports SB16 but BLASTER "
+-                             "has no H (high/16-bit DMA) channel -- GRACEFUL "
+-                             "fall back to the 8-bit low-DMA D-channel path "
+-                             "(D=%d) instead of erroring; this is the "
+-                             "PicoGUS-in-SB-mode / SB2.0-class unblock. Set "
+-                             "SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT=1 to force "
++        /* Loud witness (SDL/0109 widens the SDL/0106 trigger): a DSP-4.x card
++           that does NOT resolve a VALID 16-bit channel (5/6/7) downshifts to the
++           8-bit D-channel path the pre-0106 code would have hard-errored on and
++           the SDL/0106 (>=0) guard would have HUNG on (highdma 0..4). Names the
++           offending highdma + the force-8bit hint for the operator. */
++        if ((soundblaster_version >= 4) && !have_valid_highdma && !force_8bit) {
++            doskutsu_dbg_log("audio: SDL/0109 DSP %d.%d reports SB16 but BLASTER "
++                             "has no VALID 16-bit DMA channel (highdma=%d; valid "
++                             "= 5/6/7) -- GRACEFUL fall back to the 8-bit low-DMA "
++                             "D-channel path (D=%d) instead of programming 16-bit "
++                             "DMA on an 8-bit channel (the g2k ch-0 init hang). "
++                             "PicoGUS-in-SB-mode / SB2.0-class / bogus-H unblock. "
++                             "Set SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT=1 to force "
+                              "this path on any card.",
+                              soundblaster_version, soundblaster_version_minor,
++                             soundblaster_highdma_channel,
+                              soundblaster_dma_channel);
+         }
+     }
+-- 
+2.47.3
+
