@@ -5,6 +5,25 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.5.0] - 2026-06-22
+
+AdLib / OPL-FM-only music support -- music on a machine that has only an OPL/FM
+chip and no Sound Blaster.
+
+### Added
+
+- **AdLib / OPL-FM music backend** (`SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib`).
+  DOSKUTSU now plays music on an OPL/AdLib-only system with **no Sound Blaster**
+  -- e.g. a real AdLib card, or a PicoGUS in `/mode adlib`. A PIT/IRQ-0 timer
+  drives the music clock (no SB interrupt needed) and a 9-voice OPL2 backend
+  renders the General MIDI on the OPL chip, using the v1.4.1 GM instrument bank.
+  **Music only** -- a pure AdLib card has no DAC, so there are no PCM sound
+  effects on this path. The DOS time-of-day clock is preserved (BIOS tick chained
+  at the divided rate; the timer is restored on exit). g2k-validated on a PicoGUS
+  in AdLib mode. (If both this and `..._AUDIO_OFF=1` are set, the explicit AdLib
+  request wins.)
+- `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` -- AdLib music-pump tick rate (default 120).
+
 ## [1.4.1] - 2026-06-22
 
 A real OPL3 General MIDI instrument bank, plus two correctness fixes for OPL3 and
