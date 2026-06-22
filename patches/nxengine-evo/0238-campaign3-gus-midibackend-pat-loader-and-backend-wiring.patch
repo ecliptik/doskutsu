@@ -1,4 +1,4 @@
-From 2f7a74afc26350a6669797ac97e0d57410317f26 Mon Sep 17 00:00:00 2001
+From 343880a14098ae7e5e25e9320621e2d4df1e872a Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 16:24:41 -0700
 Subject: [PATCH] patch 0238 -- Campaign 3 GUS: MidiBackendGus + GM .pat loader
@@ -20,6 +20,10 @@ touch only resident DRAM with integer-only math (no I/O/malloc/FPU in ISR).
 Per-song lazy .pat residency bounded by the <=1MB GF1 DRAM. MUSIC ONLY this
 phase (#27); GF1 SFX = #28.
 
+The two SB-device-open gates (MIX_Init + MIX_CreateMixerDevice) are widened
+to the gus path too (not just adlib) -- otherwise the gus path fell through
+to opening a nonexistent SB device and fataled at boot (no-SB GUS-only box).
+
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  src/Utils/diagnostic_timers.h |   5 +
@@ -30,9 +34,9 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>
  src/sound/MidiBackendGus.h    | 139 ++++++++
  src/sound/MidiScheduler.cpp   |  26 ++
  src/sound/MidiScheduler.h     |  12 +
- src/sound/SoundManager.cpp    | 123 +++++--
+ src/sound/SoundManager.cpp    | 146 +++++---
  src/sound/SoundManager.h      |   6 +
- 10 files changed, 957 insertions(+), 40 deletions(-)
+ 10 files changed, 972 insertions(+), 48 deletions(-)
  create mode 100644 src/sound/MidiBackendGus.cpp
  create mode 100644 src/sound/MidiBackendGus.h
 
@@ -1014,7 +1018,7 @@ index 9f7559fd..efc105f8 100644
    friend class Singleton<MidiScheduler>;
  
 diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
-index af771c9f..76fe0d31 100644
+index af771c9f..c85ab35e 100644
 --- a/src/sound/SoundManager.cpp
 +++ b/src/sound/SoundManager.cpp
 @@ -24,6 +24,7 @@ extern "C" void midi_scheduler_tick_isr_thunk(Uint64 now_ms);
@@ -1075,7 +1079,46 @@ index af771c9f..76fe0d31 100644
    if (_adlib)
    {
      _adlib_path = true;
-@@ -886,6 +923,21 @@ bool SoundManager::init()
+@@ -464,7 +501,11 @@ bool SoundManager::init()
+   // is gone in SDL3_mixer's API -- the MIX_Init() below takes no flags.
+   // patch 0234 (Campaign 2 AdLib): skip the mixer library init on the AdLib
+   // path -- there is no audio device (SDL_INIT_AUDIO omitted) and no PCM SFX.
+-  if (!_adlib && !MIX_Init())
++  // patch 0238 (Campaign 3 GUS): like the AdLib path, the GUS out-of-band path
++  // has no SDL audio device (SDL_INIT_AUDIO omitted), so MIX_Init must be
++  // skipped there too -- otherwise the SDL3_mixer global init runs against a
++  // subsystem that was never started.
++  if (!_adlib && !_gus && !MIX_Init())
+   {
+     LOG_ERROR("Unable to init mixer: {}", SDL_GetError());
+     return false;
+@@ -604,15 +645,18 @@ bool SoundManager::init()
+     }
+   }
+ 
+-  // patch 0234 (Campaign 2 AdLib): no SB device on the AdLib path -- leave
+-  // _mixer null and skip MIX_CreateMixerDevice (it would call into
+-  // SDL_OpenAudioDevice and fail with SDL_INIT_AUDIO omitted). All SFX call
+-  // sites already guard on `if (_mixer)`, so the SFX path no-ops cleanly.
+-  if (_adlib)
++  // patch 0234 (Campaign 2 AdLib) / patch 0238 (Campaign 3 GUS): no SB device on
++  // either out-of-band path -- leave _mixer null and skip MIX_CreateMixerDevice
++  // (it would call into SDL_OpenAudioDevice and fail with SDL_INIT_AUDIO
++  // omitted, which fataled the GUS boot before this gate was widened). All SFX
++  // call sites already guard on `if (_mixer)` / `_adlib_path`/`_gus_path`, so
++  // the SFX path no-ops cleanly.
++  if (_adlib || _gus)
+   {
+     _mixer = nullptr;
+-    LOG_INFO("Sound system: AdLib path -- no SB16 mixer (music via OPL2/PIT "
+-             "pump; SFX disabled on a DAC-less AdLib card).");
++    LOG_INFO("Sound system: {} path -- no SB16 mixer (music via the PIT pump; "
++             "SFX disabled on this no-SB out-of-band path).",
++             _gus ? "GUS (GF1)" : "AdLib");
+   }
+   else
+   {
+@@ -886,6 +930,21 @@ bool SoundManager::init()
                   "the OPL base port was moved.");
        break;
  
@@ -1097,7 +1140,7 @@ index af771c9f..76fe0d31 100644
      case NXE::Diag::AudioBackend::auto_select:
        // patch 0217: WaveBlaster is NO LONGER auto-probed. The MPU-401 status
        // read stalls the ISA bus when the SB16 block is live and the chip is
-@@ -1102,7 +1154,8 @@ bool SoundManager::init()
+@@ -1102,7 +1161,8 @@ bool SoundManager::init()
          (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub) ||
          (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb) ||
          (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3) ||
@@ -1107,7 +1150,7 @@ index af771c9f..76fe0d31 100644
      if (prl_env && midi_active)
      {
        _preload_midi_active = true;
-@@ -1153,7 +1206,7 @@ bool SoundManager::init()
+@@ -1153,7 +1213,7 @@ bool SoundManager::init()
    // playSfxResampled / stopSfx) also no-op under _adlib_path so gameplay
    // stays clean. Music (OPL2 via MidiScheduler + the PIT pump) is unaffected
    // -- it never touches Pixtone/Organya/the mixer.
@@ -1116,7 +1159,7 @@ index af771c9f..76fe0d31 100644
    {
      Pixtone::getInstance()->init();
      // patch 0167-v3 (Bug 5 defensive interlock per team-lead #137 + flush-instr
-@@ -1176,10 +1229,10 @@ bool SoundManager::init()
+@@ -1176,10 +1236,10 @@ bool SoundManager::init()
    }
    else
    {
@@ -1131,7 +1174,7 @@ index af771c9f..76fe0d31 100644
    }
  
    // patch 0168 (Lever 2b MIDI-tick-from-IRQ). Register the engine-side
-@@ -1192,16 +1245,19 @@ bool SoundManager::init()
+@@ -1192,16 +1252,19 @@ bool SoundManager::init()
    // the SDL side ignores the callback). LOG_INFO banner narrates the
    // decision so flush-instr's sec.23 verdict-extraction sees the
    // engine-side registration outcome alongside the SDL/0072 banner.
@@ -1159,7 +1202,7 @@ index af771c9f..76fe0d31 100644
      SDL_DOSMidiTickRegister(&midi_scheduler_tick_isr_thunk);
  
      int hz = 120;
-@@ -1212,21 +1268,22 @@ bool SoundManager::init()
+@@ -1212,21 +1275,22 @@ bool SoundManager::init()
        if (v >= 19 && v <= 1000)
          hz = v;
        else
@@ -1188,7 +1231,7 @@ index af771c9f..76fe0d31 100644
      }
    }
    else if (SDL_DOSMidiIsrTickActive())
-@@ -1334,10 +1391,10 @@ void SoundManager::shutdown()
+@@ -1334,10 +1398,10 @@ void SoundManager::shutdown()
      _mixer = nullptr;
    }
    doskutsu_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
@@ -1203,7 +1246,7 @@ index af771c9f..76fe0d31 100644
      MIX_Quit();
    doskutsu_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
                     "SoundManager::shutdown body complete; "
-@@ -1350,7 +1407,7 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+@@ -1350,7 +1414,7 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
    // patch 0236 (#19): no PCM SFX on the AdLib path (no DAC/mixer). No-op so
    // gameplay doesn't spam "Pixtone::play: not rendered" against a null mixer.
    // Covers startPropSound (delegates here) too.
@@ -1212,7 +1255,7 @@ index af771c9f..76fe0d31 100644
      return;
    if (!settings->sound_enabled)
      return;
-@@ -1376,7 +1433,7 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
+@@ -1376,7 +1440,7 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
  {
    // patch 0236 (#19): no PCM SFX on the AdLib path. Covers startStreamSound
    // (delegates here) too.
@@ -1221,7 +1264,7 @@ index af771c9f..76fe0d31 100644
      return;
    if (!settings->sound_enabled)
      return;
-@@ -1399,7 +1456,7 @@ void SoundManager::stopSfx(NXE::Sound::SFX snd)
+@@ -1399,7 +1463,7 @@ void SoundManager::stopSfx(NXE::Sound::SFX snd)
  {
    // patch 0236 (#19): no PCM SFX on the AdLib path. Covers stopLoopSfx
    // (delegates here) too.
@@ -1230,7 +1273,7 @@ index af771c9f..76fe0d31 100644
      return;
    Pixtone::getInstance()->stop((int32_t)snd);
  }
-@@ -1451,7 +1508,10 @@ void SoundManager::music(uint32_t songno, bool resume)
+@@ -1451,7 +1515,10 @@ void SoundManager::music(uint32_t songno, bool resume)
        // patch 0235 (Campaign 2 AdLib): adlib is a MIDI-routed backend too --
        // route music() through _start_mid_track + the MidiScheduler so songs
        // actually dispatch to MidiBackendOpl2 via the PIT pump.
@@ -1242,7 +1285,7 @@ index af771c9f..76fe0d31 100644
  
    if (songno != 0 && !_shouldMusicPlay(songno, settings->music_enabled))
    {
-@@ -1513,7 +1573,9 @@ void SoundManager::enableMusic(int newstate)
+@@ -1513,7 +1580,9 @@ void SoundManager::enableMusic(int newstate)
          NXE::Diag::g_p10_audio_backend_active ==
              NXE::Diag::AudioBackend::opl3 ||
          NXE::Diag::g_p10_audio_backend_active ==
@@ -1253,7 +1296,7 @@ index af771c9f..76fe0d31 100644
      {
        if (play != MidiScheduler::getInstance()->isPlaying())
        {
-@@ -1618,7 +1680,8 @@ void SoundManager::runFade()
+@@ -1618,7 +1687,8 @@ void SoundManager::runFade()
    if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub ||
        NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb ||
        NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3 ||
