@@ -411,7 +411,10 @@ BANNER_REGEX=(
   "audio: SDL/0109 DSP [0-9]+\.[0-9]+ reports SB16 but BLASTER has no VALID 16-bit DMA channel \(highdma=-?[0-9]+; valid = 5/6/7\)"
   "audio backend: adlib \(Campaign 2 -- native OPL2 FM synthesis"
   "Sound system: AdLib \(OPL2\) path -- AUDIO_BACKEND=adlib"
-  "adlib: OPL music pump STARTED at [0-9]+ Hz"
+  "(adlib|gus): music pump STARTED at [0-9]+ Hz"
+  "audio backend: gus \(Campaign 3 -- native Gravis Ultrasound GF1"
+  "Sound system: GUS \(GF1\) path -- AUDIO_BACKEND=gus"
+  "gus backend ready: GF1 detected"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -518,6 +521,9 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
+  "optional"
+  "optional"
   "optional"
   "optional"
   "optional"

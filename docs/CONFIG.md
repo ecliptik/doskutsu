@@ -40,8 +40,8 @@ SET SDL_HINT_DOSKUTSU_PERF_MODE=1        REM drop decorative foreground detail
 
 | Variable | Values | Default | Effect | FPS impact |
 |---|---|---|---|---|
-| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto`, `opl3`, `organya`, `wb`, `adlib` | `auto` | Music synthesizer. `auto` (default): probe for a WaveBlaster daughterboard first, fall back to OPL3 FM if none is found. `opl3`: force the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: force a WaveBlaster daughterboard. `adlib`: native OPL2 FM on a card with **no Sound Blaster** (a real AdLib/OPL2 card, or a PicoGUS in `/mode adlib`); music is clocked off the PIT timer, not the SB IRQ. **`adlib` is MUSIC ONLY** -- a DAC-less AdLib card cannot play the digital sound effects, so SFX are silent. | `organya` is ~9 fps slower than MIDI; `auto` / `opl3` / `wb` / `adlib` run music off the CPU |
-| `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` | `19`..`1000` | `120` | Tick rate of the AdLib music pump (the PIT/IRQ-0 timer that clocks MIDI playback under `AUDIO_BACKEND=adlib`). Higher = finer tempo resolution at slightly more interrupt overhead. Only used on the `adlib` path; ignored otherwise. | Leave at default unless tempo sounds off |
+| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto`, `opl3`, `organya`, `wb`, `adlib`, `gus` | `auto` | Music synthesizer. `auto` (default): probe for a WaveBlaster daughterboard first, fall back to OPL3 FM if none is found. `opl3`: force the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: force a WaveBlaster daughterboard. `adlib`: native OPL2 FM on a card with **no Sound Blaster** (a real AdLib/OPL2 card, or a PicoGUS in `/mode adlib`); music is clocked off the PIT timer, not the SB IRQ. **`adlib` is MUSIC ONLY** -- a DAC-less AdLib card cannot play the digital sound effects, so SFX are silent. `gus`: native Gravis Ultrasound (GF1) wavetable music on a card with **no Sound Blaster** (a real GUS, or a PicoGUS in `/mode gus`); GM instruments play on the GF1's hardware voices from `.pat` samples loaded into the card's DRAM, clocked off the PIT timer. **`gus` is MUSIC ONLY for now** -- digital sound effects on the GUS voices are a follow-up; SFX are silent on this backend today. | `organya` is ~9 fps slower than MIDI; `auto` / `opl3` / `wb` / `adlib` / `gus` run music off the CPU |
+| `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` | `19`..`1000` | `120` | Tick rate of the PIT/IRQ-0 music pump that clocks MIDI playback under `AUDIO_BACKEND=adlib` **and** `AUDIO_BACKEND=gus` (both no-Sound-Blaster paths share the same card-agnostic timer pump). Higher = finer tempo resolution at slightly more interrupt overhead. Only used on the `adlib` / `gus` paths; ignored otherwise. | Leave at default unless tempo sounds off |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi`, `orgmid`, `<dir>` | `wiimidi` | Which MIDI set the `opl3` / `wb` backends play. `wiimidi`: the WiiWare arrangement (`data/midi/`). `orgmid`: the Hart legacy `.mid` set (`data/orgmid/`). Any other value is treated as a custom drop-in directory name: if `data/<dir>/` holds your own `.mid` tracks, the engine plays from there (see "Bring your own MIDI set" in `docs/ASSETS.md`). SETUP exposes this as the **MIDI music set** row (writing the `MIDI_SET` DOSKUTSU.CFG key) -- known sets show as WiiWare / OrgMIDI, drop-ins as `Custom (<dir>)`. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | unset | Picks an `org2mid`-converted General MIDI variant. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS` | `0` (to disable) | on | Whether `MIDI_SET` / `..._MIDI_SOURCE` may name a custom `data/<dir>/` drop-in set (see the row above). On (default): an unrecognized value naming a real `data/<dir>/` with at least one `.mid` plays from that dir. `=0`: only the built-in `wiimidi` / `orgmid` sets are accepted; any other value falls back to `wiimidi`. The dir name must be a single safe path segment (letters/digits/`_`/`-`/`.`, no `..`, no path separators); on real DOS hardware that means 8 characters or fewer. | None |
@@ -103,7 +103,45 @@ sample rate puts the PWM carrier squarely in the audible band, with no way to
 filter it on this hardware), so it was **not adopted**. If you want sound effects,
 use a Sound Blaster-class card (`opl3` / `wb` for music + the SB DAC for SFX). For
 a card that does both rich music *and* effects without a Sound Blaster, native
-Gravis Ultrasound support is the planned path.
+Gravis Ultrasound support is the planned path (see below).
+
+### Gravis Ultrasound (`AUDIO_BACKEND=gus`)
+
+The `gus` backend makes music on a **Gravis Ultrasound** (or a **PicoGUS booted in
+`/mode gus`**) with **no Sound Blaster** in the machine. Unlike the FM backends, the
+GUS is a *wavetable* card: General MIDI instruments are real recorded samples that
+the engine loads into the card's on-board DRAM, and the GF1 chip mixes up to 28
+voices in hardware straight to its own output - the CPU only sends note events, so
+the music is both richer and cheaper on a slow processor. Like the `adlib` path it
+has no Sound Blaster interrupt to clock the music, so it uses the **PIT/IRQ-0 system
+timer** (chained and restored the same way), and it does **not** need `AUDIO_OFF`
+(it brings up its own audio path and takes precedence over `AUDIO_OFF`).
+
+Enable it with:
+
+```
+SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=gus
+```
+
+The GUS reads its port/IRQ/DMA from the standard `ULTRASND` environment variable and
+its instrument patches from the directory named by `ULTRADIR` (the engine passes
+both through to the driver automatically). A normal GUS install sets these for you;
+a typical setup is `SET ULTRASND=240,3,3,7,7` and `SET ULTRADIR=C:\ULTRASND`, with
+the General MIDI `.pat` patch files under `C:\ULTRASND\MIDI`.
+
+**Requirements and cautions:**
+
+- A Gravis Ultrasound (or PicoGUS `/mode gus`) must be present and `ULTRASND` /
+  `ULTRADIR` set. If no card is found the game still runs, just with silent music.
+- The GM `.pat` instrument files named by `ULTRADIR` must be present (the standard
+  Gravis stock patch set). Instruments whose `.pat` is missing play silently.
+- Tempo resolution is governed by `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` (default `120`),
+  shared with the `adlib` path.
+
+**Limitation - music only, for now.** This first release plays *music* on the GUS;
+routing Cave Story's digital sound effects onto the GUS's own voices is a planned
+follow-up, so **sound effects are currently silent on the `gus` backend**. (The GUS
+is fully capable of both - this is a staging limitation, not a hardware one.)
 
 ---
 

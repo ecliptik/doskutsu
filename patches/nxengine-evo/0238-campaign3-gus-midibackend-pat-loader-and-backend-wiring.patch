@@ -1,0 +1,1285 @@
+From 2f7a74afc26350a6669797ac97e0d57410317f26 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 22 Jun 2026 16:24:41 -0700
+Subject: [PATCH] patch 0238 -- Campaign 3 GUS: MidiBackendGus + GM .pat loader
+ + AUDIO_BACKEND=gus
+
+Native Gravis Ultrasound (GF1) wavetable music on a no-Sound-Blaster card
+(real GUS or PicoGUS /mode gus). Structurally the AdLib path: out-of-band
+(no SDL audio device, no SDL3_mixer), clocked by the shared PIT/IRQ-0 pump
+(SDL/0110), brought up via the SDL/0112 GF1 exports. GM instruments render
+on the GF1's hardware voices from GUS .pat samples uploaded to card DRAM.
+
+Why DOS needs this: a GUS-only box has no Sound Blaster, so SDL_INIT_AUDIO
+cannot open an SB device and the SB IRQ-5 MIDI clock never fires. The gus
+boot-mode omits SDL_INIT_AUDIO but keeps SoundManager::init (mirroring the
+adlib FOURTH boot mode), brings the GF1 up out-of-band, and clocks MIDI off
+the card-agnostic PIT pump. .pat file I/O + float pitch precompute happen at
+on_song_start (main-loop); note_on/program_change run in the PIT IRQ and
+touch only resident DRAM with integer-only math (no I/O/malloc/FPU in ISR).
+Per-song lazy .pat residency bounded by the <=1MB GF1 DRAM. MUSIC ONLY this
+phase (#27); GF1 SFX = #28.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h |   5 +
+ src/graphics/Renderer.cpp     |   1 +
+ src/main.cpp                  |  56 +++-
+ src/sound/AudioBackend.cpp    |  22 +-
+ src/sound/MidiBackendGus.cpp  | 607 ++++++++++++++++++++++++++++++++++
+ src/sound/MidiBackendGus.h    | 139 ++++++++
+ src/sound/MidiScheduler.cpp   |  26 ++
+ src/sound/MidiScheduler.h     |  12 +
+ src/sound/SoundManager.cpp    | 123 +++++--
+ src/sound/SoundManager.h      |   6 +
+ 10 files changed, 957 insertions(+), 40 deletions(-)
+ create mode 100644 src/sound/MidiBackendGus.cpp
+ create mode 100644 src/sound/MidiBackendGus.h
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 0e3033a5..c8cde8c3 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -1100,6 +1100,11 @@ enum class AudioBackend : std::uint8_t
+   // instead of the SB IRQ-5. MUSIC ONLY -- a DAC-less AdLib card cannot
+   // play Pixtone PCM SFX. See docs/internal/ADLIB-NATIVE-DESIGN.md.
+   adlib       = 7,
++  // patch 0238 (Campaign 3 GUS): native Gravis Ultrasound (GF1) wavetable
++  // music. Out-of-band like adlib (no SDL audio device, PIT/IRQ-0 pump clock),
++  // but GM instruments render on the GF1's hardware voices from .pat samples
++  // uploaded to card DRAM. See docs/internal/GUS-NATIVE-DESIGN.md.
++  gus         = 8,
+ };
+ 
+ extern AudioBackend g_p10_audio_backend_active;
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 77e80645..05ce1ac3 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -347,6 +347,7 @@ const char *backend_to_string(AudioBackend b)
+     case AudioBackend::midi_stub:   return "midi-stub";
+     case AudioBackend::auto_select: return "auto";
+     case AudioBackend::adlib:       return "adlib";  // patch 0234 (Campaign 2)
++    case AudioBackend::gus:         return "gus";    // patch 0238 (Campaign 3)
+   }
+   return "unknown";
+ }
+diff --git a/src/main.cpp b/src/main.cpp
+index 6650d8b8..cecc8501 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1628,11 +1628,36 @@ int main(int argc, char *argv[])
+   // come up. Read via getenv (SDL_GetHint needs SDL_Init, not yet run -- same
+   // pattern as the AUDIO_OFF check). See docs/internal/ADLIB-NATIVE-DESIGN.md.
+   bool _adlib_mode = false;
++  // patch 0238 (Campaign 3 GUS): FOURTH boot mode. AUDIO_BACKEND=gus runs music
++  // natively on a no-Sound-Blaster Gravis Ultrasound (GF1), driven out-of-band
++  // by the SDL/0112 exports + clocked by the PIT/IRQ-0 pump. Like AUDIO_OFF /
++  // adlib it must OMIT SDL_INIT_AUDIO (there is no SB device to open), but like
++  // adlib it KEEPS SoundManager::init() so the GF1 backend + pump come up.
++  bool _gus_mode = false;
+   {
+     const char *e = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_OFF");
+     _audio_off = e && e[0] == '1' && e[1] == 0;
+     const char *b = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
+     _adlib_mode = b && std::strcmp(b, "adlib") == 0;
++    _gus_mode   = b && std::strcmp(b, "gus") == 0;
++  }
++  // patch 0238 (Campaign 3 GUS): bridge the operator's real ULTRASND / ULTRADIR
++  // env vars into the SDL hints the GF1 driver reads (SDL is getenv-forbidden;
++  // it reads ONLY SDL_GetHint). Must run BEFORE SDL_Init / SDL_DOSGusInit. The
++  // operator box uses e.g. ULTRASND=240,3,3,7,7 + ULTRADIR=C:\ULTRASND -- do NOT
++  // assume IRQ5/DMA1 (that is the coexisting Vibra16). Only bridged for the GUS
++  // path so non-GUS configs are byte-untouched.
++  if (_gus_mode)
++  {
++    const char *us = std::getenv("ULTRASND");
++    if (us && us[0] != '\0')
++      SDL_SetHintWithPriority("SDL_HINT_DOSKUTSU_GUS_ULTRASND", us, SDL_HINT_OVERRIDE);
++    const char *ud = std::getenv("ULTRADIR");
++    if (ud && ud[0] != '\0')
++      SDL_SetHintWithPriority("SDL_HINT_DOSKUTSU_GUS_ULTRADIR", ud, SDL_HINT_OVERRIDE);
++    LOG_INFO("AUDIO_BACKEND=gus -- bridged ULTRASND='{}' ULTRADIR='{}' from env "
++             "into the GUS SDL hints (SDL reads hints, not env).",
++             us ? us : "(unset)", ud ? ud : "(unset)");
+   }
+   // patch 0236 (#20): AUDIO_BACKEND=adlib takes PRECEDENCE over AUDIO_OFF.
+   // adlib is an EXPLICIT request for OPL music and needs the synth path
+@@ -1642,19 +1667,30 @@ int main(int argc, char *argv[])
+   // AUDIO_OFF bypassed init). Clear _audio_off so adlib wins -- the
+   // SDL_INIT_AUDIO omission still happens via the `|| _adlib_mode` test
+   // below, and SoundManager::init now runs.
+-  if (_adlib_mode && _audio_off)
++  // patch 0238 (Campaign 3 GUS): same precedence rule as adlib (#20) -- an
++  // explicit GUS-music request needs the synth path, so AUDIO_BACKEND=gus wins
++  // over AUDIO_OFF (else AUDIO_OFF would bypass SoundManager::init and leave the
++  // GF1 silent -- the g2k first-run footgun).
++  if ((_adlib_mode || _gus_mode) && _audio_off)
+   {
+-    LOG_WARN("Both SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib and "
+-             "SDL_HINT_DOSKUTSU_AUDIO_OFF=1 are set -- adlib WINS (an "
+-             "explicit OPL-music request needs the synth path). Ignoring "
+-             "AUDIO_OFF's SoundManager::init bypass; OPL2 + the PIT pump "
+-             "will come up. Unset one to silence this warning.");
++    LOG_WARN("Both SDL_HINT_DOSKUTSU_AUDIO_BACKEND={} and "
++             "SDL_HINT_DOSKUTSU_AUDIO_OFF=1 are set -- {} WINS (an explicit "
++             "music request needs the synth path). Ignoring AUDIO_OFF's "
++             "SoundManager::init bypass; the backend + PIT pump will come up. "
++             "Unset one to silence this warning.",
++             _gus_mode ? "gus" : "adlib", _gus_mode ? "gus" : "adlib");
+     _audio_off = false;
+   }
+-  if (_audio_off || _adlib_mode)
++  if (_audio_off || _adlib_mode || _gus_mode)
+   {
+     _sdl_init_flags &= ~SDL_INIT_AUDIO;
+-    if (_adlib_mode)
++    if (_gus_mode)
++      LOG_INFO("AUDIO_BACKEND=gus -- omitting SDL_INIT_AUDIO (no Sound Blaster "
++               "on a Gravis Ultrasound config; the GF1 is driven out-of-band "
++               "via the SDL/0112 exports + the PIT/IRQ-0 music pump). "
++               "SoundManager::init() STILL RUNS (unlike AUDIO_OFF) to bring up "
++               "the GF1 backend. MUSIC ONLY this phase (#27) -- GF1 SFX = #28.");
++    else if (_adlib_mode)
+       LOG_INFO("AUDIO_BACKEND=adlib -- omitting SDL_INIT_AUDIO (no Sound "
+                "Blaster on a native-AdLib config; the OPL chip is driven by "
+                "direct port I/O + the PIT/IRQ-0 music pump). SoundManager::"
+@@ -1679,7 +1715,9 @@ int main(int argc, char *argv[])
+   // atexit too so an abnormal exit (fatal(), etc.) still restores PIT ch0.
+   // SDL_DOSOplTimerPumpStop is idempotent + a no-op if the pump never started,
+   // so registering it only in adlib mode is sufficient + harmless.
+-  if (_adlib_mode)
++  // patch 0238 (Campaign 3 GUS): the GUS path uses the SAME PIT pump as the
++  // music clock, so it needs the same belt-and-braces PIT-restore atexit.
++  if (_adlib_mode || _gus_mode)
+   {
+     std::atexit(SDL_DOSOplTimerPumpStop);
+   }
+diff --git a/src/sound/AudioBackend.cpp b/src/sound/AudioBackend.cpp
+index 7f2a71c2..d09d8f79 100644
+--- a/src/sound/AudioBackend.cpp
++++ b/src/sound/AudioBackend.cpp
+@@ -139,6 +139,26 @@ void selectBackendFromEnv()
+              "0x388 via the Adlib timer-1 sequence; if absent, music is silent "
+              "(the game still runs). Reuses data/opl3bank.dat (DMXOPL GM bank).");
+   }
++  else if (std::strcmp(value, "gus") == 0)
++  {
++    // patch 0238 (Campaign 3 GUS): native Gravis Ultrasound (GF1) wavetable
++    // music on a no-Sound-Blaster card (incl. PicoGUS in /mode gus). Like the
++    // adlib path, SoundManager::init takes the no-mixer out-of-band route: it
++    // omits the SB16 bring-up, brings the GF1 up via SDL_DOSGusInit (SDL/0112),
++    // installs MidiBackendGus, uploads GM .pat instruments to card DRAM, and
++    // clocks the MidiScheduler off the PIT/IRQ-0 pump (SDL/0110) -- there is no
++    // SB IRQ-5 on such a box. main.cpp omits SDL_INIT_AUDIO for this backend
++    // (like AUDIO_OFF / adlib) but KEEPS SoundManager::init. MUSIC ONLY this
++    // phase (#27); Pixtone SFX on GF1 voices lands in #28.
++    selected = NXE::Diag::AudioBackend::gus;
++    LOG_INFO("audio backend: gus (Campaign 3 -- native Gravis Ultrasound GF1 "
++             "wavetable music; GM instruments render on GF1 hardware voices "
++             "from .pat samples uploaded to card DRAM; music clock = PIT/IRQ-0 "
++             "pump, NOT SB IRQ-5). MUSIC ONLY this phase. SoundManager::init "
++             "brings up the GF1 via SDL_DOSGusInit; if absent, music is silent "
++             "(the game still runs). Reads GM .pat from ULTRADIR (Gravis stock "
++             "set). See docs/internal/GUS-NATIVE-DESIGN.md.");
++  }
+   else if (std::strcmp(value, "tracker") == 0)
+   {
+     selected = NXE::Diag::AudioBackend::organya;
+@@ -166,7 +186,7 @@ void selectBackendFromEnv()
+     selected = NXE::Diag::AudioBackend::organya;
+     LOG_INFO("audio backend: unrecognized value '{}' for "
+              "SDL_HINT_DOSKUTSU_AUDIO_BACKEND; falling back to organya. "
+-             "Recognized values: auto | organya | wb | opl3 | adlib | tracker | midi-stub.",
++             "Recognized values: auto | organya | wb | opl3 | adlib | gus | tracker | midi-stub.",
+              value);
+   }
+ 
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+new file mode 100644
+index 00000000..0ba5acac
+--- /dev/null
++++ b/src/sound/MidiBackendGus.cpp
+@@ -0,0 +1,607 @@
++/* Cave Story port -- Campaign 3 (native Gravis Ultrasound / GF1, patch 0238).
++ * MidiBackendGus implementation. See MidiBackendGus.h for the design + the
++ * IRQ-context discipline, and docs/internal/GUS-PAT-PARSER-DESIGN.md for the
++ * .pat byte layout + the GM filename table provenance.
++ *
++ * The GF1 transport is the SDL/0112 out-of-band export surface
++ * (SDL3/SDL_dosgus.h): Init/Shutdown/GetState/UploadSample/ResetDram +
++ * AllocVoice/StartVoice/StopVoice/SetVoiceFreq/Vol/Pan. The driver owns every
++ * GF1 register/fixed-point/log conversion; this backend hands friendly units
++ * (Hz, 0..255 vol, 0..255 pan) + native-format sample bytes (8-bit unsigned /
++ * 16-bit signed -- the .pat signed->unsigned flip is done here).
++ */
++
++#include "MidiBackendGus.h"
++
++#include "../Utils/Logger.h"
++
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#include <SDL3/SDL.h>
++#include <SDL3/SDL_dosgus.h>        // SDL/0112 GF1 export surface
++#include <SDL3/SDL_dosmidi_tick.h>  // SDL_DOSMidiIsrAnyActive (DPMI-lock gate)
++
++#ifdef __DJGPP__
++#include <dpmi.h>  // _go32_dpmi_lock_data for the IRQ-touched instance
++#endif
++
++namespace NXE
++{
++namespace Sound
++{
++
++// ============================================================================
++// GM program / drum-note -> Gravis stock .pat base filename.
++//
++// This is the canonical Gravis Ultrasound default-patchset name table (the
++// de-facto standard shared by every GUS GM config; transcribed from the
++// TiMidity-compatible gravis.cfg for the GUS default patchset). It matches the
++// operator's stock C:\ULTRASND\MIDI\*.pat set. Every name is DOS 8.3-safe
++// (<=8 chars). const char* rodata -- read only in on_song_start (main-loop
++// context), never from the IRQ note path, so no DPMI lock needed.
++// ============================================================================
++
++static const char *const MELODIC_NAMES[128] = {
++  "acpiano",  "britepno", "synpiano", "honky",    "epiano1",  "epiano2",
++  "hrpschrd", "clavinet", "celeste",  "glocken",  "musicbox", "vibes",
++  "marimba",  "xylophon", "tubebell", "santur",   "homeorg",  "percorg",
++  "rockorg",  "church",   "reedorg",  "accordn",  "harmonca", "concrtna",
++  "nyguitar", "acguitar", "jazzgtr",  "cleangtr", "mutegtr",  "odguitar",
++  "distgtr",  "gtrharm",  "acbass",   "fngrbass", "pickbass", "fretless",
++  "slapbas1", "slapbas2", "synbass1", "synbass2", "violin",   "viola",
++  "cello",    "contraba", "tremstr",  "pizzcato", "harp",     "timpani",
++  "marcato",  "slowstr",  "synstr1",  "synstr2",  "choir",    "doo",
++  "voices",   "orchhit",  "trumpet",  "trombone", "tuba",     "mutetrum",
++  "frenchrn", "hitbrass", "synbras1", "synbras2", "sprnosax", "altosax",
++  "tenorsax", "barisax",  "oboe",     "englhorn", "bassoon",  "clarinet",
++  "piccolo",  "flute",    "recorder", "woodflut", "bottle",   "shakazul",
++  "whistle",  "ocarina",  "sqrwave",  "sawwave",  "calliope", "chiflead",
++  "charang",  "voxlead",  "lead5th",  "basslead", "fantasia", "warmpad",
++  "polysyn",  "ghostie",  "bowglass", "metalpad", "halopad",  "sweeper",
++  "aurora",   "soundtrk", "crystal",  "atmosphr", "freshair", "unicorn",
++  "echovox",  "startrak", "sitar",    "banjo",    "shamisen", "koto",
++  "kalimba",  "bagpipes", "fiddle",   "shannai",  "carillon", "agogo",
++  "steeldrm", "woodblk",  "taiko",    "toms",     "syntom",   "revcym",
++  "fx-fret",  "fx-blow",  "seashore", "jungle",   "telephon", "helicptr",
++  "applause", "pistol",
++};
++
++// Percussion: GM note 27..87 -> drum .pat. Index by (note - 27).
++static const char *const DRUM_NAMES[61] = {
++  "highq",    "slap",     "scratch1", "scratch2", "sticks",   "sqrclick", // 27-32
++  "metclick", "metbell",  "kick1",    "kick2",    "stickrim", "snare1",   // 33-38
++  "claps",    "snare2",   "tomlo2",   "hihatcl",  "tomlo1",   "hihatpd",  // 39-44
++  "tommid2",  "hihatop",  "tommid1",  "tomhi2",   "cymcrsh1", "tomhi1",   // 45-50
++  "cymride1", "cymchina", "cymbell",  "tamborin", "cymsplsh", "cowbell",  // 51-56
++  "cymcrsh2", "vibslap",  "cymride2", "bongohi",  "bongolo",  "congahi1", // 57-62
++  "congahi2", "congalo",  "timbaleh", "timbalel", "agogohi",  "agogolo",  // 63-68
++  "cabasa",   "maracas",  "whistle1", "whistle2", "guiro1",   "guiro2",   // 69-74
++  "clave",    "woodblk1", "woodblk2", "cuica1",   "cuica2",   "triangl1", // 75-80
++  "triangl2", "shaker",   "jingles",  "belltree", "castinet", "surdo1",   // 81-86
++  "surdo2",                                                               // 87
++};
++
++const char *MidiBackendGus::_melodic_patch_name(int program)
++{
++  if (program < 0 || program > 127) return nullptr;
++  return MELODIC_NAMES[program];
++}
++
++const char *MidiBackendGus::_drum_patch_name(int note)
++{
++  if (note < 27 || note > 87) return nullptr;
++  return DRUM_NAMES[note - 27];
++}
++
++// ============================================================================
++// Little-endian byte readers (the .pat wire format packs multi-byte ints at
++// unaligned offsets; explicit readers avoid struct-packing assumptions).
++// ============================================================================
++
++static std::uint16_t rd_u16le(const std::uint8_t *p)
++{
++  return (std::uint16_t)(p[0] | (p[1] << 8));
++}
++static std::uint32_t rd_u32le(const std::uint8_t *p)
++{
++  return (std::uint32_t)p[0] | ((std::uint32_t)p[1] << 8) |
++         ((std::uint32_t)p[2] << 16) | ((std::uint32_t)p[3] << 24);
++}
++static std::int32_t rd_s32le(const std::uint8_t *p)
++{
++  return (std::int32_t)rd_u32le(p);
++}
++
++// ============================================================================
++// MidiBackendGus lifecycle
++// ============================================================================
++
++MidiBackendGus::MidiBackendGus()
++{
++  LOG_INFO("gus backend: bringing up the GF1 (SDL_DOSGusInit -- parses "
++           "ULTRASND, GF1 reset, DRAM sizing, voice/rate program, IRQ hook)...");
++
++  // Equal-tempered MIDI frequency table (FPU is fine here -- ctor runs in
++  // main-loop init context, NOT the IRQ note path).
++  for (int n = 0; n < 128; ++n)
++  {
++    _note_freq[n] =
++        (std::uint32_t)(440.0 * std::pow(2.0, (n - 69) / 12.0) + 0.5);
++  }
++
++  std::memset(_voices, 0, sizeof(_voices));
++  std::memset(_mel, 0, sizeof(_mel));
++  std::memset(_drum, 0, sizeof(_drum));
++  for (int ch = 0; ch < MIDI_CHANNELS; ++ch)
++  {
++    _channel_program[ch]    = 0;
++    _channel_volume[ch]     = 100;  // GM default
++    _channel_expression[ch] = 127;  // GM default
++    _channel_pan[ch]        = 64;   // GM center
++  }
++
++  if (!SDL_DOSGusInit())
++  {
++    _ready = false;
++    LOG_INFO("gus backend: SDL_DOSGusInit failed -- no GF1 detected (check "
++             "ULTRASND, or set SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION=1 for "
++             "bring-up under emulation). Music will be SILENT this run; the "
++             "game still runs.");
++    return;
++  }
++
++  SDL_DOSGusState st;
++  if (SDL_DOSGusGetState(&st) && st.valid)
++  {
++    _num_voices  = (st.num_voices > 0 && st.num_voices <= MAX_VOICES)
++                       ? st.num_voices
++                       : 28;
++    _output_rate = st.output_rate ? st.output_rate : 22050;
++    _dram_size   = st.dram_size;
++  }
++
++  // Clean DRAM slate (no persistent region yet -- #28's SFX bank is the future
++  // keep-region; for #27 music-only the whole DRAM is the per-song pool).
++  SDL_DOSGusResetDram(0);
++
++  _ready = true;
++
++  LOG_INFO("gus backend ready: GF1 detected, {} voices @ {} Hz, {} KB DRAM. "
++           "Clock = PIT/IRQ-0 pump (SDL/0110), NOT SB IRQ-5. GM instruments "
++           "load lazily per song from ULTRADIR .pat (Gravis stock set). "
++           "MUSIC ONLY this phase (#27); GF1 SFX = #28.",
++           _num_voices, (unsigned)_output_rate, (unsigned)(_dram_size / 1024));
++
++  // DPMI-lock the whole instance: under the PIT pump the IRQ-0 ISR's
++  // tick_isr -> note_on/off reads _voices / _mel / _drum / _note_freq /
++  // channel arrays. Gate on the SHARED pump predicate, mirroring
++  // MidiBackendOpl2's ctor (SDL/0110). (CWSDPMI locks all memory by default,
++  // so this is belt-and-braces -- but it keeps the IRQ-context contract
++  // explicit and matches the shipped AdLib backend.)
++#ifdef __DJGPP__
++  if (SDL_DOSMidiIsrAnyActive())
++  {
++    _go32_dpmi_lock_data((void *)this, (unsigned long)sizeof(*this));
++  }
++#endif
++}
++
++MidiBackendGus::~MidiBackendGus()
++{
++  if (_ready)
++  {
++    for (int v = 0; v < _num_voices; ++v)
++    {
++      SDL_DOSGusStopVoice(v);
++    }
++    // Idempotent: stops + silences all voices, unhooks the GF1 IRQ, parks the
++    // chip in reset. Safe even though SoundManager::shutdown may also call it.
++    SDL_DOSGusShutdown();
++    LOG_INFO("gus backend shutdown (all voices stopped; GF1 in reset).");
++  }
++}
++
++// ============================================================================
++// .pat upload (MAIN-LOOP context only -- file I/O + FPU)
++// ============================================================================
++
++bool MidiBackendGus::_upload_pat(const char *base_name, bool is_drum,
++                                 PatSample *out)
++{
++  if (!base_name || !out) return false;
++
++  const char *ultradir = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_ULTRADIR");
++  if (!ultradir || ultradir[0] == '\0') ultradir = "C:\\ULTRASND";
++
++  // Try <ULTRADIR>\<name>.pat then <ULTRADIR>\MIDI\<name>.pat (the operator's
++  // stock layout is the MIDI subdir). fopen "rb" -- DJGPP text-mode would
++  // corrupt the binary .pat (CRLF translation).
++  char path[256];
++  std::FILE *fp = nullptr;
++  std::snprintf(path, sizeof(path), "%s\\%s.pat", ultradir, base_name);
++  fp = std::fopen(path, "rb");
++  if (!fp)
++  {
++    std::snprintf(path, sizeof(path), "%s\\MIDI\\%s.pat", ultradir, base_name);
++    fp = std::fopen(path, "rb");
++  }
++  if (!fp)
++  {
++    LOG_WARN("gus backend: .pat '{}' not found under '{}' (tried both "
++             "<dir>\\ and <dir>\\MIDI\\); instrument silent.", base_name,
++             ultradir);
++    return false;
++  }
++
++  std::uint8_t hdr[129];
++  std::uint8_t ihdr[63];
++  std::uint8_t lhdr[47];
++  std::uint8_t srec[96];
++  if (std::fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr) ||
++      std::memcmp(hdr, "GF1PATCH1", 9) != 0)
++  {
++    LOG_WARN("gus backend: '{}.pat' bad/short GF1 header; instrument silent.",
++             base_name);
++    std::fclose(fp);
++    return false;
++  }
++  if (std::fread(ihdr, 1, sizeof(ihdr), fp) != sizeof(ihdr) ||
++      std::fread(lhdr, 1, sizeof(lhdr), fp) != sizeof(lhdr) ||
++      std::fread(srec, 1, sizeof(srec), fp) != sizeof(srec))
++  {
++    LOG_WARN("gus backend: '{}.pat' truncated instrument/layer/sample header; "
++             "instrument silent.", base_name);
++    std::fclose(fp);
++    return false;
++  }
++
++  // Sample-record fields (offsets per GUS-PAT-PARSER-DESIGN.md sec 1.4).
++  const std::uint32_t data_size = rd_u32le(srec + 8);
++  std::uint32_t       loop_start = rd_u32le(srec + 12);
++  std::uint32_t       loop_end   = rd_u32le(srec + 16);
++  const std::uint32_t sample_rate = rd_u16le(srec + 20);
++  const std::int32_t  root_freq   = rd_s32le(srec + 30);  // milliHz
++  const std::uint8_t  modes       = srec[55];
++
++  const bool fmt16       = (modes & 0x01) != 0;
++  const bool is_unsigned = (modes & 0x02) != 0;
++  const bool loop_on     = (modes & 0x04) != 0;
++  const bool bidi        = (modes & 0x08) != 0;
++
++  // Sanity-guard the size before allocating (defensive against a corrupt
++  // header; the io-audit discipline). data_size must be > 0 and fit DRAM.
++  if (data_size == 0 || (_dram_size && data_size > _dram_size) ||
++      data_size > (2u * 1024u * 1024u))
++  {
++    LOG_WARN("gus backend: '{}.pat' implausible data_size={} (dram={}); "
++             "instrument silent.", base_name, (unsigned)data_size,
++             (unsigned)_dram_size);
++    std::fclose(fp);
++    return false;
++  }
++
++  std::uint8_t *pcm = (std::uint8_t *)std::malloc(data_size);
++  if (!pcm)
++  {
++    LOG_WARN("gus backend: '{}.pat' OOM allocating {} bytes; instrument "
++             "silent.", base_name, (unsigned)data_size);
++    std::fclose(fp);
++    return false;
++  }
++  if (std::fread(pcm, 1, data_size, fp) != data_size)
++  {
++    LOG_WARN("gus backend: '{}.pat' truncated PCM data ({} bytes); instrument "
++             "silent.", base_name, (unsigned)data_size);
++    std::free(pcm);
++    std::fclose(fp);
++    return false;
++  }
++  std::fclose(fp);
++
++  // Normalize to native GF1 DRAM format: 8-bit UNSIGNED / 16-bit SIGNED. The
++  // driver uploads verbatim (R4), so the engine owns the sign flip. .pat is
++  // most commonly 8-bit signed -> xor 0x80; 16-bit is usually already signed.
++  if (!fmt16)
++  {
++    if (!is_unsigned)
++      for (std::uint32_t i = 0; i < data_size; ++i) pcm[i] ^= 0x80;
++  }
++  else
++  {
++    if (is_unsigned)
++      for (std::uint32_t i = 1; i < data_size; i += 2) pcm[i] ^= 0x80;  // hi byte
++  }
++
++  const std::uint32_t addr = SDL_DOSGusUploadSample(pcm, data_size, fmt16 ? 1 : 0);
++  std::free(pcm);
++  if (addr == SDL_DOSGUS_BAD_ADDR)
++  {
++    LOG_WARN("gus backend: '{}.pat' DRAM upload failed (full?); instrument "
++             "silent. dram_size={} bytes.", base_name, (unsigned)_dram_size);
++    return false;
++  }
++
++  // Resolve loop/end byte offsets. Drums are one-shot regardless of the .pat
++  // loop flag (a looping drum would ring forever on note-selected percussion).
++  const bool use_loop = loop_on && !is_drum;
++  if (loop_end == 0 || loop_end > data_size) loop_end = data_size;
++  if (loop_start > data_size) loop_start = 0;
++
++  // Pitch scaler g_fp = (sample_rate / root_hz) << 16, integer fixed-point.
++  // root_hz = root_freq (milliHz) / 1000. FPU OK here (main-loop). note_on
++  // then does playback_hz = (g_fp * _note_freq[note]) >> 16 with pure ints.
++  double root_hz = (root_freq > 0) ? (root_freq / 1000.0) : 440.0;
++  if (root_hz < 1.0) root_hz = 440.0;
++  const double g = (double)sample_rate / root_hz;
++  std::uint32_t g_fp = (std::uint32_t)(g * 65536.0 + 0.5);
++  if (g_fp == 0) g_fp = 65536;  // identity guard
++
++  out->resident    = true;
++  out->dram_addr   = addr;
++  out->data_size   = data_size;
++  out->loop_start  = loop_start;
++  out->loop_end    = loop_end;
++  out->sample_rate = sample_rate ? sample_rate : 22050;
++  out->g_fp        = g_fp;
++  out->flags       = (std::uint16_t)((use_loop ? SDL_DOSGUS_LOOP : 0) |
++                                     (fmt16 ? SDL_DOSGUS_16BIT : 0) |
++                                     (use_loop && bidi ? SDL_DOSGUS_BIDI : 0));
++  return true;
++}
++
++// ============================================================================
++// Voice pool (engine owns lifecycle; driver pool via Alloc/StopVoice)
++// ============================================================================
++
++void MidiBackendGus::_reap_finished_voices()
++{
++  // Read live hardware status; any voice the mirror thinks is active but the
++  // hardware reports stopped (a one-shot drum/sample that ran to its end) is
++  // returned to the pool so it can be reused + _find_voice stays correct.
++  SDL_DOSGusState st;
++  if (!SDL_DOSGusGetState(&st) || !st.valid) return;
++  for (int v = 0; v < _num_voices; ++v)
++  {
++    if (_voices[v].active && ((st.voice_active_mask >> v) & 1u) == 0u)
++    {
++      SDL_DOSGusStopVoice(v);
++      _voices[v].active = false;
++    }
++  }
++}
++
++int MidiBackendGus::_allocate_voice()
++{
++  _reap_finished_voices();
++  ++_voice_alloc_count;
++
++  // Prefer the driver's free-list; it tracks the real hardware pool.
++  int v = SDL_DOSGusAllocVoice();
++  if (v < 0 || v >= _num_voices)
++  {
++    // Pool exhausted -> engine LRU steal of the oldest active mirror voice.
++    int lru = 0;
++    for (int i = 1; i < _num_voices; ++i)
++    {
++      if (_voices[i].last_used < _voices[lru].last_used) lru = i;
++    }
++    SDL_DOSGusStopVoice(lru);
++    _voices[lru].active = false;
++    v = SDL_DOSGusAllocVoice();
++    if (v < 0 || v >= _num_voices) v = lru;  // last resort: reuse the slot id
++  }
++  _voices[v].last_used = _voice_alloc_count;
++  return v;
++}
++
++int MidiBackendGus::_find_voice(int channel, int note)
++{
++  for (int v = 0; v < _num_voices; ++v)
++  {
++    if (_voices[v].active &&
++        _voices[v].midi_channel == (std::uint8_t)channel &&
++        _voices[v].midi_note    == (std::uint8_t)note)
++    {
++      return v;
++    }
++  }
++  return -1;
++}
++
++// ============================================================================
++// MidiBackend dispatch (note_on/off/cc/pc run in IRQ-0 context -- int only)
++// ============================================================================
++
++void MidiBackendGus::note_on(int channel, int note, int velocity)
++{
++  if (!_ready) return;
++  if (velocity == 0)
++  {
++    note_off(channel, note, 0);
++    return;
++  }
++  const int ch = channel & 0x0F;
++  note &= 0x7F;
++
++  const bool is_drum = (ch == DRUM_CHANNEL);
++  const PatSample *ps =
++      is_drum ? &_drum[note] : &_mel[_channel_program[ch] & 0x7F];
++  if (!ps->resident) return;  // not pre-uploaded at on_song_start -> silent.
++                              // (No file I/O in IRQ context, by design.)
++
++  const int v = _allocate_voice();
++  _voices[v].active       = true;
++  _voices[v].midi_channel = (std::uint8_t)ch;
++  _voices[v].midi_note    = (std::uint8_t)note;
++
++  // Pitch. Drums play at the sample's native rate (the note selects the drum,
++  // it does not transpose it). Melodic voices pitch via the fixed-point scaler.
++  std::uint32_t hz;
++  if (is_drum)
++  {
++    hz = ps->sample_rate;
++  }
++  else
++  {
++    hz = (std::uint32_t)(((std::uint64_t)ps->g_fp * _note_freq[note]) >> 16);
++  }
++  if (hz == 0) hz = ps->sample_rate;
++
++  // Volume: velocity * channel-volume(CC7) * expression(CC11), 0..255 linear.
++  int lin = velocity;                                  // 0..127
++  lin = (lin * _channel_volume[ch]) / 127;             // apply CC7
++  lin = (lin * _channel_expression[ch]) / 127;         // apply CC11
++  int vol255 = (lin * 255) / 127;                      // 0..127 -> 0..255
++  if (vol255 > 255) vol255 = 255;
++
++  int pan255 = (int)_channel_pan[ch] << 1;             // CC10 0..127 -> 0..255
++  if (pan255 > 255) pan255 = 255;
++
++  const std::uint32_t start     = ps->dram_addr;
++  const std::uint32_t end       = ps->dram_addr + ps->loop_end;
++  const std::uint32_t loopstart = ps->dram_addr + ps->loop_start;
++
++  SDL_DOSGusSetVoiceFreq(v, hz);
++  SDL_DOSGusSetVoiceVol(v, vol255);
++  SDL_DOSGusSetVoicePan(v, pan255);
++  SDL_DOSGusStartVoice(v, start, end, loopstart, ps->flags);
++}
++
++void MidiBackendGus::note_off(int channel, int note, int velocity)
++{
++  (void)velocity;
++  if (!_ready) return;
++  const int v = _find_voice(channel & 0x0F, note & 0x7F);
++  if (v >= 0)
++  {
++    // No hardware release ramp is exported; stop immediately (matches the
++    // shipped OPL2/OPL3 backends, which KEY-OFF on note_off). A software
++    // release ramp is a deferred polish item (GUS-PAT-PARSER-DESIGN sec 7).
++    SDL_DOSGusStopVoice(v);
++    _voices[v].active = false;
++  }
++}
++
++void MidiBackendGus::control_change(int channel, int controller, int value)
++{
++  if (!_ready) return;
++  const int ch = channel & 0x0F;
++  switch (controller)
++  {
++    case 7:   _channel_volume[ch]     = (std::uint8_t)(value & 0x7F); break;
++    case 10:  _channel_pan[ch]        = (std::uint8_t)(value & 0x7F); break;
++    case 11:  _channel_expression[ch] = (std::uint8_t)(value & 0x7F); break;
++    case 120:  // All Sound Off
++    case 123:  // All Notes Off
++    {
++      for (int v = 0; v < _num_voices; ++v)
++      {
++        if (_voices[v].active && _voices[v].midi_channel == (std::uint8_t)ch)
++        {
++          SDL_DOSGusStopVoice(v);
++          _voices[v].active = false;
++        }
++      }
++      break;
++    }
++    default:
++      break;
++  }
++}
++
++void MidiBackendGus::program_change(int channel, int program)
++{
++  if (!_ready) return;
++  // IRQ context: record only. The .pat was pre-uploaded at on_song_start; the
++  // upload itself never happens here (no file I/O in the ISR).
++  _channel_program[channel & 0x0F] = (std::uint8_t)(program & 0x7F);
++}
++
++void MidiBackendGus::on_song_start()
++{
++  if (!_ready) return;
++
++  // MAIN-LOOP context (the loop-restart does NOT re-fire this -- see
++  // MidiScheduler.cpp:472). Safe for file I/O + FPU. Tear down the prior
++  // song's voices, free its DRAM, then pre-upload exactly the instruments the
++  // new song references so the IRQ note path only ever touches resident DRAM.
++
++  for (int v = 0; v < _num_voices; ++v)
++  {
++    SDL_DOSGusStopVoice(v);
++    _voices[v].active = false;
++  }
++  // Free the previous song's .pat region (no persistent #28 SFX region yet ->
++  // keep 0). Stop voices FIRST (above) so none reads the freed DRAM (R3).
++  SDL_DOSGusResetDram(0);
++  for (int i = 0; i < 128; ++i) { _mel[i].resident = false; _drum[i].resident = false; }
++
++  for (int ch = 0; ch < MIDI_CHANNELS; ++ch)
++  {
++    _channel_program[ch]    = 0;
++    _channel_volume[ch]     = 100;
++    _channel_expression[ch] = 127;
++    _channel_pan[ch]        = 64;
++  }
++
++  // Pre-scan the loaded song for its melodic programs + drum notes.
++  std::uint8_t mel_used[128];
++  std::uint8_t drum_used[128];
++  MidiScheduler::getInstance()->collect_song_instruments(mel_used, drum_used);
++  mel_used[0] = 1;  // program 0 (piano) is the GM default for un-programmed
++                    // channels; always have it resident.
++
++  int loaded = 0, missing = 0;
++  for (int p = 0; p < 128; ++p)
++  {
++    if (!mel_used[p]) continue;
++    if (_upload_pat(_melodic_patch_name(p), /*is_drum=*/false, &_mel[p]))
++      ++loaded;
++    else
++      ++missing;
++  }
++  for (int n = 0; n < 128; ++n)
++  {
++    if (!drum_used[n]) continue;
++    const char *nm = _drum_patch_name(n);
++    if (nm && _upload_pat(nm, /*is_drum=*/true, &_drum[n]))
++      ++loaded;
++    else
++      ++missing;
++  }
++
++  SDL_DOSGusState st;
++  const unsigned used_kb =
++      (SDL_DOSGusGetState(&st) && st.valid) ? (unsigned)(st.dram_used / 1024) : 0;
++  LOG_INFO("gus backend: on_song_start -- uploaded {} instruments ({} "
++           "missing/silent) into {} KB DRAM for this song.",
++           loaded, missing, used_kb);
++}
++
++void MidiBackendGus::on_song_stop()
++{
++  if (!_ready) return;
++  for (int v = 0; v < _num_voices; ++v)
++  {
++    SDL_DOSGusStopVoice(v);
++    _voices[v].active = false;
++  }
++  LOG_INFO("gus backend: on_song_stop (all voices stopped).");
++}
++
++void MidiBackendGus::silence_for_shutdown()
++{
++  if (!_ready) return;
++  for (int v = 0; v < _num_voices; ++v)
++  {
++    SDL_DOSGusStopVoice(v);
++    _voices[v].active = false;
++  }
++}
++
++}  // namespace Sound
++}  // namespace NXE
+diff --git a/src/sound/MidiBackendGus.h b/src/sound/MidiBackendGus.h
+new file mode 100644
+index 00000000..fc5f4b48
+--- /dev/null
++++ b/src/sound/MidiBackendGus.h
+@@ -0,0 +1,139 @@
++/* Cave Story port -- Campaign 3 (native Gravis Ultrasound / GF1, patch 0238).
++ * MidiBackendGus: concrete MidiBackend that renders GM MIDI music on the GF1
++ * wavetable engine. Out-of-band, exactly like the AdLib path (MidiBackendOpl2):
++ * there is NO SDL audio device and NO SDL3_mixer. The card is brought up via
++ * SDL_DOSGusInit() (SDL/0112), GM instruments are uploaded into the card's
++ * on-board DRAM as GUS .pat samples, and per-note GF1 hardware voices are
++ * commanded through the SDL_DOSGus* exports. The GF1 mixes up to 28 voices in
++ * hardware straight to its DAC; the host CPU only allocates + dispatches.
++ *
++ * Selected when SDL_HINT_DOSKUTSU_AUDIO_BACKEND=gus. The music clock is the
++ * PIT/IRQ-0 pump (SDL/0110, shared with the AdLib path), NOT the SB IRQ-5 --
++ * a GUS-only box has no Sound Blaster. MUSIC ONLY for Phase 1 (#27); Pixtone
++ * SFX on GF1 voices lands in #28.
++ *
++ * IRQ-CONTEXT DISCIPLINE (critical): under the PIT pump, note_on / note_off /
++ * control_change / program_change are dispatched from MidiScheduler::tick_isr
++ * in IRQ-0 context. Those paths therefore do NO file I/O, NO malloc/free, and
++ * NO FPU (the DOS ISR does not save FPU state). All .pat loading + the float
++ * pitch precompute happen in on_song_start (main-loop context -- the loop-
++ * restart does NOT re-fire on_song_start, MidiScheduler.cpp:472). note_on uses
++ * integer-only pitch math against a per-program fixed-point scaler computed at
++ * upload time.
++ *
++ * .pat residency: lazy per song. on_song_start pre-scans the loaded song's
++ * instruments (MidiScheduler::collect_song_instruments) + uploads exactly the
++ * GM programs / drum notes it uses, bounded by the card's <=1MB DRAM. Per-song
++ * swap rewinds the DRAM bump allocator (SDL_DOSGusResetDram). BRING-UP reads
++ * the Gravis stock .pat from ULTRADIR (operator CF: C:\ULTRASND\MIDI). FreePats
++ * bundling for ship is a separate later task.
++ *
++ * See docs/internal/GUS-NATIVE-DESIGN.md (sec 3a) + GUS-PAT-PARSER-DESIGN.md.
++ */
++
++#ifndef _MIDI_BACKEND_GUS_H
++#define _MIDI_BACKEND_GUS_H
++
++#include "MidiScheduler.h"
++
++#include <cstdint>
++
++namespace NXE
++{
++namespace Sound
++{
++
++class MidiBackendGus : public MidiBackend
++{
++public:
++  MidiBackendGus();
++  ~MidiBackendGus() override;
++
++  // True if SDL_DOSGusInit succeeded in the ctor. Polled by SoundManager::init
++  // to decide install-or-skip (same contract as MidiBackendOpl2::isReady).
++  bool isReady() const { return _ready; }
++
++  void note_on(int channel, int note, int velocity)               override;
++  void note_off(int channel, int note, int velocity)              override;
++  void control_change(int channel, int controller, int value)     override;
++  void program_change(int channel, int program)                   override;
++  void on_song_start()                                            override;
++  void on_song_stop()                                             override;
++  void silence_for_shutdown()                                     override;
++
++private:
++  // GF1 supports up to 32 hardware voices; we cap our mirror at 32 and use the
++  // driver-reported active count (SDL_DOSGusGetState().num_voices, e.g. 28).
++  static constexpr int MAX_VOICES    = 32;
++  static constexpr int MIDI_CHANNELS = 16;
++  static constexpr int DRUM_CHANNEL  = 9;   // GM percussion channel (0-indexed)
++
++  // A resident DRAM sample (one GM program, or one drum note). POD so the
++  // whole instance can be DPMI-locked for IRQ-context note_on reads. Byte
++  // addresses/offsets are in the DRAM space SDL_DOSGusUploadSample returns.
++  struct PatSample
++  {
++    bool          resident;     // uploaded + ready
++    std::uint32_t dram_addr;    // DRAM byte address of the sample's first byte
++    std::uint32_t data_size;    // bytes
++    std::uint32_t loop_start;   // byte offset into the sample (loop point)
++    std::uint32_t loop_end;     // byte offset (== data_size if no loop)
++    std::uint32_t sample_rate;  // native Hz (drum playback rate; pitch base)
++    std::uint32_t g_fp;         // (sample_rate/root_hz) << 16, fixed-point.
++                                // playback_hz(note) = (g_fp*_note_freq[note])>>16
++    std::uint16_t flags;        // SDL_DOSGUS_LOOP / _16BIT / _BIDI
++  };
++
++  // Per-voice mirror. The driver owns the hardware pool (AllocVoice/StopVoice);
++  // this mirror tracks channel/note for note_off matching + LRU steal + reap.
++  struct Voice
++  {
++    bool          active;
++    std::uint8_t  midi_channel;
++    std::uint8_t  midi_note;
++    std::uint64_t last_used;    // monotonic; LRU steal target
++  };
++
++  // Resolve a GM program (0-127) / drum note (0-127) to its Gravis .pat base
++  // filename (no extension). Returns nullptr for an out-of-range index.
++  static const char *_melodic_patch_name(int program);
++  static const char *_drum_patch_name(int note);
++
++  // Load + upload one .pat into DRAM (MAIN-LOOP context only -- file I/O). On
++  // success fills *out and returns true; on miss/OOM logs + returns false.
++  // `is_drum` selects the drum vs melodic name table + pitch handling.
++  bool _upload_pat(const char *base_name, bool is_drum, PatSample *out);
++
++  // Reap one-shot voices the hardware finished (voice_active_mask), then return
++  // a free voice, else LRU-steal. Returns a voice id in [0,_num_voices).
++  int  _allocate_voice();
++  int  _find_voice(int channel, int note);
++  void _reap_finished_voices();
++
++  bool          _ready        = false;
++  int           _num_voices   = 28;    // from SDL_DOSGusGetState
++  std::uint32_t _output_rate  = 22050; // GF1 DAC rate (informational)
++  std::uint32_t _dram_size    = 0;
++
++  Voice         _voices[MAX_VOICES];
++  std::uint64_t _voice_alloc_count = 0;
++
++  // Residency tables (indexed by GM program / MIDI note). Lazy per song.
++  PatSample     _mel[128];   // melodic programs
++  PatSample     _drum[128];  // percussion notes (GM 27..87 used)
++
++  // Per-channel MIDI controller state.
++  std::uint8_t  _channel_program[MIDI_CHANNELS]    = {0};
++  std::uint8_t  _channel_volume[MIDI_CHANNELS]     = {0};
++  std::uint8_t  _channel_expression[MIDI_CHANNELS] = {0};
++  std::uint8_t  _channel_pan[MIDI_CHANNELS]        = {0};
++
++  // Equal-tempered MIDI note frequencies (Hz, rounded), note 0..127. Computed
++  // once in the ctor (FPU OK there); read in note_on with integer math only.
++  std::uint32_t _note_freq[128] = {0};
++};
++
++}  // namespace Sound
++}  // namespace NXE
++
++#endif  // _MIDI_BACKEND_GUS_H
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+index 1cd24869..ba0f23b8 100644
+--- a/src/sound/MidiScheduler.cpp
++++ b/src/sound/MidiScheduler.cpp
+@@ -373,6 +373,32 @@ void MidiScheduler::stop()
+   _playing = false;
+ }
+ 
++void MidiScheduler::collect_song_instruments(std::uint8_t mel_used[128],
++                                             std::uint8_t drum_used[128]) const
++{
++  // patch 0238 (Campaign 3 GUS): read-only walk of the loaded event list to
++  // discover which GM programs + percussion notes the current song uses, so a
++  // wavetable backend (MidiBackendGus) can pre-upload exactly those .pat
++  // samples at on_song_start (main-loop) and keep the IRQ note path free of
++  // file I/O. Percussion is MIDI channel 9 (0-indexed).
++  std::memset(mel_used, 0, 128);
++  std::memset(drum_used, 0, 128);
++  for (std::size_t i = 0; i < _events.size(); ++i)
++  {
++    const MidiEvent &ev = _events[i];
++    if (ev.type == EventType::PROGRAM_CHANGE)
++    {
++      if (ev.channel != 9 && ev.data1 < 128) mel_used[ev.data1] = 1;
++    }
++    else if (ev.type == EventType::NOTE_ON)
++    {
++      // data2 == 0 is a note-off-by-zero-velocity; ignore for "used".
++      if (ev.channel == 9 && ev.data2 != 0 && ev.data1 < 128)
++        drum_used[ev.data1] = 1;
++    }
++  }
++}
++
+ void MidiScheduler::silence_for_shutdown()
+ {
+   // Patch 0136 (wave 42): pre-SoundManager-teardown explicit silence.
+diff --git a/src/sound/MidiScheduler.h b/src/sound/MidiScheduler.h
+index 9f7559fd..efc105f8 100644
+--- a/src/sound/MidiScheduler.h
++++ b/src/sound/MidiScheduler.h
+@@ -209,6 +209,18 @@ public:
+   // Used by SoundManager to gate the per-frame tick call.
+   bool isPlaying() const { return _playing; }
+ 
++  // patch 0238 (Campaign 3 GUS): pre-scan the currently-loaded song's events
++  // for the instruments it references, so a wavetable backend can pre-upload
++  // exactly those .pat samples at on_song_start (main-loop context) instead of
++  // loading from the IRQ note path. Read-only walk of _events; no state
++  // mutation. mel_used[p] (p=0..127) is set to 1 if any PROGRAM_CHANGE selects
++  // program p on a non-percussion channel; drum_used[n] (n=0..127) is set to 1
++  // if any NOTE_ON occurs on the percussion channel (9) with note n. Both
++  // output arrays are fully written (zeroed first). Safe to call from the
++  // backend's on_song_start (re-entrant read on the single-threaded main loop).
++  void collect_song_instruments(std::uint8_t mel_used[128],
++                                std::uint8_t drum_used[128]) const;
++
+ protected:
+   friend class Singleton<MidiScheduler>;
+ 
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index af771c9f..76fe0d31 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -24,6 +24,7 @@ extern "C" void midi_scheduler_tick_isr_thunk(Uint64 now_ms);
+ #include "../game.h"
+ #include "../settings.h"
+ #include "AudioBackend.h"
++#include "MidiBackendGus.h"   // patch 0238 (Campaign 3 GUS): native GF1 backend
+ #include "MidiBackendOpl2.h"  // patch 0234 (Campaign 2 AdLib): native OPL2 backend
+ #include "MidiBackendOpl3.h"
+ #include "MidiBackendStub.h"
+@@ -187,6 +188,29 @@ static bool _try_install_opl2_backend()
+   return true;
+ }
+ 
++// patch 0238 (Campaign 3 GUS): install the native GF1 wavetable backend. The
++// MidiBackendGus ctor brings the GF1 up via SDL_DOSGusInit (SDL/0112); on probe
++// failure the unique_ptr unwinds (idempotent SDL_DOSGusShutdown in the dtor)
++// and we return false. Like the AdLib path, a probe failure does NOT roll back
++// to organya -- the GUS path has no SB DMA, so organya/Pixtone cannot run
++// anyway; the caller leaves music silent and the game still runs.
++static bool _try_install_gus_backend()
++{
++  auto gus = std::unique_ptr<MidiBackendGus>(new MidiBackendGus());
++  if (!gus->isReady())
++  {
++    return false;
++  }
++  MidiScheduler::getInstance()->set_backend(std::move(gus));
++  NXE::Diag::g_p10_audio_backend_active = NXE::Diag::AudioBackend::gus;
++  LOG_INFO("Sound system: MidiScheduler armed with MidiBackendGus "
++           "(Campaign 3 GUS -- native GF1 wavetable, GM .pat instruments in "
++           "card DRAM). Music dispatch routes via SMF parser + GF1 voice "
++           "allocator; the clock is the PIT/IRQ-0 pump (SDL/0110), NOT the SB "
++           "IRQ-5. MUSIC ONLY this phase -- no Pixtone SFX yet (GF1 SFX = #28).");
++  return true;
++}
++
+ static void _install_midi_stub_backend()
+ {
+   MidiScheduler::getInstance()->set_backend(
+@@ -302,6 +326,19 @@ bool SoundManager::init()
+   // plumbing further down is SHARED with the SB path.
+   const char *_be_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
+   const bool _adlib = _be_hint && SDL_strcmp(_be_hint, "adlib") == 0;
++  // patch 0238 (Campaign 3 GUS): the GF1 path is structurally the AdLib path --
++  // no SB16, no SDL3_mixer, out-of-band synthesis clocked by the PIT pump. It
++  // shares every mixer-skip + pump-start gate below; only the installed backend
++  // (MidiBackendGus) + the GF1 bring-up (in that backend's ctor) differ.
++  const bool _gus = _be_hint && SDL_strcmp(_be_hint, "gus") == 0;
++  if (_gus)
++  {
++    _gus_path = true;
++    LOG_INFO("Sound system: GUS (GF1) path -- AUDIO_BACKEND=gus. Skipping "
++             "SB16 + SDL_mixer bring-up (no SDL_INIT_AUDIO); music via native "
++             "GF1 wavetable on the PIT/IRQ-0 pump. MUSIC ONLY this phase (#27) "
++             "-- GF1 SFX = #28. See docs/internal/GUS-NATIVE-DESIGN.md.");
++  }
+   if (_adlib)
+   {
+     _adlib_path = true;
+@@ -886,6 +923,21 @@ bool SoundManager::init()
+                  "the OPL base port was moved.");
+       break;
+ 
++    case NXE::Diag::AudioBackend::gus:
++      // patch 0238 (Campaign 3 GUS): install the native GF1 backend. On probe
++      // failure we do NOT fall back to organya (no SB DMA on this path -> the
++      // PCM subsystems cannot run); music simply stays silent and the game
++      // runs. The PIT pump is started further down (after the tick callback is
++      // registered) so PumpStart can snapshot the registration.
++      if (!_try_install_gus_backend())
++        LOG_WARN("Sound system: GF1 probe failed on the GUS path; music will "
++                 "be SILENT this run (no Gravis Ultrasound detected). The game "
++                 "still runs. Verify ULTRASND is set (the engine bridges it to "
++                 "SDL_HINT_DOSKUTSU_GUS_ULTRASND), the card is in /mode gus if "
++                 "PicoGUS, or set SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION=1 for "
++                 "emulation bring-up.");
++      break;
++
+     case NXE::Diag::AudioBackend::auto_select:
+       // patch 0217: WaveBlaster is NO LONGER auto-probed. The MPU-401 status
+       // read stalls the ISA bus when the SB16 block is live and the chip is
+@@ -1102,7 +1154,8 @@ bool SoundManager::init()
+         (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub) ||
+         (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb) ||
+         (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3) ||
+-        (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib);  // patch 0235 (Campaign 2 AdLib)
++        (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib) ||  // patch 0235 (Campaign 2 AdLib)
++        (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::gus);  // patch 0238 (Campaign 3 GUS)
+     if (prl_env && midi_active)
+     {
+       _preload_midi_active = true;
+@@ -1153,7 +1206,7 @@ bool SoundManager::init()
+   // playSfxResampled / stopSfx) also no-op under _adlib_path so gameplay
+   // stays clean. Music (OPL2 via MidiScheduler + the PIT pump) is unaffected
+   // -- it never touches Pixtone/Organya/the mixer.
+-  if (!_adlib)
++  if (!_adlib && !_gus)
+   {
+     Pixtone::getInstance()->init();
+     // patch 0167-v3 (Bug 5 defensive interlock per team-lead #137 + flush-instr
+@@ -1176,10 +1229,10 @@ bool SoundManager::init()
+   }
+   else
+   {
+-    LOG_INFO("Sound system: AdLib path -- skipping Pixtone/SFX/Organya/mixer "
+-             "init (no SDL audio device; MUSIC ONLY via OPL2). No "
+-             "MIX_CreateTrack / SFX-render attempts; runtime SFX calls "
+-             "no-op.");
++    LOG_INFO("Sound system: {} path -- skipping Pixtone/SFX/Organya/mixer "
++             "init (no SDL audio device; MUSIC ONLY). No MIX_CreateTrack / "
++             "SFX-render attempts; runtime SFX calls no-op.",
++             _gus ? "GUS (GF1)" : "AdLib");
+   }
+ 
+   // patch 0168 (Lever 2b MIDI-tick-from-IRQ). Register the engine-side
+@@ -1192,16 +1245,19 @@ bool SoundManager::init()
+   // the SDL side ignores the callback). LOG_INFO banner narrates the
+   // decision so flush-instr's sec.23 verdict-extraction sees the
+   // engine-side registration outcome alongside the SDL/0072 banner.
+-  if (_adlib)
++  if (_adlib || _gus)
+   {
+-    // patch 0234 (Campaign 2 AdLib): the AdLib path's music clock is the
+-    // PIT/IRQ-0 OPL pump (SDL/0110), NOT the SB16 IRQ-5 (there is no SB).
+-    // Register the engine tick_isr FIRST, then start the pump -- PumpStart
+-    // snapshots the registered callback at Start time (same register-before-
+-    // arm order the SB path uses). The pump refuses if the SB device is hot,
+-    // bounds hz to [19,1000], and is the single owner of PIT ch0; on refusal
+-    // music is silent but the game runs. hz comes from
++    // patch 0234 (Campaign 2 AdLib) / patch 0238 (Campaign 3 GUS): both the
++    // AdLib and GUS paths run on a no-Sound-Blaster card, so the music clock is
++    // the PIT/IRQ-0 pump (SDL/0110), NOT the SB16 IRQ-5 (there is no SB). The
++    // pump is card-agnostic -- it just drives MidiScheduler::tick_isr, which
++    // dispatches to whichever backend is installed (OPL2 or GF1). Register the
++    // engine tick_isr FIRST, then start the pump -- PumpStart snapshots the
++    // registered callback at Start time. The pump refuses if the SB device is
++    // hot, bounds hz to [19,1000], and is the single owner of PIT ch0; on
++    // refusal music is silent but the game runs. hz comes from
+     // SDL_HINT_DOSKUTSU_OPL_TIMER_HZ (default 120).
++    const char *_pump_tag = _gus ? "gus" : "adlib";
+     SDL_DOSMidiTickRegister(&midi_scheduler_tick_isr_thunk);
+ 
+     int hz = 120;
+@@ -1212,21 +1268,22 @@ bool SoundManager::init()
+       if (v >= 19 && v <= 1000)
+         hz = v;
+       else
+-        LOG_WARN("adlib: SDL_HINT_DOSKUTSU_OPL_TIMER_HZ='{}' out of range "
+-                 "[19,1000]; using default {} Hz.", hz_hint, hz);
++        LOG_WARN("{}: SDL_HINT_DOSKUTSU_OPL_TIMER_HZ='{}' out of range "
++                 "[19,1000]; using default {} Hz.", _pump_tag, hz_hint, hz);
+     }
+ 
+     if (SDL_DOSOplTimerPumpStart(hz))
+     {
+-      LOG_INFO("adlib: OPL music pump STARTED at {} Hz (PIT ch0 / IRQ-0 drives "
++      LOG_INFO("{}: music pump STARTED at {} Hz (PIT ch0 / IRQ-0 drives "
+                "MidiScheduler::tick_isr; BIOS 18.2 Hz tick chained; restored "
+-               "on exit). This is the music clock on a no-SB AdLib card.", hz);
++               "on exit). This is the music clock on a no-SB card.",
++               _pump_tag, hz);
+     }
+     else
+     {
+-      LOG_WARN("adlib: OPL music pump FAILED to start at {} Hz (SB device hot, "
++      LOG_WARN("{}: music pump FAILED to start at {} Hz (SB device hot, "
+                "hz out of range, or pump already active) -- music will be "
+-               "SILENT this run; the game still runs.", hz);
++               "SILENT this run; the game still runs.", _pump_tag, hz);
+     }
+   }
+   else if (SDL_DOSMidiIsrTickActive())
+@@ -1334,10 +1391,10 @@ void SoundManager::shutdown()
+     _mixer = nullptr;
+   }
+   doskutsu_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
+-  // patch 0234 (Campaign 2 AdLib): MIX_Quit pairs with MIX_Init, which the
+-  // AdLib path never called (no mixer). Skip it there to avoid an
+-  // unbalanced teardown.
+-  if (!_adlib_path)
++  // patch 0234 (Campaign 2 AdLib) / patch 0238 (Campaign 3 GUS): MIX_Quit pairs
++  // with MIX_Init, which neither the AdLib nor the GUS out-of-band path called
++  // (no mixer). Skip it there to avoid an unbalanced teardown.
++  if (!_adlib_path && !_gus_path)
+     MIX_Quit();
+   doskutsu_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
+                    "SoundManager::shutdown body complete; "
+@@ -1350,7 +1407,7 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+   // patch 0236 (#19): no PCM SFX on the AdLib path (no DAC/mixer). No-op so
+   // gameplay doesn't spam "Pixtone::play: not rendered" against a null mixer.
+   // Covers startPropSound (delegates here) too.
+-  if (_adlib_path)
++  if (_adlib_path || _gus_path)  // patch 0238: GUS is also music-only this phase (#27)
+     return;
+   if (!settings->sound_enabled)
+     return;
+@@ -1376,7 +1433,7 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
+ {
+   // patch 0236 (#19): no PCM SFX on the AdLib path. Covers startStreamSound
+   // (delegates here) too.
+-  if (_adlib_path)
++  if (_adlib_path || _gus_path)  // patch 0238: GUS is also music-only this phase (#27)
+     return;
+   if (!settings->sound_enabled)
+     return;
+@@ -1399,7 +1456,7 @@ void SoundManager::stopSfx(NXE::Sound::SFX snd)
+ {
+   // patch 0236 (#19): no PCM SFX on the AdLib path. Covers stopLoopSfx
+   // (delegates here) too.
+-  if (_adlib_path)
++  if (_adlib_path || _gus_path)  // patch 0238: GUS is also music-only this phase (#27)
+     return;
+   Pixtone::getInstance()->stop((int32_t)snd);
+ }
+@@ -1451,7 +1508,10 @@ void SoundManager::music(uint32_t songno, bool resume)
+       // patch 0235 (Campaign 2 AdLib): adlib is a MIDI-routed backend too --
+       // route music() through _start_mid_track + the MidiScheduler so songs
+       // actually dispatch to MidiBackendOpl2 via the PIT pump.
+-      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib);
++      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib) ||
++      // patch 0238 (Campaign 3 GUS): gus is likewise a MIDI-routed backend --
++      // songs dispatch to MidiBackendGus (GF1 wavetable) via the PIT pump.
++      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::gus);
+ 
+   if (songno != 0 && !_shouldMusicPlay(songno, settings->music_enabled))
+   {
+@@ -1513,7 +1573,9 @@ void SoundManager::enableMusic(int newstate)
+         NXE::Diag::g_p10_audio_backend_active ==
+             NXE::Diag::AudioBackend::opl3 ||
+         NXE::Diag::g_p10_audio_backend_active ==
+-            NXE::Diag::AudioBackend::adlib)  // patch 0235 (Campaign 2 AdLib)
++            NXE::Diag::AudioBackend::adlib ||  // patch 0235 (Campaign 2 AdLib)
++        NXE::Diag::g_p10_audio_backend_active ==
++            NXE::Diag::AudioBackend::gus)  // patch 0238 (Campaign 3 GUS)
+     {
+       if (play != MidiScheduler::getInstance()->isPlaying())
+       {
+@@ -1618,7 +1680,8 @@ void SoundManager::runFade()
+   if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub ||
+       NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb ||
+       NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3 ||
+-      NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib)
++      NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib ||
++      NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::gus)  // patch 0238 (Campaign 3 GUS)
+   {
+     // patch 0168 (Lever 2b): skip the main-loop tick under L2b active --
+     // the SB16 IRQ-5 ISR drives MidiScheduler::tick_isr at ~43 Hz
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index af1f2bdd..19081062 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -266,6 +266,12 @@ private:
+   // mixer). MUSIC ONLY -- no PCM SFX on a DAC-less AdLib card.
+   bool _adlib_path = false;
+ 
++  // patch 0238 (Campaign 3 GUS): true when AUDIO_BACKEND=gus resolved at init
++  // -- the no-Sound-Blaster GF1 wavetable + PIT-pump path. Like _adlib_path it
++  // skips the SB16 + SDL3_mixer bring-up (the GF1 is out-of-band; there is no
++  // PCM device). MUSIC ONLY this phase (#27); GF1 SFX = #28.
++  bool _gus_path = false;
++
+   const char _bossmusic[14] = {4, 7, 10, 11, 15, 16, 17, 18, 21, 22, 31, 33, 35, 0};
+ };
+ 
+-- 
+2.47.3
+
