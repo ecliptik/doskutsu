@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 22 Jun 2026 12:11:40 -0700
+Subject: [PATCH 3/3] patch 0236 -- Campaign 2 AdLib Phase-1.x: SFX-init gate +
+ AUDIO_OFF precedence
+
+Two pre-ship cleanups for the AUDIO_BACKEND=adlib path. SB/Vibra/opl3
+paths byte-identical (changes scoped to the adlib branch).
+
+#19 -- gate off the SFX/mixer-track init on the adlib path. The music-only
+adlib path has no SDL audio device + no mixer, but SoundManager::init still
+ran Pixtone::init (64x MIX_CreateTrack), checkL3OrganyaInterlock,
+Organya::init, and the 4 prepareResampled renders -- spamming "MIX_CreateTrack(N):
+Mixer not initialized" + "Pixtone::play: sound slot N not rendered" against
+the null mixer + wasting cycles. Now wrapped in `if (!_adlib)`; the runtime
+SFX entry points (playSfx / playSfxResampled / stopSfx, which also cover
+startStreamSound / startPropSound / stopLoopSfx) no-op under _adlib_path so
+gameplay stays clean. Music (OPL2 via the PIT pump) is unaffected. (Pixtone::
+shutdown + Organya::shutdown are already null-pointer-guarded, so the quit
+path is safe with neither initialized.)
+
+#20 -- AUDIO_BACKEND=adlib takes precedence over AUDIO_OFF. g2k first-run
+footgun: with both SDL_HINT_DOSKUTSU_AUDIO_OFF=1 and AUDIO_BACKEND=adlib set,
+main.cpp's AUDIO_OFF check bypassed SoundManager::init -> no OPL2 backend ->
+silent (it even printed the adlib banner first, then bypassed). adlib is an
+explicit OPL-music request that needs the synth path, so it must win: when
+both are set, clear _audio_off (SoundManager::init now runs) + emit a LOG_WARN.
+The SDL_INIT_AUDIO omission still happens via the `|| _adlib_mode` test.
+
+Verified (DOSBox sbtype=none + oplmode=opl2): (1) AUDIO_BACKEND=adlib alone --
+zero MIX_CreateTrack/Mixer-not-init/not-rendered errors, skip banner emits,
+pump STARTED at 120 Hz, curly.mid parsed + opl2 on_song_start (music ticks);
+(2) adlib + AUDIO_OFF=1 both set -- "adlib WINS" warning, opl2 backend ready,
+pump started, no sdl_init failure, flips alive.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp               | 17 ++++++++++
+ src/sound/SoundManager.cpp | 68 ++++++++++++++++++++++++++++----------
+ 2 files changed, 67 insertions(+), 18 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index fa57b1b2..6650d8b8 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1634,6 +1634,23 @@ int main(int argc, char *argv[])
+     const char *b = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
+     _adlib_mode = b && std::strcmp(b, "adlib") == 0;
+   }
++  // patch 0236 (#20): AUDIO_BACKEND=adlib takes PRECEDENCE over AUDIO_OFF.
++  // adlib is an EXPLICIT request for OPL music and needs the synth path
++  // (SoundManager::init -> OPL2 backend + PIT pump). If both are set,
++  // AUDIO_OFF's SoundManager::init bypass below would win and leave the
++  // game silent (the g2k first-run footgun: the adlib banner printed, then
++  // AUDIO_OFF bypassed init). Clear _audio_off so adlib wins -- the
++  // SDL_INIT_AUDIO omission still happens via the `|| _adlib_mode` test
++  // below, and SoundManager::init now runs.
++  if (_adlib_mode && _audio_off)
++  {
++    LOG_WARN("Both SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib and "
++             "SDL_HINT_DOSKUTSU_AUDIO_OFF=1 are set -- adlib WINS (an "
++             "explicit OPL-music request needs the synth path). Ignoring "
++             "AUDIO_OFF's SoundManager::init bypass; OPL2 + the PIT pump "
++             "will come up. Unset one to silence this warning.");
++    _audio_off = false;
++  }
+   if (_audio_off || _adlib_mode)
+   {
+     _sdl_init_flags &= ~SDL_INIT_AUDIO;
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 477b473e..af771c9f 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -1144,24 +1144,43 @@ bool SoundManager::init()
+     }
+   }
+ 
+-  Pixtone::getInstance()->init();
+-  // patch 0167-v3 (Bug 5 defensive interlock per team-lead #137 + flush-instr
+-  // three-front response): if BOTH SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=1 AND
+-  // SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya, force L3 OFF early so no
+-  // Pixtone::play can enter the L3 routing branch (which hangs PLAY2 per
+-  // sec.23.x; v1.0.2 owns root-cause). One LOG_ERROR diagnostic emitted
+-  // on the dangerous combo; otherwise no-op.
+-  Pixtone::getInstance()->checkL3OrganyaInterlock();
+-  Organya::getInstance()->init();
+-
+-  // prepare resampled stream sounds (Core battle and <SSS in main artery)
+-  Pixtone::getInstance()->prepareResampled((int32_t)SFX::SND_STREAM1, 1000);
+-  Pixtone::getInstance()->prepareResampled((int32_t)SFX::SND_STREAM2, 1100);
+-  Pixtone::getInstance()->prepareResampled((int32_t)SFX::SND_STREAM1, 400);
+-  Pixtone::getInstance()->prepareResampled((int32_t)SFX::SND_STREAM2, 500);
+-
+-  updateSfxVolume();
+-  updateMusicVolume();
++  // patch 0236 (#19): on the AdLib path there is no SDL audio device + no
++  // mixer (music-only OPL2). Skip the Pixtone/SFX/Organya/mixer-track init
++  // entirely -- otherwise Pixtone::init's 64x MIX_CreateTrack + the
++  // prepareResampled renders spam "[error] MIX_CreateTrack(N): Mixer not
++  // initialized" + "Pixtone::play: sound slot N not rendered" against the
++  // null mixer and waste cycles. The runtime SFX entry points (playSfx /
++  // playSfxResampled / stopSfx) also no-op under _adlib_path so gameplay
++  // stays clean. Music (OPL2 via MidiScheduler + the PIT pump) is unaffected
++  // -- it never touches Pixtone/Organya/the mixer.
++  if (!_adlib)
++  {
++    Pixtone::getInstance()->init();
++    // patch 0167-v3 (Bug 5 defensive interlock per team-lead #137 + flush-instr
++    // three-front response): if BOTH SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=1 AND
++    // SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya, force L3 OFF early so no
++    // Pixtone::play can enter the L3 routing branch (which hangs PLAY2 per
++    // sec.23.x; v1.0.2 owns root-cause). One LOG_ERROR diagnostic emitted
++    // on the dangerous combo; otherwise no-op.
++    Pixtone::getInstance()->checkL3OrganyaInterlock();
++    Organya::getInstance()->init();
++
++    // prepare resampled stream sounds (Core battle and <SSS in main artery)
++    Pixtone::getInstance()->prepareResampled((int32_t)SFX::SND_STREAM1, 1000);
++    Pixtone::getInstance()->prepareResampled((int32_t)SFX::SND_STREAM2, 1100);
++    Pixtone::getInstance()->prepareResampled((int32_t)SFX::SND_STREAM1, 400);
++    Pixtone::getInstance()->prepareResampled((int32_t)SFX::SND_STREAM2, 500);
++
++    updateSfxVolume();
++    updateMusicVolume();
++  }
++  else
++  {
++    LOG_INFO("Sound system: AdLib path -- skipping Pixtone/SFX/Organya/mixer "
++             "init (no SDL audio device; MUSIC ONLY via OPL2). No "
++             "MIX_CreateTrack / SFX-render attempts; runtime SFX calls "
++             "no-op.");
++  }
+ 
+   // patch 0168 (Lever 2b MIDI-tick-from-IRQ). Register the engine-side
+   // tick_isr thunk with SDL_DOSMidiTickRegister if SDL/0072's killswitch
+@@ -1328,6 +1347,11 @@ void SoundManager::shutdown()
+ 
+ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+ {
++  // patch 0236 (#19): no PCM SFX on the AdLib path (no DAC/mixer). No-op so
++  // gameplay doesn't spam "Pixtone::play: not rendered" against a null mixer.
++  // Covers startPropSound (delegates here) too.
++  if (_adlib_path)
++    return;
+   if (!settings->sound_enabled)
+     return;
+ 
+@@ -1350,6 +1374,10 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+ 
+ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
+ {
++  // patch 0236 (#19): no PCM SFX on the AdLib path. Covers startStreamSound
++  // (delegates here) too.
++  if (_adlib_path)
++    return;
+   if (!settings->sound_enabled)
+     return;
+ 
+@@ -1369,6 +1397,10 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
+ 
+ void SoundManager::stopSfx(NXE::Sound::SFX snd)
+ {
++  // patch 0236 (#19): no PCM SFX on the AdLib path. Covers stopLoopSfx
++  // (delegates here) too.
++  if (_adlib_path)
++    return;
+   Pixtone::getInstance()->stop((int32_t)snd);
+ }
+ 
