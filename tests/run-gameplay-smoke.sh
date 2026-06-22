@@ -42,6 +42,13 @@
 
 set -euo pipefail
 
+# Contention-robust retry bookkeeping (task #10). Capture the original argv BEFORE
+# the parse loop below consumes it, so a clean-slate re-run preserves --parity /
+# --out / etc. SMOKE_ATTEMPT is incremented across the (at most one) self-re-exec;
+# see the REQUIRED-banner retry guard near the gate decision for the rationale.
+SMOKE_ORIG_ARGS=("$@")
+SMOKE_ATTEMPT="${SMOKE_ATTEMPT:-1}"
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LAUNCHER="$REPO_ROOT/tools/dosbox-launch.sh"
 # shellcheck source=../tools/dosbox-teardown.sh
@@ -652,6 +659,7 @@ if [[ "$SKIP_GATE" == "1" ]]; then
 fi
 
 GATE_FAIL=0
+GATE_FAIL_REQUIRED_ABSENT=0   # set only when a REQUIRED banner is absent (vs a FORBIDDEN one present); gates the contention retry below
 log ""
 log "=== Banner-emit gate (proves runtime invocation, not just embed) ==="
 
@@ -680,6 +688,7 @@ for i in "${!BANNER_REGEX[@]}"; do
         log "  FAIL [$label] emits=0 -- REQUIRED banner absent; runtime code path is dead"
         log "        regex: $regex"
         GATE_FAIL=1
+        GATE_FAIL_REQUIRED_ABSENT=1
       fi
       ;;
     forbidden)
@@ -697,9 +706,37 @@ for i in "${!BANNER_REGEX[@]}"; do
   esac
 done
 
+# Contention-robust single retry (task #10). A REQUIRED default-on boot banner that
+# is absent here is far more often a DISTURBED CAPTURE than a real regression: these
+# banners (e.g. patch 0224's menu-slide forced eval at main.cpp boot) emit
+# DETERMINISTICALLY on every clean boot -- verified 20/20 in a contention-free window
+# -- so an absence almost always means the captured build/stage/LOGS/DEBUG.LOG was
+# clobbered by a concurrent DOSBox sharing build/stage, or this run was killed mid-
+# capture by a cross-workstream global pkill ([[dosbox_global_pkill_collides_concurrent_workstreams]]).
+# A single clean-slate re-run distinguishes the two cases WITHOUT weakening the gate:
+# a genuine dead-code regression is deterministic and fails the retry too (still
+# caught + reported), while a transient contention/capture flake passes it. We retry
+# at most ONCE, and ONLY for a REQUIRED-absent failure -- a FORBIDDEN-present failure
+# is a deterministic incomplete-revert that a retry cannot clear, so it falls straight
+# through to the hard FAIL below.
+if [[ "$GATE_FAIL" -gt 0 && "$GATE_FAIL_REQUIRED_ABSENT" -gt 0 && "$SMOKE_ATTEMPT" -lt 2 ]]; then
+  log ""
+  log "GATE FAIL on attempt $SMOKE_ATTEMPT was a REQUIRED-banner absence. Those banners emit"
+  log "deterministically every clean boot, so this is most likely a capture disturbed by"
+  log "concurrent-DOSBox contention (shared build/stage log / cross-workstream pkill), not a"
+  log "regression. Re-running ONCE on a clean slate -- a real regression fails the retry too."
+  dbx_kill_conf "$CONF" KILL || true
+  sleep 2
+  exec env SMOKE_ATTEMPT=2 "$0" ${SMOKE_ORIG_ARGS[@]+"${SMOKE_ORIG_ARGS[@]}"}
+fi
+
 if [[ "$GATE_FAIL" -gt 0 ]]; then
   log ""
-  log "GATE FAIL: one or more REQUIRED banners absent (or FORBIDDEN banners present)."
+  log "GATE FAIL (attempt $SMOKE_ATTEMPT): one or more REQUIRED banners absent (or FORBIDDEN banners present)."
+  if [[ "$SMOKE_ATTEMPT" -ge 2 ]]; then
+    log "This failure REPRODUCED on a clean-slate retry -- it is NOT a transient contention"
+    log "flake but a real regression (or a FORBIDDEN incomplete-revert)."
+  fi
   log "This is the wave-38 failure mode: code that strings|grep finds in the binary"
   log "is not actually reached at runtime. Investigate the failing patch(es) before"
   log "shipping. See CLAUDE.md sec. Critical Rules -- Build verification."
