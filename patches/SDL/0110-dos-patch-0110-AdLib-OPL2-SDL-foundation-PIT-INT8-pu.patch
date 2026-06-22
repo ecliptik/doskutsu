@@ -1,0 +1,606 @@
+From b87e1cbcbc5e1a83fa128a8d4aef77040ee5acdb Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 22 Jun 2026 10:39:50 -0700
+Subject: [PATCH] dos: patch 0110 -- AdLib OPL2 SDL foundation (PIT/INT8 pump +
+ predicate + OPL2)
+
+Campaign 2 (native AdLib / OPL-FM music), Phase 1 SDL side. A pure AdLib /
+OPL-only card (incl. a PicoGUS in /mode adlib) has no Sound Blaster, so the
+SB16 IRQ-5 that drives the MIDI tick (Lever 2b) never fires -- the music has
+no clock. This patch supplies the SB-independent SDL primitives the engine
+side (MidiBackendOpl2 + AUDIO_BACKEND=adlib boot-gate, a separate nx step)
+will consume. Design + lead decisions: docs/internal/ADLIB-NATIVE-DESIGN.md
+sec.3/7 + sec.10.
+
+Why DOS needs this: on a no-SB box the only SDL audio driver (the SB backend)
+cannot open, and even if the engine boots silent there is no SB DMA IRQ to
+ride for the MIDI clock. The OPL register transport + detect are ALREADY
+SB-independent (SDL_DOSOpl3WriteRegister / SDL_DOSOpl3Detect); the only thing
+tying OPL music to the SB is the pump. So Campaign 2 is a pump + chip-init
+problem, solved here:
+
+1. PIT/INT8 OPL music pump (new header SDL3/SDL_dosopltimer.h; impl in
+   SDL_dos_audio_synth.c):
+   - SDL_DOSOplTimerPumpStart(int hz) reprograms 8253 PIT ch0 from the BIOS
+     18.2065 Hz to `hz` (engine passes the resolved rate; ~120 recommended),
+     hooks IRQ-0 via DOS_HookInterruptReplace (an IRET wrapper; we own the
+     EOI), and from that ISR drives the SAME registered MIDI tick callback the
+     SB path uses (snapshotted via SDL_DOSMidiTickGetRegistered). The original
+     BIOS INT 8 is chained at the divided rate via a fractional accumulator
+     (s_bios_accum += div; chain when it rolls 65536) so the BIOS handler fires
+     at exactly PIT_INPUT/65536 == 18.2065 Hz regardless of our rate, keeping
+     DOS time-of-day correct. The chain uses the canonical DJGPP pushfl+lcall
+     idiom to the saved protected-mode vector (which issues its own EOI).
+   - SINGLE OWNER of PIT ch0: Start REFUSES if SDL_DOSAudioSB_IsDeviceHot(), so
+     the SB-IRQ clock and the PIT clock can never both drive the tick. The pump
+     is started only on the no-SB AdLib path; SB-present configs are unchanged.
+   - SDL_DOSOplTimerPumpStop restores PIT ch0 to divisor 0 (65536 -> 18.2065
+     Hz) and unhooks IRQ-0 WITHOUT masking it (a left-reprogrammed PIT makes
+     the DOS clock run fast after quit). Idempotent. Must run on teardown +
+     atexit (engine wires it).
+   - ISR + chain helper + all ISR-touched data are DPMI-locked at Start; the
+     ISR does no malloc/FPU/SDL-call (now_ms via a us->ms accumulator loop, no
+     in-ISR 64-bit divide).
+   - SDL_DOSOplTimerPumpActive() accessor.
+
+2. Shared ISR-active predicate SDL_DOSMidiIsrAnyActive() (SDL_dosmidi_tick.h):
+   true if EITHER the SB-IRQ MIDI tick OR the PIT pump is active. The engine's
+   MidiScheduler reentrancy guards (MidiIsrCriticalSection cli/sti,
+   _refresh_isr_buffer early-return, the OPL backend instance DPMI-lock, the
+   runFade per-frame-tick skip) switch to this so they engage under either
+   clock -- without it, under the AdLib path the SB-only predicate is false
+   while a REAL IRQ-0 ISR reads the scheduler data (a freeze/corruption
+   hazard). Required correctness item per lead decision (c).
+
+3. OPL2 chip helpers (SDL_dos_audio_synth.c/.h): SDL_DOSOpl2Detect (reuses the
+   OPL3 timer-1 detect), SDL_DOSOpl2InitChip (WSE on, 0xBD cleared, 9 voices
+   KEY-OFF; NO 0x105/0x104, NO secondary bank), SDL_DOSOpl2Shutdown (9-voice
+   TL=0x3F sweep + KEY-OFF + 0xBD clear). Voices 0-8 are all primary-bank, so
+   the existing voice/patch/note helpers serve the OPL2 backend unchanged.
+
+Supporting change: DOS_UnhookInterrupt's `SDL_assert(hook->irq > 0)` relaxed to
+`>= 0` so IRQ-0 can be unhooked (callers must pass disable_interrupt=false for
+the timer). No other behavior change.
+
+SB-present path is unchanged: the pump is never started when an SB is hot
+(belt-and-braces refuse), the OPL3 backend + SB IRQ-5 clock are untouched, and
+the new predicate is a superset that returns the same value when only the SB
+path is active. Foundation-only: not end-to-end testable until the engine side
+(MidiBackendOpl2 + adlib boot-gate); this confirms compile + symbol export.
+
+Deferred (coordination / later phases, per the design + lead decisions): the
+SDL_HINT_DOSKUTSU_OPL_TIMER_HZ + OPL2_PORT hints (engine reads HZ and passes it
+to Start; the 0x388 port override is a later additive item), smoke BANNERS
+entries (Phase 2 -- the banners only emit on the engine-enabled AdLib path), and
+docs/BOOT.md rows (nx-engine owns per the design unless reassigned).
+
+g2k-validation item ([[dosbox_not_proxy]]): the IRQ-0 EOI/chain split + the
+pushfl+lcall chain to the BIOS INT 8 are the BIOS-tick-correctness risk the
+design flagged MEDIUM; they require real-HW confirmation (DOSBox-X cannot
+validate IRQ-0 timing). Foundation compiles + exports; the quit-path PIT
+restore must be ear/clock-checked on g2k once the engine side lands.
+
+Workspace-local patch; not upstreamed (sdl_ai_policy).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dosmidi_tick.h    |  33 ++++
+ include/SDL3/SDL_dosopltimer.h     | 108 ++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c    |  12 ++
+ src/core/dos/SDL_dos.c             |   7 +-
+ src/core/dos/SDL_dos_audio_synth.c | 253 +++++++++++++++++++++++++++++
+ src/core/dos/SDL_dos_audio_synth.h |  27 +++
+ 6 files changed, 439 insertions(+), 1 deletion(-)
+ create mode 100644 include/SDL3/SDL_dosopltimer.h
+
+diff --git a/include/SDL3/SDL_dosmidi_tick.h b/include/SDL3/SDL_dosmidi_tick.h
+index 8e52a114d..0d12c0bb9 100644
+--- a/include/SDL3/SDL_dosmidi_tick.h
++++ b/include/SDL3/SDL_dosmidi_tick.h
+@@ -221,6 +221,39 @@ extern SDL_DECLSPEC void SDLCALL SDL_DOSMidiTickRegister(SDL_DOSMidiTickCallback
+  */
+ extern SDL_DECLSPEC bool SDLCALL SDL_DOSMidiIsrTickActive(void);
+ 
++/*
++ * DOSKUTSU patch (SDL/0110, Campaign 2 AdLib): shared ISR-active predicate.
++ *
++ * Returns true if EITHER the SB16 IRQ-5 MIDI tick (SDL_DOSMidiIsrTickActive())
++ * OR the AdLib PIT/IRQ-0 OPL music pump (SDL_DOSOplTimerPumpActive(),
++ * SDL_dosopltimer.h) is currently driving MidiScheduler::tick_isr from a
++ * hardware ISR.
++ *
++ * The engine's MidiScheduler reentrancy guards -- the MidiIsrCriticalSection
++ * cli/sti, the _refresh_isr_buffer early-return, the OPL/OPL2 backend instance
++ * DPMI-lock, and the runFade per-frame-tick skip -- must be gated on THIS
++ * predicate (not the SB-only SDL_DOSMidiIsrTickActive()) so they engage under
++ * either clock. Under the AdLib path there is no SB, so the SB-only predicate
++ * is false while a REAL IRQ-0 ISR reads the scheduler data -- gating on the
++ * SB-only predicate there would leave cli/sti + DPMI-locks disengaged during
++ * live ISR reads (a freeze/corruption hazard). This predicate closes that gap.
++ *
++ * \returns true if either the SB-IRQ MIDI tick or the PIT OPL pump is active.
++ * \since SDL 3 -- doskutsu workspace-local patch 0110, 2026-06-22.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSMidiIsrAnyActive(void);
++
++/*
++ * DOSKUTSU patch (SDL/0110): accessor for the MIDI tick callback registered
++ * via SDL_DOSMidiTickRegister. The AdLib PIT pump (SDL_dosopltimer.h) snapshots
++ * this at SDL_DOSOplTimerPumpStart so it can drive the SAME engine
++ * MidiScheduler tick the SB path drives. Returns NULL if none is registered.
++ *
++ * \returns the registered SDL_DOSMidiTickCallback, or NULL.
++ * \since SDL 3 -- doskutsu workspace-local patch 0110, 2026-06-22.
++ */
++extern SDL_DECLSPEC SDL_DOSMidiTickCallback SDLCALL SDL_DOSMidiTickGetRegistered(void);
++
+ /* Ends C function definitions when using C++ */
+ #ifdef __cplusplus
+ }
+diff --git a/include/SDL3/SDL_dosopltimer.h b/include/SDL3/SDL_dosopltimer.h
+new file mode 100644
+index 000000000..fc1d35863
+--- /dev/null
++++ b/include/SDL3/SDL_dosopltimer.h
+@@ -0,0 +1,108 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/*
++ * DOSKUTSU patch (SDL/0110, Campaign 2 AdLib): PIT/INT8 OPL music pump.
++ *
++ * Workspace-local; NOT upstreamed (same status as SDL_dosmidi_tick.h).
++ *
++ * PURPOSE. On a pure AdLib / OPL-only card (including a PicoGUS in
++ * `/mode adlib`) there is no Sound Blaster, so the SB16 IRQ-5 that normally
++ * drives the MIDI tick (Lever 2b, SDL_dosmidi_tick.h) never fires -- the
++ * music has no clock. This pump replaces that clock with the 8253 PIT
++ * channel-0 timer interrupt (IRQ-0 / INT 8): it reprograms PIT ch0 from the
++ * BIOS default 18.2065 Hz up to a finer MIDI tick rate, hooks IRQ-0, and from
++ * that ISR drives the SAME registered MIDI tick callback the SB path uses
++ * (SDL_DOSMidiTickRegister / the engine's MidiScheduler tick_isr). The
++ * original BIOS INT 8 handler is chained at the divided rate (called once per
++ * 18.2065 Hz worth of fast ticks) so the DOS time-of-day clock stays correct.
++ *
++ * SINGLE OWNER OF PIT CH0. The pump is the sole writer of the PIT ch0 divisor
++ * for the duration of a run. SDL_DOSOplTimerPumpStart REFUSES (returns false)
++ * if the SB audio device is hot (SDL_DOSAudioSB_IsDeviceHot()), so the SB-IRQ
++ * clock and the PIT clock can never both drive the MIDI tick. On SB-present
++ * configs (opl3 / wb / organya) this pump is never started; the SB IRQ-5
++ * remains the clock exactly as before.
++ *
++ * RESTORATION IS MANDATORY. A left-reprogrammed PIT ch0 makes the DOS clock
++ * run fast after quit. SDL_DOSOplTimerPumpStop restores the divisor to the
++ * BIOS default (0 -> 65536 -> 18.2065 Hz) and unhooks IRQ-0; it MUST run on
++ * both normal teardown and an atexit-style early handler.
++ *
++ * ISR DISCIPLINE. The pump ISR runs in hardware interrupt context, preempting
++ * the cooperative scheduler. It performs no malloc/free, no FPU, no SDL API
++ * calls; the ISR + its data are DPMI-locked at Start. The tick callback it
++ * invokes (the engine's MidiScheduler::tick_isr) is already ISR-safe and the
++ * engine's MidiScheduler cli/sti + DPMI-lock guards must be gated on
++ * SDL_DOSMidiIsrAnyActive() (SDL_dosmidi_tick.h) so they engage under EITHER
++ * the SB-IRQ clock OR this PIT clock.
++ */
++
++#ifndef SDL_dosopltimer_h_
++#define SDL_dosopltimer_h_
++
++#include <SDL3/SDL_stdinc.h>
++
++#include <SDL3/SDL_begin_code.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/**
++ * Install the PIT-ch0 / IRQ-0 OPL music pump at `hz` ticks per second.
++ *
++ * Reprograms PIT ch0 to `hz`, hooks IRQ-0 (replace + manual every-Nth chain
++ * to the original BIOS INT 8 so the 18.2065 Hz DOS clock is preserved), and
++ * DPMI-locks the ISR + its data. The pump invokes the MIDI tick callback
++ * previously registered with SDL_DOSMidiTickRegister, at `hz`, from IRQ-0
++ * context, with a monotonic now_ms.
++ *
++ * Register the MIDI tick callback (SDL_DOSMidiTickRegister) BEFORE calling
++ * this, the same ordering the SB path uses (register at SoundManager::init
++ * before the clock arms).
++ *
++ * \param hz the tick rate (clamped/validated to [19, 1000]; ~120 recommended).
++ * \returns true if the pump was installed, false if it is already active, if
++ *          the SB audio device is hot (the SB IRQ-5 owns the clock), or if hz
++ *          is out of range.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSOplTimerPumpStart(int hz);
++
++/**
++ * Restore PIT ch0 to the BIOS 18.2065 Hz divisor and unhook IRQ-0.
++ *
++ * MUST run at shutdown and from an atexit-style handler. Idempotent: a no-op
++ * if the pump is not active. Never masks IRQ-0 (the system timer must keep
++ * running).
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSOplTimerPumpStop(void);
++
++/**
++ * \returns true if the PIT OPL pump is currently active for this process.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSOplTimerPumpActive(void);
++
++#ifdef __cplusplus
++}
++#endif
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_dosopltimer_h_ */
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 52ac07f20..00e091b9f 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -1531,6 +1531,18 @@ void SDL_DOSMidiTickRegister(SDL_DOSMidiTickCallback cb)
+     g_dos_midi_tick_cb = cb;
+ }
+ 
++/* DOSKUTSU patch (SDL/0110, Campaign 2 AdLib): accessor for the registered
++   MIDI tick callback. The AdLib PIT/IRQ-0 OPL pump (SDL_dosopltimer.h, in
++   SDL_dos_audio_synth.c) snapshots this at SDL_DOSOplTimerPumpStart so it can
++   drive the SAME engine MidiScheduler tick the SB IRQ-5 path drives. The SB
++   path keeps reading g_dos_midi_tick_cb directly in SoundBlasterIRQHandler;
++   the pump lives in a different TU and cannot see this file-static, hence the
++   accessor. */
++SDL_DOSMidiTickCallback SDL_DOSMidiTickGetRegistered(void)
++{
++    return g_dos_midi_tick_cb;
++}
++
+ /* Engine-visible accessor. Resolved at OpenDevice (sentinel-cached);
+  * stable post-init. */
+ bool SDL_DOSMidiIsrTickActive(void)
+diff --git a/src/core/dos/SDL_dos.c b/src/core/dos/SDL_dos.c
+index 1c3cdad37..5bfabcfeb 100644
+--- a/src/core/dos/SDL_dos.c
++++ b/src/core/dos/SDL_dos.c
+@@ -184,7 +184,12 @@ void DOS_UnhookInterrupt(DOS_InterruptHook *hook, bool disable_interrupt)
+     }
+ 
+     SDL_assert(hook->interrupt_vector > 0);
+-    SDL_assert(hook->irq > 0);
++    /* DOSKUTSU patch (SDL/0110, Campaign 2 AdLib): allow IRQ 0 (the PIT/INT8
++       timer) to be unhooked. The AdLib OPL music pump (SDL_dosopltimer.h)
++       hooks IRQ-0 via DOS_HookInterruptReplace and must restore the original
++       INT8 vector on stop. Callers MUST pass disable_interrupt=false for
++       IRQ-0 -- masking the system timer would freeze the DOS clock. */
++    SDL_assert(hook->irq >= 0);
+ 
+     if (disable_interrupt) {
+         if (hook->irq > 7) {
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 9dc29b6c3..285180bb0 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -39,6 +39,8 @@
+ #if defined(SDL_PLATFORM_DOS)
+ 
+ #include "SDL_dos_audio_synth.h"
++#include <SDL3/SDL_dosmidi_tick.h>  /* SDL/0110: registered-tick accessor + Any-active predicate */
++#include <SDL3/SDL_dosopltimer.h>   /* SDL/0110: AdLib PIT/IRQ-0 OPL music pump API */
+ 
+ /* DOSKUTSU patch (Phase 10 patch 0041): route Phase 10 init banners
+    through doskutsu_dbg_log so they reach <TAG>SDL.LOG (sdldbg.log).
+@@ -1174,6 +1176,257 @@ void SDL_DOSOpl3Shutdown(void)
+     SDL_DOSOpl3WriteRegister(0x105, 0x00);
+ }
+ 
++/* ========================================================================
++ * DOSKUTSU patch (SDL/0110, Campaign 2 AdLib): OPL2 chip helpers
++ * ========================================================================
++ * OPL2 = 9 voices, single bank (0x388/0x389). NO secondary bank, NO OPL3
++ * 0x105/0x104. Voices 0-8 are all primary-bank (s_opl3_voice_offsets[0..8]),
++ * so the existing voice/patch/note helpers serve them unchanged; only chip
++ * init/shutdown + detect differ from the OPL3 path. See ADLIB-NATIVE-DESIGN.md
++ * sec.7.1. */
++
++bool SDL_DOSOpl2Detect(void)
++{
++    /* OPL2 detection == the standard Adlib timer-1 rollover sequence on the
++       primary base, which detects ANY OPL (OPL2 included). Reuse the OPL3
++       detector verbatim; the distinct name is for AdLib-path log clarity and
++       so the engine's MidiBackendOpl2 has a semantically-named entry point. */
++    return SDL_DOSOpl3Detect();
++}
++
++void SDL_DOSOpl2InitChip(void)
++{
++    /* OPL2: do NOT write 0x105 (OPL3 enable) or 0x104 (4-op) -- those are
++       secondary-bank / OPL3-only and hit nonexistent registers on a real
++       OPL2 / PicoGUS AdLib mode. */
++    /* Enable waveform-select (reg 0x01 bit 5 = WSE) so non-sine operator
++       waveforms are usable, per the AdLib/OPL2 spec. */
++    SDL_DOSOpl3WriteRegister(0x01, 0x20);
++    /* Clear the rhythm-mode / tremolo-depth / vibrato-depth latch (reg 0xBD)
++       -- the wub-wub source; start from a known-quiet melodic state. */
++    SDL_DOSOpl3WriteRegister(0xBD, 0x00);
++    /* KEY-OFF the 9 primary-bank voices (all reg<0x100 -> primary port; the
++       secondary bank is never touched). */
++    for (int v = 0; v < 9; v++) {
++        SDL_DOSOpl3VoiceNoteOff(v);
++    }
++    doskutsu_dbg_log("audio: SDL/0110 OPL2 chip init (9 voices, single bank "
++                     "0x388/0x389; no OPL3 0x105/0x104; WSE on; 0xBD cleared)");
++}
++
++void SDL_DOSOpl2Shutdown(void)
++{
++    /* TL=0x3F max-attenuation sweep on both operators of the 9 primary-bank
++       voices (the OPL3 wub-wub-teardown discipline, sized for OPL2's 9
++       voices), then KEY-OFF + clear 0xBD. No OPL3-mode-disable -- we never
++       enabled it. */
++    for (int v = 0; v < 9; v++) {
++        const uint16_t op0 = s_opl3_voice_offsets[v].op0_base;
++        const uint16_t op1 = s_opl3_voice_offsets[v].op1_base;
++        SDL_DOSOpl3WriteRegister((uint16_t)(0x40 + op0), 0x3F);
++        SDL_DOSOpl3WriteRegister((uint16_t)(0x40 + op1), 0x3F);
++    }
++    for (int v = 0; v < 9; v++) {
++        SDL_DOSOpl3VoiceNoteOff(v);
++    }
++    SDL_DOSOpl3WriteRegister(0xBD, 0x00);
++    doskutsu_dbg_log("audio: SDL/0110 OPL2 chip shutdown (9-voice TL=0x3F "
++                     "sweep + KEY-OFF + 0xBD clear; OPL2 mode left intact)");
++}
++
++/* ========================================================================
++ * DOSKUTSU patch (SDL/0110, Campaign 2 AdLib): PIT/INT8 OPL music pump
++ * ========================================================================
++ * Replaces the SB16 IRQ-5 as the MIDI clock on a no-SB AdLib box. Reprograms
++ * 8253 PIT ch0 to a fine tick rate, hooks IRQ-0 (replace + manual every-Nth
++ * chain to the original BIOS INT 8 so the 18.2065 Hz DOS clock is preserved),
++ * and from that ISR drives the SAME registered MIDI tick callback the SB path
++ * uses. See ADLIB-NATIVE-DESIGN.md sec.3 + LEAD DECISIONS (d). API +
++ * discipline contract: include/SDL3/SDL_dosopltimer.h. */
++
++#define DOS_PIT_INPUT_HZ      1193182UL  /* 8253 PIT input clock */
++#define DOS_OPL_PUMP_HZ_MIN   19         /* >= the BIOS 18.2 Hz floor */
++#define DOS_OPL_PUMP_HZ_MAX   1000       /* ISR-overhead ceiling */
++
++static DOS_InterruptHook s_opl_pit_hook;
++static volatile bool     s_opl_pump_active = false;
++
++/* Far pointer (offset:selector) to the saved original protected-mode INT 8
++   handler, for the manual every-Nth chain. Layout matches gas `lcall *mem`
++   (32-bit offset then 16-bit selector). DPMI-locked at Start. */
++static volatile struct { uint32_t off; uint16_t sel; } s_old_int8_vec;
++
++/* ISR-touched state (all DPMI-locked at Start). */
++static volatile uint32_t s_pit_div = 0;       /* our PIT ch0 divisor */
++static volatile uint32_t s_us_per_tick = 0;   /* microseconds per fast tick */
++static volatile uint32_t s_us_frac = 0;       /* sub-millisecond us accumulator */
++static volatile Uint64   s_now_ms = 0;        /* monotonic ms for the tick cb */
++static volatile uint32_t s_bios_accum = 0;    /* fractional toward the 18.2 Hz BIOS tick */
++static SDL_DOSMidiTickCallback s_pump_tick_cb = NULL;
++
++/* Chain to the original BIOS INT 8 (it issues its own EOI). Simulate the
++   interrupt entry: push flags, far-call the saved protected-mode vector; the
++   handler's IRET pops EIP/CS/EFLAGS, balancing the CALL's CS/EIP + our pushfl.
++   This is the canonical DJGPP "call the previous handler" idiom. DPMI-locked.
++   NOTE (g2k-validation item per [[dosbox_not_proxy]]): the EOI/chain split +
++   this far-call are the BIOS-tick-correctness risk the design flagged -- they
++   require real-HW confirmation; DOSBox-X cannot validate IRQ-0 timing. */
++static void OplPitChainOld(void)
++{
++    __asm__ __volatile__(
++        "pushfl\n\t"
++        "lcall *%0\n\t"
++        :
++        : "m"(s_old_int8_vec)
++        : "memory", "cc");
++}
++static void OplPitChainOld_End(void) {}
++
++/* IRQ-0 / INT 8 ISR. Installed via DOS_HookInterruptReplace (an IRET wrapper
++   enters this as a plain C function). Runs with interrupts disabled. */
++static void OplPitISR(void)
++{
++    /* 1. advance the monotonic clock by one fast-tick period (no 64-bit
++       divide in-ISR: collapse the us accumulator to ms with a small loop). */
++    s_us_frac += s_us_per_tick;
++    while (s_us_frac >= 1000u) {
++        s_us_frac -= 1000u;
++        s_now_ms++;
++    }
++
++    /* 2. drive the music (the engine's ISR-safe MidiScheduler::tick_isr). */
++    if (s_pump_tick_cb) {
++        s_pump_tick_cb(s_now_ms);
++    }
++
++    /* 3. preserve the BIOS 18.2065 Hz tick. Accumulate our divisor; each time
++       it rolls 65536, the original INT 8 must run exactly once -- which makes
++       the BIOS handler fire at (fast_rate * div / 65536) == PIT_INPUT/65536 ==
++       18.2065 Hz EXACTLY, independent of our chosen rate. The original handler
++       issues its own EOI, so we do NOT EOI on a chained tick; otherwise we EOI
++       the master PIC ourselves. */
++    s_bios_accum += s_pit_div;
++    if (s_bios_accum >= 65536u) {
++        s_bios_accum -= 65536u;
++        OplPitChainOld();      /* original BIOS INT 8 runs + EOIs */
++    } else {
++        DOS_EndOfInterrupt(0); /* master-PIC EOI (IRQ-0) */
++    }
++}
++static void OplPitISR_End(void) {}
++
++bool SDL_DOSOplTimerPumpStart(int hz)
++{
++    if (s_opl_pump_active) {
++        doskutsu_dbg_log("audio: SDL/0110 OPL timer pump: already active -- refused");
++        return false;
++    }
++    /* SINGLE OWNER of PIT ch0: never coexist with the SB IRQ-5 clock. */
++    if (SDL_DOSAudioSB_IsDeviceHot()) {
++        doskutsu_dbg_log("audio: SDL/0110 OPL timer pump: REFUSED -- SB device is "
++                         "hot (SB IRQ-5 owns the MIDI clock; the PIT pump is the "
++                         "no-SB AdLib path only)");
++        return false;
++    }
++    if (hz < DOS_OPL_PUMP_HZ_MIN || hz > DOS_OPL_PUMP_HZ_MAX) {
++        doskutsu_dbg_log("audio: SDL/0110 OPL timer pump: hz=%d out of range "
++                         "[%d,%d] -- refused", hz, DOS_OPL_PUMP_HZ_MIN,
++                         DOS_OPL_PUMP_HZ_MAX);
++        return false;
++    }
++
++    /* PIT ch0 divisor + per-tick microseconds (derived from the ACTUAL divisor
++       so tempo tracks the real fire rate, not the requested hz). The 64-bit
++       math here runs at Start, not in-ISR. */
++    uint32_t div = (uint32_t)(DOS_PIT_INPUT_HZ / (unsigned)hz);
++    if (div < 1u)     div = 1u;
++    if (div > 65535u) div = 65535u;
++    s_pit_div     = div;
++    s_us_per_tick = (uint32_t)(((Uint64)div * 1000000ULL) / DOS_PIT_INPUT_HZ);
++    s_us_frac     = 0;
++    s_now_ms      = 0;
++    s_bios_accum  = 0;
++
++    /* Snapshot the registered MIDI tick callback. The engine registers it
++       (SDL_DOSMidiTickRegister) BEFORE Start, mirroring the SB init order. */
++    s_pump_tick_cb = SDL_DOSMidiTickGetRegistered();
++
++    /* Install IRQ-0 via the REPLACE variant: an IRET wrapper enters OplPitISR
++       as the terminal handler, so we own the EOI + the manual every-Nth chain
++       (the chaining variant would run the old handler every fire == BIOS clock
++       ~6.6x fast at 120 Hz). */
++    DOS_HookInterruptReplace(0, OplPitISR, &s_opl_pit_hook);
++    s_old_int8_vec.off = (uint32_t)s_opl_pit_hook.original_irq_handler_seginfo.pm_offset;
++    s_old_int8_vec.sel = (uint16_t)s_opl_pit_hook.original_irq_handler_seginfo.pm_selector;
++
++    /* DPMI-lock the ISR + chain helper + all ISR-touched data BEFORE arming
++       the fast PIT rate so no page-fault can occur in interrupt context. */
++    DOS_LockCode(OplPitISR, OplPitISR_End);
++    DOS_LockCode(OplPitChainOld, OplPitChainOld_End);
++    DOS_LockVariable(s_pit_div);
++    DOS_LockVariable(s_us_per_tick);
++    DOS_LockVariable(s_us_frac);
++    DOS_LockVariable(s_now_ms);
++    DOS_LockVariable(s_bios_accum);
++    DOS_LockVariable(s_pump_tick_cb);
++    DOS_LockVariable(s_old_int8_vec);
++    DOS_LockVariable(s_opl_pump_active);
++
++    /* Program PIT ch0: control 0x43 = 0x36 (ch0, lobyte+hibyte, mode 3,
++       binary), then divisor low+high to 0x40. */
++    DOS_DisableInterrupts();
++    outportb(0x43, 0x36);
++    outportb(0x40, (Uint8)(div & 0xFF));
++    outportb(0x40, (Uint8)((div >> 8) & 0xFF));
++    s_opl_pump_active = true;
++    DOS_EnableInterrupts();
++
++    doskutsu_dbg_log("audio: SDL/0110 OPL timer pump STARTED hz=%d div=%u "
++                     "us_per_tick=%u (PIT ch0 reprogrammed; BIOS INT8 chained "
++                     "~every %u fast ticks -> 18.2065 Hz; tick_cb=%s)",
++                     hz, (unsigned)div, (unsigned)s_us_per_tick,
++                     (unsigned)(65536u / div),
++                     s_pump_tick_cb ? "registered"
++                                    : "NULL(no MidiScheduler tick registered!)");
++    return true;
++}
++
++void SDL_DOSOplTimerPumpStop(void)
++{
++    if (!s_opl_pump_active) {
++        return; /* idempotent */
++    }
++    /* Restore PIT ch0 to the BIOS default divisor (0 == 65536 -> 18.2065 Hz)
++       FIRST, so even a final in-flight ISR fire self-EOIs at the BIOS rate. */
++    DOS_DisableInterrupts();
++    outportb(0x43, 0x36);
++    outportb(0x40, 0x00);
++    outportb(0x40, 0x00);
++    s_opl_pump_active = false;
++    DOS_EnableInterrupts();
++
++    /* Restore the original INT 8 vector + free the IRET wrapper. Pass
++       disable_interrupt=false: IRQ-0 (the system timer) must NEVER be masked. */
++    DOS_UnhookInterrupt(&s_opl_pit_hook, false);
++
++    doskutsu_dbg_log("audio: SDL/0110 OPL timer pump STOPPED (PIT ch0 restored "
++                     "to 18.2065 Hz; IRQ-0 unhooked; timer left unmasked)");
++}
++
++bool SDL_DOSOplTimerPumpActive(void)
++{
++    return s_opl_pump_active;
++}
++
++/* DOSKUTSU patch (SDL/0110): shared ISR-active predicate. True if either the
++   SB16 IRQ-5 MIDI tick OR the AdLib PIT/IRQ-0 pump is driving the scheduler.
++   The engine's MidiScheduler reentrancy guards switch to this so they engage
++   under either clock (see SDL_dosmidi_tick.h). */
++bool SDL_DOSMidiIsrAnyActive(void)
++{
++    return SDL_DOSMidiIsrTickActive() || SDL_DOSOplTimerPumpActive();
++}
++
+ /* ========================================================================
+  * Audio IRQ-5 idle-pause coordination
+  *
+diff --git a/src/core/dos/SDL_dos_audio_synth.h b/src/core/dos/SDL_dos_audio_synth.h
+index 4eddd360a..a65c23e47 100644
+--- a/src/core/dos/SDL_dos_audio_synth.h
++++ b/src/core/dos/SDL_dos_audio_synth.h
+@@ -188,6 +188,33 @@ extern void SDL_DOSOpl3VoiceNoteOn(int voice_id, uint16_t freq, uint8_t block);
+ // Convenience hot-path: silences a voice (clears key-on bit at 0xB0+ch).
+ extern void SDL_DOSOpl3VoiceNoteOff(int voice_id);
+ 
++/* ------------------------------------------------------------------------
++ * DOSKUTSU patch (SDL/0110, Campaign 2 AdLib): OPL2 (AdLib) chip helpers.
++ *
++ * OPL2 = 9 voices, single register bank at 0x388/0x389 ONLY -- NO secondary
++ * bank (0x38A/0x38B), NO OPL3-enable (0x105), NO 4-op (0x104). The existing
++ * SDL_DOSOpl3WriteRegister already routes reg<0x100 to the primary bank, and
++ * voices 0-8 (s_opl3_voice_offsets[0..8]) are all primary-bank, so
++ * SDL_DOSOpl3VoiceWritePatch/NoteOn/NoteOff for voice_id 0-8 work UNCHANGED on
++ * a real OPL2 (the patch struct + note formula are bank-agnostic). Only chip
++ * init/shutdown + detect differ from the OPL3 path. Music only -- a pure OPL2
++ * card has no DAC/DMA so Cave Story PCM SFX cannot play (by hardware).
++ * ------------------------------------------------------------------------ */
++
++// Detects ANY OPL chip at the primary base (same timer-1 rollover sequence as
++// SDL_DOSOpl3Detect; OPL2 included). Distinct name for AdLib-path log clarity.
++extern bool SDL_DOSOpl2Detect(void);
++
++// Initializes an OPL2 chip to a known state: enables waveform-select (reg 0x01
++// bit 5), clears the rhythm/tremolo/vibrato latch (reg 0xBD), and KEY-OFFs the
++// 9 primary-bank voices. Does NOT touch the OPL3 0x105/0x104 registers.
++extern void SDL_DOSOpl2InitChip(void);
++
++// Silences an OPL2 chip: TL=0x3F max-attenuation sweep on both operators of the
++// 9 primary-bank voices, KEY-OFF those voices, and clear reg 0xBD. Leaves the
++// chip in OPL2/Adlib state for any subsequent process.
++extern void SDL_DOSOpl2Shutdown(void);
++
+ /* ------------------------------------------------------------------------
+  * Audio IRQ-5 idle-pause coordination -- sec. E of design doc
+  * ------------------------------------------------------------------------
+-- 
+2.47.3
+
