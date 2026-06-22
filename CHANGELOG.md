@@ -5,6 +5,36 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.4.1] - 2026-06-22
+
+A real OPL3 General MIDI instrument bank, plus two correctness fixes for OPL3 and
+for Sound Blaster init on cards without a 16-bit DMA channel.
+
+### Added
+
+- **OPL3 General MIDI instrument bank** (`data/opl3bank.dat`, DMXOPL-derived, MIT-
+  licensed; see `THIRD-PARTY`). The `opl3` music backend now renders a full
+  128-program GM instrument set instead of the previous 8-patch placeholder, so
+  OPL3 FM music has proper, recognizable instruments. Card-agnostic -- it helps
+  any Sound Blaster with an OPL3 chip. (It is a 2-op approximation of DMXOPL's
+  4-op voicing; a large upgrade over the placeholder, not full DMXOPL fidelity.)
+
+### Fixed
+
+- **OPL3 instrument bank never loaded on real DOS.** The loader's filename
+  (`opl3-patches.dat`) violated the DOS 8.3 limit, so on a real (no-LFN)
+  filesystem it was never found and the engine silently used the 8-patch
+  placeholder. Renamed to `opl3bank.dat` (8.3-valid); the bank now loads on
+  hardware.
+- **OPL3 instruments played an octave too high.** The DOPL3v1 per-program
+  transpose byte is now honored, matching the GM bank's note-offset convention.
+- **Hang at startup on a Sound Blaster reporting SB16 but with no valid 16-bit
+  DMA channel.** Such a card (e.g. a DSP-4.x card whose `BLASTER` lacked a valid
+  high-DMA channel 5/6/7) could program 16-bit DMA on an invalid channel and
+  hang at the loading screen. The engine now requires a valid 16-bit channel for
+  the 16-bit path and otherwise falls back to 8-bit playback. A normal SB16
+  (e.g. Vibra16 with `H5`) is unaffected.
+
 ## [1.4.0] - 2026-06-21
 
 PicoGUS in "Sound Blaster mode" (and other 8-bit Sound Blaster-class cards) is
