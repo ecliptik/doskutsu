@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 22 Jun 2026 11:00:09 -0700
+Subject: [PATCH 1/2] patch 0234 -- Campaign 2 AdLib: enum + shared ISR
+ predicate switch
+
+Scaffolding + correctness predicate for the native-AdLib (OPL2) music
+path. No behavior change for existing backends.
+
+WHY DOS needs this: a pure AdLib / OPL-only card (incl. PicoGUS in
+/mode adlib) has no Sound Blaster, so the SB16 IRQ-5 that drives the
+MIDI tick (Lever 2b) never fires. Campaign 2 adds a PIT/IRQ-0 OPL music
+pump (SDL/0110) as the alternate clock. The MidiScheduler reentrancy
+guards (MidiIsrCriticalSection cli/sti, _refresh_isr_buffer, the OPL
+instance DPMI-lock) currently gate on the SB-only SDL_DOSMidiIsrTickActive();
+under the no-SB pump that predicate is false while a REAL IRQ-0 ISR reads
+the scheduler -- leaving cli/sti + DPMI-locks disengaged during live ISR
+reads (a freeze/corruption hazard). Switch every functional guard site to
+the shared SDL_DOSMidiIsrAnyActive() (SB-IRQ tick OR PIT pump), per the
+2026-06-21 lead decision (c).
+
+- diagnostic_timers.h: AudioBackend::adlib = 7.
+- Renderer.cpp: backend_to_string(adlib) -> "adlib".
+- AudioBackend.cpp: selectBackendFromEnv handles AUDIO_BACKEND=adlib.
+- MidiScheduler.cpp + MidiBackendOpl3.cpp: guard sites -> AnyActive.
+
+Design: docs/internal/ADLIB-NATIVE-DESIGN.md.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h |  5 +++++
+ src/graphics/Renderer.cpp     |  1 +
+ src/sound/AudioBackend.cpp    | 20 +++++++++++++++++++-
+ src/sound/MidiBackendOpl3.cpp |  7 ++++++-
+ src/sound/MidiScheduler.cpp   | 16 +++++++++++++---
+ 5 files changed, 44 insertions(+), 5 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 84681e03..0e3033a5 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -1095,6 +1095,11 @@ enum class AudioBackend : std::uint8_t
+   none        = 4,
+   midi_stub   = 5,
+   auto_select = 6,
++  // patch 0234 (Campaign 2 AdLib): native OPL2 (YM3812 / AdLib) music on
++  // a no-Sound-Blaster card, driven by the PIT/IRQ-0 OPL pump (SDL/0110)
++  // instead of the SB IRQ-5. MUSIC ONLY -- a DAC-less AdLib card cannot
++  // play Pixtone PCM SFX. See docs/internal/ADLIB-NATIVE-DESIGN.md.
++  adlib       = 7,
+ };
+ 
+ extern AudioBackend g_p10_audio_backend_active;
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 742d79d6..77e80645 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -346,6 +346,7 @@ const char *backend_to_string(AudioBackend b)
+     case AudioBackend::none:        return "none";
+     case AudioBackend::midi_stub:   return "midi-stub";
+     case AudioBackend::auto_select: return "auto";
++    case AudioBackend::adlib:       return "adlib";  // patch 0234 (Campaign 2)
+   }
+   return "unknown";
+ }
+diff --git a/src/sound/AudioBackend.cpp b/src/sound/AudioBackend.cpp
+index 5de79533..7f2a71c2 100644
+--- a/src/sound/AudioBackend.cpp
++++ b/src/sound/AudioBackend.cpp
+@@ -121,6 +121,24 @@ void selectBackendFromEnv()
+              "sequence + fall back to organya gracefully if the chip "
+              "is absent. Pixtone SFX still active on SB16 DAC.");
+   }
++  else if (std::strcmp(value, "adlib") == 0)
++  {
++    // patch 0234 (Campaign 2 AdLib): native OPL2 FM music on a no-Sound-
++    // Blaster card (incl. PicoGUS in /mode adlib, which emulates OPL2 only).
++    // SoundManager::init takes the no-mixer AdLib path: it omits the SB16
++    // bring-up, detects OPL2 via SDL_DOSOpl2Detect, installs MidiBackendOpl2,
++    // and starts the PIT/IRQ-0 OPL music pump (SDL/0110) as the clock -- the
++    // SB IRQ-5 does not exist on such a box. main.cpp omits SDL_INIT_AUDIO
++    // for this backend (like AUDIO_OFF) but KEEPS SoundManager::init.
++    // MUSIC ONLY: a DAC-less AdLib card cannot play Pixtone PCM SFX.
++    selected = NXE::Diag::AudioBackend::adlib;
++    LOG_INFO("audio backend: adlib (Campaign 2 -- native OPL2 FM synthesis on "
++             "a no-Sound-Blaster card; 9-voice single-bank allocator; music "
++             "clock = PIT/IRQ-0 OPL pump, NOT SB IRQ-5). MUSIC ONLY -- no PCM "
++             "SFX on a DAC-less AdLib card. SoundManager::init probes OPL2 at "
++             "0x388 via the Adlib timer-1 sequence; if absent, music is silent "
++             "(the game still runs). Reuses data/opl3bank.dat (DMXOPL GM bank).");
++  }
+   else if (std::strcmp(value, "tracker") == 0)
+   {
+     selected = NXE::Diag::AudioBackend::organya;
+@@ -148,7 +166,7 @@ void selectBackendFromEnv()
+     selected = NXE::Diag::AudioBackend::organya;
+     LOG_INFO("audio backend: unrecognized value '{}' for "
+              "SDL_HINT_DOSKUTSU_AUDIO_BACKEND; falling back to organya. "
+-             "Recognized values: auto | organya | wb | opl3 | tracker | midi-stub.",
++             "Recognized values: auto | organya | wb | opl3 | adlib | tracker | midi-stub.",
+              value);
+   }
+ 
+diff --git a/src/sound/MidiBackendOpl3.cpp b/src/sound/MidiBackendOpl3.cpp
+index b6bacc7f..e3cc88d7 100644
+--- a/src/sound/MidiBackendOpl3.cpp
++++ b/src/sound/MidiBackendOpl3.cpp
+@@ -585,8 +585,13 @@ MidiBackendOpl3::MidiBackendOpl3()
+   // Locking the whole instance via DOS_LockData(this, sizeof) covers
+   // _voices[] + _program_state[] + _channel_volume[] + all other
+   // members in a single syscall. ~few hundred bytes locked total.
++  //
++  // patch 0234 (Campaign 2 AdLib): gate on the SHARED predicate
++  // SDL_DOSMidiIsrAnyActive() (consistent with the other guard sites). The
++  // OPL3 backend runs only on the SB path today, so this is behavior-neutral
++  // here; the OPL2 backend is the AdLib-path consumer of the PIT pump.
+ #ifdef __DJGPP__
+-  if (SDL_DOSMidiIsrTickActive())
++  if (SDL_DOSMidiIsrAnyActive())
+   {
+     _go32_dpmi_lock_data((void *)this, (unsigned long)sizeof(*this));
+   }
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+index a2bb5025..1cd24869 100644
+--- a/src/sound/MidiScheduler.cpp
++++ b/src/sound/MidiScheduler.cpp
+@@ -80,7 +80,14 @@ volatile bool             g_midi_isr_buffer_locked  = false;
+ struct MidiIsrCriticalSection
+ {
+   bool active;
+-  MidiIsrCriticalSection() : active(SDL_DOSMidiIsrTickActive())
++  // patch 0234 (Campaign 2 AdLib): gate on the SHARED predicate so the
++  // cli/sti critical section engages under EITHER the SB16 IRQ-5 tick OR
++  // the AdLib PIT/IRQ-0 OPL pump (SDL/0110). Under the AdLib path there is
++  // no SB, so SDL_DOSMidiIsrTickActive() is false while a REAL IRQ-0 ISR
++  // reads the scheduler state -- gating on the SB-only predicate there
++  // would leave the cli/sti disengaged during live ISR reads (corruption
++  // hazard). SDL_DOSMidiIsrAnyActive() closes that gap.
++  MidiIsrCriticalSection() : active(SDL_DOSMidiIsrAnyActive())
+   {
+ #ifdef __DJGPP__
+     if (active) __asm__ __volatile__("cli\n");
+@@ -536,8 +543,11 @@ void MidiScheduler::tick(std::uint64_t now_ms)
+ // is dormant -- single lock-table entry maintained by CWSDPMI).
+ void MidiScheduler::_refresh_isr_buffer()
+ {
+-  if (!SDL_DOSMidiIsrTickActive())
+-    return;  // L2b off; no need to refresh ISR buffer
++  // patch 0234 (Campaign 2 AdLib): shared predicate -- refresh + DPMI-lock
++  // the ISR events buffer when EITHER the SB16 IRQ-5 tick OR the AdLib PIT
++  // pump (SDL/0110) is driving tick_isr.
++  if (!SDL_DOSMidiIsrAnyActive())
++    return;  // no ISR pump active; no need to refresh ISR buffer
+ 
+   // patch 0168-v2 (TAS-replay .bss-layout fix per team-lead #139 +
+   // flush-instr re-audit): lazy-alloc g_midi_isr_events on first

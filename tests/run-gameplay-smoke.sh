@@ -402,6 +402,9 @@ BANNER_REGEX=(
   "audio: SDL/0107 8-bit channel mode: ch=[12] \((MONO|STEREO)\) tc=-?[0-9]+ effective=[0-9]+ Hz stereo_bit=(yes|no) ring_silence_primed=yes"
   "audio: SDL/0108 pixtone IRQ-mix format: (S16-stereo|U8-stereo|U8-mono) \(device is_16bit=[01] channels=[12]\)"
   "audio: SDL/0109 DSP [0-9]+\.[0-9]+ reports SB16 but BLASTER has no VALID 16-bit DMA channel \(highdma=-?[0-9]+; valid = 5/6/7\)"
+  "audio backend: adlib \(Campaign 2 -- native OPL2 FM synthesis"
+  "Sound system: AdLib \(OPL2\) path -- AUDIO_BACKEND=adlib"
+  "adlib: OPL music pump STARTED at [0-9]+ Hz"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -508,6 +511,9 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
+  "optional"
+  "optional"
   "optional"
   "optional"
   "optional"
@@ -631,6 +637,9 @@ BANNER_LABEL=(
   "SDL/0107 8-bit MONO + ring silence-prime witness (OPTIONAL -- 'audio: SDL/0107 8-bit channel mode: ch=1 (MONO) tc=.. effective=.. Hz stereo_bit=no ring_silence_primed=yes ...' emits at OpenDevice ONLY on the pre-SB16 8-bit DMA path. DOSBox-X emulates an SB16 (DSP 4.x + high DMA) so is_sb16=true and the 8-bit branch never runs -> ABSENT under the default smoke, expected, not a failure (same g2k-only gating as the wave-49 Cirrus-BLT banner). The g2k PicoGUS-in-SB-mode iter is the runtime witness: ch=1/MONO/no-stereo-bit confirms the SDL/0107 chipmunk-pitch fix; ring_silence_primed=yes confirms the U8 0x80 ring prime (loud-pop fix). Killswitch SDL_HINT_DOSKUTSU_AUDIO_SB_8BIT_STEREO=1 restores prior SB-Pro 8-bit STEREO (would emit ch=2/STEREO/yes). Embed witness = strings|grep 'SDL/0107'. BANNER_REGEX idx 105.)"
   "SDL/0108 8-bit U8 Pixtone IRQ-mix format (OPTIONAL -- 'audio: SDL/0108 pixtone IRQ-mix format: (S16-stereo|U8-stereo|U8-mono) (device is_16bit=.. channels=..)' emits at OpenDevice ONLY when Lever-3 Pixtone IRQ-mix is active (default-ON; absent under AUDIO_BACKEND=organya or PIXTONE_IRQ_MIX=0). DOSBox-X emulates an SB16 so it emits the S16-stereo variant (byte-identical 16-bit path); g2k PicoGUS-in-SB-mode emits U8-mono -- the decisive witness that the SFX-distortion fix engaged (the ISR now writes U8 centered on 0x80 with the correct mono stride instead of S16-stereo into the U8 ring). No new env var (rides the existing PIXTONE_IRQ_MIX killswitch). Embed witness = strings|grep 'SDL/0108'. BANNER_REGEX idx 106.)"
   "SDL/0109 SB16 valid-16bit-DMA-channel guard (OPTIONAL -- 'audio: SDL/0109 DSP X.Y reports SB16 but BLASTER has no VALID 16-bit DMA channel (highdma=N; valid = 5/6/7) -- GRACEFUL fall back to the 8-bit low-DMA D-channel path ...' emits at SB detection ONLY when a DSP-4.x card resolves highdma NOT in {5,6,7} (the g2k 'H0' channel-0 init-hang shape, or a PicoGUS-in-SB-mode bogus/absent H) AND force-8bit is off. Default DOSBox-X smoke has a real H5 -> is_sb16=true so this is ABSENT, expected, not a failure. The dedicated DOSBox cell (sb16 + no-valid-H + no-force, e.g. BLASTER with H0/no-H) is the witness: it must now log the SDL/0106 decision banner as 8-bit-low-DMA + this SDL/0109 fall-back line, NEVER a 16-bit ch-0 program -- fixes the v1.4.0 SDL/0106 (highdma>=0) latent hang. Embed witness = strings|grep 'SDL/0109'. BANNER_REGEX idx 107.)"
+  "0234 Campaign 2 AdLib backend selection (OPTIONAL -- 'audio backend: adlib (Campaign 2 -- native OPL2 FM synthesis ...)' emits at selectBackendFromEnv ONLY under SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib. The default smoke leaves AUDIO_BACKEND unset (-> opl3 default) so this is ABSENT, expected, not a failure (same OPTIONAL gating as the wave-44 AUDIO_BACKEND=opl3/wb selection banners). The witness is the dedicated AdLib cell: a no-Sound-Blaster DOSBox config (sbtype=none + oplmode=opl2) with SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib. Embed witness = strings|grep 'audio backend: adlib'. BANNER_REGEX idx 108.)"
+  "0234 Campaign 2 AdLib no-mixer init path (OPTIONAL -- 'Sound system: AdLib (OPL2) path -- AUDIO_BACKEND=adlib. Skipping SB16 + SDL_mixer bring-up ...' emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib. ABSENT in the default smoke (no adlib), expected. The runtime witness that the THIRD boot mode engaged: main.cpp omitted SDL_INIT_AUDIO yet kept SoundManager::init, which then skipped MIX_Init/MIX_CreateMixerDevice and took the OPL2 path. MUSIC ONLY -- a DAC-less AdLib card has no PCM SFX. Embed witness = strings|grep 'AdLib (OPL2) path'. BANNER_REGEX idx 109.)"
+  "0235 Campaign 2 AdLib PIT/IRQ-0 OPL music pump started (OPTIONAL -- 'adlib: OPL music pump STARTED at N Hz (PIT ch0 / IRQ-0 drives MidiScheduler::tick_isr; BIOS 18.2 Hz tick chained; restored on exit) ...' emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib AND when SDL_DOSOplTimerPumpStart succeeded (OPL2 detected, SB not hot, hz in [19,1000]). This is THE decisive runtime witness that the no-SB music clock engaged -- on a real AdLib/OPL2 card or PicoGUS /mode adlib the 8253 PIT ch0 is reprogrammed to N Hz (default 120; override SDL_HINT_DOSKUTSU_OPL_TIMER_HZ) and IRQ-0 drives the SAME tick_isr the SB path drives. ABSENT in the default smoke (no adlib), expected. NB per [[dosbox_not_proxy]] DOSBox-X confirms the banner/boot path but NOT real PIT/IRQ-0 timing -- the g2k AdLib iter is the perf/correctness witness (incl. PIT-restore-on-quit + BIOS-tick correctness). Embed witness = strings|grep 'OPL music pump STARTED'. BANNER_REGEX idx 110.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

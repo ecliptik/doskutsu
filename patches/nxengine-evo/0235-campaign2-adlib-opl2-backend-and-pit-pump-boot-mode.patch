@@ -1,0 +1,1025 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 22 Jun 2026 11:00:28 -0700
+Subject: [PATCH 2/2] patch 0235 -- Campaign 2 AdLib: OPL2 backend + PIT-pump
+ boot mode
+
+The native-AdLib music path itself (Phase 1, explicit selection only).
+
+WHY DOS needs this: lets a no-Sound-Blaster OPL card (incl. PicoGUS in
+/mode adlib, which emulates OPL2 only) play Cave Story music natively on
+the OPL chip. Today such a box can't even boot: SDL_Init(SDL_INIT_AUDIO)
+fails with no SB and the engine exits.
+
+- MidiBackendOpl2 (NEW class, lead decision (a) -- isolated from the
+  shipped MidiBackendOpl3): 9-voice single-bank allocator on the OPL
+  primary bank. Reuses the bank-agnostic SDL transport helpers
+  (VoiceWritePatch/NoteOn/NoteOff) for voice 0-8 verbatim; OPL2-specific
+  Detect/InitChip/Shutdown via SDL/0110. Loads the SAME data/opl3bank.dat
+  DMXOPL GM bank (panning nibble no-ops on OPL2); honors patch[11]
+  transpose (mirrors 0232). DPMI-locks under SDL_DOSMidiIsrAnyActive().
+
+- main.cpp: AUDIO_BACKEND=adlib = THIRD boot mode -- omit SDL_INIT_AUDIO
+  (no SB device to open) but KEEP SoundManager::init() (unlike AUDIO_OFF).
+  Register an atexit SDL_DOSOplTimerPumpStop (PIT-ch0 restore safety).
+
+- SoundManager::init: AdLib path skips the SB16 + SDL_mixer bring-up
+  (MIX_Init / MIX_CreateMixerDevice), installs MidiBackendOpl2, registers
+  the MIDI tick, then starts the PIT/IRQ-0 OPL pump as the clock (register
+  BEFORE start so PumpStart snapshots the callback). hz from
+  SDL_HINT_DOSKUTSU_OPL_TIMER_HZ (default 120, clamped [19,1000]).
+  shutdown(): stop the pump FIRST (no IRQ into a torn-down backend; PIT
+  restored), and skip MIX_Quit on the AdLib path (MIX_Init never ran).
+
+MUSIC ONLY (lead-confirmed hard limit): a DAC-less AdLib card has no DMA,
+so Pixtone PCM SFX cannot play; _mixer stays null and the SFX path no-ops.
+
+Design: docs/internal/ADLIB-NATIVE-DESIGN.md.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp                  |  41 +++-
+ src/sound/MidiBackendOpl2.cpp | 451 ++++++++++++++++++++++++++++++++++
+ src/sound/MidiBackendOpl2.h   | 119 +++++++++
+ src/sound/SoundManager.cpp    | 182 ++++++++++++--
+ src/sound/SoundManager.h      |   6 +
+ 5 files changed, 776 insertions(+), 23 deletions(-)
+ create mode 100644 src/sound/MidiBackendOpl2.cpp
+ create mode 100644 src/sound/MidiBackendOpl2.h
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 5200132d..fa57b1b2 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -42,6 +42,8 @@ extern "C" {
+ #include <SDL3_mixer/SDL_mixer.h>
+ #include <SDL3_image/SDL_image.h>
+ #include <SDL3/SDL_dosaudio_pump.h>  // patch 0164: SDL_DOSAudioPump for the tick-boundary audio pump
++#include <SDL3/SDL_dosopltimer.h>  // patch 0234 (Campaign 2 AdLib): SDL_DOSOplTimerPumpStop for the PIT-restore atexit
++#include <cstring>  // patch 0234 (Campaign 2 AdLib): std::strcmp for the AUDIO_BACKEND=adlib boot-mode check
+ using namespace NXE::Graphics;
+ #include "ResourceManager.h"
+ #include "caret.h"
+@@ -1618,17 +1620,34 @@ int main(int argc, char *argv[])
+   // memory/wave_20_misc_slice_in_flip_body.md).
+   Uint32 _sdl_init_flags = SDL_INIT_VIDEO | SDL_INIT_AUDIO;
+   bool _audio_off = false;
++  // patch 0234 (Campaign 2 AdLib): THIRD boot mode. AUDIO_BACKEND=adlib runs
++  // music natively on a no-Sound-Blaster OPL chip (the PIT/IRQ-0 pump is the
++  // clock). Like AUDIO_OFF it must OMIT SDL_INIT_AUDIO (there is no SB device
++  // to open -- leaving it in makes SDL_Init fail and the engine exit), but
++  // UNLIKE AUDIO_OFF it KEEPS SoundManager::init() so the OPL2 backend + pump
++  // come up. Read via getenv (SDL_GetHint needs SDL_Init, not yet run -- same
++  // pattern as the AUDIO_OFF check). See docs/internal/ADLIB-NATIVE-DESIGN.md.
++  bool _adlib_mode = false;
+   {
+     const char *e = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_OFF");
+     _audio_off = e && e[0] == '1' && e[1] == 0;
++    const char *b = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
++    _adlib_mode = b && std::strcmp(b, "adlib") == 0;
+   }
+-  if (_audio_off)
++  if (_audio_off || _adlib_mode)
+   {
+     _sdl_init_flags &= ~SDL_INIT_AUDIO;
+-    LOG_INFO("SDL_HINT_DOSKUTSU_AUDIO_OFF=1 -- skipping SDL_INIT_AUDIO "
+-             "(W20A2 audio-off ablation; SB16 IRQ never hooked, audio "
+-             "subsystem not initialized; SoundManager::init() will also "
+-             "be skipped below)");
++    if (_adlib_mode)
++      LOG_INFO("AUDIO_BACKEND=adlib -- omitting SDL_INIT_AUDIO (no Sound "
++               "Blaster on a native-AdLib config; the OPL chip is driven by "
++               "direct port I/O + the PIT/IRQ-0 music pump). SoundManager::"
++               "init() STILL RUNS (unlike AUDIO_OFF) to bring up the OPL2 "
++               "backend. MUSIC ONLY -- no PCM SFX on a DAC-less AdLib card.");
++    else
++      LOG_INFO("SDL_HINT_DOSKUTSU_AUDIO_OFF=1 -- skipping SDL_INIT_AUDIO "
++               "(W20A2 audio-off ablation; SB16 IRQ never hooked, audio "
++               "subsystem not initialized; SoundManager::init() will also "
++               "be skipped below)");
+   }
+   if (!SDL_Init(_sdl_init_flags))
+   {
+@@ -1636,6 +1655,18 @@ int main(int argc, char *argv[])
+     return 1;
+   }
+ 
++  // patch 0234 (Campaign 2 AdLib): belt-and-braces PIT-restore. The AdLib
++  // music pump reprograms 8253 PIT ch0 off the BIOS 18.2 Hz divisor; a left-
++  // reprogrammed timer makes the DOS clock run fast after quit. SoundManager::
++  // shutdown() stops the pump on the normal teardown path, but register an
++  // atexit too so an abnormal exit (fatal(), etc.) still restores PIT ch0.
++  // SDL_DOSOplTimerPumpStop is idempotent + a no-op if the pump never started,
++  // so registering it only in adlib mode is sufficient + harmless.
++  if (_adlib_mode)
++  {
++    std::atexit(SDL_DOSOplTimerPumpStop);
++  }
++
+   // DOS-PORT (patch 0163, data cache): boot-time preload of heavy data
+   // files into RAM, behind SDL_HINT_DOSKUTSU_DATA_CACHE. Placed here
+   // because (a) SDL_Init must have run for SDL_GetHint to work, (b)
+diff --git a/src/sound/MidiBackendOpl2.cpp b/src/sound/MidiBackendOpl2.cpp
+new file mode 100644
+index 00000000..17a50764
+--- /dev/null
++++ b/src/sound/MidiBackendOpl2.cpp
+@@ -0,0 +1,451 @@
++/* Cave Story port -- Campaign 2 (AdLib / OPL-FM, patch 0235).
++ * MidiBackendOpl2 implementation. See MidiBackendOpl2.h for the design +
++ * docs/internal/ADLIB-NATIVE-DESIGN.md for the full campaign rationale.
++ *
++ * This is a deliberately self-contained sibling of MidiBackendOpl3 (lead
++ * decision (a), 2026-06-21: NEW class, isolation -- do not refactor the
++ * shipped OPL3 path). The instrument bank + loader + GM-bucket map + note
++ * table are duplicated from MidiBackendOpl3.cpp (file-scope statics there
++ * are not externally visible). The duplication is pure const data + a
++ * read-only loader; zero blast radius onto the shipped backend. The chip
++ * I/O reuses the bank-agnostic SDL transport helpers (voices 0-8 ->
++ * primary bank); only Detect / InitChip / Shutdown are OPL2-specific.
++ */
++
++#include "MidiBackendOpl2.h"
++
++#include "../ResourceManager.h"
++#include "../Utils/Logger.h"
++
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++
++#include <SDL3/SDL.h>
++#include <SDL3/SDL_dosmidi_tick.h>  // SDL_DOSMidiIsrAnyActive (SDL/0110): gate the DPMI lock under EITHER pump
++
++#ifdef __DJGPP__
++#include <dpmi.h>  // _go32_dpmi_lock_data for instance + patch-bank
++#endif
++
++// Cross-vendor extern declarations for the SDL/0037+ OPL transport helpers
++// (voices 0-8 / primary bank reused verbatim) + the SDL/0110 OPL2 chip
++// helpers. Same file-scope C-linkage pattern as MidiBackendOpl3.cpp.
++extern "C" {
++  // OPL2-specific chip lifecycle (SDL/0110):
++  bool SDL_DOSOpl2Detect(void);
++  void SDL_DOSOpl2InitChip(void);
++  void SDL_DOSOpl2Shutdown(void);
++  // Bank-agnostic transport (SDL/0037; primary bank for voice_id 0-8):
++  void SDL_DOSOpl3WriteRegister(uint16_t reg, uint8_t value);
++  void SDL_DOSOpl3VoiceWritePatch(int voice_id, const uint8_t patch[12]);
++  void SDL_DOSOpl3VoiceNoteOn(int voice_id, uint16_t freq, uint8_t block);
++  void SDL_DOSOpl3VoiceNoteOff(int voice_id);
++}
++
++namespace NXE
++{
++namespace Sound
++{
++
++// ============================================================================
++// Patch bank -- 8 representative patches (duplicated from MidiBackendOpl3.cpp).
++// 12-byte SBI layout per SDL_DOSOpl3VoiceWritePatch:
++//   patch[0..4] op0 (modulator); patch[5] channel FB/CONN(+pan, no-op on OPL2);
++//   patch[6..10] op1 (carrier); patch[11] signed semitone transpose (engine).
++// RR>=8 on all (wub-wub-safe, mirrors patch 0171).
++// ============================================================================
++
++static constexpr uint8_t PATCH_PIANO[12] = {
++  0x01, 0x08, 0xE6, 0x48, 0x00, 0xF8, 0x01, 0x00, 0xF4, 0x48, 0x00, 0x00,
++};
++static constexpr uint8_t PATCH_MALLET[12] = {
++  0x01, 0x10, 0xF0, 0x88, 0x00, 0xF8, 0x01, 0x00, 0xF0, 0xC8, 0x00, 0x00,
++};
++static constexpr uint8_t PATCH_ORGAN[12] = {
++  0x01, 0x18, 0xF0, 0x08, 0x00, 0xFE, 0x01, 0x00, 0xF0, 0x08, 0x00, 0x00,
++};
++static constexpr uint8_t PATCH_GUITAR[12] = {
++  0x21, 0x10, 0xE2, 0x18, 0x00, 0xFA, 0x01, 0x00, 0xF1, 0x68, 0x00, 0x00,
++};
++static constexpr uint8_t PATCH_BRASS[12] = {
++  0x21, 0x18, 0x91, 0x18, 0x00, 0xFC, 0x21, 0x00, 0x71, 0x18, 0x00, 0x00,
++};
++static constexpr uint8_t PATCH_REED[12] = {
++  0x21, 0x10, 0x71, 0x18, 0x00, 0xF8, 0x21, 0x00, 0x91, 0x68, 0x00, 0x00,
++};
++static constexpr uint8_t PATCH_PAD[12] = {
++  0x21, 0x18, 0x71, 0x08, 0x01, 0xF6, 0x21, 0x00, 0x51, 0x08, 0x01, 0x00,
++};
++static constexpr uint8_t PATCH_DRUM[12] = {
++  0x0F, 0x00, 0xFF, 0x0F, 0x07, 0xF0, 0x0F, 0x00, 0xFF, 0x0F, 0x07, 0x00,
++};
++
++// Runtime bank (loaded from data/opl3bank.dat). Separate static storage
++// from the OPL3 backend's -- only one of the two backends is ever
++// constructed in a given process (adlib XOR opl3), so no double-load.
++static uint8_t _loaded_patch_bank[128][12];
++static int     _loaded_patch_bank_count = 0;
++
++// Try to load data/opl3bank.dat (DOPL3v1; same format + file the OPL3
++// backend loads). Returns true on success; false leaves state unchanged.
++static bool _try_load_opl2_bank(void)
++{
++  const std::string path =
++      ResourceManager::getInstance()->getPath("opl3bank.dat", false);
++  std::FILE *fp = std::fopen(path.c_str(), "rb");
++  if (!fp)
++  {
++    LOG_INFO("opl2 backend: opl3bank.dat not found at '{}'; using 8-patch "
++             "placeholder bank.", path);
++    return false;
++  }
++  uint8_t header[12];
++  if (std::fread(header, 1, sizeof header, fp) != sizeof header)
++  {
++    LOG_WARN("opl2 backend: opl3bank.dat header truncated; 8-patch placeholder.");
++    std::fclose(fp);
++    return false;
++  }
++  static const uint8_t k_magic[8] = { 'D', 'O', 'P', 'L', '3', 'v', '1', 0x0A };
++  if (std::memcmp(header, k_magic, 8) != 0)
++  {
++    LOG_WARN("opl2 backend: opl3bank.dat magic mismatch; 8-patch placeholder.");
++    std::fclose(fp);
++    return false;
++  }
++  const uint8_t version      = header[8];
++  const uint8_t num_programs = header[9];
++  const uint8_t reserved_lo  = header[10];
++  const uint8_t reserved_hi  = header[11];
++  if (version != 0x01 || num_programs == 0 || num_programs > 128 ||
++      reserved_lo != 0 || reserved_hi != 0)
++  {
++    LOG_WARN("opl2 backend: opl3bank.dat header invalid (version={} "
++             "num_programs={} reserved={},{}); 8-patch placeholder.",
++             (int)version, (int)num_programs, (int)reserved_lo, (int)reserved_hi);
++    std::fclose(fp);
++    return false;
++  }
++  const std::size_t payload_bytes = (std::size_t)num_programs * 12u;
++  if (std::fread(_loaded_patch_bank, 1, payload_bytes, fp) != payload_bytes)
++  {
++    LOG_WARN("opl2 backend: opl3bank.dat payload truncated; 8-patch placeholder.");
++    std::memset(_loaded_patch_bank, 0, sizeof _loaded_patch_bank);
++    std::fclose(fp);
++    return false;
++  }
++  std::fclose(fp);
++  _loaded_patch_bank_count = (int)num_programs;
++
++#ifdef __DJGPP__
++  // DPMI-lock the runtime bank: _apply_patch reads it from IRQ-0 context
++  // under the PIT pump. (rodata placeholders are already locked.)
++  _go32_dpmi_lock_data((void *)_loaded_patch_bank,
++                       (unsigned long)sizeof(_loaded_patch_bank));
++#endif
++
++  LOG_INFO("opl2 backend: opl3bank.dat loaded {} programs from '{}' "
++           "({} bytes). OPL2 ignores the SBI panning nibble; programs >= {} "
++           "fall back to the 8-patch family bucket; drum channel uses "
++           "PATCH_DRUM.", (int)num_programs, path,
++           (unsigned long)payload_bytes, (int)num_programs);
++  return true;
++}
++
++// GM program (0-127) -> placeholder patch family (identical buckets to
++// MidiBackendOpl3).
++static const uint8_t *_program_to_patch(int program)
++{
++  if (program < 0 || program > 127) return PATCH_PIANO;
++  if (program < _loaded_patch_bank_count) return _loaded_patch_bank[program];
++  const int bucket = program / 8;
++  switch (bucket)
++  {
++    case 0:  return PATCH_PIANO;
++    case 1:  return PATCH_MALLET;
++    case 2:  return PATCH_ORGAN;
++    case 3:  return PATCH_GUITAR;
++    case 4:  return PATCH_GUITAR;
++    case 5:  return PATCH_PAD;
++    case 6:  return PATCH_PAD;
++    case 7:  return PATCH_BRASS;
++    case 8:  return PATCH_REED;
++    case 9:  return PATCH_REED;
++    case 10: return PATCH_GUITAR;
++    case 11: return PATCH_PAD;
++    case 12: return PATCH_PAD;
++    case 13: return PATCH_GUITAR;
++    case 14: return PATCH_MALLET;
++    case 15: return PATCH_PIANO;
++    default: return PATCH_PIANO;
++  }
++}
++
++// Base F-num table at block=4 (octave reference), 12 semitones from C.
++static const uint16_t _base_fnum_table[12] = {
++  363, 385, 408, 432, 458, 485,
++  514, 544, 577, 611, 647, 686,
++};
++
++void MidiBackendOpl2::_midi_note_to_fnum_block(int note,
++                                               std::uint16_t *out_fnum,
++                                               std::uint8_t *out_block)
++{
++  if (note < 0)   note = 0;
++  if (note > 127) note = 127;
++  const int rel = note - 60;  // MIDI note 60 = C4; reference block = 4
++  int octave_delta;
++  int semitone;
++  if (rel >= 0)
++  {
++    octave_delta = rel / 12;
++    semitone     = rel % 12;
++  }
++  else
++  {
++    octave_delta = -((-rel + 11) / 12);
++    semitone     = ((rel % 12) + 12) % 12;
++  }
++  int block = 4 + octave_delta;
++  if (block < 0) block = 0;
++  if (block > 7) block = 7;
++  *out_fnum  = _base_fnum_table[semitone];
++  *out_block = (std::uint8_t)block;
++}
++
++// ============================================================================
++// MidiBackendOpl2 implementation
++// ============================================================================
++
++MidiBackendOpl2::MidiBackendOpl2()
++{
++  LOG_INFO("opl2 backend probing for OPL chip (Adlib timer-1 sequence on "
++           "0x388)...");
++
++  if (!SDL_DOSOpl2Detect())
++  {
++    _ready = false;
++    LOG_INFO("opl2 backend probe failed -- no OPL chip detected at 0x388. "
++             "AdLib music will be SILENT this run (no SB/OPL present). "
++             "Expected on a box with neither an AdLib/OPL2 card nor a "
++             "PicoGUS in /mode adlib.");
++    return;
++  }
++
++  // Detected. OPL2 init: WSE on, 0xBD cleared, 9 primary-bank voices
++  // KEY-OFF; NO OPL3 0x105/0x104, NO secondary bank.
++  SDL_DOSOpl2InitChip();
++  _ready = true;
++
++  _try_load_opl2_bank();
++
++  for (int ch = 0; ch < MIDI_CHANNELS; ++ch)
++  {
++    _channel_program[ch]    = 0;
++    _channel_volume[ch]     = 100;
++    _channel_expression[ch] = 127;
++  }
++
++  LOG_INFO("opl2 backend ready (OPL2 detected; 9-voice single-bank allocator "
++           "armed; bank={}; clock = PIT/IRQ-0 OPL music pump, NOT SB IRQ-5; "
++           "MUSIC ONLY -- no PCM SFX on a DAC-less AdLib card).",
++           _loaded_patch_bank_count > 0
++               ? "runtime opl3bank.dat ACTIVE"
++               : "8-patch placeholder ACTIVE");
++
++  // DPMI-lock the whole instance so the PIT/IRQ-0 ISR's
++  // tick_isr -> _backend->note_on/off/... reads (_voices[9],
++  // _channel_program[16], etc.) stay resident across IRQ context. Gate on
++  // the SHARED predicate (SDL/0110) -- under the AdLib PIT pump the SB-only
++  // SDL_DOSMidiIsrTickActive() is false, but the pump still preempts the
++  // cooperative scheduler, so the lock is required here too.
++#ifdef __DJGPP__
++  if (SDL_DOSMidiIsrAnyActive())
++  {
++    _go32_dpmi_lock_data((void *)this, (unsigned long)sizeof(*this));
++  }
++#endif
++}
++
++MidiBackendOpl2::~MidiBackendOpl2()
++{
++  if (_ready)
++  {
++    // Clear the chip-wide rhythm/tremolo/vibrato latch FIRST (mirrors the
++    // OPL3 wub-wub mitigation), then KEY-OFF all 9 voices unconditionally,
++    // then the SDL OPL2 shutdown (TL-sweep + KEY-OFF + 0xBD clear).
++    SDL_DOSOpl3WriteRegister(0xBD, 0x00);
++    for (int v = 0; v < VOICES; ++v)
++    {
++      SDL_DOSOpl3VoiceNoteOff(v);
++    }
++    SDL_DOSOpl2Shutdown();
++    LOG_INFO("opl2 backend shutdown (all 9 voices KEY-OFF; 0xBD cleared; "
++             "chip state safe for next process)");
++  }
++}
++
++int MidiBackendOpl2::_allocate_voice()
++{
++  ++_voice_alloc_count;
++  int free_voice = -1;
++  int lru_voice  = 0;
++  for (int v = 0; v < VOICES; ++v)
++  {
++    if (!_voices[v].active)
++    {
++      if (free_voice < 0) free_voice = v;
++    }
++    if (_voices[v].last_used < _voices[lru_voice].last_used)
++    {
++      lru_voice = v;
++    }
++  }
++  const int chosen = (free_voice >= 0) ? free_voice : lru_voice;
++  if (free_voice < 0)
++  {
++    SDL_DOSOpl3VoiceNoteOff(chosen);  // LRU steal: silence prior occupant
++  }
++  _voices[chosen].last_used = _voice_alloc_count;
++  return chosen;
++}
++
++int MidiBackendOpl2::_find_voice(int channel, int note)
++{
++  for (int v = 0; v < VOICES; ++v)
++  {
++    if (_voices[v].active &&
++        _voices[v].midi_channel == (std::uint8_t)channel &&
++        _voices[v].midi_note    == (std::uint8_t)note)
++    {
++      return v;
++    }
++  }
++  return -1;
++}
++
++void MidiBackendOpl2::_apply_patch(int voice_id, int channel, int program)
++{
++  const uint8_t *patch =
++      (channel == DRUM_CHANNEL) ? PATCH_DRUM : _program_to_patch(program);
++  SDL_DOSOpl3VoiceWritePatch(voice_id, patch);
++}
++
++void MidiBackendOpl2::_silence_voice(int voice_id)
++{
++  if (voice_id < 0 || voice_id >= VOICES) return;
++  SDL_DOSOpl3VoiceNoteOff(voice_id);
++  _voices[voice_id].active = false;
++}
++
++void MidiBackendOpl2::note_on(int channel, int note, int velocity)
++{
++  if (!_ready) return;
++  if (velocity == 0)
++  {
++    note_off(channel, note, 0);
++    return;
++  }
++
++  const int voice = _allocate_voice();
++  _voices[voice].active       = true;
++  _voices[voice].midi_channel = (std::uint8_t)(channel & 0x0F);
++  _voices[voice].midi_note    = (std::uint8_t)(note    & 0x7F);
++
++  _apply_patch(voice, channel, _channel_program[channel & 0x0F]);
++
++  // Honor patch[11] as a SIGNED int8 semitone transpose (DMXOPL/GENMIDI
++  // convention; mirrors patch 0232 in the OPL3 backend). midi_note keeps
++  // the ORIGINAL note for note_off matching; only the frequency calc is
++  // transposed.
++  const std::uint8_t *_xpatch =
++      (channel == DRUM_CHANNEL)
++          ? PATCH_DRUM
++          : _program_to_patch(_channel_program[channel & 0x0F]);
++  const int _play_note = note + (int)(std::int8_t)_xpatch[11];
++
++  std::uint16_t fnum  = 0;
++  std::uint8_t  block = 4;
++  _midi_note_to_fnum_block(_play_note, &fnum, &block);
++  SDL_DOSOpl3VoiceNoteOn(voice, fnum, block);
++}
++
++void MidiBackendOpl2::note_off(int channel, int note, int velocity)
++{
++  (void)velocity;
++  if (!_ready) return;
++  const int voice = _find_voice(channel, note);
++  if (voice >= 0)
++  {
++    _silence_voice(voice);
++  }
++}
++
++void MidiBackendOpl2::control_change(int channel, int controller, int value)
++{
++  if (!_ready) return;
++  switch (controller)
++  {
++    case 7:   _channel_volume[channel & 0x0F]     = (std::uint8_t)(value & 0x7F); break;
++    case 11:  _channel_expression[channel & 0x0F] = (std::uint8_t)(value & 0x7F); break;
++    case 120:
++    case 123:
++    {
++      for (int v = 0; v < VOICES; ++v)
++      {
++        if (_voices[v].active &&
++            _voices[v].midi_channel == (std::uint8_t)(channel & 0x0F))
++        {
++          _silence_voice(v);
++        }
++      }
++      break;
++    }
++    default:
++      break;
++  }
++}
++
++void MidiBackendOpl2::program_change(int channel, int program)
++{
++  if (!_ready) return;
++  _channel_program[channel & 0x0F] = (std::uint8_t)(program & 0x7F);
++}
++
++void MidiBackendOpl2::on_song_start()
++{
++  if (!_ready) return;
++  for (int v = 0; v < VOICES; ++v)
++  {
++    if (_voices[v].active)
++    {
++      SDL_DOSOpl3VoiceNoteOff(v);
++      _voices[v].active = false;
++    }
++  }
++  for (int ch = 0; ch < MIDI_CHANNELS; ++ch)
++  {
++    _channel_program[ch]    = 0;
++    _channel_volume[ch]     = 100;
++    _channel_expression[ch] = 127;
++  }
++  LOG_INFO("opl2 backend: on_song_start");
++}
++
++void MidiBackendOpl2::on_song_stop()
++{
++  if (!_ready) return;
++  for (int v = 0; v < VOICES; ++v)
++  {
++    if (_voices[v].active)
++    {
++      SDL_DOSOpl3VoiceNoteOff(v);
++      _voices[v].active = false;
++    }
++  }
++  LOG_INFO("opl2 backend: on_song_stop");
++}
++
++}  // namespace Sound
++}  // namespace NXE
+diff --git a/src/sound/MidiBackendOpl2.h b/src/sound/MidiBackendOpl2.h
+new file mode 100644
+index 00000000..ff0255b8
+--- /dev/null
++++ b/src/sound/MidiBackendOpl2.h
+@@ -0,0 +1,119 @@
++/* Cave Story port -- Campaign 2 (AdLib / OPL-FM, patch 0235). MidiBackendOpl2:
++ * concrete MidiBackend implementation that routes MIDI events to a real
++ * OPL2 (YM3812 / AdLib-compatible) FM synthesizer -- 9 voices, single
++ * register bank at 0x388/0x389, NO OPL3 secondary bank, NO 4-op.
++ *
++ * This is the engine half of the native-AdLib campaign. It exists so a
++ * pure AdLib / OPL-only card (including a PicoGUS in `/mode adlib`, which
++ * emulates OPL2 only) plays Cave Story MUSIC natively on the OPL chip.
++ * The music clock is NOT the Sound Blaster IRQ-5 (there is no SB on such
++ * a box) -- it is the 8253 PIT / IRQ-0 OPL music pump
++ * (SDL_DOSOplTimerPump*, SDL/0110), which drives the SAME
++ * MidiScheduler::tick_isr the SB path uses. See
++ * docs/internal/ADLIB-NATIVE-DESIGN.md for the full design + the
++ * 2026-06-21 lead decisions.
++ *
++ * Relationship to MidiBackendOpl3 (lead decision (a), 2026-06-21): this
++ * is a NEW class, deliberately NOT a parameterization of the shipped
++ * MidiBackendOpl3 -- isolation keeps the v1.4.x OPL3 production path
++ * byte-untouched. It REUSES the bank-agnostic SDL transport helpers
++ * (SDL_DOSOpl3VoiceWritePatch / VoiceNoteOn / VoiceNoteOff /
++ * WriteRegister) for voice_id 0-8 verbatim -- those route to the primary
++ * bank (reg < 0x100 -> ports 0x388/0x389) and work unchanged on a real
++ * OPL2. Only chip init / detect / shutdown differ (SDL_DOSOpl2*).
++ *
++ * HARD LIMIT -- MUSIC ONLY. A pure AdLib card has no DAC and no DMA, so
++ * Cave Story's Pixtone PCM SFX cannot play on this path. The SFX path is
++ * skipped cleanly (no mixer is created under AUDIO_BACKEND=adlib).
++ *
++ * Instrument bank: loads the SAME data/opl3bank.dat GM bank the OPL3
++ * backend uses (DMXOPL-derived, nx 0233). The 12-byte SBI records are
++ * OPL2-compatible -- the per-channel FB/CONN byte's L/R panning nibble
++ * (CHA-CHD) is simply ignored by an OPL2 chip. On absence the 8-patch
++ * placeholder family-bucket is used, identical to the OPL3 backend.
++ *
++ * Selected when SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib (explicit-only;
++ * no auto-detect this phase per lead decision (b)). SoundManager::init
++ * detects OPL2 via SDL_DOSOpl2Detect, installs this backend, registers
++ * the MIDI tick, and starts the PIT pump.
++ */
++
++#ifndef _MIDI_BACKEND_OPL2_H
++#define _MIDI_BACKEND_OPL2_H
++
++#include "MidiScheduler.h"
++
++#include <cstdint>
++
++namespace NXE
++{
++namespace Sound
++{
++
++class MidiBackendOpl2 : public MidiBackend
++{
++public:
++  MidiBackendOpl2();
++  ~MidiBackendOpl2() override;
++
++  // True if SDL_DOSOpl2Detect succeeded in the constructor. Polled by
++  // SoundManager::init() to decide install-or-skip.
++  bool isReady() const { return _ready; }
++
++  void note_on(int channel, int note, int velocity)               override;
++  void note_off(int channel, int note, int velocity)              override;
++  void control_change(int channel, int controller, int value)     override;
++  void program_change(int channel, int program)                   override;
++  void on_song_start()                                            override;
++  void on_song_stop()                                             override;
++
++private:
++  // OPL2 = 9 voices, single (primary) bank. (OPL3's 18-voice second bank
++  // does not exist on an OPL2 chip / in PicoGUS AdLib mode.)
++  static constexpr int VOICES = 9;
++
++  // 16 MIDI channels (4-bit channel field per MIDI spec).
++  static constexpr int MIDI_CHANNELS = 16;
++
++  // Drum channel = MIDI channel 9 (0-indexed; per GM spec).
++  static constexpr int DRUM_CHANNEL = 9;
++
++  // Per-voice state. Used for note->voice tracking and LRU steal.
++  struct Voice
++  {
++    bool         active       = false;  // currently playing a note
++    std::uint8_t midi_channel = 0;      // 0-15
++    std::uint8_t midi_note    = 0;      // 0-127
++    std::uint64_t last_used   = 0;      // monotonic counter; LRU steal target
++  };
++
++  // Find a free voice or LRU-steal an active one. Returns voice ID 0-8.
++  int  _allocate_voice();
++
++  // Reverse lookup: find the voice currently playing (channel, note).
++  // Returns -1 if no match (idempotent note-off).
++  int  _find_voice(int channel, int note);
++
++  // Apply the GM patch for `program` on `channel` to voice `voice_id`.
++  void _apply_patch(int voice_id, int channel, int program);
++
++  // Convert MIDI note (0-127) to OPL (fnum, block) tuple.
++  void _midi_note_to_fnum_block(int note, std::uint16_t *out_fnum,
++                                std::uint8_t *out_block);
++
++  // Issue silence for a single voice (clear key-on bit).
++  void _silence_voice(int voice_id);
++
++  bool          _ready             = false;
++  Voice         _voices[VOICES];
++  std::uint64_t _voice_alloc_count = 0;  // monotonic; voice's last_used
++                                         // = this at time of allocation
++  std::uint8_t  _channel_program[MIDI_CHANNELS]    = {0};
++  std::uint8_t  _channel_volume[MIDI_CHANNELS]      = {0};
++  std::uint8_t  _channel_expression[MIDI_CHANNELS]  = {0};
++};
++
++}  // namespace Sound
++}  // namespace NXE
++
++#endif  // _MIDI_BACKEND_OPL2_H
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index d5ab9722..477b473e 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -9,6 +9,7 @@
+ #include <SDL3/SDL_dosmidi_tick.h>  // patch 0168 (Lever 2b): SDL_DOSMidiTickRegister + IsrTickActive (sdl-engine SDL/0072)
+ #include <SDL3/SDL_dospixtone.h>  // patch 0169 (Bug 6 RATEDIV bake-in): SDL_DOSPixtoneSetMasterRate (sdl-engine SDL/0074)
+ #include <SDL3/SDL_dosaudio_devicerate.h>  // patch 0205 (#31 v1.0.8): SDL_DOSAudioSetDeviceFrameRate (sdl-engine SDL/0090)
++#include <SDL3/SDL_dosopltimer.h>  // patch 0234 (Campaign 2 AdLib): SDL_DOSOplTimerPumpStart/Stop/Active (sdl-engine SDL/0110)
+ 
+ // patch 0168 (Lever 2b): extern "C" forward-decl for the engine-side
+ // tick_isr thunk defined in MidiScheduler.cpp. Address-of taken at
+@@ -23,6 +24,7 @@ extern "C" void midi_scheduler_tick_isr_thunk(Uint64 now_ms);
+ #include "../game.h"
+ #include "../settings.h"
+ #include "AudioBackend.h"
++#include "MidiBackendOpl2.h"  // patch 0234 (Campaign 2 AdLib): native OPL2 backend
+ #include "MidiBackendOpl3.h"
+ #include "MidiBackendStub.h"
+ #include "MidiBackendWB.h"
+@@ -162,6 +164,29 @@ static bool _try_install_opl3_backend()
+   return true;
+ }
+ 
++// patch 0234 (Campaign 2 AdLib): install the native OPL2 backend. Probes
++// OPL2 at 0x388 (Adlib timer-1) in the ctor; on probe failure the unique_ptr
++// unwinds (idempotent SDL_DOSOpl2Shutdown) and we return false. Unlike the
++// SB-backed installs, a probe failure here does NOT roll back to organya --
++// the AdLib path has no SB DMA, so organya/Pixtone cannot run anyway; the
++// caller simply leaves music silent and the game still runs.
++static bool _try_install_opl2_backend()
++{
++  auto opl2 = std::unique_ptr<MidiBackendOpl2>(new MidiBackendOpl2());
++  if (!opl2->isReady())
++  {
++    return false;
++  }
++  MidiScheduler::getInstance()->set_backend(std::move(opl2));
++  NXE::Diag::g_p10_audio_backend_active = NXE::Diag::AudioBackend::adlib;
++  LOG_INFO("Sound system: MidiScheduler armed with MidiBackendOpl2 "
++           "(Campaign 2 AdLib -- native OPL2 FM, 9-voice single bank). "
++           "Music dispatch routes via SMF parser + OPL2 voice allocator; "
++           "the clock is the PIT/IRQ-0 OPL pump (SDL/0110), NOT the SB "
++           "IRQ-5. MUSIC ONLY -- no Pixtone PCM SFX on a DAC-less card.");
++  return true;
++}
++
+ static void _install_midi_stub_backend()
+ {
+   MidiScheduler::getInstance()->set_backend(
+@@ -264,6 +289,29 @@ bool SoundManager::init()
+ {
+   LOG_INFO("Sound system init");
+ 
++  // patch 0234 (Campaign 2 AdLib): no-Sound-Blaster OPL2 path. When
++  // AUDIO_BACKEND=adlib, main.cpp omitted SDL_INIT_AUDIO (there is no SB to
++  // open) but kept this init running. We must SKIP the entire SB16 + mixer
++  // bring-up (MIX_Init / MIX_CreateMixerDevice / the SB-backed setters,
++  // which need the audio device) and instead detect OPL2, install
++  // MidiBackendOpl2, and start the PIT/IRQ-0 OPL music pump as the clock.
++  // MUSIC ONLY -- a DAC-less AdLib card cannot play Pixtone PCM SFX, so
++  // _mixer stays null and the SFX path no-ops. Resolved here from the hint
++  // (SDL_GetHint works now -- SDL_Init has run) and used to gate the
++  // mixer-specific blocks below; the music-source-dir + catalog + tick
++  // plumbing further down is SHARED with the SB path.
++  const char *_be_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
++  const bool _adlib = _be_hint && SDL_strcmp(_be_hint, "adlib") == 0;
++  if (_adlib)
++  {
++    _adlib_path = true;
++    LOG_INFO("Sound system: AdLib (OPL2) path -- AUDIO_BACKEND=adlib. "
++             "Skipping SB16 + SDL_mixer bring-up (no SDL_INIT_AUDIO); music "
++             "via native OPL2 FM on the PIT/IRQ-0 pump. MUSIC ONLY: a "
++             "DAC-less AdLib card has no PCM SFX. See "
++             "docs/internal/ADLIB-NATIVE-DESIGN.md.");
++  }
++
+   // DOS-PORT (patch 0092, Phase 9 wave 21 Lever G; polarity flipped
+   // patch 0093, wave 21 default-flip). Wave 21 W21A measured Lever G
+   // working as designed; W21B confirmed audio quality "acceptable" per
+@@ -414,7 +462,9 @@ bool SoundManager::init()
+   // with SDLMIXER_VORBIS_STB=ON for stb_vorbis OGG, SDLMIXER_WAVE=ON for
+   // WAV; everything else OFF). The SDL2-era Mix_Init(MIX_INIT_OGG) gate
+   // is gone in SDL3_mixer's API -- the MIX_Init() below takes no flags.
+-  if (!MIX_Init())
++  // patch 0234 (Campaign 2 AdLib): skip the mixer library init on the AdLib
++  // path -- there is no audio device (SDL_INIT_AUDIO omitted) and no PCM SFX.
++  if (!_adlib && !MIX_Init())
+   {
+     LOG_ERROR("Unable to init mixer: {}", SDL_GetError());
+     return false;
+@@ -554,15 +604,28 @@ bool SoundManager::init()
+     }
+   }
+ 
+-  spec.channels = ::AUDIO_CHANNELS;
+-  spec.freq     = ::SAMPLE_RATE;
+-
+-  _mixer = MIX_CreateMixerDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec);
+-  if (!_mixer)
++  // patch 0234 (Campaign 2 AdLib): no SB device on the AdLib path -- leave
++  // _mixer null and skip MIX_CreateMixerDevice (it would call into
++  // SDL_OpenAudioDevice and fail with SDL_INIT_AUDIO omitted). All SFX call
++  // sites already guard on `if (_mixer)`, so the SFX path no-ops cleanly.
++  if (_adlib)
+   {
+-    LOG_ERROR("Unable to open audio device: {}", SDL_GetError());
+-    MIX_Quit();
+-    return false;
++    _mixer = nullptr;
++    LOG_INFO("Sound system: AdLib path -- no SB16 mixer (music via OPL2/PIT "
++             "pump; SFX disabled on a DAC-less AdLib card).");
++  }
++  else
++  {
++    spec.channels = ::AUDIO_CHANNELS;
++    spec.freq     = ::SAMPLE_RATE;
++
++    _mixer = MIX_CreateMixerDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec);
++    if (!_mixer)
++    {
++      LOG_ERROR("Unable to open audio device: {}", SDL_GetError());
++      MIX_Quit();
++      return false;
++    }
+   }
+ 
+   // DOS-PORT (patch 0068, Phase 9 wave 13.6.1): consolidated runtime-knob
+@@ -809,6 +872,20 @@ bool SoundManager::init()
+         _narrate_organya_fallback("OPL3");
+       break;
+ 
++    case NXE::Diag::AudioBackend::adlib:
++      // patch 0234 (Campaign 2 AdLib): install the native OPL2 backend. On
++      // probe failure we do NOT fall back to organya (no SB DMA on this path
++      // -> organya/Pixtone cannot run); music simply stays silent and the
++      // game runs. The PIT pump is started further down (after the tick
++      // callback is registered) so PumpStart can snapshot the registration.
++      if (!_try_install_opl2_backend())
++        LOG_WARN("Sound system: OPL2 probe failed on the AdLib path; music "
++                 "will be SILENT this run (no OPL chip at 0x388). The game "
++                 "still runs. Verify the card is in AdLib/OPL mode (e.g. "
++                 "PicoGUS /mode adlib) and SDL_HINT_DOSKUTSU_OPL2_PORT if "
++                 "the OPL base port was moved.");
++      break;
++
+     case NXE::Diag::AudioBackend::auto_select:
+       // patch 0217: WaveBlaster is NO LONGER auto-probed. The MPU-401 status
+       // read stalls the ISA bus when the SB16 block is live and the chip is
+@@ -1024,7 +1101,8 @@ bool SoundManager::init()
+     const bool midi_active =
+         (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub) ||
+         (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb) ||
+-        (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3);
++        (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3) ||
++        (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib);  // patch 0235 (Campaign 2 AdLib)
+     if (prl_env && midi_active)
+     {
+       _preload_midi_active = true;
+@@ -1095,7 +1173,44 @@ bool SoundManager::init()
+   // the SDL side ignores the callback). LOG_INFO banner narrates the
+   // decision so flush-instr's sec.23 verdict-extraction sees the
+   // engine-side registration outcome alongside the SDL/0072 banner.
+-  if (SDL_DOSMidiIsrTickActive())
++  if (_adlib)
++  {
++    // patch 0234 (Campaign 2 AdLib): the AdLib path's music clock is the
++    // PIT/IRQ-0 OPL pump (SDL/0110), NOT the SB16 IRQ-5 (there is no SB).
++    // Register the engine tick_isr FIRST, then start the pump -- PumpStart
++    // snapshots the registered callback at Start time (same register-before-
++    // arm order the SB path uses). The pump refuses if the SB device is hot,
++    // bounds hz to [19,1000], and is the single owner of PIT ch0; on refusal
++    // music is silent but the game runs. hz comes from
++    // SDL_HINT_DOSKUTSU_OPL_TIMER_HZ (default 120).
++    SDL_DOSMidiTickRegister(&midi_scheduler_tick_isr_thunk);
++
++    int hz = 120;
++    const char *hz_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_OPL_TIMER_HZ");
++    if (hz_hint && hz_hint[0] != '\0')
++    {
++      const int v = SDL_atoi(hz_hint);
++      if (v >= 19 && v <= 1000)
++        hz = v;
++      else
++        LOG_WARN("adlib: SDL_HINT_DOSKUTSU_OPL_TIMER_HZ='{}' out of range "
++                 "[19,1000]; using default {} Hz.", hz_hint, hz);
++    }
++
++    if (SDL_DOSOplTimerPumpStart(hz))
++    {
++      LOG_INFO("adlib: OPL music pump STARTED at {} Hz (PIT ch0 / IRQ-0 drives "
++               "MidiScheduler::tick_isr; BIOS 18.2 Hz tick chained; restored "
++               "on exit). This is the music clock on a no-SB AdLib card.", hz);
++    }
++    else
++    {
++      LOG_WARN("adlib: OPL music pump FAILED to start at {} Hz (SB device hot, "
++               "hz out of range, or pump already active) -- music will be "
++               "SILENT this run; the game still runs.", hz);
++    }
++  }
++  else if (SDL_DOSMidiIsrTickActive())
+   {
+     SDL_DOSMidiTickRegister(&midi_scheduler_tick_isr_thunk);
+     // patch 0170 (v1.0.1 default-flip): banner reworded to default-ON
+@@ -1137,6 +1252,17 @@ void SoundManager::shutdown()
+   // begun yet). For WB backend: emits CC 123 (All Notes Off) on all
+   // 16 channels via DSP cmd 0x38. For Stub / OPL3 backends: no-op
+   // (their own on_song_stop / dtor paths are correctness-complete).
++  // patch 0234 (Campaign 2 AdLib): STOP the PIT/IRQ-0 OPL pump FIRST, before
++  // any MidiScheduler teardown -- so no IRQ-0 fires tick_isr into a half-
++  // destroyed scheduler/backend, and PIT ch0 is restored to the BIOS 18.2 Hz
++  // divisor immediately. Idempotent + a no-op if the pump was never started
++  // (SB / non-adlib paths), so it is safe to call unconditionally. A second
++  // restore happens via the atexit handler registered in main.cpp (belt +
++  // braces for an abnormal exit).
++  doskutsu_dbg_log("snd-shutdown[-1/6]: SDL_DOSOplTimerPumpStop "
++                   "(restore PIT ch0; no-op off the AdLib path)");
++  SDL_DOSOplTimerPumpStop();
++
+   doskutsu_dbg_log("snd-shutdown[0/6]: pre-MidiScheduler::silence_for_shutdown");
+   MidiScheduler::getInstance()->silence_for_shutdown();
+ 
+@@ -1189,7 +1315,11 @@ void SoundManager::shutdown()
+     _mixer = nullptr;
+   }
+   doskutsu_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
+-  MIX_Quit();
++  // patch 0234 (Campaign 2 AdLib): MIX_Quit pairs with MIX_Init, which the
++  // AdLib path never called (no mixer). Skip it there to avoid an
++  // unbalanced teardown.
++  if (!_adlib_path)
++    MIX_Quit();
+   doskutsu_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
+                    "SoundManager::shutdown body complete; "
+                    "returning to engine-shutdown[7/8]");
+@@ -1285,7 +1415,11 @@ void SoundManager::music(uint32_t songno, bool resume)
+   const bool midi_path =
+       (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub) ||
+       (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb) ||
+-      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3);
++      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3) ||
++      // patch 0235 (Campaign 2 AdLib): adlib is a MIDI-routed backend too --
++      // route music() through _start_mid_track + the MidiScheduler so songs
++      // actually dispatch to MidiBackendOpl2 via the PIT pump.
++      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib);
+ 
+   if (songno != 0 && !_shouldMusicPlay(songno, settings->music_enabled))
+   {
+@@ -1345,7 +1479,9 @@ void SoundManager::enableMusic(int newstate)
+         NXE::Diag::g_p10_audio_backend_active ==
+             NXE::Diag::AudioBackend::wb ||
+         NXE::Diag::g_p10_audio_backend_active ==
+-            NXE::Diag::AudioBackend::opl3)
++            NXE::Diag::AudioBackend::opl3 ||
++        NXE::Diag::g_p10_audio_backend_active ==
++            NXE::Diag::AudioBackend::adlib)  // patch 0235 (Campaign 2 AdLib)
+     {
+       if (play != MidiScheduler::getInstance()->isPlaying())
+       {
+@@ -1449,14 +1585,19 @@ void SoundManager::runFade()
+   // Organya / OGG fade still runs as before.
+   if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::midi_stub ||
+       NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb ||
+-      NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3)
++      NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::opl3 ||
++      NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib)
+   {
+     // patch 0168 (Lever 2b): skip the main-loop tick under L2b active --
+     // the SB16 IRQ-5 ISR drives MidiScheduler::tick_isr at ~43 Hz
+     // Tier-2 instead. Under L2b OFF, this is byte-identical to pre-
+     // 0168 (the engine-thread tick path stays authoritative). Cached-
+     // bool query inside SDL_DOSMidiIsrTickActive; no per-call getenv.
+-    if (!SDL_DOSMidiIsrTickActive())
++    // patch 0234 (Campaign 2 AdLib): use the SHARED predicate -- under
++    // AUDIO_BACKEND=adlib the PIT/IRQ-0 OPL pump drives tick_isr, so the
++    // main-loop tick must be skipped there too (the SB-only predicate is
++    // false on a no-SB box). adlib added to the backend list above.
++    if (!SDL_DOSMidiIsrAnyActive())
+       MidiScheduler::getInstance()->tick((std::uint64_t)SDL_GetTicks());
+     return;
+   }
+@@ -1571,7 +1712,10 @@ void SoundManager::pause()
+   // current behavior (Cave Story's pause-then-unpause path also starts
+   // music from the top via the music() call sequence). No mid-song
+   // resume semantic; that's a v2 candidate if operator complains.
+-  if (SDL_DOSMidiIsrTickActive())
++  // patch 0234 (Campaign 2 AdLib): shared predicate -- halt music on pause
++  // under EITHER the SB16 IRQ-5 tick OR the AdLib PIT pump (which keeps
++  // ticking tick_isr regardless of engine pause state otherwise).
++  if (SDL_DOSMidiIsrAnyActive())
+   {
+     static bool _l2b_pause_warned = false;
+     if (!_l2b_pause_warned)
+@@ -1599,7 +1743,9 @@ void SoundManager::resume()
+   // which re-runs _playing=true under cli/sti so the ISR's tick_isr
+   // resumes dispatching. Starts from event 0 (matches the engine's
+   // existing pause-then-unpause music re-trigger behavior).
+-  if (SDL_DOSMidiIsrTickActive())
++  // patch 0234 (Campaign 2 AdLib): shared predicate -- re-arm under EITHER
++  // the SB16 IRQ-5 tick OR the AdLib PIT pump.
++  if (SDL_DOSMidiIsrAnyActive())
+   {
+     MidiScheduler::getInstance()->start();
+   }
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index f02aa847..af1f2bdd 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -260,6 +260,12 @@ private:
+   // W22-WB-D measurement.
+   bool _preload_midi_active = false;
+ 
++  // patch 0234 (Campaign 2 AdLib): true when AUDIO_BACKEND=adlib resolved at
++  // init -- the no-Sound-Blaster OPL2 + PIT-pump path. Used in shutdown() to
++  // skip the MIX_Quit (the AdLib path never called MIX_Init; there is no
++  // mixer). MUSIC ONLY -- no PCM SFX on a DAC-less AdLib card.
++  bool _adlib_path = false;
++
+   const char _bossmusic[14] = {4, 7, 10, 11, 15, 16, 17, 18, 21, 22, 31, 33, 35, 0};
+ };
+ 
