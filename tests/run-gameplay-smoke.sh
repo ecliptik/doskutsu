@@ -415,6 +415,8 @@ BANNER_REGEX=(
   "audio backend: gus \(Campaign 3 -- native Gravis Ultrasound GF1"
   "Sound system: GUS \(GF1\) path -- AUDIO_BACKEND=gus"
   "gus backend ready: GF1 detected"
+  "audio: SDL/0112 GUS GF1 detect: present=[01]"
+  "gus backend: on_song_start -- uploaded [0-9]+ instruments"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -521,6 +523,8 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
+  "optional"
   "optional"
   "optional"
   "optional"
