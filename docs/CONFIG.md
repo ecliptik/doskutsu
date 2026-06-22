@@ -61,6 +61,50 @@ SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=mymidi   REM play your own data/mymidi/*
 
 The `opl3` and `wb` backends play music on dedicated sound hardware, off the CPU. `organya` mixes every audio tick on the CPU - it is the exact 2004 sound, at a cost. `AUDIO_TIER2=0` restores full-quality audio but costs frame rate in music-heavy scenes. Raising `SDL_AUDIO_DEVICE_SAMPLE_FRAMES` (try `2048`) helps with audio stutter on slow hardware.
 
+### AdLib / OPL2-only cards (`AUDIO_BACKEND=adlib`)
+
+The `adlib` backend lets the game make music on a machine that has an OPL2/OPL3 FM
+chip but **no Sound Blaster** at all - a genuine AdLib or AdLib-clone card, or a
+PicoGUS booted in `/mode adlib`. Normally the engine clocks music off the Sound
+Blaster's DMA interrupt; with no Sound Blaster that interrupt never fires, so on
+the `adlib` path the music is instead clocked off the **PIT/IRQ-0 system timer**
+(the BIOS 18.2 Hz tick is chained at a divided rate and restored on exit, so the
+DOS clock keeps correct time). Music plays through the OPL chip at port `0x388`
+using the bundled General MIDI bank (`data/opl3bank.dat`).
+
+Enable it with:
+
+```
+SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib
+```
+
+On the reference boot menu this is the **PicoGUS AdLib** profile (`pgusinit /mode
+adlib`). You do **not** need `AUDIO_OFF` - the `adlib` backend brings up its own
+audio path and deliberately takes precedence over `AUDIO_OFF` so the music is not
+silently suppressed.
+
+**Requirements and cautions:**
+
+- An OPL2 (or OPL3) chip must answer at `0x388`. If none is found the game still
+  runs, just silently.
+- Do **not** run a Sound Blaster and a separate AdLib card in the same machine on
+  the `adlib` path - two OPL chips answering at `0x388` conflict. (On a normal SB
+  box, use `auto` / `opl3` instead; `adlib` is specifically for the no-SB case.)
+- Tempo resolution is governed by `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` (default `120`);
+  leave it alone unless music tempo sounds off.
+
+**Limitation - music only, no sound effects.** A pure AdLib/OPL card is an FM
+*synthesizer*; it has no DAC and no DMA, so it cannot play Cave Story's digital
+sound effects (the Pixtone samples). On the `adlib` path **SFX are silent by
+design** - this is a hardware limitation of the card class, not a bug. A
+PC-speaker PWM route for these effects was built and tested, but on the target
+1-bit motherboard speaker it produced harsh, aliased output (the affordable
+sample rate puts the PWM carrier squarely in the audible band, with no way to
+filter it on this hardware), so it was **not adopted**. If you want sound effects,
+use a Sound Blaster-class card (`opl3` / `wb` for music + the SB DAC for SFX). For
+a card that does both rich music *and* effects without a Sound Blaster, native
+Gravis Ultrasound support is the planned path.
+
 ---
 
 ## Input
