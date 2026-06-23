@@ -1,0 +1,91 @@
+From a8959d8aeb2b064a509cfcf61c216fb2d1ff91f2 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 10:28:35 -0700
+Subject: [PATCH] patch 0242 -- #38: GF1 SFX upload overread guard pad +
+ per-SFX diag
+
+g2k iter gus-2: the GUS SFX init crashes host-side in Pixtone::initGusSfx --
+IDENTICAL under PIO and DMA, at a specific .pxt (fx64), quit-to-DOS with no
+LOG_CRITICAL. Diagnosis: the upload transport over-reads the source buffer.
+
+render() (shared with the SB path, which works) produces final_buffer of
+exactly final_size bytes, and the engine reads exactly final_size -- so the
+over-read is in the TRANSPORT, which reads the buffer in word/dword-aligned
+units and can run a few bytes PAST  for an odd/unaligned length. That
+faults only when the buffer tail sits on an unmapped DPMI page -- hence a
+specific, data+heap-dependent slot. PIO==DMA crashing identically fits (both
+read the same buffer the same over-running way). The SB path never exposed it:
+there final_buffer is consumed by SDL_AudioStream, which reads EXACTLY
+final_size.
+
+This patch (engine lane, defensive + diagnostic):
+- GUARD PAD: over-allocate the upload bounce buffer by 16 bytes, fill the pad
+  with 0x80 (GF1 8-bit unsigned silence). Any transport over-read up to +16
+  now lands in mapped, silent bytes instead of faulting. Still uploads only the
+  true length. Likely resolves the crash engine-side; the authoritative fix --
+  SDL_DOSGusUploadSample reading EXACTLY len -- is sdl-pg's SDL side (#38 split).
+- PER-SFX DIAG (GUS_DIAG-gated): logs fx#/synth-size/upload-len before each
+  upload, so a crash log's last line pinpoints the exact culprit .pxt + size.
+
+Built clean; SFX-on GUS path otherwise unchanged (pad is +16 bytes/upload, diag
+default-off). Music + SFX-off (#37) paths untouched.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp | 28 +++++++++++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index f52288a7..84cc0ab1 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -565,6 +565,11 @@ bool Pixtone::initGusSfx()
+            "(reserving {} KB for the song's .pat set -- music-priority).",
+            (unsigned)(sfx_budget / 1024), (unsigned)(st.dram_size / 1024),
+            (unsigned)(RESERVE_FOR_MUSIC / 1024));
++  // patch 0242 (#38): per-SFX upload diagnostic, gated on the existing GUS_DIAG
++  // hint (strict-"1", default OFF). When on, each .pxt logs fx#/synth-size/
++  // upload-len BEFORE its upload so a crash log's last line names the culprit.
++  const char *_gd = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_DIAG");
++  const bool _gusdiag = _gd && _gd[0] == '1' && _gd[1] == '\0';
+   std::string path = ResourceManager::getInstance()->getPathForDir("pxt/");
+   int uploaded = 0, failed = 0, skipped = 0;
+   uint32_t sfx_used = 0;
+@@ -588,12 +593,33 @@ bool Pixtone::initGusSfx()
+         snd.freeBuf();
+         continue;
+       }
+-      uint8_t *tmp = (uint8_t *)std::malloc(n);
++      // patch 0242 (#38): defensive guard pad. The GF1 upload transport (PIO
++      // poke OR DMA bounce) reads the source buffer in word/dword-aligned units,
++      // so it can read a few bytes PAST `n` for an odd/unaligned length -- which
++      // faults (quit-to-DOS, no LOG_CRITICAL) when the buffer's tail happens to
++      // sit at an unmapped DPMI page. That is the host-side crash g2k iter gus-2
++      // hit at a specific .pxt, IDENTICAL under PIO and DMA (both over-read the
++      // same way). The SB path never exposed it -- there final_buffer is consumed
++      // by SDL_AudioStream, which reads EXACTLY final_size. Over-allocate by
++      // GUS_SFX_UPLOAD_PAD and fill the pad with 0x80 (GF1 8-bit unsigned
++      // silence) so any transport over-read lands in mapped, silent bytes; we
++      // still upload only `n` (the true length). The authoritative fix --
++      // SDL_DOSGusUploadSample reading EXACTLY `len` -- is sdl-pg's SDL side.
++      static const uint32_t GUS_SFX_UPLOAD_PAD = 16;
++      uint8_t *tmp = (uint8_t *)std::malloc(n + GUS_SFX_UPLOAD_PAD);
+       if (tmp)
+       {
+         // .pxt is 8-bit signed; GF1 8-bit DRAM is UNSIGNED -> flip the sign bit.
+         for (uint32_t k = 0; k < n; ++k)
+           tmp[k] = (uint8_t)((uint8_t)snd.final_buffer[k] ^ 0x80);
++        std::memset(tmp + n, 0x80, GUS_SFX_UPLOAD_PAD);  // silent guard bytes
++        // patch 0242 (#38): per-SFX diag (GUS_DIAG) -- logged BEFORE the upload
++        // so the LAST line in a crash log pinpoints the exact crashing .pxt +
++        // its synth size + upload length (the #38 diagnostic ask).
++        if (_gusdiag)
++          LOG_INFO("gus SFX diag: fx{:02x} (slot {}) synth_size={} upload_len={} "
++                   "sfx_used={} -> uploading...", slot, slot,
++                   (unsigned)snd.final_size, (unsigned)n, (unsigned)sfx_used);
+         const uint32_t addr = SDL_DOSGusUploadSample(tmp, n, 0 /*is16bit*/);
+         std::free(tmp);
+         if (addr != SDL_DOSGUS_BAD_ADDR)
+-- 
+2.47.3
+
