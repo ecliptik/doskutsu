@@ -419,6 +419,8 @@ BANNER_REGEX=(
   "gus backend: on_song_start -- uploaded [0-9]+ instruments"
   "gus SFX: uploaded [0-9]+ of [0-9]+ .pxt to GF1 DRAM"
   "Sound system: GUS path -- Pixtone SFX uploaded to GF1 voices"
+  "Sound system: 4-state audio enable \(#31\) -- music=(on|OFF) sfx=(on|OFF)"
+  "audio backend: none \(No Music -- #31\)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -525,6 +527,8 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
+  "optional"
   "optional"
   "optional"
   "optional"

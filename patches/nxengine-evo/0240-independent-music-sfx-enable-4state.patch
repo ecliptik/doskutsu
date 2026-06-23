@@ -1,0 +1,191 @@
+From da146fd4fd35f4fd5877a07c40be5ab44f5fc00e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 22 Jun 2026 17:32:53 -0700
+Subject: [PATCH] patch 0240 -- #31: independent music/SFX enable (4-state)
+
+Generalizes audio enable so music and SFX are independently toggleable --
+the engine capability behind SETUP's 'Select Music Card -> No Music' and
+'Select Sound FX Device -> No Sound FX' entries. Four states: music+sfx /
+music-only / sfx-only / both-off.
+
+Why DOS needs this: previously only AUDIO_OFF (device-level both-off) + the
+adlib-specific music-only special case existed. SETUP's Doom-style sound UX
+(#32) needs each axis independent on ANY backend. Implemented at the DISPATCH
+level, not device-init, because Organya/OGG music ALSO rides the SB mixer that
+SFX use -- so they cannot be split at the device:
+- _music_off (AUDIO_BACKEND=none OR SDL_HINT_DOSKUTSU_MUSIC_OFF=1) -> music()
+  + enableMusic() no-op; the device + mixer still come up so SFX play.
+- _sfx_off (SDL_HINT_DOSKUTSU_SFX_OFF=1 OR SFX_DEVICE=none) -> playSfx /
+  playSfxResampled / stopSfx no-op; music still plays. Generalizes the AdLib
+  no-DAC music-only behavior to every backend.
+- AUDIO_BACKEND=none gains a selectBackendFromEnv case (No Music; distinct
+  from AUDIO_OFF -- the device still opens for SFX).
+AUDIO_OFF stays the device-level both-off (back-compat). Resolved once at init;
+banner 'Sound system: 4-state audio enable (#31) -- music=.. sfx=..' every boot.
+
+Built clean; default/all-existing backends byte-identical when neither new
+flag is set (the gates are no-ops unless explicitly enabled). Full series
+re-applies (0239 -> 0240).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/AudioBackend.cpp | 17 ++++++++++++++-
+ src/sound/SoundManager.cpp | 44 +++++++++++++++++++++++++++++++++++---
+ src/sound/SoundManager.h   | 16 ++++++++++++++
+ 3 files changed, 73 insertions(+), 4 deletions(-)
+
+diff --git a/src/sound/AudioBackend.cpp b/src/sound/AudioBackend.cpp
+index d09d8f79..eb1be0a6 100644
+--- a/src/sound/AudioBackend.cpp
++++ b/src/sound/AudioBackend.cpp
+@@ -159,6 +159,21 @@ void selectBackendFromEnv()
+              "(the game still runs). Reads GM .pat from ULTRADIR (Gravis stock "
+              "set). See docs/internal/GUS-NATIVE-DESIGN.md.");
+   }
++  else if (std::strcmp(value, "none") == 0)
++  {
++    // patch 0240 (#31): AUDIO_BACKEND=none = "No Music" -- the music-card
++    // selector's off state. The engine installs NO music backend and gates the
++    // per-song music dispatch off (SoundManager resolves _music_off from this).
++    // DISTINCT from AUDIO_OFF (which is both-off, device-level): with `none` the
++    // SB device + SDL3_mixer still come up so SOUND EFFECTS still play (the
++    // sfx-only state). The SETUP "Select Music Card -> No Music" entry writes
++    // this. See docs/internal/SETUP-DOOM-UX-PLAN.md + BOOT.md MUSIC_OFF.
++    selected = NXE::Diag::AudioBackend::none;
++    LOG_INFO("audio backend: none (No Music -- #31). No music backend installed; "
++             "per-song music dispatch gated off. SFX still play on the SB device "
++             "(this is music-off, NOT audio-off; use AUDIO_OFF=1 for both-off). "
++             "Override by selecting a real music card (opl3/wb/organya/adlib/gus).");
++  }
+   else if (std::strcmp(value, "tracker") == 0)
+   {
+     selected = NXE::Diag::AudioBackend::organya;
+@@ -186,7 +201,7 @@ void selectBackendFromEnv()
+     selected = NXE::Diag::AudioBackend::organya;
+     LOG_INFO("audio backend: unrecognized value '{}' for "
+              "SDL_HINT_DOSKUTSU_AUDIO_BACKEND; falling back to organya. "
+-             "Recognized values: auto | organya | wb | opl3 | adlib | gus | tracker | midi-stub.",
++             "Recognized values: auto | organya | wb | opl3 | adlib | gus | none | tracker | midi-stub.",
+              value);
+   }
+ 
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 810b19de..0216e71e 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -349,6 +349,27 @@ bool SoundManager::init()
+              "docs/internal/ADLIB-NATIVE-DESIGN.md.");
+   }
+ 
++  // patch 0240 (#31): resolve the independent music/SFX dispatch gates (the
++  // 4-state enable). Music-off = AUDIO_BACKEND=none OR MUSIC_OFF=1. SFX-off =
++  // SFX_OFF=1 OR SFX_DEVICE=none. Both are DISPATCH-level (the device still
++  // comes up either way -- music-off keeps SFX, sfx-off keeps music); AUDIO_OFF
++  // remains the device-level both-off. Strict-"1" / strict-"none" match.
++  {
++    const char *_mo = SDL_GetHint("SDL_HINT_DOSKUTSU_MUSIC_OFF");
++    _music_off = (_mo && _mo[0] == '1' && _mo[1] == '\0') ||
++                 (NXE::Diag::g_p10_audio_backend_active ==
++                  NXE::Diag::AudioBackend::none);
++    const char *_so = SDL_GetHint("SDL_HINT_DOSKUTSU_SFX_OFF");
++    const char *_sd = SDL_GetHint("SDL_HINT_DOSKUTSU_SFX_DEVICE");
++    _sfx_off = (_so && _so[0] == '1' && _so[1] == '\0') ||
++               (_sd && SDL_strcmp(_sd, "none") == 0);
++    LOG_INFO("Sound system: 4-state audio enable (#31) -- music={} sfx={} "
++             "(MUSIC_OFF/AUDIO_BACKEND=none -> music-off; SFX_OFF/SFX_DEVICE="
++             "none -> sfx-off; both gates are dispatch-level, the device still "
++             "opens; AUDIO_OFF=1 is the device-level both-off).",
++             _music_off ? "OFF" : "on", _sfx_off ? "OFF" : "on");
++  }
++
+   // DOS-PORT (patch 0092, Phase 9 wave 21 Lever G; polarity flipped
+   // patch 0093, wave 21 default-flip). Wave 21 W21A measured Lever G
+   // working as designed; W21B confirmed audio quality "acceptable" per
+@@ -1428,7 +1449,7 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+   // patch 0236 (#19): no PCM SFX on the AdLib path (no DAC/mixer). No-op so
+   // gameplay doesn't spam "Pixtone::play: not rendered" against a null mixer.
+   // Covers startPropSound (delegates here) too.
+-  if (_adlib_path)  // patch 0239 (#28): gus now plays SFX on GF1 voices (not music-only); only adlib no-ops SFX
++  if (_adlib_path || _sfx_off)  // patch 0240 (#31): _sfx_off = SFX disabled (SFX_OFF/SFX_DEVICE=none); adlib stays music-only
+     return;
+   if (!settings->sound_enabled)
+     return;
+@@ -1454,7 +1475,7 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
+ {
+   // patch 0236 (#19): no PCM SFX on the AdLib path. Covers startStreamSound
+   // (delegates here) too.
+-  if (_adlib_path)  // patch 0239 (#28): gus now plays SFX on GF1 voices (not music-only); only adlib no-ops SFX
++  if (_adlib_path || _sfx_off)  // patch 0240 (#31): _sfx_off = SFX disabled (SFX_OFF/SFX_DEVICE=none); adlib stays music-only
+     return;
+   if (!settings->sound_enabled)
+     return;
+@@ -1477,7 +1498,7 @@ void SoundManager::stopSfx(NXE::Sound::SFX snd)
+ {
+   // patch 0236 (#19): no PCM SFX on the AdLib path. Covers stopLoopSfx
+   // (delegates here) too.
+-  if (_adlib_path)  // patch 0239 (#28): gus now plays SFX on GF1 voices (not music-only); only adlib no-ops SFX
++  if (_adlib_path || _sfx_off)  // patch 0240 (#31): _sfx_off = SFX disabled (SFX_OFF/SFX_DEVICE=none); adlib stays music-only
+     return;
+   Pixtone::getInstance()->stop((int32_t)snd);
+ }
+@@ -1510,6 +1531,13 @@ void SoundManager::music(uint32_t songno, bool resume)
+ 
+   LOG_DEBUG(" >> music({})", songno);
+ 
++  // patch 0240 (#31): music disabled (AUDIO_BACKEND=none or MUSIC_OFF=1). Track
++  // the song number (above) for dedup, but dispatch NO music. SFX are unaffected
++  // -- they ride their own playSfx path. Dispatch-level gate so the device +
++  // mixer (which SFX / a future music-on toggle need) still came up at init.
++  if (_music_off)
++    return;
++
+   // patch 0101 (Phase 10 Stage 2): MIDI-backend dispatch path. When
+   // g_p10_audio_backend_active is one of {midi_stub, wb, opl3}, route
+   // through MidiScheduler instead of Organya / OGG. patch 0102 (Stage 3)
+@@ -1577,6 +1605,16 @@ void SoundManager::music(uint32_t songno, bool resume)
+ 
+ void SoundManager::enableMusic(int newstate)
+ {
++  // patch 0240 (#31): music hard-disabled (AUDIO_BACKEND=none / MUSIC_OFF=1).
++  // The in-game music toggle is a no-op -- there is no backend to start and
++  // music() already gates dispatch. Record the requested state so a later
++  // (hypothetical) re-enable is consistent, but never start playback.
++  if (_music_off)
++  {
++    settings->music_enabled = newstate;
++    return;
++  }
++
+   if (newstate != settings->music_enabled)
+   {
+     LOG_DEBUG("enableMusic({})", newstate);
+diff --git a/src/sound/SoundManager.h b/src/sound/SoundManager.h
+index 19081062..e2399e8f 100644
+--- a/src/sound/SoundManager.h
++++ b/src/sound/SoundManager.h
+@@ -272,6 +272,22 @@ private:
+   // PCM device). MUSIC ONLY this phase (#27); GF1 SFX = #28.
+   bool _gus_path = false;
+ 
++  // patch 0240 (#31): independent music/SFX enable (4-state). Dispatch-level
++  // gates, resolved once at init, generalizing the AUDIO_OFF (both-off) +
++  // adlib-music-only special cases to any backend:
++  //   _music_off -> music() / enableMusic no-op (set by AUDIO_BACKEND=none OR
++  //                 SDL_HINT_DOSKUTSU_MUSIC_OFF=1). The audio DEVICE still comes
++  //                 up so SFX can play (this is music-off, not audio-off).
++  //   _sfx_off   -> playSfx / playSfxResampled / stopSfx no-op (set by
++  //                 SDL_HINT_DOSKUTSU_SFX_OFF=1 OR SFX_DEVICE=none). The device
++  //                 still comes up so music (Organya/OGG/MIDI) can play.
++  // The 4 states: neither=both, _sfx_off=music-only, _music_off=sfx-only,
++  // AUDIO_OFF (or both flags)=both-off. Gating is at DISPATCH, not device-init,
++  // because Organya/OGG music ALSO rides the SB mixer, so the two cannot be
++  // separated at the device.
++  bool _music_off = false;
++  bool _sfx_off   = false;
++
+   const char _bossmusic[14] = {4, 7, 10, 11, 15, 16, 17, 18, 21, 22, 31, 33, 35, 0};
+ };
+ 
+-- 
+2.47.3
+
