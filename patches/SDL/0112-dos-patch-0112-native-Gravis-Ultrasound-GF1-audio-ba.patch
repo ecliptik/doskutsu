@@ -1,4 +1,4 @@
-From ae89c1a08c2db706a5e2826d22339c9da6b2b6f3 Mon Sep 17 00:00:00 2001
+From 2e3902daba403b09a0dbacc145cd3a374b0981ef Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -69,8 +69,8 @@ no audio bootstrap, no PC-speaker contamination, no GF1 IRQ hook.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        | 254 ++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 977 +++++++++++++++++++++++++++++++
- 2 files changed, 1231 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 985 +++++++++++++++++++++++++++++++
+ 2 files changed, 1239 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -336,10 +336,10 @@ index 000000000..96a0444c4
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..6fb84cc4c
+index 000000000..05c5919ff
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,977 @@
+@@ -0,0 +1,985 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -941,11 +941,14 @@ index 000000000..6fb84cc4c
 +        doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE: no free voice");
 +        return;
 +    }
-+    /* 256-sample loop played at 256*440 samples/s -> a ~440 Hz tone. */
-+    SDL_DOSGusStartVoice(v, addr, addr + 255, addr, SDL_DOSGUS_LOOP);
++    /* Mirror the engine note_on order EXACTLY (SetFreq -> SetVol -> SetPan ->
++       StartVoice) so an audible tone also proves the "set volume/pan BEFORE
++       StartVoice" path works (i.e. StartVoice preserves them -- the #39 fix).
++       256-sample loop at 256*440 samples/s -> a ~440 Hz tone. */
 +    SDL_DOSGusSetVoiceFreq(v, 256u * 440u);
 +    SDL_DOSGusSetVoiceVol(v, 255);
 +    SDL_DOSGusSetVoicePan(v, 128);
++    SDL_DOSGusStartVoice(v, addr, addr + 255, addr, SDL_DOSGUS_LOOP);
 +    doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE STARTED: voice=%d addr=0x%X "
 +                     "(256-byte square loop, ~440Hz, max vol). AUDIBLE => voice "
 +                     "primitives + output path OK (bug is note-mapping); SILENT "
@@ -1127,9 +1130,9 @@ index 000000000..6fb84cc4c
 +           (fx#/len/method/dram_addr). Pairs with the engine's per-.pxt
 +           synth-size vs len-passed log to localize the mismatch. */
 +        if (g_gus_diag) {
-+            doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u (start): addr=0x%X len=%u %s "
-+                             "via=%s used=%uKB/%uKB",
-+                             g_gus_n_upload, (unsigned)dram_addr, (unsigned)len,
++            doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u (start): src=%p len=%u "
++                             "dram=0x%X %s via=%s used=%uKB/%uKB",
++                             g_gus_n_upload, data, (unsigned)len, (unsigned)dram_addr,
 +                             is16bit ? "16b" : "8b", want_dma ? "dma" : "pio",
 +                             (unsigned)(g_gus_dram_used / 1024),
 +                             (unsigned)(g_gus_dram_size / 1024));
@@ -1232,8 +1235,13 @@ index 000000000..6fb84cc4c
 +       leaving 0x07/0x08 at 0 would clamp 0x09 to 0 = silent (#39 suspect). */
 +    gus_w8(GUS_VREG_RAMPSTART, 0x00);
 +    gus_w8(GUS_VREG_RAMPEND, 0xFF);
-+    gus_w16(GUS_VREG_VOLUME, (Uint16)(gus_linear_to_logvol(200) << 4)); /* default audible */
-+    gus_w8(GUS_VREG_PAN, 0x07);            /* center until SetVoicePan */
++    /* #39: StartVoice does NOT write the volume (0x09) or pan (0x0C) -- it
++       PRESERVES whatever the caller set via SetVoiceVol/SetVoicePan, which the
++       engine calls BEFORE StartVoice (note_on order: SetVoiceFreq -> SetVoiceVol
++       -> SetVoicePan -> StartVoice). Previously StartVoice clobbered both with a
++       fixed default, wasting the per-note velocity/pan (and a default-200 wrote
++       over the engine's value). The caller owns volume + pan; this just arms
++       addresses + ramp bounds and starts the voice. */
 +    gus_w8(GUS_VREG_CTRL, ctrl);           /* GO */
 +    g_gus_voice_busy[voice] = true;        /* claim inside the critical section */
 +    DOS_EnableInterrupts();
