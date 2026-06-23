@@ -1,74 +1,76 @@
-From 44aebb108ccacd95441aa92ca11eb9358174ee95 Mon Sep 17 00:00:00 2001
+From 4a7fb93e4a517defe6fe436895968a8f655e681d Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
  backend
 
-Campaign 3 Phase 0. A native GF1 wavetable audio backend (new
-src/audio/dos/SDL_dosaudio_gus.c) driven OUT-OF-BAND, exactly like the
-shipped AdLib/OPL path (SDL/0110's PIT/OPL exports). It is NOT an SDL
-streaming audio device: no audio bootstrap, no SDL audio device opened, no
-SDL3_mixer PCM sink, no SDL_INIT_AUDIO involvement. The engine brings the card
-up via SDL_DOSGusInit() (mirroring how the AdLib path uses SDL_DOSOpl2Detect +
-the pump start), then uploads sample bytes into the card's on-board DRAM and
-commands GF1 hardware voices through the exports in SDL3/SDL_dosgus.h. The GF1
-mixes up to N voices in hardware straight to its DAC; the host CPU does
-allocation + event dispatch only.
+Campaign 3. A native GF1 wavetable audio backend (new
+src/audio/dos/SDL_dosaudio_gus.c) driven OUT-OF-BAND, exactly like the shipped
+AdLib/OPL path (SDL/0110's PIT/OPL exports). It is NOT an SDL streaming audio
+device: no audio bootstrap, no SDL audio device opened, no SDL3_mixer PCM sink,
+no SDL_INIT_AUDIO involvement. The engine brings the card up via
+SDL_DOSGusInit() (mirroring the AdLib SDL_DOSOpl2Detect + pump start), then
+uploads sample bytes into the card's on-board DRAM and commands GF1 hardware
+voices through the exports in SDL3/SDL_dosgus.h. The GF1 mixes up to N voices
+in hardware straight to its DAC; the host CPU does allocation + event dispatch
+only.
 
-Why DOS needs this: a GUS-only machine (no Sound Blaster) cannot open
-SDL_INIT_AUDIO at all today, so it had to boot AUDIO_OFF. The engine adds a
-`gus` boot-mode that omits SDL_INIT_AUDIO (like `adlib`) and drives the GF1
-purely through these exports. The Sound Blaster path is wholly untouched
-(this patch adds no audio bootstrap and edits no shared audio core file), so
-it stays byte-identical.
+Why DOS needs this: a GUS-only machine cannot open SDL_INIT_AUDIO today, so it
+had to boot AUDIO_OFF. The engine adds a `gus` boot-mode that omits
+SDL_INIT_AUDIO (like `adlib`) and drives the GF1 purely through these exports.
+The Sound Blaster path is wholly untouched (no audio bootstrap, no shared
+audio-core edit), so it stays byte-identical.
 
-FULLY GF1-IRQ-INDEPENDENT (real-HW finding 2026-06-23): a PicoGUS plays
-poll-based Gravis MIDIDEMO but is SILENT for IRQ-driven Doom GUS on every
-jumper config -- i.e. it does not deliver the GF1 IRQ to IRQ-driven software.
-So this driver hooks NO GF1 IRQ and enables none:
-  - DMA-upload completion POLLS the host 8237 terminal-count (port 0x08 status,
-    bit=channel), independent of the GF1 IRQ line (GF1 reg 0x41 bit6 is a
-    secondary signal); bounded timeout so a stuck transfer can't hang boot.
-  - No ISR is installed; reset reg 0x4C is written 0x03 (master+DAC, IRQ bit2
-    OFF); the per-voice wave-end IRQ is never enabled (SDL_DOSGUS_IRQ accepted
-    but no-op).
-  - Voice-reap is poll-based (engine polls voice_active_mask = GF1 voice-
-    stopped hardware status); the music clock is the external PIT pump.
-This is why doskutsu GUS sounds where IRQ-driven Doom GUS goes silent.
+FULLY GF1-IRQ-INDEPENDENT (real-HW finding): a PicoGUS plays poll-based MIDIDEMO
+but is SILENT for IRQ-driven Doom -- it does not deliver the GF1 IRQ to
+IRQ-driven software. So this driver hooks NO GF1 IRQ and enables none: no ISR;
+reset reg 0x4C=0x03 (IRQ bit2 off); per-voice wave-end IRQ never set
+(SDL_DOSGUS_IRQ is a no-op); voice-reap polls voice_active_mask (GF1
+voice-stopped hw bit); the music clock is the external PIT pump.
 
-Phase 0 scope:
+DRAM UPLOAD is 64KB-CRASH-SAFE (#36 real-HW fix): the g2k iter hard-crashed
+during the SFX upload because the 8237 DMA transfer crossed a 64KB ISA
+physical-page boundary (the controller wraps the offset within the page ->
+memory corruption -> page-fault; DOSBox doesn't enforce it so smoke passed).
+Fix:
+  - DEFAULT upload path = programmed-I/O poke -- the SAME mechanism as GF1
+    detection's DRAM peek/poke (proven on the operator's PicoGUS, which sized
+    1024KB DRAM that way) and immune to the 8237/64KB crash. Done in bounded
+    cli/sti bursts so a large per-song .pat upload can't starve the PIT clock /
+    cooperative scheduler.
+  - DMA upload is OPT-IN (SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD=1), 8-bit only, and
+    SPLIT into <=32KB 64KB-page-safe chunks through one boundary-safe bounce
+    buffer so no single 8237 transfer can cross a page. Promote to default once
+    g2k-validated.
+  - DRAM allocations are 16-byte aligned (GF1 DMA dest reg 0x42 = addr>>4).
+
+Other Phase-0 scope:
 - SDL_DOSGusInit/Shutdown: parse ULTRASND/ULTRADIR/VOICES hints via SDL_GetHint
-  (never getenv; engine bridges the env), GF1 reset, DRAM peek/poke detect +
-  256K-boundary sizing, set active voices (reg 0x0E -> rate), DAC enable;
-  Shutdown silences + parks the chip. SKIP_DETECTION bypass.
-- DRAM upload (verbatim, no sign munging): PIO poke (default) + one-shot 8237
-  DMA bulk into a DOS_AllocateDMAMemory bounce; 16-bit samples bank-aligned.
+  (never getenv), GF1 reset, DRAM peek/poke detect + 256K sizing, set active
+  voices (reg 0x0E -> rate), DAC enable; SKIP_DETECTION bypass.
 - Voice ops alloc/start/stop/freq/vol/pan. Driver owns all GF1 conversions
-  (FC=hz*1024/rate; 8-bit addr split; 16-bit bank-interleave quirk;
-  linear->4.8-log volume; 0-255->4-bit pan). 28 voices (-> ~22050 Hz) at Init.
-- IRQ-SAFE voice pool: AllocVoice / StartVoice / StopVoice mutate the shared
-  busy-list inside cli/sti, because the pool is driven from BOTH the main loop
-  (Pixtone SFX) AND the IRQ-0 music pump (MidiBackendGus note_on/off) -- without
-  the lock a preempting note_on could double-claim a slot (real-HW race).
-- SDL_DOSGusResetDram(keep_bytes) rewinds the DRAM bump cursor while preserving
-  a low keep region (persistent SFX bank survives per-song .pat swaps).
-- New hints SDL_HINT_DOSKUTSU_GUS_{ULTRASND,ULTRADIR,VOICES,SKIP_DETECTION,
-  DIAG} (diag default-OFF).
-- REQUIRED detect banner "audio: SDL/0112 GUS GF1 detect: present=..." for the
-  smoke BANNERS array.
+  (FC=hz*1024/rate; 8-bit addr split; 16-bit bank quirk; linear->4.8-log vol;
+  0-255->4-bit pan). 28 voices (~22050 Hz) at Init.
+- IRQ-SAFE voice pool: AllocVoice/StartVoice/StopVoice mutate the shared
+  busy-list inside cli/sti -- the pool is driven from BOTH the main loop
+  (Pixtone SFX) AND the IRQ-0 music pump, so a preempting note_on must not
+  double-claim a slot.
+- SDL_DOSGusResetDram(keep_bytes) rewinds the DRAM bump cursor preserving a low
+  keep region (persistent SFX bank survives per-song .pat swaps).
+- Hints SDL_HINT_DOSKUTSU_GUS_{ULTRASND,ULTRADIR,VOICES,SKIP_DETECTION,DIAG,
+  DMA_UPLOAD} (DIAG + DMA_UPLOAD default-OFF).
+- REQUIRED detect banner "audio: SDL/0112 GUS GF1 detect: present=...".
 
-GF1 register indices cross-checked against the DOSBox-X gus.cpp emulation (the
-campaign's functional witness) + the GUS SDK programming model; the IRQ/DMA
-latch + a few conversions are ACCURATE-BUT-CONFIRM inline, pending the
-operator's g2k register-accuracy pass (dosbox_not_proxy). Validated here by a
-clean libSDL3.a link with all 11 exports, no audio bootstrap symbol, no
-PC-speaker contamination, and no GF1 IRQ hook.
+GF1 register indices cross-checked vs DOSBox-X gus.cpp + the GUS SDK; the
+IRQ/DMA latch + a few conversions are ACCURATE-BUT-CONFIRM inline pending the
+operator's g2k register pass. Validated by a clean libSDL3.a link: 11 exports,
+no audio bootstrap, no PC-speaker contamination, no GF1 IRQ hook.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        | 254 +++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 858 +++++++++++++++++++++++++++++++
- 2 files changed, 1112 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 896 +++++++++++++++++++++++++++++++
+ 2 files changed, 1150 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -334,10 +336,10 @@ index 000000000..96a0444c4
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..09e2300ba
+index 000000000..a015a37af
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,858 @@
+@@ -0,0 +1,896 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -447,9 +449,17 @@ index 000000000..09e2300ba
 +#define GUS_DEF_VOICES     28
 +#define GUS_RATE_NUM       617400u /* output_rate ~= 617400 / active_voices */
 +
-+/* DMA-upload threshold: samples at or below this go via simple/always-correct
-+   programmed-I/O poke; larger blocks use the one-shot 8237 DMA upload. */
++/* DMA-upload tunables. DMA upload is OPT-IN (SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD=1);
++   the DEFAULT upload path is programmed-I/O poke, which is proven on real HW
++   (it is the same mechanism as GF1 detection's DRAM peek/poke) and immune to
++   the ISA 8237 64KB-physical-page crash (#36). When DMA IS enabled, only
++   samples >= GUS_DMA_UPLOAD_MIN take it, and the transfer is split into
++   GUS_DMA_CHUNK-byte pieces so a single 8237 transfer never crosses a 64KB
++   page (the real-HW crash mode). GUS_DMA_CHUNK must be <= 64KB and a multiple
++   of 16 (the GF1 DMA dest reg 0x42 holds addr>>4). */
 +#define GUS_DMA_UPLOAD_MIN 4096
++#define GUS_DMA_CHUNK      32768u
++#define GUS_PIO_BURST      64u /* bytes per cli/sti window in PIO upload */
 +
 +/* ------------------------------------------------------------------------- */
 +/* File-static card state. The GF1 is driven out-of-band, so the card / voice */
@@ -464,6 +474,7 @@ index 000000000..09e2300ba
 +static Uint32 g_gus_dram_size = 0;         /* detected DRAM bytes */
 +static Uint32 g_gus_dram_used = 0;         /* bump-allocator high-water */
 +static bool g_gus_diag = false;            /* SDL/0112 diag counters (default OFF) */
++static bool g_gus_dma_upload = false;      /* DMA upload opt-in (default OFF -> PIO; #36) */
 +
 +/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
 +   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
@@ -770,7 +781,11 @@ index 000000000..09e2300ba
 +   straddle a 256K bank boundary. Returns the DRAM byte address or BAD_ADDR. */
 +static Uint32 gus_dram_alloc(Uint32 len, int is16bit)
 +{
-+    Uint32 addr = g_gus_dram_used;
++    /* 16-byte align every allocation: the GF1 DMA dest register (0x42) holds
++       addr>>4, so a DMA upload requires a 16-aligned DRAM dest. Harmless for
++       the PIO path (exact 20-bit addressing). Keeps the chunked-DMA dest
++       (dram_addr + k*GUS_DMA_CHUNK, both 16-multiples) exact. */
++    Uint32 addr = (g_gus_dram_used + 15u) & ~15u;
 +    if (is16bit) {
 +        /* keep the whole sample inside one 256K bank */
 +        Uint32 bank = addr & 0xC0000u;
@@ -785,100 +800,115 @@ index 000000000..09e2300ba
 +    return addr;
 +}
 +
-+/* Programmed-I/O upload: poke each byte to DRAM via port 3X7. Always correct;
-+   used for small samples (the Cave Story .pxt SFX + the Phase-0 smoke). */
++/* Programmed-I/O upload: poke each byte to DRAM via port 3X7. This is the
++   DEFAULT upload path (#36) -- the same mechanism as GF1 detection's DRAM
++   poke/peek (proven on real HW) and immune to the ISA 8237 64KB-page crash
++   (no DMA controller involved).
++
++   Each gus_set_dram_addr + poke must be atomic vs the IRQ-0 music pump (which
++   drives GF1 voice regs through the same index/data ports), so it runs with
++   interrupts disabled -- but in BOUNDED bursts (GUS_PIO_BURST bytes) that
++   re-enable between bursts, so a large per-song .pat upload can't starve the
++   PIT clock / cooperative scheduler. Per-byte address re-set: no auto-
++   increment assumption (matches the proven detection mechanism). */
 +static void gus_upload_pio(Uint32 dram_addr, const Uint8 *src, Uint32 len)
 +{
-+    Uint32 i;
-+    DOS_DisableInterrupts();
-+    for (i = 0; i < len; i++) {
-+        /* Re-point per byte: the GF1 does not reliably auto-increment the
-+           poke address across all revisions, so set-then-write each byte.
-+           Slow but bullet-proof; bulk uploads take the DMA path below. */
-+        gus_set_dram_addr(dram_addr + i);
-+        outportb(GUS_P3X7_DRAMIO(g_gus_base), src[i]);
++    Uint32 i = 0;
++    while (i < len) {
++        Uint32 j, burst = len - i;
++        if (burst > GUS_PIO_BURST) {
++            burst = GUS_PIO_BURST;
++        }
++        DOS_DisableInterrupts();
++        for (j = 0; j < burst; j++) {
++            gus_set_dram_addr(dram_addr + i + j);
++            outportb(GUS_P3X7_DRAMIO(g_gus_base), src[i + j]);
++        }
++        DOS_EnableInterrupts();
++        i += burst;
 +    }
-+    DOS_EnableInterrupts();
 +}
 +
-+/* One-shot DMA upload: copy `src` into a conventional-memory bounce buffer,
-+   program reg 0x42 (DRAM dest) + reg 0x41 (to-DRAM enable) and the host 8237
-+   exactly like the SB path, fire, wait for the DMA-terminal flag, free the
-+   bounce. Reuses DOS_AllocateDMAMemory (NOT a persistent ring). Returns true
-+   on success; on any failure the caller falls back to PIO. */
++/* OPT-IN DMA upload (SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD=1), 8-bit samples only.
++   64KB-SAFE BY CHUNKING (#36): a single conventional-memory bounce buffer of
++   GUS_DMA_CHUNK bytes is allocated via DOS_AllocateDMAMemory, which guarantees
++   that buffer does not straddle a 64KB ISA physical page (because GUS_DMA_CHUNK
++   <= 64KB). The sample is uploaded GUS_DMA_CHUNK bytes at a time through that
++   buffer to consecutive DRAM addresses, so NO single 8237 transfer ever
++   crosses a 64KB page -- the real-HW crash mode where the 8237 wraps the
++   offset within the page and corrupts memory (passed in DOSBox, which doesn't
++   enforce the boundary). Returns true on success; false -> caller uses PIO. */
 +static bool gus_upload_dma(Uint32 dram_addr, const Uint8 *src, Uint32 len)
 +{
 +    _go32_dpmi_seginfo bounce_seg;
 +    Uint8 *bounce;
-+    Uint32 physical, dma_bytes;
++    Uint32 physical, off;
 +    Uint8 physical_page;
 +    int dma = g_gus_play_dma;
-+    int spin;
 +
 +    if (dma < 0 || dma > 3) {
-+        return false; /* Phase 0 DMA upload uses an 8-bit (0-3) playback channel */
++        return false; /* 8-bit (0-3) playback DMA channel only */
 +    }
-+    bounce = (Uint8 *)DOS_AllocateDMAMemory((int)len, &bounce_seg);
++    /* One boundary-safe bounce buffer reused for every chunk. */
++    bounce = (Uint8 *)DOS_AllocateDMAMemory((int)GUS_DMA_CHUNK, &bounce_seg);
 +    if (!bounce) {
 +        return false;
 +    }
-+    SDL_memcpy(bounce, src, len);
-+
 +    physical = DOS_LinearToPhysical(bounce);
 +    physical_page = (Uint8)((physical >> 16) & 0xFF);
-+    dma_bytes = len - 1;
 +
-+    DOS_DisableInterrupts();
-+
-+    /* Clear any STALE 8237 terminal-count status before arming, so the poll
-+       below only ever sees the TC of THIS transfer. Reading the status
-+       register (0x08) clears its TC/request bits. Without this, a TC bit left
-+       set on our channel by a prior transfer (or by BIOS/a prior program at
-+       first-upload) would read as instant "done" -> a truncated DRAM upload.
-+       (Sequential uploads on the GUS path normally leave it clear, but this is
-+       a won't-repro-in-DOSBox real-HW edge.) */
-+    (void)inportb(0x08);
-+
-+    /* host 8237 (8-bit channel) -- single, READ from memory, no auto-init
-+       (mode 0x48 | ch: GF1 upload is one-shot, not the SB's auto-init 0x58). */
-+    {
-+        static const int page_ports[] = { 0x87, 0x83, 0x81, 0x82 };
-+        outportb(0x0A, 0x04 | dma);                              /* mask channel */
-+        outportb(0x0B, 0x48 | dma);                              /* single, read, one-shot */
-+        outportb(page_ports[dma], physical_page);                /* page */
-+        outportb(0x0C, 0x00);                                    /* clear flip-flop */
-+        outportb(dma * 2, (Uint8)(physical & 0xFF));             /* offset low */
-+        outportb(dma * 2, (Uint8)((physical >> 8) & 0xFF));      /* offset high */
-+        outportb(0x0C, 0x00);                                    /* clear flip-flop */
-+        outportb(dma * 2 + 1, (Uint8)(dma_bytes & 0xFF));        /* count low */
-+        outportb(dma * 2 + 1, (Uint8)((dma_bytes >> 8) & 0xFF)); /* count high */
-+        outportb(0x0A, dma);                                     /* unmask channel */
-+    }
-+
-+    /* GF1 side: DRAM dest address (>>4) + DMA control = enable, host->DRAM,
-+       8-bit (bit6=0). ACCURATE-BUT-CONFIRM vs g2k. */
-+    gus_w16(GUS_REG_DMA_ADDR, (Uint16)((dram_addr >> 4) & 0xFFFF));
-+    gus_w8(GUS_REG_DMA_CTRL, 0x01);
-+    DOS_EnableInterrupts();
-+
-+    /* IRQ-INDEPENDENT completion poll: watch the HOST 8237 terminal-count
-+       status (port 0x08 status register, bit = channel -- set when the
-+       channel's transfer completes; read-to-clear). This does NOT depend on
-+       the GF1 IRQ line, so the upload completes on a PicoGUS that withholds
-+       the GF1 IRQ from IRQ-driven software (the Doom-silence finding). The
-+       GF1's own DMA-TC status (reg 0x41 bit6) is a secondary signal. Bounded
-+       spin with a timeout so a stuck transfer can't hang boot. Interrupts are
-+       enabled here so the cooperative scheduler / PIT pump keep running. */
-+    for (spin = 0; spin < 100000; spin++) {
-+        if (inportb(0x08) & (1 << dma)) {
-+            break; /* host 8237 reached terminal count for this channel */
++    for (off = 0; off < len; off += GUS_DMA_CHUNK) {
++        Uint32 dma_bytes;
++        Uint32 dest = dram_addr + off;
++        int spin;
++        Uint32 nbytes = len - off;
++        if (nbytes > GUS_DMA_CHUNK) {
++            nbytes = GUS_DMA_CHUNK;
 +        }
-+        if (gus_r8(GUS_REG_DMA_CTRL) & 0x40) {
-+            break; /* GF1 DMA-TC status (secondary, IRQ-line-independent) */
++        SDL_memcpy(bounce, src + off, nbytes);
++        dma_bytes = nbytes - 1;
++
++        DOS_DisableInterrupts();
++        (void)inportb(0x08); /* clear stale 8237 terminal-count before arming */
++
++        /* host 8237 (8-bit channel) -- single, READ from memory, one-shot. */
++        {
++            static const int page_ports[] = { 0x87, 0x83, 0x81, 0x82 };
++            outportb(0x0A, 0x04 | dma);                              /* mask channel */
++            outportb(0x0B, 0x48 | dma);                              /* single, read, one-shot */
++            outportb(page_ports[dma], physical_page);                /* page */
++            outportb(0x0C, 0x00);                                    /* clear flip-flop */
++            outportb(dma * 2, (Uint8)(physical & 0xFF));             /* offset low */
++            outportb(dma * 2, (Uint8)((physical >> 8) & 0xFF));      /* offset high */
++            outportb(0x0C, 0x00);                                    /* clear flip-flop */
++            outportb(dma * 2 + 1, (Uint8)(dma_bytes & 0xFF));        /* count low */
++            outportb(dma * 2 + 1, (Uint8)((dma_bytes >> 8) & 0xFF)); /* count high */
++            outportb(0x0A, dma);                                     /* unmask channel */
 +        }
-+        SDL_DelayPrecise(SDL_US_TO_NS(10));
++
++        /* GF1 side for THIS chunk: DRAM dest (>>4; dest is 16-aligned via
++           gus_dram_alloc + a 16-multiple chunk size) + DMA enable, host->DRAM,
++           8-bit (bit6=0). ACCURATE-BUT-CONFIRM vs g2k. */
++        gus_w16(GUS_REG_DMA_ADDR, (Uint16)((dest >> 4) & 0xFFFF));
++        gus_w8(GUS_REG_DMA_CTRL, 0x01);
++        DOS_EnableInterrupts();
++
++        /* IRQ-INDEPENDENT completion poll: the HOST 8237 terminal-count status
++           (port 0x08, bit = channel; read-to-clear) -- does NOT depend on the
++           GF1 IRQ line (the Doom-silence finding); GF1 reg 0x41 bit6 is a
++           secondary signal. Bounded spin; interrupts enabled so the PIT pump /
++           cooperative scheduler keep running. */
++        for (spin = 0; spin < 100000; spin++) {
++            if (inportb(0x08) & (1 << dma)) {
++                break; /* host 8237 reached terminal count for this channel */
++            }
++            if (gus_r8(GUS_REG_DMA_CTRL) & 0x40) {
++                break; /* GF1 DMA-TC status (secondary, IRQ-line-independent) */
++            }
++            SDL_DelayPrecise(SDL_US_TO_NS(10));
++        }
++        gus_w8(GUS_REG_DMA_CTRL, 0x00); /* stop DMA for this chunk */
 +    }
-+    gus_w8(GUS_REG_DMA_CTRL, 0x00); /* stop DMA */
 +
 +    DOS_FreeConventionalMemory(&bounce_seg);
 +    return true;
@@ -907,6 +937,7 @@ index 000000000..09e2300ba
 +
 +    gus_resolve_voices();
 +    g_gus_diag = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_DIAG");
++    g_gus_dma_upload = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD");
 +    skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
 +
 +    /* detection: reset the GF1, DRAM peek/poke roundtrip + size. */
@@ -1031,20 +1062,29 @@ index 000000000..09e2300ba
 +        return SDL_DOSGUS_BAD_ADDR;
 +    }
 +    /* uploaded VERBATIM -- no sign conversion (caller hands native GF1 format:
-+       8-bit unsigned / 16-bit signed). */
-+    if (len >= GUS_DMA_UPLOAD_MIN && gus_upload_dma(dram_addr, (const Uint8 *)data, len)) {
-+        /* uploaded via DMA */
-+    } else {
-+        gus_upload_pio(dram_addr, (const Uint8 *)data, len);
-+    }
-+    g_gus_n_upload++;
-+    if (g_gus_diag) {
-+        doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u: addr=0x%X len=%u %s "
-+                         "used=%uKB/%uKB",
-+                         g_gus_n_upload, (unsigned)dram_addr, (unsigned)len,
-+                         is16bit ? "16b" : "8b",
-+                         (unsigned)(g_gus_dram_used / 1024),
-+                         (unsigned)(g_gus_dram_size / 1024));
++       8-bit unsigned / 16-bit signed). DEFAULT path = PIO (#36): proven on real
++       HW (same mechanism as detection's DRAM poke/peek) and immune to the ISA
++       8237 64KB-page crash. DMA (64KB-safe chunked) is OPT-IN via
++       SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD=1, and only for 8-bit samples >= the
++       threshold; 16-bit always takes PIO (sidesteps the 16-bit DMA dest quirk). */
++    {
++        const char *method;
++        if (g_gus_dma_upload && !is16bit && len >= GUS_DMA_UPLOAD_MIN &&
++            gus_upload_dma(dram_addr, (const Uint8 *)data, len)) {
++            method = "dma";
++        } else {
++            gus_upload_pio(dram_addr, (const Uint8 *)data, len);
++            method = "pio";
++        }
++        g_gus_n_upload++;
++        if (g_gus_diag) {
++            doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u: addr=0x%X len=%u %s "
++                             "via=%s used=%uKB/%uKB",
++                             g_gus_n_upload, (unsigned)dram_addr, (unsigned)len,
++                             is16bit ? "16b" : "8b", method,
++                             (unsigned)(g_gus_dram_used / 1024),
++                             (unsigned)(g_gus_dram_size / 1024));
++        }
 +    }
 +    return dram_addr;
 +}
