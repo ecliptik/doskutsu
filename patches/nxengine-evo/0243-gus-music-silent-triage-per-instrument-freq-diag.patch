@@ -1,0 +1,73 @@
+From edbb9d333045ebd2e9a61db430995301e407aa62 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 10:38:47 -0700
+Subject: [PATCH] patch 0243 -- #39: per-instrument freq/addr diag for
+ silent-GUS-music triage
+
+g2k iter (SFX_OFF=1): GUS music runs (6 instruments uploaded, voices commanded,
+activity light) but is INAUDIBLE; MIDIDEMO is audible on the same card, so it
+is our note->voice mapping, not the hardware.
+
+Code-review of MidiBackendGus note_on (no fix yet -- diagnose first):
+- VOLUME: passes 0..255 linear to SDL_DOSGusSetVoiceVol, matching the frozen
+  contract (driver converts to GF1 4.8 log). Non-zero for normal notes. If
+  volume is the cause it is the driver's linear->log impl (sdl-pg test-tone
+  isolates it).
+- ORDER: SetVoiceFreq/Vol/Pan then StartVoice -- if StartVoice resets/ramps
+  volume from 0 the pre-set vol is clobbered. Pending sdl-pg StartVoice
+  semantics.
+- FREQ: hz = (g_fp * note_freq) >> 16; g_fp from .pat root_freq parsed as
+  milliHz. If that unit is wrong, hz is 1000x off -> ultra/subsonic -> silent.
+
+This patch adds a GUS_DIAG-gated per-instrument log in _upload_pat (MAIN-LOOP
+context -- note_on is IRQ, can't log there) dumping data_size / sample_rate /
+root_freq / g_fp / the DERIVED hz@note60 (flagged sane / SUBSONIC / ULTRASONIC)
+/ loop+dram addresses / voice flags. The next GUS_DIAG=1 iter empirically pins
+the suspect: sane hz -> volume/order (sdl-pg primitives); ultra/subsonic hz ->
+.pat freq parse. Diagnostic only, default-off; zero behavior change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendGus.cpp | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index bc2a225c..cac2a0b0 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -350,6 +350,32 @@ bool MidiBackendGus::_upload_pat(const char *base_name, bool is_drum,
+   out->flags       = (std::uint16_t)((use_loop ? SDL_DOSGUS_LOOP : 0) |
+                                      (fmt16 ? SDL_DOSGUS_16BIT : 0) |
+                                      (use_loop && bidi ? SDL_DOSGUS_BIDI : 0));
++
++  // patch 0243 (#39 silent-music diag, GUS_DIAG-gated): dump the parsed .pat
++  // fields + the DERIVED note_on values for a reference note (middle C = 60),
++  // from this MAIN-LOOP context (note_on itself is IRQ -- can't log there). The
++  // computed hz pins down the #39 silent-voices suspects: a SANE hz@60 (~hundreds
++  // -> few-thousand Hz) means freq/root-freq are right and the bug is volume-
++  // units or the SetVoiceVol/StartVoice order (sdl-pg primitives); an ULTRASONIC
++  // (~MHz, root_freq-unit-too-Hz) or SUBSONIC hz means the .pat freq parse is
++  // wrong. Also surfaces start/end/loop addresses + the voice flags.
++  {
++    const char *_gd = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_DIAG");
++    if (_gd && _gd[0] == '1' && _gd[1] == '\0')
++    {
++      const std::uint32_t hz60 =
++          (std::uint32_t)(((std::uint64_t)g_fp * _note_freq[60]) >> 16);
++      LOG_INFO("gus .pat diag '{}': data_size={} sample_rate={} root_freq={} "
++               "(root_hz={}) g_fp={} -> hz@note60={} ({}); loop_start={} "
++               "loop_end={} flags=0x{:x} dram_addr={}",
++               base_name, (unsigned)data_size, (unsigned)sample_rate,
++               (int)root_freq, (int)(root_hz + 0.5), (unsigned)g_fp,
++               (unsigned)hz60,
++               (hz60 < 20u) ? "SUBSONIC?" : (hz60 > 96000u ? "ULTRASONIC?" : "sane"),
++               (unsigned)loop_start, (unsigned)loop_end, (unsigned)out->flags,
++               (unsigned)addr);
++    }
++  }
+   return true;
+ }
+ 
+-- 
+2.47.3
+
