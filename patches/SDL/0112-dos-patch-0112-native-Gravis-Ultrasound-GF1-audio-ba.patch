@@ -1,4 +1,4 @@
-From 40d80ee1922aa05640c6b74b4ea3c4ed1f161115 Mon Sep 17 00:00:00 2001
+From cdb1f00758f24e556ced30b78517f4a95fd89935 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -116,11 +116,37 @@ gus-6 (#42 the post-upload first-note freeze -- the real music blocker):
   8-bit voice addressing to isolate the 16-bit path if the encode fix does not
   fully clear the wedge. Diagnostic only.
 
+gus-7 (#39 the post-#42 SILENCE: diagnostic bundle, IRQ-safe):
+
+Static analysis exonerated the SDL voice path (DAC two-step 0x4C 0x00->0x01->0x03,
+mix-ctrl line-out 0x08 bit1=0 active-low, gus_w8 high-byte placement, logvol<<4
+into bits[15:4]) and DISPROVED the ramp-gating theory (DOSBox-X + DOSBox-staging:
+a stopped ramp with non-zero static 0x09 IS audible -- ramp does not gate output).
+So the silence needs RUNTIME values, but H5 blocked the diag. This bundle gets the
+data:
+- IRQ-SAFE voice-diag ring (the H5 fix): SetVoiceFreq/Vol + StartVoice run in the
+  note_on PIT-IRQ, where doskutsu_dbg_log (fprintf+fsync) deadlocks via libc
+  reentrancy (confirmed H5 -- GUS_DIAG=1 hung). The ops now ENQUEUE fixed records
+  (FREQ hz/fc, VOL in/reg, START addr/ctrl) into a static ring INSIDE their
+  existing cli (memory-only, no I/O); a MAIN-LOOP-only flush (GetState per-frame
+  poll gated by an entry interrupt-flag check + a guaranteed flush at each
+  on_song_start UploadSample) drains them. GUS_DIAG=1 is now runnable on g2k.
+- POST-GO voice-status READ-BACK: StartVoice reads voice-control 0x80 (twice, GF1
+  latch quirk) right after GO and enqueues RBACK status -- stopped=1 means the GF1
+  did NOT run the voice (the decisive silence datum).
+- FORCE_MAXVOL probe (SDL_HINT_DOSKUTSU_GUS_FORCE_MAXVOL=1, default OFF): forces
+  0x09=0xFFF0 in SetVoiceVol + StartVoice. A/B: audible -> the bug is the volume
+  VALUE (engine low/zero vol or conversion); still silent -> volume path
+  exonerated, deeper voice-run/DAC/PicoGUS cause (the ring + RBACK pin it).
+- device-up banner gains " maxvol=ON"; new hint documented in BOOT.md.
+No new export (still 12). The gus-6 hw_fetch START diag (also IRQ-context) is
+replaced by the ring -- the >>1 encode is already confirmed.
+
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- include/SDL3/SDL_dosgus.h        |  267 ++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1089 ++++++++++++++++++++++++++++++
- 2 files changed, 1356 insertions(+)
+ include/SDL3/SDL_dosgus.h        |  267 +++++++
+ src/audio/dos/SDL_dosaudio_gus.c | 1209 ++++++++++++++++++++++++++++++
+ 2 files changed, 1476 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -399,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..724f59e36
+index 000000000..90e75527d
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1089 @@
+@@ -0,0 +1,1209 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -540,6 +566,7 @@ index 000000000..724f59e36
 +static bool g_gus_dma_upload = false;      /* DMA upload opt-in (default OFF -> PIO; #36) */
 +static bool g_gus_pio_autoinc = false;     /* PIO DRAM auto-increment (gus-5 #41; default OFF) */
 +static bool g_gus_force_8bit_addr = false; /* gus-6 #42 A/B: force 8-bit voice addressing (default OFF) */
++static bool g_gus_force_maxvol = false;    /* gus-7 #39 probe: force every voice to max volume (default OFF) */
 +
 +/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
 +   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
@@ -556,6 +583,100 @@ index 000000000..724f59e36
 +/* diag counters */
 +static Uint32 g_gus_n_upload = 0;
 +static Uint32 g_gus_n_start = 0;
++
++/* gus-7 #39: IRQ-SAFE voice-diagnostic ring (the H5 fix). The voice ops
++   (SetVoiceFreq/Vol, StartVoice) run in the PIT-pump IRQ (note_on), where file
++   I/O -- doskutsu_dbg_log = fprintf + per-line fsync (patch 0036) -- DEADLOCKS
++   via libc reentrancy if the IRQ fires mid main-loop fprintf (this is the
++   confirmed H5: GUS_DIAG=1 hung). So the ops now ENQUEUE fixed records into
++   this static ring (memory-only, done INSIDE their existing cli/sti so it is
++   atomic vs the IRQ -- no new cli/sti, no I/O), and a MAIN-LOOP-only flush
++   drains them to the log. GUS_DIAG is therefore IRQ-safe and runnable on g2k. */
++#define GUS_DIAG_RING 128u /* power of 2 */
++enum { GUS_DR_FREQ = 1, GUS_DR_VOL, GUS_DR_START, GUS_DR_RBACK };
++typedef struct { Uint8 kind; Uint8 voice; Uint32 a; Uint32 b; } gus_diag_rec;
++static volatile gus_diag_rec g_gus_dr[GUS_DIAG_RING];
++static volatile Uint32 g_gus_dr_head = 0; /* next write slot */
++static volatile Uint32 g_gus_dr_tail = 0; /* next read slot */
++static volatile int    g_gus_dr_flushing = 0;
++
++/* Enqueue a diag record. The CALLER must already hold the voice-op cli section
++   so this is atomic vs the IRQ; it does NO I/O. Overwrites the oldest record
++   when full (lossy by design -- diagnostic only). */
++static SDL_INLINE void gus_diag_put(Uint8 kind, Uint8 voice, Uint32 a, Uint32 b)
++{
++    Uint32 i = g_gus_dr_head & (GUS_DIAG_RING - 1u);
++    g_gus_dr[i].kind = kind;
++    g_gus_dr[i].voice = voice;
++    g_gus_dr[i].a = a;
++    g_gus_dr[i].b = b;
++    g_gus_dr_head++;
++    if (g_gus_dr_head - g_gus_dr_tail > GUS_DIAG_RING) {
++        g_gus_dr_tail = g_gus_dr_head - GUS_DIAG_RING; /* drop oldest */
++    }
++}
++
++/* True when CPU interrupts are ENABLED (IF set) at the call -> we are in
++   main-loop context, NOT inside an IRQ handler or a cli critical section.
++   Gates the diag flush so its file I/O only runs where it is safe. Capture
++   this at a function's ENTRY (before any cli), since DOS_EnableInterrupts is an
++   unconditional sti that would otherwise force IF=1 even in an IRQ-entered call. */
++static SDL_INLINE int gus_ints_enabled(void)
++{
++    unsigned long fl;
++    __asm__ __volatile__("pushfl\n\tpopl %0" : "=r"(fl));
++    return (fl & 0x200u) ? 1 : 0;
++}
++
++/* Drain the diag ring to the log. MAIN-LOOP ONLY (does fprintf+fsync). Callers
++   gate on gus_ints_enabled() captured at entry; a reentrancy flag guards
++   against a nested flush. Pops one record under cli, logs it with interrupts
++   on. */
++static void gus_diag_flush(void)
++{
++    if (!g_gus_diag || g_gus_dr_flushing) {
++        return;
++    }
++    g_gus_dr_flushing = 1;
++    for (;;) {
++        gus_diag_rec r;
++        Uint32 i;
++        DOS_DisableInterrupts();
++        if (g_gus_dr_tail == g_gus_dr_head) {
++            DOS_EnableInterrupts();
++            break;
++        }
++        i = g_gus_dr_tail & (GUS_DIAG_RING - 1u);
++        r.kind = g_gus_dr[i].kind;
++        r.voice = g_gus_dr[i].voice;
++        r.a = g_gus_dr[i].a;
++        r.b = g_gus_dr[i].b;
++        g_gus_dr_tail++;
++        DOS_EnableInterrupts();
++        switch (r.kind) {
++        case GUS_DR_FREQ:
++            doskutsu_dbg_log("audio: SDL/0112 GUS v%d FREQ hz=%u -> fc=0x%04X",
++                             r.voice, (unsigned)r.a, (unsigned)r.b);
++            break;
++        case GUS_DR_VOL:
++            doskutsu_dbg_log("audio: SDL/0112 GUS v%d VOL in=%d -> reg=0x%04X",
++                             r.voice, (int)r.a, (unsigned)r.b);
++            break;
++        case GUS_DR_START:
++            doskutsu_dbg_log("audio: SDL/0112 GUS v%d START addr=0x%X ctrl=0x%02X",
++                             r.voice, (unsigned)r.a, (unsigned)r.b);
++            break;
++        case GUS_DR_RBACK:
++            doskutsu_dbg_log("audio: SDL/0112 GUS v%d RBACK status=0x%02X "
++                             "stopped=%d (1=voice did NOT run)",
++                             r.voice, (unsigned)r.a, (int)(r.a & 0x01u));
++            break;
++        default:
++            break;
++        }
++    }
++    g_gus_dr_flushing = 0;
++}
 +
 +/* ------------------------------------------------------------------------- */
 +/* Low-level GF1 register access. The per-voice and DRAM-address sequences    */
@@ -1097,6 +1218,8 @@ index 000000000..724f59e36
 +    g_gus_dma_upload = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD");
 +    g_gus_pio_autoinc = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_PIO_AUTOINC");
 +    g_gus_force_8bit_addr = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_FORCE_8BIT_ADDR");
++    g_gus_force_maxvol = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_FORCE_MAXVOL");
++    g_gus_dr_head = g_gus_dr_tail = 0; /* arm the IRQ-safe diag ring */
 +    skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
 +
 +    /* detection: reset the GF1, DRAM peek/poke roundtrip + size. */
@@ -1149,11 +1272,12 @@ index 000000000..724f59e36
 +    g_gus_active = true;
 +
 +    doskutsu_dbg_log("audio: SDL/0112 GUS device up: base=0x%X irq=%d dma=%d "
-+                     "voices=%d rate=%dHz dram=%dKB upload=%s%s",
++                     "voices=%d rate=%dHz dram=%dKB upload=%s%s%s",
 +                     g_gus_base, g_gus_irq, g_gus_play_dma, g_gus_voices,
 +                     (int)g_gus_rate, (int)(g_gus_dram_size / 1024),
 +                     g_gus_dma_upload ? "dma" : "pio",
-+                     g_gus_pio_autoinc ? "+autoinc" : "");
++                     g_gus_pio_autoinc ? "+autoinc" : "",
++                     g_gus_force_maxvol ? " maxvol=ON" : "");
 +
 +    /* #39 diagnostic test-tone (gated, default OFF). */
 +    if (gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_TESTTONE")) {
@@ -1177,6 +1301,11 @@ index 000000000..724f59e36
 +{
 +    int v;
 +    Uint32 mask = 0;
++    /* gus-7: capture interrupt-enabled state at ENTRY (before any cli) -- tells
++       us this call is in MAIN-LOOP context (IF set), the only place the diag
++       ring may be flushed to the log safely. Captured here because the cli/sti
++       below would otherwise leave IF=1 even on an IRQ-entered call. */
++    int was_main = gus_ints_enabled();
 +
 +    if (!out) {
 +        return false;
@@ -1214,6 +1343,14 @@ index 000000000..724f59e36
 +    out->dram_used = g_gus_dram_used;
 +    out->voice_active_mask = mask;
 +    out->abi_version = 1;
++
++    /* gus-7: drain the IRQ-safe voice-diag ring to the log -- ONLY when this
++       GetState was entered in main-loop context (was_main), never from the
++       IRQ-clocked reap path. The engine also polls this once per frame, so the
++       ring stays flushed. */
++    if (g_gus_diag && was_main) {
++        gus_diag_flush();
++    }
 +    return true;
 +}
 +
@@ -1222,6 +1359,12 @@ index 000000000..724f59e36
 +    Uint32 dram_addr;
 +    if (!g_gus_active || !data || len == 0) {
 +        return SDL_DOSGUS_BAD_ADDR;
++    }
++    /* gus-7 safety-net flush: UploadSample runs at on_song_start (MAIN-LOOP), so
++       this guarantees the prior song's captured voice-diag records reach the log
++       even if the per-frame GetState flush never ran. */
++    if (g_gus_diag) {
++        gus_diag_flush();
 +    }
 +    dram_addr = gus_dram_alloc(len, is16bit);
 +    if (dram_addr == SDL_DOSGUS_BAD_ADDR) {
@@ -1376,25 +1519,27 @@ index 000000000..724f59e36
 +       fixed default, wasting the per-note velocity/pan (and a default-200 wrote
 +       over the engine's value). The caller owns volume + pan; this just arms
 +       addresses + ramp bounds and starts the voice. */
++    if (g_gus_force_maxvol) {
++        gus_w16(GUS_VREG_VOLUME, 0xFFF0); /* gus-7 #39 probe: max vol regardless of caller */
++    }
 +    gus_w8(GUS_VREG_CTRL, ctrl);           /* GO */
 +    g_gus_voice_busy[voice] = true;        /* claim inside the critical section */
++    /* gus-7 #39: IRQ-safe diag (StartVoice runs in the note_on IRQ). Enqueue the
++       START params + a post-GO READ-BACK of the voice control status (read 0x80
++       twice for the GF1 latch quirk) -- stopped bit set => the GF1 did NOT run
++       the voice we just started (the decisive silence datum). Memory-only,
++       inside the cli; drained later by the main-loop flush. */
++    if (g_gus_diag) {
++        Uint8 st;
++        gus_select_voice(voice);
++        st = gus_r8(GUS_VREG_CTRL_RD);
++        st = gus_r8(GUS_VREG_CTRL_RD);
++        gus_diag_put(GUS_DR_START, (Uint8)voice, start, ctrl);
++        gus_diag_put(GUS_DR_RBACK, (Uint8)voice, st, 0);
++    }
 +    DOS_EnableInterrupts();
 +
 +    g_gus_n_start++;
-+    if (g_gus_diag) {
-+        /* gus-6 #42 confirm diag: reconstruct the programmed integer DRAM
-+           address from the ACTUAL encoded start MSW|LSW, then apply the GF1
-+           16-bit READ transform to show hw_fetch -- the byte address the card
-+           will actually fetch. With the >>1 encode fix hw_fetch==start; with
-+           the old <<1 bug it was ~4*start. (==start? 1) proves the round-trip. */
-+        Uint32 pa = ((Uint32)smsw << 7) | (((Uint32)slsw >> 9) & 0x7Fu);
-+        Uint32 hw_fetch = is16 ? ((pa & 0xC0000u) | ((pa & 0x1FFFFu) << 1u)) : pa;
-+        doskutsu_dbg_log("audio: SDL/0112 GUS voice %d START: start=0x%X end=0x%X "
-+                         "ctrl=0x%02X %s enc=%04X:%04X hw_fetch=0x%X (==start? %d)",
-+                         voice, (unsigned)start, (unsigned)end, (unsigned)ctrl,
-+                         is16 ? "16b" : "8b", (unsigned)smsw, (unsigned)slsw,
-+                         (unsigned)hw_fetch, (hw_fetch == start) ? 1 : 0);
-+    }
 +}
 +
 +void SDL_DOSGusStopVoice(int voice)
@@ -1444,14 +1589,13 @@ index 000000000..724f59e36
 +    DOS_DisableInterrupts();
 +    gus_select_voice(voice);
 +    gus_w16(GUS_VREG_FREQ, fc);
-+    DOS_EnableInterrupts();
++    /* gus-7: enqueue INSIDE the cli (IRQ-safe, memory-only) -- this runs in the
++       note_on IRQ. fc near 0 => caller passed note-pitch Hz instead of sample
++       PLAYBACK rate -> near-DC -> silent (a #39 suspect). */
 +    if (g_gus_diag) {
-+        /* fc near 0 here => the caller passed a note-pitch Hz instead of the
-+           sample PLAYBACK rate (native_rate * pitch_ratio) -> near-DC -> silent.
-+           A prime #39 suspect for the note->freq mapping. */
-+        doskutsu_dbg_log("audio: SDL/0112 GUS voice %d FREQ: hz=%u -> fc=0x%04X",
-+                         voice, (unsigned)playback_hz, (unsigned)fc);
++        gus_diag_put(GUS_DR_FREQ, (Uint8)voice, playback_hz, fc);
 +    }
++    DOS_EnableInterrupts();
 +}
 +
 +void SDL_DOSGusSetVoiceVol(int voice, int linear_vol)
@@ -1461,17 +1605,19 @@ index 000000000..724f59e36
 +        return;
 +    }
 +    reg = (Uint16)(gus_linear_to_logvol(linear_vol) << 4);
++    if (g_gus_force_maxvol) {
++        reg = 0xFFF0; /* gus-7 #39 probe: force max volume regardless of caller */
++    }
 +    DOS_DisableInterrupts();
 +    gus_select_voice(voice);
 +    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* manual hold (ramp stopped) */
 +    gus_w8(GUS_VREG_RAMPSTART, 0x00);      /* full ramp range so 0x09 isn't clamped (#39) */
 +    gus_w8(GUS_VREG_RAMPEND, 0xFF);
 +    gus_w16(GUS_VREG_VOLUME, reg);
-+    DOS_EnableInterrupts();
 +    if (g_gus_diag) {
-+        doskutsu_dbg_log("audio: SDL/0112 GUS voice %d VOL: in=%d -> reg=0x%04X",
-+                         voice, linear_vol, (unsigned)reg);
++        gus_diag_put(GUS_DR_VOL, (Uint8)voice, (Uint32)linear_vol, reg); /* IRQ-safe */
 +    }
++    DOS_EnableInterrupts();
 +}
 +
 +void SDL_DOSGusSetVoicePan(int voice, int pan)
