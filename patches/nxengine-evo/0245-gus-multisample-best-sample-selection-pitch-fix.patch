@@ -1,0 +1,214 @@
+From 5c17d310dda53e1d718e552fa7cd2416d16183c9 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 11:32:09 -0700
+Subject: [PATCH] patch 0245 -- #39: multisample best-sample selection
+ (note->freq pitch fix)
+
+gus-3 g2k diag proved the freq is STILL wrong: acpiano sample[0] root_freq=98381
+(root_hz=98) -> hz@note60=104026 -> note 60 plays 2.7x too fast (music pitched
+~1.5 octaves up). Root cause: GM .pat instruments are MULTISAMPLED (the layer
+holds N samples, each rooted at a different pitch + covering a key range), and I
+was using sample[0] (typically the LOWEST root) for EVERY note -> mid/high notes
+get pitch-shifted up by octaves. Confirmed against TiMidity instrum.c (it selects
+samples by low_freq/high_freq range).
+
+Fully-correct = per-note sample selection, but uploading every sample of every
+program blows the <=1MB GF1 DRAM. Bring-up fix: scan the layer, upload the SINGLE
+sample whose root MIDI note (via the 0244 unit-robust root_hz) is nearest middle
+C (note 60). Mid-range music (most of Cave Story) then plays ~native rate; notes
+far from the chosen root pitch-shift gracefully (standard wavetable). One upload/
+program -> DRAM unchanged. (Per-note multi-sample residency is a future
+enhancement if DRAM + quality justify.)
+
+Also adds a GUS_DIAG per-sample log (root_freq/root_hz/root_note/rate/size/
+dist60) so the iter shows the layer's sample structure + which was chosen. Built
+clean. (std::log2 unavailable on DJGPP -> std::log/log(2).)
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendGus.cpp | 148 ++++++++++++++++++++++++-----------
+ 1 file changed, 101 insertions(+), 47 deletions(-)
+
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index 272e8b51..7a233cd6 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -250,74 +250,128 @@ bool MidiBackendGus::_upload_pat(const char *base_name, bool is_drum,
+     return false;
+   }
+   if (std::fread(ihdr, 1, sizeof(ihdr), fp) != sizeof(ihdr) ||
+-      std::fread(lhdr, 1, sizeof(lhdr), fp) != sizeof(lhdr) ||
+-      std::fread(srec, 1, sizeof(srec), fp) != sizeof(srec))
++      std::fread(lhdr, 1, sizeof(lhdr), fp) != sizeof(lhdr))
+   {
+-    LOG_WARN("gus backend: '{}.pat' truncated instrument/layer/sample header; "
++    LOG_WARN("gus backend: '{}.pat' truncated instrument/layer header; "
+              "instrument silent.", base_name);
+     std::fclose(fp);
+     return false;
+   }
+ 
+-  // Sample-record fields (offsets per GUS-PAT-PARSER-DESIGN.md sec 1.4).
+-  const std::uint32_t data_size = rd_u32le(srec + 8);
+-  std::uint32_t       loop_start = rd_u32le(srec + 12);
+-  std::uint32_t       loop_end   = rd_u32le(srec + 16);
+-  const std::uint32_t sample_rate = rd_u16le(srec + 20);
+-  const std::int32_t  root_freq   = rd_s32le(srec + 30);  // milliHz
+-  const std::uint8_t  modes       = srec[55];
+-
+-  const bool fmt16       = (modes & 0x01) != 0;
+-  const bool is_unsigned = (modes & 0x02) != 0;
+-  const bool loop_on     = (modes & 0x04) != 0;
+-  const bool bidi        = (modes & 0x08) != 0;
+-
+-  // Sanity-guard the size before allocating (defensive against a corrupt
+-  // header; the io-audit discipline). data_size must be > 0 and fit DRAM.
+-  if (data_size == 0 || (_dram_size && data_size > _dram_size) ||
+-      data_size > (2u * 1024u * 1024u))
+-  {
+-    LOG_WARN("gus backend: '{}.pat' implausible data_size={} (dram={}); "
+-             "instrument silent.", base_name, (unsigned)data_size,
+-             (unsigned)_dram_size);
+-    std::fclose(fp);
+-    return false;
++  // patch 0245 (#39 multisample fix): GM .pat instruments are MULTISAMPLED --
++  // the layer holds N samples, each tuned to a different root pitch + covering a
++  // key range (low_freq..high_freq). Using sample[0] (typically the LOWEST root)
++  // for ALL notes pitch-shifts mid/high notes up by octaves (g2k: acpiano
++  // sample[0] root ~98 Hz -> note 60 played 2.7x too fast). The fully-correct
++  // answer is per-note sample selection, but uploading EVERY sample of every
++  // program blows the <=1MB GF1 DRAM. So for bring-up we scan the layer and
++  // upload the SINGLE sample whose root note is nearest middle C (note 60) --
++  // mid-range music (most of Cave Story) then plays at ~native rate; notes far
++  // from the chosen root pitch-shift gracefully (standard wavetable). One
++  // upload/program keeps DRAM bounded. (Per-note multi-sample residency is a
++  // future enhancement if DRAM + quality justify.)
++  int nsamp = lhdr[6];
++  if (nsamp < 1) nsamp = 1;
++  if (nsamp > 64) nsamp = 64;  // sanity
++
++  const char *_gd0 = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_DIAG");
++  const bool _diag = _gd0 && _gd0[0] == '1' && _gd0[1] == '\0';
++
++  // Chosen-sample state (the best so far + its raw PCM, sign-flipped lazily).
++  bool          have      = false;
++  int           best_dist = 1000;
++  std::uint8_t *best_pcm  = nullptr;
++  std::uint32_t data_size = 0, loop_start = 0, loop_end = 0, sample_rate = 0;
++  std::int32_t  root_freq = 0;
++  std::uint8_t  modes      = 0;
++
++  for (int s = 0; s < nsamp; ++s)
++  {
++    if (std::fread(srec, 1, sizeof(srec), fp) != sizeof(srec))
++      break;  // truncated sample header; use whatever we have
++    const std::uint32_t s_data  = rd_u32le(srec + 8);
++    const std::uint32_t s_lstart = rd_u32le(srec + 12);
++    const std::uint32_t s_lend   = rd_u32le(srec + 16);
++    const std::uint32_t s_rate   = rd_u16le(srec + 20);
++    const std::int32_t  s_root   = rd_s32le(srec + 30);  // root freq (auto-unit)
++    const std::uint8_t  s_modes  = srec[55];
++    if (s_data == 0 || (_dram_size && s_data > _dram_size) ||
++        s_data > (2u * 1024u * 1024u))
++      break;  // implausible size -> can't safely advance the file cursor
++
++    std::uint8_t *spcm = (std::uint8_t *)std::malloc(s_data);
++    if (!spcm) break;
++    if (std::fread(spcm, 1, s_data, fp) != s_data) { std::free(spcm); break; }
++
++    // This sample's root MIDI note (via the unit-robust root_hz auto-detect),
++    // and its distance from middle C -- the selection metric.
++    const double srm = (s_root > 0) ? (s_root / 1000.0) : 0.0;
++    const double srh = (s_root > 0) ? (double)s_root    : 0.0;
++    double s_root_hz;
++    if (srm >= 8.0 && srm <= 12544.0)      s_root_hz = srm;
++    else if (srh >= 8.0 && srh <= 12544.0) s_root_hz = srh;
++    else                                   s_root_hz = 440.0;
++    int s_root_note =
++        (int)(69.0 + 12.0 * (std::log(s_root_hz / 440.0) / std::log(2.0)) + 0.5);
++    if (s_root_note < 0)   s_root_note = 0;
++    if (s_root_note > 127) s_root_note = 127;
++    const int dist = (s_root_note > 60) ? (s_root_note - 60) : (60 - s_root_note);
++
++    if (_diag)
++      LOG_INFO("gus .pat '{}' sample {}/{}: root_freq={} root_hz={} "
++               "root_note={} rate={} size={} dist60={}",
++               base_name, s, nsamp, (int)s_root, (int)(s_root_hz + 0.5),
++               s_root_note, (unsigned)s_rate, (unsigned)s_data, dist);
++
++    if (!have || dist < best_dist)
++    {
++      std::free(best_pcm);
++      best_pcm    = spcm;
++      best_dist   = dist;
++      have        = true;
++      data_size   = s_data;
++      loop_start  = s_lstart;
++      loop_end    = s_lend;
++      sample_rate = s_rate;
++      root_freq   = s_root;
++      modes       = s_modes;
++    }
++    else
++    {
++      std::free(spcm);
++    }
+   }
++  std::fclose(fp);
+ 
+-  std::uint8_t *pcm = (std::uint8_t *)std::malloc(data_size);
+-  if (!pcm)
++  if (!have || !best_pcm)
+   {
+-    LOG_WARN("gus backend: '{}.pat' OOM allocating {} bytes; instrument "
+-             "silent.", base_name, (unsigned)data_size);
+-    std::fclose(fp);
+-    return false;
+-  }
+-  if (std::fread(pcm, 1, data_size, fp) != data_size)
+-  {
+-    LOG_WARN("gus backend: '{}.pat' truncated PCM data ({} bytes); instrument "
+-             "silent.", base_name, (unsigned)data_size);
+-    std::free(pcm);
+-    std::fclose(fp);
++    LOG_WARN("gus backend: '{}.pat' no usable sample; instrument silent.",
++             base_name);
++    std::free(best_pcm);
+     return false;
+   }
+-  std::fclose(fp);
+ 
+-  // Normalize to native GF1 DRAM format: 8-bit UNSIGNED / 16-bit SIGNED. The
+-  // driver uploads verbatim (R4), so the engine owns the sign flip. .pat is
+-  // most commonly 8-bit signed -> xor 0x80; 16-bit is usually already signed.
++  const bool fmt16       = (modes & 0x01) != 0;
++  const bool is_unsigned = (modes & 0x02) != 0;
++  const bool loop_on     = (modes & 0x04) != 0;
++  const bool bidi        = (modes & 0x08) != 0;
++
++  // Normalize the CHOSEN sample to native GF1 DRAM format: 8-bit UNSIGNED /
++  // 16-bit SIGNED. The driver uploads verbatim (R4), so the engine owns the
++  // sign flip. .pat is most commonly 8-bit signed -> xor 0x80.
+   if (!fmt16)
+   {
+     if (!is_unsigned)
+-      for (std::uint32_t i = 0; i < data_size; ++i) pcm[i] ^= 0x80;
++      for (std::uint32_t i = 0; i < data_size; ++i) best_pcm[i] ^= 0x80;
+   }
+   else
+   {
+     if (is_unsigned)
+-      for (std::uint32_t i = 1; i < data_size; i += 2) pcm[i] ^= 0x80;  // hi byte
++      for (std::uint32_t i = 1; i < data_size; i += 2) best_pcm[i] ^= 0x80;  // hi byte
+   }
+ 
+-  const std::uint32_t addr = SDL_DOSGusUploadSample(pcm, data_size, fmt16 ? 1 : 0);
+-  std::free(pcm);
++  const std::uint32_t addr = SDL_DOSGusUploadSample(best_pcm, data_size, fmt16 ? 1 : 0);
++  std::free(best_pcm);
+   if (addr == SDL_DOSGUS_BAD_ADDR)
+   {
+     LOG_WARN("gus backend: '{}.pat' DRAM upload failed (full?); instrument "
+-- 
+2.47.3
+
