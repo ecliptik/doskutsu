@@ -1,4 +1,4 @@
-From 2e3902daba403b09a0dbacc145cd3a374b0981ef Mon Sep 17 00:00:00 2001
+From fbe550d6550b243fa34645727338d68ab51b6791 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -69,8 +69,8 @@ no audio bootstrap, no PC-speaker contamination, no GF1 IRQ hook.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        | 254 ++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 985 +++++++++++++++++++++++++++++++
- 2 files changed, 1239 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 991 +++++++++++++++++++++++++++++++
+ 2 files changed, 1245 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -336,10 +336,10 @@ index 000000000..96a0444c4
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..05c5919ff
+index 000000000..65ac84aba
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,985 @@
+@@ -0,0 +1,991 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -922,14 +922,16 @@ index 000000000..05c5919ff
 +   output path are all correct and the silent-music bug is in MidiBackendGus's
 +   note mapping (vel/chanvol->vol, note->FC, .pat->addr); if SILENT, the voice
 +   primitives / output path are the bug. */
++#define GUS_TESTTONE_LEN 8000          /* ~0.36s at 22050 Hz */
++#define GUS_TESTTONE_PERIOD 50         /* 22050/440 ~= 50 samples -> ~440 Hz */
 +static void gus_emit_test_tone(void)
 +{
-+    Uint8 wave[256];
++    static Uint8 wave[GUS_TESTTONE_LEN]; /* static: keep it off the init stack */
 +    int i, v;
 +    Uint32 addr;
 +
-+    for (i = 0; i < 256; i++) {
-+        wave[i] = (i < 128) ? 0xFF : 0x00; /* full-scale 8-bit square (silence=0x80) */
++    for (i = 0; i < GUS_TESTTONE_LEN; i++) {
++        wave[i] = ((i % GUS_TESTTONE_PERIOD) < (GUS_TESTTONE_PERIOD / 2)) ? 0xFF : 0x00;
 +    }
 +    addr = SDL_DOSGusUploadSample(wave, sizeof(wave), 0);
 +    if (addr == SDL_DOSGUS_BAD_ADDR) {
@@ -941,18 +943,22 @@ index 000000000..05c5919ff
 +        doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE: no free voice");
 +        return;
 +    }
-+    /* Mirror the engine note_on order EXACTLY (SetFreq -> SetVol -> SetPan ->
-+       StartVoice) so an audible tone also proves the "set volume/pan BEFORE
-+       StartVoice" path works (i.e. StartVoice preserves them -- the #39 fix).
-+       256-sample loop at 256*440 samples/s -> a ~440 Hz tone. */
-+    SDL_DOSGusSetVoiceFreq(v, 256u * 440u);
++    /* ONE-SHOT, NOT looping (#39 cell-A hang fix): a forever-looping voice keeps
++       reading DRAM and contends with the engine's gameplay .pat PIO poke ->
++       wedge on the PicoGUS. This plays the ~0.36s tone ONCE and wave-ends
++       (voice stops itself + stops reading DRAM) within ~0.36s of boot, long
++       before on_song_start, so it can't contend. Mirrors the engine note_on
++       order (SetFreq -> SetVol -> SetPan -> StartVoice) so an audible tone also
++       proves the "vol/pan before StartVoice" path (the StartVoice-preserves-vol
++       #39 fix). Played at 22050 Hz (sample's native rate, FC ~ 1.0). */
++    SDL_DOSGusSetVoiceFreq(v, 22050u);
 +    SDL_DOSGusSetVoiceVol(v, 255);
 +    SDL_DOSGusSetVoicePan(v, 128);
-+    SDL_DOSGusStartVoice(v, addr, addr + 255, addr, SDL_DOSGUS_LOOP);
++    SDL_DOSGusStartVoice(v, addr, addr + GUS_TESTTONE_LEN - 1, addr, 0); /* flags=0: one-shot, no loop */
 +    doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE STARTED: voice=%d addr=0x%X "
-+                     "(256-byte square loop, ~440Hz, max vol). AUDIBLE => voice "
-+                     "primitives + output path OK (bug is note-mapping); SILENT "
-+                     "=> primitives/output are the bug.",
++                     "(one-shot ~0.36s 440Hz square, max vol; self-terminating). "
++                     "AUDIBLE => voice primitives + output path OK (bug is "
++                     "note-mapping); SILENT => primitives/output are the bug.",
 +                     v, (unsigned)addr);
 +}
 +
