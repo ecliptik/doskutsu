@@ -1,4 +1,4 @@
-From 7ddd39f1cd7ebf66ac9a46607b18edf275e17a96 Mon Sep 17 00:00:00 2001
+From 44aebb108ccacd95441aa92ca11eb9358174ee95 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -7,13 +7,13 @@ Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
 Campaign 3 Phase 0. A native GF1 wavetable audio backend (new
 src/audio/dos/SDL_dosaudio_gus.c) driven OUT-OF-BAND, exactly like the
 shipped AdLib/OPL path (SDL/0110's PIT/OPL exports). It is NOT an SDL
-streaming audio device: there is no audio bootstrap, no SDL audio device
-opened, no SDL3_mixer PCM sink, and no SDL_INIT_AUDIO involvement. The engine
-brings the card up via SDL_DOSGusInit() (mirroring how the AdLib path uses
-SDL_DOSOpl2Detect + the pump start), then uploads sample bytes into the
-card's on-board DRAM and commands GF1 hardware voices through the exports in
-SDL3/SDL_dosgus.h. The GF1 mixes up to N voices in hardware straight to its
-DAC; the host CPU does allocation + event dispatch only.
+streaming audio device: no audio bootstrap, no SDL audio device opened, no
+SDL3_mixer PCM sink, no SDL_INIT_AUDIO involvement. The engine brings the card
+up via SDL_DOSGusInit() (mirroring how the AdLib path uses SDL_DOSOpl2Detect +
+the pump start), then uploads sample bytes into the card's on-board DRAM and
+commands GF1 hardware voices through the exports in SDL3/SDL_dosgus.h. The GF1
+mixes up to N voices in hardware straight to its DAC; the host CPU does
+allocation + event dispatch only.
 
 Why DOS needs this: a GUS-only machine (no Sound Blaster) cannot open
 SDL_INIT_AUDIO at all today, so it had to boot AUDIO_OFF. The engine adds a
@@ -22,25 +22,34 @@ purely through these exports. The Sound Blaster path is wholly untouched
 (this patch adds no audio bootstrap and edits no shared audio core file), so
 it stays byte-identical.
 
-Phase 0 scope (out-of-band model, per the GUS-NATIVE-DESIGN model-B amendment):
+FULLY GF1-IRQ-INDEPENDENT (real-HW finding 2026-06-23): a PicoGUS plays
+poll-based Gravis MIDIDEMO but is SILENT for IRQ-driven Doom GUS on every
+jumper config -- i.e. it does not deliver the GF1 IRQ to IRQ-driven software.
+So this driver hooks NO GF1 IRQ and enables none:
+  - DMA-upload completion POLLS the host 8237 terminal-count (port 0x08 status,
+    bit=channel), independent of the GF1 IRQ line (GF1 reg 0x41 bit6 is a
+    secondary signal); bounded timeout so a stuck transfer can't hang boot.
+  - No ISR is installed; reset reg 0x4C is written 0x03 (master+DAC, IRQ bit2
+    OFF); the per-voice wave-end IRQ is never enabled (SDL_DOSGUS_IRQ accepted
+    but no-op).
+  - Voice-reap is poll-based (engine polls voice_active_mask = GF1 voice-
+    stopped hardware status); the music clock is the external PIT pump.
+This is why doskutsu GUS sounds where IRQ-driven Doom GUS goes silent.
+
+Phase 0 scope:
 - SDL_DOSGusInit/Shutdown: parse ULTRASND/ULTRADIR/VOICES hints via SDL_GetHint
-  (never getenv; the engine bridges the env), GF1 reset, DRAM peek/poke detect
-  + 256K-boundary sizing, set active voices (reg 0x0E -> rate), DAC enable,
-  hook+lock the GF1 IRQ; Shutdown tears down. SKIP_DETECTION bypass.
+  (never getenv; engine bridges the env), GF1 reset, DRAM peek/poke detect +
+  256K-boundary sizing, set active voices (reg 0x0E -> rate), DAC enable;
+  Shutdown silences + parks the chip. SKIP_DETECTION bypass.
 - DRAM upload (verbatim, no sign munging): PIO poke (default) + one-shot 8237
   DMA bulk into a DOS_AllocateDMAMemory bounce; 16-bit samples bank-aligned.
 - Voice ops alloc/start/stop/freq/vol/pan. Driver owns all GF1 conversions
   (FC=hz*1024/rate; 8-bit addr split; 16-bit bank-interleave quirk;
   linear->4.8-log volume; 0-255->4-bit pan). 28 voices (-> ~22050 Hz) at Init.
-- Engine owns voice lifecycle: GetState refreshes voice_active_mask from the
-  GF1 voice-stopped hardware status; the engine polls + StopVoice to reap. The
-  light GF1 ISR only ACKs voice IRQs + flags DMA-terminal; never the pool.
 - IRQ-SAFE voice pool: AllocVoice / StartVoice / StopVoice mutate the shared
-  busy-list inside cli/sti critical sections, because the pool is now driven
-  from BOTH the main loop (Pixtone SFX) AND the IRQ-0 music pump
-  (MidiBackendGus note_on/off) -- without the lock a preempting note_on could
-  double-claim a slot the main loop is allocating (real-HW data race; won't
-  repro in DOSBox). Hardens nx-opl's #28 SFX-on-GF1 path before the g2k iter.
+  busy-list inside cli/sti, because the pool is driven from BOTH the main loop
+  (Pixtone SFX) AND the IRQ-0 music pump (MidiBackendGus note_on/off) -- without
+  the lock a preempting note_on could double-claim a slot (real-HW race).
 - SDL_DOSGusResetDram(keep_bytes) rewinds the DRAM bump cursor while preserving
   a low keep region (persistent SFX bank survives per-song .pat swaps).
 - New hints SDL_HINT_DOSKUTSU_GUS_{ULTRASND,ULTRADIR,VOICES,SKIP_DETECTION,
@@ -52,20 +61,20 @@ GF1 register indices cross-checked against the DOSBox-X gus.cpp emulation (the
 campaign's functional witness) + the GUS SDK programming model; the IRQ/DMA
 latch + a few conversions are ACCURATE-BUT-CONFIRM inline, pending the
 operator's g2k register-accuracy pass (dosbox_not_proxy). Validated here by a
-clean libSDL3.a link with all 11 exports present, no audio bootstrap symbol,
-and no PC-speaker contamination.
+clean libSDL3.a link with all 11 exports, no audio bootstrap symbol, no
+PC-speaker contamination, and no GF1 IRQ hook.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        | 254 +++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 879 +++++++++++++++++++++++++++++++
- 2 files changed, 1133 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 858 +++++++++++++++++++++++++++++++
+ 2 files changed, 1112 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
 diff --git a/include/SDL3/SDL_dosgus.h b/include/SDL3/SDL_dosgus.h
 new file mode 100644
-index 000000000..e7be88194
+index 000000000..96a0444c4
 --- /dev/null
 +++ b/include/SDL3/SDL_dosgus.h
 @@ -0,0 +1,254 @@
@@ -140,7 +149,7 @@ index 000000000..e7be88194
 +#define SDL_DOSGUS_LOOP   0x01u /* loop start..end (else one-shot, stop at end) */
 +#define SDL_DOSGUS_16BIT  0x02u /* sample is 16-bit signed (else 8-bit unsigned) */
 +#define SDL_DOSGUS_BIDI   0x04u /* bidirectional (ping-pong) loop */
-+#define SDL_DOSGUS_IRQ    0x08u /* raise a wave-end IRQ (driver only acks it) */
++#define SDL_DOSGUS_IRQ    0x08u /* accepted but NO-OP: the IRQ-independent driver never enables wave-end IRQs (poll voice_active_mask instead) */
 +
 +/* Snapshot of the active GF1 device state. Cheap struct copy + a per-voice
 +   hardware status poll; safe to call once per MIDI tick. */
@@ -325,10 +334,10 @@ index 000000000..e7be88194
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..66323ea95
+index 000000000..09e2300ba
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,879 @@
+@@ -0,0 +1,858 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -461,14 +470,16 @@ index 000000000..66323ea95
 +   in StopVoice; the ISR never touches it. */
 +static volatile bool g_gus_voice_busy[GUS_MAX_VOICES];
 +
-+/* GF1 interrupt hook + a DMA-terminal completion flag (set by the ISR). */
-+static DOS_InterruptHook g_gus_int_hook;
-+static volatile int g_gus_dma_done = 0;
++/* IRQ-INDEPENDENT design (SDL/0112, real-HW finding 2026-06-23): the driver
++   hooks NO GF1 IRQ and enables none. DMA-upload completion is detected by
++   polling the host 8237 terminal-count (independent of the GF1 IRQ line);
++   voice-reap is poll-based via voice_active_mask; the music clock is the PIT
++   pump. This is why doskutsu GUS sounds on a PicoGUS that doesn't deliver the
++   GF1 IRQ to IRQ-driven software (where IRQ-driven Doom GUS stays silent). */
 +
 +/* diag counters */
 +static Uint32 g_gus_n_upload = 0;
 +static Uint32 g_gus_n_start = 0;
-+static Uint32 g_gus_n_irq = 0;
 +
 +/* ------------------------------------------------------------------------- */
 +/* Low-level GF1 register access. The per-voice and DRAM-address sequences    */
@@ -619,7 +630,7 @@ index 000000000..66323ea95
 +    gus_w8(GUS_REG_RESET, 0x01); /* master enable, out of reset */
 +    SDL_DelayPrecise(SDL_US_TO_NS(100));
 +    if (enable_outputs) {
-+        gus_w8(GUS_REG_RESET, 0x07); /* bit0 master + bit1 DAC + bit2 IRQ */
++        gus_w8(GUS_REG_RESET, 0x03); /* bit0 master + bit1 DAC; IRQ (bit2) OFF (IRQ-independent) */
 +        SDL_DelayPrecise(SDL_US_TO_NS(100));
 +    }
 +}
@@ -688,40 +699,11 @@ index 000000000..66323ea95
 +    return size;
 +}
 +
-+/* ------------------------------------------------------------------------- */
-+/* The GF1 interrupt service routine -- LIGHT (no PCM ring drain, and it does  */
-+/* NOT free voices: the engine owns the pool). It only ACKs pending GF1 voice  */
-+/* IRQs (so they don't re-fire) and flags DMA-terminal completion, then EOIs.  */
-+/* Locked + runs with interrupts disabled (chain IRET wrapper).                */
-+/* ------------------------------------------------------------------------- */
-+static void gus_irq_handler(void)
-+{
-+    int guard;
-+    Uint8 dma_ctrl;
-+
-+    g_gus_n_irq++;
-+
-+    /* drain pending voice wave-end / ramp-end IRQs by reading reg 0x8F (it
-+       reports one voice per read, advancing to the next; bit7=0 wave IRQ,
-+       bit6=0 ramp IRQ). We only ACK them -- we do NOT touch the alloc pool
-+       (the engine reaps voices via voice_active_mask + StopVoice). */
-+    for (guard = 0; guard < (GUS_MAX_VOICES + 1); guard++) {
-+        Uint8 src = gus_r8(GUS_REG_IRQSTAT);
-+        if ((src & 0x80) && (src & 0x40)) {
-+            break; /* no IRQ pending */
-+        }
-+        /* reading 0x8F already cleared this voice's pending bit(s). */
-+    }
-+
-+    /* DMA-terminal: reg 0x41 bit6 = TC pending (read-acknowledge clears). */
-+    dma_ctrl = gus_r8(GUS_REG_DMA_CTRL);
-+    if (dma_ctrl & 0x40) {
-+        g_gus_dma_done = 1;
-+    }
-+
-+    DOS_EndOfInterrupt(g_gus_irq);
-+}
-+static void gus_irq_handler_end(void) { }
++/* No GF1 interrupt service routine: the driver is IRQ-independent (see the
++   top-of-file note). DMA-upload completion polls the host 8237 terminal-count
++   (gus_upload_dma), wave-end is detected by polling voice_active_mask in
++   SDL_DOSGusGetState, and the music clock is the external PIT pump (SDL/0110).
++   Nothing hooks or depends on the GF1 IRQ line. */
 +
 +/* ------------------------------------------------------------------------- */
 +/* Hint parsing.                                                              */
@@ -847,7 +829,15 @@ index 000000000..66323ea95
 +    dma_bytes = len - 1;
 +
 +    DOS_DisableInterrupts();
-+    g_gus_dma_done = 0;
++
++    /* Clear any STALE 8237 terminal-count status before arming, so the poll
++       below only ever sees the TC of THIS transfer. Reading the status
++       register (0x08) clears its TC/request bits. Without this, a TC bit left
++       set on our channel by a prior transfer (or by BIOS/a prior program at
++       first-upload) would read as instant "done" -> a truncated DRAM upload.
++       (Sequential uploads on the GUS path normally leave it clear, but this is
++       a won't-repro-in-DOSBox real-HW edge.) */
++    (void)inportb(0x08);
 +
 +    /* host 8237 (8-bit channel) -- single, READ from memory, no auto-init
 +       (mode 0x48 | ch: GF1 upload is one-shot, not the SB's auto-init 0x58). */
@@ -871,14 +861,20 @@ index 000000000..66323ea95
 +    gus_w8(GUS_REG_DMA_CTRL, 0x01);
 +    DOS_EnableInterrupts();
 +
-+    /* wait for the DMA-terminal flag (ISR) or poll reg 0x41 bit6 directly, with
-+       a bounded spin so a mis-wired IRQ can't hang the boot. */
++    /* IRQ-INDEPENDENT completion poll: watch the HOST 8237 terminal-count
++       status (port 0x08 status register, bit = channel -- set when the
++       channel's transfer completes; read-to-clear). This does NOT depend on
++       the GF1 IRQ line, so the upload completes on a PicoGUS that withholds
++       the GF1 IRQ from IRQ-driven software (the Doom-silence finding). The
++       GF1's own DMA-TC status (reg 0x41 bit6) is a secondary signal. Bounded
++       spin with a timeout so a stuck transfer can't hang boot. Interrupts are
++       enabled here so the cooperative scheduler / PIT pump keep running. */
 +    for (spin = 0; spin < 100000; spin++) {
-+        if (g_gus_dma_done) {
-+            break;
++        if (inportb(0x08) & (1 << dma)) {
++            break; /* host 8237 reached terminal count for this channel */
 +        }
 +        if (gus_r8(GUS_REG_DMA_CTRL) & 0x40) {
-+            break; /* TC seen directly */
++            break; /* GF1 DMA-TC status (secondary, IRQ-line-independent) */
 +        }
 +        SDL_DelayPrecise(SDL_US_TO_NS(10));
 +    }
@@ -944,28 +940,21 @@ index 000000000..66323ea95
 +        return false;
 +    }
 +
-+    /* bring-up: IRQ/DMA latch, active-voice count (rate), DAC + IRQ enable. */
++    /* bring-up: DMA latch (still needed for the upload), active-voice count
++       (rate), master + DAC enable. The GF1 IRQ is NEITHER hooked NOR enabled
++       (reset reg bit2 stays OFF) -- IRQ-independent design (see top-of-file
++       note): upload completion polls the host 8237 TC, voice-reap polls
++       voice_active_mask, and the music clock is the external PIT pump. */
 +    gus_program_irq_dma();
 +    gus_w8(GUS_REG_VOICES, (Uint8)(0xC0 | (g_gus_voices - 1)));
-+    gus_w8(GUS_REG_RESET, 0x07); /* master + DAC + IRQ */
++    gus_w8(GUS_REG_RESET, 0x03); /* master + DAC; IRQ (bit2) OFF */
 +    SDL_DelayPrecise(SDL_US_TO_NS(100));
 +
 +    for (v = 0; v < GUS_MAX_VOICES; v++) {
 +        g_gus_voice_busy[v] = false;
 +    }
 +    g_gus_dram_used = 0;
-+    g_gus_dma_done = 0;
 +    gus_silence_all_voices();
-+
-+    /* lock the ISR + the globals it touches, then hook the GF1 IRQ. */
-+    DOS_LockCode(gus_irq_handler, gus_irq_handler_end);
-+    DOS_LockVariable(g_gus_base);
-+    DOS_LockVariable(g_gus_irq);
-+    DOS_LockVariable(g_gus_dma_done);
-+    DOS_LockVariable(g_gus_n_irq);
-+    if (g_gus_irq >= 0) {
-+        DOS_HookInterrupt(g_gus_irq, gus_irq_handler, &g_gus_int_hook);
-+    }
 +
 +    g_gus_active = true;
 +
@@ -983,9 +972,7 @@ index 000000000..66323ea95
 +    }
 +    g_gus_active = false;
 +    gus_silence_all_voices();
-+    if (g_gus_irq >= 0 && g_gus_int_hook.fn) {
-+        DOS_UnhookInterrupt(&g_gus_int_hook, true);
-+    }
++    /* no GF1 IRQ was hooked (IRQ-independent design) -- nothing to unhook. */
 +    gus_w8(GUS_REG_RESET, 0x00); /* park the chip in reset */
 +}
 +
@@ -1131,9 +1118,10 @@ index 000000000..66323ea95
 +    if (flags & SDL_DOSGUS_BIDI) {
 +        ctrl |= GUS_VC_BIDI;
 +    }
-+    if (flags & SDL_DOSGUS_IRQ) {
-+        ctrl |= GUS_VC_IRQ;
-+    }
++    /* SDL_DOSGUS_IRQ is deliberately NOT honored: the IRQ-independent design
++       never enables the per-voice wave-end IRQ (the engine detects wave-end by
++       polling voice_active_mask). The flag is accepted for API compatibility
++       but sets no hardware bit, so the GF1 never asserts its IRQ line. */
 +
 +    DOS_DisableInterrupts();
 +    gus_select_voice(voice);
