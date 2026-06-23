@@ -1,4 +1,4 @@
-From ff2d34cbdcf00133415a7baf84bfae8917b34f9b Mon Sep 17 00:00:00 2001
+From 7ddd39f1cd7ebf66ac9a46607b18edf275e17a96 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -18,32 +18,31 @@ DAC; the host CPU does allocation + event dispatch only.
 Why DOS needs this: a GUS-only machine (no Sound Blaster) cannot open
 SDL_INIT_AUDIO at all today, so it had to boot AUDIO_OFF. The engine adds a
 `gus` boot-mode that omits SDL_INIT_AUDIO (like `adlib`) and drives the GF1
-purely through these exports -- enabling native wavetable audio on a GUS box
-and moving the whole PCM mix off the P54C (the 50fps KPI angle). The Sound
-Blaster path is wholly untouched (this patch adds no audio bootstrap and edits
-no shared audio core file), so it stays byte-identical.
+purely through these exports. The Sound Blaster path is wholly untouched
+(this patch adds no audio bootstrap and edits no shared audio core file), so
+it stays byte-identical.
 
 Phase 0 scope (out-of-band model, per the GUS-NATIVE-DESIGN model-B amendment):
 - SDL_DOSGusInit/Shutdown: parse ULTRASND/ULTRADIR/VOICES hints via SDL_GetHint
-  (never getenv; the engine bridges the real env vars), GF1 reset, DRAM
-  peek/poke detect (0x43/0x44/3X7) + 256K-boundary sizing, set active voices
-  (reg 0x0E -> rate), DAC enable, hook+lock the GF1 IRQ; Shutdown tears down.
-  SKIP_DETECTION escape hatch for DOSBox/PicoGUS bring-up.
-- DRAM upload (verbatim, no sign munging): programmed-I/O poke (small,
-  always-correct, default) + one-shot 8237 DMA bulk into a DOS_AllocateDMAMemory
-  bounce buffer (freed after; not a ring); 16-bit samples bank-aligned.
-- Voice ops alloc/start/stop/freq/vol/pan via per-voice regs. Driver owns all
-  GF1 conversions (FC = hz*1024/rate; 8-bit addr split hi=addr>>7
-  lo=(addr&0x7F)<<9; 16-bit bank-interleave quirk; linear->4.8-log volume;
-  0-255->4-bit pan). Voices pinned at 28 (-> ~22050 Hz) set once at Init.
-- Engine owns voice lifecycle: the driver never auto-returns a wave-ended
-  voice. SDL_DOSGusGetState refreshes voice_active_mask from the GF1
-  voice-stopped hardware status (double-read for the latch quirk); the engine
-  polls it and calls StopVoice to reap. The light GF1 ISR only ACKs pending
-  voice IRQs + flags DMA-terminal; it never touches the alloc pool. Locked
-  code + globals.
+  (never getenv; the engine bridges the env), GF1 reset, DRAM peek/poke detect
+  + 256K-boundary sizing, set active voices (reg 0x0E -> rate), DAC enable,
+  hook+lock the GF1 IRQ; Shutdown tears down. SKIP_DETECTION bypass.
+- DRAM upload (verbatim, no sign munging): PIO poke (default) + one-shot 8237
+  DMA bulk into a DOS_AllocateDMAMemory bounce; 16-bit samples bank-aligned.
+- Voice ops alloc/start/stop/freq/vol/pan. Driver owns all GF1 conversions
+  (FC=hz*1024/rate; 8-bit addr split; 16-bit bank-interleave quirk;
+  linear->4.8-log volume; 0-255->4-bit pan). 28 voices (-> ~22050 Hz) at Init.
+- Engine owns voice lifecycle: GetState refreshes voice_active_mask from the
+  GF1 voice-stopped hardware status; the engine polls + StopVoice to reap. The
+  light GF1 ISR only ACKs voice IRQs + flags DMA-terminal; never the pool.
+- IRQ-SAFE voice pool: AllocVoice / StartVoice / StopVoice mutate the shared
+  busy-list inside cli/sti critical sections, because the pool is now driven
+  from BOTH the main loop (Pixtone SFX) AND the IRQ-0 music pump
+  (MidiBackendGus note_on/off) -- without the lock a preempting note_on could
+  double-claim a slot the main loop is allocating (real-HW data race; won't
+  repro in DOSBox). Hardens nx-opl's #28 SFX-on-GF1 path before the g2k iter.
 - SDL_DOSGusResetDram(keep_bytes) rewinds the DRAM bump cursor while preserving
-  a low keep region (a persistent SFX bank survives per-song .pat swaps).
+  a low keep region (persistent SFX bank survives per-song .pat swaps).
 - New hints SDL_HINT_DOSKUTSU_GUS_{ULTRASND,ULTRADIR,VOICES,SKIP_DETECTION,
   DIAG} (diag default-OFF).
 - REQUIRED detect banner "audio: SDL/0112 GUS GF1 detect: present=..." for the
@@ -52,15 +51,15 @@ Phase 0 scope (out-of-band model, per the GUS-NATIVE-DESIGN model-B amendment):
 GF1 register indices cross-checked against the DOSBox-X gus.cpp emulation (the
 campaign's functional witness) + the GUS SDK programming model; the IRQ/DMA
 latch + a few conversions are ACCURATE-BUT-CONFIRM inline, pending the
-operator's g2k register-accuracy pass (dosbox_not_proxy: DOSBox is a functional
-witness only). Validated here by a clean libSDL3.a link with all 11 exports
-present and no audio bootstrap symbol.
+operator's g2k register-accuracy pass (dosbox_not_proxy). Validated here by a
+clean libSDL3.a link with all 11 exports present, no audio bootstrap symbol,
+and no PC-speaker contamination.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        | 254 +++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 869 +++++++++++++++++++++++++++++++
- 2 files changed, 1123 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 879 +++++++++++++++++++++++++++++++
+ 2 files changed, 1133 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -326,10 +325,10 @@ index 000000000..e7be88194
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..22a2715ca
+index 000000000..66323ea95
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,869 @@
+@@ -0,0 +1,879 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -1085,17 +1084,27 @@ index 000000000..22a2715ca
 +
 +int SDL_DOSGusAllocVoice(void)
 +{
-+    int v;
++    int v, found = -1;
 +    if (!g_gus_active) {
 +        return -1;
 +    }
++    /* IRQ-SAFE: the voice pool is shared between main-loop SFX (Pixtone
++       playSfx -> AllocVoice) and IRQ-0-pump music note_on (MidiBackendGus ->
++       AllocVoice). A main-loop AllocVoice can be preempted mid-scan by the
++       pump IRQ firing a note_on that also allocates; without a critical
++       section both see the same free slot and double-claim it. cli/sti makes
++       the find-free + claim atomic across the IRQ boundary. (StartVoice /
++       StopVoice mutate the busy-list inside their own cli/sti windows too.) */
++    DOS_DisableInterrupts();
 +    for (v = 0; v < g_gus_voices; v++) {
 +        if (!g_gus_voice_busy[v]) {
 +            g_gus_voice_busy[v] = true;
-+            return v;
++            found = v;
++            break;
 +        }
 +    }
-+    return -1; /* pool exhausted -- caller does its own steal policy */
++    DOS_EnableInterrupts();
++    return found; /* -1 if pool exhausted -- caller does its own steal policy */
 +}
 +
 +void SDL_DOSGusStartVoice(int voice, Uint32 start, Uint32 end, Uint32 loopstart, Uint32 flags)
@@ -1139,9 +1148,9 @@ index 000000000..22a2715ca
 +    gus_w16(GUS_VREG_VOLUME, (Uint16)(gus_linear_to_logvol(200) << 4)); /* default audible */
 +    gus_w8(GUS_VREG_PAN, 0x07);            /* center until SetVoicePan */
 +    gus_w8(GUS_VREG_CTRL, ctrl);           /* GO */
++    g_gus_voice_busy[voice] = true;        /* claim inside the critical section */
 +    DOS_EnableInterrupts();
 +
-+    g_gus_voice_busy[voice] = true;
 +    g_gus_n_start++;
 +}
 +
@@ -1154,8 +1163,8 @@ index 000000000..22a2715ca
 +    gus_select_voice(voice);
 +    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
 +    gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);
++    g_gus_voice_busy[voice] = false;       /* free inside the critical section */
 +    DOS_EnableInterrupts();
-+    g_gus_voice_busy[voice] = false;
 +}
 +
 +void SDL_DOSGusSetVoiceFreq(int voice, Uint32 playback_hz)
