@@ -1,4 +1,4 @@
-From 4a7fb93e4a517defe6fe436895968a8f655e681d Mon Sep 17 00:00:00 2001
+From f6b95790a8e446cfc953d7ceb41018c26795100b Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -69,8 +69,8 @@ no audio bootstrap, no PC-speaker contamination, no GF1 IRQ hook.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        | 254 +++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 896 +++++++++++++++++++++++++++++++
- 2 files changed, 1150 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 906 +++++++++++++++++++++++++++++++
+ 2 files changed, 1160 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -336,10 +336,10 @@ index 000000000..96a0444c4
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..a015a37af
+index 000000000..a75bb728d
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,896 @@
+@@ -0,0 +1,906 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -1066,24 +1066,34 @@ index 000000000..a015a37af
 +       HW (same mechanism as detection's DRAM poke/peek) and immune to the ISA
 +       8237 64KB-page crash. DMA (64KB-safe chunked) is OPT-IN via
 +       SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD=1, and only for 8-bit samples >= the
-+       threshold; 16-bit always takes PIO (sidesteps the 16-bit DMA dest quirk). */
++       threshold; 16-bit always takes PIO (sidesteps the 16-bit DMA dest quirk).
++
++       Both transports read EXACTLY [data, data+len): PIO is strictly byte-wise
++       (src[i] single bytes, no word/dword over-read), DMA is SDL_memcpy(nbytes)
++       (bounded). So a host page-fault during the read means `len` EXCEEDS the
++       caller's `data` buffer -- a caller-side length bug, NOT a transport
++       over-read (#38: PIO and DMA fault identically, which a word-alignment
++       over-read could not cause since PIO reads single bytes). */
 +    {
-+        const char *method;
-+        if (g_gus_dma_upload && !is16bit && len >= GUS_DMA_UPLOAD_MIN &&
-+            gus_upload_dma(dram_addr, (const Uint8 *)data, len)) {
-+            method = "dma";
-+        } else {
-+            gus_upload_pio(dram_addr, (const Uint8 *)data, len);
-+            method = "pio";
-+        }
++        const int want_dma = (g_gus_dma_upload && !is16bit && len >= GUS_DMA_UPLOAD_MIN);
 +        g_gus_n_upload++;
++        /* DIAG (#38): logged + fsync'd BEFORE reading the host buffer, so if a
++           too-large `len` over-reads `data` into an unmapped DPMI page and hard-
++           faults, this is the LAST log line -- naming the culprit upload
++           (fx#/len/method/dram_addr). Pairs with the engine's per-.pxt
++           synth-size vs len-passed log to localize the mismatch. */
 +        if (g_gus_diag) {
-+            doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u: addr=0x%X len=%u %s "
++            doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u (start): addr=0x%X len=%u %s "
 +                             "via=%s used=%uKB/%uKB",
 +                             g_gus_n_upload, (unsigned)dram_addr, (unsigned)len,
-+                             is16bit ? "16b" : "8b", method,
++                             is16bit ? "16b" : "8b", want_dma ? "dma" : "pio",
 +                             (unsigned)(g_gus_dram_used / 1024),
 +                             (unsigned)(g_gus_dram_size / 1024));
++        }
++        if (want_dma && gus_upload_dma(dram_addr, (const Uint8 *)data, len)) {
++            /* uploaded via DMA */
++        } else {
++            gus_upload_pio(dram_addr, (const Uint8 *)data, len);
 +        }
 +    }
 +    return dram_addr;
