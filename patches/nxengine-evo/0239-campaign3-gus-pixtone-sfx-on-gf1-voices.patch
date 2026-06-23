@@ -1,8 +1,8 @@
-From 4533ed0ae022ed7a586cbea3087c954011e7ea46 Mon Sep 17 00:00:00 2001
+From a118da89f41db8ed7a58781a802ca6e7b9bf99b7 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 17:06:13 -0700
-Subject: [PATCH] patch 0239 -- Campaign 3 GUS P2 (#28): Pixtone SFX on GF1
- voices
+Subject: [PATCH 239/240] patch 0239 -- Campaign 3 GUS P2 (#28): Pixtone SFX on
+ GF1 voices
 
 Renders the 117 Pixtone .pxt and uploads them (8-bit unsigned mono @ 22050 Hz)
 into the Gravis Ultrasound's on-board DRAM once at init, then plays them on the
@@ -32,12 +32,12 @@ banners + GF1 voice exports; no pcspk. Full series re-applies (0238 -> 0239).
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- src/sound/MidiBackendGus.cpp |  21 +++-
+ src/sound/MidiBackendGus.cpp |  21 ++-
  src/sound/MidiBackendGus.h   |   8 ++
- src/sound/Pixtone.cpp        | 213 +++++++++++++++++++++++++++++++++++
- src/sound/Pixtone.h          |  33 ++++++
- src/sound/SoundManager.cpp   |  28 +++--
- 5 files changed, 293 insertions(+), 10 deletions(-)
+ src/sound/Pixtone.cpp        | 242 +++++++++++++++++++++++++++++++++++
+ src/sound/Pixtone.h          |  33 +++++
+ src/sound/SoundManager.cpp   |  28 +++-
+ 5 files changed, 322 insertions(+), 10 deletions(-)
 
 diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
 index 0ba5acac..bc2a225c 100644
@@ -91,7 +91,7 @@ index fc5f4b48..c30c7bdb 100644
    std::uint64_t _voice_alloc_count = 0;
  
 diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
-index ce40ea14..063a001f 100644
+index ce40ea14..f52288a7 100644
 --- a/src/sound/Pixtone.cpp
 +++ b/src/sound/Pixtone.cpp
 @@ -17,6 +17,7 @@
@@ -102,7 +102,7 @@ index ce40ea14..063a001f 100644
  #include <SDL3_mixer/SDL_mixer.h>
  
  #ifdef __DJGPP__
-@@ -507,6 +508,173 @@ bool Pixtone::init()
+@@ -507,6 +508,202 @@ bool Pixtone::init()
    return true;
  }
  
@@ -145,9 +145,27 @@ index ce40ea14..063a001f 100644
 +    return false;
 +  }
 +
-+  LOG_INFO("Loading Sound FX (GUS / GF1 DRAM)...");
++  // MUSIC-PRIORITY DRAM CAP (#28 robustness): reserve room for a song's GM .pat
++  // set so the SFX bank can NEVER starve the music (the headline). SFX fills DRAM
++  // only up to (dram_size - RESERVE_FOR_MUSIC); the remainder stays free for the
++  // MidiBackendGus per-song .pat residency. On a large card all 117 SFX fit; on a
++  // small card SFX degrades gracefully (over-budget SFX stay silent) but music
++  // ALWAYS loads. Without this, bq-pg's 256KB DOSBox GF1 filled with SFX alone ->
++  // music starved. INVARIANT (holds at any DRAM size), not a measured perf-tune.
++  // RESERVE_FOR_MUSIC is a CONSERVATIVE DEFAULT -- REFINE once realhw #30 reports
++  // the real PicoGUS /mode gus DRAM size (via the SDL/0112 detect banner) + the
++  // actual per-song .pat footprint.
++  static const uint32_t RESERVE_FOR_MUSIC = 320u * 1024u;  // ~a song's instrument set
++  const uint32_t sfx_budget =
++      (st.dram_size > RESERVE_FOR_MUSIC) ? (st.dram_size - RESERVE_FOR_MUSIC)
++                                         : (st.dram_size / 2);  // tiny card: 50/50 floor
++  LOG_INFO("Loading Sound FX (GUS / GF1 DRAM)... SFX budget = {} KB of {} KB "
++           "(reserving {} KB for the song's .pat set -- music-priority).",
++           (unsigned)(sfx_budget / 1024), (unsigned)(st.dram_size / 1024),
++           (unsigned)(RESERVE_FOR_MUSIC / 1024));
 +  std::string path = ResourceManager::getInstance()->getPathForDir("pxt/");
-+  int uploaded = 0, failed = 0;
++  int uploaded = 0, failed = 0, skipped = 0;
++  uint32_t sfx_used = 0;
 +  for (uint32_t slot = 1; slot <= NUM_SOUNDS; slot++)
 +  {
 +    std::ostringstream filename;
@@ -160,6 +178,14 @@ index ce40ea14..063a001f 100644
 +    if (snd.final_buffer && snd.final_size > 0)
 +    {
 +      const uint32_t n = (uint32_t)snd.final_size;
++      // Music-priority cap: skip this SFX if it would push the bank past the
++      // budget (continue, not break, so a smaller later SFX can still fit).
++      if (sfx_used + n > sfx_budget)
++      {
++        ++skipped;
++        snd.freeBuf();
++        continue;
++      }
 +      uint8_t *tmp = (uint8_t *)std::malloc(n);
 +      if (tmp)
 +      {
@@ -174,12 +200,14 @@ index ce40ea14..063a001f 100644
 +          _sound_fx[slot].gus_len       = n;
 +          _sound_fx[slot].gus_resident  = true;
 +          ++uploaded;
++          sfx_used += n;  // music-priority budget accounting
 +        }
 +        else
 +        {
 +          ++failed;
 +          LOG_WARN("gus SFX: DRAM full uploading slot {} ({} bytes); this SFX "
-+                   "stays silent.", slot, n);
++                   "stays silent (the music-priority cap should normally "
++                   "prevent this).", slot, n);
 +        }
 +      }
 +    }
@@ -190,9 +218,10 @@ index ce40ea14..063a001f 100644
 +  const unsigned used_kb =
 +      (SDL_DOSGusGetState(&st2) && st2.valid) ? (unsigned)(st2.dram_used / 1024) : 0;
 +  LOG_INFO("gus SFX: uploaded {} of {} .pxt to GF1 DRAM (8-bit unsigned mono @ "
-+           "22050 Hz; {} failed). Persistent SFX bank = {} KB DRAM (the "
-+           "MidiBackendGus per-song .pat residency preserves it via its "
-+           "auto-snapshotted keep-mark at first song start).",
++           "22050 Hz; {} failed; {} skipped over the music-priority budget). "
++           "Persistent SFX bank = {} KB DRAM (the MidiBackendGus per-song .pat "
++           "residency preserves it via its auto-snapshotted keep-mark at first "
++           "song start; the reserve above it always fits a song's instruments).",
 +           uploaded, (int)NUM_SOUNDS, failed, used_kb);
 +  return uploaded > 0;
 +}
@@ -276,7 +305,7 @@ index ce40ea14..063a001f 100644
  void Pixtone::shutdown()
  {
    // DOS-PORT: Mix_FreeChunk(chunk) -> MIX_DestroyAudio(audio). Also no
-@@ -575,6 +743,16 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+@@ -575,6 +772,16 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
    // dispatch) trigger the destructor identically.
    NXE::Diag::P12PixtonePlayTimer _p12_ppt;
  
@@ -293,7 +322,7 @@ index ce40ea14..063a001f 100644
    // patch 0167 (Lever 3 Pixtone IRQ-mix routing branch). When the
    // killswitch is ENABLED, route to the SB16 IRQ-5 ISR mix path via
    // SDL_DOSPixtoneStart instead of MIX_PlayTrack. The ISR-pool path
-@@ -688,6 +866,16 @@ void Pixtone::setVolume(int volume_0_100)
+@@ -688,6 +895,16 @@ void Pixtone::setVolume(int volume_0_100)
    // same null-check; consistent.
    const float gain = (float)volume_0_100 / 100.0f;
  
@@ -310,7 +339,7 @@ index ce40ea14..063a001f 100644
    // patch 0167 (Lever 3 Pixtone IRQ-mix). Mirror the new gain into
    // per-slot gain_x256 so future Pixtone::play calls under L3 pass
    // the current gain to SDL_DOSPixtoneStart. fixed-point x256 (256
-@@ -802,6 +990,15 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+@@ -802,6 +1019,15 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
    // cache after that; flush-instr's decomp distinguishes cached vs
    // fresh by the count/avg ratio if it matters.
    NXE::Diag::P12PixtonePlayTimer _p12_ppt;
@@ -326,7 +355,7 @@ index ce40ea14..063a001f 100644
    if (_sound_fx[slot].chunk)
    {
      uint32_t resampled_rate = SAMPLE_RATE * (percent / 100);
-@@ -991,6 +1188,22 @@ void Pixtone::stop(int32_t slot)
+@@ -991,6 +1217,22 @@ void Pixtone::stop(int32_t slot)
    // cost + per-SFX bookkeeping. Per-SFX-event; not per-frame.
    NXE::Diag::P12PixtoneStopTimer _p12_pst;
  
