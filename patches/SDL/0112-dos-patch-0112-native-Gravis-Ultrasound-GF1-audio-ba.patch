@@ -1,4 +1,4 @@
-From 1b6a0bc01845aa295fa774dffc8fa21d1964985c Mon Sep 17 00:00:00 2001
+From 40d80ee1922aa05640c6b74b4ea3c4ed1f161115 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -92,11 +92,35 @@ gus-5 (#41 the .pat-upload freeze + #40 quiesce, folded in):
 - "device up" banner gains upload=pio[+autoinc] to witness the active cell.
 - New hint documented in docs/internal/BOOT.md.
 
+gus-6 (#42 the post-upload first-note freeze -- the real music blocker):
+- ROOT (code-confirmed): gus_encode_addr encoded the GF1 16-bit DRAM address
+  with the READ-side transform (a = (a & 0xC0000) | ((a & 0x1FFFF) << 1)) -- the
+  inverse of what a driver needs. The hardware then applies its own <<1 on read,
+  so a 16-bit voice fetched from ~4*A (the wrong DRAM region: other instruments
+  / un-uploaded garbage). All these .pat are 16-bit, so EVERY music voice
+  mis-fetched. The PicoGUS mis-fetch then asserted IOCHRDY on the next card I/O
+  -> CPU freeze right after on_song_start (no game-loop flips, no voice line).
+  gus-2 never hit it (the old freq bug left voices near-DC, never fetching);
+  #39 "in-tune" was an fc-value log check, not an ear check; DOSBox smoke never
+  audibly plays a 16-bit voice -- so this path had never played on anything.
+- FIX (one line): canonical GUS_16BIT_ADDR encode -- shift the in-bank offset
+  RIGHT: a = (a & 0xC0000) | ((a >> 1) & 0x1FFFF). Round-trip is now exact
+  (hw read-back == A). The 0x1FFFF mask is complete with >>1 (A spans 0..0x3FFFF
+  in a 256K bank -> A>>1 spans 0..0x1FFFF, no bits dropped). Ref: Gravis SDK /
+  Linux gus_wave.c; cross-checked vs DOSBox-X gus.cpp read xform.
+- CONFIRM diag (GUS_DIAG): the per-voice START log reconstructs the programmed
+  integer address from the actual encoded MSW|LSW, applies the GF1 read xform,
+  and prints hw_fetch=0x... (==start? N) -- 1 proves the fetch lands on the
+  uploaded address.
+- A/B fallback hint SDL_HINT_DOSKUTSU_GUS_FORCE_8BIT_ADDR=1 (default OFF): forces
+  8-bit voice addressing to isolate the 16-bit path if the encode fix does not
+  fully clear the wedge. Diagnostic only.
+
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 ++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1057 ++++++++++++++++++++++++++++++
- 2 files changed, 1324 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1089 ++++++++++++++++++++++++++++++
+ 2 files changed, 1356 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -375,10 +399,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..d31506211
+index 000000000..724f59e36
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1057 @@
+@@ -0,0 +1,1089 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -515,6 +539,7 @@ index 000000000..d31506211
 +static bool g_gus_diag = false;            /* SDL/0112 diag counters (default OFF) */
 +static bool g_gus_dma_upload = false;      /* DMA upload opt-in (default OFF -> PIO; #36) */
 +static bool g_gus_pio_autoinc = false;     /* PIO DRAM auto-increment (gus-5 #41; default OFF) */
++static bool g_gus_force_8bit_addr = false; /* gus-6 #42 A/B: force 8-bit voice addressing (default OFF) */
 +
 +/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
 +   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
@@ -625,13 +650,25 @@ index 000000000..d31506211
 +
 +/* Encode a DRAM byte address into the GF1 voice address MSW/LSW pair. 8-bit:
 +   the 32-bit accumulator is (byteaddr << 9) | 9-bit fraction, so MSW =
-+   addr>>7, LSW = (addr & 0x7F) << 9. 16-bit: apply the bank-interleave quirk
-+   first (keep bits 18-19, shift bits 0-17 left 1). */
++   addr>>7, LSW = (addr & 0x7F) << 9.
++
++   16-bit (gus-6 #41 fix): the GF1 16-bit DRAM quirk requires the canonical
++   GUS_16BIT_ADDR ENCODE: keep the bank bits (18-19) and shift the in-bank
++   offset RIGHT by 1 -> programmed = (A & 0xC0000) | ((A>>1) & 0x1FFFF). The
++   prior code shifted LEFT, which is the GF1's READ-side transform (the inverse
++   -- what the hardware applies to recover the byte address FROM a programmed
++   address). Encoding with <<1 meant the GF1 then applied its own <<1 on read,
++   so a 16-bit voice fetched from ~4*A -- the wrong DRAM region (garbage /
++   un-uploaded). With >>1 the round-trip is exact (read-back == A). The 0x1FFFF
++   mask is now COMPLETE: A spans 0..0x3FFFF within a 256K bank, so A>>1 spans
++   0..0x1FFFF with no bits dropped (the earlier bit-17 loss was an artifact of
++   the wrong <<1 direction, not a mask-width gap). Ref: Gravis SDK /
++   Linux gus_wave.c GUS_16BIT_ADDR; cross-checked vs DOSBox-X gus.cpp read xform. */
 +static void gus_encode_addr(Uint32 byteaddr, int is16bit, Uint16 *msw, Uint16 *lsw)
 +{
 +    Uint32 a = byteaddr;
 +    if (is16bit) {
-+        a = (a & 0xC0000u) | ((a & 0x1FFFFu) << 1u);
++        a = (a & 0xC0000u) | ((a >> 1u) & 0x1FFFFu);
 +    }
 +    *msw = (Uint16)((a >> 7) & 0x1FFF);
 +    *lsw = (Uint16)((a & 0x7F) << 9);
@@ -1059,6 +1096,7 @@ index 000000000..d31506211
 +    g_gus_diag = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_DIAG");
 +    g_gus_dma_upload = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD");
 +    g_gus_pio_autoinc = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_PIO_AUTOINC");
++    g_gus_force_8bit_addr = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_FORCE_8BIT_ADDR");
 +    skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
 +
 +    /* detection: reset the GF1, DRAM peek/poke roundtrip + size. */
@@ -1289,6 +1327,15 @@ index 000000000..d31506211
 +        return;
 +    }
 +
++    /* gus-6 #42 A/B fallback: force 8-bit voice addressing + clear the 16-bit
++       control bit. Plays the (16-bit) DRAM data AS IF linear 8-bit -- wrong
++       pitch/noise, but if it RUNS without wedging it isolates the freeze to the
++       16-bit addressing/mode path vs something else. Diagnostic only, default
++       OFF; the >>1 encode fix is the real fix, this is the isolation cell. */
++    if (g_gus_force_8bit_addr) {
++        is16 = 0;
++    }
++
 +    gus_encode_addr(start, is16, &smsw, &slsw);
 +    gus_encode_addr(end, is16, &emsw, &elsw);
 +    gus_encode_addr(curaddr, is16, &cmsw, &clsw);
@@ -1335,9 +1382,18 @@ index 000000000..d31506211
 +
 +    g_gus_n_start++;
 +    if (g_gus_diag) {
++        /* gus-6 #42 confirm diag: reconstruct the programmed integer DRAM
++           address from the ACTUAL encoded start MSW|LSW, then apply the GF1
++           16-bit READ transform to show hw_fetch -- the byte address the card
++           will actually fetch. With the >>1 encode fix hw_fetch==start; with
++           the old <<1 bug it was ~4*start. (==start? 1) proves the round-trip. */
++        Uint32 pa = ((Uint32)smsw << 7) | (((Uint32)slsw >> 9) & 0x7Fu);
++        Uint32 hw_fetch = is16 ? ((pa & 0xC0000u) | ((pa & 0x1FFFFu) << 1u)) : pa;
 +        doskutsu_dbg_log("audio: SDL/0112 GUS voice %d START: start=0x%X end=0x%X "
-+                         "ctrl=0x%02X %s", voice, (unsigned)start, (unsigned)end,
-+                         (unsigned)ctrl, is16 ? "16b" : "8b");
++                         "ctrl=0x%02X %s enc=%04X:%04X hw_fetch=0x%X (==start? %d)",
++                         voice, (unsigned)start, (unsigned)end, (unsigned)ctrl,
++                         is16 ? "16b" : "8b", (unsigned)smsw, (unsigned)slsw,
++                         (unsigned)hw_fetch, (hw_fetch == start) ? 1 : 0);
 +    }
 +}
 +
