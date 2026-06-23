@@ -1,0 +1,75 @@
+From 17afef3176519f919e3442563c03dd4d674e15ce Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 11:40:35 -0700
+Subject: [PATCH] patch 0246 -- #38: graceful SFX-bank exhaustion (render OOM
+ guard + budget short-circuit)
+
+sdl-pg cleared the SDL side (PIO byte-wise + DRAM-poke addr both correct; port
+I/O cannot host-fault), so the g2k GUS SFX-init crash (~701KB, fx64) is ENTIRELY
+ENGINE-SIDE host memory. Two guards:
+
+1. render() (Pixtone synth, upstream): middle_buffer = malloc(final_size*2) was
+   memset + indexed with NO null check, so a failed malloc made memset(NULL)
+   host-page-fault (quit-to-DOS, no LOG_CRITICAL). On OOM now emit silence
+   (zeroed final_buffer) instead of faulting; the game continues.
+2. initGusSfx: once sfx_used reaches the music-priority budget, STOP the loop --
+   don't load/render the remaining .pxt (all cap-skipped anyway), shrinking the
+   host-memory-pressure window that triggers (1).
+
+There is NO re-upload path: SDL_DOSGusUploadSample is called only in initGusSfx
+(once per slot) plus the music .pat loader; Pixtone gus play reuses the cached
+dram_addr. The g2k climbing-uploads were the init loop, not a caching miss.
+Built clean.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 84cc0ab1..d6cf8cad 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -344,6 +344,23 @@ bool stPXSound::render()
+ 
+   middle_buffer = (int16_t *)malloc(this->final_size * 2);
+ 
++  // patch 0246 (#38 host-crash guard): the upstream code mem-set + indexed
++  // middle_buffer with NO null check -- a failed malloc here (host-memory
++  // pressure / a pathologically large final_size) made memset(NULL,...) HOST-
++  // PAGE-FAULT = quit-to-DOS, no LOG_CRITICAL. That is the engine-side
++  // host-memory crash class the g2k GUS SFX-init hit. On OOM, produce SILENCE
++  // (a valid final_buffer of zeros) instead of crashing -- the SFX just won't
++  // sound, the game continues. Affects all backends (SB too) but is pure
++  // robustness: it only changes behavior in the previously-crashing OOM case.
++  if (!middle_buffer)
++  {
++    LOG_ERROR("pxt render: OOM allocating middle_buffer ({} bytes) -- emitting "
++              "silence for this sound instead of faulting.",
++              (unsigned)(this->final_size * 2));
++    memset(this->final_buffer, 0, this->final_size);  // 8-bit silence
++    return 0;
++  }
++
+   memset(middle_buffer, 0, this->final_size * 2);
+ 
+   for (i = 0; i < PXT_NO_CHANNELS; i++)
+@@ -575,6 +592,15 @@ bool Pixtone::initGusSfx()
+   uint32_t sfx_used = 0;
+   for (uint32_t slot = 1; slot <= NUM_SOUNDS; slot++)
+   {
++    // patch 0246 (#38): once the SFX bank has reached its budget, STOP -- don't
++    // even load/render the remaining .pxt (they'd all be cap-skipped anyway).
++    // Cuts the wasted synth work + middle_buffer allocations after the budget,
++    // shrinking the host-memory-pressure window during the upload band.
++    if (sfx_used >= sfx_budget)
++    {
++      ++skipped;
++      continue;
++    }
+     std::ostringstream filename;
+     filename << path << "fx" << std::hex << std::setw(2) << std::setfill('0') << slot << ".pxt";
+     stPXSound snd;
+-- 
+2.47.3
+
