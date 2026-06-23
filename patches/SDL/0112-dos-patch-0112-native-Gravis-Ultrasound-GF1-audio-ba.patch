@@ -1,4 +1,4 @@
-From f6b95790a8e446cfc953d7ceb41018c26795100b Mon Sep 17 00:00:00 2001
+From ae89c1a08c2db706a5e2826d22339c9da6b2b6f3 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -68,9 +68,9 @@ no audio bootstrap, no PC-speaker contamination, no GF1 IRQ hook.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- include/SDL3/SDL_dosgus.h        | 254 +++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 906 +++++++++++++++++++++++++++++++
- 2 files changed, 1160 insertions(+)
+ include/SDL3/SDL_dosgus.h        | 254 ++++++++
+ src/audio/dos/SDL_dosaudio_gus.c | 977 +++++++++++++++++++++++++++++++
+ 2 files changed, 1231 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -336,10 +336,10 @@ index 000000000..96a0444c4
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..a75bb728d
+index 000000000..6fb84cc4c
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,906 @@
+@@ -0,0 +1,977 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -914,6 +914,45 @@ index 000000000..a75bb728d
 +    return true;
 +}
 +
++/* #39 diagnostic: a one-voice TEST-TONE played at init via the PUBLIC voice
++   primitives (UploadSample/AllocVoice/StartVoice/SetVoiceFreq/SetVoiceVol/
++   SetVoicePan). Gated by SDL_HINT_DOSKUTSU_GUS_TESTTONE=1 (default OFF). It
++   isolates the SDL primitives from the engine's note->voice mapping: if the
++   tone is AUDIBLE on g2k, StartVoice/SetVoiceFreq/SetVoiceVol + the mix/DAC
++   output path are all correct and the silent-music bug is in MidiBackendGus's
++   note mapping (vel/chanvol->vol, note->FC, .pat->addr); if SILENT, the voice
++   primitives / output path are the bug. */
++static void gus_emit_test_tone(void)
++{
++    Uint8 wave[256];
++    int i, v;
++    Uint32 addr;
++
++    for (i = 0; i < 256; i++) {
++        wave[i] = (i < 128) ? 0xFF : 0x00; /* full-scale 8-bit square (silence=0x80) */
++    }
++    addr = SDL_DOSGusUploadSample(wave, sizeof(wave), 0);
++    if (addr == SDL_DOSGUS_BAD_ADDR) {
++        doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE: DRAM upload FAILED");
++        return;
++    }
++    v = SDL_DOSGusAllocVoice();
++    if (v < 0) {
++        doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE: no free voice");
++        return;
++    }
++    /* 256-sample loop played at 256*440 samples/s -> a ~440 Hz tone. */
++    SDL_DOSGusStartVoice(v, addr, addr + 255, addr, SDL_DOSGUS_LOOP);
++    SDL_DOSGusSetVoiceFreq(v, 256u * 440u);
++    SDL_DOSGusSetVoiceVol(v, 255);
++    SDL_DOSGusSetVoicePan(v, 128);
++    doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE STARTED: voice=%d addr=0x%X "
++                     "(256-byte square loop, ~440Hz, max vol). AUDIBLE => voice "
++                     "primitives + output path OK (bug is note-mapping); SILENT "
++                     "=> primitives/output are the bug.",
++                     v, (unsigned)addr);
++}
++
 +/* ------------------------------------------------------------------------- */
 +/* Engine-facing exports (SDL3/SDL_dosgus.h).                                 */
 +/* ------------------------------------------------------------------------- */
@@ -993,6 +1032,11 @@ index 000000000..a75bb728d
 +                     "voices=%d rate=%dHz dram=%dKB",
 +                     g_gus_base, g_gus_irq, g_gus_play_dma, g_gus_voices,
 +                     (int)g_gus_rate, (int)(g_gus_dram_size / 1024));
++
++    /* #39 diagnostic test-tone (gated, default OFF). */
++    if (gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_TESTTONE")) {
++        gus_emit_test_tone();
++    }
 +    return true;
 +}
 +
@@ -1183,6 +1227,11 @@ index 000000000..a75bb728d
 +    gus_w16(GUS_VREG_ENDLO, elsw);
 +    gus_w16(GUS_VREG_CURHI, cmsw);
 +    gus_w16(GUS_VREG_CURLO, clsw);
++    /* Full ramp range so the current volume (0x09) is never clamped to
++       [start,end] -- DOSBox-X doesn't clamp, but a real GF1/PicoGUS might, and
++       leaving 0x07/0x08 at 0 would clamp 0x09 to 0 = silent (#39 suspect). */
++    gus_w8(GUS_VREG_RAMPSTART, 0x00);
++    gus_w8(GUS_VREG_RAMPEND, 0xFF);
 +    gus_w16(GUS_VREG_VOLUME, (Uint16)(gus_linear_to_logvol(200) << 4)); /* default audible */
 +    gus_w8(GUS_VREG_PAN, 0x07);            /* center until SetVoicePan */
 +    gus_w8(GUS_VREG_CTRL, ctrl);           /* GO */
@@ -1190,6 +1239,11 @@ index 000000000..a75bb728d
 +    DOS_EnableInterrupts();
 +
 +    g_gus_n_start++;
++    if (g_gus_diag) {
++        doskutsu_dbg_log("audio: SDL/0112 GUS voice %d START: start=0x%X end=0x%X "
++                         "ctrl=0x%02X %s", voice, (unsigned)start, (unsigned)end,
++                         (unsigned)ctrl, is16 ? "16b" : "8b");
++    }
 +}
 +
 +void SDL_DOSGusStopVoice(int voice)
@@ -1207,25 +1261,42 @@ index 000000000..a75bb728d
 +
 +void SDL_DOSGusSetVoiceFreq(int voice, Uint32 playback_hz)
 +{
++    Uint16 fc;
 +    if (!g_gus_active || voice < 0 || voice >= g_gus_voices) {
 +        return;
 +    }
++    fc = gus_hz_to_fc(playback_hz);
 +    DOS_DisableInterrupts();
 +    gus_select_voice(voice);
-+    gus_w16(GUS_VREG_FREQ, gus_hz_to_fc(playback_hz));
++    gus_w16(GUS_VREG_FREQ, fc);
 +    DOS_EnableInterrupts();
++    if (g_gus_diag) {
++        /* fc near 0 here => the caller passed a note-pitch Hz instead of the
++           sample PLAYBACK rate (native_rate * pitch_ratio) -> near-DC -> silent.
++           A prime #39 suspect for the note->freq mapping. */
++        doskutsu_dbg_log("audio: SDL/0112 GUS voice %d FREQ: hz=%u -> fc=0x%04X",
++                         voice, (unsigned)playback_hz, (unsigned)fc);
++    }
 +}
 +
 +void SDL_DOSGusSetVoiceVol(int voice, int linear_vol)
 +{
++    Uint16 reg;
 +    if (!g_gus_active || voice < 0 || voice >= g_gus_voices) {
 +        return;
 +    }
++    reg = (Uint16)(gus_linear_to_logvol(linear_vol) << 4);
 +    DOS_DisableInterrupts();
 +    gus_select_voice(voice);
-+    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* manual hold */
-+    gus_w16(GUS_VREG_VOLUME, (Uint16)(gus_linear_to_logvol(linear_vol) << 4));
++    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* manual hold (ramp stopped) */
++    gus_w8(GUS_VREG_RAMPSTART, 0x00);      /* full ramp range so 0x09 isn't clamped (#39) */
++    gus_w8(GUS_VREG_RAMPEND, 0xFF);
++    gus_w16(GUS_VREG_VOLUME, reg);
 +    DOS_EnableInterrupts();
++    if (g_gus_diag) {
++        doskutsu_dbg_log("audio: SDL/0112 GUS voice %d VOL: in=%d -> reg=0x%04X",
++                         voice, linear_vol, (unsigned)reg);
++    }
 +}
 +
 +void SDL_DOSGusSetVoicePan(int voice, int pan)
