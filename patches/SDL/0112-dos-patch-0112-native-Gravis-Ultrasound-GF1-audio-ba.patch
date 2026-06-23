@@ -1,4 +1,4 @@
-From 1e60a713d62e9bc8e22c58de30a83d8047d35765 Mon Sep 17 00:00:00 2001
+From fbe550d6550b243fa34645727338d68ab51b6791 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -68,18 +68,18 @@ no audio bootstrap, no PC-speaker contamination, no GF1 IRQ hook.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- include/SDL3/SDL_dosgus.h        |  268 ++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1014 ++++++++++++++++++++++++++++++
- 2 files changed, 1282 insertions(+)
+ include/SDL3/SDL_dosgus.h        | 254 ++++++++
+ src/audio/dos/SDL_dosaudio_gus.c | 991 +++++++++++++++++++++++++++++++
+ 2 files changed, 1245 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
 diff --git a/include/SDL3/SDL_dosgus.h b/include/SDL3/SDL_dosgus.h
 new file mode 100644
-index 000000000..da4bd6163
+index 000000000..96a0444c4
 --- /dev/null
 +++ b/include/SDL3/SDL_dosgus.h
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,254 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -291,20 +291,6 @@ index 000000000..da4bd6163
 +extern SDL_DECLSPEC void SDLCALL SDL_DOSGusStopVoice(int voice);
 +
 +/**
-+ * Stop and free ALL voices.
-+ *
-+ * Defensive primitive for the .pat/SFX residency swap: a host DRAM upload
-+ * (poke) concurrent with a voice actively reading DRAM wedges the PicoGUS.
-+ * Call this BEFORE an upload that could overlap an active voice (e.g. a song
-+ * change while a note is still sounding) so no voice reads DRAM during the
-+ * poke, then re-allocate voices for the new content. Engine-sequenced, so it
-+ * is race-free with respect to voice_active_mask polling.
-+ *
-+ * \since DOSKUTSU patch SDL/0112.
-+ */
-+extern SDL_DECLSPEC void SDLCALL SDL_DOSGusStopAllVoices(void);
-+
-+/**
 + * Set a voice's playback frequency.
 + *
 + * \param voice       a voice index.
@@ -350,10 +336,10 @@ index 000000000..da4bd6163
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..1a7ce9b4b
+index 000000000..65ac84aba
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1014 @@
+@@ -0,0 +1,991 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -1284,29 +1270,6 @@ index 000000000..1a7ce9b4b
 +    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
 +    gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);
 +    g_gus_voice_busy[voice] = false;       /* free inside the critical section */
-+    DOS_EnableInterrupts();
-+}
-+
-+void SDL_DOSGusStopAllVoices(void)
-+{
-+    int v;
-+    if (!g_gus_active) {
-+        return;
-+    }
-+    /* Stop + free EVERY voice. Defensive use for the .pat/SFX residency swap:
-+       a host DRAM poke (upload) CONCURRENT with a voice actively reading DRAM
-+       wedges the PicoGUS (the gus-3 cell-A freeze). The engine calls this
-+       BEFORE an upload that could overlap an active voice (e.g. a song change
-+       with a still-sounding note), so no voice is reading DRAM during the poke,
-+       then re-allocates for the new song. Engine-sequenced (race-free vs the
-+       voice_active_mask polling, unlike an SDL-internal transient pause). */
-+    DOS_DisableInterrupts();
-+    for (v = 0; v < g_gus_voices; v++) {
-+        gus_select_voice(v);
-+        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
-+        gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);
-+        g_gus_voice_busy[v] = false;
-+    }
 +    DOS_EnableInterrupts();
 +}
 +
