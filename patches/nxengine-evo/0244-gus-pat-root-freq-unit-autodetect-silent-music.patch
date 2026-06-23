@@ -1,0 +1,75 @@
+From 9ac79436408d792a1fa65cbf234b6bc4fa6b6413 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 10:52:31 -0700
+Subject: [PATCH] patch 0244 -- #39: robust .pat root_freq unit auto-detect
+ (silent-music likely fix)
+
+g2k: GUS music runs (voices commanded) but inaudible; sdl-pg audited their
+voice primitives (FC/log-vol/address per DOSBox-X gus.cpp) and they look
+correct, pointing at the FREQUENCY mapping (engine).
+
+My note_on already computes playback_hz = sample_rate * note_freq / root_hz
+(the playback RATE, ~13kHz for note 60), NOT the bare note frequency -- BUT
+that is correct ONLY if root_freq parses to a sane root_hz. The one offline-
+unverifiable field is the .pat root_frequency UNIT. The record offset is sound
+(modes@55 reads correctly -> the 96-byte layout is anchored -> root_freq@30 is
+right), but milliHz-vs-Hz is ambiguous. A wrong unit makes root_hz 1000x off ->
+playback_hz ultrasonic or sub-DC -> EVERY note silent (and via the old
+g_fp==0->65536 guard, a too-high root_hz degenerated playback_hz to the bare
+NOTE frequency -- exactly the silent-voices symptom).
+
+Fix: auto-detect the unit -- pick whichever of root_freq/1000 (milliHz,
+canonical) or root_freq (Hz) yields a musically-plausible root pitch
+(8..12544 Hz, the MIDI range); fall back to A440 if neither. Cleanly separates
+the two (milliHz ~100k+ raw; Hz ~50-2000 raw). Robust to the format ambiguity,
+not a blind guess; the GUS_DIAG per-instrument log prints the chosen root_hz +
+hz@note60 so the iter shows which unit won (preserves attribution alongside
+sdl-pg's vol fix + test-tone).
+
+Built clean; default/non-GUS paths untouched.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendGus.cpp | 26 ++++++++++++++++++++++----
+ 1 file changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index cac2a0b0..272e8b51 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -332,10 +332,28 @@ bool MidiBackendGus::_upload_pat(const char *base_name, bool is_drum,
+   if (loop_start > data_size) loop_start = 0;
+ 
+   // Pitch scaler g_fp = (sample_rate / root_hz) << 16, integer fixed-point.
+-  // root_hz = root_freq (milliHz) / 1000. FPU OK here (main-loop). note_on
+-  // then does playback_hz = (g_fp * _note_freq[note]) >> 16 with pure ints.
+-  double root_hz = (root_freq > 0) ? (root_freq / 1000.0) : 440.0;
+-  if (root_hz < 1.0) root_hz = 440.0;
++  // note_on then does playback_hz = (g_fp * _note_freq[note]) >> 16 (pure int).
++  //
++  // patch 0244 (#39 silent-music fix): be ROBUST to the GUS .pat root_frequency
++  // UNIT. The field is canonically milliHz (Hz*1000, e.g. 261626 for C5), so we
++  // divide by 1000 -> root_hz. But some sets/tools store it in Hz directly. If
++  // we guess wrong, root_hz is 1000x off -> playback_hz is 1000x off ->
++  // ultrasonic or sub-DC -> EVERY note silent (the #39 systemic symptom; and
++  // via the old g_fp==0 guard, a too-high root_hz collapsed g_fp to 1.0 so
++  // playback_hz degenerated to the bare NOTE frequency -- exactly sdl-pg's
++  // "note-pitch not playback-rate" hypothesis). Auto-detect: pick whichever
++  // interpretation yields a musically-PLAUSIBLE root pitch (8 Hz .. 12544 Hz,
++  // the full MIDI note range). milliHz data is ~100k+ (the /1000 lands in range,
++  // the raw value is way above 12544); Hz data is ~50-2000 (the raw value lands
++  // in range, /1000 is sub-8). Cleanly separates the two; falls back to A440 if
++  // neither is plausible (corrupt/garbage field). The per-instrument GUS_DIAG
++  // log (below) prints the chosen root_hz so the iter shows which unit won.
++  const double rh_milli = (root_freq > 0) ? (root_freq / 1000.0) : 0.0;
++  const double rh_hz    = (root_freq > 0) ? (double)root_freq    : 0.0;
++  double root_hz;
++  if (rh_milli >= 8.0 && rh_milli <= 12544.0)      root_hz = rh_milli;  // milliHz (canonical)
++  else if (rh_hz >= 8.0 && rh_hz <= 12544.0)       root_hz = rh_hz;     // stored as Hz
++  else                                             root_hz = 440.0;     // implausible -> A440
+   const double g = (double)sample_rate / root_hz;
+   std::uint32_t g_fp = (std::uint32_t)(g * 65536.0 + 0.5);
+   if (g_fp == 0) g_fp = 65536;  // identity guard
+-- 
+2.47.3
+
