@@ -40,7 +40,7 @@ SET SDL_HINT_DOSKUTSU_PERF_MODE=1        REM drop decorative foreground detail
 
 | Variable | Values | Default | Effect | FPS impact |
 |---|---|---|---|---|
-| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto`, `opl3`, `organya`, `wb`, `adlib`, `gus` | `auto` | Music synthesizer. `auto` (default): probe for a WaveBlaster daughterboard first, fall back to OPL3 FM if none is found. `opl3`: force the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: force a WaveBlaster daughterboard. `adlib`: native OPL2 FM on a card with **no Sound Blaster** (a real AdLib/OPL2 card, or a PicoGUS in `/mode adlib`); music is clocked off the PIT timer, not the SB IRQ. **`adlib` is MUSIC ONLY** -- a DAC-less AdLib card cannot play the digital sound effects, so SFX are silent. `gus`: native Gravis Ultrasound (GF1) wavetable music on a card with **no Sound Blaster** (a real GUS, or a PicoGUS in `/mode gus`); GM instruments play on the GF1's hardware voices from `.pat` samples loaded into the card's DRAM, clocked off the PIT timer. **`gus` is MUSIC ONLY for now** -- digital sound effects on the GUS voices are a follow-up; SFX are silent on this backend today. | `organya` is ~9 fps slower than MIDI; `auto` / `opl3` / `wb` / `adlib` / `gus` run music off the CPU |
+| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto`, `opl3`, `organya`, `wb`, `adlib`, `gus` | `auto` | Music synthesizer. `auto` (default): probe for a WaveBlaster daughterboard first, fall back to OPL3 FM if none is found. `opl3`: force the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: force a WaveBlaster daughterboard. `adlib`: native OPL2 FM on a card with **no Sound Blaster** (a real AdLib/OPL2 card, or a PicoGUS in `/mode adlib`); music is clocked off the PIT timer, not the SB IRQ. **`adlib` is MUSIC ONLY** -- a DAC-less AdLib card cannot play the digital sound effects, so SFX are silent. `gus`: native Gravis Ultrasound (GF1) wavetable on a card with **no Sound Blaster** (a real GUS, or a PicoGUS in `/mode gus`); GM instruments play on the GF1's hardware voices from `.pat` samples loaded into the card's DRAM, clocked off the PIT timer. **`gus` plays both music AND sound effects** on the GUS's own voices -- unlike `adlib`, the GUS has a real DAC, so the Cave Story SFX render on the GF1 too. | `organya` is ~9 fps slower than MIDI; `auto` / `opl3` / `wb` / `adlib` / `gus` run music off the CPU |
 | `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` | `19`..`1000` | `120` | Tick rate of the PIT/IRQ-0 music pump that clocks MIDI playback under `AUDIO_BACKEND=adlib` **and** `AUDIO_BACKEND=gus` (both no-Sound-Blaster paths share the same card-agnostic timer pump). Higher = finer tempo resolution at slightly more interrupt overhead. Only used on the `adlib` / `gus` paths; ignored otherwise. | Leave at default unless tempo sounds off |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi`, `orgmid`, `<dir>` | `wiimidi` | Which MIDI set the `opl3` / `wb` backends play. `wiimidi`: the WiiWare arrangement (`data/midi/`). `orgmid`: the Hart legacy `.mid` set (`data/orgmid/`). Any other value is treated as a custom drop-in directory name: if `data/<dir>/` holds your own `.mid` tracks, the engine plays from there (see "Bring your own MIDI set" in `docs/ASSETS.md`). SETUP exposes this as the **MIDI music set** row (writing the `MIDI_SET` DOSKUTSU.CFG key) -- known sets show as WiiWare / OrgMIDI, drop-ins as `Custom (<dir>)`. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | unset | Picks an `org2mid`-converted General MIDI variant. | None |
@@ -138,10 +138,13 @@ the General MIDI `.pat` patch files under `C:\ULTRASND\MIDI`.
 - Tempo resolution is governed by `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` (default `120`),
   shared with the `adlib` path.
 
-**Limitation - music only, for now.** This first release plays *music* on the GUS;
-routing Cave Story's digital sound effects onto the GUS's own voices is a planned
-follow-up, so **sound effects are currently silent on the `gus` backend**. (The GUS
-is fully capable of both - this is a staging limitation, not a hardware one.)
+**Music and sound effects both play on the GUS.** Unlike the AdLib backend, the
+GUS has its own DAC and on-board sample RAM, so Cave Story's digital sound effects
+render on the GF1's hardware voices too: at startup the engine uploads the sound
+effects into the card's DRAM once, then triggers them on spare GF1 voices alongside
+the music. Music and SFX share the card's voice pool (28 voices), which is ample for
+Cave Story; in a rare voice-saturated moment a new sound effect may drop rather than
+cut off music, which is the intended trade.
 
 ---
 

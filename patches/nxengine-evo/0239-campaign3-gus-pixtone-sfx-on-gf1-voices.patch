@@ -1,0 +1,477 @@
+From 4533ed0ae022ed7a586cbea3087c954011e7ea46 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 22 Jun 2026 17:06:13 -0700
+Subject: [PATCH] patch 0239 -- Campaign 3 GUS P2 (#28): Pixtone SFX on GF1
+ voices
+
+Renders the 117 Pixtone .pxt and uploads them (8-bit unsigned mono @ 22050 Hz)
+into the Gravis Ultrasound's on-board DRAM once at init, then plays them on the
+GF1's hardware voices alongside the native GM music -- the AUDIO_BACKEND=gus
+path is now music+SFX, not music-only.
+
+Why DOS needs this: unlike a DAC-less AdLib card, the GUS has its own DAC + 1MB
+sample RAM, so Cave Story's digital SFX render on the GF1 too. No SDL3_mixer
+exists on the no-SB GUS path, so the SFX go out-of-band like the music:
+- Pixtone::initGusSfx renders + sign-flips (xor 0x80 -> GF1 8-bit unsigned) +
+  SDL_DOSGusUploadSample each .pxt to a persistent low-DRAM band.
+- A THIRD Pixtone::play/playResampled branch (_gusPlay) allocates a GF1 voice
+  from the SHARED driver pool (the same SDL_DOSGusAllocVoice pool the music
+  note path uses), sets freq (22050*percent/100) / vol / center pan, starts it
+  one-shot (loop-enable for ambient loopers). Wave-ended voices reaped via
+  voice_active_mask; pool exhaustion drops the SFX (music protected).
+- MidiBackendGus::on_song_start auto-snapshots dram_used at first song start as
+  the SFX keep-mark, so SDL_DOSGusResetDram(keep) preserves the SFX bank across
+  per-song .pat residency swaps.
+- SoundManager gus path calls initGusSfx (no MIX_CreateTrack) + the playSfx/
+  stopSfx no-op gates revert for gus (only adlib stays music-only).
+
+SFX dispatch is main-loop context (playSfx is game-logic-driven), so no engine
+DPMI lock; the driver's shared-pool ops must be IRQ-safe (music note_on calls
+AllocVoice from the PIT IRQ). Built clean; two-witness embeds the gus SFX
+banners + GF1 voice exports; no pcspk. Full series re-applies (0238 -> 0239).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendGus.cpp |  21 +++-
+ src/sound/MidiBackendGus.h   |   8 ++
+ src/sound/Pixtone.cpp        | 213 +++++++++++++++++++++++++++++++++++
+ src/sound/Pixtone.h          |  33 ++++++
+ src/sound/SoundManager.cpp   |  28 +++--
+ 5 files changed, 293 insertions(+), 10 deletions(-)
+
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index 0ba5acac..bc2a225c 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -535,9 +535,24 @@ void MidiBackendGus::on_song_start()
+     SDL_DOSGusStopVoice(v);
+     _voices[v].active = false;
+   }
+-  // Free the previous song's .pat region (no persistent #28 SFX region yet ->
+-  // keep 0). Stop voices FIRST (above) so none reads the freed DRAM (R3).
+-  SDL_DOSGusResetDram(0);
++  // patch 0239 (#28): auto-discover the persistent SFX-bank keep-mark on the
++  // FIRST song start -- at this point dram_used reflects exactly the Pixtone
++  // SFX uploaded by initGusSfx (no .pat loaded yet), so it IS the keep
++  // boundary. On a music-only build (no SFX uploaded) this snapshots 0, so the
++  // behavior is identical to the #27 ResetDram(0). Music .pat then lives above
++  // it and is freed/reuploaded per song; the SFX bank below it is preserved.
++  if (!_persist_mark_set)
++  {
++    SDL_DOSGusState st0;
++    _persist_mark     = (SDL_DOSGusGetState(&st0) && st0.valid) ? st0.dram_used : 0;
++    _persist_mark_set = true;
++    LOG_INFO("gus backend: SFX-bank keep-mark = {} bytes DRAM (per-song .pat "
++             "residency preserves [0,{}); music uploads above it).",
++             (unsigned)_persist_mark, (unsigned)_persist_mark);
++  }
++  // Free the previous song's .pat region while preserving the SFX bank. Stop
++  // voices FIRST (above) so none reads the freed DRAM (R3 single-owner rule).
++  SDL_DOSGusResetDram(_persist_mark);
+   for (int i = 0; i < 128; ++i) { _mel[i].resident = false; _drum[i].resident = false; }
+ 
+   for (int ch = 0; ch < MIDI_CHANNELS; ++ch)
+diff --git a/src/sound/MidiBackendGus.h b/src/sound/MidiBackendGus.h
+index fc5f4b48..c30c7bdb 100644
+--- a/src/sound/MidiBackendGus.h
++++ b/src/sound/MidiBackendGus.h
+@@ -115,6 +115,14 @@ private:
+   std::uint32_t _output_rate  = 22050; // GF1 DAC rate (informational)
+   std::uint32_t _dram_size    = 0;
+ 
++  // patch 0239 (Campaign 3 GUS, #28): the persistent low-DRAM region to keep
++  // across per-song .pat residency swaps -- the Pixtone SFX bank (initGusSfx)
++  // lives there. Auto-discovered at the FIRST on_song_start by snapshotting
++  // dram_used (which at that point reflects exactly the SFX uploads, since no
++  // .pat has been loaded yet). ResetDram(_persist_mark) then preserves it.
++  std::uint32_t _persist_mark     = 0;
++  bool          _persist_mark_set = false;
++
+   Voice         _voices[MAX_VOICES];
+   std::uint64_t _voice_alloc_count = 0;
+ 
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index ce40ea14..063a001f 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -17,6 +17,7 @@
+ 
+ #include <SDL3/SDL.h>
+ #include <SDL3/SDL_dospixtone.h>  // patch 0167 (Lever 3): SDL_DOSPixtoneStart/Stop/IsActive (sdl-engine SDL/0071)
++#include <SDL3/SDL_dosgus.h>       // patch 0239 (Campaign 3 GUS, #28): GF1 SFX voice exports
+ #include <SDL3_mixer/SDL_mixer.h>
+ 
+ #ifdef __DJGPP__
+@@ -507,6 +508,173 @@ bool Pixtone::init()
+   return true;
+ }
+ 
++// patch 0239 (Campaign 3 GUS, #28): render the 117 .pxt and upload them into
++// the GF1 card's DRAM as 8-bit UNSIGNED mono @ 22050 Hz. Replaces init() on the
++// AUDIO_BACKEND=gus path (no SDL3_mixer device exists). Runs in main-loop init
++// context (file I/O + synth are fine here, not the IRQ note path).
++bool Pixtone::initGusSfx()
++{
++  if (_inited)
++  {
++    LOG_ERROR("pxt_init: pxt module already initialized");
++    return false;
++  }
++  _inited   = true;
++  _gus_mode = true;
++
++  for (uint16_t i = 0; i < 256; i++)
++    _sound_fx[i].channel = -1;
++  for (int v = 0; v < 32; v++)
++    _gus_voice_slot[v] = -1;
++
++  // Wave-model tables (identical to init()).
++  for (uint32_t seed = 0, i = 0; i < 256; ++i)
++  {
++    seed                       = (seed * 214013) + 2531011;
++    wave[MOD_SINE].table[i]    = 0x40 * std::sin(i * 3.1416 / 0x80);
++    wave[MOD_TRI].table[i]     = ((0x40 + i) & 0x80) ? 0x80 - i : i;
++    wave[MOD_SAWUP].table[i]   = -0x40 + i / 2;
++    wave[MOD_SAWDOWN].table[i] = 0x40 - i / 2;
++    wave[MOD_SQUARE].table[i]  = 0x40 - (i & 0x80);
++    wave[MOD_NOISE].table[i]   = (signed char)(seed >> 16) / 2;
++  }
++
++  SDL_DOSGusState st;
++  if (!SDL_DOSGusGetState(&st) || !st.valid)
++  {
++    LOG_WARN("gus SFX: GF1 not active (SDL_DOSGusGetState); SFX silent this "
++             "run. The game still runs (music continues on the GF1).");
++    return false;
++  }
++
++  LOG_INFO("Loading Sound FX (GUS / GF1 DRAM)...");
++  std::string path = ResourceManager::getInstance()->getPathForDir("pxt/");
++  int uploaded = 0, failed = 0;
++  for (uint32_t slot = 1; slot <= NUM_SOUNDS; slot++)
++  {
++    std::ostringstream filename;
++    filename << path << "fx" << std::hex << std::setw(2) << std::setfill('0') << slot << ".pxt";
++    stPXSound snd;
++    if (!snd.load(filename.str()))
++      continue;
++    snd.render();  // -> final_buffer: 8-bit SIGNED mono @ 22050 Hz, final_size bytes
++
++    if (snd.final_buffer && snd.final_size > 0)
++    {
++      const uint32_t n = (uint32_t)snd.final_size;
++      uint8_t *tmp = (uint8_t *)std::malloc(n);
++      if (tmp)
++      {
++        // .pxt is 8-bit signed; GF1 8-bit DRAM is UNSIGNED -> flip the sign bit.
++        for (uint32_t k = 0; k < n; ++k)
++          tmp[k] = (uint8_t)((uint8_t)snd.final_buffer[k] ^ 0x80);
++        const uint32_t addr = SDL_DOSGusUploadSample(tmp, n, 0 /*is16bit*/);
++        std::free(tmp);
++        if (addr != SDL_DOSGUS_BAD_ADDR)
++        {
++          _sound_fx[slot].gus_dram_addr = addr;
++          _sound_fx[slot].gus_len       = n;
++          _sound_fx[slot].gus_resident  = true;
++          ++uploaded;
++        }
++        else
++        {
++          ++failed;
++          LOG_WARN("gus SFX: DRAM full uploading slot {} ({} bytes); this SFX "
++                   "stays silent.", slot, n);
++        }
++      }
++    }
++    snd.freeBuf();
++  }
++
++  SDL_DOSGusState st2;
++  const unsigned used_kb =
++      (SDL_DOSGusGetState(&st2) && st2.valid) ? (unsigned)(st2.dram_used / 1024) : 0;
++  LOG_INFO("gus SFX: uploaded {} of {} .pxt to GF1 DRAM (8-bit unsigned mono @ "
++           "22050 Hz; {} failed). Persistent SFX bank = {} KB DRAM (the "
++           "MidiBackendGus per-song .pat residency preserves it via its "
++           "auto-snapshotted keep-mark at first song start).",
++           uploaded, (int)NUM_SOUNDS, failed, used_kb);
++  return uploaded > 0;
++}
++
++// patch 0239 (Campaign 3 GUS, #28): return GF1 voices that finished playing a
++// one-shot SFX back to the shared pool, so they can be reused + a preempting
++// play() can find a free voice. Reads the live hardware voice-active mask. Only
++// touches voices THIS subsystem owns (_gus_voice_slot[v] >= 0); music voices
++// (owned by MidiBackendGus) are left alone. Main-loop context.
++void Pixtone::_gusReap()
++{
++  SDL_DOSGusState st;
++  if (!SDL_DOSGusGetState(&st) || !st.valid)
++    return;
++  const int nv = (st.num_voices < 32) ? st.num_voices : 32;
++  for (int v = 0; v < nv; ++v)
++  {
++    const int32_t slot = _gus_voice_slot[v];
++    if (slot >= 0 && ((st.voice_active_mask >> v) & 1u) == 0u)
++    {
++      SDL_DOSGusStopVoice(v);
++      _gus_voice_slot[v] = -1;
++      if (slot < 256 && _sound_fx[slot].channel == v)
++        _sound_fx[slot].channel = -1;
++    }
++  }
++}
++
++// patch 0239 (Campaign 3 GUS, #28): start a resident SFX on a GF1 voice.
++// percent = playback-rate percentage (100 = native 22050 Hz; the playResampled
++// pitch variants pass other values). Returns the GF1 voice id, or -1 if
++// dropped (not resident / pool exhausted). Main-loop context (playSfx is called
++// from game logic, not the IRQ note pump).
++int Pixtone::_gusPlay(int32_t slot, int32_t loop, uint32_t percent)
++{
++  if (slot < 0 || slot >= 256 || !_sound_fx[slot].gus_resident)
++  {
++    LOG_DEBUG("gus SFX: slot {} not resident; dropped.", slot);
++    return -1;
++  }
++
++  _gusReap();  // reclaim finished one-shot voices first
++
++  // Preempt: if this slot is already sounding, stop its voice.
++  const int32_t prev = _sound_fx[slot].channel;
++  if (prev >= 0 && prev < 32)
++  {
++    SDL_DOSGusStopVoice(prev);
++    _gus_voice_slot[prev]   = -1;
++    _sound_fx[slot].channel = -1;
++  }
++
++  int v = SDL_DOSGusAllocVoice();
++  if (v < 0 || v >= 32)
++  {
++    // Shared pool exhausted (music holds the voices). Drop the SFX -- a
++    // legitimate resource-pressure outcome, not an error.
++    LOG_DEBUG("gus SFX: no free GF1 voice for slot {} (shared pool full).", slot);
++    return -1;
++  }
++
++  uint32_t rate = 22050u;
++  if (percent != 0 && percent != 100)
++    rate = (uint32_t)(((uint64_t)22050u * percent) / 100u);
++  if (rate == 0) rate = 22050u;
++
++  const uint32_t start = _sound_fx[slot].gus_dram_addr;
++  const uint32_t end   = start + _sound_fx[slot].gus_len;
++  const uint32_t flags = (loop != 0) ? SDL_DOSGUS_LOOP : 0u;  // 8-bit -> no _16BIT
++
++  SDL_DOSGusSetVoiceFreq(v, rate);
++  SDL_DOSGusSetVoiceVol(v, _gus_sfx_vol_255);
++  SDL_DOSGusSetVoicePan(v, 128);  // SFX are mono -> center
++  SDL_DOSGusStartVoice(v, start, end, start /*loopstart*/, flags);
++
++  _sound_fx[slot].channel = v;
++  _gus_voice_slot[v]      = slot;
++  return v;
++}
++
+ void Pixtone::shutdown()
+ {
+   // DOS-PORT: Mix_FreeChunk(chunk) -> MIX_DestroyAudio(audio). Also no
+@@ -575,6 +743,16 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+   // dispatch) trigger the destructor identically.
+   NXE::Diag::P12PixtonePlayTimer _p12_ppt;
+ 
++  // patch 0239 (Campaign 3 GUS, #28): GF1 SFX path. Routed FIRST so the gus
++  // path never touches the L3 ISR-pool or the SDL3_mixer branches (neither
++  // exists on a no-Sound-Blaster GUS box -- there is no mixer). The SFX sample
++  // is already resident in card DRAM (initGusSfx); allocate a GF1 voice and
++  // start it. `chan` is ignored (the GF1 driver owns voice allocation).
++  if (_gus_mode)
++  {
++    return _gusPlay(slot, loop, 100);  // 100% = native 22050 Hz pitch
++  }
++
+   // patch 0167 (Lever 3 Pixtone IRQ-mix routing branch). When the
+   // killswitch is ENABLED, route to the SB16 IRQ-5 ISR mix path via
+   // SDL_DOSPixtoneStart instead of MIX_PlayTrack. The ISR-pool path
+@@ -688,6 +866,16 @@ void Pixtone::setVolume(int volume_0_100)
+   // same null-check; consistent.
+   const float gain = (float)volume_0_100 / 100.0f;
+ 
++  // patch 0239 (Campaign 3 GUS, #28): mirror the SFX volume into the GF1 linear
++  // (0..255) scale used by _gusPlay -> SDL_DOSGusSetVoiceVol. Affects voices
++  // started after this call (GF1 volume is per-voice, set at start).
++  {
++    int g255 = (volume_0_100 * 255) / 100;
++    if (g255 < 0)   g255 = 0;
++    if (g255 > 255) g255 = 255;
++    _gus_sfx_vol_255 = g255;
++  }
++
+   // patch 0167 (Lever 3 Pixtone IRQ-mix). Mirror the new gain into
+   // per-slot gain_x256 so future Pixtone::play calls under L3 pass
+   // the current gain to SDL_DOSPixtoneStart. fixed-point x256 (256
+@@ -802,6 +990,15 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+   // cache after that; flush-instr's decomp distinguishes cached vs
+   // fresh by the count/avg ratio if it matters.
+   NXE::Diag::P12PixtonePlayTimer _p12_ppt;
++
++  // patch 0239 (Campaign 3 GUS, #28): GF1 SFX path. The pitch variants don't
++  // need the pre-rendered resampled[] buffers -- the GF1 just plays the one
++  // resident sample at a scaled playback frequency (22050 * percent/100).
++  if (_gus_mode)
++  {
++    return _gusPlay(slot, loop, percent);
++  }
++
+   if (_sound_fx[slot].chunk)
+   {
+     uint32_t resampled_rate = SAMPLE_RATE * (percent / 100);
+@@ -991,6 +1188,22 @@ void Pixtone::stop(int32_t slot)
+   // cost + per-SFX bookkeeping. Per-SFX-event; not per-frame.
+   NXE::Diag::P12PixtoneStopTimer _p12_pst;
+ 
++  // patch 0239 (Campaign 3 GUS, #28): GF1 SFX stop. `channel` holds the GF1
++  // voice id under _gus_mode; stop it + return it to the shared pool + clear
++  // the reverse map. (Used by the looping ambient SFX on stopLoopSfx, and by
++  // play() preempting a slot that is still sounding.)
++  if (_gus_mode)
++  {
++    const int32_t v = _sound_fx[slot].channel;
++    if (v >= 0 && v < 32)
++    {
++      SDL_DOSGusStopVoice(v);
++      _gus_voice_slot[v] = -1;
++    }
++    _sound_fx[slot].channel = -1;
++    return;
++  }
++
+   // patch 0167 (Lever 3 Pixtone IRQ-mix routing branch). When the
+   // slot was started via SDL_DOSPixtoneStart (on_irq_pool=true),
+   // route stop through SDL_DOSPixtoneStop. The channel value is an
+diff --git a/src/sound/Pixtone.h b/src/sound/Pixtone.h
+index 84b76795..e77baf96 100644
+--- a/src/sound/Pixtone.h
++++ b/src/sound/Pixtone.h
+@@ -156,6 +156,16 @@ public:
+   bool init();
+   void shutdown();
+ 
++  // patch 0239 (Campaign 3 GUS, #28): render the 117 .pxt SFX and upload them
++  // (8-bit unsigned mono) into the GF1 card's DRAM ONCE -- the no-mixer SFX
++  // bring-up for AUDIO_BACKEND=gus. Replaces the full init() on the gus path
++  // (no SDL3_mixer device exists). Returns true if the GF1 is active + at least
++  // one SFX uploaded. The uploaded region is the persistent low DRAM band the
++  // MidiBackendGus per-song .pat residency preserves (it auto-snapshots
++  // dram_used as its keep-mark at the first song start). MUST be called AFTER
++  // the GF1 backend's SDL_DOSGusInit (so the card + DRAM allocator are live).
++  bool initGusSfx();
++
+   int play(int32_t chan, int32_t slot, int32_t loop);
+   int playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t percent);
+   int prepareResampled(int32_t slot, uint32_t percent);
+@@ -196,6 +206,16 @@ protected:
+ private:
+   void _prepareToPlay(stPXSound *snd, int32_t slot);
+   int  _findFreeTrack();
++
++  // patch 0239 (Campaign 3 GUS, #28): GF1 SFX dispatch. Allocate a GF1 voice
++  // from the shared driver pool, point it at the slot's resident DRAM sample,
++  // set freq (native 22050 Hz * percent/100 for the resampled pitch variants),
++  // volume + center pan, and start it (one-shot, or loop-enabled for `loop`).
++  // Reaps wave-ended voices (voice_active_mask) before allocating. Returns the
++  // GF1 voice id (>=0) or -1 if dropped. No-op unless _gus_mode.
++  int  _gusPlay(int32_t slot, int32_t loop, uint32_t percent);
++  void _gusReap();
++
+   bool _inited = false;
+   struct
+   {
+@@ -232,9 +252,22 @@ private:
+     //   play(L3 ON path) / cleared on Pixtone::stop after release.
+     int16_t  gain_x256       = 256;     // 1.0 default
+     bool     on_irq_pool     = false;   // L3 routing disambiguator
++    // patch 0239 (Campaign 3 GUS, #28): resident GF1 DRAM sample for this slot
++    // (8-bit unsigned mono @ 22050 Hz, uploaded once in initGusSfx). Under
++    // _gus_mode, `channel` holds the active GF1 voice id (or -1 idle).
++    uint32_t gus_dram_addr   = 0;
++    uint32_t gus_len         = 0;       // bytes (== samples, 8-bit mono)
++    bool     gus_resident    = false;
+   } _sound_fx[256];
+   int32_t _slots[PIXTONE_TRACK_POOL_SIZE];
+ 
++  // patch 0239 (Campaign 3 GUS, #28): GF1 SFX state.
++  bool    _gus_mode        = false;     // AUDIO_BACKEND=gus: route SFX to GF1
++  int     _gus_sfx_vol_255 = 255;       // sfx volume 0..255 (set via setVolume)
++  // Reverse map: GF1 voice id -> the SFX slot playing on it (-1 = not an SFX
++  // voice / idle). Sized to the GF1 max (32); the driver caps actual voices.
++  int32_t _gus_voice_slot[32];
++
+   // DOS-PORT: pre-allocated track pool (see PIXTONE_TRACK_POOL_SIZE comment
+   // above). Created in Pixtone::init() via MIX_CreateTrack against the
+   // SoundManager's mixer; explicitly destroyed in Pixtone::shutdown() via
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index c85ab35e..810b19de 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -1234,12 +1234,26 @@ bool SoundManager::init()
+     updateSfxVolume();
+     updateMusicVolume();
+   }
++  else if (_gus)
++  {
++    // patch 0239 (Campaign 3 GUS, #28): the GUS path has no SDL3_mixer, but the
++    // GF1 CAN play SFX -- render the 117 .pxt + upload them to card DRAM as
++    // 8-bit voices (no MIX_CreateTrack). Organya stays off (gus music = MIDI on
++    // the GF1 via MidiBackendGus). Runs AFTER the gus backend install above, so
++    // SDL_DOSGusInit has brought the card up. updateSfxVolume() sets the GF1
++    // per-voice SFX volume used by the gus play path.
++    Pixtone::getInstance()->initGusSfx();
++    updateSfxVolume();
++    LOG_INFO("Sound system: GUS path -- Pixtone SFX uploaded to GF1 voices "
++             "(#28); music via MidiBackendGus on the same shared GF1 voice "
++             "pool. No SDL3_mixer / Organya.");
++  }
+   else
+   {
+-    LOG_INFO("Sound system: {} path -- skipping Pixtone/SFX/Organya/mixer "
+-             "init (no SDL audio device; MUSIC ONLY). No MIX_CreateTrack / "
+-             "SFX-render attempts; runtime SFX calls no-op.",
+-             _gus ? "GUS (GF1)" : "AdLib");
++    LOG_INFO("Sound system: AdLib path -- skipping Pixtone/SFX/Organya/mixer "
++             "init (no SDL audio device; MUSIC ONLY -- a DAC-less AdLib card "
++             "has no PCM SFX). No MIX_CreateTrack / SFX-render attempts; "
++             "runtime SFX calls no-op.");
+   }
+ 
+   // patch 0168 (Lever 2b MIDI-tick-from-IRQ). Register the engine-side
+@@ -1414,7 +1428,7 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+   // patch 0236 (#19): no PCM SFX on the AdLib path (no DAC/mixer). No-op so
+   // gameplay doesn't spam "Pixtone::play: not rendered" against a null mixer.
+   // Covers startPropSound (delegates here) too.
+-  if (_adlib_path || _gus_path)  // patch 0238: GUS is also music-only this phase (#27)
++  if (_adlib_path)  // patch 0239 (#28): gus now plays SFX on GF1 voices (not music-only); only adlib no-ops SFX
+     return;
+   if (!settings->sound_enabled)
+     return;
+@@ -1440,7 +1454,7 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
+ {
+   // patch 0236 (#19): no PCM SFX on the AdLib path. Covers startStreamSound
+   // (delegates here) too.
+-  if (_adlib_path || _gus_path)  // patch 0238: GUS is also music-only this phase (#27)
++  if (_adlib_path)  // patch 0239 (#28): gus now plays SFX on GF1 voices (not music-only); only adlib no-ops SFX
+     return;
+   if (!settings->sound_enabled)
+     return;
+@@ -1463,7 +1477,7 @@ void SoundManager::stopSfx(NXE::Sound::SFX snd)
+ {
+   // patch 0236 (#19): no PCM SFX on the AdLib path. Covers stopLoopSfx
+   // (delegates here) too.
+-  if (_adlib_path || _gus_path)  // patch 0238: GUS is also music-only this phase (#27)
++  if (_adlib_path)  // patch 0239 (#28): gus now plays SFX on GF1 voices (not music-only); only adlib no-ops SFX
+     return;
+   Pixtone::getInstance()->stop((int32_t)snd);
+ }
+-- 
+2.47.3
+
