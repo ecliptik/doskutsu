@@ -1,4 +1,4 @@
-From fbe550d6550b243fa34645727338d68ab51b6791 Mon Sep 17 00:00:00 2001
+From 1b6a0bc01845aa295fa774dffc8fa21d1964985c Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -63,23 +63,49 @@ Other Phase-0 scope:
 
 GF1 register indices cross-checked vs DOSBox-X gus.cpp + the GUS SDK; the
 IRQ/DMA latch + a few conversions are ACCURATE-BUT-CONFIRM inline pending the
-operator's g2k register pass. Validated by a clean libSDL3.a link: 11 exports,
+operator's g2k register pass. Validated by a clean libSDL3.a link: 12 exports,
 no audio bootstrap, no PC-speaker contamination, no GF1 IRQ hook.
+
+gus-5 (#41 the .pat-upload freeze + #40 quiesce, folded in):
+- #41 ROOT (IOCHRDY poke-overrun): the per-byte PIO path re-selected the FULL
+  GF1 DRAM address (0x43/0x44, ~5 outportb) before EVERY data byte poked to
+  3X7 -- ~6 port ops/byte. On the operator's PicoGUS (RP2040) this floods the
+  card's ISA command path; the 2nd .pat instrument upload of a song overruns it,
+  the card asserts IOCHRDY, and the outportb stalls the ISA bus with unbounded
+  wait states while the driver holds cli -> CPU freeze. (Earlier "a bounded PIO
+  loop can't hang" reasoning was wrong: a single outportb is not guaranteed to
+  return when the card holds IOCHRDY.)
+- #41 FIX (gated): SDL_HINT_DOSKUTSU_GUS_PIO_AUTOINC=1 programs the DRAM address
+  ONCE per upload and pokes 3X7 sequentially, letting the GF1 auto-advance its
+  own DRAM pointer -- ~1 outportb/byte (~6x fewer). Default OFF (per-byte = the
+  observe cell) until g2k confirms autoinc reaches gameplay, then flip to ON.
+- OBSERVE diags (GUS_DIAG-gated): the upload-start log now includes the live
+  hardware active_mask (H1 contention vs H2 overrun decider), and gus_upload_pio
+  emits a byte-offset progress line every ~1KB (last line before a freeze pins
+  where the ISA bus wedged).
+- #40 SDL_DOSGusStopAllVoices(): stops + frees every voice in one cli/sti pass
+  (song-boundary quiesce; engine calls it at .pat residency swaps, never
+  per-SFX). This is the 12th export.
+- Test-tone (TESTTONE=1) now plays SYNCHRONOUSLY then EXPLICITLY StopVoice-frees
+  voice 0 before Init returns -- no reliance on GF1 wave-end auto-stop, nothing
+  lingering into gameplay; doubles as a #40 quiesce probe.
+- "device up" banner gains upload=pio[+autoinc] to witness the active cell.
+- New hint documented in docs/internal/BOOT.md.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- include/SDL3/SDL_dosgus.h        | 254 ++++++++
- src/audio/dos/SDL_dosaudio_gus.c | 991 +++++++++++++++++++++++++++++++
- 2 files changed, 1245 insertions(+)
+ include/SDL3/SDL_dosgus.h        |  267 ++++++++
+ src/audio/dos/SDL_dosaudio_gus.c | 1057 ++++++++++++++++++++++++++++++
+ 2 files changed, 1324 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
 diff --git a/include/SDL3/SDL_dosgus.h b/include/SDL3/SDL_dosgus.h
 new file mode 100644
-index 000000000..96a0444c4
+index 000000000..ae67412f5
 --- /dev/null
 +++ b/include/SDL3/SDL_dosgus.h
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,267 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -291,6 +317,19 @@ index 000000000..96a0444c4
 +extern SDL_DECLSPEC void SDLCALL SDL_DOSGusStopVoice(int voice);
 +
 +/**
++ * Stop and free EVERY voice in one pass (song-boundary quiesce).
++ *
++ * Stops + silences all hardware voices and returns them all to the pool inside
++ * a single critical section, so no voice is left reading card DRAM. Intended
++ * for SONG .pat-residency boundaries ONLY (call it before swapping the .pat
++ * bank + uploading the new song's instruments) -- never per-SFX. Idempotent and
++ * safe when no voices are active.
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSGusStopAllVoices(void);
++
++/**
 + * Set a voice's playback frequency.
 + *
 + * \param voice       a voice index.
@@ -336,10 +375,10 @@ index 000000000..96a0444c4
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..65ac84aba
+index 000000000..d31506211
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,991 @@
+@@ -0,0 +1,1057 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -475,6 +514,7 @@ index 000000000..65ac84aba
 +static Uint32 g_gus_dram_used = 0;         /* bump-allocator high-water */
 +static bool g_gus_diag = false;            /* SDL/0112 diag counters (default OFF) */
 +static bool g_gus_dma_upload = false;      /* DMA upload opt-in (default OFF -> PIO; #36) */
++static bool g_gus_pio_autoinc = false;     /* PIO DRAM auto-increment (gus-5 #41; default OFF) */
 +
 +/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
 +   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
@@ -814,6 +854,17 @@ index 000000000..65ac84aba
 +static void gus_upload_pio(Uint32 dram_addr, const Uint8 *src, Uint32 len)
 +{
 +    Uint32 i = 0;
++    const bool autoinc = g_gus_pio_autoinc;
++    /* gus-5 #41 (H2 fix, gated): with autoinc the GF1 DRAM address is programmed
++       ONCE (0x43/0x44) and the card advances its own DRAM pointer per 3X7 write
++       (~1 outportb/byte). The default per-byte path re-selects the FULL address
++       before EVERY byte (~6 outportb/byte). The per-byte hammering floods the
++       PicoGUS RP2040 ISA command path; the 2nd .pat upload overruns it -> the
++       card holds IOCHRDY -> outportb stalls the ISA bus unboundedly (cli held)
++       -> CPU freeze. autoinc cuts the port-op rate ~6x to relieve that. */
++    if (autoinc) {
++        gus_set_dram_addr(dram_addr); /* set ONCE; GF1 auto-increments per write */
++    }
 +    while (i < len) {
 +        Uint32 j, burst = len - i;
 +        if (burst > GUS_PIO_BURST) {
@@ -821,11 +872,21 @@ index 000000000..65ac84aba
 +        }
 +        DOS_DisableInterrupts();
 +        for (j = 0; j < burst; j++) {
-+            gus_set_dram_addr(dram_addr + i + j);
++            if (!autoinc) {
++                gus_set_dram_addr(dram_addr + i + j);
++            }
 +            outportb(GUS_P3X7_DRAMIO(g_gus_base), src[i + j]);
 +        }
 +        DOS_EnableInterrupts();
 +        i += burst;
++        /* gus-5 #41 H2 locator: byte offset every ~1KB, fsync'd with interrupts
++           ON (dbg_log does file I/O). The LAST line before a freeze pins where
++           in the upload the ISA bus wedged. GUS_DIAG-gated, default OFF. */
++        if (g_gus_diag && (i & 0x3FF) < GUS_PIO_BURST) {
++            doskutsu_dbg_log("audio: SDL/0112 GUS upload progress: %u/%u bytes "
++                             "(dram=0x%X autoinc=%d)", (unsigned)i, (unsigned)len,
++                             (unsigned)(dram_addr + i), autoinc ? 1 : 0);
++        }
 +    }
 +}
 +
@@ -955,11 +1016,22 @@ index 000000000..65ac84aba
 +    SDL_DOSGusSetVoiceVol(v, 255);
 +    SDL_DOSGusSetVoicePan(v, 128);
 +    SDL_DOSGusStartVoice(v, addr, addr + GUS_TESTTONE_LEN - 1, addr, 0); /* flags=0: one-shot, no loop */
-+    doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE STARTED: voice=%d addr=0x%X "
-+                     "(one-shot ~0.36s 440Hz square, max vol; self-terminating). "
-+                     "AUDIBLE => voice primitives + output path OK (bug is "
-+                     "note-mapping); SILENT => primitives/output are the bug.",
-+                     v, (unsigned)addr);
++    doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE: voice=%d addr=0x%X playing "
++                     "~0.36s 440Hz square (max vol). AUDIBLE => voice primitives "
++                     "+ output path OK (bug is note-mapping); SILENT => "
++                     "primitives/output are the bug.", v, (unsigned)addr);
++    /* gus-5: SYNCHRONOUS play + EXPLICIT stop (test-tone wedge fix + #40 quiesce
++       probe). Do NOT rely on the GF1 wave-end auto-stop -- on the PicoGUS a
++       wave-ended-but-still-ALLOCATED voice keeps contending with a later DRAM
++       poke (the on_song_start wedge). Block here for the tone duration + margin,
++       then explicitly stop + free voice 0, so it is fully quiesced before Init
++       returns (long before any gameplay/.pat upload). ~0.45s one-time boot delay
++       in the TESTTONE=1 diagnostic cell only. */
++    SDL_DelayPrecise(SDL_MS_TO_NS(450));
++    SDL_DOSGusStopVoice(v);
++    doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE: voice %d explicitly stopped "
++                     "+ freed after play (no lingering voice into gameplay; "
++                     "#40 quiesce probe).", v);
 +}
 +
 +/* ------------------------------------------------------------------------- */
@@ -986,6 +1058,7 @@ index 000000000..65ac84aba
 +    gus_resolve_voices();
 +    g_gus_diag = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_DIAG");
 +    g_gus_dma_upload = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD");
++    g_gus_pio_autoinc = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_PIO_AUTOINC");
 +    skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
 +
 +    /* detection: reset the GF1, DRAM peek/poke roundtrip + size. */
@@ -1038,9 +1111,11 @@ index 000000000..65ac84aba
 +    g_gus_active = true;
 +
 +    doskutsu_dbg_log("audio: SDL/0112 GUS device up: base=0x%X irq=%d dma=%d "
-+                     "voices=%d rate=%dHz dram=%dKB",
++                     "voices=%d rate=%dHz dram=%dKB upload=%s%s",
 +                     g_gus_base, g_gus_irq, g_gus_play_dma, g_gus_voices,
-+                     (int)g_gus_rate, (int)(g_gus_dram_size / 1024));
++                     (int)g_gus_rate, (int)(g_gus_dram_size / 1024),
++                     g_gus_dma_upload ? "dma" : "pio",
++                     g_gus_pio_autoinc ? "+autoinc" : "");
 +
 +    /* #39 diagnostic test-tone (gated, default OFF). */
 +    if (gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_TESTTONE")) {
@@ -1136,10 +1211,16 @@ index 000000000..65ac84aba
 +           (fx#/len/method/dram_addr). Pairs with the engine's per-.pxt
 +           synth-size vs len-passed log to localize the mismatch. */
 +        if (g_gus_diag) {
++            /* gus-5 #41 H1 decider: include the live hardware active-voice mask.
++               active_mask != 0 at the wedging upload => a voice is reading DRAM
++               during the poke (H1 contention); == 0 => no voice (H2 overrun). */
++            SDL_DOSGusState st;
++            SDL_DOSGusGetState(&st);
 +            doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u (start): src=%p len=%u "
-+                             "dram=0x%X %s via=%s used=%uKB/%uKB",
++                             "dram=0x%X %s via=%s active_mask=0x%X used=%uKB/%uKB",
 +                             g_gus_n_upload, data, (unsigned)len, (unsigned)dram_addr,
 +                             is16bit ? "16b" : "8b", want_dma ? "dma" : "pio",
++                             (unsigned)st.voice_active_mask,
 +                             (unsigned)(g_gus_dram_used / 1024),
 +                             (unsigned)(g_gus_dram_size / 1024));
 +        }
@@ -1271,6 +1352,30 @@ index 000000000..65ac84aba
 +    gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);
 +    g_gus_voice_busy[voice] = false;       /* free inside the critical section */
 +    DOS_EnableInterrupts();
++}
++
++void SDL_DOSGusStopAllVoices(void)
++{
++    int v;
++    if (!g_gus_active) {
++        return;
++    }
++    /* #40 song-boundary quiesce: stop + free EVERY voice in one critical section
++       so no voice is still reading DRAM when the engine swaps the .pat residency
++       and pokes new instruments. The engine calls this only at SONG .pat
++       boundaries (never per-SFX). Mirrors StopVoice's stop+free, iterated. */
++    DOS_DisableInterrupts();
++    for (v = 0; v < g_gus_voices; v++) {
++        gus_select_voice(v);
++        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
++        gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);
++        g_gus_voice_busy[v] = false;
++    }
++    DOS_EnableInterrupts();
++    if (g_gus_diag) {
++        doskutsu_dbg_log("audio: SDL/0112 GUS StopAllVoices: %d voices stopped + "
++                         "freed (song-boundary quiesce, #40).", g_gus_voices);
++    }
 +}
 +
 +void SDL_DOSGusSetVoiceFreq(int voice, Uint32 playback_hz)
