@@ -1,4 +1,4 @@
-From cdb1f00758f24e556ced30b78517f4a95fd89935 Mon Sep 17 00:00:00 2001
+From 650357c913dc0f50ce786b11fae4ff6afe60a8b9 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -145,8 +145,8 @@ replaced by the ring -- the >>1 encode is already confirmed.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 +++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1209 ++++++++++++++++++++++++++++++
- 2 files changed, 1476 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1247 ++++++++++++++++++++++++++++++
+ 2 files changed, 1514 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..90e75527d
+index 000000000..34ca6d66c
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1209 @@
+@@ -0,0 +1,1247 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -593,21 +593,25 @@ index 000000000..90e75527d
 +   atomic vs the IRQ -- no new cli/sti, no I/O), and a MAIN-LOOP-only flush
 +   drains them to the log. GUS_DIAG is therefore IRQ-safe and runnable on g2k. */
 +#define GUS_DIAG_RING 128u /* power of 2 */
-+enum { GUS_DR_FREQ = 1, GUS_DR_VOL, GUS_DR_START, GUS_DR_RBACK };
-+typedef struct { Uint8 kind; Uint8 voice; Uint32 a; Uint32 b; } gus_diag_rec;
++enum { GUS_DR_FREQ = 1, GUS_DR_VOL, GUS_DR_START, GUS_DR_RBACK, GUS_DR_STOP, GUS_DR_PEEK };
++typedef struct { Uint8 kind; Uint8 voice; Uint16 seq; Uint32 a; Uint32 b; } gus_diag_rec;
 +static volatile gus_diag_rec g_gus_dr[GUS_DIAG_RING];
 +static volatile Uint32 g_gus_dr_head = 0; /* next write slot */
 +static volatile Uint32 g_gus_dr_tail = 0; /* next read slot */
++static volatile Uint16 g_gus_dr_seq = 0;  /* monotonic op sequence (voice-state ordering) */
 +static volatile int    g_gus_dr_flushing = 0;
 +
-+/* Enqueue a diag record. The CALLER must already hold the voice-op cli section
-+   so this is atomic vs the IRQ; it does NO I/O. Overwrites the oldest record
-+   when full (lossy by design -- diagnostic only). */
++/* Enqueue a diag record with a monotonic seq. The CALLER must already hold the
++   voice-op cli section so this is atomic vs the IRQ; it does NO I/O. The seq +
++   voice index let the flushed log show op ORDERING -- zero-duration notes
++   (START seq N -> STOP seq N+1 same voice) and voice pileup (all on one index)
++   are nx-opl's voice-state branch. Overwrites the oldest record when full. */
 +static SDL_INLINE void gus_diag_put(Uint8 kind, Uint8 voice, Uint32 a, Uint32 b)
 +{
 +    Uint32 i = g_gus_dr_head & (GUS_DIAG_RING - 1u);
 +    g_gus_dr[i].kind = kind;
 +    g_gus_dr[i].voice = voice;
++    g_gus_dr[i].seq = g_gus_dr_seq++;
 +    g_gus_dr[i].a = a;
 +    g_gus_dr[i].b = b;
 +    g_gus_dr_head++;
@@ -649,27 +653,43 @@ index 000000000..90e75527d
 +        i = g_gus_dr_tail & (GUS_DIAG_RING - 1u);
 +        r.kind = g_gus_dr[i].kind;
 +        r.voice = g_gus_dr[i].voice;
++        r.seq = g_gus_dr[i].seq;
 +        r.a = g_gus_dr[i].a;
 +        r.b = g_gus_dr[i].b;
 +        g_gus_dr_tail++;
 +        DOS_EnableInterrupts();
 +        switch (r.kind) {
 +        case GUS_DR_FREQ:
-+            doskutsu_dbg_log("audio: SDL/0112 GUS v%d FREQ hz=%u -> fc=0x%04X",
-+                             r.voice, (unsigned)r.a, (unsigned)r.b);
++            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d FREQ hz=%u -> fc=0x%04X",
++                             (unsigned)r.seq, r.voice, (unsigned)r.a, (unsigned)r.b);
 +            break;
 +        case GUS_DR_VOL:
-+            doskutsu_dbg_log("audio: SDL/0112 GUS v%d VOL in=%d -> reg=0x%04X",
-+                             r.voice, (int)r.a, (unsigned)r.b);
++            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d VOL in=%d -> reg=0x%04X",
++                             (unsigned)r.seq, r.voice, (int)r.a, (unsigned)r.b);
 +            break;
 +        case GUS_DR_START:
-+            doskutsu_dbg_log("audio: SDL/0112 GUS v%d START addr=0x%X ctrl=0x%02X",
-+                             r.voice, (unsigned)r.a, (unsigned)r.b);
++            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d START addr=0x%X ctrl=0x%02X",
++                             (unsigned)r.seq, r.voice, (unsigned)r.a, (unsigned)r.b);
++            break;
++        case GUS_DR_PEEK:
++            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d PEEK@start=0x%X bytes="
++                             "%02X %02X %02X %02X (all-00 => upload did NOT land "
++                             "at the voice start addr)", (unsigned)r.seq, r.voice,
++                             (unsigned)r.a, (unsigned)(r.b & 0xFF),
++                             (unsigned)((r.b >> 8) & 0xFF),
++                             (unsigned)((r.b >> 16) & 0xFF),
++                             (unsigned)((r.b >> 24) & 0xFF));
 +            break;
 +        case GUS_DR_RBACK:
-+            doskutsu_dbg_log("audio: SDL/0112 GUS v%d RBACK status=0x%02X "
++            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d RBACK status=0x%02X "
 +                             "stopped=%d (1=voice did NOT run)",
-+                             r.voice, (unsigned)r.a, (int)(r.a & 0x01u));
++                             (unsigned)r.seq, r.voice, (unsigned)r.a,
++                             (int)(r.a & 0x01u));
++            break;
++        case GUS_DR_STOP:
++            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d STOP (START#N->STOP "
++                             "same v next seq => zero-duration note)",
++                             (unsigned)r.seq, r.voice);
 +            break;
 +        default:
 +            break;
@@ -1531,10 +1551,22 @@ index 000000000..90e75527d
 +       inside the cli; drained later by the main-loop flush. */
 +    if (g_gus_diag) {
 +        Uint8 st;
++        Uint32 pk;
++        /* PEEK the 4 bytes at the voice's START byte address via the DRAM port
++           (nx-opl's decisive check): confirms the uploaded sample is physically
++           present where the voice was told to start. all-00 => the upload landed
++           ELSEWHERE (write-addr vs voice read-addr mismatch); non-zero => the
++           data is there and the silence is voice-run/output, not addressing. */
++        pk  = (Uint32)gus_peek(start);
++        pk |= (Uint32)gus_peek(start + 1u) << 8;
++        pk |= (Uint32)gus_peek(start + 2u) << 16;
++        pk |= (Uint32)gus_peek(start + 3u) << 24;
++        gus_diag_put(GUS_DR_START, (Uint8)voice, start, ctrl);
++        gus_diag_put(GUS_DR_PEEK, (Uint8)voice, start, pk);
++        /* post-GO voice-control read-back (0x80 twice for the GF1 latch quirk). */
 +        gus_select_voice(voice);
 +        st = gus_r8(GUS_VREG_CTRL_RD);
 +        st = gus_r8(GUS_VREG_CTRL_RD);
-+        gus_diag_put(GUS_DR_START, (Uint8)voice, start, ctrl);
 +        gus_diag_put(GUS_DR_RBACK, (Uint8)voice, st, 0);
 +    }
 +    DOS_EnableInterrupts();
@@ -1552,6 +1584,12 @@ index 000000000..90e75527d
 +    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
 +    gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);
 +    g_gus_voice_busy[voice] = false;       /* free inside the critical section */
++    if (g_gus_diag) {
++        /* gus-7: capture STOP (IRQ-safe) for the voice-state branch -- a START
++           immediately followed by a STOP on the same voice (adjacent seq) is a
++           zero-duration note = silent. */
++        gus_diag_put(GUS_DR_STOP, (Uint8)voice, 0, 0);
++    }
 +    DOS_EnableInterrupts();
 +}
 +
