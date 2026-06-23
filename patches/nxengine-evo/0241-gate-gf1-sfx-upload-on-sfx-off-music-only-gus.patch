@@ -1,0 +1,71 @@
+From 33120aae62843c8dc3c4a4be39cc9e0df806aaca Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 09:40:21 -0700
+Subject: [PATCH] patch 0241 -- #37: gate GF1 SFX upload on _sfx_off
+ (music-only GUS fallback)
+
+#31's _sfx_off gated SFX PLAYBACK (playSfx/stopSfx no-op) but NOT the upload:
+SoundManager's gus path called Pixtone::initGusSfx() unconditionally (0239), so
+SFX_OFF=1 / SFX_DEVICE=none still uploaded the whole SFX bank -- no music-only
+GUS, and no way to dodge the #36 SFX-upload crash.
+
+Fix: gate the initGusSfx() + updateSfxVolume() call on !_sfx_off. When sfx-off,
+skip the SFX upload entirely -- (a) the full card DRAM is then free for the
+per-song .pat instruments (MidiBackendGus's keep-mark auto-snapshots 0), and
+(b) the SFX-upload path is never entered, giving a clean MUSIC-ONLY GUS the
+operator can use to hear native GF1 wavetable music (and to dodge #36 until
+its fix lands).
+
+New slot (not an amend of 0239): _sfx_off is resolved in 0240 (#31), so the
+gate -- which references _sfx_off -- must sit AFTER 0240 in the series.
+
+Built clean; full nx series re-applies (0238->0239->0240->0241); defaults +
+the SFX-on GUS path byte-identical (the gate is a no-op unless sfx-off).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 28 +++++++++++++++++++++++-----
+ 1 file changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 8c704a88..b1b73e6d 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -1269,11 +1269,29 @@ bool SoundManager::init()
+     // the GF1 via MidiBackendGus). Runs AFTER the gus backend install above, so
+     // SDL_DOSGusInit has brought the card up. updateSfxVolume() sets the GF1
+     // per-voice SFX volume used by the gus play path.
+-    Pixtone::getInstance()->initGusSfx();
+-    updateSfxVolume();
+-    LOG_INFO("Sound system: GUS path -- Pixtone SFX uploaded to GF1 voices "
+-             "(#28); music via MidiBackendGus on the same shared GF1 voice "
+-             "pool. No SDL3_mixer / Organya.");
++    //
++    // patch 0241 (#37): gate the SFX UPLOAD on _sfx_off (#31's sfx-off state,
++    // SFX_OFF=1 / SFX_DEVICE=none). #31 only gated SFX PLAYBACK; the upload ran
++    // unconditionally, so there was no music-only GUS. Skipping initGusSfx when
++    // sfx-off (a) frees the whole card DRAM for the per-song .pat instruments
++    // (no SFX bank, so MidiBackendGus's keep-mark auto-snapshots 0), and (b)
++    // gives a MUSIC-ONLY GUS fallback that dodges the SFX-upload path entirely
++    // (relevant to the #36 SFX-upload crash until its fix lands).
++    if (!_sfx_off)
++    {
++      Pixtone::getInstance()->initGusSfx();
++      updateSfxVolume();
++      LOG_INFO("Sound system: GUS path -- Pixtone SFX uploaded to GF1 voices "
++               "(#28); music via MidiBackendGus on the same shared GF1 voice "
++               "pool. No SDL3_mixer / Organya.");
++    }
++    else
++    {
++      LOG_INFO("Sound system: GUS path -- SFX DISABLED (SFX_OFF/SFX_DEVICE=none, "
++               "#37); skipping the GF1 SFX upload. MUSIC-ONLY GUS: the full card "
++               "DRAM is free for the per-song .pat instruments, and the SFX "
++               "upload path is not entered at all.");
++    }
+   }
+   else
+   {
+-- 
+2.47.3
+
