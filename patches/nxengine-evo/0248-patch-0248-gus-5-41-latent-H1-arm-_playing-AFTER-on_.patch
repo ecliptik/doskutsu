@@ -1,0 +1,61 @@
+From 059b61d79f9fc66276979fff2e3abb5519d5d304 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 12:51:52 -0700
+Subject: [PATCH 248/249] patch 0248 -- gus-5 (#41 latent-H1): arm _playing
+ AFTER on_song_start
+
+The GUS MidiBackendGus::on_song_start() uploads GM .pat instruments to GF1
+DRAM via slow byte-wise PIO pokes, in main-loop context. MidiScheduler::start()
+previously set _playing=true BEFORE calling on_song_start(), so the PIT music
+pump's tick_isr (a real INT8 hardware IRQ on DOS) could preempt mid-upload and
+dispatch a note into a half-uploaded instrument bank -- a voice contending the
+card during the poke window.
+
+Move _playing=true to AFTER on_song_start() returns. The pump cannot dispatch
+any note until every instrument is resident. Backends with a no-op
+on_song_start (SB/OPL) are unaffected; the only added latency is the upload
+time, already synchronous in start().
+
+Latent-risk close for gus-5; the gus-4b music hang itself is the SDL-side PIO
+poke (sdl-pg autoinc fix), not this dispatch race.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiScheduler.cpp | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+index ba0f23b8..56c13acb 100644
+--- a/src/sound/MidiScheduler.cpp
++++ b/src/sound/MidiScheduler.cpp
+@@ -350,12 +350,26 @@ void MidiScheduler::start()
+     _last_tick_now_ms = 0;  // first tick() sets this; treats first delta as 0
+     _tempo_us_per_quarter = 500000;  // reset to SMF default; tempo events re-set
+     _recompute_us_per_tick();
+-    _playing = true;
++    // patch 0248 (gus-5, latent-H1 close): _playing is armed AFTER on_song_-
++    // start() below, NOT here. The GUS backend's on_song_start() uploads .pat
++    // instruments via slow PIO pokes in main-loop context; were _playing true
++    // now, the PIT music pump's tick_isr could preempt mid-upload and dispatch
++    // a note into a half-uploaded instrument bank. Arming after the uploads
++    // complete means the pump cannot dispatch until every instrument is
++    // resident. Backends whose on_song_start is a no-op (SB/OPL) are
++    // unaffected -- the only added latency is the upload time itself.
+   }
+   if (_backend)
+   {
+     _backend->on_song_start();
+   }
++  // Arm playback now that the backend has finished any per-song setup (GUS
++  // .pat uploads). cli/sti so the ISR sees the flip atomically vs the state
++  // reset above.
++  {
++    MidiIsrCriticalSection _cs;
++    _playing = true;
++  }
+ }
+ 
+ void MidiScheduler::stop()
+-- 
+2.47.3
+

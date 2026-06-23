@@ -1,0 +1,47 @@
+From b559b78b321f7aa3044b68fbc0894221e064115f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 12:51:59 -0700
+Subject: [PATCH 249/249] patch 0249 -- gus-5 (#40): StopAllVoices across the
+ .pat song boundary
+
+MidiBackendGus::on_song_start() tears down the prior song's voices before
+freeing/re-uploading the .pat region, but its per-voice loop only covers the
+music voice pool (_num_voices). Looping Pixtone SFX voices (e.g. CRITTER_FLY)
+are allocated from a separate GF1 voice range the music backend does not own,
+so a looping SFX survives a song change and keeps driving the card while we
+PIO-poke the new song's instruments -- the same contention window patch 0248
+closes for note dispatch.
+
+Call SDL_DOSGusStopAllVoices() (sdl-pg gus-5 export, SDL/0112) at the top of
+on_song_start to quiesce every GF1 voice -- music + SFX -- before the upload.
+SFX DRAM is preserved by the persist_mark, so silenced SFX replay after the
+song change; only in-flight playback is cut, correct across a scene transition.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendGus.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index 7a233cd6..ab6c36cc 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -628,6 +628,15 @@ void MidiBackendGus::on_song_start()
+   // song's voices, free its DRAM, then pre-upload exactly the instruments the
+   // new song references so the IRQ note path only ever touches resident DRAM.
+ 
++  // patch 0249 (#40, gus-5): quiesce EVERY GF1 voice -- including looping SFX
++  // voices (e.g. CRITTER_FLY) allocated by the Pixtone path, which the music
++  // pool loop below does NOT own. A looping SFX surviving a song change would
++  // keep driving the card while we PIO-poke the new song's .pat instruments
++  // (the contention window). StopAllVoices is the only call that reaches the
++  // SFX voice range; the per-voice music loop below still clears engine-side
++  // _voices[].active bookkeeping (StopAllVoices is a hardware-only sweep).
++  SDL_DOSGusStopAllVoices();
++
+   for (int v = 0; v < _num_voices; ++v)
+   {
+     SDL_DOSGusStopVoice(v);
+-- 
+2.47.3
+
