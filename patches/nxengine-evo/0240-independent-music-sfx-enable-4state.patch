@@ -1,8 +1,7 @@
-From a5da8d229ecbc0abb1aa63f340dfe8b8170fa6c8 Mon Sep 17 00:00:00 2001
+From 3bc04c994c82fa3dedb2cac1651f345c2c11b843 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 17:32:53 -0700
-Subject: [PATCH 240/240] patch 0240 -- #31: independent music/SFX enable
- (4-state)
+Subject: [PATCH] patch 0240 -- #31: independent music/SFX enable (4-state)
 
 Generalizes audio enable so music and SFX are independently toggleable --
 the engine capability behind SETUP's 'Select Music Card -> No Music' and
@@ -30,10 +29,10 @@ re-applies (0239 -> 0240).
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- src/sound/AudioBackend.cpp | 17 ++++++++++++++-
- src/sound/SoundManager.cpp | 44 +++++++++++++++++++++++++++++++++++---
- src/sound/SoundManager.h   | 16 ++++++++++++++
- 3 files changed, 73 insertions(+), 4 deletions(-)
+ src/sound/AudioBackend.cpp | 17 ++++++++++++-
+ src/sound/SoundManager.cpp | 50 +++++++++++++++++++++++++++++++++++---
+ src/sound/SoundManager.h   | 16 ++++++++++++
+ 3 files changed, 79 insertions(+), 4 deletions(-)
 
 diff --git a/src/sound/AudioBackend.cpp b/src/sound/AudioBackend.cpp
 index d09d8f79..eb1be0a6 100644
@@ -71,10 +70,10 @@ index d09d8f79..eb1be0a6 100644
    }
  
 diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
-index 810b19de..0216e71e 100644
+index 810b19de..8c704a88 100644
 --- a/src/sound/SoundManager.cpp
 +++ b/src/sound/SoundManager.cpp
-@@ -349,6 +349,27 @@ bool SoundManager::init()
+@@ -349,6 +349,33 @@ bool SoundManager::init()
               "docs/internal/ADLIB-NATIVE-DESIGN.md.");
    }
  
@@ -85,9 +84,15 @@ index 810b19de..0216e71e 100644
 +  // remains the device-level both-off. Strict-"1" / strict-"none" match.
 +  {
 +    const char *_mo = SDL_GetHint("SDL_HINT_DOSKUTSU_MUSIC_OFF");
++    // BUGFIX (bq-pg #31 default-music=OFF): resolve "No Music" from the
++    // AUDIO_BACKEND HINT STRING (_be_hint, in scope here), NOT
++    // g_p10_audio_backend_active. That enum DEFAULTS to `none` and is only set
++    // later by selectBackendFromEnv() (called further down at the install
++    // dispatch, ~line 635) -- reading it here would make _music_off TRUE on
++    // EVERY boot (music silent by default). The hint string reflects the real
++    // env value now: unset/opl3/etc -> music on; "none" -> music off.
 +    _music_off = (_mo && _mo[0] == '1' && _mo[1] == '\0') ||
-+                 (NXE::Diag::g_p10_audio_backend_active ==
-+                  NXE::Diag::AudioBackend::none);
++                 (_be_hint && SDL_strcmp(_be_hint, "none") == 0);
 +    const char *_so = SDL_GetHint("SDL_HINT_DOSKUTSU_SFX_OFF");
 +    const char *_sd = SDL_GetHint("SDL_HINT_DOSKUTSU_SFX_DEVICE");
 +    _sfx_off = (_so && _so[0] == '1' && _so[1] == '\0') ||
@@ -102,7 +107,7 @@ index 810b19de..0216e71e 100644
    // DOS-PORT (patch 0092, Phase 9 wave 21 Lever G; polarity flipped
    // patch 0093, wave 21 default-flip). Wave 21 W21A measured Lever G
    // working as designed; W21B confirmed audio quality "acceptable" per
-@@ -1428,7 +1449,7 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+@@ -1428,7 +1455,7 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
    // patch 0236 (#19): no PCM SFX on the AdLib path (no DAC/mixer). No-op so
    // gameplay doesn't spam "Pixtone::play: not rendered" against a null mixer.
    // Covers startPropSound (delegates here) too.
@@ -111,7 +116,7 @@ index 810b19de..0216e71e 100644
      return;
    if (!settings->sound_enabled)
      return;
-@@ -1454,7 +1475,7 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
+@@ -1454,7 +1481,7 @@ void SoundManager::playSfxResampled(NXE::Sound::SFX snd, uint32_t percent)
  {
    // patch 0236 (#19): no PCM SFX on the AdLib path. Covers startStreamSound
    // (delegates here) too.
@@ -120,7 +125,7 @@ index 810b19de..0216e71e 100644
      return;
    if (!settings->sound_enabled)
      return;
-@@ -1477,7 +1498,7 @@ void SoundManager::stopSfx(NXE::Sound::SFX snd)
+@@ -1477,7 +1504,7 @@ void SoundManager::stopSfx(NXE::Sound::SFX snd)
  {
    // patch 0236 (#19): no PCM SFX on the AdLib path. Covers stopLoopSfx
    // (delegates here) too.
@@ -129,7 +134,7 @@ index 810b19de..0216e71e 100644
      return;
    Pixtone::getInstance()->stop((int32_t)snd);
  }
-@@ -1510,6 +1531,13 @@ void SoundManager::music(uint32_t songno, bool resume)
+@@ -1510,6 +1537,13 @@ void SoundManager::music(uint32_t songno, bool resume)
  
    LOG_DEBUG(" >> music({})", songno);
  
@@ -143,7 +148,7 @@ index 810b19de..0216e71e 100644
    // patch 0101 (Phase 10 Stage 2): MIDI-backend dispatch path. When
    // g_p10_audio_backend_active is one of {midi_stub, wb, opl3}, route
    // through MidiScheduler instead of Organya / OGG. patch 0102 (Stage 3)
-@@ -1577,6 +1605,16 @@ void SoundManager::music(uint32_t songno, bool resume)
+@@ -1577,6 +1611,16 @@ void SoundManager::music(uint32_t songno, bool resume)
  
  void SoundManager::enableMusic(int newstate)
  {
