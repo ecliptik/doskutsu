@@ -1,0 +1,68 @@
+From 6732eabcf180cf795bb5d99cc53d462e4c05fd3a Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 12:07:47 -0700
+Subject: [PATCH] patch 0247 -- #38: bracket diag around the GF1 SFX upload
+ (pinpoint fx6d/slot 109)
+
+gus-4 g2k: SFX-init still crashes at fx6d/slot 109 (SND_CRITTER_FLY) -- SAME slot
+as gus-3 -> data/position-specific, NOT cumulative. NEITHER 0246 guard fired:
+the render-OOM guard didn't (render completed) and the budget-stop didn't
+(sfx_used=714600 = 698KB is UNDER the 720896 = 704KB budget, so correctly no
+skip). So the crash is in/around the upload itself, cause still unknown after
+sdl-pg cleared the transport + addressing.
+
+This adds two GUS_DIAG bracket lines around SDL_DOSGusUploadSample:
+- "fx.. UploadSample returned addr=.." immediately after the call.
+- "fx.. DONE (.. dram_used=..)" after the free + store.
+Combined with the existing "fx.. -> uploading..." (0242), the LAST line in the
+crash log pins the exact failing step for slot 109: uploading-but-not-returned
+= inside UploadSample; returned-but-not-DONE = free/store; DONE = next slot's
+render. Diagnostic only, GUS_DIAG-gated, zero behavior change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index d6cf8cad..5f2e7732 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -647,6 +647,18 @@ bool Pixtone::initGusSfx()
+                    "sfx_used={} -> uploading...", slot, slot,
+                    (unsigned)snd.final_size, (unsigned)n, (unsigned)sfx_used);
+         const uint32_t addr = SDL_DOSGusUploadSample(tmp, n, 0 /*is16bit*/);
++        // patch 0247 (#38 bracket diag): logged IMMEDIATELY after UploadSample
++        // returns -- brackets the crash. g2k gus-4 crashed at fx6d/slot 109 with
++        // NEITHER the render-OOM nor budget guard firing (it's under budget +
++        // render completed), so the fault is in/around the upload. If a slot
++        // logs "uploading..." (above) but NOT this "returned" line -> the fault
++        // is INSIDE SDL_DOSGusUploadSample (sdl-pg's poke at that DRAM addr/len);
++        // if it logs "returned" but not "DONE" (below) -> the fault is in the
++        // free/store; if "DONE" logs -> the next slot's render/load. This pins
++        // the exact failing step for slot 109.
++        if (_gusdiag)
++          LOG_INFO("gus SFX diag: fx{:02x} UploadSample returned addr={} -- "
++                   "freeing tmp + storing...", slot, (unsigned)addr);
+         std::free(tmp);
+         if (addr != SDL_DOSGUS_BAD_ADDR)
+         {
+@@ -655,6 +667,15 @@ bool Pixtone::initGusSfx()
+           _sound_fx[slot].gus_resident  = true;
+           ++uploaded;
+           sfx_used += n;  // music-priority budget accounting
++          if (_gusdiag)
++          {
++            SDL_DOSGusState _st;
++            const unsigned _du =
++                (SDL_DOSGusGetState(&_st) && _st.valid) ? (unsigned)_st.dram_used : 0u;
++            LOG_INFO("gus SFX diag: fx{:02x} DONE (uploaded={} sfx_used={} "
++                     "dram_used={}); next slot...", slot, uploaded,
++                     (unsigned)sfx_used, _du);
++          }
+         }
+         else
+         {
+-- 
+2.47.3
+
