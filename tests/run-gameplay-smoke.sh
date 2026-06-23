@@ -422,6 +422,7 @@ BANNER_REGEX=(
   "Sound system: 4-state audio enable \(#31\) -- music=(on|OFF) sfx=(on|OFF)"
   "audio backend: none \(No Music -- #31\)"
   "Sound system: GUS path -- SFX DISABLED .*MUSIC-ONLY GUS"
+  "audio: SDL/0112 GUS device up: .*upload=pio"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -528,6 +529,7 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
   "optional"
   "optional"
   "optional"
