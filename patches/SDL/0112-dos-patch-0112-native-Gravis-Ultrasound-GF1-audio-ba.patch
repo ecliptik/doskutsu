@@ -1,4 +1,4 @@
-From 8500a2a4c1c8d59a5b19c9c1cdd4c45255402900 Mon Sep 17 00:00:00 2001
+From c964e565aeca382bd16bccd04134b442e344f3ef Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -145,8 +145,8 @@ replaced by the ring -- the >>1 encode is already confirmed.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 ++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1402 ++++++++++++++++++++++++++++++
- 2 files changed, 1669 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1415 ++++++++++++++++++++++++++++++
+ 2 files changed, 1682 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..1db8e895d
+index 000000000..b8a00bed6
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1402 @@
+@@ -0,0 +1,1415 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -570,6 +570,7 @@ index 000000000..1db8e895d
 +static bool g_gus_reap_grace = false;      /* gus-8c #39: start-race mask guard (default OFF) */
 +static bool g_gus_double_write = true;     /* gus-13 #39 FIX: real-GF1 control-reg errata (default ON; killswitch GUS_NO_DOUBLE_WRITE) */
 +static bool g_gus_vol_ramp = true;         /* gus-14 #39 FIX: drive volume via the GF1 ramp engine (default ON; killswitch GUS_NO_VOL_RAMP) */
++static bool g_gus_dac_irq = true;          /* gus-15 #39 FIX: set 0x4C bit2 (master-IRQ-enable) -- may gate the DAC clock (default ON; killswitch GUS_NO_DAC_IRQBIT) */
 +
 +/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
 +   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
@@ -1319,6 +1320,10 @@ index 000000000..1db8e895d
 +       direct 0x09 write with the ramp stopped). Default ON; GUS_NO_VOL_RAMP=1
 +       reverts to the direct-0x09 path for the A/B. */
 +    g_gus_vol_ramp = !gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_NO_VOL_RAMP");
++    /* gus-15 #39 FIX: set the GF1 reset-reg master-IRQ-enable bit2 (0x4C=0x07 not
++       0x03) -- on a real GF1/PicoGUS the DAC may not clock to output unless bit2
++       is set. Default ON; GUS_NO_DAC_IRQBIT=1 reverts to 0x03 for the A/B. */
++    g_gus_dac_irq = !gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_NO_DAC_IRQBIT");
 +    g_gus_dr_head = g_gus_dr_tail = 0; /* arm the IRQ-safe diag ring */
 +    skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
 +
@@ -1360,13 +1365,21 @@ index 000000000..1db8e895d
 +       voice_active_mask, and the music clock is the external PIT pump. */
 +    gus_program_irq_dma();
 +    gus_w8(GUS_REG_VOICES, (Uint8)(0xC0 | (g_gus_voices - 1)));
-+    gus_w8(GUS_REG_RESET, 0x03); /* master + DAC; IRQ (bit2) OFF */
-+    /* gus-13 #39 FIX: double-write the reset/DAC-enable. The first write after
-+       coming out of reset can be DROPPED on a real GF1 (errata; emulators
-+       tolerate the single write -- the emulator-vs-PicoGUS divergence). Default
-+       ON; killswitch GUS_NO_DOUBLE_WRITE=1. Idempotent. */
-+    if (g_gus_double_write) {
-+        gus_w8(GUS_REG_RESET, 0x03);
++    /* gus-15 #39 candidate: master-IRQ-enable bit2. Canonical GUS init writes
++       0x4C=0x07 (master+DAC+IRQ); we wrote 0x03 (no IRQ) for the IRQ-independent
++       design. On a real GF1/PicoGUS the DAC may not CLOCK to output unless bit2
++       is set (DOSBox#149) -> every voice runs but is silent (our g2k symptom;
++       both per-voice fixes failed). We enable ZERO IRQ SOURCES (no wave-end, no
++       timer), so master-IRQ-enable with no source = no IRQ actually fires (safe).
++       Default ON; killswitch GUS_NO_DAC_IRQBIT=1 reverts to 0x03 for the A/B. */
++    {
++        Uint8 reset_val = g_gus_dac_irq ? 0x07 : 0x03;
++        gus_w8(GUS_REG_RESET, reset_val); /* master + DAC (+ IRQ-enable if gus-15) */
++        /* gus-13 #39: double-write the reset/DAC-enable (errata -- the first write
++           after reset can be dropped on a real GF1). Idempotent. */
++        if (g_gus_double_write) {
++            gus_w8(GUS_REG_RESET, reset_val);
++        }
 +    }
 +    SDL_DelayPrecise(SDL_US_TO_NS(100));
 +
