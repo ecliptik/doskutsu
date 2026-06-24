@@ -1,4 +1,4 @@
-From a78650d73fcf0d6a976e676b60e6954c46e895ff Mon Sep 17 00:00:00 2001
+From f05c114530bad24fcf424e18d132591e34dfc7cf Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -144,9 +144,9 @@ replaced by the ring -- the >>1 encode is already confirmed.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- include/SDL3/SDL_dosgus.h        |  267 ++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1294 ++++++++++++++++++++++++++++++
- 2 files changed, 1561 insertions(+)
+ include/SDL3/SDL_dosgus.h        |  267 +++++++
+ src/audio/dos/SDL_dosaudio_gus.c | 1280 ++++++++++++++++++++++++++++++
+ 2 files changed, 1547 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..c4c52a6a9
+index 000000000..037aeba31
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1294 @@
+@@ -0,0 +1,1280 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -1453,16 +1453,15 @@ index 000000000..c4c52a6a9
 +           (fx#/len/method/dram_addr). Pairs with the engine's per-.pxt
 +           synth-size vs len-passed log to localize the mismatch. */
 +        if (g_gus_diag) {
-+            /* gus-5 #41 H1 decider: include the live hardware active-voice mask.
-+               active_mask != 0 at the wedging upload => a voice is reading DRAM
-+               during the poke (H1 contention); == 0 => no voice (H2 overrun). */
-+            SDL_DOSGusState st;
-+            SDL_DOSGusGetState(&st);
++            /* gus-9: memory-only -- NO GF1 read here. Dropped the gus-5
++               active_mask GetState call (a 0x80 read inside a diag block); this
++               PicoGUS wedges on ANY diag-added GF1 read. The live mask still
++               reaches the log via the GUS_DR_MASK ring record (sourced from the
++               core, non-diag GetState 0x80 read that already runs in the reap). */
 +            doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u (start): src=%p len=%u "
-+                             "dram=0x%X %s via=%s active_mask=0x%X used=%uKB/%uKB",
++                             "dram=0x%X %s via=%s used=%uKB/%uKB",
 +                             g_gus_n_upload, data, (unsigned)len, (unsigned)dram_addr,
 +                             is16bit ? "16b" : "8b", want_dma ? "dma" : "pio",
-+                             (unsigned)st.voice_active_mask,
 +                             (unsigned)(g_gus_dram_used / 1024),
 +                             (unsigned)(g_gus_dram_size / 1024));
 +        }
@@ -1472,25 +1471,12 @@ index 000000000..c4c52a6a9
 +            gus_upload_pio(dram_addr, (const Uint8 *)data, len);
 +        }
 +    }
-+    /* gus-8 #39 data-present PEEK -- MAIN-CONTEXT (on_song_start / SFX init),
-+       safe because no voice is active here (the engine StopAllVoices'd before
-+       these uploads and arms _playing only AFTER). Reads back, via the GF1 DRAM
-+       peek port, the first bytes at the WRITE address (dram_addr) AND at the
-+       voice's encoded READ address. write-bytes all-00 => the upload wrote zero
-+       / parse bug (nx-opl's top candidate); write-bytes non-zero => the sample
-+       IS resident and the silence is voice-run/output, not the upload. The enc
-+       column is for a PicoGUS that might fetch the literal encoded address. */
-+    if (g_gus_diag) {
-+        Uint32 enc = is16bit ? ((dram_addr & 0xC0000u) | ((dram_addr >> 1) & 0x1FFFFu))
-+                             : dram_addr;
-+        Uint8 w0 = gus_peek(dram_addr),     w1 = gus_peek(dram_addr + 1u);
-+        Uint8 w2 = gus_peek(dram_addr + 2u), w3 = gus_peek(dram_addr + 3u);
-+        Uint8 e0 = gus_peek(enc),           e1 = gus_peek(enc + 1u);
-+        doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u PEEK write@0x%X=%02X %02X "
-+                         "%02X %02X enc@0x%X=%02X %02X (write all-00 => upload "
-+                         "wrote ZERO)", g_gus_n_upload, (unsigned)dram_addr,
-+                         w0, w1, w2, w3, (unsigned)enc, e0, e1);
-+    }
++    /* gus-9: the gus-8 on_song_start data-present PEEK (6x gus_peek on the GF1
++       DRAM port) is REMOVED -- it wedged the PicoGUS (any diag-added GF1 read
++       does, even main-context with voices stopped). The datum it gave already
++       settled the question (the 16-bit sample IS resident at the voice's encoded
++       read addr -> upload + #42 encode correct; silence is NOT the upload). The
++       diag is now 100% memory-only. */
 +    return dram_addr;
 +}
 +
