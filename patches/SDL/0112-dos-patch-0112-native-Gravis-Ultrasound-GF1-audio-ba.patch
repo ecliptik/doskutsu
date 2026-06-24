@@ -1,4 +1,4 @@
-From 650357c913dc0f50ce786b11fae4ff6afe60a8b9 Mon Sep 17 00:00:00 2001
+From dd3f3b76fea2f2c2ffb3aa23fb9d2f8f2e75dc1c Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -145,8 +145,8 @@ replaced by the ring -- the >>1 encode is already confirmed.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 +++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1247 ++++++++++++++++++++++++++++++
- 2 files changed, 1514 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1236 ++++++++++++++++++++++++++++++
+ 2 files changed, 1503 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..34ca6d66c
+index 000000000..01eb64ab6
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1247 @@
+@@ -0,0 +1,1236 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -593,7 +593,7 @@ index 000000000..34ca6d66c
 +   atomic vs the IRQ -- no new cli/sti, no I/O), and a MAIN-LOOP-only flush
 +   drains them to the log. GUS_DIAG is therefore IRQ-safe and runnable on g2k. */
 +#define GUS_DIAG_RING 128u /* power of 2 */
-+enum { GUS_DR_FREQ = 1, GUS_DR_VOL, GUS_DR_START, GUS_DR_RBACK, GUS_DR_STOP, GUS_DR_PEEK };
++enum { GUS_DR_FREQ = 1, GUS_DR_VOL, GUS_DR_START, GUS_DR_STOP };
 +typedef struct { Uint8 kind; Uint8 voice; Uint16 seq; Uint32 a; Uint32 b; } gus_diag_rec;
 +static volatile gus_diag_rec g_gus_dr[GUS_DIAG_RING];
 +static volatile Uint32 g_gus_dr_head = 0; /* next write slot */
@@ -670,21 +670,6 @@ index 000000000..34ca6d66c
 +        case GUS_DR_START:
 +            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d START addr=0x%X ctrl=0x%02X",
 +                             (unsigned)r.seq, r.voice, (unsigned)r.a, (unsigned)r.b);
-+            break;
-+        case GUS_DR_PEEK:
-+            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d PEEK@start=0x%X bytes="
-+                             "%02X %02X %02X %02X (all-00 => upload did NOT land "
-+                             "at the voice start addr)", (unsigned)r.seq, r.voice,
-+                             (unsigned)r.a, (unsigned)(r.b & 0xFF),
-+                             (unsigned)((r.b >> 8) & 0xFF),
-+                             (unsigned)((r.b >> 16) & 0xFF),
-+                             (unsigned)((r.b >> 24) & 0xFF));
-+            break;
-+        case GUS_DR_RBACK:
-+            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d RBACK status=0x%02X "
-+                             "stopped=%d (1=voice did NOT run)",
-+                             (unsigned)r.seq, r.voice, (unsigned)r.a,
-+                             (int)(r.a & 0x01u));
 +            break;
 +        case GUS_DR_STOP:
 +            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d STOP (START#N->STOP "
@@ -1431,6 +1416,25 @@ index 000000000..34ca6d66c
 +            gus_upload_pio(dram_addr, (const Uint8 *)data, len);
 +        }
 +    }
++    /* gus-8 #39 data-present PEEK -- MAIN-CONTEXT (on_song_start / SFX init),
++       safe because no voice is active here (the engine StopAllVoices'd before
++       these uploads and arms _playing only AFTER). Reads back, via the GF1 DRAM
++       peek port, the first bytes at the WRITE address (dram_addr) AND at the
++       voice's encoded READ address. write-bytes all-00 => the upload wrote zero
++       / parse bug (nx-opl's top candidate); write-bytes non-zero => the sample
++       IS resident and the silence is voice-run/output, not the upload. The enc
++       column is for a PicoGUS that might fetch the literal encoded address. */
++    if (g_gus_diag) {
++        Uint32 enc = is16bit ? ((dram_addr & 0xC0000u) | ((dram_addr >> 1) & 0x1FFFFu))
++                             : dram_addr;
++        Uint8 w0 = gus_peek(dram_addr),     w1 = gus_peek(dram_addr + 1u);
++        Uint8 w2 = gus_peek(dram_addr + 2u), w3 = gus_peek(dram_addr + 3u);
++        Uint8 e0 = gus_peek(enc),           e1 = gus_peek(enc + 1u);
++        doskutsu_dbg_log("audio: SDL/0112 GUS upload #%u PEEK write@0x%X=%02X %02X "
++                         "%02X %02X enc@0x%X=%02X %02X (write all-00 => upload "
++                         "wrote ZERO)", g_gus_n_upload, (unsigned)dram_addr,
++                         w0, w1, w2, w3, (unsigned)enc, e0, e1);
++    }
 +    return dram_addr;
 +}
 +
@@ -1544,30 +1548,15 @@ index 000000000..34ca6d66c
 +    }
 +    gus_w8(GUS_VREG_CTRL, ctrl);           /* GO */
 +    g_gus_voice_busy[voice] = true;        /* claim inside the critical section */
-+    /* gus-7 #39: IRQ-safe diag (StartVoice runs in the note_on IRQ). Enqueue the
-+       START params + a post-GO READ-BACK of the voice control status (read 0x80
-+       twice for the GF1 latch quirk) -- stopped bit set => the GF1 did NOT run
-+       the voice we just started (the decisive silence datum). Memory-only,
-+       inside the cli; drained later by the main-loop flush. */
++    /* gus-8 #39: IRQ voice path is MEMORY-ONLY -- enqueue the COMMANDED values
++       (start addr, ctrl) only, ZERO port reads. gus-7 put a GF1 DRAM PEEK + a
++       voice-status read-back HERE (in the note_on IRQ, right after GO); on the
++       PicoGUS a DRAM/status read concurrent with the just-activated voice
++       CONTENDS for the GF1 -> bus wedge (GUS_DIAG=1 froze at the first note;
++       GUS_DIAG=0 reached gameplay). The data-present PEEK moved to on_song_start
++       (UploadSample, main-context, before any voice is active -- see there). */
 +    if (g_gus_diag) {
-+        Uint8 st;
-+        Uint32 pk;
-+        /* PEEK the 4 bytes at the voice's START byte address via the DRAM port
-+           (nx-opl's decisive check): confirms the uploaded sample is physically
-+           present where the voice was told to start. all-00 => the upload landed
-+           ELSEWHERE (write-addr vs voice read-addr mismatch); non-zero => the
-+           data is there and the silence is voice-run/output, not addressing. */
-+        pk  = (Uint32)gus_peek(start);
-+        pk |= (Uint32)gus_peek(start + 1u) << 8;
-+        pk |= (Uint32)gus_peek(start + 2u) << 16;
-+        pk |= (Uint32)gus_peek(start + 3u) << 24;
 +        gus_diag_put(GUS_DR_START, (Uint8)voice, start, ctrl);
-+        gus_diag_put(GUS_DR_PEEK, (Uint8)voice, start, pk);
-+        /* post-GO voice-control read-back (0x80 twice for the GF1 latch quirk). */
-+        gus_select_voice(voice);
-+        st = gus_r8(GUS_VREG_CTRL_RD);
-+        st = gus_r8(GUS_VREG_CTRL_RD);
-+        gus_diag_put(GUS_DR_RBACK, (Uint8)voice, st, 0);
 +    }
 +    DOS_EnableInterrupts();
 +
