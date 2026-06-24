@@ -1,4 +1,4 @@
-From c964e565aeca382bd16bccd04134b442e344f3ef Mon Sep 17 00:00:00 2001
+From 3c90825efcdd48d74e0973afa0ecd3468d84a5e9 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -145,8 +145,8 @@ replaced by the ring -- the >>1 encode is already confirmed.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 ++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1415 ++++++++++++++++++++++++++++++
- 2 files changed, 1682 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1426 ++++++++++++++++++++++++++++++
+ 2 files changed, 1693 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..b8a00bed6
+index 000000000..06e482cd7
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1415 @@
+@@ -0,0 +1,1426 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -571,6 +571,7 @@ index 000000000..b8a00bed6
 +static bool g_gus_double_write = true;     /* gus-13 #39 FIX: real-GF1 control-reg errata (default ON; killswitch GUS_NO_DOUBLE_WRITE) */
 +static bool g_gus_vol_ramp = true;         /* gus-14 #39 FIX: drive volume via the GF1 ramp engine (default ON; killswitch GUS_NO_VOL_RAMP) */
 +static bool g_gus_dac_irq = true;          /* gus-15 #39 FIX: set 0x4C bit2 (master-IRQ-enable) -- may gate the DAC clock (default ON; killswitch GUS_NO_DAC_IRQBIT) */
++static bool g_gus_fullcanon = false;       /* gus-15 #39 FULLCANON hedge: + 160us reset settle + mixer latch-enable bit3 (opt-in GUS_FULLCANON) */
 +
 +/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
 +   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
@@ -845,15 +846,19 @@ index 000000000..b8a00bed6
 +{
 +    Uint8 irqc = (g_gus_irq >= 0 && g_gus_irq < 16) ? g_gus_irq_codes[g_gus_irq] : 0;
 +    Uint8 dmac = (g_gus_play_dma >= 0 && g_gus_play_dma < 8) ? g_gus_dma_codes[g_gus_play_dma] : 0;
++    /* gus-15 FULLCANON: set the mixer latch-enable bit3 (0x08) DURING the 2XB
++       latch writes (canonical) -- our default leaves bit3 clear until the final
++       write, so the latches may not take on a real GF1. Opt-in (default 0x00). */
++    Uint8 le = g_gus_fullcanon ? 0x08u : 0x00u;
 +
 +    DOS_DisableInterrupts();
 +    /* select + write IRQ control latch (P2X0 bit6 = 0) */
-+    outportb(GUS_P2X0_MIXCTRL(g_gus_base), 0x00);
++    outportb(GUS_P2X0_MIXCTRL(g_gus_base), (Uint8)(0x00 | le));
 +    outportb(GUS_P2XB_IRQDMA(g_gus_base), irqc);
 +    /* select + write DMA control latch (P2X0 bit6 = 1) */
-+    outportb(GUS_P2X0_MIXCTRL(g_gus_base), 0x40);
++    outportb(GUS_P2X0_MIXCTRL(g_gus_base), (Uint8)(0x40 | le));
 +    outportb(GUS_P2XB_IRQDMA(g_gus_base), dmac);
-+    /* leave outputs enabled (bit1=0 line out enable, bit6 back to 0) */
++    /* leave outputs enabled (bit1=0 line out enable, bit3=1 latches, bit6=0) */
 +    outportb(GUS_P2X0_MIXCTRL(g_gus_base), 0x08);
 +    DOS_EnableInterrupts();
 +}
@@ -861,13 +866,14 @@ index 000000000..b8a00bed6
 +/* Master GF1 reset: into reset, out of reset, then optionally DAC + IRQ. */
 +static void gus_reset_chip(bool enable_outputs)
 +{
++    Uint32 us = g_gus_fullcanon ? 160u : 100u; /* gus-15 FULLCANON: canonical 160us settle */
 +    gus_w8(GUS_REG_RESET, 0x00); /* assert reset (halts voices + DMA) */
-+    SDL_DelayPrecise(SDL_US_TO_NS(100));
++    SDL_DelayPrecise(SDL_US_TO_NS(us));
 +    gus_w8(GUS_REG_RESET, 0x01); /* master enable, out of reset */
-+    SDL_DelayPrecise(SDL_US_TO_NS(100));
++    SDL_DelayPrecise(SDL_US_TO_NS(us));
 +    if (enable_outputs) {
 +        gus_w8(GUS_REG_RESET, 0x03); /* bit0 master + bit1 DAC; IRQ (bit2) OFF (IRQ-independent) */
-+        SDL_DelayPrecise(SDL_US_TO_NS(100));
++        SDL_DelayPrecise(SDL_US_TO_NS(us));
 +    }
 +}
 +
@@ -1324,6 +1330,11 @@ index 000000000..b8a00bed6
 +       0x03) -- on a real GF1/PicoGUS the DAC may not clock to output unless bit2
 +       is set. Default ON; GUS_NO_DAC_IRQBIT=1 reverts to 0x03 for the A/B. */
 +    g_gus_dac_irq = !gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_NO_DAC_IRQBIT");
++    /* gus-15 FULLCANON hedge (opt-in, default OFF): the OTHER documented canonical
++       deltas on top of 0x4C=0x07 -- 160us reset settle (vs our 100us) + mixer
++       latch-enable bit3 set DURING the IRQ/DMA latch writes. The catch-all g2k
++       cell if the IRQ-bit alone isn't enough. */
++    g_gus_fullcanon = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_FULLCANON");
 +    g_gus_dr_head = g_gus_dr_tail = 0; /* arm the IRQ-safe diag ring */
 +    skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
 +
@@ -1381,7 +1392,7 @@ index 000000000..b8a00bed6
 +            gus_w8(GUS_REG_RESET, reset_val);
 +        }
 +    }
-+    SDL_DelayPrecise(SDL_US_TO_NS(100));
++    SDL_DelayPrecise(SDL_US_TO_NS(g_gus_fullcanon ? 160u : 100u)); /* gus-15 FULLCANON settle */
 +
 +    for (v = 0; v < GUS_MAX_VOICES; v++) {
 +        g_gus_voice_busy[v] = false;
