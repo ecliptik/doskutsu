@@ -1,0 +1,75 @@
+From 86f545ce0d16d813b4d764772b17a879fe66d038 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 24 Jun 2026 00:33:33 -0700
+Subject: [PATCH] patch 0253 -- gus (#39 ring capture): FORCE engine GUS_DIAG
+ ON (bypass hint)
+
+TEMPORARY diagnostic (revert after the capture). The #39 ring goal does not need
+the runtime hint to resolve -- we own the source, and the diag is gated on the
+GUS_DIAG hint only by convention. That hint does not resolve under DOSBox-X env-
+passing (0252 probes WHY separately). So decouple the ring from the hint: force
+the three engine-side _diag flags ON unconditionally.
+
+Sites (hint read kept + (void)'d for the revert):
+- MidiBackendGus.cpp:292  _diag (per-instrument .pat parse + per-sample select)
+- MidiBackendGus.cpp:450  the hz60 playback-freq dump (FREQ-mapping diagnostic)
+- Pixtone.cpp:589         _gusdiag (per-.pxt SFX-upload diag)
+
+All three are MAIN-LOOP context (on_song_start / initGusSfx) -- no IRQ logging.
+Pairs with sdl-pg forcing SDL-side g_gus_diag ON in 0112 -> one full build emits
+the complete #39 ring decoupled from the hint saga. Revert by dropping 0253.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendGus.cpp | 10 ++++++++--
+ src/sound/Pixtone.cpp        |  6 +++++-
+ 2 files changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index 212fc14e..5a0cbbaf 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -289,7 +289,12 @@ bool MidiBackendGus::_upload_pat(const char *base_name, bool is_drum,
+   if (nsamp > 64) nsamp = 64;  // sanity
+ 
+   const char *_gd0 = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_DIAG");
+-  const bool _diag = _gd0 && _gd0[0] == '1' && _gd0[1] == '\0';
++  (void)_gd0;  // patch 0253: hint read kept for the revert; value bypassed.
++  // patch 0253 (#39 ring capture, TEMPORARY): FORCE the engine diag ON. The
++  // GUS_DIAG hint does not resolve under DOSBox-X env-passing, but we own the
++  // source so bypass the hint -- the per-instrument/per-sample logs emit
++  // unconditionally for the capture. Revert by dropping 0253.
++  const bool _diag = true;
+ 
+   // Chosen-sample state (the best so far + its raw PCM, sign-flipped lazily).
+   bool          have      = false;
+@@ -447,7 +452,8 @@ bool MidiBackendGus::_upload_pat(const char *base_name, bool is_drum,
+   // wrong. Also surfaces start/end/loop addresses + the voice flags.
+   {
+     const char *_gd = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_DIAG");
+-    if (_gd && _gd[0] == '1' && _gd[1] == '\0')
++    (void)_gd;  // patch 0253: hint read kept for the revert; value bypassed.
++    if (true)  // patch 0253 (#39 ring capture, TEMPORARY): FORCE engine diag ON
+     {
+       const std::uint32_t hz60 =
+           (std::uint32_t)(((std::uint64_t)g_fp * _note_freq[60]) >> 16);
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 5f2e7732..06dc048c 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -586,7 +586,11 @@ bool Pixtone::initGusSfx()
+   // hint (strict-"1", default OFF). When on, each .pxt logs fx#/synth-size/
+   // upload-len BEFORE its upload so a crash log's last line names the culprit.
+   const char *_gd = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_DIAG");
+-  const bool _gusdiag = _gd && _gd[0] == '1' && _gd[1] == '\0';
++  (void)_gd;  // patch 0253: hint read kept for the revert; value bypassed.
++  // patch 0253 (#39 ring capture, TEMPORARY): FORCE the SFX-upload diag ON --
++  // GUS_DIAG does not resolve under DOSBox-X; bypass the hint (we own the
++  // source). Revert by dropping 0253.
++  const bool _gusdiag = true;
+   std::string path = ResourceManager::getInstance()->getPathForDir("pxt/");
+   int uploaded = 0, failed = 0, skipped = 0;
+   uint32_t sfx_used = 0;
+-- 
+2.47.3
+
