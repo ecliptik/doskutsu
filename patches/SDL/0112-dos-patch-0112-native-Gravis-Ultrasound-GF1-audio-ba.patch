@@ -1,4 +1,4 @@
-From 42ad43d6376bbc28fadffafe120ed687e7e6c246 Mon Sep 17 00:00:00 2001
+From b0a251032d97564292f0110a79ff7d22ce5e5485 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -145,8 +145,8 @@ replaced by the ring -- the >>1 encode is already confirmed.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 ++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1329 ++++++++++++++++++++++++++++++
- 2 files changed, 1596 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1368 ++++++++++++++++++++++++++++++
+ 2 files changed, 1635 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..006896f02
+index 000000000..73d017ca8
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1329 @@
+@@ -0,0 +1,1368 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -568,6 +568,7 @@ index 000000000..006896f02
 +static bool g_gus_force_8bit_addr = false; /* gus-6 #42 A/B: force 8-bit voice addressing (default OFF) */
 +static bool g_gus_force_maxvol = false;    /* gus-7 #39 probe: force every voice to max volume (default OFF) */
 +static bool g_gus_reap_grace = false;      /* gus-8c #39: start-race mask guard (default OFF) */
++static bool g_gus_double_write = true;     /* gus-13 #39 FIX: real-GF1 control-reg errata (default ON; killswitch GUS_NO_DOUBLE_WRITE) */
 +
 +/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
 +   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
@@ -688,14 +689,11 @@ index 000000000..006896f02
 +                             (unsigned)r.seq, r.voice, (unsigned)r.a, (unsigned)r.b);
 +            break;
 +        case GUS_DR_STOP:
-+            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d STOP (START#N->STOP "
-+                             "same v next seq => zero-duration note)",
++            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d STOP",
 +                             (unsigned)r.seq, r.voice);
 +            break;
 +        case GUS_DR_MASK:
-+            doskutsu_dbg_log("audio: SDL/0112 GUS #%u MASK active=0x%X busy=%d "
-+                             "(busy>0 && active=0 => reap kills all = mask reads "
-+                             "running voices STOPPED)",
++            doskutsu_dbg_log("audio: SDL/0112 GUS #%u MASK active=0x%X busy=%d",
 +                             (unsigned)r.seq, (unsigned)r.a, (int)r.voice);
 +            break;
 +        default:
@@ -1233,6 +1231,57 @@ index 000000000..006896f02
 +                     "#40 quiesce probe).", v);
 +}
 +
++/* #39 gus-13: CLEAN 16-BIT test-tone -- the 16-bit positive/negative control the
++   8-bit gus_emit_test_tone CANNOT provide. Identical to the 8-bit tone EXCEPT
++   is16bit=1, so the ONLY variable under test is the 16-bit path: UploadSample's
++   16-bit DRAM placement + StartVoice's gus_encode_addr >>1 encode + the GF1 0x04
++   DAC-mode bit (none of which the 8-bit tone touches -- so an audible 8-bit tone
++   does NOT prove 16-bit playback). Gated by SDL_HINT_DOSKUTSU_GUS_TESTTONE16=1
++   (default OFF). AUDIBLE on g2k => 16-bit GF1 playback works on this card; SILENT
++   (while the 8-bit TESTTONE is audible) => the 16-bit playback path is the #39
++   silence. ONE-SHOT + synchronous explicit stop (mirrors the gus-5 8-bit-tone
++   wedge fix: never leave a voice reading DRAM into gameplay on the PicoGUS).
++   One-shot (flags = 16BIT only, no LOOP) keeps it a true single-variable delta
++   from the 8-bit tone; if it is audible but music still silent, the next probe
++   adds a LOOP variant to split 16-bit-vs-loop. */
++static void gus_emit_test_tone_16(void)
++{
++    static Sint16 wave16[GUS_TESTTONE_LEN]; /* static: off the init stack (~16KB) */
++    int i, v;
++    Uint32 addr, end_byte;
++
++    for (i = 0; i < GUS_TESTTONE_LEN; i++) {
++        wave16[i] = ((i % GUS_TESTTONE_PERIOD) < (GUS_TESTTONE_PERIOD / 2))
++                        ? (Sint16)28000 : (Sint16)(-28000);
++    }
++    /* is16bit=1: UploadSample takes a BYTE length (GUS_TESTTONE_LEN samples * 2). */
++    addr = SDL_DOSGusUploadSample(wave16, (Uint32)sizeof(wave16), 1);
++    if (addr == SDL_DOSGUS_BAD_ADDR) {
++        doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE16: DRAM upload FAILED");
++        return;
++    }
++    v = SDL_DOSGusAllocVoice();
++    if (v < 0) {
++        doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE16: no free voice");
++        return;
++    }
++    /* BYTE addresses (StartVoice does the 16-bit >>1 encode). end = byte addr of
++       the LAST 16-bit sample = addr + (LEN-1)*2. flags = 16BIT only (one-shot) --
++       the single-bit difference from the 8-bit tone's flags=0. */
++    end_byte = addr + ((Uint32)(GUS_TESTTONE_LEN - 1) * 2u);
++    SDL_DOSGusSetVoiceFreq(v, 22050u);
++    SDL_DOSGusSetVoiceVol(v, 255);
++    SDL_DOSGusSetVoicePan(v, 128);
++    SDL_DOSGusStartVoice(v, addr, end_byte, addr, SDL_DOSGUS_16BIT);
++    doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE16: voice=%d addr=0x%X end=0x%X "
++                     "playing ~0.36s 16-bit square (max vol). AUDIBLE => 16-bit GF1 "
++                     "playback OK; SILENT (with 8-bit TESTTONE audible) => 16-bit "
++                     "path is the #39 silence.", v, (unsigned)addr, (unsigned)end_byte);
++    SDL_DelayPrecise(SDL_MS_TO_NS(450));
++    SDL_DOSGusStopVoice(v);
++    doskutsu_dbg_log("audio: SDL/0112 GUS TEST-TONE16: voice %d stopped + freed.", v);
++}
++
 +/* ------------------------------------------------------------------------- */
 +/* Engine-facing exports (SDL3/SDL_dosgus.h).                                 */
 +/* ------------------------------------------------------------------------- */
@@ -1255,47 +1304,15 @@ index 000000000..006896f02
 +    }
 +
 +    gus_resolve_voices();
-+    /* gus-11 HINTPROBE (#39 hint-resolution trace, ALWAYS-ON -- NOT g_gus_diag-
-+       gated, since g_gus_diag is the thing failing). Side-by-side at the read
-+       point: SDL_GetHint + SDL_getenv_unsafe for a WORKING bridged hint
-+       (GUS_ULTRASND -- GF1 detected, so it retrieves) vs the FAILING one
-+       (GUS_DIAG). nx 0251 SDL_SetHintWithPriority(OVERRIDE)'d both before
-+       SDL_Init with byte-identical names, yet GUS_DIAG reads null here while
-+       GUS_ULTRASND reads fine. This pins table-has-DIAG-or-not vs a GetHint
-+       retrieval quirk. Remove once resolved. */
-+    {
-+        /* ULTRASND = name-map bridge (works); DIAG = self-map bridge via
-+           gus_hint_is_one (fails); VOICES = self-map bridge read via DIRECT
-+           SDL_GetHint (gus_resolve_voices) -- the discriminator: if VOICES
-+           resolves but DIAG doesn't, gus_hint_is_one is implicated; if both
-+           self-maps fail, it's the SDL_SetHint self-map path. (SET
-+           SDL_HINT_DOSKUTSU_GUS_VOICES=28 in the probe BAT to populate it.) */
-+        const char *hu = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_ULTRASND");
-+        const char *hd = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_DIAG");
-+        const char *hv = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_VOICES");
-+        const char *ed = SDL_getenv_unsafe("SDL_HINT_DOSKUTSU_GUS_DIAG");
-+        doskutsu_dbg_log("audio: SDL/0112 GUS HINTPROBE: GetHint(ULTRASND=name-map)"
-+                         "='%s' GetHint(DIAG=self-map)='%s' GetHint(VOICES=self-map-"
-+                         "direct)='%s' | getenv_unsafe(DIAG)='%s'",
-+                         hu ? hu : "(null)", hd ? hd : "(null)",
-+                         hv ? hv : "(null)", ed ? ed : "(null)");
-+    }
 +    g_gus_diag = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_DIAG");
-+    /* ===================================================================== */
-+    /* gus-12 #39 CAPTURE BUILD -- DIAGNOSTIC ONLY. DO NOT SHIP. DO NOT RUN   */
-+    /* ON g2k/real PicoGUS. FORCE the memory-only voice-diag ring ON          */
-+    /* unconditionally, decoupled from the DOSBox-X SDL hint-resolution bug   */
-+    /* (parked as a separate task). The #39 ring/voice-command logs don't     */
-+    /* need the hint to resolve -- we own the source. The gus-11 HINTPROBE    */
-+    /* above still records the real hint resolution for the parked fix.       */
-+    /* REVERT this 2-line force before any ship build or g2k iter.            */
-+    g_gus_diag = true;
-+    /* ===================================================================== */
 +    g_gus_dma_upload = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD");
 +    g_gus_pio_autoinc = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_PIO_AUTOINC");
 +    g_gus_force_8bit_addr = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_FORCE_8BIT_ADDR");
 +    g_gus_force_maxvol = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_FORCE_MAXVOL");
 +    g_gus_reap_grace = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_REAP_GRACE");
++    /* gus-13 #39 FIX: double-write the GF1 control registers (errata). Default ON;
++       killswitch GUS_NO_DOUBLE_WRITE=1 disables for the A/B. */
++    g_gus_double_write = !gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_NO_DOUBLE_WRITE");
 +    g_gus_dr_head = g_gus_dr_tail = 0; /* arm the IRQ-safe diag ring */
 +    skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
 +
@@ -1338,6 +1355,13 @@ index 000000000..006896f02
 +    gus_program_irq_dma();
 +    gus_w8(GUS_REG_VOICES, (Uint8)(0xC0 | (g_gus_voices - 1)));
 +    gus_w8(GUS_REG_RESET, 0x03); /* master + DAC; IRQ (bit2) OFF */
++    /* gus-13 #39 FIX: double-write the reset/DAC-enable. The first write after
++       coming out of reset can be DROPPED on a real GF1 (errata; emulators
++       tolerate the single write -- the emulator-vs-PicoGUS divergence). Default
++       ON; killswitch GUS_NO_DOUBLE_WRITE=1. Idempotent. */
++    if (g_gus_double_write) {
++        gus_w8(GUS_REG_RESET, 0x03);
++    }
 +    SDL_DelayPrecise(SDL_US_TO_NS(100));
 +
 +    for (v = 0; v < GUS_MAX_VOICES; v++) {
@@ -1361,6 +1385,12 @@ index 000000000..006896f02
 +    /* #39 diagnostic test-tone (gated, default OFF). */
 +    if (gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_TESTTONE")) {
 +        gus_emit_test_tone();
++    }
++    /* #39 gus-13: clean 16-bit test-tone -- the 16-bit positive/negative control
++       (the 8-bit TESTTONE above exercises neither the >>1 encode nor the 0x04
++       DAC-mode bit). Gated, default OFF. */
++    if (gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_TESTTONE16")) {
++        gus_emit_test_tone_16();
 +    }
 +    return true;
 +}
@@ -1616,6 +1646,9 @@ index 000000000..006896f02
 +    gus_select_voice(voice);
 +    gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);    /* stop before reprogramming */
 +    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* hold volume (no ramp) */
++    /* gus-13 #39 FIX: double-write the volume-control register (errata -- the
++       first 0x0D write after a control change can be dropped on a real GF1). */
++    if (g_gus_double_write) gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
 +    gus_w16(GUS_VREG_STARTHI, smsw);
 +    gus_w16(GUS_VREG_STARTLO, slsw);
 +    gus_w16(GUS_VREG_ENDHI, emsw);
@@ -1638,6 +1671,12 @@ index 000000000..006896f02
 +        gus_w16(GUS_VREG_VOLUME, 0xFFF0); /* gus-7 #39 probe: max vol regardless of caller */
 +    }
 +    gus_w8(GUS_VREG_CTRL, ctrl);           /* GO */
++    /* gus-13 #39 FIX: double-write the voice-control GO (errata). The FAQ/ALSA
++       symptom matches #39 verbatim: "voices read running after a single 0x00
++       write but are SILENT -> double-write 0x00 and 0x0D." The voice reads
++       running off the first write; the second ensures the play state actually
++       latches on a real GF1 (emulators tolerate the single write). Idempotent. */
++    if (g_gus_double_write) gus_w8(GUS_VREG_CTRL, ctrl);
 +    g_gus_voice_busy[voice] = true;        /* claim inside the critical section */
 +    g_gus_voice_confirmed[voice] = 0;      /* gus-8c: re-arm the start-race guard */
 +    g_gus_voice_polls[voice] = 0;
