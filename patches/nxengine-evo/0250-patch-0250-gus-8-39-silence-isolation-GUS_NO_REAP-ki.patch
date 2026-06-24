@@ -1,0 +1,92 @@
+From 074efe10f53e0872e09f404f22d49e3d7e060bdb Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 19:30:21 -0700
+Subject: [PATCH] patch 0250 -- gus-8 (#39 silence isolation): GUS_NO_REAP
+ killswitch
+
+MidiBackendGus::_reap_finished_voices() runs on every note_on (via
+_allocate_voice, in the PIT-IRQ note path) and StopVoice's any voice the engine
+mirror thinks active but SDL_DOSGusGetState's voice_active_mask reports
+inactive. If that mask reads 0/unreliable on the PicoGUS GF1 emulation, each
+just-started voice is reaped almost immediately from the 2nd note_on -> dense
+Cave Story music is cut to ~1-note lifetimes -> universal near-silence (#39:
+fits 8-bit AND 16-bit, FORCE_MAXVOL still silent, gameplay still reached).
+
+DOSKUTSU_GUS_NO_REAP=1 (SDL_HINT_DOSKUTSU_GUS_NO_REAP) makes the reap a no-op:
+a clean no-wedge A/B (no in-IRQ port peek, unlike the gus-7 diag that wedged).
+Music AUDIBLE with reap off => mask-driven premature reap is the silence (real
+fix = correct voice_active_mask SDL-side, or reap one-shots-only engine-side);
+still silent => reaping exonerated. LRU-steal in _allocate_voice still recycles
+the pool with reap off, so voices do not exhaust.
+
+IRQ-safe: the hint is read ONCE at init() (main-loop -- SDL_GetHint is not
+IRQ-safe) into a cached bool; the IRQ path only tests the bool.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendGus.cpp | 20 ++++++++++++++++++++
+ src/sound/MidiBackendGus.h   | 10 ++++++++++
+ 2 files changed, 30 insertions(+)
+
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index ab6c36cc..212fc14e 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -170,6 +170,20 @@ MidiBackendGus::MidiBackendGus()
+ 
+   _ready = true;
+ 
++  // patch 0250 (#39 silence isolation, gus-8): cache the GUS_NO_REAP killswitch
++  // ONCE here in main-loop context (SDL_GetHint is not safe to call from the
++  // PIT-IRQ note path where _reap_finished_voices runs). When set, reap is a
++  // no-op -- isolates whether mask-driven premature voice reaping is the
++  // "commanded but silent" cause.
++  {
++    const char *_nr = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_NO_REAP");
++    _no_reap = _nr && _nr[0] == '1' && _nr[1] == '\0';
++    if (_no_reap)
++      LOG_INFO("gus backend: GUS_NO_REAP=1 -- voice reaping DISABLED "
++               "(silence-isolation diagnostic; LRU-steal still recycles "
++               "the voice pool).");
++  }
++
+   LOG_INFO("gus backend ready: GF1 detected, {} voices @ {} Hz, {} KB DRAM. "
+            "Clock = PIT/IRQ-0 pump (SDL/0110), NOT SB IRQ-5. GM instruments "
+            "load lazily per song from ULTRADIR .pat (Gravis stock set). "
+@@ -457,6 +471,12 @@ bool MidiBackendGus::_upload_pat(const char *base_name, bool is_drum,
+ 
+ void MidiBackendGus::_reap_finished_voices()
+ {
++  // patch 0250 (#39 silence isolation, gus-8): GUS_NO_REAP killswitch. When
++  // set, skip reaping entirely -- if music becomes audible, a voice_active_mask
++  // that reads inactive while the voice is still sounding was StopVoice-ing
++  // every note. IRQ-safe: cached bool, no SDL call here.
++  if (_no_reap) return;
++
+   // Read live hardware status; any voice the mirror thinks is active but the
+   // hardware reports stopped (a one-shot drum/sample that ran to its end) is
+   // returned to the pool so it can be reused + _find_voice stays correct.
+diff --git a/src/sound/MidiBackendGus.h b/src/sound/MidiBackendGus.h
+index c30c7bdb..e70c7dca 100644
+--- a/src/sound/MidiBackendGus.h
++++ b/src/sound/MidiBackendGus.h
+@@ -126,6 +126,16 @@ private:
+   Voice         _voices[MAX_VOICES];
+   std::uint64_t _voice_alloc_count = 0;
+ 
++  // patch 0250 (#39 silence isolation, gus-8): opt-in killswitch
++  // (DOSKUTSU_GUS_NO_REAP=1) that makes _reap_finished_voices a no-op. Read
++  // ONCE in init() (main-loop -- SDL_GetHint is not IRQ-safe) and checked in
++  // _reap_finished_voices, which runs in the PIT-IRQ note path. Diagnostic for
++  // "voices commanded but silent": if music goes AUDIBLE with reap disabled,
++  // a voice_active_mask that reads inactive while the voice is still sounding
++  // was prematurely StopVoice-ing every note. LRU-steal in _allocate_voice
++  // still recycles the pool with reap off, so voices do not exhaust.
++  bool          _no_reap = false;
++
+   // Residency tables (indexed by GM program / MIDI note). Lazy per song.
+   PatSample     _mel[128];   // melodic programs
+   PatSample     _drum[128];  // percussion notes (GM 27..87 used)
+-- 
+2.47.3
+
