@@ -1,0 +1,55 @@
+From 21b27d70c8becfec322234bc6109fd1d285c330d Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 24 Jun 2026 00:28:08 -0700
+Subject: [PATCH] patch 0252 -- gus (#39 probe): log SetHint ret + immediate
+ readback in bridge
+
+TEMPORARY diagnostic (revert after triage). The 0251 bridge builds + embeds all
+hint strings, but GUS_DIAG still does not resolve at the SDL read point under
+DOSBox-X, and the SDL source trace says by-source it SHOULD -- a runtime
+behavior we can't model statically. Go empirical: in the _gus_passthru loop,
+right after each SDL_SetHintWithPriority(name, v, OVERRIDE), log BOTH the bool
+return AND an immediate same-name SDL_GetHint readback (pre-SDL_Init).
+
+ALWAYS-ON (not GUS_DIAG-gated -- GUS_DIAG is the broken hint). One capture
+decides:
+- readback==value + ret=true -> the table HAS the hint right after the bridge,
+  so a later-null at the SDL read point is a loss ACROSS SDL_Init (-> sdl-pg
+  gus-11 SDL-read-point probe).
+- readback null / ret=false -> SetHintWithPriority didn't take -> bridge-level
+  bug (try plain SDL_SetHint to match the working ULTRASND call).
+
+Engine-only, zero SDL rebuild. Default behavior otherwise unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 1f0dd5ba..60e3ac5e 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1690,7 +1690,18 @@ int main(int argc, char *argv[])
+       const char *v = std::getenv(_gus_passthru[i]);
+       if (v && v[0] != '\0')
+       {
+-        SDL_SetHintWithPriority(_gus_passthru[i], v, SDL_HINT_OVERRIDE);
++        // patch 0252 (#39 / task#43 probe, ALWAYS-ON -- NOT GUS_DIAG-gated,
++        // since GUS_DIAG is the hint that fails to resolve): log the SetHint
++        // bool return + an IMMEDIATE same-name SDL_GetHint readback, right here
++        // pre-SDL_Init. Decisive: readback==value+ret=true -> the table HAS it
++        // after the bridge (so any later null is a loss ACROSS SDL_Init ->
++        // sdl-pg gus-11 read-point probe); readback null / ret=false -> the
++        // SetHint itself didn't take (bridge-level bug). Revert after triage.
++        bool _ret = SDL_SetHintWithPriority(_gus_passthru[i], v, SDL_HINT_OVERRIDE);
++        const char *_rb = SDL_GetHint(_gus_passthru[i]);
++        LOG_INFO("GUS-BRIDGE-PROBE: SetHint('{}','{}') ret={} readback='{}'",
++                 _gus_passthru[i], v, _ret ? "true" : "false",
++                 _rb ? _rb : "(null)");
+         ++_nbridged;
+       }
+     }
+-- 
+2.47.3
+
