@@ -1,4 +1,4 @@
-From b70e6af3e2e9c87a29d8fb70fc3e2aa59478b113 Mon Sep 17 00:00:00 2001
+From a78650d73fcf0d6a976e676b60e6954c46e895ff Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -144,9 +144,9 @@ replaced by the ring -- the >>1 encode is already confirmed.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- include/SDL3/SDL_dosgus.h        |  267 +++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1259 ++++++++++++++++++++++++++++++
- 2 files changed, 1526 insertions(+)
+ include/SDL3/SDL_dosgus.h        |  267 ++++++
+ src/audio/dos/SDL_dosaudio_gus.c | 1294 ++++++++++++++++++++++++++++++
+ 2 files changed, 1561 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..1f78e6a23
+index 000000000..c4c52a6a9
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1259 @@
+@@ -0,0 +1,1294 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -567,11 +567,25 @@ index 000000000..1f78e6a23
 +static bool g_gus_pio_autoinc = false;     /* PIO DRAM auto-increment (gus-5 #41; default OFF) */
 +static bool g_gus_force_8bit_addr = false; /* gus-6 #42 A/B: force 8-bit voice addressing (default OFF) */
 +static bool g_gus_force_maxvol = false;    /* gus-7 #39 probe: force every voice to max volume (default OFF) */
++static bool g_gus_reap_grace = false;      /* gus-8c #39: start-race mask guard (default OFF) */
 +
 +/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
 +   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
 +   in StopVoice; the ISR never touches it. */
 +static volatile bool g_gus_voice_busy[GUS_MAX_VOICES];
++
++/* gus-8c #39 start-race mask guard (candidate fix for the reap-driven silence,
++   GATED behind SDL_HINT_DOSKUTSU_GUS_REAP_GRACE, default OFF). The engine reap
++   stops any busy voice GetState's voice_active_mask reports inactive; if the
++   PicoGUS 0x80 read mis-reports a JUST-STARTED voice as stopped (start-race),
++   every voice is reaped -> silence. With the guard ON, GetState reports a busy
++   voice ACTIVE until the hardware has read it RUNNING at least once (confirmed)
++   -- so a fresh voice can't be reaped in the race window. BOUNDED: if it never
++   confirms within GUS_REAP_GRACE_POLLS GetState polls (instant one-shot /
++   genuinely never started), it becomes reap-eligible again (no voice leak). */
++#define GUS_REAP_GRACE_POLLS 3u
++static volatile Uint8 g_gus_voice_confirmed[GUS_MAX_VOICES]; /* hw read it running >=1x */
++static volatile Uint8 g_gus_voice_polls[GUS_MAX_VOICES];     /* GetState polls since start (saturating) */
 +
 +/* IRQ-INDEPENDENT design (SDL/0112, real-HW finding 2026-06-23): the driver
 +   hooks NO GF1 IRQ and enables none. DMA-upload completion is detected by
@@ -1232,6 +1246,7 @@ index 000000000..1f78e6a23
 +    g_gus_pio_autoinc = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_PIO_AUTOINC");
 +    g_gus_force_8bit_addr = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_FORCE_8BIT_ADDR");
 +    g_gus_force_maxvol = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_FORCE_MAXVOL");
++    g_gus_reap_grace = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_REAP_GRACE");
 +    g_gus_dr_head = g_gus_dr_tail = 0; /* arm the IRQ-safe diag ring */
 +    skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
 +
@@ -1278,6 +1293,8 @@ index 000000000..1f78e6a23
 +
 +    for (v = 0; v < GUS_MAX_VOICES; v++) {
 +        g_gus_voice_busy[v] = false;
++        g_gus_voice_confirmed[v] = 0;
++        g_gus_voice_polls[v] = 0;
 +    }
 +    g_gus_dram_used = 0;
 +    gus_silence_all_voices();
@@ -1338,11 +1355,27 @@ index 000000000..1f78e6a23
 +        for (v = 0; v < g_gus_voices; v++) {
 +            if (g_gus_voice_busy[v]) {
 +                Uint8 ctrl;
++                int hw_running;
 +                busy++;
 +                gus_select_voice(v);
 +                ctrl = gus_r8(GUS_VREG_CTRL_RD);
 +                ctrl = gus_r8(GUS_VREG_CTRL_RD);
-+                if (!(ctrl & 0x01)) { /* not stopped -> still sounding */
++                hw_running = !(ctrl & 0x01); /* bit0 clear -> still sounding */
++                if (g_gus_reap_grace) {
++                    /* gus-8c start-race guard: report a fresh voice ACTIVE until
++                       the hw confirms it running once; if it never confirms
++                       within the grace window, fall back to the hw bit (no leak). */
++                    if (hw_running) {
++                        g_gus_voice_confirmed[v] = 1;
++                    } else if (!g_gus_voice_confirmed[v] &&
++                               g_gus_voice_polls[v] < GUS_REAP_GRACE_POLLS) {
++                        hw_running = 1; /* protect the start-race window */
++                    }
++                    if (g_gus_voice_polls[v] < 255) {
++                        g_gus_voice_polls[v]++;
++                    }
++                }
++                if (hw_running) {
 +                    mask |= (1u << v);
 +                }
 +            }
@@ -1571,6 +1604,8 @@ index 000000000..1f78e6a23
 +    }
 +    gus_w8(GUS_VREG_CTRL, ctrl);           /* GO */
 +    g_gus_voice_busy[voice] = true;        /* claim inside the critical section */
++    g_gus_voice_confirmed[voice] = 0;      /* gus-8c: re-arm the start-race guard */
++    g_gus_voice_polls[voice] = 0;
 +    /* gus-8 #39: IRQ voice path is MEMORY-ONLY -- enqueue the COMMANDED values
 +       (start addr, ctrl) only, ZERO port reads. gus-7 put a GF1 DRAM PEEK + a
 +       voice-status read-back HERE (in the note_on IRQ, right after GO); on the
