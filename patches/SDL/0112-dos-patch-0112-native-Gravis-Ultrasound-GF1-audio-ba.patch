@@ -1,4 +1,4 @@
-From dd3f3b76fea2f2c2ffb3aa23fb9d2f8f2e75dc1c Mon Sep 17 00:00:00 2001
+From b70e6af3e2e9c87a29d8fb70fc3e2aa59478b113 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -145,8 +145,8 @@ replaced by the ring -- the >>1 encode is already confirmed.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 +++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1236 ++++++++++++++++++++++++++++++
- 2 files changed, 1503 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1259 ++++++++++++++++++++++++++++++
+ 2 files changed, 1526 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..01eb64ab6
+index 000000000..1f78e6a23
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1236 @@
+@@ -0,0 +1,1259 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -593,13 +593,15 @@ index 000000000..01eb64ab6
 +   atomic vs the IRQ -- no new cli/sti, no I/O), and a MAIN-LOOP-only flush
 +   drains them to the log. GUS_DIAG is therefore IRQ-safe and runnable on g2k. */
 +#define GUS_DIAG_RING 128u /* power of 2 */
-+enum { GUS_DR_FREQ = 1, GUS_DR_VOL, GUS_DR_START, GUS_DR_STOP };
++enum { GUS_DR_FREQ = 1, GUS_DR_VOL, GUS_DR_START, GUS_DR_STOP, GUS_DR_MASK };
 +typedef struct { Uint8 kind; Uint8 voice; Uint16 seq; Uint32 a; Uint32 b; } gus_diag_rec;
 +static volatile gus_diag_rec g_gus_dr[GUS_DIAG_RING];
 +static volatile Uint32 g_gus_dr_head = 0; /* next write slot */
 +static volatile Uint32 g_gus_dr_tail = 0; /* next read slot */
 +static volatile Uint16 g_gus_dr_seq = 0;  /* monotonic op sequence (voice-state ordering) */
 +static volatile int    g_gus_dr_flushing = 0;
++static Uint32 g_gus_dr_last_mask = 0xFFFFFFFFu; /* dedup the mask log (force first) */
++static int    g_gus_dr_last_busy = -1;
 +
 +/* Enqueue a diag record with a monotonic seq. The CALLER must already hold the
 +   voice-op cli section so this is atomic vs the IRQ; it does NO I/O. The seq +
@@ -675,6 +677,12 @@ index 000000000..01eb64ab6
 +            doskutsu_dbg_log("audio: SDL/0112 GUS #%u v%d STOP (START#N->STOP "
 +                             "same v next seq => zero-duration note)",
 +                             (unsigned)r.seq, r.voice);
++            break;
++        case GUS_DR_MASK:
++            doskutsu_dbg_log("audio: SDL/0112 GUS #%u MASK active=0x%X busy=%d "
++                             "(busy>0 && active=0 => reap kills all = mask reads "
++                             "running voices STOPPED)",
++                             (unsigned)r.seq, (unsigned)r.a, (int)r.voice);
 +            break;
 +        default:
 +            break;
@@ -1325,15 +1333,30 @@ index 000000000..01eb64ab6
 +       twice -- the first read after a register select can latch stale data on
 +       the GF1. Only busy (allocated) voices are polled. */
 +    DOS_DisableInterrupts();
-+    for (v = 0; v < g_gus_voices; v++) {
-+        if (g_gus_voice_busy[v]) {
-+            Uint8 ctrl;
-+            gus_select_voice(v);
-+            ctrl = gus_r8(GUS_VREG_CTRL_RD);
-+            ctrl = gus_r8(GUS_VREG_CTRL_RD);
-+            if (!(ctrl & 0x01)) { /* not stopped -> still sounding */
-+                mask |= (1u << v);
++    {
++        int busy = 0;
++        for (v = 0; v < g_gus_voices; v++) {
++            if (g_gus_voice_busy[v]) {
++                Uint8 ctrl;
++                busy++;
++                gus_select_voice(v);
++                ctrl = gus_r8(GUS_VREG_CTRL_RD);
++                ctrl = gus_r8(GUS_VREG_CTRL_RD);
++                if (!(ctrl & 0x01)) { /* not stopped -> still sounding */
++                    mask |= (1u << v);
++                }
 +            }
++        }
++        /* gus-8 #39 MASK AUDIT: the engine reap stops any busy voice this mask
++           reports INACTIVE. If the PicoGUS 0x80 read mis-reports a just-started
++           voice as stopped (start-race / latch quirk), busy>0 with active=0
++           right after notes fire => the reap kills every voice => universal
++           silence. Log the mask whenever it changes (deduped -- reap polls every
++           note). Memory-only enqueue, safe in both IRQ and main context. */
++        if (g_gus_diag && (mask != g_gus_dr_last_mask || busy != g_gus_dr_last_busy)) {
++            gus_diag_put(GUS_DR_MASK, (Uint8)busy, mask, 0);
++            g_gus_dr_last_mask = mask;
++            g_gus_dr_last_busy = busy;
 +        }
 +    }
 +    DOS_EnableInterrupts();
