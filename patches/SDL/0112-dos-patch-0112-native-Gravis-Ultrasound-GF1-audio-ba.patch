@@ -1,4 +1,4 @@
-From b0a251032d97564292f0110a79ff7d22ce5e5485 Mon Sep 17 00:00:00 2001
+From 8500a2a4c1c8d59a5b19c9c1cdd4c45255402900 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -145,8 +145,8 @@ replaced by the ring -- the >>1 encode is already confirmed.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 ++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1368 ++++++++++++++++++++++++++++++
- 2 files changed, 1635 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1402 ++++++++++++++++++++++++++++++
+ 2 files changed, 1669 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +425,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..73d017ca8
+index 000000000..1db8e895d
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1368 @@
+@@ -0,0 +1,1402 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -569,6 +569,7 @@ index 000000000..73d017ca8
 +static bool g_gus_force_maxvol = false;    /* gus-7 #39 probe: force every voice to max volume (default OFF) */
 +static bool g_gus_reap_grace = false;      /* gus-8c #39: start-race mask guard (default OFF) */
 +static bool g_gus_double_write = true;     /* gus-13 #39 FIX: real-GF1 control-reg errata (default ON; killswitch GUS_NO_DOUBLE_WRITE) */
++static bool g_gus_vol_ramp = true;         /* gus-14 #39 FIX: drive volume via the GF1 ramp engine (default ON; killswitch GUS_NO_VOL_RAMP) */
 +
 +/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
 +   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
@@ -1313,6 +1314,11 @@ index 000000000..73d017ca8
 +    /* gus-13 #39 FIX: double-write the GF1 control registers (errata). Default ON;
 +       killswitch GUS_NO_DOUBLE_WRITE=1 disables for the A/B. */
 +    g_gus_double_write = !gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_NO_DOUBLE_WRITE");
++    /* gus-14 #39 FIX: drive voice volume through the GF1 ramp engine (errata --
++       a real GF1 updates the volume DAC only via the ramp accumulator, not a
++       direct 0x09 write with the ramp stopped). Default ON; GUS_NO_VOL_RAMP=1
++       reverts to the direct-0x09 path for the A/B. */
++    g_gus_vol_ramp = !gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_NO_VOL_RAMP");
 +    g_gus_dr_head = g_gus_dr_tail = 0; /* arm the IRQ-safe diag ring */
 +    skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
 +
@@ -1645,10 +1651,14 @@ index 000000000..73d017ca8
 +    DOS_DisableInterrupts();
 +    gus_select_voice(voice);
 +    gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);    /* stop before reprogramming */
-+    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* hold volume (no ramp) */
-+    /* gus-13 #39 FIX: double-write the volume-control register (errata -- the
-+       first 0x0D write after a control change can be dropped on a real GF1). */
-+    if (g_gus_double_write) gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
++    if (!g_gus_vol_ramp) {
++        /* legacy direct-volume path holds the ramp stopped here. In vol-ramp mode
++           (gus-14) SetVoiceVol owns + RUNS the ramp -- do NOT stop it here. */
++        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* hold volume (no ramp) */
++        /* gus-13 #39 FIX: double-write the volume-control register (errata -- the
++           first 0x0D write after a control change can be dropped on a real GF1). */
++        if (g_gus_double_write) gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
++    }
 +    gus_w16(GUS_VREG_STARTHI, smsw);
 +    gus_w16(GUS_VREG_STARTLO, slsw);
 +    gus_w16(GUS_VREG_ENDHI, emsw);
@@ -1657,9 +1667,12 @@ index 000000000..73d017ca8
 +    gus_w16(GUS_VREG_CURLO, clsw);
 +    /* Full ramp range so the current volume (0x09) is never clamped to
 +       [start,end] -- DOSBox-X doesn't clamp, but a real GF1/PicoGUS might, and
-+       leaving 0x07/0x08 at 0 would clamp 0x09 to 0 = silent (#39 suspect). */
-+    gus_w8(GUS_VREG_RAMPSTART, 0x00);
-+    gus_w8(GUS_VREG_RAMPEND, 0xFF);
++       leaving 0x07/0x08 at 0 would clamp 0x09 to 0 = silent (#39 suspect).
++       Skipped in vol-ramp mode (gus-14): SetVoiceVol owns + runs the ramp. */
++    if (!g_gus_vol_ramp) {
++        gus_w8(GUS_VREG_RAMPSTART, 0x00);
++        gus_w8(GUS_VREG_RAMPEND, 0xFF);
++    }
 +    /* #39: StartVoice does NOT write the volume (0x09) or pan (0x0C) -- it
 +       PRESERVES whatever the caller set via SetVoiceVol/SetVoicePan, which the
 +       engine calls BEFORE StartVoice (note_on order: SetVoiceFreq -> SetVoiceVol
@@ -1769,10 +1782,31 @@ index 000000000..73d017ca8
 +    }
 +    DOS_DisableInterrupts();
 +    gus_select_voice(voice);
-+    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* manual hold (ramp stopped) */
-+    gus_w8(GUS_VREG_RAMPSTART, 0x00);      /* full ramp range so 0x09 isn't clamped (#39) */
-+    gus_w8(GUS_VREG_RAMPEND, 0xFF);
-+    gus_w16(GUS_VREG_VOLUME, reg);
++    if (g_gus_vol_ramp) {
++        /* gus-14 #39 FIX: drive the volume THROUGH the GF1 ramp engine. On a real
++           GF1 the volume DAC tracks the ramp accumulator -- a directly-written
++           0x09 with the ramp stopped never reaches the DAC, so the voice runs but
++           is SILENT (confirmed on g2k: TONE8/TONE16 ran at max-vol yet silent,
++           while MIDIDEMO -- which ramps -- played on the same card). Seed the
++           accumulator at the floor, set the ramp target (top 8 bits of the log
++           volume) and run UP at max rate: it climbs to target in <1ms and HOLDS
++           (no loop/rollover). The voice may be started just after this (note_on
++           order) -- the ramp completes around/just after GO, an inaudible fast
++           attack. */
++        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);        /* halt the ramp to reprogram */
++        gus_w8(GUS_VREG_RAMPSTART, 0x00);             /* floor */
++        gus_w8(GUS_VREG_RAMPEND, (Uint8)(reg >> 8));  /* target = top 8 bits of 0x09 */
++        gus_w8(GUS_VREG_RAMPRATE, 0x3F);              /* fastest: range 0, max increment */
++        gus_w16(GUS_VREG_VOLUME, 0x0000);             /* current = floor (ramp start) */
++        gus_w8(GUS_VREG_VOLCTRL, 0x00);               /* RUN up: no stop/loop/rollover/IRQ */
++        if (g_gus_double_write) gus_w8(GUS_VREG_VOLCTRL, 0x00); /* errata double-write */
++    } else {
++        /* legacy direct-0x09 path (GUS_NO_VOL_RAMP=1) -- the A/B baseline. */
++        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* manual hold (ramp stopped) */
++        gus_w8(GUS_VREG_RAMPSTART, 0x00);      /* full ramp range so 0x09 isn't clamped (#39) */
++        gus_w8(GUS_VREG_RAMPEND, 0xFF);
++        gus_w16(GUS_VREG_VOLUME, reg);
++    }
 +    if (g_gus_diag) {
 +        gus_diag_put(GUS_DR_VOL, (Uint8)voice, (Uint32)linear_vol, reg); /* IRQ-safe */
 +    }
