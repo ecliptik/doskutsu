@@ -1,0 +1,83 @@
+From a09e92d536780ed9768534fa471ce75ed0693911 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 23 Jun 2026 23:50:12 -0700
+Subject: [PATCH] patch 0251 -- gus (#39/task#43): bridge GUS_* diag hints
+ env->SDL hint table
+
+The SDL GF1 backend reads its diag/probe hints ONLY via SDL_GetHint, whose
+getenv-fallback does NOT see the DOS environment under DOSBox-X (DJGPP env-
+passing differs from real COMMAND.COM; universal, not a regression -- gus-5-era
+also returns an empty GUS_DIAG ring under DOSBox-X). So the #39 silence
+diagnostics could never be captured under DOSBox-X.
+
+The engine's getenv DOES see the env under DOSBox-X (it resolves AUDIO_BACKEND
+live). So extend the existing _gus_mode ULTRASND/ULTRADIR bridge to mirror each
+operator-set GUS_* hint from the DOS env into the SDL hint TABLE via
+SDL_SetHintWithPriority(OVERRIDE), BEFORE SDL_Init. SDL_GetHint then returns
+from the table on BOTH g2k and DOSBox-X, bypassing the broken env read.
+
+Bridges the 9 SDL-side probe hints (DIAG, TESTTONE, FORCE_MAXVOL,
+FORCE_8BIT_ADDR, REAP_GRACE, PIO_AUTOINC, SKIP_DETECTION, DMA_UPLOAD, VOICES)
+plus GUS_NO_REAP (engine-read via SDL_GetHint -- same fallback hazard). All
+default-OFF probes, passed verbatim; untouched when unset, so non-GUS and
+normal-GUS runs are byte-identical. Self-maps (env name == hint name).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 40 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index cecc8501..1f0dd5ba 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1658,6 +1658,46 @@ int main(int argc, char *argv[])
+     LOG_INFO("AUDIO_BACKEND=gus -- bridged ULTRASND='{}' ULTRADIR='{}' from env "
+              "into the GUS SDL hints (SDL reads hints, not env).",
+              us ? us : "(unset)", ud ? ud : "(unset)");
++
++    // patch 0251 (#39 / task #43): bridge the GUS_* diag/probe hints the same
++    // way. SDL reads ONLY SDL_GetHint, and its getenv-fallback does NOT see the
++    // DOS env under DOSBox-X (env-passing differs from real COMMAND.COM) -- but
++    // the engine's getenv here DOES (it resolved AUDIO_BACKEND above), so mirror
++    // each operator-set env var into the hint TABLE; SDL_GetHint then returns
++    // from the table on BOTH g2k and DOSBox-X. These are SELF-MAPS: the operator
++    // SETs the FULL hint name (e.g. SET SDL_HINT_DOSKUTSU_GUS_DIAG=1), unlike the
++    // ULTRASND/ULTRADIR NAME-MAPs above. All default-OFF probes (8 strict 1/0
++    // flags + GUS_VOICES, a number) -- untouched when unset, so no behavior
++    // change for normal runs. GUS_NO_REAP is engine-read (MidiBackendGus 0250)
++    // but also via SDL_GetHint, so it hits the same broken fallback -- bridge it
++    // here too. Pass the raw value verbatim (the SDL backend / engine parse it).
++    static const char *const _gus_passthru[] = {
++        "SDL_HINT_DOSKUTSU_GUS_DIAG",
++        "SDL_HINT_DOSKUTSU_GUS_TESTTONE",
++        "SDL_HINT_DOSKUTSU_GUS_FORCE_MAXVOL",
++        "SDL_HINT_DOSKUTSU_GUS_FORCE_8BIT_ADDR",
++        "SDL_HINT_DOSKUTSU_GUS_REAP_GRACE",
++        "SDL_HINT_DOSKUTSU_GUS_PIO_AUTOINC",
++        "SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION",
++        "SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD",
++        "SDL_HINT_DOSKUTSU_GUS_VOICES",    // VALUE (e.g. "28"), not a 1/0 flag
++        "SDL_HINT_DOSKUTSU_GUS_NO_REAP",   // engine-read (0250); same fallback hazard
++    };
++    const int _ngp = (int)(sizeof(_gus_passthru) / sizeof(_gus_passthru[0]));
++    int _nbridged = 0;
++    for (int i = 0; i < _ngp; ++i)
++    {
++      const char *v = std::getenv(_gus_passthru[i]);
++      if (v && v[0] != '\0')
++      {
++        SDL_SetHintWithPriority(_gus_passthru[i], v, SDL_HINT_OVERRIDE);
++        ++_nbridged;
++      }
++    }
++    if (_nbridged > 0)
++      LOG_INFO("AUDIO_BACKEND=gus -- bridged {} GUS_* diag/probe hint(s) from DOS "
++               "env into the SDL hint table (DOSBox-X env-read workaround).",
++               _nbridged);
+   }
+   // patch 0236 (#20): AUDIO_BACKEND=adlib takes PRECEDENCE over AUDIO_OFF.
+   // adlib is an EXPLICIT request for OPL music and needs the synth path
+-- 
+2.47.3
+
