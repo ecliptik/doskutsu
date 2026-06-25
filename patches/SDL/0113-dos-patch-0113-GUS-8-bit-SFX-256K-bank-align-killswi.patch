@@ -1,0 +1,93 @@
+From a9168961b2f0bfb0bb6fa1d1854afbbe1a40f182 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 25 Jun 2026 00:00:07 -0700
+Subject: [PATCH] dos: patch 0113 -- GUS 8-bit SFX 256K bank-align killswitch
+ (#38 candidate)
+
+Why DOS needs this: the native GF1 backend (SDL/0112) bank-aligns only 16-bit
+DRAM allocations -- the classic GF1 16-bit-mode limit, where the voice read
+pointer keeps bits 18-19 as the 256K bank select so a 16-bit sample crossing a
+bank wraps and corrupts. 8-bit samples use full 20-bit linear addressing, so
+gus_dram_alloc lets them straddle a bank freely.
+
+nx 0239 uploads Cave Story's Pixtone sound effects as 8-bit mono. The #38 crash
+(quit-to-DOS) reproduces at a LATE 8-bit SFX slot around ~715KB of GF1 DRAM in
+use -- just past the 0x80000 (512KB) bank boundary -- and is slot-data-specific.
+The leading hypothesis is a PicoGUS straddle intolerance the 8-bit path never
+guarded against. The prior "address encoding ruled out" finding was the gus-6
+gus_encode_addr 16-bit voice-read-pointer fix (#42), a DIFFERENT mechanism from
+allocator placement; 8-bit bank-straddle was never tested.
+
+This extends the existing 256K no-straddle bump to 8-bit allocations too, gated
+behind a NEW killswitch hint SDL_HINT_DOSKUTSU_GUS_SFX_BANKALIGN. Default OFF so
+the SAME binary reproduces the crash (fix-OFF cell) while =1 engages the guard
+(fix-ON cell) for the g2k A/B -- the single lever for iter-1. Emits an anchored
+boot banner "audio: SDL/0113 GUS SFX bank-align: ENGAGED ..." only when the
+guard is on (smoke two-witness). Strict-match: only literal "1" activates.
+
+Workspace-local; never upstreamed.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_gus.c | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
+index 064773e28..362bd2ee1 100644
+--- a/src/audio/dos/SDL_dosaudio_gus.c
++++ b/src/audio/dos/SDL_dosaudio_gus.c
+@@ -151,6 +151,7 @@ static bool g_gus_double_write = true;     /* gus-13 #39 FIX: real-GF1 control-r
+ static bool g_gus_vol_ramp = true;         /* gus-14 #39 FIX: drive volume via the GF1 ramp engine (default ON; killswitch GUS_NO_VOL_RAMP) */
+ static bool g_gus_dac_irq = true;          /* gus-15 #39 FIX: set 0x4C bit2 (master-IRQ-enable) -- may gate the DAC clock (default ON; killswitch GUS_NO_DAC_IRQBIT) */
+ static bool g_gus_fullcanon = false;       /* gus-15 #39 FULLCANON hedge: + 160us reset settle + mixer latch-enable bit3 (opt-in GUS_FULLCANON) */
++static bool g_gus_sfx_bankalign = false;   /* gussfx-1 #38: also keep 8-bit allocs inside one 256K bank (default OFF; opt-in GUS_SFX_BANKALIGN) */
+ 
+ /* voice allocation pool (busy = currently allocated to a caller). The ENGINE
+    owns this lifecycle -- the driver only sets it in AllocVoice and clears it
+@@ -610,7 +611,17 @@ static Uint32 gus_dram_alloc(Uint32 len, int is16bit)
+        the PIO path (exact 20-bit addressing). Keeps the chunked-DMA dest
+        (dram_addr + k*GUS_DMA_CHUNK, both 16-multiples) exact. */
+     Uint32 addr = (g_gus_dram_used + 15u) & ~15u;
+-    if (is16bit) {
++    /* gussfx-1 #38: 16-bit samples ALWAYS bank-align (classic GF1 16-bit-mode
++       limit: the voice read pointer keeps bits 18-19 as the 256K bank select, so
++       a 16-bit sample crossing a bank wraps -> corruption). 8-bit samples use
++       full 20-bit linear addressing, so on a classic GF1 they may cross a bank
++       freely -- but nx 0239 uploads Pixtone SFX as 8-bit and the #38 crash is a
++       LATE 8-bit slot at ~715KB DRAM (just past the 0x80000 bank boundary),
++       slot-data-specific. Leading hypothesis: a PicoGUS straddle intolerance the
++       8-bit path never guarded against. GUS_SFX_BANKALIGN=1 extends the same
++       no-straddle bump to 8-bit allocs so the operator can A/B the SAME binary
++       (default OFF reproduces the crash; =1 engages the guard). */
++    if (is16bit || g_gus_sfx_bankalign) {
+         /* keep the whole sample inside one 256K bank */
+         Uint32 bank = addr & 0xC0000u;
+         if (((addr + len) & 0xC0000u) != bank) {
+@@ -914,6 +925,10 @@ bool SDL_DOSGusInit(void)
+        latch-enable bit3 set DURING the IRQ/DMA latch writes. The catch-all g2k
+        cell if the IRQ-bit alone isn't enough. */
+     g_gus_fullcanon = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_FULLCANON");
++    /* gussfx-1 #38 killswitch (default OFF): extend the 256K no-straddle bump to
++       8-bit allocs too (Pixtone SFX). OFF reproduces the crash; =1 engages the
++       guard -- both from the SAME binary for the g2k A/B. */
++    g_gus_sfx_bankalign = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SFX_BANKALIGN");
+     g_gus_dr_head = g_gus_dr_tail = 0; /* arm the IRQ-safe diag ring */
+     skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
+ 
+@@ -991,6 +1006,13 @@ bool SDL_DOSGusInit(void)
+                      g_gus_pio_autoinc ? "+autoinc" : "",
+                      g_gus_force_maxvol ? " maxvol=ON" : "");
+ 
++    /* gussfx-1 #38 ENGAGE banner (only when the guard is on) -- anchored format
++       "SDL/0113 GUS SFX bank-align: ENGAGED" for the smoke two-witness. */
++    if (g_gus_sfx_bankalign) {
++        doskutsu_dbg_log("audio: SDL/0113 GUS SFX bank-align: ENGAGED "
++                         "(8-bit no-straddle 256K guard)");
++    }
++
+     /* #39 diagnostic test-tone (gated, default OFF). */
+     if (gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_TESTTONE")) {
+         gus_emit_test_tone();
+-- 
+2.47.3
+

@@ -1,0 +1,91 @@
+From 511b110fe5018187280f3ebd10c4c4c546266985 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 24 Jun 2026 23:59:26 -0700
+Subject: [PATCH] patch 0256 -- gus (#38): DRAM bank-straddle observability in
+ initGusSfx
+
+Records, from the LIVE engine run, which uploaded Pixtone SFX cross a 256KB
+GF1 DRAM bank boundary (0x40000/0x80000/0xC0000...). This is the ground-truth
+observation the standalone gussfx probe gathers, but from inside the real game
+so the crashing slot is confirmed in the actual engine path (cells 2/3).
+
+Why DOS needs this: the #38 GUS-SFX crash is slot-data-specific at a late slot
+~715KB into GF1 DRAM; the leading hypothesis is a late 8-bit SFX slot whose
+[addr, addr+len) straddles a 256KB bank boundary. The existing 0242/0247 diag
+logs slot/len/addr but never computes the straddle flag -- this adds exactly
+that flag so a g2k log pinpoints the crossing slot. sdl-engine task #2 is the
+actual fix (driver-side no-straddle alloc guard); this patch only OBSERVES.
+
+Separate slot (after 0255), NOT folded into 0239 -- independently revertible,
+diagnostic-only, ZERO behavior change to the upload itself (single-lever
+attribution). Honors the PicoGUS diag-wedge rules: init-time only (no logging
+on the trigger/crash/play path), memory-only (no GF1 port reads), per-slot
+detail GUS_DIAG-gated (strict-"1", default OFF) -- consistent with the
+established 0242/0247 init-time pattern. An unconditional one-line boot banner
+(gus path only) feeds the smoke gate (two-witness: strings embed + runtime
+emit). Built clean; full series re-applies (0255 -> 0256).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp | 38 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 5f2e7732..e9816e5f 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -539,6 +539,19 @@ bool Pixtone::initGusSfx()
+   _inited   = true;
+   _gus_mode = true;
+ 
++  // patch 0256 (#38): boot banner for the GUS-SFX iter smoke gate + the DRAM
++  // bank-straddle observability lever. Unconditional (gus path only) so the
++  // gate sees one stable line proving this diagnostic's code path is invoked
++  // (two-witness: strings embed + runtime emit). The per-slot straddle detail
++  // below is GUS_DIAG-gated (init-time only) -- it OBSERVES which uploaded SFX
++  // cross a 256KB GF1 DRAM bank boundary (0x40000/0x80000/0xC0000...), the
++  // leading #38 crash hypothesis (a late 8-bit slot straddling 0x80000). It is
++  // diagnostic-only: NO change to the upload itself (the fix is sdl-engine's
++  // driver-side no-straddle guard, task #2); this just records ground truth
++  // from the LIVE engine run to confirm the crashing slot's address band.
++  LOG_INFO("gus SFX DRAM-straddle diag [nx0256]: per-slot 256KB-bank-boundary "
++           "observability active (GUS_DIAG-gated; init-time, memory-only).");
++
+   for (uint16_t i = 0; i < 256; i++)
+     _sound_fx[i].channel = -1;
+   for (int v = 0; v < 32; v++)
+@@ -667,6 +680,31 @@ bool Pixtone::initGusSfx()
+           _sound_fx[slot].gus_resident  = true;
+           ++uploaded;
+           sfx_used += n;  // music-priority budget accounting
++          // patch 0256 (#38): DRAM bank-straddle observability. [addr, addr+n)
++          // crosses a 256KB GF1 bank boundary (0x40000/0x80000/0xC0000...) iff
++          // addr and the last byte fall in different 256KB banks. SFX are tiny
++          // (< one bank) so a straddle crosses exactly one boundary; report it.
++          // GUS_DIAG-gated (init-time, memory-only -- no GF1 port reads, no
++          // logging on the trigger/crash path; honors the PicoGUS wedge rules).
++          if (_gusdiag)
++          {
++            static const uint32_t GUS_BANK = 0x40000u;  // 256 KB GF1 DRAM bank
++            const uint32_t _last     = addr + n - 1;    // n > 0 here
++            const bool     _straddle = (addr / GUS_BANK) != (_last / GUS_BANK);
++            const uint32_t _boundary = ((addr / GUS_BANK) + 1u) * GUS_BANK;
++            if (_straddle)
++              LOG_WARN("gus SFX straddle [nx0256]: fx{:02x} (slot {}) addr={} "
++                       "len={} end={} CROSSES 256KB bank boundary at {} "
++                       "(0x{:x}) -- #38 crash-hypothesis slot.",
++                       slot, slot, (unsigned)addr, (unsigned)n,
++                       (unsigned)(addr + n), (unsigned)_boundary,
++                       (unsigned)_boundary);
++            else
++              LOG_INFO("gus SFX straddle [nx0256]: fx{:02x} (slot {}) addr={} "
++                       "len={} end={} in-bank (bank {}, no 256KB crossing).",
++                       slot, slot, (unsigned)addr, (unsigned)n,
++                       (unsigned)(addr + n), (unsigned)(addr / GUS_BANK));
++          }
+           if (_gusdiag)
+           {
+             SDL_DOSGusState _st;
+-- 
+2.47.3
+
