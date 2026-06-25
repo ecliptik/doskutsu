@@ -1,0 +1,663 @@
+From e8985f569bceddf60dd32909b72fd57489d51264 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 24 Jun 2026 19:59:53 -0700
+Subject: [PATCH] patch 0255 -- gus fidelity (lever c): per-note multisample
+ residency
+
+The GUS backend (patch 0245) uploaded ONLY the single .pat sample nearest
+middle C per instrument and pitch-shifted it across the whole keyboard. A
+GM .pat is MULTISAMPLED -- the layer holds N samples, each rooted at a
+different pitch and covering a key range -- so notes far from that one root
+shift by octaves: the audible "off" timbre vs Gravis MIDIDEMO playing the
+SAME bank.
+
+Keep up to GUS_MAX_SUBSAMPLES (8) samples resident per instrument and pick
+per-note at note_on. _upload_pat now parses every sample of the layer
+(main-loop: file I/O + FPU ok), precomputes each sample's low_note/high_note
+(from the .pat low_freq/high_freq fields) + root_note + fixed-point pitch
+scaler, then uploads the selection ordered nearest-middle-C first. note_on
+selects the resident subsample whose [low_note,high_note] covers the note,
+else the nearest root -- integer-only, IRQ-safe (no file I/O / malloc / FPU
+in the PIT-pump note path). DRAM is bounded by greedy fit: on the GF1's
+~1MB filling, the upload stops and keeps the most central samples already
+resident, degrading gracefully toward exactly the single 0245 sample --
+never silence. Drums stay single-sample (a note selects the drum, it does
+not transpose it). An always-on per-instrument summary logs N->K resident +
+any K-cap / DRAM-truncation (no silent cap), and on_song_start reports the
+per-song subsample total.
+
+Gated by SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE (cached once in the ctor per the
+0250 pattern; bridged env->hint in main.cpp). Default ON; =0 reverts to the
+single nearest-middle-C sample (patch 0245) for clean g2k A/B and the
+low-DRAM SETUP off state. SETUP exposes it as the GUS_HIFI "GUS high
+fidelity" config key (coordinated with setup-dev). Smoke banner
+"gus backend: multisample ..." added (GUS-path only, optional).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp                 |   1 +
+ src/sound/MidiBackendGus.cpp | 408 ++++++++++++++++++++++-------------
+ src/sound/MidiBackendGus.h   |  45 +++-
+ 3 files changed, 299 insertions(+), 155 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 5c1666e9..c1937bb3 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1683,6 +1683,7 @@ int main(int argc, char *argv[])
+         "SDL_HINT_DOSKUTSU_GUS_VOICES",    // VALUE (e.g. "28"), not a 1/0 flag
+         "SDL_HINT_DOSKUTSU_GUS_NO_REAP",   // engine-read (0250); same fallback hazard
+         "SDL_HINT_DOSKUTSU_GUS_RELEASE",   // engine-read (0254); release-ramp killswitch (default ON, =0 off)
++        "SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE", // engine-read (0255); per-note multisample killswitch (default ON, =0 off; SETUP GUS_HIFI)
+     };
+     const int _ngp = (int)(sizeof(_gus_passthru) / sizeof(_gus_passthru[0]));
+     int _nbridged = 0;
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index e95fda4b..f9451b60 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -116,6 +116,26 @@ static std::int32_t rd_s32le(const std::uint8_t *p)
+   return (std::int32_t)rd_u32le(p);
+ }
+ 
++// patch 0255 (GUS fidelity, lever c): convert a .pat frequency field (root /
++// low / high) to a MIDI note, robust to the milliHz-vs-Hz unit ambiguity (see
++// patch 0244's root_freq auto-detect). Returns `fallback` when the field is
++// zero/implausible -- callers pass 0 for low_freq (cover down to note 0), 127
++// for high_freq (cover up to note 127), 60 for root (nearest-mid-C default).
++// MAIN-LOOP context only (uses std::log/FPU) -- never the IRQ note path.
++static int pat_freq_to_note(std::int32_t raw, int fallback)
++{
++  const double milli = (raw > 0) ? (raw / 1000.0) : 0.0;
++  const double hz    = (raw > 0) ? (double)raw    : 0.0;
++  double f;
++  if (milli >= 8.0 && milli <= 12544.0)    f = milli;  // milliHz (canonical)
++  else if (hz >= 8.0 && hz <= 12544.0)     f = hz;      // stored as Hz
++  else                                     return fallback;
++  int n = (int)(69.0 + 12.0 * (std::log(f / 440.0) / std::log(2.0)) + 0.5);
++  if (n < 0)   n = 0;
++  if (n > 127) n = 127;
++  return n;
++}
++
+ // ============================================================================
+ // MidiBackendGus lifecycle
+ // ============================================================================
+@@ -202,6 +222,22 @@ MidiBackendGus::MidiBackendGus()
+              RELEASE_TICKS);
+   }
+ 
++  // patch 0255 (GUS fidelity, lever c): cache the GUS_MULTISAMPLE killswitch
++  // ONCE here (main-loop; SDL_GetHint is not IRQ-safe). Default ON; =0 reverts
++  // to the single nearest-middle-C sample per instrument (patch 0245 behavior)
++  // for clean g2k A/B and as the low-DRAM SETUP "GUS high fidelity" off state.
++  // Read in _upload_pat only (main-loop); note_on just walks the resident sub[].
++  // The banner is a smoke-gate anchor. (SETUP config key GUS_HIFI maps here.)
++  {
++    const char *_ms = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE");
++    _multisample = !(_ms && _ms[0] == '0' && _ms[1] == '\0');
++    LOG_INFO("gus backend: multisample {} -- per-note .pat sample selection "
++             "(up to {} resident/instrument; GUS_MULTISAMPLE; =0 = single "
++             "nearest-middle-C sample, patch 0245 behavior).",
++             _multisample ? "ENABLED (default)" : "DISABLED (killswitch =0)",
++             GUS_MAX_SUBSAMPLES);
++  }
++
+   // DPMI-lock the whole instance: under the PIT pump the IRQ-0 ISR's
+   // tick_isr -> note_on/off reads _voices / _mel / _drum / _note_freq /
+   // channel arrays. Gate on the SHARED pump predicate, mirroring
+@@ -284,41 +320,48 @@ bool MidiBackendGus::_upload_pat(const char *base_name, bool is_drum,
+     return false;
+   }
+ 
+-  // patch 0245 (#39 multisample fix): GM .pat instruments are MULTISAMPLED --
+-  // the layer holds N samples, each tuned to a different root pitch + covering a
+-  // key range (low_freq..high_freq). Using sample[0] (typically the LOWEST root)
+-  // for ALL notes pitch-shifts mid/high notes up by octaves (g2k: acpiano
+-  // sample[0] root ~98 Hz -> note 60 played 2.7x too fast). The fully-correct
+-  // answer is per-note sample selection, but uploading EVERY sample of every
+-  // program blows the <=1MB GF1 DRAM. So for bring-up we scan the layer and
+-  // upload the SINGLE sample whose root note is nearest middle C (note 60) --
+-  // mid-range music (most of Cave Story) then plays at ~native rate; notes far
+-  // from the chosen root pitch-shift gracefully (standard wavetable). One
+-  // upload/program keeps DRAM bounded. (Per-note multi-sample residency is a
+-  // future enhancement if DRAM + quality justify.)
++  // GM .pat instruments are MULTISAMPLED -- the layer holds N samples, each
++  // tuned to a different root pitch and covering a key range (low_freq..
++  // high_freq). patch 0245 uploaded ONLY the single sample nearest middle C and
++  // pitch-shifted it across the whole keyboard (notes far from that root shift
++  // by octaves -- the audible "off" timbre vs MIDIDEMO). patch 0255 (lever c):
++  // when GUS_MULTISAMPLE is ON, keep up to GUS_MAX_SUBSAMPLES samples resident
++  // and pick per-note at note_on (int-only). Uploads are ordered nearest-middle-
++  // C first, so a partial DRAM fit degrades gracefully toward exactly the single
++  // 0245 sample. GUS_MULTISAMPLE=0 (or a drum, where the note selects the drum
++  // rather than transposing it) keeps the single-sample 0245 behavior.
+   int nsamp = lhdr[6];
+   if (nsamp < 1) nsamp = 1;
+-  if (nsamp > 64) nsamp = 64;  // sanity
++  if (nsamp > 64) nsamp = 64;  // sanity (also bounds the cand[] table below)
+ 
+   const char *_gd0 = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_DIAG");
+   const bool _diag = _gd0 && _gd0[0] == '1' && _gd0[1] == '\0';
+ 
+-  // Chosen-sample state (the best so far + its raw PCM, sign-flipped lazily).
+-  bool          have      = false;
+-  int           best_dist = 1000;
+-  std::uint8_t *best_pcm  = nullptr;
+-  std::uint32_t data_size = 0, loop_start = 0, loop_end = 0, sample_rate = 0;
+-  std::int32_t  root_freq = 0;
+-  std::uint8_t  modes      = 0;
++  // Parsed candidate samples (PCM normalized to native GF1 format, plus the
++  // derived pitch scaler + key-range notes). Held transiently in host RAM: GM
++  // .pat are well under the GF1's ~1 MB DRAM, so this is a few hundred KB. POD
++  // metadata only -- the upload selection below copies into out->sub[].
++  struct Cand
++  {
++    std::uint8_t *pcm;
++    std::uint32_t data_size, loop_start, loop_end, sample_rate, g_fp;
++    std::uint16_t flags;
++    std::uint8_t  low_note, high_note, root_note;
++    int           dist60;
++  };
++  Cand cand[64];
++  int  ncand = 0;
+ 
+   for (int s = 0; s < nsamp; ++s)
+   {
+     if (std::fread(srec, 1, sizeof(srec), fp) != sizeof(srec))
+       break;  // truncated sample header; use whatever we have
+-    const std::uint32_t s_data  = rd_u32le(srec + 8);
++    const std::uint32_t s_data   = rd_u32le(srec + 8);
+     const std::uint32_t s_lstart = rd_u32le(srec + 12);
+     const std::uint32_t s_lend   = rd_u32le(srec + 16);
+     const std::uint32_t s_rate   = rd_u16le(srec + 20);
++    const std::int32_t  s_low    = rd_s32le(srec + 22);  // low_frequency
++    const std::int32_t  s_high   = rd_s32le(srec + 26);  // high_frequency
+     const std::int32_t  s_root   = rd_s32le(srec + 30);  // root freq (auto-unit)
+     const std::uint8_t  s_modes  = srec[55];
+     if (s_data == 0 || (_dram_size && s_data > _dram_size) ||
+@@ -329,150 +372,174 @@ bool MidiBackendGus::_upload_pat(const char *base_name, bool is_drum,
+     if (!spcm) break;
+     if (std::fread(spcm, 1, s_data, fp) != s_data) { std::free(spcm); break; }
+ 
+-    // This sample's root MIDI note (via the unit-robust root_hz auto-detect),
+-    // and its distance from middle C -- the selection metric.
+-    const double srm = (s_root > 0) ? (s_root / 1000.0) : 0.0;
+-    const double srh = (s_root > 0) ? (double)s_root    : 0.0;
+-    double s_root_hz;
+-    if (srm >= 8.0 && srm <= 12544.0)      s_root_hz = srm;
+-    else if (srh >= 8.0 && srh <= 12544.0) s_root_hz = srh;
+-    else                                   s_root_hz = 440.0;
+-    int s_root_note =
+-        (int)(69.0 + 12.0 * (std::log(s_root_hz / 440.0) / std::log(2.0)) + 0.5);
+-    if (s_root_note < 0)   s_root_note = 0;
+-    if (s_root_note > 127) s_root_note = 127;
+-    const int dist = (s_root_note > 60) ? (s_root_note - 60) : (60 - s_root_note);
+-
+-    if (_diag)
+-      LOG_INFO("gus .pat '{}' sample {}/{}: root_freq={} root_hz={} "
+-               "root_note={} rate={} size={} dist60={}",
+-               base_name, s, nsamp, (int)s_root, (int)(s_root_hz + 0.5),
+-               s_root_note, (unsigned)s_rate, (unsigned)s_data, dist);
+-
+-    if (!have || dist < best_dist)
++    // Pitch scaler g_fp = (sample_rate / root_hz) << 16 (integer fixed-point;
++    // note_on does playback_hz = (g_fp * _note_freq[note]) >> 16, pure int).
++    // root_hz auto-detect is unit-robust (milliHz vs Hz -- see patch 0244): pick
++    // whichever interpretation yields a musically-plausible root (8..12544 Hz),
++    // else A440. The same robustness drives pat_freq_to_note for the key range.
++    const double rh_milli = (s_root > 0) ? (s_root / 1000.0) : 0.0;
++    const double rh_hz    = (s_root > 0) ? (double)s_root    : 0.0;
++    double root_hz;
++    if (rh_milli >= 8.0 && rh_milli <= 12544.0)    root_hz = rh_milli;  // milliHz
++    else if (rh_hz >= 8.0 && rh_hz <= 12544.0)     root_hz = rh_hz;     // Hz
++    else                                           root_hz = 440.0;     // A440
++    const double g = (double)s_rate / root_hz;
++    std::uint32_t s_gfp = (std::uint32_t)(g * 65536.0 + 0.5);
++    if (s_gfp == 0) s_gfp = 65536;  // identity guard
++
++    const bool fmt16       = (s_modes & 0x01) != 0;
++    const bool is_unsigned = (s_modes & 0x02) != 0;
++    const bool loop_on     = (s_modes & 0x04) != 0;
++    const bool bidi        = (s_modes & 0x08) != 0;
++
++    // Normalize to native GF1 DRAM format: 8-bit UNSIGNED / 16-bit SIGNED. The
++    // driver uploads verbatim (R4), so the engine owns the sign flip. .pat is
++    // most commonly 8-bit signed -> xor 0x80.
++    if (!fmt16)
+     {
+-      std::free(best_pcm);
+-      best_pcm    = spcm;
+-      best_dist   = dist;
+-      have        = true;
+-      data_size   = s_data;
+-      loop_start  = s_lstart;
+-      loop_end    = s_lend;
+-      sample_rate = s_rate;
+-      root_freq   = s_root;
+-      modes       = s_modes;
++      if (!is_unsigned)
++        for (std::uint32_t i = 0; i < s_data; ++i) spcm[i] ^= 0x80;
+     }
+     else
+     {
+-      std::free(spcm);
++      if (is_unsigned)
++        for (std::uint32_t i = 1; i < s_data; i += 2) spcm[i] ^= 0x80;  // hi byte
+     }
++
++    // Resolve loop/end byte offsets. Drums are one-shot regardless of the .pat
++    // loop flag (a looping drum would ring forever on note-selected percussion).
++    const bool    use_loop = loop_on && !is_drum;
++    std::uint32_t lend = s_lend, lstart = s_lstart;
++    if (lend == 0 || lend > s_data) lend = s_data;
++    if (lstart > s_data) lstart = 0;
++
++    // Key range + root, MIDI notes. low_freq=0/garbage -> cover from note 0;
++    // high_freq garbage -> cover to note 127; root garbage -> middle C (60).
++    const int root_note = pat_freq_to_note(s_root, 60);
++    const int low_note  = pat_freq_to_note(s_low, 0);
++    const int high_note = pat_freq_to_note(s_high, 127);
++    const int dist60    = (root_note > 60) ? (root_note - 60) : (60 - root_note);
++
++    if (_diag)
++      LOG_INFO("gus .pat '{}' sample {}/{}: root_freq={} root_hz={} root_note={} "
++               "range=[{}..{}] rate={} size={} g_fp={} dist60={}",
++               base_name, s, nsamp, (int)s_root, (int)(root_hz + 0.5),
++               root_note, low_note, high_note, (unsigned)s_rate,
++               (unsigned)s_data, (unsigned)s_gfp, dist60);
++
++    Cand &c    = cand[ncand++];
++    c.pcm         = spcm;
++    c.data_size   = s_data;
++    c.loop_start  = lstart;
++    c.loop_end    = lend;
++    c.sample_rate = s_rate ? s_rate : 22050;
++    c.g_fp        = s_gfp;
++    c.flags       = (std::uint16_t)((use_loop ? SDL_DOSGUS_LOOP : 0) |
++                                    (fmt16 ? SDL_DOSGUS_16BIT : 0) |
++                                    (use_loop && bidi ? SDL_DOSGUS_BIDI : 0));
++    c.low_note    = (std::uint8_t)low_note;
++    c.high_note   = (std::uint8_t)high_note;
++    c.root_note   = (std::uint8_t)root_note;
++    c.dist60      = dist60;
++    if (ncand >= (int)(sizeof(cand) / sizeof(cand[0]))) break;
+   }
+   std::fclose(fp);
+ 
+-  if (!have || !best_pcm)
++  if (ncand == 0)
+   {
+     LOG_WARN("gus backend: '{}.pat' no usable sample; instrument silent.",
+              base_name);
+-    std::free(best_pcm);
+     return false;
+   }
+ 
+-  const bool fmt16       = (modes & 0x01) != 0;
+-  const bool is_unsigned = (modes & 0x02) != 0;
+-  const bool loop_on     = (modes & 0x04) != 0;
+-  const bool bidi        = (modes & 0x08) != 0;
+-
+-  // Normalize the CHOSEN sample to native GF1 DRAM format: 8-bit UNSIGNED /
+-  // 16-bit SIGNED. The driver uploads verbatim (R4), so the engine owns the
+-  // sign flip. .pat is most commonly 8-bit signed -> xor 0x80.
+-  if (!fmt16)
+-  {
+-    if (!is_unsigned)
+-      for (std::uint32_t i = 0; i < data_size; ++i) best_pcm[i] ^= 0x80;
+-  }
+-  else
++  // Upload order: nearest-middle-C first (insertion sort on dist60; ncand is
++  // tiny, no <algorithm>). A partial DRAM fit then keeps the most central
++  // samples, degrading gracefully toward exactly the single 0245 sample.
++  int order[64];
++  for (int i = 0; i < ncand; ++i) order[i] = i;
++  for (int i = 1; i < ncand; ++i)
+   {
+-    if (is_unsigned)
+-      for (std::uint32_t i = 1; i < data_size; i += 2) best_pcm[i] ^= 0x80;  // hi byte
+-  }
+-
+-  const std::uint32_t addr = SDL_DOSGusUploadSample(best_pcm, data_size, fmt16 ? 1 : 0);
+-  std::free(best_pcm);
+-  if (addr == SDL_DOSGUS_BAD_ADDR)
++    const int key = order[i];
++    int j = i - 1;
++    while (j >= 0 && cand[order[j]].dist60 > cand[key].dist60)
++    {
++      order[j + 1] = order[j];
++      --j;
++    }
++    order[j + 1] = key;
++  }
++
++  // Single-sample mode (multisample OFF, or a drum) keeps only the nearest-
++  // middle-C sample = exactly patch 0245. Multisample keeps up to K, soft-capped.
++  const bool multi  = _multisample && !is_drum;
++  int        want   = multi ? ncand : 1;
++  bool       capped = false;
++  if (want > GUS_MAX_SUBSAMPLES) { want = GUS_MAX_SUBSAMPLES; capped = true; }
++
++  out->resident = false;
++  out->nsub     = 0;
++  for (int k = 0; k < want; ++k)
++  {
++    const Cand &c = cand[order[k]];
++    const std::uint32_t addr =
++        SDL_DOSGusUploadSample(c.pcm, c.data_size,
++                               (c.flags & SDL_DOSGUS_16BIT) ? 1 : 0);
++    if (addr == SDL_DOSGUS_BAD_ADDR)
++      break;  // DRAM exhausted -- keep the central samples already resident
++    SubSample &ss  = out->sub[out->nsub++];
++    ss.dram_addr   = addr;
++    ss.data_size   = c.data_size;
++    ss.loop_start  = c.loop_start;
++    ss.loop_end    = c.loop_end;
++    ss.sample_rate = c.sample_rate;
++    ss.g_fp        = c.g_fp;
++    ss.flags       = c.flags;
++    ss.low_note    = c.low_note;
++    ss.high_note   = c.high_note;
++    ss.root_note   = c.root_note;
++  }
++
++  for (int i = 0; i < ncand; ++i) std::free(cand[i].pcm);
++
++  out->resident = (out->nsub > 0);
++  if (!out->resident)
+   {
+     LOG_WARN("gus backend: '{}.pat' DRAM upload failed (full?); instrument "
+              "silent. dram_size={} bytes.", base_name, (unsigned)_dram_size);
+     return false;
+   }
+ 
+-  // Resolve loop/end byte offsets. Drums are one-shot regardless of the .pat
+-  // loop flag (a looping drum would ring forever on note-selected percussion).
+-  const bool use_loop = loop_on && !is_drum;
+-  if (loop_end == 0 || loop_end > data_size) loop_end = data_size;
+-  if (loop_start > data_size) loop_start = 0;
+-
+-  // Pitch scaler g_fp = (sample_rate / root_hz) << 16, integer fixed-point.
+-  // note_on then does playback_hz = (g_fp * _note_freq[note]) >> 16 (pure int).
+-  //
+-  // patch 0244 (#39 silent-music fix): be ROBUST to the GUS .pat root_frequency
+-  // UNIT. The field is canonically milliHz (Hz*1000, e.g. 261626 for C5), so we
+-  // divide by 1000 -> root_hz. But some sets/tools store it in Hz directly. If
+-  // we guess wrong, root_hz is 1000x off -> playback_hz is 1000x off ->
+-  // ultrasonic or sub-DC -> EVERY note silent (the #39 systemic symptom; and
+-  // via the old g_fp==0 guard, a too-high root_hz collapsed g_fp to 1.0 so
+-  // playback_hz degenerated to the bare NOTE frequency -- exactly sdl-pg's
+-  // "note-pitch not playback-rate" hypothesis). Auto-detect: pick whichever
+-  // interpretation yields a musically-PLAUSIBLE root pitch (8 Hz .. 12544 Hz,
+-  // the full MIDI note range). milliHz data is ~100k+ (the /1000 lands in range,
+-  // the raw value is way above 12544); Hz data is ~50-2000 (the raw value lands
+-  // in range, /1000 is sub-8). Cleanly separates the two; falls back to A440 if
+-  // neither is plausible (corrupt/garbage field). The per-instrument GUS_DIAG
+-  // log (below) prints the chosen root_hz so the iter shows which unit won.
+-  const double rh_milli = (root_freq > 0) ? (root_freq / 1000.0) : 0.0;
+-  const double rh_hz    = (root_freq > 0) ? (double)root_freq    : 0.0;
+-  double root_hz;
+-  if (rh_milli >= 8.0 && rh_milli <= 12544.0)      root_hz = rh_milli;  // milliHz (canonical)
+-  else if (rh_hz >= 8.0 && rh_hz <= 12544.0)       root_hz = rh_hz;     // stored as Hz
+-  else                                             root_hz = 440.0;     // implausible -> A440
+-  const double g = (double)sample_rate / root_hz;
+-  std::uint32_t g_fp = (std::uint32_t)(g * 65536.0 + 0.5);
+-  if (g_fp == 0) g_fp = 65536;  // identity guard
+-
+-  out->resident    = true;
+-  out->dram_addr   = addr;
+-  out->data_size   = data_size;
+-  out->loop_start  = loop_start;
+-  out->loop_end    = loop_end;
+-  out->sample_rate = sample_rate ? sample_rate : 22050;
+-  out->g_fp        = g_fp;
+-  out->flags       = (std::uint16_t)((use_loop ? SDL_DOSGUS_LOOP : 0) |
+-                                     (fmt16 ? SDL_DOSGUS_16BIT : 0) |
+-                                     (use_loop && bidi ? SDL_DOSGUS_BIDI : 0));
+-
+-  // patch 0243 (#39 silent-music diag, GUS_DIAG-gated): dump the parsed .pat
+-  // fields + the DERIVED note_on values for a reference note (middle C = 60),
+-  // from this MAIN-LOOP context (note_on itself is IRQ -- can't log there). The
+-  // computed hz pins down the #39 silent-voices suspects: a SANE hz@60 (~hundreds
+-  // -> few-thousand Hz) means freq/root-freq are right and the bug is volume-
+-  // units or the SetVoiceVol/StartVoice order (sdl-pg primitives); an ULTRASONIC
+-  // (~MHz, root_freq-unit-too-Hz) or SUBSONIC hz means the .pat freq parse is
+-  // wrong. Also surfaces start/end/loop addresses + the voice flags.
+-  {
+-    const char *_gd = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_DIAG");
+-    if (_gd && _gd[0] == '1' && _gd[1] == '\0')
+-    {
+-      const std::uint32_t hz60 =
+-          (std::uint32_t)(((std::uint64_t)g_fp * _note_freq[60]) >> 16);
+-      LOG_INFO("gus .pat diag '{}': data_size={} sample_rate={} root_freq={} "
+-               "(root_hz={}) g_fp={} -> hz@note60={} ({}); loop_start={} "
+-               "loop_end={} flags=0x{:x} dram_addr={}",
+-               base_name, (unsigned)data_size, (unsigned)sample_rate,
+-               (int)root_freq, (int)(root_hz + 0.5), (unsigned)g_fp,
+-               (unsigned)hz60,
+-               (hz60 < 20u) ? "SUBSONIC?" : (hz60 > 96000u ? "ULTRASONIC?" : "sane"),
+-               (unsigned)loop_start, (unsigned)loop_end, (unsigned)out->flags,
+-               (unsigned)addr);
+-    }
++  const bool truncated = (out->nsub < want);  // DRAM ran out before K
++  _ms_sub_total += out->nsub;
++  if (capped || truncated) ++_ms_capped;
++
++  // ALWAYS-on per-instrument residency summary (no silent cap, per discipline):
++  // surfaces N candidate samples -> K resident, and any K-cap / DRAM-truncation.
++  LOG_INFO("gus .pat '{}': {} sample(s) -> {} resident{}{} ({}).",
++           base_name, ncand, (unsigned)out->nsub,
++           capped ? " [K-capped]" : "",
++           truncated ? " [DRAM-truncated]" : "",
++           multi ? "multisample" : (is_drum ? "drum/single" : "single (=0)"));
++
++  // patch 0243 (#39 diag, GUS_DIAG-gated): dump the nearest-middle-C subsample's
++  // parsed fields + the DERIVED note_on hz for the reference note (middle C =
++  // 60) from this MAIN-LOOP context. A SANE hz@60 (~hundreds..few-thousand Hz)
++  // means the freq/root parse is right; ULTRASONIC/SUBSONIC flags a bad .pat
++  // freq parse (the #39 silent-voices symptom).
++  if (_diag)
++  {
++    const SubSample &s0 = out->sub[0];
++    const std::uint32_t hz60 =
++        (std::uint32_t)(((std::uint64_t)s0.g_fp * _note_freq[60]) >> 16);
++    LOG_INFO("gus .pat diag '{}': nsub={} sub0 data_size={} sample_rate={} "
++             "g_fp={} -> hz@note60={} ({}); root_note={} range=[{}..{}] "
++             "loop_start={} loop_end={} flags=0x{:x} dram_addr={}",
++             base_name, (unsigned)out->nsub, (unsigned)s0.data_size,
++             (unsigned)s0.sample_rate, (unsigned)s0.g_fp, (unsigned)hz60,
++             (hz60 < 20u) ? "SUBSONIC?" : (hz60 > 96000u ? "ULTRASONIC?" : "sane"),
++             (unsigned)s0.root_note, (unsigned)s0.low_note, (unsigned)s0.high_note,
++             (unsigned)s0.loop_start, (unsigned)s0.loop_end, (unsigned)s0.flags,
++             (unsigned)s0.dram_addr);
+   }
+   return true;
+ }
+@@ -571,6 +638,31 @@ void MidiBackendGus::on_tick()
+   }
+ }
+ 
++// patch 0255 (GUS fidelity, lever c): per-note resident-subsample selection.
++// IRQ-context (note_on): int-only, no SDL/FPU/malloc. nsub<=1 (single-sample /
++// drums / multisample OFF) returns sub[0] immediately. Otherwise pick the
++// sample whose precomputed [low_note,high_note] covers the note; if none covers
++// it (a gap at the keyboard extremes of the resident set), pick the nearest
++// root note so the worst case is still a bounded pitch-shift, never silence.
++const MidiBackendGus::SubSample *
++MidiBackendGus::_pick_subsample(const PatSample *ps, int note) const
++{
++  if (ps->nsub <= 1) return &ps->sub[0];
++  for (int k = 0; k < ps->nsub; ++k)
++  {
++    if (note >= (int)ps->sub[k].low_note && note <= (int)ps->sub[k].high_note)
++      return &ps->sub[k];
++  }
++  int best = 0, bestd = 1000;
++  for (int k = 0; k < ps->nsub; ++k)
++  {
++    int d = (int)ps->sub[k].root_note - note;
++    if (d < 0) d = -d;
++    if (d < bestd) { bestd = d; best = k; }
++  }
++  return &ps->sub[best];
++}
++
+ // ============================================================================
+ // MidiBackend dispatch (note_on/off/cc/pc run in IRQ-0 context -- int only)
+ // ============================================================================
+@@ -592,6 +684,9 @@ void MidiBackendGus::note_on(int channel, int note, int velocity)
+   if (!ps->resident) return;  // not pre-uploaded at on_song_start -> silent.
+                               // (No file I/O in IRQ context, by design.)
+ 
++  // patch 0255: pick the resident subsample covering this note (int-only).
++  const SubSample *ss = _pick_subsample(ps, note);
++
+   const int v = _allocate_voice();
+   _voices[v].active       = true;
+   _voices[v].releasing    = false;  // patch 0254: fresh note cancels any ramp
+@@ -603,13 +698,13 @@ void MidiBackendGus::note_on(int channel, int note, int velocity)
+   std::uint32_t hz;
+   if (is_drum)
+   {
+-    hz = ps->sample_rate;
++    hz = ss->sample_rate;
+   }
+   else
+   {
+-    hz = (std::uint32_t)(((std::uint64_t)ps->g_fp * _note_freq[note]) >> 16);
++    hz = (std::uint32_t)(((std::uint64_t)ss->g_fp * _note_freq[note]) >> 16);
+   }
+-  if (hz == 0) hz = ps->sample_rate;
++  if (hz == 0) hz = ss->sample_rate;
+ 
+   // Volume: velocity * channel-volume(CC7) * expression(CC11), 0..255 linear.
+   int lin = velocity;                                  // 0..127
+@@ -622,14 +717,14 @@ void MidiBackendGus::note_on(int channel, int note, int velocity)
+   int pan255 = (int)_channel_pan[ch] << 1;             // CC10 0..127 -> 0..255
+   if (pan255 > 255) pan255 = 255;
+ 
+-  const std::uint32_t start     = ps->dram_addr;
+-  const std::uint32_t end       = ps->dram_addr + ps->loop_end;
+-  const std::uint32_t loopstart = ps->dram_addr + ps->loop_start;
++  const std::uint32_t start     = ss->dram_addr;
++  const std::uint32_t end       = ss->dram_addr + ss->loop_end;
++  const std::uint32_t loopstart = ss->dram_addr + ss->loop_start;
+ 
+   SDL_DOSGusSetVoiceFreq(v, hz);
+   SDL_DOSGusSetVoiceVol(v, vol255);
+   SDL_DOSGusSetVoicePan(v, pan255);
+-  SDL_DOSGusStartVoice(v, start, end, loopstart, ps->flags);
++  SDL_DOSGusStartVoice(v, start, end, loopstart, ss->flags);
+ }
+ 
+ void MidiBackendGus::note_off(int channel, int note, int velocity)
+@@ -704,6 +799,11 @@ void MidiBackendGus::on_song_start()
+   // song's voices, free its DRAM, then pre-upload exactly the instruments the
+   // new song references so the IRQ note path only ever touches resident DRAM.
+ 
++  // patch 0255 (lever c): reset per-song multisample accounting for the
++  // always-on residency summary at the end of this function.
++  _ms_sub_total = 0;
++  _ms_capped    = 0;
++
+   // patch 0249 (#40, gus-5): quiesce EVERY GF1 voice -- including looping SFX
+   // voices (e.g. CRITTER_FLY) allocated by the Pixtone path, which the music
+   // pool loop below does NOT own. A looping SFX surviving a song change would
+@@ -776,8 +876,10 @@ void MidiBackendGus::on_song_start()
+   const unsigned used_kb =
+       (SDL_DOSGusGetState(&st) && st.valid) ? (unsigned)(st.dram_used / 1024) : 0;
+   LOG_INFO("gus backend: on_song_start -- uploaded {} instruments ({} "
+-           "missing/silent) into {} KB DRAM for this song.",
+-           loaded, missing, used_kb);
++           "missing/silent) into {} KB DRAM for this song; {} subsamples "
++           "resident, {} instrument(s) K-capped/DRAM-truncated (multisample {}).",
++           loaded, missing, used_kb, (unsigned)_ms_sub_total, _ms_capped,
++           _multisample ? "on" : "off");
+ }
+ 
+ void MidiBackendGus::on_song_stop()
+diff --git a/src/sound/MidiBackendGus.h b/src/sound/MidiBackendGus.h
+index 9b8f247d..ecc9ccd5 100644
+--- a/src/sound/MidiBackendGus.h
++++ b/src/sound/MidiBackendGus.h
+@@ -79,12 +79,23 @@ private:
+   // on sustained instruments, which is the audible "thin" artifact vs MIDIDEMO.
+   static constexpr int RELEASE_TICKS = 12;
+ 
++  // Patch 0255 (GUS fidelity, lever c): per-note multisample residency. A GM
++  // .pat instrument is MULTISAMPLED -- the layer holds N samples, each rooted at
++  // a different pitch and covering a key range [low_freq, high_freq]. Keeping
++  // several samples resident and picking by note (instead of one nearest-middle-C
++  // sample stretched across the whole keyboard, patch 0245) is the real timbre
++  // win vs MIDIDEMO. Cap the per-instrument resident count so DRAM + the locked
++  // instance stay bounded; instruments with more samples keep the lowest K (note
++  // selection falls back to nearest-root for uncovered notes).
++  static constexpr int GUS_MAX_SUBSAMPLES = 8;
++
+   // A resident DRAM sample (one GM program, or one drum note). POD so the
+   // whole instance can be DPMI-locked for IRQ-context note_on reads. Byte
+   // addresses/offsets are in the DRAM space SDL_DOSGusUploadSample returns.
+-  struct PatSample
++  // One resident DRAM sample of an instrument (patch 0255: a PatSample now holds
++  // up to GUS_MAX_SUBSAMPLES of these, selected per-note). POD for DPMI lock.
++  struct SubSample
+   {
+-    bool          resident;     // uploaded + ready
+     std::uint32_t dram_addr;    // DRAM byte address of the sample's first byte
+     std::uint32_t data_size;    // bytes
+     std::uint32_t loop_start;   // byte offset into the sample (loop point)
+@@ -93,6 +104,19 @@ private:
+     std::uint32_t g_fp;         // (sample_rate/root_hz) << 16, fixed-point.
+                                 // playback_hz(note) = (g_fp*_note_freq[note])>>16
+     std::uint16_t flags;        // SDL_DOSGUS_LOOP / _16BIT / _BIDI
++    std::uint8_t  low_note;     // inclusive MIDI-note range this sample covers
++    std::uint8_t  high_note;    // (from the .pat low_freq/high_freq fields)
++    std::uint8_t  root_note;    // sample's root MIDI note (nearest-root fallback)
++  };
++
++  // A resident GM program / drum note: one or more SubSamples. note_on (IRQ)
++  // selects sub[k] whose [low_note,high_note] covers the note, else nearest root.
++  // Single-sample mode (patch 0245 legacy / drums / multisample OFF) sets nsub=1.
++  struct PatSample
++  {
++    bool          resident;     // >=1 subsample uploaded + ready
++    std::uint8_t  nsub;         // number of resident subsamples (1..GUS_MAX_SUBSAMPLES)
++    SubSample     sub[GUS_MAX_SUBSAMPLES];
+   };
+ 
+   // Per-voice mirror. The driver owns the hardware pool (AllocVoice/StopVoice);
+@@ -127,6 +151,12 @@ private:
+   int  _find_voice(int channel, int note);
+   void _reap_finished_voices();
+ 
++  // patch 0255 (GUS fidelity, lever c): pick the resident subsample to play for
++  // `note` (IRQ-context, int-only -- no SDL/FPU/malloc). nsub<=1 returns sub[0];
++  // otherwise the sample whose [low_note,high_note] covers the note, else the
++  // nearest root note (covers keyboard-extreme gaps in the resident set).
++  const SubSample *_pick_subsample(const PatSample *ps, int note) const;
++
+   bool          _ready        = false;
+   int           _num_voices   = 28;    // from SDL_DOSGusGetState
+   std::uint32_t _output_rate  = 22050; // GF1 DAC rate (informational)
+@@ -160,6 +190,17 @@ private:
+   // _no_reap cache pattern.
+   bool          _release = true;
+ 
++  // Patch 0255 (GUS fidelity, lever c): GUS_MULTISAMPLE killswitch, cached ONCE
++  // in the ctor. Default ON; SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE=0 reverts to the
++  // single nearest-middle-C sample per instrument (patch 0245 behavior) for
++  // clean g2k A/B and as the low-DRAM SETUP "GUS high fidelity" off state. Read
++  // in _upload_pat (main-loop) only -- note_on just walks the resident sub[].
++  bool          _multisample = true;
++  // Per-song multisample accounting for the always-on on_song_start summary
++  // (reset at the top of on_song_start; no silent caps, per discipline).
++  std::uint32_t _ms_sub_total = 0;  // total subsamples uploaded this song
++  int           _ms_capped    = 0;  // instruments truncated by the DRAM soft cap
++
+   // Residency tables (indexed by GM program / MIDI note). Lazy per song.
+   PatSample     _mel[128];   // melodic programs
+   PatSample     _drum[128];  // percussion notes (GM 27..87 used)
+-- 
+2.47.3
+

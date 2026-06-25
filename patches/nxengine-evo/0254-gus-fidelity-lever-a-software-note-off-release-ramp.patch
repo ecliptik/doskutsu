@@ -1,0 +1,270 @@
+From 3284a11297c8efa30987749d10118d34ad113c1b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 24 Jun 2026 19:43:34 -0700
+Subject: [PATCH] patch 0254 -- gus fidelity (lever a): software note-off
+ release ramp
+
+The native GF1 backend stopped each voice instantly on note_off (the GF1
+exports no hardware volume-ramp engine). On sustained instruments that
+abrupt cut is a percussive click -- the audible reason our GUS output
+sounds thinner than Gravis MIDIDEMO playing the SAME .pat bank.
+
+Add a per-tick backend hook (MidiBackend::on_tick, default no-op so OPL2/
+OPL3/WB/Stub are unaffected) called from both MidiScheduler::tick() and
+tick_isr() after event dispatch. The GF1 backend overrides it to step a
+releasing voice's volume down to silence over RELEASE_TICKS scheduler
+ticks (a ~30-60 ms tail at the PIT music-pump rate), then StopVoice. The
+per-tick decrement is sized from the note-on volume so the release time
+is ~constant regardless of note loudness. note_off enters the ramp;
+on_tick advances it; _find_voice skips releasing voices so a retrigger
+matches the held voice. All int-only and IRQ-safe (SetVoiceVol/StopVoice
+already run in tick_isr context); no FPU/SDL_GetHint/malloc in the hook.
+
+Gated by SDL_HINT_DOSKUTSU_GUS_RELEASE (cached once in the ctor per the
+0250 _no_reap pattern; bridged env->hint in main.cpp). Default ON; =0
+reverts to the legacy instant StopVoice for clean g2k A/B. Smoke banner
+"gus backend: release-ramp ..." added (optional, GUS-path only).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp                 |  1 +
+ src/sound/MidiBackendGus.cpp | 66 +++++++++++++++++++++++++++++++++---
+ src/sound/MidiBackendGus.h   | 24 +++++++++++++
+ src/sound/MidiScheduler.cpp  | 10 ++++++
+ src/sound/MidiScheduler.h    | 11 ++++++
+ 5 files changed, 107 insertions(+), 5 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 1f0dd5ba..5c1666e9 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1682,6 +1682,7 @@ int main(int argc, char *argv[])
+         "SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD",
+         "SDL_HINT_DOSKUTSU_GUS_VOICES",    // VALUE (e.g. "28"), not a 1/0 flag
+         "SDL_HINT_DOSKUTSU_GUS_NO_REAP",   // engine-read (0250); same fallback hazard
++        "SDL_HINT_DOSKUTSU_GUS_RELEASE",   // engine-read (0254); release-ramp killswitch (default ON, =0 off)
+     };
+     const int _ngp = (int)(sizeof(_gus_passthru) / sizeof(_gus_passthru[0]));
+     int _nbridged = 0;
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index 212fc14e..e95fda4b 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -190,6 +190,18 @@ MidiBackendGus::MidiBackendGus()
+            "MUSIC ONLY this phase (#27); GF1 SFX = #28.",
+            _num_voices, (unsigned)_output_rate, (unsigned)(_dram_size / 1024));
+ 
++  // patch 0254 (GUS fidelity, lever a): cache the GUS_RELEASE killswitch ONCE
++  // here (main-loop; SDL_GetHint is not IRQ-safe). Default ON; =0 reverts to
++  // legacy instant-stop note_off. The banner is a smoke-gate anchor.
++  {
++    const char *_rl = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_RELEASE");
++    _release = !(_rl && _rl[0] == '0' && _rl[1] == '\0');
++    LOG_INFO("gus backend: release-ramp {} -- software note-off volume fade "
++             "over {} ticks (GUS_RELEASE; the GF1 has no hardware ramp).",
++             _release ? "ENABLED (default)" : "DISABLED (killswitch =0)",
++             RELEASE_TICKS);
++  }
++
+   // DPMI-lock the whole instance: under the PIT pump the IRQ-0 ISR's
+   // tick_isr -> note_on/off reads _voices / _mel / _drum / _note_freq /
+   // channel arrays. Gate on the SHARED pump predicate, mirroring
+@@ -520,7 +532,10 @@ int MidiBackendGus::_find_voice(int channel, int note)
+ {
+   for (int v = 0; v < _num_voices; ++v)
+   {
+-    if (_voices[v].active &&
++    // patch 0254: skip voices already in the release ramp so a note_off (or a
++    // same-note retrigger's note_off) matches the actively-held voice, not one
++    // that is already fading out.
++    if (_voices[v].active && !_voices[v].releasing &&
+         _voices[v].midi_channel == (std::uint8_t)channel &&
+         _voices[v].midi_note    == (std::uint8_t)note)
+     {
+@@ -530,6 +545,32 @@ int MidiBackendGus::_find_voice(int channel, int note)
+   return -1;
+ }
+ 
++// patch 0254 (GUS fidelity, lever a): step every releasing voice's volume down
++// one notch per scheduler tick; when it reaches silence, stop + free the voice.
++// Runs in IRQ-0 (PIT pump) context via MidiScheduler::tick_isr -- int-only, and
++// SDL_DOSGusSetVoiceVol/StopVoice are already called from this context by
++// note_on/off, so they are safe here. No-op when GUS_RELEASE is disabled.
++void MidiBackendGus::on_tick()
++{
++  if (!_ready || !_release) return;
++  for (int v = 0; v < _num_voices; ++v)
++  {
++    if (!_voices[v].active || !_voices[v].releasing) continue;
++    const int nv = _voices[v].rel_vol - _voices[v].rel_step;
++    if (nv <= 0)
++    {
++      SDL_DOSGusStopVoice(v);
++      _voices[v].active    = false;
++      _voices[v].releasing = false;
++    }
++    else
++    {
++      _voices[v].rel_vol = nv;
++      SDL_DOSGusSetVoiceVol(v, nv);
++    }
++  }
++}
++
+ // ============================================================================
+ // MidiBackend dispatch (note_on/off/cc/pc run in IRQ-0 context -- int only)
+ // ============================================================================
+@@ -553,6 +594,7 @@ void MidiBackendGus::note_on(int channel, int note, int velocity)
+ 
+   const int v = _allocate_voice();
+   _voices[v].active       = true;
++  _voices[v].releasing    = false;  // patch 0254: fresh note cancels any ramp
+   _voices[v].midi_channel = (std::uint8_t)ch;
+   _voices[v].midi_note    = (std::uint8_t)note;
+ 
+@@ -575,6 +617,7 @@ void MidiBackendGus::note_on(int channel, int note, int velocity)
+   lin = (lin * _channel_expression[ch]) / 127;         // apply CC11
+   int vol255 = (lin * 255) / 127;                      // 0..127 -> 0..255
+   if (vol255 > 255) vol255 = 255;
++  _voices[v].cur_vol = vol255;                         // patch 0254: ramp top
+ 
+   int pan255 = (int)_channel_pan[ch] << 1;             // CC10 0..127 -> 0..255
+   if (pan255 > 255) pan255 = 255;
+@@ -594,11 +637,24 @@ void MidiBackendGus::note_off(int channel, int note, int velocity)
+   (void)velocity;
+   if (!_ready) return;
+   const int v = _find_voice(channel & 0x0F, note & 0x7F);
+-  if (v >= 0)
++  if (v < 0) return;
++
++  // patch 0254 (GUS fidelity, lever a): software release ramp. When GUS_RELEASE
++  // is ON, do NOT StopVoice now -- mark the voice releasing and let on_tick step
++  // its volume down to silence over RELEASE_TICKS, then stop it. The decrement
++  // is sized from the note-on volume so the release time is ~constant. This
++  // kills the abrupt instant-cut click that made sustained GUS notes sound thin
++  // vs MIDIDEMO. Killswitch =0 (or a zero-volume voice) keeps the legacy
++  // instant stop. IRQ-context: int-only, no SDL_GetHint here (_release cached).
++  if (_release && _voices[v].cur_vol > 0)
++  {
++    _voices[v].releasing = true;
++    _voices[v].rel_vol   = _voices[v].cur_vol;
++    int step             = _voices[v].cur_vol / RELEASE_TICKS;
++    _voices[v].rel_step  = (step > 0) ? step : 1;
++  }
++  else
+   {
+-    // No hardware release ramp is exported; stop immediately (matches the
+-    // shipped OPL2/OPL3 backends, which KEY-OFF on note_off). A software
+-    // release ramp is a deferred polish item (GUS-PAT-PARSER-DESIGN sec 7).
+     SDL_DOSGusStopVoice(v);
+     _voices[v].active = false;
+   }
+diff --git a/src/sound/MidiBackendGus.h b/src/sound/MidiBackendGus.h
+index e70c7dca..9b8f247d 100644
+--- a/src/sound/MidiBackendGus.h
++++ b/src/sound/MidiBackendGus.h
+@@ -60,6 +60,7 @@ public:
+   void on_song_start()                                            override;
+   void on_song_stop()                                             override;
+   void silence_for_shutdown()                                     override;
++  void on_tick()                                                  override;
+ 
+ private:
+   // GF1 supports up to 32 hardware voices; we cap our mirror at 32 and use the
+@@ -68,6 +69,16 @@ private:
+   static constexpr int MIDI_CHANNELS = 16;
+   static constexpr int DRUM_CHANNEL  = 9;   // GM percussion channel (0-indexed)
+ 
++  // Patch 0254 (GUS fidelity, lever a): software note-off release. The GF1
++  // exports no hardware volume-ramp engine, so note_off steps the voice volume
++  // down to silence over RELEASE_TICKS scheduler ticks (via on_tick) instead of
++  // an abrupt StopVoice. The decrement is sized per-voice from its note-on
++  // volume so the release DURATION is ~constant regardless of how loud the note
++  // was. At the music pump's tick rate (OPL_TIMER_HZ, a few hundred Hz) this is
++  // a ~30-60 ms tail -- enough to kill the percussive click of an instant cut
++  // on sustained instruments, which is the audible "thin" artifact vs MIDIDEMO.
++  static constexpr int RELEASE_TICKS = 12;
++
+   // A resident DRAM sample (one GM program, or one drum note). POD so the
+   // whole instance can be DPMI-locked for IRQ-context note_on reads. Byte
+   // addresses/offsets are in the DRAM space SDL_DOSGusUploadSample returns.
+@@ -92,6 +103,12 @@ private:
+     std::uint8_t  midi_channel;
+     std::uint8_t  midi_note;
+     std::uint64_t last_used;    // monotonic; LRU steal target
++
++    // Patch 0254 (GUS fidelity, lever a): software release-ramp state.
++    bool          releasing;    // in note-off ramp-down (still sounding)
++    int           cur_vol;      // 0..255 volume programmed at note_on (ramp top)
++    int           rel_vol;      // current ramp volume, stepped down per tick
++    int           rel_step;     // per-tick decrement (cur_vol / RELEASE_TICKS)
+   };
+ 
+   // Resolve a GM program (0-127) / drum note (0-127) to its Gravis .pat base
+@@ -136,6 +153,13 @@ private:
+   // still recycles the pool with reap off, so voices do not exhaust.
+   bool          _no_reap = false;
+ 
++  // Patch 0254 (GUS fidelity, lever a): GUS_RELEASE killswitch, cached ONCE in
++  // the ctor (main-loop -- SDL_GetHint is not IRQ-safe) and read in the IRQ
++  // note path / on_tick. Default ON; SDL_HINT_DOSKUTSU_GUS_RELEASE=0 reverts to
++  // the legacy instant-StopVoice note_off for clean g2k A/B. Mirrors the 0250
++  // _no_reap cache pattern.
++  bool          _release = true;
++
+   // Residency tables (indexed by GM program / MIDI note). Lazy per song.
+   PatSample     _mel[128];   // melodic programs
+   PatSample     _drum[128];  // percussion notes (GM 27..87 used)
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+index 56c13acb..3b04314d 100644
+--- a/src/sound/MidiScheduler.cpp
++++ b/src/sound/MidiScheduler.cpp
+@@ -568,6 +568,12 @@ void MidiScheduler::tick(std::uint64_t now_ms)
+     ++_next_event_idx;
+   }
+ 
++  // Patch 0254 (GUS fidelity, lever a): advance per-tick backend state (GF1
++  // software release ramps) once per tick, after dispatch. No-op for all other
++  // backends. Reached only while _playing (early-return above), which is
++  // exactly when a release ramp should keep stepping.
++  _backend->on_tick();
++
+   _current_tick = (std::uint64_t)((double)_position_us / _us_per_tick);
+ }
+ 
+@@ -781,6 +787,10 @@ void MidiScheduler::tick_isr(std::uint64_t now_ms)
+     }
+     ++_next_event_idx;
+   }
++  // Patch 0254 (GUS fidelity, lever a): advance per-tick backend state from the
++  // IRQ-0 PIT pump too (the GF1 backend runs under this path). on_tick() is
++  // int-only in the GF1 override -- ISR-safe like the note_on/off dispatch above.
++  _backend->on_tick();
+   // _current_tick under fixed-point: position_us / us_per_tick
+   // = (position_us * 256) / us_per_tick_x256. Integer divide.
+   if (_us_per_tick_x256 != 0)
+diff --git a/src/sound/MidiScheduler.h b/src/sound/MidiScheduler.h
+index efc105f8..4fd7b4f3 100644
+--- a/src/sound/MidiScheduler.h
++++ b/src/sound/MidiScheduler.h
+@@ -83,6 +83,17 @@ public:
+   // on_song_stop + dtor 18-voice KEY-OFF is correctness-complete; Stub
+   // has nothing to silence).
+   virtual void silence_for_shutdown() {}
++
++  // Patch 0254 (Campaign 3 GUS fidelity, lever a): per-tick advance hook.
++  // Called once per MidiScheduler tick (both the engine-thread tick() and the
++  // IRQ-0 PIT-pump tick_isr()), AFTER event dispatch, while a song is playing.
++  // Default: no-op (OPL2/OPL3/WB/Stub carry no per-tick state -- one extra
++  // virtual call per tick, negligible). The native GF1 backend overrides it to
++  // step software note-off release ramps (the GF1 exports no hardware ramp
++  // engine, so a smooth release must be driven from here). IRQ-CONTEXT when the
++  // PIT pump drives it: the override must be int-only (no FPU / SDL_GetHint /
++  // malloc), exactly like note_on/off which already run in this context.
++  virtual void on_tick() {}
+ };
+ 
+ // ----------------------------------------------------------------------
+-- 
+2.47.3
+

@@ -1,4 +1,4 @@
-From 62bbeef74b5f26ede8dbd7c3fa8b5bb762bfff58 Mon Sep 17 00:00:00 2001
+From 6c71203d22097e0b1f2943f470f81731806d3b86 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -169,8 +169,8 @@ boots to a silent default.
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 ++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1433 ++++++++++++++++++++++++++++++
- 2 files changed, 1700 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1436 ++++++++++++++++++++++++++++++
+ 2 files changed, 1703 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -449,10 +449,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..5df524eca
+index 000000000..064773e28
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1433 @@
+@@ -0,0 +1,1436 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -559,14 +559,17 @@ index 000000000..5df524eca
 +
 +#define GUS_MAX_VOICES     32
 +#define GUS_MIN_VOICES     14
-+/* DOS-PORT: default 14 voices -> GF1 output rate = 617400/14 = 44100Hz (the
-+   highest-quality point). 28 voices yields EXACTLY 22050Hz, which is the
-+   PicoGUS PCM510xA DAC dead-zone -- dead silence on ~10% of cards (the reason
-+   pgusinit ships /gus44k). g2k wave-gus16 CONFIRMED, same binary: 28 voices
-+   (22050Hz) = silent; 14 voices (44100Hz) = audible + playable. There is no
-+   pitch bug (g_gus_rate is recomputed from g_gus_voices below). The
-+   SDL_HINT_DOSKUTSU_GUS_VOICES hint still overrides for A/B. #39. */
-+#define GUS_DEF_VOICES     14
++/* DOS-PORT: default 20 voices -> GF1 output rate = 617400/20 = 30870Hz.
++   g2k wave-gus18 ear-judged BEST: 20 voices beats 14 (44100Hz) -- the extra
++   polyphony outweighs the slightly lower DAC rate. AVOID 28 voices: it yields
++   EXACTLY 22050Hz, a PicoGUS firmware special-case (SCALE_22K_TO_44K forces
++   28-channel output to 44.1k) that collides with our driver's 22050 assumption
++   -> rate mismatch -> dead silence (g2k wave-gus16/18, same binary: V27/V29
++   audible, only V28 silent). There is no pitch bug (g_gus_rate is recomputed
++   from g_gus_voices below). The SDL_HINT_DOSKUTSU_GUS_VOICES hint still
++   overrides [14,32] for A/B. pgusinit /gus44k 1 + 32 voices = full 44.1k
++   internal mixing at max polyphony (premium option). #39. */
++#define GUS_DEF_VOICES     20
 +#define GUS_RATE_NUM       617400u /* output_rate ~= 617400 / active_voices */
 +
 +/* DMA-upload tunables. DMA upload is OPT-IN (SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD=1);
@@ -590,7 +593,7 @@ index 000000000..5df524eca
 +static int  g_gus_play_dma = -1;           /* playback DMA channel */
 +static int  g_gus_irq = -1;                /* GF1 IRQ */
 +static int  g_gus_voices = GUS_DEF_VOICES; /* active-voice count */
-+static Uint32 g_gus_rate = 44100;          /* resulting DAC rate (recomputed from voices) */
++static Uint32 g_gus_rate = 30870;          /* resulting DAC rate (recomputed from voices; 617400/20) */
 +static Uint32 g_gus_dram_size = 0;         /* detected DRAM bytes */
 +static Uint32 g_gus_dram_used = 0;         /* bump-allocator high-water */
 +static bool g_gus_diag = false;            /* SDL/0112 diag counters (default OFF) */
