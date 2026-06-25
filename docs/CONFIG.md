@@ -41,6 +41,8 @@ SET SDL_HINT_DOSKUTSU_PERF_MODE=1        REM drop decorative foreground detail
 | Variable | Values | Default | Effect | FPS impact |
 |---|---|---|---|---|
 | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto`, `opl3`, `organya`, `wb`, `adlib`, `gus`, `none` | `auto` | Music synthesizer (also the SETUP "Select Music Card" selection). `none` = **No Music** (music off, but sound effects still play -- distinct from `AUDIO_OFF` which is both-off). `auto` (default): probe for a WaveBlaster daughterboard first, fall back to OPL3 FM if none is found. `opl3`: force the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: force a WaveBlaster daughterboard. `adlib`: native OPL2 FM on a card with **no Sound Blaster** (a real AdLib/OPL2 card, or a PicoGUS in `/mode adlib`); music is clocked off the PIT timer, not the SB IRQ. **`adlib` is MUSIC ONLY** -- a DAC-less AdLib card cannot play the digital sound effects, so SFX are silent. `gus`: native Gravis Ultrasound (GF1) wavetable on a card with **no Sound Blaster** (a real GUS, or a PicoGUS in `/mode gus`); GM instruments play on the GF1's hardware voices from `.pat` samples loaded into the card's DRAM, clocked off the PIT timer. **`gus` plays both music AND sound effects** on the GUS's own voices -- unlike `adlib`, the GUS has a real DAC, so the Cave Story SFX render on the GF1 too. | `organya` is ~9 fps slower than MIDI; `auto` / `opl3` / `wb` / `adlib` / `gus` run music off the CPU |
+| `SDL_HINT_DOSKUTSU_GUS_VOICES` | `14`..`32` | `14` | Gravis Ultrasound active-voice count (only meaningful under `AUDIO_BACKEND=gus`; the SETUP "Select GUS Voices" screen writes the `GUS_VOICES` `DOSKUTSU.CFG` key). The GF1 DAC output rate is `617400 / voices`, so the voice count IS the music sample rate: `14` = 44100 Hz (default, best fidelity, and it clears the dead-zone), `16` = 38588 Hz, `24` = 25725 Hz (more polyphony), `28` = 22050 Hz, `32` = 19294 Hz. The driver clamps any value to `[14,32]`. **`28` voices = 22050 Hz hits a PicoGUS PCM510xA DAC dead-zone that is SILENT on ~10% of cards** -- it is high-polyphony and valid on unaffected hardware, but if GUS music goes silent at 28, choose 14 (or any other value). SETUP offers the curated presets {14,16,24,28,32}. | Leave at `14` unless you need more simultaneous voices and have confirmed your card is not dead-zone-affected at 22050 Hz |
+| `SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE` | `0`, `1` | `1` (on) | Gravis Ultrasound multi-sample fidelity (only meaningful under `AUDIO_BACKEND=gus`; the SETUP "GUS high fidelity" row writes the `GUS_HIFI` `DOSKUTSU.CFG` key). On (default): upload the full multi-sample `.pat` set per instrument so each note plays from the nearest-pitched sample -- the best fidelity across the keyboard. `0` = the killswitch: a single nearest-middle-C sample per instrument (the low-DRAM fallback). The engine reads it once when the GUS MIDI backend starts; **default ON** -- unset or any non-`0` value = on. | Leave on; set `0` only if a song runs the GF1 out of on-card memory |
 | `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` | `19`..`1000` | `120` | Tick rate of the PIT/IRQ-0 music pump that clocks MIDI playback under `AUDIO_BACKEND=adlib` **and** `AUDIO_BACKEND=gus` (both no-Sound-Blaster paths share the same card-agnostic timer pump). Higher = finer tempo resolution at slightly more interrupt overhead. Only used on the `adlib` / `gus` paths; ignored otherwise. | Leave at default unless tempo sounds off |
 | `SDL_HINT_DOSKUTSU_SFX_DEVICE` | `sb`, `gus`, `none` | `sb` | Which device plays the sound effects (the SETUP "Select Sound FX Device" selection). `sb` (default): the Sound Blaster DAC. `gus`: the GUS GF1 voices (under `AUDIO_BACKEND=gus`). `none` = **No Sound FX** (sound effects off; music still plays). | None |
 | `SDL_HINT_DOSKUTSU_MUSIC_OFF` / `SDL_HINT_DOSKUTSU_SFX_OFF` | `1` | unset | Independent music / sound-effects disable. `MUSIC_OFF=1` turns music off but keeps SFX (same as `AUDIO_BACKEND=none`); `SFX_OFF=1` turns SFX off but keeps music (same as `SFX_DEVICE=none`). Both set, or `AUDIO_OFF=1`, = silent. The audio device still opens (these gate the *dispatch*, not the hardware), so toggling one does not disturb the other. | You normally set these via the Music Card / Sound FX Device menus, not by hand |
@@ -112,7 +114,7 @@ Gravis Ultrasound support is the planned path (see below).
 The `gus` backend makes music on a **Gravis Ultrasound** (or a **PicoGUS booted in
 `/mode gus`**) with **no Sound Blaster** in the machine. Unlike the FM backends, the
 GUS is a *wavetable* card: General MIDI instruments are real recorded samples that
-the engine loads into the card's on-board DRAM, and the GF1 chip mixes up to 28
+the engine loads into the card's on-board DRAM, and the GF1 chip mixes its active
 voices in hardware straight to its own output - the CPU only sends note events, so
 the music is both richer and cheaper on a slow processor. Like the `adlib` path it
 has no Sound Blaster interrupt to clock the music, so it uses the **PIT/IRQ-0 system
@@ -144,9 +146,13 @@ the General MIDI `.pat` patch files under `C:\ULTRASND\MIDI`.
 GUS has its own DAC and on-board sample RAM, so Cave Story's digital sound effects
 render on the GF1's hardware voices too: at startup the engine uploads the sound
 effects into the card's DRAM once, then triggers them on spare GF1 voices alongside
-the music. Music and SFX share the card's voice pool (28 voices), which is ample for
-Cave Story; in a rare voice-saturated moment a new sound effect may drop rather than
-cut off music, which is the intended trade.
+the music. Music and SFX share the card's voice pool (`14` voices by default, set by
+the `GUS_VOICES` key / SETUP "Select GUS Voices" screen), which is ample for Cave
+Story; in a rare voice-saturated moment a new sound effect may drop rather than cut
+off music, which is the intended trade. The GF1 output rate is `617400 / voices`, so
+the voice count is also the music sample rate -- `14` voices = 44100 Hz, the
+highest-fidelity setting and the one that clears the PicoGUS 22050 Hz DAC dead-zone
+(see the `GUS_VOICES` key in the hint table above).
 
 ---
 

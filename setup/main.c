@@ -168,14 +168,11 @@ static const char *ui_help(const char *cfg_key, const char *fallback)
  * it describes (T22 item 3 -- single shared role, not per-option colors). */
 typedef struct { const char *key; const char *desc; } helprow_t;
 
-/* Per-line help for the Music backend row (replaces the paragraph blob).
- * Each description starts with a capital letter; no ";" (round-6 item 2). */
-static const helprow_t BACKEND_HELP[] = {
-  { "Auto",        "Detect the best option the card supports." },
-  { "WaveBlaster", "Wavetable MIDI daughterboard, best quality." },
-  { "OPL3",        "FM synth on any Sound Blaster, classic sound." },
-  { "Organya",     "Cave Story's own synth, most faithful (more demanding on CPU)." }
-};
+/* (#9: the per-backend help table BACKEND_HELP was REMOVED -- the music backend
+ * is no longer a generic-editor row; it is the Select Music Card picker, whose
+ * one-line descriptions live in the MUSIC_CARDS table and whose labels come from
+ * snd_backend_name. Keeping a second backend-description table here was the same
+ * drift risk we just single-sourced for the labels.) */
 
 /* Per-line help for the Performance mode row (round-8 item 9 wording:
  * standardized "more/less/least demanding on CPU"). */
@@ -241,7 +238,8 @@ static const helprow_t *opt_help_for(const char *cfg_key, int *n, int *keyw)
 #define OPT_K(s, tbl, kw)                                          \
   if (dkt_key_ieq(cfg_key, s, (int)sizeof(s) - 1))                 \
   { *n = (int)(sizeof(tbl) / sizeof(tbl[0])); *keyw = (kw); return tbl; }
-  OPT_K("AUDIO_BACKEND",        BACKEND_HELP,      13)
+  /* AUDIO_BACKEND is not a generic-editor row (it is the Select Music Card
+   * picker), so it has no per-line help table here -- removed with BACKEND_HELP. */
   OPT_K("PERF_MODE",            PERF_HELP,         12)
   OPT_K("AUDIO_WB_DIRECT_PORT", H_ONOFF_WB,         6)
   OPT_K("DIRTY_RECTS",          H_ONOFF_DIRTY,      6)
@@ -310,6 +308,11 @@ static int cat_active(int idx)
   return 1;
 }
 
+/* #9: forward decl -- snd_backend_name (defined below) is the SINGLE source of
+ * music-card labels, shared by the picker, the hub banner, Auto-detect, and the
+ * generic backend pick-list here, so the wording can never drift. */
+static const char *snd_backend_name(const char *v);
+
 /* R-I: open a modal pick-list for registry key `idx` and apply the chosen value
  * to the session (live). Friendly labels per key (backend names, Enabled/
  * Disabled, sample rates, perf-mode names). Returns 1 if a list was shown
@@ -331,13 +334,12 @@ static int pick_value(int idx)
       const char *e = k->enum_vals[i];
       raw[n] = e;
       if (is_backend)
-        snprintf(buf[n], sizeof(buf[n]), "%s",
-                 strcmp(e, "wb") == 0      ? "MIDI (WaveBlaster)" :
-                 strcmp(e, "opl3") == 0    ? "MIDI (OPL3)" :
-                 strcmp(e, "organya") == 0 ? "Organya" : "Auto (detect)");
+        items[n] = snd_backend_name(e); /* #9 single label source (literal) */
       else
+      {
         snprintf(buf[n], sizeof(buf[n]), "%s", e);
-      items[n] = buf[n];
+        items[n] = buf[n];
+      }
       if (strcmp(cur, e) == 0) start = n;
       ++n;
     }
@@ -518,23 +520,63 @@ static void screen_advanced(void)
  * is omitted so a first-timer is never pointed at a directory their disk lacks.
  */
 
-/* R-B: the "Music" screen holds only the music-playback choices (backend,
- * Organya pre-render, audio quality). Sound enable/disable + the SFX/Music
- * volume levels moved to Custom setup (the Sound Hardware screen). */
+/* #9: the music BACKEND is now chosen in the Sound hub's "Select Music Card"
+ * picker (snd_pick_music_card), so this screen -- retitled "Music options" --
+ * holds only the per-card music EXTRAS: GUS voices + GUS high-fidelity (gus),
+ * MIDI set (MIDI cards), Organya pre-render (organya), audio quality. Sound
+ * enable/disable + the SFX/Music volume levels live in Sound card hardware. */
 enum
 {
-  SND_BACKEND = 0, /* AUDIO_BACKEND, friendly names                 */
-  SND_MIDISET,     /* MIDI_SET, shown only for a MIDI backend + >=2 sets (#39) */
-  SND_PRERENDER,   /* ORG_PRERENDER, active only for Organya        */
-  SND_QUALITY,     /* AUDIO_TIER2                                    */
+  SND_GUSVOICES = 0, /* GUS_VOICES, shown only for the gus backend (#39) */
+  SND_GUSHIFI,       /* GUS_HIFI high-fidelity toggle, gus only (#9/#12) */
+  SND_MIDISET,       /* MIDI_SET, shown only for a MIDI backend + >=2 sets (#39) */
+  SND_PRERENDER,     /* ORG_PRERENDER, active only for Organya        */
+  SND_QUALITY,       /* AUDIO_TIER2                                    */
   SND_NROWS
 };
+
+/* GUS active-voice presets (#39): the GF1 DAC output rate is 617400/voices, so
+ * the voice count IS the music sample rate. The approved value-list (FastDoom
+ * "Select Frequency" style): full label for the picker, a compact "<n> (<rate>)"
+ * for the Music-screen row value, and a one-line DESCRIPTION note. The values
+ * match dkt_gus_voice_vals in the shared registry. */
+static const struct
+{
+  const char *value;   /* GUS_VOICES cfg value (== voice count)     */
+  const char *label;   /* picker row label (approved presentation)  */
+  const char *compact; /* Music-screen row value (fits the column)  */
+  const char *desc;    /* picker DESCRIPTION note                   */
+} GUS_VOICE_PRESETS[] = {
+  { "14", "14 voices  - 44100 Hz",                   "14 (44100 Hz)",
+    "44100 Hz. Highest fidelity, 14 notes." },
+  { "16", "16 voices  - 38588 Hz",                   "16 (38588 Hz)",
+    "38588 Hz. 16-note polyphony." },
+  { "24", "24 voices  - 25725 Hz",                   "24 (25725 Hz)",
+    "25725 Hz. 24-note polyphony." },
+  { "28", "28 voices  - 22050 Hz",                   "28 (22050 Hz)",
+    "22050 Hz. May be silent on PicoGUS." },
+  { "32", "32 voices  - 19294 Hz",                   "32 (19294 Hz)",
+    "19294 Hz. Lowest fidelity, 32 notes." }
+};
+#define GUS_VOICE_NPRESETS \
+  ((int)(sizeof(GUS_VOICE_PRESETS) / sizeof(GUS_VOICE_PRESETS[0])))
+
+/* Index of a GUS_VOICES value among the presets, or 0 (the 14-voice default)
+ * if the stored value is not one of the curated presets. */
+static int gus_preset_index(const char *v)
+{
+  int i;
+  for (i = 0; i < GUS_VOICE_NPRESETS; ++i)
+    if (strcmp(GUS_VOICE_PRESETS[i].value, v) == 0) return i;
+  return 0;
+}
 
 static int snd_key_idx(int row)
 {
   switch (row)
   {
-    case SND_BACKEND:   return scfg_index("AUDIO_BACKEND");
+    case SND_GUSVOICES: return scfg_index("GUS_VOICES");
+    case SND_GUSHIFI:   return scfg_index("GUS_HIFI");
     case SND_MIDISET:   return scfg_index("MIDI_SET");
     case SND_PRERENDER: return scfg_index("ORG_PRERENDER");
     case SND_QUALITY:   return scfg_index("AUDIO_TIER2");
@@ -546,7 +588,8 @@ static const char *snd_label(int row)
 {
   switch (row)
   {
-    case SND_BACKEND:   return "Music backend";
+    case SND_GUSVOICES: return "GUS voices";
+    case SND_GUSHIFI:   return "GUS high fidelity";
     case SND_MIDISET:   return "MIDI music set";
     case SND_PRERENDER: return "Organya pre-render";
     case SND_QUALITY:   return "Audio quality";
@@ -554,12 +597,32 @@ static const char *snd_label(int row)
   }
 }
 
+/* #9: the SINGLE source of the music-card label, operator-locked FastDoom-plain
+ * names. Banner (music_card_name), Select Music Card picker, Auto-detect, and
+ * Express modal ALL resolve through music_card_label so the wording can never
+ * drift. AUDIO_BACKEND=wb is shared by TWO cards (General MIDI external module
+ * vs WaveBlaster daughterboard) -- the SETUP-only MIDI_DEV discriminator picks
+ * the label when backend==wb (genmidi -> General MIDI, else WaveBlaster). */
+static const char *music_card_label(const char *backend, const char *midi_dev)
+{
+  if (strcmp(backend, "wb") == 0)
+    return (midi_dev && strcmp(midi_dev, "genmidi") == 0)
+           ? "General MIDI" : "WaveBlaster";
+  if (strcmp(backend, "opl3") == 0)    return "Sound Blaster";
+  if (strcmp(backend, "organya") == 0) return "Organya";
+  if (strcmp(backend, "adlib") == 0)   return "AdLib";
+  if (strcmp(backend, "gus") == 0)     return "Gravis UltraSound";
+  if (strcmp(backend, "none") == 0)    return "No Music";
+  return "Auto-detect"; /* "auto" or anything unrecognized */
+}
+
+/* Wrapper used where only the backend value is in hand (Auto-detect / Express /
+ * the generic enum picker): resolves the wb split from the CURRENT MIDI_DEV. */
 static const char *snd_backend_name(const char *v)
 {
-  if (strcmp(v, "wb") == 0)      return "MIDI (WaveBlaster)";
-  if (strcmp(v, "opl3") == 0)    return "MIDI (OPL3)";
-  if (strcmp(v, "organya") == 0) return "Organya";
-  return "Auto (detect)"; /* "auto" or anything unrecognized */
+  const char *md = (strcmp(v, "wb") == 0)
+                   ? scfg_get(&g_cfg, scfg_index("MIDI_DEV")) : NULL;
+  return music_card_label(v, md);
 }
 
 /* Friendly label of the currently-selected MIDI set (the value stored in
@@ -576,8 +639,8 @@ static void snd_value(int row, char *out, int cap)
 {
   int idx = snd_key_idx(row);
   const char *v = scfg_get(&g_cfg, idx);
-  if (row == SND_BACKEND)
-    snprintf(out, (size_t)cap, "%s", snd_backend_name(v));
+  if (row == SND_GUSVOICES)
+    snprintf(out, (size_t)cap, "%s", GUS_VOICE_PRESETS[gus_preset_index(v)].compact);
   else if (row == SND_MIDISET)
     snprintf(out, (size_t)cap, "%s", snd_midiset_name(v));
   else if (row == SND_QUALITY)
@@ -593,13 +656,15 @@ static const char *snd_help(int row)
 {
   switch (row)
   {
-    case SND_BACKEND:
-      return "How music is played. MIDI (WaveBlaster) = wavetable music from a "
-             "daughterboard: best quality, needs that hardware. MIDI (OPL3) = "
-             "FM synth built into most Sound Blasters: works everywhere, the "
-             "classic sound. Organya = Cave Story's original synth: most "
-             "faithful (more demanding on CPU). Auto = pick the best option the "
-             "card supports.";
+    case SND_GUSVOICES:
+      return "Gravis UltraSound active voices. The GF1 output rate is "
+             "617400/voices, so fewer voices = a higher sample rate. 28 "
+             "voices = 22050 Hz can be SILENT on some PicoGUS cards (a DAC "
+             "dead-zone). More voices = more notes at a lower rate.";
+    case SND_GUSHIFI:
+      /* Each option on its own line (tui_wrap honors '\n'), fits the box. */
+      return "On  - multisample, richer instruments\n"
+             "Off - single sample, less GF1 memory";
     case SND_MIDISET:
       return "Which set of MIDI music the WaveBlaster / OPL3 backend plays. "
              "WiiWare = polished re-arrangements (Yann van der Cruyssen). "
@@ -625,11 +690,25 @@ static const char *snd_help(int row)
  * backend (anything but Organya). */
 static int snd_active(int row)
 {
-  int organya = strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND")),
-                       "organya") == 0;
-  if (row == SND_MIDISET)   return !organya;
+  const char *be = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
+  int organya = strcmp(be, "organya") == 0;
+  int gus     = strcmp(be, "gus") == 0;
+  int adlib   = strcmp(be, "adlib") == 0;
+  /* The MIDI music-set applies only to a MIDI synth backend (WaveBlaster /
+   * OPL3, or Auto which may resolve to one). */
+  int midi    = strcmp(be, "wb") == 0 || strcmp(be, "opl3") == 0 ||
+                strcmp(be, "auto") == 0;
+  if (row == SND_GUSVOICES) return gus;
+  if (row == SND_GUSHIFI)   return gus;
+  if (row == SND_MIDISET)   return midi;
   if (row == SND_PRERENDER) return organya;
-  if (row == SND_QUALITY)   return organya;
+  /* Audio quality (the SDL mix-device rate, AUDIO_TIER2) is the SB/OPL3/WB
+   * rate-quality knob too -- it governs the SFX mix rate on those backends, not
+   * just Organya's whole-synth rate (team-lead Option A: one editor per key, so
+   * SB's quality choice lives here rather than in a duplicate SB screen). It is
+   * greyed only for adlib (OPL2, music-only, no PCM mix) and gus (the GF1 has
+   * its own DAC rate, set by the GUS voices row above). */
+  if (row == SND_QUALITY)   return !(adlib || gus);
   return 1;
 }
 
@@ -639,6 +718,11 @@ static int snd_active(int row)
  * (#39 sec.4). Every other row is always present (greying handles the rest). */
 static int snd_visible(int row)
 {
+  /* The GUS-voices row is shown only when the Gravis backend is selected --
+   * a first-timer on any other card never sees a dead choice (mirrors the
+   * MIDI-set row, which needs >=2 installed sets). */
+  if (row == SND_GUSVOICES || row == SND_GUSHIFI)
+    return strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND")), "gus") == 0;
   if (row == SND_MIDISET) return g_midi_nsets >= 2;
   return 1;
 }
@@ -670,6 +754,50 @@ static void snd_midiset_cycle(int dir)
     scfg_set(&g_cfg, idx, g_midi_sets[cur].value);
     g_dirty = 1;
   }
+}
+
+/* Cycle GUS_VOICES among the curated presets (Space / Left / Right on the row). */
+static void snd_gusvoices_cycle(int dir)
+{
+  int idx = scfg_index("GUS_VOICES");
+  int cur = gus_preset_index(scfg_get(&g_cfg, idx));
+  cur = (cur + dir + GUS_VOICE_NPRESETS) % GUS_VOICE_NPRESETS;
+  if (strcmp(scfg_get(&g_cfg, idx), GUS_VOICE_PRESETS[cur].value) != 0)
+  {
+    scfg_set(&g_cfg, idx, GUS_VOICE_PRESETS[cur].value);
+    g_dirty = 1;
+  }
+}
+
+/* Modal "Select GUS Voices" value-list (Enter on the GUS-voices row). FastDoom
+ * "Select Frequency" style: every preset shown at once with its voice count +
+ * resulting DAC rate, the current one tagged "(current)", and a DESCRIPTION
+ * note (incl. the 28-voice/22050 Hz PicoGUS dead-zone warning). Writes
+ * GUS_VOICES on a change. Returns 1 (a list was shown). */
+static int snd_pick_gusvoices(void)
+{
+  const char *items[GUS_VOICE_NPRESETS];
+  const char *tags[GUS_VOICE_NPRESETS];
+  const char *descs[GUS_VOICE_NPRESETS];
+  int idx = scfg_index("GUS_VOICES");
+  int i, choice, start = gus_preset_index(scfg_get(&g_cfg, idx));
+
+  for (i = 0; i < GUS_VOICE_NPRESETS; ++i)
+  {
+    items[i] = GUS_VOICE_PRESETS[i].label;
+    tags[i]  = (i == start) ? "(current)" : "";
+    descs[i] = GUS_VOICE_PRESETS[i].desc;
+  }
+
+  choice = tui_picklist("Select GUS Voices", 0, 0, items, tags, descs,
+                        GUS_VOICE_NPRESETS, start, 0, NULL, NULL, 0);
+  if (choice >= 0 && choice < GUS_VOICE_NPRESETS &&
+      strcmp(scfg_get(&g_cfg, idx), GUS_VOICE_PRESETS[choice].value) != 0)
+  {
+    scfg_set(&g_cfg, idx, GUS_VOICE_PRESETS[choice].value);
+    g_dirty = 1;
+  }
+  return 1;
 }
 
 /* Compose the absolute DOS path a MIDI set loads from: <cwd>\DATA\<DIR>,
@@ -812,9 +940,14 @@ static void midiset_scan_cached(void)
 
 static void screen_sound(void)
 {
-  int sel = SND_BACKEND;
+  /* Land on the first row that is meaningful for the chosen card (the backend
+   * now lives in the hub's Music-card picker, so this screen has no fixed
+   * always-on first row). */
+  int sel = 0;
   scfg_t snap = g_cfg;          /* T52: entry snapshot for the ESC revert path */
   int dirty_snap = g_dirty;
+
+  if (!(snd_visible(sel) && snd_active(sel))) sel = snd_step(sel, +1);
 
   /* #39: discover the MIDI music sets present on disk (data/midi/, data/orgmid/).
    * Cached once per SETUP session -- the on-disk set list does not change
@@ -836,8 +969,8 @@ static void screen_sound(void)
     hy = TUI_DESC_TOP(8);
     boxy = menu_box_top(3, hy, nvis + 2);
 
-    tui_titlebar("MUSIC");
-    tui_box(9, boxy, 64, nvis + 2, "MUSIC"); /* R-O: centered (8/8 margins) */
+    tui_titlebar("MUSIC OPTIONS");
+    tui_box(9, boxy, 64, nvis + 2, "MUSIC OPTIONS"); /* R-O: centered (8/8 margins) */
     for (p = 0; p < nvis; ++p)
     {
       char row[80], val[28];
@@ -901,7 +1034,8 @@ static void screen_sound(void)
     k = tui_getkey();
     if (k == TUI_KEY_UP)        sel = snd_step(sel, -1);
     else if (k == TUI_KEY_DOWN) sel = snd_step(sel, +1);
-    else if (k == TUI_KEY_HOME) sel = SND_BACKEND; /* always selectable */
+    else if (k == TUI_KEY_HOME)
+      sel = (snd_visible(0) && snd_active(0)) ? 0 : snd_step(0, +1);
     else if (k == TUI_KEY_LEFT || k == TUI_KEY_RIGHT || k == TUI_KEY_SPACE)
     {
       /* T62: only Space / Left / Right cycle the highlighted row's value. */
@@ -911,33 +1045,28 @@ static void screen_sound(void)
           /* #39: MIDI_SET is a DKT_STR over the discovered logical sets, so it
            * has its own cycle (the generic cycle_value does not handle STR). */
           snd_midiset_cycle((k == TUI_KEY_LEFT) ? -1 : +1);
+        else if (sel == SND_GUSVOICES)
+          /* #39: cycle among the curated voice presets, not raw enum values. */
+          snd_gusvoices_cycle((k == TUI_KEY_LEFT) ? -1 : +1);
         else
           cycle_value(snd_key_idx(sel), (k == TUI_KEY_LEFT) ? -1 : +1);
-        /* T8 auto-suggest: choosing Organya on a sub-Pentium CPU enables the
-         * v1.0.8 PCM pre-render cache (the user can toggle it back off). The
-         * explanatory Note box renders from the same condition (T22 item 4). */
-        if (sel == SND_BACKEND)
-          recommend_org_prerender(&g_cfg, &g_prof);
       }
     }
     else if (k == TUI_KEY_ENTER)
     {
       /* R-I: Enter opens a pick-list for the highlighted row; R-H: full-clear
-       * after it closes (no overlay residue). Organya auto-suggest rides along
-       * on a backend change, same as the cycle path. */
+       * after it closes (no overlay residue). */
       int shown;
       if (!snd_active(sel))
         shown = 0;
       else if (sel == SND_MIDISET)
         shown = snd_pick_midiset(); /* #39: dedicated set picker (STR key) */
+      else if (sel == SND_GUSVOICES)
+        shown = snd_pick_gusvoices(); /* #39: "Select GUS Voices" value list */
       else
         shown = pick_value(snd_key_idx(sel));
       if (shown)
-      {
-        if (sel == SND_BACKEND)
-          recommend_org_prerender(&g_cfg, &g_prof);
         tui_clear();
-      }
     }
     else if (k == TUI_KEY_ESC)
     {
@@ -1392,13 +1521,22 @@ static int cfg_dma(void)
   return (h >= 6) ? h : d;
 }
 
-/* Friendly name for the configured music backend (AUDIO_BACKEND). */
+/* COMPACT music-backend name for the main-menu SYSTEM PROFILE "Sound" line,
+ * which pairs it with the SB card type ("Sound Blaster 16, OPL3"). Deliberately
+ * shorter than the verbose Select-Music-Card labels (snd_backend_name) -- this
+ * is a constrained one-line panel, not the picker. */
 static const char *cfg_backend_name(void)
 {
   const char *b = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
-  if (strcmp(b, "wb") == 0)      return "WaveBlaster";
+  /* wb: delegate to the single label source (General MIDI / WaveBlaster) -- its
+   * plain name already fits this compact line. The rest stay compact ("OPL3"). */
+  if (strcmp(b, "wb") == 0)
+    return music_card_label("wb", scfg_get(&g_cfg, scfg_index("MIDI_DEV")));
   if (strcmp(b, "opl3") == 0)    return "OPL3";
   if (strcmp(b, "organya") == 0) return "Organya";
+  if (strcmp(b, "adlib") == 0)   return "AdLib";
+  if (strcmp(b, "gus") == 0)     return "Gravis";
+  if (strcmp(b, "none") == 0)    return "No Music";
   return "Auto";
 }
 
@@ -1780,16 +1918,242 @@ static int sound_inline_test(int phase)
   return rc;
 }
 
+/* ====================================================================== *
+ * #9 Sound redesign -- dual hardware pickers (FastDoom PATTERN, original
+ * doskutsu screens). The Sound hub leads with a Music-card picker and a
+ * Sound-FX-device picker. Picking a music card walks that card's inline
+ * param sub-screen(s) (fdsetup "pick -> params -> back"), then the SFX list
+ * re-narrows to only the devices that card can drive. See
+ * docs/internal/SETUP-SOUND-UX-SPEC.md sec.4-5.
+ * ====================================================================== */
+
+/* The inline param sub-screen a music-card pick walks after committing the
+ * backend (NONE = no sub-screen; SB = the BLASTER hardware screen; GUS = the
+ * voice picker; ORGANYA = BLASTER hardware + the pre-render auto-suggest). */
+enum { MCARD_SUB_NONE = 0, MCARD_SUB_SB, MCARD_SUB_GUS, MCARD_SUB_ORGANYA };
+
+/* The Music-card list, in operator-locked presentation order. `value` is the
+ * AUDIO_BACKEND cfg value ("auto" => SETUP omits the line so the engine's
+ * auto-detect chain runs). `midi_dev` is the SETUP-only MIDI_DEV discriminator
+ * for the two wb cards (NULL for every non-wb card). `sub` is the inline
+ * sub-screen walked on pick. The display LABEL is NOT stored here -- it comes
+ * from music_card_label(value, midi_dev), the single shared source, so the
+ * picker and the hub banner can never drift. */
+static const struct
+{
+  const char *value;
+  const char *midi_dev; /* NULL unless value=="wb" */
+  int         sub;
+  const char *desc;
+} MUSIC_CARDS[] = {
+  { "auto",    NULL,          MCARD_SUB_SB,
+    "Auto-detects installed sound hardware." },
+  { "wb",      "genmidi",     MCARD_SUB_SB,
+    "MPU-401 to an external General MIDI module." },
+  { "wb",      "waveblaster", MCARD_SUB_SB,
+    "Wavetable daughterboard on the SB header." },
+  { "opl3",    NULL,          MCARD_SUB_SB,
+    "OPL3 FM synth on a Sound Blaster 16/Pro." },
+  { "adlib",   NULL,          MCARD_SUB_NONE,
+    "OPL2 FM synth. AdLib or OPL2 card. Music only." },
+  { "gus",     NULL,          MCARD_SUB_GUS,
+    "GF1 wavetable. Gravis UltraSound / PicoGUS." },
+  { "organya", NULL,          MCARD_SUB_ORGANYA,
+    "Cave Story software synth, via the DAC." },
+  { "none",    NULL,          MCARD_SUB_NONE,
+    "No music." }
+};
+#define MUSIC_NCARDS ((int)(sizeof(MUSIC_CARDS) / sizeof(MUSIC_CARDS[0])))
+
+/* Friendly device name for the SFX the current music backend routes effects to
+ * when SFX are ENABLED. SFX routing is DERIVED from the music path (engine
+ * patch 0240): an SB-family card -> the Sound Blaster DAC; the Gravis card ->
+ * the GF1 wavetable; AdLib has no DAC (effects forced off). */
+static const char *sfx_native_name(const char *be)
+{
+  if (strcmp(be, "gus") == 0)   return "Gravis UltraSound";
+  if (strcmp(be, "adlib") == 0) return "No Sound FX"; /* DAC-less: forced off */
+  return "Sound Blaster"; /* opl3 / organya / wb / auto / none -> SB DAC */
+}
+
+/* The Sound-FX device as the current config resolves it: "No Sound FX" when the
+ * card is DAC-less (adlib) or the user turned effects off (SFX_DEVICE=none),
+ * otherwise the music card's native SFX device. */
+static const char *sfx_current_name(void)
+{
+  const char *be = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
+  const char *sd = scfg_get(&g_cfg, scfg_index("SFX_DEVICE"));
+  if (strcmp(be, "adlib") == 0)  return "No Sound FX";
+  if (strcmp(sd, "none") == 0)   return "No Sound FX";
+  return sfx_native_name(be);
+}
+
+/* "Select Music Card" picker (Sound hub row 1). Lists the sec.4 music cards;
+ * on a pick it writes AUDIO_BACKEND, then walks the card's inline param
+ * sub-screen(s) -- BLASTER hardware for an SB-family card, the voice picker for
+ * Gravis, BLASTER + the Organya pre-render auto-suggest for Organya -- exactly
+ * the fdsetup "pick -> params -> back" flow. The SFX list does NOT need an
+ * explicit re-narrow write: SFX_DEVICE only ever stores "none" (off) or is
+ * unset (the engine derives the native device from the new backend), so a
+ * card change re-points the derived SFX device for free. Returns 1 (a list was
+ * shown), matching the screen_sound Enter contract. */
+static int snd_pick_music_card(void)
+{
+  const char *items[MUSIC_NCARDS];
+  const char *tags[MUSIC_NCARDS];
+  const char *descs[MUSIC_NCARDS];
+  int beidx = scfg_index("AUDIO_BACKEND");
+  int mdidx = scfg_index("MIDI_DEV");
+  const char *cur = scfg_get(&g_cfg, beidx);
+  const char *curmd = scfg_get(&g_cfg, mdidx);
+  int i, choice, start = 0;
+
+  for (i = 0; i < MUSIC_NCARDS; ++i)
+  {
+    /* Label from the single shared resolver, passing this row's own MIDI_DEV
+     * so the two wb rows (General MIDI / WaveBlaster) read distinctly. */
+    items[i] = music_card_label(MUSIC_CARDS[i].value, MUSIC_CARDS[i].midi_dev);
+    descs[i] = MUSIC_CARDS[i].desc;
+    /* "(current)" = backend matches AND, for the wb split, MIDI_DEV matches. */
+    if (strcmp(MUSIC_CARDS[i].value, cur) == 0 &&
+        (MUSIC_CARDS[i].midi_dev == NULL ||
+         strcmp(MUSIC_CARDS[i].midi_dev, curmd) == 0))
+    { tags[i] = "(current)"; start = i; }
+    else tags[i] = "";
+  }
+
+  choice = tui_picklist("Select Music Card", 0, 0, items, tags, descs,
+                        MUSIC_NCARDS, start, 0, NULL, NULL, 0);
+  if (choice < 0 || choice >= MUSIC_NCARDS) return 1; /* ESC: abandon, no change */
+
+  if (strcmp(scfg_get(&g_cfg, beidx), MUSIC_CARDS[choice].value) != 0)
+  {
+    scfg_set(&g_cfg, beidx, MUSIC_CARDS[choice].value);
+    g_dirty = 1;
+  }
+  /* For a wb card, record which one (SETUP-only label/MPU-default discriminator;
+   * the engine ignores MIDI_DEV). Non-wb cards leave it untouched. */
+  if (MUSIC_CARDS[choice].midi_dev &&
+      strcmp(scfg_get(&g_cfg, mdidx), MUSIC_CARDS[choice].midi_dev) != 0)
+  {
+    scfg_set(&g_cfg, mdidx, MUSIC_CARDS[choice].midi_dev);
+    g_dirty = 1;
+  }
+
+  /* Walk the card's required param sub-screen(s), then return to the hub. */
+  tui_clear();
+  switch (MUSIC_CARDS[choice].sub)
+  {
+    case MCARD_SUB_SB:      screen_hardware(); break;
+    case MCARD_SUB_GUS:     snd_pick_gusvoices(); break;
+    case MCARD_SUB_ORGANYA:
+      screen_hardware();
+      /* T8 auto-suggest: Organya on a sub-Pentium CPU enables the PCM
+       * pre-render cache (user can toggle it back off in Music options). */
+      recommend_org_prerender(&g_cfg, &g_prof);
+      break;
+    default: break; /* adlib / none: no per-card hardware */
+  }
+  tui_clear();
+  return 1;
+}
+
+/* "Select Sound FX Device" picker (Sound hub row 2). The list is NARROWED by
+ * the current music card (sec.4 / operator coupling): SB-family + Auto + No
+ * Music -> { Sound Blaster, No Sound FX }; Gravis -> { Gravis UltraSound, No
+ * Sound FX }; AdLib -> { No Sound FX } only (DAC-less, so the "no DAC" reason
+ * rides the description pane, NOT a blocking modal -- every picker is a uniform
+ * list with a No-X row). The native device is the
+ * SAME hardware already configured for music, so this pick is purely on/off:
+ * the native row clears SFX_DEVICE (engine derives it), "No Sound FX" writes
+ * SFX_DEVICE=none. We never offer the GUS+SB cross-combo (PicoGUS is
+ * single-mode; engine cannot route GF1 SFX without GUS music).
+ *
+ * When the chosen SFX device is the Sound Blaster (the native device on every
+ * non-Gravis path), we walk the BLASTER Port/IRQ/DMA sub-screen inline -- the
+ * same pattern the music-card pick uses for an SB-family card. This is the
+ * SINGLE place SB hardware is configured when SB is used for SFX but not music
+ * (No Music + SB SFX, or WaveBlaster + SB SFX): the old standalone "Sound card
+ * hardware" hub row is gone, so SB hardware is always reached through whichever
+ * picker put SB into use. Returns 1. */
+static int snd_pick_sfx_device(void)
+{
+  const char *be = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
+  int idx = scfg_index("SFX_DEVICE");
+  const char *items[2], *descs[2], *raw[2];
+  int n = 0, start, choice;
+  int adlib = strcmp(be, "adlib") == 0;
+
+  /* Native device row (Sound Blaster, or Gravis on the GUS path) -- clears the
+   * key. AdLib is DAC-less, so it has NO native row: the list is just the
+   * No-Sound-FX entry, with the "no DAC" reason in the description pane (uniform
+   * list UX -- no special blocking modal). */
+  if (!adlib)
+  {
+    items[n] = sfx_native_name(be);
+    descs[n] = (strcmp(be, "gus") == 0)
+               ? "With Gravis music, sound effects play on the GF1 wavetable."
+               : "Sound effects play through the Sound Blaster DAC.";
+    raw[n] = ""; /* clear SFX_DEVICE: the engine derives the native device */
+    ++n;
+  }
+
+  items[n] = "No Sound FX";
+  descs[n] = adlib
+             ? "AdLib (OPL2) has no DAC, so sound effects are unavailable. "
+               "Pick Sound Blaster, Organya, or Gravis music to get effects."
+             : "Turn sound effects off. Music keeps playing.";
+  raw[n] = "none";
+  ++n;
+
+  /* AdLib's only row is No Sound FX; otherwise the current SFX_DEVICE selects. */
+  start = adlib ? 0
+                : (strcmp(scfg_get(&g_cfg, idx), "none") == 0) ? (n - 1) : 0;
+
+  choice = tui_picklist("Select Sound FX Device", 0, 0, items, NULL, descs,
+                        n, start, 0, NULL, NULL, 0);
+  if (choice < 0 || choice >= n) return 1; /* ESC: abandon, no change */
+
+  if (strcmp(scfg_get(&g_cfg, idx), raw[choice]) != 0)
+  {
+    scfg_set(&g_cfg, idx, raw[choice]);
+    g_dirty = 1;
+  }
+
+  /* The native row (raw == "") on any non-Gravis path means Sound Blaster --
+   * walk its hardware sub-screen inline, then return to the hub. */
+  if (raw[choice][0] == '\0' && strcmp(be, "gus") != 0)
+  {
+    tui_clear();
+    screen_hardware();
+    tui_clear();
+  }
+  return 1;
+}
+
+/* Friendly Music-card name for the hub banner/value (an alias of the backend
+ * friendly-name; "none" -> "No Music"). */
+static const char *music_card_name(void)
+{
+  return snd_backend_name(scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND")));
+}
+
 /* R-C/R-G: a current-sound-settings banner at the top of the Sound submenu,
  * formatted to MATCH the main-menu SYSTEM PROFILE panel exactly: titled
- * "SOUND", one setting per row in a SINGLE aligned column with dotted leaders
- * (Card / Port / IRQ / DMA / Backend). Sourced from the configured BLASTER +
- * AUDIO_BACKEND. Box height 7 = 5 rows + borders, like the profile panel. */
+ * "SOUND", one setting per row in a SINGLE aligned column with dotted leaders.
+ * #9: leads with the two device lines (Music Device / Sound FX Device --
+ * spec 5.2), then the SB Card / Port / IRQ / DMA detail. Box height 8 = 6 rows
+ * + borders. */
 static void draw_sound_banner(int x, int y, int w)
 {
   char v[40];
   int  kx = x + 2, vw = 11, row = y + 1;
-  tui_box(x, y, w, 7, "SOUND");
+  tui_box(x, y, w, 8, "SOUND");
+  /* #9 spec 5.2: lead with the two device picks, then the SB hardware detail. */
+  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Music ....",
+         music_card_name());
+  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Sound FX .",
+         sfx_current_name());
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Card .....",
          sb_type_name(cfg_card_type()));
   snprintf(v, sizeof(v), "0x%X", cfg_io_port());
@@ -1798,8 +2162,6 @@ static void draw_sound_banner(int x, int y, int w)
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "IRQ ......", v);
   snprintf(v, sizeof(v), "%d", cfg_dma());
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "DMA ......", v);
-  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Backend ..",
-         cfg_backend_name());
 }
 
 /* T-DFUX-P2: Express setup -- DF's one-key "Detect", reimagined. (1) a red
@@ -1862,13 +2224,9 @@ static void screen_express(void)
     snprintf(l1, sizeof l1, "DSP Version: None");
   snprintf(l2, sizeof l2, "OPL3 FM: %s", g_prof.has_opl3 ? "Yes" : "No");
   snprintf(l3, sizeof l3, "WaveBlaster: %s", g_prof.has_waveblaster ? "Yes" : "No");
-  {
-    const char *bname =
-        strcmp(backend, "opl3") == 0    ? "OPL3 FM (MIDI)" :
-        strcmp(backend, "wb") == 0      ? "WaveBlaster (MIDI)" :
-        strcmp(backend, "organya") == 0 ? "Organya" : "Auto-detect";
-    snprintf(l4, sizeof l4, "Music Backend: %s", bname);
-  }
+  /* #9: render the backend through the SINGLE music-card label source so the
+   * Express evidence modal matches the picker + banner wording exactly. */
+  snprintf(l4, sizeof l4, "Music Backend: %s", snd_backend_name(backend));
   ev[0] = l0; ev[1] = l1; ev[2] = l2; ev[3] = l3; ev[4] = l4;
   tui_message("DETECTION COMPLETE", ev, 5);
 
@@ -1891,20 +2249,33 @@ static void screen_express(void)
 
 static void screen_sound_menu(void)
 {
+  /* #9: the hub leads with the two device pickers (Select Music Card / Select
+   * Sound FX Device), then Music options (the per-card music extras), then the
+   * inline tests. There is NO standalone "Sound card hardware" row (operator
+   * UX): SB Port/IRQ/DMA is configured inline by whichever picker puts the SB
+   * into use -- the music-card pick for an SB-family card, or the SFX-device
+   * pick when Sound Blaster is the effects device. */
+  enum { ROW_EXPRESS = 0, ROW_MUSCARD, ROW_SFXDEV, ROW_MUSOPTS,
+         ROW_TESTSFX, ROW_TESTMUS, ROW_BACK };
   static const char *items[] = {
-    "Express setup", "Custom setup", "Music",
+    "Express setup", "Select Music Card", "Select Sound FX Device",
+    "Music options",
     "Test sound effects", "Test music", "Back"
   };
   static const char *helps[] = {
     "Detect the sound card and set everything in one step.",
-    "Set the card, port, IRQ, DMA, volume, and sound on/off.",
-    "Choose the music backend, Organya pre-render, and audio quality.",
+    "Choose how music plays -- Sound Blaster, WaveBlaster, Organya, AdLib, "
+    "Gravis, or off. Sets up that card.",
+    "Choose where sound effects play. The choices depend on the music card.",
+    "Per-card music extras: GUS voices, MIDI set, Organya pre-render, quality.",
     "Play a test sound effect to check the audio.",
     "Play a test song to check the music.",
     "Return to the main menu."
   };
   const int n = (int)(sizeof(items) / sizeof(items[0]));
-  const int my = 11; /* menu box top row (the SOUND banner occupies rows 3-9) */
+  const int bx = 11, bw = 60;     /* R-O: x=11 centers a 60-wide box (10/10) */
+  const int vcol = bx + 1 + 30;   /* value/badge column for the value rows    */
+  const int my = 12; /* menu box top row (the SOUND banner occupies rows 3-10) */
   int sel = 0, res_sfx = -2, res_music = -2;
 
   tui_clear();
@@ -1913,21 +2284,25 @@ static void screen_sound_menu(void)
     int i, k;
     tui_titlebar("SOUND");
     draw_sound_banner(TUI_DESC_X, 3, TUI_DESC_W);
-    tui_box(19, my, 44, n + 2, "SOUND"); /* R-O: x=19 centers a 44-wide box (18/18) */
+    tui_box(bx, my, bw, n + 2, "SOUND");
     for (i = 0; i < n; ++i)
     {
       int selrow = (i == sel);
       int fg = selrow ? PAL->sel_fg : PAL->body;
       int bg = selrow ? PAL->sel_bg : PAL->bg;
-      char row[46];
-      snprintf(row, sizeof(row), " %-41.41s", items[i]);
-      tui_at(20, my + 1 + i, fg, bg, row);
-      if (i == 3 || i == 4) /* the two test rows carry a result badge */
-      {
-        int vfg = selrow ? PAL->sel_fg : PAL->value;
-        tui_at(20 + 28, my + 1 + i, vfg, bg,
-               audiotest_badge(i == 3 ? res_sfx : res_music));
-      }
+      int vfg = selrow ? PAL->sel_fg : PAL->value;
+      char row[64];
+      snprintf(row, sizeof(row), " %-*.*s", bw - 3, bw - 3, items[i]);
+      tui_at(bx + 1, my + 1 + i, fg, bg, row);
+      /* The two picker rows show their current value; the two test rows show a
+       * result badge -- both in the value column. */
+      if (i == ROW_MUSCARD)
+        tui_at(vcol, my + 1 + i, vfg, bg, music_card_name());
+      else if (i == ROW_SFXDEV)
+        tui_at(vcol, my + 1 + i, vfg, bg, sfx_current_name());
+      else if (i == ROW_TESTSFX || i == ROW_TESTMUS)
+        tui_at(vcol, my + 1 + i, vfg, bg,
+               audiotest_badge(i == ROW_TESTSFX ? res_sfx : res_music));
     }
     tui_box(TUI_DESC_X, TUI_DESC_TOP(4), TUI_DESC_W, 4, "DESCRIPTION");
     tui_wrap(TUI_DESC_TX, TUI_DESC_TOP(4) + 1, TUI_DESC_TW, 2, PAL->desc, PAL->bg, helps[sel]);
@@ -1940,11 +2315,12 @@ static void screen_sound_menu(void)
     else if (k == TUI_KEY_ESC)  return;
     else if (k == TUI_KEY_ENTER)
     {
-      if (sel == 0)      screen_express();   /* T-DFUX-P2: real one-key detect */
-      else if (sel == 1) screen_hardware();
-      else if (sel == 2) screen_sound();
-      else if (sel == 3) res_sfx   = sound_inline_test(0);
-      else if (sel == 4) res_music = sound_inline_test(1);
+      if (sel == ROW_EXPRESS)       screen_express();   /* one-key detect */
+      else if (sel == ROW_MUSCARD)  snd_pick_music_card();
+      else if (sel == ROW_SFXDEV)   snd_pick_sfx_device();
+      else if (sel == ROW_MUSOPTS)  screen_sound();      /* Music options */
+      else if (sel == ROW_TESTSFX)  res_sfx   = sound_inline_test(0);
+      else if (sel == ROW_TESTMUS)  res_music = sound_inline_test(1);
       else return; /* Back */
       tui_clear(); /* a sub-screen / popup overwrote the screen; repaint clean */
     }

@@ -92,7 +92,25 @@ typedef struct
 /* Enum value tables. "auto" means "let the engine auto-detect" -- SETUP
  * omits the key from DOSKUTSU.CFG in that case so the auto-detect chain
  * runs unchanged. */
-static const char *dkt_backend_vals[] = { "auto", "wb", "opl3", "organya", NULL };
+static const char *dkt_backend_vals[] =
+  { "auto", "wb", "opl3", "organya", "adlib", "gus", "none", NULL };
+
+/* SETUP-side discriminator for the two cards that BOTH map to AUDIO_BACKEND=wb
+ * (the engine sees only `wb` + the MPU-401 port and behaves identically): a
+ * "General MIDI" external module vs a "WaveBlaster" daughterboard. SETUP keys
+ * the Music-card label/picker off this when backend==wb. The engine ignores
+ * MIDI_DEV entirely (#9). */
+static const char *dkt_midi_dev_vals[] =
+  { "genmidi", "waveblaster", NULL };
+
+/* GUS active-voice presets. The native GF1 backend's DAC output rate is
+ * 617400/voices, so the voice count IS the music sample rate: 14=44100Hz
+ * (best fidelity), 16=38588, 24=25725, 28=22050 (the PicoGUS PCM510xA
+ * dead-zone -- SILENT on ~10% of cards, hence not the default), 32=19294.
+ * The SDL3-DOS GF1 driver clamps the hint to [14,32]; these 5 are the
+ * curated presets SETUP offers (#39). */
+static const char *dkt_gus_voice_vals[] =
+  { "14", "16", "24", "28", "32", NULL };
 
 /* System Speed preset classes (plan 3.4). "notset" is the provenance sentinel
  * shown as "(not set)" until a class is chosen or Auto-detect runs. */
@@ -105,7 +123,7 @@ static const dkt_key_t DKT_KEYS[] =
   { "AUDIO_BACKEND", "SDL_HINT_DOSKUTSU_AUDIO_BACKEND",
     DKT_ENUM, DKC_SOUND, "auto", 0, 0, dkt_backend_vals,
     "Music backend",
-    "auto=detect, wb=WaveBlaster MIDI, opl3=FM synth, organya=Organya synth", 0 },
+    "auto=detect, wb=WaveBlaster, opl3=FM synth, organya=Organya, adlib=OPL2 FM, gus=Gravis Ultrasound, none=no music", 0 },
 
   { "AUDIO_OFF", "DOSKUTSU_NO_AUDIO",
     DKT_BOOL, DKC_SOUND, "0", 0, 0, NULL,
@@ -305,6 +323,88 @@ static const dkt_key_t DKT_KEYS[] =
     DKT_BOOL, DKC_INPUT, "0", 0, 0, NULL,
     "Invert joystick Y",
     "1 swaps the gameport stick up/down (for flightsticks with inverted pitch)", 0 },
+
+  /* Gravis Ultrasound active-voice count (#39 -- patch SDL/0112 GF1 backend).
+   * env_name is the hint the SDL3-DOS GF1 driver reads ONCE at device open
+   * (gus_resolve_voices, SDL_dosaudio_gus.c): the GF1 DAC output rate is
+   * 617400/voices, so fewer voices = a higher (better-fidelity) sample rate.
+   * The driver clamps to [14,32]; SETUP offers the curated presets in
+   * dkt_gus_voice_vals (14=44100Hz best .. 32=19294Hz). Default "14" is
+   * byte-neutral vs the driver's GUS_DEF_VOICES=14 -- it is the highest-quality
+   * rate AND avoids the 28-voice/22050Hz PicoGUS DAC dead-zone that is silent
+   * on ~10% of cards. Only meaningful for AUDIO_BACKEND=gus; other backends
+   * ignore the hint (the driver only reads it when the GF1 device opens).
+   * APPEND-ONLY: sits at the end so existing positional indices are unchanged. */
+  { "GUS_VOICES", "SDL_HINT_DOSKUTSU_GUS_VOICES",
+    DKT_ENUM, DKC_SOUND, "14", 0, 0, dkt_gus_voice_vals,
+    "GUS voices",
+    "Gravis Ultrasound active voices; rate=617400/voices (14=44100Hz best, 28=22050Hz may be silent)", 0 },
+
+  /* ---- Sound-redesign keys (#9 -- dual Music-card + SFX-device pickers) ----
+   * SETUP's Sound flow encodes the user's two device picks as INTENT keys:
+   *   - AUDIO_BACKEND=none  -> "No Music"  (the music dispatch is off)
+   *   - SFX_DEVICE=none     -> "No Sound FX" (the SFX dispatch is off)
+   * Both are the clearest single-key encodings of the engine's independent
+   * music/SFX on-off (patches nxengine-evo 0240/0241). SFX_DEVICE is a DKT_STR
+   * with default "" so SETUP OMITS the line when SFX rides the music card's
+   * native DAC (engine derives it -- SB DAC for an SB-family card, GF1 for the
+   * Gravis card); only an explicit "No Sound FX" writes SFX_DEVICE=none. The
+   * engine strict-matches the literal "none" (SoundManager dispatch gate). */
+  { "SFX_DEVICE", "SDL_HINT_DOSKUTSU_SFX_DEVICE",
+    DKT_STR, DKC_SOUND, "", 0, 0, NULL,
+    "Sound FX device",
+    "none = no sound effects; unset = effects ride the music card's native DAC", 0 },
+
+  /* MUSIC_OFF / SFX_OFF: engine-internal equivalents of the two intent keys
+   * above (SoundManager accepts either encoding). SETUP does NOT toggle these
+   * through the UI -- it writes the AUDIO_BACKEND=none / SFX_DEVICE=none intent
+   * instead, to avoid double-encoding one state. They are REGISTERED so a
+   * hand-edited DOSKUTSU.CFG with MUSIC_OFF=1 / SFX_OFF=1 still reaches the
+   * engine through the loader. VALUE-checked, not presence: the engine (patch
+   * nxengine-evo 0240) strict-matches "1" via SDL_GetHint (_mo[0]=='1' &&
+   * _mo[1]=='\0'), so a setenv'd "0" correctly reads as OFF (music/SFX stay on).
+   * Default "0". APPEND-ONLY: at the end so positional indices are unchanged. */
+  { "MUSIC_OFF", "SDL_HINT_DOSKUTSU_MUSIC_OFF",
+    DKT_BOOL, DKC_SOUND, "0", 0, 0, NULL,
+    "Music disabled",
+    "1 disables music only (sound effects keep playing); alt to AUDIO_BACKEND=none", 0 },
+
+  { "SFX_OFF", "SDL_HINT_DOSKUTSU_SFX_OFF",
+    DKT_BOOL, DKC_SOUND, "0", 0, 0, NULL,
+    "Sound FX disabled",
+    "1 disables sound effects only (music keeps playing); alt to SFX_DEVICE=none", 0 },
+
+  /* Gravis Ultrasound high-fidelity (multi-sample) mixing (#9 / #12 -- GF1 MIDI
+   * bank rendering; engine patch nxengine-evo 0255). When ON the GF1 backend
+   * uploads the full multi-sample .pat set per instrument for best fidelity +
+   * polyphony; OFF falls back to a single nearest-middle-C sample (the low-DRAM
+   * state). Only meaningful for AUDIO_BACKEND=gus. Confirmed with pat-bank:
+   * cfg_key GUS_HIFI -> SDL hint SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE, read once by
+   * MidiBackendGus's ctor via SDL_GetHint. POLARITY: the engine DEFAULTS ON --
+   * it strict-matches "0" as the killswitch; unset OR any non-"0" value = ON.
+   * So this registry default is "1" (matching the engine default): SETUP writes
+   * GUS_HIFI=1 (hint "1" -> on), and only an explicit Off writes GUS_HIFI=0
+   * (hint "0" -> the single-sample fallback). The loader passthru SETs the full
+   * hint name from this key (same shim as GUS_VOICES). */
+  { "GUS_HIFI", "SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE",
+    DKT_BOOL, DKC_SOUND, "1", 0, 0, NULL,
+    "GUS high fidelity",
+    "1 = full multi-sample fidelity (default); 0 = single-sample low-memory fallback", 0 },
+
+  /* MIDI device discriminator for the AUDIO_BACKEND=wb path (#9). SETUP-ONLY:
+   * the two Music-card rows "General MIDI" and "WaveBlaster" both write
+   * AUDIO_BACKEND=wb (identical engine behavior -- MPU-401 out); this key only
+   * tells SETUP which label/picker state to show and which MPU-401 default to
+   * suggest. The engine never reads it (the hint name exists only so the
+   * loader's generic passthru has somewhere to put it; SDL ignores an unknown
+   * hint). genmidi = external General MIDI module (operator sets the MPU port);
+   * waveblaster = daughterboard on the SB header (default MPU port 0x330).
+   * Default "waveblaster" preserves the historical meaning of a bare wb config.
+   * APPEND-ONLY: at the end so positional indices are unchanged. */
+  { "MIDI_DEV", "SDL_HINT_DOSKUTSU_MIDI_DEV",
+    DKT_ENUM, DKC_SOUND, "waveblaster", 0, 0, dkt_midi_dev_vals,
+    "MIDI device",
+    "SETUP-only (AUDIO_BACKEND=wb): genmidi=external GM module via MPU-401, waveblaster=daughterboard on the SB header", 0 },
 };
 
 #define DKT_KEY_COUNT ((int)(sizeof(DKT_KEYS) / sizeof(DKT_KEYS[0])))

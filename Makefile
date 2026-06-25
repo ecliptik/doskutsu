@@ -1358,6 +1358,39 @@ PROBE_WBHOT_SRC   := tests/probes/wbhot.c
 PROBE_WBHOT_EXE   := $(PROBES_DIR)/wbhot.exe
 PROBE_WBHOT_SHA12 := $(shell sha256sum $(PROBE_WBHOT_SRC) 2>/dev/null | cut -c1-12)
 
+# P39 -- GUS Campaign 3 (#39) task #4: standalone GF1 test-utility suite.
+#   Isolates "can a minimal by-the-book GF1 init make ONE audible tone on the
+#   real PicoGUS" from the SDL/engine machinery, so the operator can binary-
+#   search the init delta on g2k via fast CF-swap WITHOUT the diag-wedge risk
+#   (no GF1 port-READS while a voice is active). Mirrors the PROVEN-in-DOSBox
+#   command stream of vendor/SDL/src/audio/dos/SDL_dosaudio_gus.c. Pure DJGPP;
+#   NO SDL/engine/C++ link. All three basenames are 8.3-clean.
+#     GUSTONE.EXE -- PRIMARY: minimal init -> upload tone -> play ONE voice.
+#                    CLI knobs ARE the hypotheses (V=voices=DAC-rate, R=reset
+#                    seq, RV=reset val, MIX=mixctrl, B=8|16, HZ, W, L, DUR).
+#                    Discriminates the 22.05kHz PicoGUS DAC dead-zone (task #5):
+#                    V=28->22050Hz SILENT vs V=14->44100Hz AUDIBLE.
+#                    Links -lm (sine waveform option) -> explicit rule below.
+#     GUSDET.EXE  -- read-only detect: base/IRQ/DMA/DRAM-size (peek/poke; the
+#                    SAME ops the driver already runs non-wedging on g2k).
+#     GUSDUMP.EXE -- BOUNDED single-pass register snapshot (own-init, no voice).
+#   Real-HW iter: bundle alongside CWSDPMI.EXE + the .bat launchers. Outputs ->
+#   GUSTONE.LOG / GUSDET.LOG / GUSDUMP.LOG (CWD, fopen-direct, per-line flush).
+#   HAZARD: direct GF1 chip I/O; bounded; no reads concurrent with active voice.
+PROBE_GUSTONE_SRC := tests/probes/gustone.c
+PROBE_GUSTONE_EXE := $(PROBES_DIR)/gustone.exe
+PROBE_GUSDET_SRC  := tests/probes/gusdet.c
+PROBE_GUSDET_EXE  := $(PROBES_DIR)/gusdet.exe
+PROBE_GUSDUMP_SRC := tests/probes/gusdump.c
+PROBE_GUSDUMP_EXE := $(PROBES_DIR)/gusdump.exe
+
+# Explicit rule: GUSTONE links libm for the optional W=sin waveform (sin used in
+# tone-buffer build only). GUSDET/GUSDUMP are pure DJGPP -> generic rule below.
+$(PROBE_GUSTONE_EXE): $(PROBE_GUSTONE_SRC) | djgpp-check
+	@mkdir -p $(PROBES_DIR)
+	$(CC) $(PROBES_CFLAGS) -o $@ $< -lm
+	$(STUBEDIT) $@ minstack=$(PROBES_MINSTK)
+
 # Generic build rule for any probe .c with no library deps (P0/P1/P3-pure).
 $(PROBES_DIR)/%.exe: tests/probes/%.c | djgpp-check
 	@mkdir -p $(PROBES_DIR)
@@ -2103,7 +2136,22 @@ s3ckey-dosbox-smoke: $(PROBE_S3CKEY_EXE) $(CWSDPMI_EXE)
 probes-p23: $(PROBE_BANDCOMP_EXE)
 	@echo "Built P23 probe set: bandcomp.exe (wave-52/53 -- banded-composition resid_frac gate)"
 
-probes: probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 probes-p25 probes-p26 probes-p27 probes-p28 probes-p37 probes-p38
+# P39 GUS Campaign 3 (#39) task #4 -- standalone GF1 test-utility suite.
+gustone: $(PROBE_GUSTONE_EXE)
+	@echo "Built $(PROBE_GUSTONE_EXE) -- PRIMARY GF1 single-voice test-tone (DAC dead-zone discriminator)."
+gusdet: $(PROBE_GUSDET_EXE)
+	@echo "Built $(PROBE_GUSDET_EXE) -- read-only GF1 detect/report."
+gusdump: $(PROBE_GUSDUMP_EXE)
+	@echo "Built $(PROBE_GUSDUMP_EXE) -- bounded GF1 register snapshot."
+
+probes-gus: $(PROBE_GUSTONE_EXE) $(PROBE_GUSDET_EXE) $(PROBE_GUSDUMP_EXE)
+	@echo "Built P39 GUS suite: gustone.exe gusdet.exe gusdump.exe (#39 task #4)."
+	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/gus*.bat."
+	@echo "  Operator setup: SET ULTRASND=240,3,3,7,7 ; pgusinit /mode gus ; pgusinit /gusdma 12"
+	@echo "  Outputs on CF: C:\\GUSTONE.LOG  C:\\GUSDET.LOG  C:\\GUSDUMP.LOG (fopen-direct)"
+	@echo "  DAC dead-zone discriminator: GUSTONE V=28 (SILENT) vs V=24 / V=14 (AUDIBLE)."
+
+probes: probes-gus probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 probes-p25 probes-p26 probes-p27 probes-p28 probes-p37 probes-p38
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE (memory/iter_must_include_cwsdpmi.md)"
 	@echo "  Output filenames on CF: C:\\DACPROG.LOG  C:\\HWLOG.LOG  C:\\DPMITHN.LOG  C:\\L1FILL.LOG  C:\\PARTIAL.LOG  C:\\YIELD.LOG  C:\\CFFSYNC.LOG  C:\\IRQRATE.LOG  C:\\MEMBW.OUT (fopen-direct)  C:\\MPUPROBE.LOG  C:\\MPUSDL.LOG  C:\\TILEPROB.LOG  C:\\PIXPROB.LOG  C:\\AUDBUF.LOG  C:\\IDLEPROB.LOG  C:\\OPAQUE.LOG  C:\\BLTFILL.LOG"

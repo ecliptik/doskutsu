@@ -1,4 +1,4 @@
-From 3c90825efcdd48d74e0973afa0ecd3468d84a5e9 Mon Sep 17 00:00:00 2001
+From 62bbeef74b5f26ede8dbd7c3fa8b5bb762bfff58 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Mon, 22 Jun 2026 15:57:28 -0700
 Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
@@ -142,11 +142,35 @@ data:
 No new export (still 12). The gus-6 hw_fetch START diag (also IRQ-context) is
 replaced by the ring -- the >>1 encode is already confirmed.
 
+gus-16 (#39 dead-zone PERMANENT FIX -- default voices 28 -> 14):
+
+Root cause CONFIRMED on g2k (wave-gus16, same binary, A/B): the PicoGUS
+PCM510xA DAC is dead-silent at EXACTLY 22.05kHz (~10% of cards; the reason
+pgusinit ships /gus44k). Our GUS_DEF_VOICES=28 set the GF1 output rate to
+617400/28 = 22050Hz -> the dead zone -> total silence. With GUS_VOICES=14
+(617400/14 = 44100Hz) the SAME binary is audible + playable + save/load OK;
+28 voices is silent. There is NO pitch/rate bug -- g_gus_rate is recomputed
+from g_gus_voices, so 14 voices plays in tune at 44100Hz (highest quality).
+The four prior register-gate fixes (double-write, vol-ramp, 0x4C=0x07,
+FULLCANON) are REFUTED by this finding; they stay default-ON as background
+correctness but none fixed #39.
+
+The fix: GUS_DEF_VOICES 28 -> 14 (one line). 44100Hz is the highest-quality
+GF1 point and clears the only DAC dead point. The SDL_HINT_DOSKUTSU_GUS_VOICES
+hint still overrides for A/B, so no new killswitch is needed. Trade-off:
+14-voice polyphony vs 28 -- the operator's 14-voice Organya had no dropped
+notes, so 14 is the chosen default; a future trip could A/B a mid count
+(24 -> 25725Hz, still clears the dead zone) if dense songs ever drop notes.
+The g_gus_rate static initializer 22050 -> 44100 for consistency (cosmetic;
+always recomputed before use). BOOT.md GUS_VOICES + AUDIO_BACKEND=gus entries
+updated. Why DOS needs this: a no-SB DOS box on a PicoGUS /mode gus otherwise
+boots to a silent default.
+
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
  include/SDL3/SDL_dosgus.h        |  267 ++++++
- src/audio/dos/SDL_dosaudio_gus.c | 1426 ++++++++++++++++++++++++++++++
- 2 files changed, 1693 insertions(+)
+ src/audio/dos/SDL_dosaudio_gus.c | 1433 ++++++++++++++++++++++++++++++
+ 2 files changed, 1700 insertions(+)
  create mode 100644 include/SDL3/SDL_dosgus.h
  create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
 
@@ -425,10 +449,10 @@ index 000000000..ae67412f5
 +#endif /* SDL_dosgus_h_ */
 diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
 new file mode 100644
-index 000000000..06e482cd7
+index 000000000..5df524eca
 --- /dev/null
 +++ b/src/audio/dos/SDL_dosaudio_gus.c
-@@ -0,0 +1,1426 @@
+@@ -0,0 +1,1433 @@
 +/*
 +  Simple DirectMedia Layer
 +  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
@@ -535,7 +559,14 @@ index 000000000..06e482cd7
 +
 +#define GUS_MAX_VOICES     32
 +#define GUS_MIN_VOICES     14
-+#define GUS_DEF_VOICES     28
++/* DOS-PORT: default 14 voices -> GF1 output rate = 617400/14 = 44100Hz (the
++   highest-quality point). 28 voices yields EXACTLY 22050Hz, which is the
++   PicoGUS PCM510xA DAC dead-zone -- dead silence on ~10% of cards (the reason
++   pgusinit ships /gus44k). g2k wave-gus16 CONFIRMED, same binary: 28 voices
++   (22050Hz) = silent; 14 voices (44100Hz) = audible + playable. There is no
++   pitch bug (g_gus_rate is recomputed from g_gus_voices below). The
++   SDL_HINT_DOSKUTSU_GUS_VOICES hint still overrides for A/B. #39. */
++#define GUS_DEF_VOICES     14
 +#define GUS_RATE_NUM       617400u /* output_rate ~= 617400 / active_voices */
 +
 +/* DMA-upload tunables. DMA upload is OPT-IN (SDL_HINT_DOSKUTSU_GUS_DMA_UPLOAD=1);
@@ -559,7 +590,7 @@ index 000000000..06e482cd7
 +static int  g_gus_play_dma = -1;           /* playback DMA channel */
 +static int  g_gus_irq = -1;                /* GF1 IRQ */
 +static int  g_gus_voices = GUS_DEF_VOICES; /* active-voice count */
-+static Uint32 g_gus_rate = 22050;          /* resulting DAC rate */
++static Uint32 g_gus_rate = 44100;          /* resulting DAC rate (recomputed from voices) */
 +static Uint32 g_gus_dram_size = 0;         /* detected DRAM bytes */
 +static Uint32 g_gus_dram_used = 0;         /* bump-allocator high-water */
 +static bool g_gus_diag = false;            /* SDL/0112 diag counters (default OFF) */
