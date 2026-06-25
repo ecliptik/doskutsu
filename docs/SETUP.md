@@ -12,6 +12,10 @@ your options, and it writes a `DOSKUTSU.CFG` file that `DOSKUTSU.EXE` reads
 at startup. You never have to edit `AUTOEXEC.BAT` or memorize environment
 variables -- though those still work and still win (see Precedence below).
 
+> For a player-facing guide to configuring music and sound effects (choosing
+> your card, the GUS voice count, MIDI sets, troubleshooting), see
+> [docs/SOUND.md](./SOUND.md).
+
 ## Running SETUP
 
 ```
@@ -106,7 +110,7 @@ FIXED_TIMESTEP=1
 | `AUDIO_BACKEND` | auto / wb / opl3 / organya / adlib / gus / none | Music backend, written by the **Select Music Card** picker (auto = detect). `auto` is omitted from the file so the engine's detection runs. `adlib` = native OPL2 FM on a no-Sound-Blaster card (music only); `gus` = native Gravis Ultrasound GF1 wavetable; `none` = **No Music** (music off, sound effects still play). |
 | `MIDI_DEV` | genmidi / waveblaster | SETUP-only discriminator for the two **Select Music Card** rows that both write `AUDIO_BACKEND=wb`: `genmidi` = "General MIDI" (MPU-401 to an external module), `waveblaster` = "WaveBlaster" (daughterboard on the SB header, default). The engine ignores this key -- it only controls which name SETUP shows and which MPU-401 port default it suggests. |
 | `MIDI_SET` | wiimidi / orgmid | Which MIDI music set the `wb` / `opl3` MIDI backends play: `wiimidi` (shown as "WiiWare", the WiiWare arrangements, `data/midi/`; default) or `orgmid` (shown as "OrgMIDI", the note-for-note transcription, `data/orgmid/`). SETUP only shows the **MIDI music set** row when a MIDI backend is selected AND at least two sets are installed on disk; otherwise the default applies. Ignored by the Organya backend. |
-| `GUS_VOICES` | 14 / 16 / 24 / 28 / 32 | Gravis Ultrasound active-voice count (only meaningful for `AUDIO_BACKEND=gus`). The GF1 DAC output rate is `617400 / voices`, so the voice count sets the music sample rate: 14 = 44100 Hz (best quality, default), 16 = 38588 Hz, 24 = 25725 Hz (more polyphony), 28 = 22050 Hz (**may be silent** on some PicoGUS cards -- a DAC dead-zone), 32 = 19294 Hz. SETUP shows the **GUS voices** row (a "Select GUS Voices" value list) only when the Gravis Ultrasound backend is selected. |
+| `GUS_VOICES` | 14 / 16 / 20 / 24 / 28 / 32 | Gravis Ultrasound active-voice count (only meaningful for `AUDIO_BACKEND=gus`). The GF1 DAC output rate is `617400 / voices`, so the voice count sets the music sample rate: 14 = 44100 Hz (highest fidelity), 16 = 38587 Hz, 20 = 30870 Hz (default -- best balance of fidelity and polyphony), 24 = 25725 Hz (more polyphony), 28 = 22050 Hz (**may be silent** on some PicoGUS cards -- a firmware rate quirk; use any other value), 32 = 19293 Hz. SETUP shows the **GUS voices** row (a "Select GUS Voices" value list) only when the Gravis Ultrasound backend is selected. |
 | `GUS_HIFI` | 0 / 1 | Gravis Ultrasound multi-sample fidelity (only meaningful for `AUDIO_BACKEND=gus`). 1 (default) = upload the full multi-sample `.pat` set per instrument for the best fidelity across the keyboard; 0 = a single sample per instrument (the low-on-card-memory fallback). SETUP shows the **GUS high fidelity** row only when the Gravis Ultrasound backend is selected. Written from the **Music options** screen. |
 | `SFX_DEVICE` | (omitted) / none | Sound-effects device, written by the **Select Sound FX Device** picker. Omitted = effects ride the music card's native device (the Sound Blaster DAC, or the GF1 on a Gravis card); `none` = **No Sound FX** (effects off, music still plays). The picker is narrowed to the devices the chosen music card can drive (AdLib has no DAC, so it offers only "No Sound FX"). |
 | `AUDIO_OFF` | 0 / 1 | Disable all audio. |

@@ -1,5 +1,7 @@
 # DOSKUTSU Configuration
 
+> For a player-facing guide to choosing your music card and sound effects, see [docs/SOUND.md](./SOUND.md).
+
 DOSKUTSU reads its options from DOS environment variables at startup. Set them with `SET` - either in `AUTOEXEC.BAT`, or at the DOS prompt before running `DOSKUTSU.EXE`:
 
 ```
@@ -40,11 +42,11 @@ SET SDL_HINT_DOSKUTSU_PERF_MODE=1        REM drop decorative foreground detail
 
 | Variable | Values | Default | Effect | FPS impact |
 |---|---|---|---|---|
-| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto`, `opl3`, `organya`, `wb`, `adlib`, `gus`, `none` | `auto` | Music synthesizer (also the SETUP "Select Music Card" selection). `none` = **No Music** (music off, but sound effects still play -- distinct from `AUDIO_OFF` which is both-off). `auto` (default): probe for a WaveBlaster daughterboard first, fall back to OPL3 FM if none is found. `opl3`: force the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: force a WaveBlaster daughterboard. `adlib`: native OPL2 FM on a card with **no Sound Blaster** (a real AdLib/OPL2 card, or a PicoGUS in `/mode adlib`); music is clocked off the PIT timer, not the SB IRQ. **`adlib` is MUSIC ONLY** -- a DAC-less AdLib card cannot play the digital sound effects, so SFX are silent. `gus`: native Gravis Ultrasound (GF1) wavetable on a card with **no Sound Blaster** (a real GUS, or a PicoGUS in `/mode gus`); GM instruments play on the GF1's hardware voices from `.pat` samples loaded into the card's DRAM, clocked off the PIT timer. **`gus` plays both music AND sound effects** on the GUS's own voices -- unlike `adlib`, the GUS has a real DAC, so the Cave Story SFX render on the GF1 too. | `organya` is ~9 fps slower than MIDI; `auto` / `opl3` / `wb` / `adlib` / `gus` run music off the CPU |
-| `SDL_HINT_DOSKUTSU_GUS_VOICES` | `14`..`32` | `14` | Gravis Ultrasound active-voice count (only meaningful under `AUDIO_BACKEND=gus`; the SETUP "Select GUS Voices" screen writes the `GUS_VOICES` `DOSKUTSU.CFG` key). The GF1 DAC output rate is `617400 / voices`, so the voice count IS the music sample rate: `14` = 44100 Hz (default, best fidelity, and it clears the dead-zone), `16` = 38588 Hz, `24` = 25725 Hz (more polyphony), `28` = 22050 Hz, `32` = 19294 Hz. The driver clamps any value to `[14,32]`. **`28` voices = 22050 Hz hits a PicoGUS PCM510xA DAC dead-zone that is SILENT on ~10% of cards** -- it is high-polyphony and valid on unaffected hardware, but if GUS music goes silent at 28, choose 14 (or any other value). SETUP offers the curated presets {14,16,24,28,32}. | Leave at `14` unless you need more simultaneous voices and have confirmed your card is not dead-zone-affected at 22050 Hz |
+| `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto`, `opl3`, `organya`, `wb`, `adlib`, `gus`, `none` | `auto` | Music synthesizer (also the SETUP "Select Music Card" selection). `none` = **No Music** (music off, but sound effects still play -- distinct from `AUDIO_OFF` which is both-off). `auto` (default): probe for a WaveBlaster daughterboard first, fall back to OPL3 FM if none is found. `opl3`: force the Sound Blaster OPL3 FM chip. `organya`: Cave Story's original software synth. `wb`: force a WaveBlaster daughterboard. `adlib`: native OPL2 FM on a card with **no Sound Blaster** (a real AdLib/OPL2 card, or a PicoGUS in `/mode adlib`); music is clocked off the PIT timer, not the SB IRQ. **`adlib` is MUSIC ONLY** -- a DAC-less AdLib card cannot play the digital sound effects, so SFX are silent. `gus`: native Gravis Ultrasound (GF1) wavetable on a card with **no Sound Blaster** (a real GUS, or a PicoGUS in `/mode gus`); GM instruments play on the GF1's hardware voices from `.pat` samples loaded into the card's DRAM, clocked off the PIT timer. **`gus` is MUSIC ONLY today** -- GF1 sound-effect support is not yet finished (it faults at init), so run the Gravis backend with effects off (`SFX_DEVICE=none`; SETUP sets this for you when you pick Gravis). | `organya` is ~9 fps slower than MIDI; `auto` / `opl3` / `wb` / `adlib` / `gus` run music off the CPU |
+| `SDL_HINT_DOSKUTSU_GUS_VOICES` | `14`..`32` | `20` | Gravis Ultrasound active-voice count (only meaningful under `AUDIO_BACKEND=gus`; the SETUP "Select GUS Voices" screen writes the `GUS_VOICES` `DOSKUTSU.CFG` key). The GF1 DAC output rate is `617400 / voices`, so the voice count IS the music sample rate: `14` = 44100 Hz (highest fidelity), `16` = 38587 Hz, `20` = 30870 Hz (**default** -- the g2k-validated best balance of fidelity and polyphony), `24` = 25725 Hz (more polyphony), `28` = 22050 Hz, `32` = 19293 Hz (the rate is the integer-truncated `617400 / voices`, matching the game's detect banner). The driver clamps any value to `[14,32]`. **`28` voices = exactly 22050 Hz trips a PicoGUS firmware quirk** (the firmware rescales 28-channel output to 44.1 kHz internally, colliding with the rate the driver expects) that leaves the music **dead silent** on affected cards -- it is high-polyphony and valid on hardware without the quirk, but if GUS music goes silent at 28, choose any other value. SETUP offers the curated presets {14,16,20,24,28,32}. | Leave at the `20` default; raise the voice count for more simultaneous notes (at a lower rate), or drop to `14` for the highest fidelity |
 | `SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE` | `0`, `1` | `1` (on) | Gravis Ultrasound multi-sample fidelity (only meaningful under `AUDIO_BACKEND=gus`; the SETUP "GUS high fidelity" row writes the `GUS_HIFI` `DOSKUTSU.CFG` key). On (default): upload the full multi-sample `.pat` set per instrument so each note plays from the nearest-pitched sample -- the best fidelity across the keyboard. `0` = the killswitch: a single nearest-middle-C sample per instrument (the low-DRAM fallback). The engine reads it once when the GUS MIDI backend starts; **default ON** -- unset or any non-`0` value = on. | Leave on; set `0` only if a song runs the GF1 out of on-card memory |
 | `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` | `19`..`1000` | `120` | Tick rate of the PIT/IRQ-0 music pump that clocks MIDI playback under `AUDIO_BACKEND=adlib` **and** `AUDIO_BACKEND=gus` (both no-Sound-Blaster paths share the same card-agnostic timer pump). Higher = finer tempo resolution at slightly more interrupt overhead. Only used on the `adlib` / `gus` paths; ignored otherwise. | Leave at default unless tempo sounds off |
-| `SDL_HINT_DOSKUTSU_SFX_DEVICE` | `sb`, `gus`, `none` | `sb` | Which device plays the sound effects (the SETUP "Select Sound FX Device" selection). `sb` (default): the Sound Blaster DAC. `gus`: the GUS GF1 voices (under `AUDIO_BACKEND=gus`). `none` = **No Sound FX** (sound effects off; music still plays). | None |
+| `SDL_HINT_DOSKUTSU_SFX_DEVICE` | `sb`, `none` | `sb` | Which device plays the sound effects (the SETUP "Select Sound FX Device" selection). `sb` (default): the Sound Blaster DAC. `none` = **No Sound FX** (sound effects off; music still plays). (`gus` is reserved for future GF1 sound-effect support but is **not supported yet** -- the Gravis backend is music-only, so use `none` with it.) | None |
 | `SDL_HINT_DOSKUTSU_MUSIC_OFF` / `SDL_HINT_DOSKUTSU_SFX_OFF` | `1` | unset | Independent music / sound-effects disable. `MUSIC_OFF=1` turns music off but keeps SFX (same as `AUDIO_BACKEND=none`); `SFX_OFF=1` turns SFX off but keeps music (same as `SFX_DEVICE=none`). Both set, or `AUDIO_OFF=1`, = silent. The audio device still opens (these gate the *dispatch*, not the hardware), so toggling one does not disturb the other. | You normally set these via the Music Card / Sound FX Device menus, not by hand |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `wiimidi`, `orgmid`, `<dir>` | `wiimidi` | Which MIDI set the `opl3` / `wb` backends play. `wiimidi`: the WiiWare arrangement (`data/midi/`). `orgmid`: the Hart legacy `.mid` set (`data/orgmid/`). Any other value is treated as a custom drop-in directory name: if `data/<dir>/` holds your own `.mid` tracks, the engine plays from there (see "Bring your own MIDI set" in `docs/ASSETS.md`). SETUP exposes this as the **MIDI music set** row (writing the `MIDI_SET` DOSKUTSU.CFG key) -- known sets show as WiiWare / OrgMIDI, drop-ins as `Custom (<dir>)`. | None |
 | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | unset | Picks an `org2mid`-converted General MIDI variant. | None |
@@ -142,17 +144,19 @@ the General MIDI `.pat` patch files under `C:\ULTRASND\MIDI`.
 - Tempo resolution is governed by `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` (default `120`),
   shared with the `adlib` path.
 
-**Music and sound effects both play on the GUS.** Unlike the AdLib backend, the
-GUS has its own DAC and on-board sample RAM, so Cave Story's digital sound effects
-render on the GF1's hardware voices too: at startup the engine uploads the sound
-effects into the card's DRAM once, then triggers them on spare GF1 voices alongside
-the music. Music and SFX share the card's voice pool (`14` voices by default, set by
-the `GUS_VOICES` key / SETUP "Select GUS Voices" screen), which is ample for Cave
-Story; in a rare voice-saturated moment a new sound effect may drop rather than cut
-off music, which is the intended trade. The GF1 output rate is `617400 / voices`, so
-the voice count is also the music sample rate -- `14` voices = 44100 Hz, the
-highest-fidelity setting and the one that clears the PicoGUS 22050 Hz DAC dead-zone
-(see the `GUS_VOICES` key in the hint table above).
+**The GUS is music-only today.** Cave Story's digital sound effects do **not**
+play on the GUS yet: GF1 sound-effect support is not finished (it currently
+faults at init), so the Gravis backend plays **music only**, and you must leave
+sound effects off (`SFX_DEVICE=none` / `SFX_OFF=1`) when running it -- SETUP does
+this for you automatically when you pick the Gravis card. If you need both music
+and effects without a Sound Blaster, that combination is still in development.
+The GUS voice pool (`20` voices by default, set by the `GUS_VOICES` key / SETUP
+"Select GUS Voices" screen) is all spent on music. The GF1 output rate is
+`617400 / voices`, so
+the voice count is also the music sample rate -- `20` voices = 30870 Hz, the default
+that balances fidelity against polyphony; `14` voices = 44100 Hz is the
+highest-fidelity setting. Any non-`28` count avoids the PicoGUS 22050 Hz
+firmware-rescale silence (see the `GUS_VOICES` key in the hint table above).
 
 ---
 

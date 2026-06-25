@@ -549,20 +549,24 @@ static const struct
 } GUS_VOICE_PRESETS[] = {
   { "14", "14 voices  - 44100 Hz",                   "14 (44100 Hz)",
     "44100 Hz. Highest fidelity, 14 notes." },
-  { "16", "16 voices  - 38588 Hz",                   "16 (38588 Hz)",
-    "38588 Hz. 16-note polyphony." },
+  { "16", "16 voices  - 38587 Hz",                   "16 (38587 Hz)",
+    "38587 Hz. 16-note polyphony." },
+  { "20", "20 voices  - 30870 Hz",                   "20 (30870 Hz)",
+    "30870 Hz. Default; best balance of fidelity and polyphony." },
   { "24", "24 voices  - 25725 Hz",                   "24 (25725 Hz)",
     "25725 Hz. 24-note polyphony." },
   { "28", "28 voices  - 22050 Hz",                   "28 (22050 Hz)",
     "22050 Hz. May be silent on PicoGUS." },
-  { "32", "32 voices  - 19294 Hz",                   "32 (19294 Hz)",
-    "19294 Hz. Lowest fidelity, 32 notes." }
+  { "32", "32 voices  - 19293 Hz",                   "32 (19293 Hz)",
+    "19293 Hz. Lowest fidelity, 32 notes." }
 };
 #define GUS_VOICE_NPRESETS \
   ((int)(sizeof(GUS_VOICE_PRESETS) / sizeof(GUS_VOICE_PRESETS[0])))
 
-/* Index of a GUS_VOICES value among the presets, or 0 (the 14-voice default)
- * if the stored value is not one of the curated presets. */
+/* Index of a GUS_VOICES value among the presets, or 0 (the first preset, 14
+ * voices) if the stored value is not one of the curated presets. The registry
+ * default is 20 (a valid preset), so this fallback only trips on a hand-edited
+ * out-of-list value. */
 static int gus_preset_index(const char *v)
 {
   int i;
@@ -659,8 +663,9 @@ static const char *snd_help(int row)
     case SND_GUSVOICES:
       return "Gravis UltraSound active voices. The GF1 output rate is "
              "617400/voices, so fewer voices = a higher sample rate. 28 "
-             "voices = 22050 Hz can be SILENT on some PicoGUS cards (a DAC "
-             "dead-zone). More voices = more notes at a lower rate.";
+             "voices = 22050 Hz can be SILENT on some PicoGUS cards (a "
+             "firmware rate quirk; use any other value). More voices = more "
+             "notes at a lower rate.";
     case SND_GUSHIFI:
       /* Each option on its own line (tui_wrap honors '\n'), fits the box. */
       return "On  - multisample, richer instruments\n"
@@ -772,7 +777,7 @@ static void snd_gusvoices_cycle(int dir)
 /* Modal "Select GUS Voices" value-list (Enter on the GUS-voices row). FastDoom
  * "Select Frequency" style: every preset shown at once with its voice count +
  * resulting DAC rate, the current one tagged "(current)", and a DESCRIPTION
- * note (incl. the 28-voice/22050 Hz PicoGUS dead-zone warning). Writes
+ * note (incl. the 28-voice/22050 Hz PicoGUS firmware-rescale silence warning). Writes
  * GUS_VOICES on a change. Returns 1 (a list was shown). */
 static int snd_pick_gusvoices(void)
 {
@@ -1971,6 +1976,10 @@ static const struct
  * the GF1 wavetable; AdLib has no DAC (effects forced off). */
 static const char *sfx_native_name(const char *be)
 {
+  /* NOTE: the "gus" branch is currently UNREACHED -- GF1 SFX is not yet
+   * supported (engine bug #38), so callers gate Gravis to music-only before
+   * reaching here (sfx_current_name returns early; the FX picker omits the
+   * native row for gus). Kept correct-in-isolation for when #38 lands. */
   if (strcmp(be, "gus") == 0)   return "Gravis UltraSound";
   if (strcmp(be, "adlib") == 0) return "No Sound FX"; /* DAC-less: forced off */
   return "Sound Blaster"; /* opl3 / organya / wb / auto / none -> SB DAC */
@@ -1984,6 +1993,9 @@ static const char *sfx_current_name(void)
   const char *be = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
   const char *sd = scfg_get(&g_cfg, scfg_index("SFX_DEVICE"));
   if (strcmp(be, "adlib") == 0)  return "No Sound FX";
+  if (strcmp(be, "gus") == 0)    return "No Sound FX"; /* GF1 SFX not yet
+    supported (engine bug #38): Gravis is music-only, so effects always read
+    off regardless of SFX_DEVICE. */
   if (strcmp(sd, "none") == 0)   return "No Sound FX";
   return sfx_native_name(be);
 }
@@ -2006,6 +2018,8 @@ static int snd_pick_music_card(void)
   int mdidx = scfg_index("MIDI_DEV");
   const char *cur = scfg_get(&g_cfg, beidx);
   const char *curmd = scfg_get(&g_cfg, mdidx);
+  int was_gus = strcmp(cur, "gus") == 0; /* capture before the backend set:
+    cur points into g_cfg storage that scfg_set() overwrites. */
   int i, choice, start = 0;
 
   for (i = 0; i < MUSIC_NCARDS; ++i)
@@ -2040,6 +2054,24 @@ static int snd_pick_music_card(void)
     g_dirty = 1;
   }
 
+  /* GUS is music-only today (engine bug #38: GF1 SFX init crashes), so force
+   * sound effects OFF whenever Gravis is the music card -- the ONLY safe state,
+   * and it stops the derived-native-GF1 SFX path from crashing the game even if
+   * the user never opens the SFX picker. Leaving Gravis for any other card
+   * clears that forced "none" so the new card's native DAC drives effects. */
+  {
+    int sfxidx = scfg_index("SFX_DEVICE");
+    const char *sd = scfg_get(&g_cfg, sfxidx);
+    if (strcmp(MUSIC_CARDS[choice].value, "gus") == 0)
+    {
+      if (strcmp(sd, "none") != 0) { scfg_set(&g_cfg, sfxidx, "none"); g_dirty = 1; }
+    }
+    else if (was_gus && strcmp(sd, "none") == 0)
+    {
+      scfg_set(&g_cfg, sfxidx, ""); g_dirty = 1;
+    }
+  }
+
   /* Walk the card's required param sub-screen(s), then return to the hub. */
   tui_clear();
   switch (MUSIC_CARDS[choice].sub)
@@ -2060,14 +2092,16 @@ static int snd_pick_music_card(void)
 
 /* "Select Sound FX Device" picker (Sound hub row 2). The list is NARROWED by
  * the current music card (sec.4 / operator coupling): SB-family + Auto + No
- * Music -> { Sound Blaster, No Sound FX }; Gravis -> { Gravis UltraSound, No
- * Sound FX }; AdLib -> { No Sound FX } only (DAC-less, so the "no DAC" reason
- * rides the description pane, NOT a blocking modal -- every picker is a uniform
- * list with a No-X row). The native device is the
- * SAME hardware already configured for music, so this pick is purely on/off:
- * the native row clears SFX_DEVICE (engine derives it), "No Sound FX" writes
- * SFX_DEVICE=none. We never offer the GUS+SB cross-combo (PicoGUS is
- * single-mode; engine cannot route GF1 SFX without GUS music).
+ * Music -> { Sound Blaster, No Sound FX }; AdLib -> { No Sound FX } only
+ * (DAC-less); Gravis -> { No Sound FX } only (GF1 SFX is NOT yet supported --
+ * engine bug #38 crashes at GF1 SFX init, so Gravis is music-only today; we do
+ * NOT offer a "Gravis UltraSound" SFX row or the user could write a config that
+ * crashes the game). The "no effects" reason rides the description pane, NOT a
+ * blocking modal -- every picker is a uniform list with a No-X row. The native
+ * device is the SAME hardware already configured for music, so this pick is
+ * purely on/off: the native row clears SFX_DEVICE (engine derives it), "No
+ * Sound FX" writes SFX_DEVICE=none. We never offer the GUS+SB cross-combo
+ * (PicoGUS is single-mode; engine cannot route GF1 SFX without GUS music).
  *
  * When the chosen SFX device is the Sound Blaster (the native device on every
  * non-Gravis path), we walk the BLASTER Port/IRQ/DMA sub-screen inline -- the
@@ -2083,17 +2117,18 @@ static int snd_pick_sfx_device(void)
   const char *items[2], *descs[2], *raw[2];
   int n = 0, start, choice;
   int adlib = strcmp(be, "adlib") == 0;
+  int gus   = strcmp(be, "gus") == 0;
+  /* AdLib is DAC-less and Gravis GF1 SFX is not yet supported (engine bug #38),
+   * so both cards are music-only: NO native SFX row, just the No-Sound-FX entry
+   * with the reason in the description pane. */
+  int no_native = adlib || gus;
 
-  /* Native device row (Sound Blaster, or Gravis on the GUS path) -- clears the
-   * key. AdLib is DAC-less, so it has NO native row: the list is just the
-   * No-Sound-FX entry, with the "no DAC" reason in the description pane (uniform
-   * list UX -- no special blocking modal). */
-  if (!adlib)
+  /* Native device row (Sound Blaster) -- clears the key so the engine derives
+   * the card's native DAC. Omitted entirely for the music-only cards above. */
+  if (!no_native)
   {
     items[n] = sfx_native_name(be);
-    descs[n] = (strcmp(be, "gus") == 0)
-               ? "With Gravis music, sound effects play on the GF1 wavetable."
-               : "Sound effects play through the Sound Blaster DAC.";
+    descs[n] = "Sound effects play through the Sound Blaster DAC.";
     raw[n] = ""; /* clear SFX_DEVICE: the engine derives the native device */
     ++n;
   }
@@ -2101,13 +2136,17 @@ static int snd_pick_sfx_device(void)
   items[n] = "No Sound FX";
   descs[n] = adlib
              ? "AdLib (OPL2) has no DAC, so sound effects are unavailable. "
-               "Pick Sound Blaster, Organya, or Gravis music to get effects."
+               "Pick Sound Blaster, Organya, or General MIDI music to get effects."
+             : gus
+             ? "Gravis sound effects are not yet supported (music only). "
+               "Pick Sound Blaster, Organya, or General MIDI music to get effects."
              : "Turn sound effects off. Music keeps playing.";
   raw[n] = "none";
   ++n;
 
-  /* AdLib's only row is No Sound FX; otherwise the current SFX_DEVICE selects. */
-  start = adlib ? 0
+  /* The music-only cards have only the No-Sound-FX row; otherwise the current
+   * SFX_DEVICE selects which row starts highlighted. */
+  start = no_native ? 0
                 : (strcmp(scfg_get(&g_cfg, idx), "none") == 0) ? (n - 1) : 0;
 
   choice = tui_picklist("Select Sound FX Device", 0, 0, items, NULL, descs,

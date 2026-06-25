@@ -105,12 +105,14 @@ static const char *dkt_midi_dev_vals[] =
 
 /* GUS active-voice presets. The native GF1 backend's DAC output rate is
  * 617400/voices, so the voice count IS the music sample rate: 14=44100Hz
- * (best fidelity), 16=38588, 24=25725, 28=22050 (the PicoGUS PCM510xA
- * dead-zone -- SILENT on ~10% of cards, hence not the default), 32=19294.
- * The SDL3-DOS GF1 driver clamps the hint to [14,32]; these 5 are the
+ * (highest fidelity), 16=38587, 20=30870 (the default -- best balance of
+ * fidelity and polyphony), 24=25725, 28=22050 (the PicoGUS firmware-rescale
+ * silence -- 28ch is forced to 44.1k, hence SILENT and not the default), 32=19293.
+ * (Rates are the integer-truncated 617400/voices the GF1 driver computes.)
+ * The SDL3-DOS GF1 driver clamps the hint to [14,32]; these 6 are the
  * curated presets SETUP offers (#39). */
 static const char *dkt_gus_voice_vals[] =
-  { "14", "16", "24", "28", "32", NULL };
+  { "14", "16", "20", "24", "28", "32", NULL };
 
 /* System Speed preset classes (plan 3.4). "notset" is the provenance sentinel
  * shown as "(not set)" until a class is chosen or Auto-detect runs. */
@@ -329,16 +331,19 @@ static const dkt_key_t DKT_KEYS[] =
    * (gus_resolve_voices, SDL_dosaudio_gus.c): the GF1 DAC output rate is
    * 617400/voices, so fewer voices = a higher (better-fidelity) sample rate.
    * The driver clamps to [14,32]; SETUP offers the curated presets in
-   * dkt_gus_voice_vals (14=44100Hz best .. 32=19294Hz). Default "14" is
-   * byte-neutral vs the driver's GUS_DEF_VOICES=14 -- it is the highest-quality
-   * rate AND avoids the 28-voice/22050Hz PicoGUS DAC dead-zone that is silent
-   * on ~10% of cards. Only meaningful for AUDIO_BACKEND=gus; other backends
-   * ignore the hint (the driver only reads it when the GF1 device opens).
-   * APPEND-ONLY: sits at the end so existing positional indices are unchanged. */
+   * dkt_gus_voice_vals (14=44100Hz highest fidelity .. 32=19293Hz). Default
+   * "20" (30870 Hz) is the g2k-validated best-sounding balance of fidelity and
+   * polyphony; it also avoids the 28-voice/22050Hz PicoGUS firmware-rescale
+   * silence (28ch is forced to 44.1k). SETUP always writes this key (DKT_ENUM with no
+   * "auto" omission), so the cfg value reaches the driver verbatim -- the
+   * driver's own GUS_DEF_VOICES fallback only applies with no cfg/env at all.
+   * Only meaningful for AUDIO_BACKEND=gus; other backends ignore the hint (the
+   * driver only reads it when the GF1 device opens). APPEND-ONLY: sits at the
+   * end so existing positional indices are unchanged. */
   { "GUS_VOICES", "SDL_HINT_DOSKUTSU_GUS_VOICES",
-    DKT_ENUM, DKC_SOUND, "14", 0, 0, dkt_gus_voice_vals,
+    DKT_ENUM, DKC_SOUND, "20", 0, 0, dkt_gus_voice_vals,
     "GUS voices",
-    "Gravis Ultrasound active voices; rate=617400/voices (14=44100Hz best, 28=22050Hz may be silent)", 0 },
+    "Gravis Ultrasound active voices; rate=617400/voices (20=30870Hz default, 14=44100Hz best, 28=22050Hz may be silent)", 0 },
 
   /* ---- Sound-redesign keys (#9 -- dual Music-card + SFX-device pickers) ----
    * SETUP's Sound flow encodes the user's two device picks as INTENT keys:
