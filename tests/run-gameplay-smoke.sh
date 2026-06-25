@@ -426,6 +426,8 @@ BANNER_REGEX=(
   "audio: SDL/0112 GUS TEST-TONE16: voice=[0-9]+ addr=0x[0-9A-Fa-f]+ end=0x[0-9A-Fa-f]+ playing"
   "gus backend: release-ramp (ENABLED \(default\)|DISABLED \(killswitch =0\))"
   "gus backend: multisample (ENABLED \(default\)|DISABLED \(killswitch =0\))"
+  "audio: SDL/0113 GUS SFX bank-align: ENGAGED \(8-bit no-straddle 256K guard\)"
+  "gus SFX DRAM-straddle diag \[nx0256\]"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -532,6 +534,8 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
+  "optional"
   "optional"
   "optional"
   "optional"

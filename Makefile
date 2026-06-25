@@ -1383,6 +1383,11 @@ PROBE_GUSDET_SRC  := tests/probes/gusdet.c
 PROBE_GUSDET_EXE  := $(PROBES_DIR)/gusdet.exe
 PROBE_GUSDUMP_SRC := tests/probes/gusdump.c
 PROBE_GUSDUMP_EXE := $(PROBES_DIR)/gusdump.exe
+# GUSSFX (#38): GF1 SFX-upload + per-slot trigger probe. Emulates nx-0239
+# initGusSfx 8-bit DRAM placement to ~715KB, logs per-slot [start,end)+straddle
+# flag, then triggers each slot to pin the quit-to-DOS crasher. Pure DJGPP.
+PROBE_GUSSFX_SRC  := tests/probes/gussfx.c
+PROBE_GUSSFX_EXE  := $(PROBES_DIR)/gussfx.exe
 
 # Explicit rule: GUSTONE links libm for the optional W=sin waveform (sin used in
 # tone-buffer build only). GUSDET/GUSDUMP are pure DJGPP -> generic rule below.
@@ -2143,13 +2148,16 @@ gusdet: $(PROBE_GUSDET_EXE)
 	@echo "Built $(PROBE_GUSDET_EXE) -- read-only GF1 detect/report."
 gusdump: $(PROBE_GUSDUMP_EXE)
 	@echo "Built $(PROBE_GUSDUMP_EXE) -- bounded GF1 register snapshot."
+gussfx: $(PROBE_GUSSFX_EXE)
+	@echo "Built $(PROBE_GUSSFX_EXE) -- GF1 SFX-upload + per-slot trigger probe (#38)."
 
-probes-gus: $(PROBE_GUSTONE_EXE) $(PROBE_GUSDET_EXE) $(PROBE_GUSDUMP_EXE)
-	@echo "Built P39 GUS suite: gustone.exe gusdet.exe gusdump.exe (#39 task #4)."
+probes-gus: $(PROBE_GUSTONE_EXE) $(PROBE_GUSDET_EXE) $(PROBE_GUSDUMP_EXE) $(PROBE_GUSSFX_EXE)
+	@echo "Built GUS suite: gustone.exe gusdet.exe gusdump.exe (#39 task #4) + gussfx.exe (#38)."
 	@echo "  Real-HW iter: bundle alongside CWSDPMI.EXE + tests/probes/gus*.bat."
 	@echo "  Operator setup: SET ULTRASND=240,3,3,7,7 ; pgusinit /mode gus ; pgusinit /gusdma 12"
-	@echo "  Outputs on CF: C:\\GUSTONE.LOG  C:\\GUSDET.LOG  C:\\GUSDUMP.LOG (fopen-direct)"
+	@echo "  Outputs on CF: C:\\GUSTONE.LOG  C:\\GUSDET.LOG  C:\\GUSDUMP.LOG  C:\\GUSSFX.LOG (fopen-direct)"
 	@echo "  DAC dead-zone discriminator: GUSTONE V=28 (SILENT) vs V=24 / V=14 (AUDIBLE)."
+	@echo "  #38 SFX crasher: GUSSFX (MAP) -> GUSSFX TRIG -> last GUSSFX.LOG line pins the slot."
 
 probes: probes-gus probes-p0 probes-p1 probes-p3 probes-p4 probes-p5 probes-p6 probes-p7 probes-p8 probes-p9 probes-p10 probes-p11 probes-p12 probes-p13 probes-p14 probes-p15 probes-p16 probes-p17 probes-p18 probes-p19 probes-p20 probes-p21 probes-p22 probes-p23 probes-p24 probes-p25 probes-p26 probes-p27 probes-p28 probes-p37 probes-p38
 	@echo "Built ALL P0+P1+P3+P4+P5+P6+P7+P8+P9 probes."
