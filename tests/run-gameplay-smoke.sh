@@ -428,6 +428,7 @@ BANNER_REGEX=(
   "gus backend: multisample (ENABLED \(default\)|DISABLED \(killswitch =0\))"
   "audio: SDL/0113 GUS SFX bank-align: ENGAGED \(8-bit no-straddle 256K guard\)"
   "gus SFX DRAM-straddle diag \[nx0256\]"
+  "gus SFX rendersafe \[nx0257\]: (ON|OFF \(default\))"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -534,6 +535,7 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
   "optional"
   "optional"
   "optional"
