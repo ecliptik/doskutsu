@@ -1,0 +1,41 @@
+From e8cf1a1a25e3091baf88cbe28104c307424b7134 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 5 Jul 2026 16:01:33 -0700
+Subject: [PATCH] patch 0258 -- #38: fix GUS SFX-init quit-to-DOS (missing
+ 'skipped' summary arg)
+
+The initGusSfx() completion summary LOG_INFO has 5 {} placeholders but passed
+only 4 args (uploaded, NUM_SOUNDS, failed, used_kb) -- the 'skipped' count was
+omitted (args jump from 'failed' straight to 'used_kb'). The DJGPP logger routes
+the format string through fmt::format_to as a RUNTIME format (not FMT_STRING),
+so it is NOT a compile error; at runtime fmt throws format_error("argument not
+found"), uncaught on DJGPP -> std::terminate -> quit-to-DOS.
+
+Why DOS needs this: on DJGPP a fmt runtime-format arg-count mismatch is a hard
+terminate (uncaught exception), not a silent truncation. It fires the instant
+the SFX upload loop finishes -- deterministic, RENDERSAFE-independent -- which
+IS the #38 crash, and why SFX_OFF=1 (initGusSfx skipped) always dodged it. g2k
+wave-gussfx2 logs (GSF2A/GSF2B) show the loop completing to the last slot fx75
+then dying before this summary ever prints. Fix: pass 'skipped' as the 4th arg.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index f7427a15..e8829930 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -849,7 +849,7 @@ bool Pixtone::initGusSfx()
+            "Persistent SFX bank = {} KB DRAM (the MidiBackendGus per-song .pat "
+            "residency preserves it via its auto-snapshotted keep-mark at first "
+            "song start; the reserve above it always fits a song's instruments).",
+-           uploaded, (int)NUM_SOUNDS, failed, used_kb);
++           uploaded, (int)NUM_SOUNDS, failed, skipped, used_kb);
+   return uploaded > 0;
+ }
+ 
+-- 
+2.47.3
+
