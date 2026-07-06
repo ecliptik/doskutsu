@@ -1976,10 +1976,8 @@ static const struct
  * the GF1 wavetable; AdLib has no DAC (effects forced off). */
 static const char *sfx_native_name(const char *be)
 {
-  /* NOTE: the "gus" branch is currently UNREACHED -- GF1 SFX is not yet
-   * supported (engine bug #38), so callers gate Gravis to music-only before
-   * reaching here (sfx_current_name returns early; the FX picker omits the
-   * native row for gus). Kept correct-in-isolation for when #38 lands. */
+  /* #38 landed: GF1 SFX now works, so the "gus" branch IS reached -- Gravis
+   * offers a native SFX device (the GF1 wavetable) just like Sound Blaster. */
   if (strcmp(be, "gus") == 0)   return "Gravis UltraSound";
   if (strcmp(be, "adlib") == 0) return "No Sound FX"; /* DAC-less: forced off */
   return "Sound Blaster"; /* opl3 / organya / wb / auto / none -> SB DAC */
@@ -1993,9 +1991,6 @@ static const char *sfx_current_name(void)
   const char *be = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
   const char *sd = scfg_get(&g_cfg, scfg_index("SFX_DEVICE"));
   if (strcmp(be, "adlib") == 0)  return "No Sound FX";
-  if (strcmp(be, "gus") == 0)    return "No Sound FX"; /* GF1 SFX not yet
-    supported (engine bug #38): Gravis is music-only, so effects always read
-    off regardless of SFX_DEVICE. */
   if (strcmp(sd, "none") == 0)   return "No Sound FX";
   return sfx_native_name(be);
 }
@@ -2018,8 +2013,6 @@ static int snd_pick_music_card(void)
   int mdidx = scfg_index("MIDI_DEV");
   const char *cur = scfg_get(&g_cfg, beidx);
   const char *curmd = scfg_get(&g_cfg, mdidx);
-  int was_gus = strcmp(cur, "gus") == 0; /* capture before the backend set:
-    cur points into g_cfg storage that scfg_set() overwrites. */
   int i, choice, start = 0;
 
   for (i = 0; i < MUSIC_NCARDS; ++i)
@@ -2054,23 +2047,10 @@ static int snd_pick_music_card(void)
     g_dirty = 1;
   }
 
-  /* GUS is music-only today (engine bug #38: GF1 SFX init crashes), so force
-   * sound effects OFF whenever Gravis is the music card -- the ONLY safe state,
-   * and it stops the derived-native-GF1 SFX path from crashing the game even if
-   * the user never opens the SFX picker. Leaving Gravis for any other card
-   * clears that forced "none" so the new card's native DAC drives effects. */
-  {
-    int sfxidx = scfg_index("SFX_DEVICE");
-    const char *sd = scfg_get(&g_cfg, sfxidx);
-    if (strcmp(MUSIC_CARDS[choice].value, "gus") == 0)
-    {
-      if (strcmp(sd, "none") != 0) { scfg_set(&g_cfg, sfxidx, "none"); g_dirty = 1; }
-    }
-    else if (was_gus && strcmp(sd, "none") == 0)
-    {
-      scfg_set(&g_cfg, sfxidx, ""); g_dirty = 1;
-    }
-  }
+  /* #38 fixed: Gravis GF1 SFX now works, so picking GUS no longer forces
+   * effects off. SFX_DEVICE is left as-is (unset/empty -> the engine derives
+   * the native GF1 SFX device = effects ON by default, mirroring the SB path);
+   * a user who wants music-only can still pick "No Sound FX" in the FX picker. */
 
   /* Walk the card's required param sub-screen(s), then return to the hub. */
   tui_clear();
@@ -2093,10 +2073,9 @@ static int snd_pick_music_card(void)
 /* "Select Sound FX Device" picker (Sound hub row 2). The list is NARROWED by
  * the current music card (sec.4 / operator coupling): SB-family + Auto + No
  * Music -> { Sound Blaster, No Sound FX }; AdLib -> { No Sound FX } only
- * (DAC-less); Gravis -> { No Sound FX } only (GF1 SFX is NOT yet supported --
- * engine bug #38 crashes at GF1 SFX init, so Gravis is music-only today; we do
- * NOT offer a "Gravis UltraSound" SFX row or the user could write a config that
- * crashes the game). The "no effects" reason rides the description pane, NOT a
+ * (DAC-less); Gravis -> { Gravis UltraSound, No Sound FX } (#38 fixed -- GF1
+ * SFX plays on the wavetable alongside the music, sharing the card's voices).
+ * The "no effects"/device reason rides the description pane, NOT a
  * blocking modal -- every picker is a uniform list with a No-X row. The native
  * device is the SAME hardware already configured for music, so this pick is
  * purely on/off: the native row clears SFX_DEVICE (engine derives it), "No
@@ -2118,17 +2097,19 @@ static int snd_pick_sfx_device(void)
   int n = 0, start, choice;
   int adlib = strcmp(be, "adlib") == 0;
   int gus   = strcmp(be, "gus") == 0;
-  /* AdLib is DAC-less and Gravis GF1 SFX is not yet supported (engine bug #38),
-   * so both cards are music-only: NO native SFX row, just the No-Sound-FX entry
-   * with the reason in the description pane. */
-  int no_native = adlib || gus;
+  /* AdLib is DAC-less (music-only): NO native SFX row. Gravis GF1 SFX is now
+   * supported (#38 fixed), so it offers a native row like Sound Blaster. */
+  int no_native = adlib;
 
   /* Native device row (Sound Blaster) -- clears the key so the engine derives
    * the card's native DAC. Omitted entirely for the music-only cards above. */
   if (!no_native)
   {
     items[n] = sfx_native_name(be);
-    descs[n] = "Sound effects play through the Sound Blaster DAC.";
+    descs[n] = gus
+               ? "Sound effects play on the Gravis UltraSound GF1 wavetable, "
+                 "alongside the music (shared card voices)."
+               : "Sound effects play through the Sound Blaster DAC.";
     raw[n] = ""; /* clear SFX_DEVICE: the engine derives the native device */
     ++n;
   }
@@ -2136,10 +2117,7 @@ static int snd_pick_sfx_device(void)
   items[n] = "No Sound FX";
   descs[n] = adlib
              ? "AdLib (OPL2) has no DAC, so sound effects are unavailable. "
-               "Pick Sound Blaster, Organya, or General MIDI music to get effects."
-             : gus
-             ? "Gravis sound effects are not yet supported (music only). "
-               "Pick Sound Blaster, Organya, or General MIDI music to get effects."
+               "Pick Sound Blaster, Gravis, Organya, or General MIDI music to get effects."
              : "Turn sound effects off. Music keeps playing.";
   raw[n] = "none";
   ++n;

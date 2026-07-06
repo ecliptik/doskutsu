@@ -45,8 +45,9 @@ impossible combination:
 - A **Sound Blaster-family** music card (Sound Blaster / WaveBlaster / General
   MIDI / Organya / Auto-detect) offers **Sound Blaster** or **No Sound FX**.
 - **AdLib** (OPL2) has no DAC, so it offers only **No Sound FX**.
-- **Gravis UltraSound** offers only **No Sound FX** today (GUS sound effects
-  are not yet available -- see the Gravis section).
+- **Gravis UltraSound** offers **Gravis UltraSound** (the default -- effects on)
+  or **No Sound FX** (music only). GUS effects play on the GF1 wavetable
+  alongside the music -- see the Gravis section.
 
 The one independent combination worth calling out: with **General MIDI** or
 **WaveBlaster** music (which play on an external module or daughterboard), the
@@ -158,10 +159,13 @@ experimental and PicoGUS-specific.
 
 ### Sound effects on the GUS
 
-GUS sound effects are **not available yet** -- the Gravis backend is
-**music-only** for now, so the FX-device picker offers only **No Sound FX** on
-a GUS card. (If you want both music and effects without a Sound Blaster, that
-combination is still in development.)
+GUS sound effects **play on the GF1 wavetable** alongside the music -- no Sound
+Blaster needed. The FX-device picker offers **Gravis UltraSound** (the default,
+effects on) or **No Sound FX** (music only). Cave Story's digital effects are
+uploaded once into the card's DRAM as 8-bit samples and play on the GF1's
+hardware voices, which they share with the music. Because those voices are
+shared, effects are a touch grainier than on a dedicated Sound Blaster, and very
+busy scenes may briefly thin the music -- a fair trade on a no-SB card.
 
 ## Sound Blaster
 
