@@ -5,6 +5,36 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.6.1] - 2026-07-06
+
+Robustness fixes for hardware beyond the reference machine, from the
+public-release code review. No behavior change on the reference target.
+
+### Fixed
+
+- **Banked VESA blit corrupted frames on cards whose bank granularity is
+  smaller than the window size** (a legal, not-rare VBE configuration). The
+  multi-bank walk now recomputes the bank from the VRAM offset each step.
+  Default-on; `SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0` restores the old walk.
+- **Unbounded vertical-blank wait could hang the machine** on a display mode
+  whose retrace bit never toggles. The wait is now time-bounded.
+  Default-on; `SDL_HINT_DOSKUTSU_VBLANK_BOUND=0` restores the old spin.
+- **`GUS_VOICES=28` (the PicoGUS silent voice count) is now nudged to 27**
+  instead of being accepted verbatim, with a log line explaining why.
+- **Two log format strings that crashed to DOS at runtime** (an unimplemented
+  TSC script opcode -- reachable by mods -- and a debug-level map log).
+- **SETUP reported "Settings saved." even when the write failed** (full or
+  write-protected disk). Write errors now surface the error message.
+- `make sources` now exists as documented; release-script asset uploads now
+  abort loudly on failure instead of publishing an incomplete release.
+
+### Known notes
+
+- PicoGUS firmware v4.x in Sound Blaster mode requires the BLASTER variable's
+  low (D) and high (H) DMA digits to MATCH (e.g. `D1 H1 T6`); with the older
+  `D1 H5` form the card never arms DMA and all Sound Blaster audio is silent.
+  Doskutsu handles `H1` correctly (auto 8-bit fallback).
+
 ## [1.6.0] - 2026-07-06
 
 Native Gravis UltraSound support -- GF1 wavetable music AND sound effects on a
