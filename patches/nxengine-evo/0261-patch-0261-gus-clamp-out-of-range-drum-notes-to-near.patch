@@ -1,0 +1,51 @@
+From 8ad3de6018d6c94a347d6bb2bb4b0b4f7f7e5384 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 6 Jul 2026 09:55:06 -0700
+Subject: [PATCH] patch 0261 -- gus: clamp out-of-range drum notes to nearest
+ percussion
+
+g2k found mura.mid uses a few drum notes outside the GM 27..87 range.
+_drum_patch_name returned null for those, and on_song_start counted them
+'missing/silent' with NO log and NO .pat lookup -- so mura's background
+percussion silently vanished (3 'missing' that were neither a DRAM-full drop
+nor a not-found .pat). Clamp such notes to the nearest defined percussion (27 or
+87) so they play instead of dropping, and log each out-of-range note at load so
+we can see exactly which the song used. General fix -- applies to every song.
+---
+ src/sound/MidiBackendGus.cpp | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/sound/MidiBackendGus.cpp b/src/sound/MidiBackendGus.cpp
+index f9451b60..c51a331c 100644
+--- a/src/sound/MidiBackendGus.cpp
++++ b/src/sound/MidiBackendGus.cpp
+@@ -93,7 +93,13 @@ const char *MidiBackendGus::_melodic_patch_name(int program)
+ 
+ const char *MidiBackendGus::_drum_patch_name(int note)
+ {
+-  if (note < 27 || note > 87) return nullptr;
++  // nx0261: clamp out-of-GM-range drum notes (< 27 or > 87) to the nearest
++  // defined percussion instead of returning null. A null used to be counted
++  // "missing/silent" with no log and no .pat lookup -- g2k found mura.mid uses a
++  // few such notes, so its background percussion vanished. Nearest-in-range
++  // beats silence for these rare edge notes.
++  if (note < 27) note = 27;
++  else if (note > 87) note = 87;
+   return DRUM_NAMES[note - 27];
+ }
+ 
+@@ -865,7 +871,10 @@ void MidiBackendGus::on_song_start()
+   for (int n = 0; n < 128; ++n)
+   {
+     if (!drum_used[n]) continue;
+-    const char *nm = _drum_patch_name(n);
++    const char *nm = _drum_patch_name(n);  // nx0261: never null now (clamped)
++    if (n < 27 || n > 87)
++      LOG_INFO("gus backend: drum note {} outside GM 27..87 -> nearest '{}' "
++               "(nx0261; was silently dropped before).", n, nm);
+     if (nm && _upload_pat(nm, /*is_drum=*/true, &_drum[n]))
+       ++loaded;
+     else
+-- 
+2.47.3
+

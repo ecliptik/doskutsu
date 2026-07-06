@@ -1,0 +1,45 @@
+From b6a7dfd27228d9843687792560881375e0207774 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 6 Jul 2026 09:34:38 -0700
+Subject: [PATCH] patch 0260 -- gus SFX: bump music DRAM reserve 320 -> 384 KB
+ (fit busy-song percussion)
+
+g2k data (2026-07-06): mura/plant loaded their GM instruments up to ~996 KB
+(near the 1 MB GF1 ceiling) and the tail-end background Latin percussion
+(bongolo/congahi2/congalo) hit 'DRAM upload failed (full?)' and dropped silent.
+The .pat exist and are fine -- it is purely the SFX-vs-music DRAM split: 320 KB
+reserved for a song's .pat set was a hair too small for the busiest songs.
+
+Bump RESERVE_FOR_MUSIC 320 -> 384 KB so the full instrument set fits. Cost is a
+shrunk SFX bank (~640 KB vs ~704 KB) -> a handful of the least-used late SFX
+slots get budget-skipped. Operator call (music quality > a few rare effects).
+---
+ src/sound/Pixtone.cpp | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 0e68529b..382e1777 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -606,10 +606,14 @@ bool Pixtone::initGusSfx()
+   // small card SFX degrades gracefully (over-budget SFX stay silent) but music
+   // ALWAYS loads. Without this, bq-pg's 256KB DOSBox GF1 filled with SFX alone ->
+   // music starved. INVARIANT (holds at any DRAM size), not a measured perf-tune.
+-  // RESERVE_FOR_MUSIC is a CONSERVATIVE DEFAULT -- REFINE once realhw #30 reports
+-  // the real PicoGUS /mode gus DRAM size (via the SDL/0112 detect banner) + the
+-  // actual per-song .pat footprint.
+-  static const uint32_t RESERVE_FOR_MUSIC = 320u * 1024u;  // ~a song's instrument set
++  // RESERVE_FOR_MUSIC refined 2026-07-06 from g2k data: busy songs (mura/plant)
++  // need slightly MORE than 320 KB for their full GM .pat set, so the tail-end
++  // instruments (background Latin percussion: bongolo/congahi2/congalo) hit
++  // "DRAM upload failed (full?)" and dropped silent. Bumped 320 -> 384 KB --
++  // audibly-thin music reads worse than losing a handful of the least-used late
++  // SFX slots (which get budget-skipped from the now-smaller SFX bank). This is
++  // the SFX-vs-music DRAM split on the 1 MB GF1; see docs/SOUND.md.
++  static const uint32_t RESERVE_FOR_MUSIC = 384u * 1024u;  // ~a busy song's instrument set
+   const uint32_t sfx_budget =
+       (st.dram_size > RESERVE_FOR_MUSIC) ? (st.dram_size - RESERVE_FOR_MUSIC)
+                                          : (st.dram_size / 2);  // tiny card: 50/50 floor
+-- 
+2.47.3
+
