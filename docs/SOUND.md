@@ -101,6 +101,37 @@ SET ULTRADIR=C:\ULTRASND
 A normal Gravis install sets both for you. If the patch set is missing, the
 card is found but instruments play silently.
 
+**The music is only as good as the patch set.** doskutsu maps every General
+MIDI program to its canonical Gravis `.pat` name (`acpiano`, `honky`, `epiano2`,
+...), so two things about your `ULTRASND` set decide the sound -- for the whole
+soundtrack at once, since every song resolves through the same names:
+
+- **Completeness.** Every instrument a song uses needs its `.pat` present, or
+  that part plays silent (a thinner arrangement). If tracks sound like they are
+  missing instruments, your set is incomplete -- install the full set.
+- **Sample quality.** The stock Gravis samples are serviceable, but a few
+  (honky-tonk piano, harmonica, and others) sound reedy. Better-sampled sets use
+  the **same filenames**, so they drop in with no config change and lift every
+  track.
+
+Recommended sets (unzip into `C:\ULTRASND`, keep `ULTRADIR=C:\ULTRASND`; all use
+the canonical Gravis filenames, so any works with doskutsu unchanged):
+
+| Set | What it is | Best for |
+|-----|-----------|----------|
+| **Full Gravis stock** (`dgguspat`) | The complete ~5.6 MB original Gravis patch set | Fixing missing instruments; baseline quality. Start here if tracks sound incomplete. |
+| **Pro Patches Lite** | Higher-quality replacements, deliberately compact | **The sweet spot on a 1 MB card** -- better fidelity that still fits the GF1 DRAM budget. |
+| **EAWPATS** | Large, high-quality GM collection (Ultrasound / Midia / Roland / etc.) | Best raw fidelity, but large -- see the DRAM note. |
+
+> **GF1 DRAM ceiling: 1 MB.** The GF1 mixes instruments from on-board DRAM, and
+> the chip's 20-bit address space caps that at **1 MB** -- on a real GUS *and* on
+> the PicoGUS, which emulates the GF1, so the same architectural limit applies
+> (you cannot raise it). doskutsu loads only the instruments each song needs and
+> trims multisamples if a song would overflow, so any set stays *safe*; but a
+> very large set (full EAWPATS) may lose some per-note sample coverage on a busy
+> song. The stock set and Pro Patches Lite avoid that. Pairing a good set with
+> `pgusinit /gus44k 1` + 32 voices (below) gives the best overall result.
+
 ### Voice count
 
 The GF1's output sample rate is set by how many voices it mixes:
