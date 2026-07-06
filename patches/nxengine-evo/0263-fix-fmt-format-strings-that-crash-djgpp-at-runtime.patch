@@ -1,0 +1,77 @@
+From abce52ff8e3151b72ed32b46be38101955300c79 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 6 Jul 2026 11:51:01 -0700
+Subject: [PATCH] patch 0263 -- fix fmt format strings that crash DJGPP at
+ runtime
+
+Two LOG_* calls used format strings that fmt cannot process, and on
+this build that is fatal rather than cosmetic.
+
+The DOS build bundles fmt 12.1.0 but is pinned to C++11 (see
+0002-cmake-djgpp-target-flags.patch). fmt's consteval compile-time
+format-string checking requires C++20, so under C++11 fmt falls back to
+RUNTIME format parsing. An uncaught fmt::format_error is std::terminate
+on DJGPP -- i.e. an instant quit-to-DOS with no orderly shutdown. This
+is the exact failure class that produced bug #38 (fixed in 0258); these
+are two more instances of it that static review surfaced.
+
+  * src/tsc.cpp:1391 -- LOG_WARN mixed a printf "%s" (which fmt treats
+    as literal text) with a real field "{:#04d}". fmt bound the FIRST
+    argument -- cmd_table[cmd].mnemonic, a const char* -- to the integer
+    presentation "d", which throws format_error. This LOG_WARN sits at
+    WARN level (>= the default INFO threshold) so it ALWAYS formats when
+    reached. Trigger: a TSC script executes an opcode that is a known
+    mnemonic but unimplemented in the switch (cmd < OP_COUNT). The
+    intended behavior is a graceful "script halted" warning; instead the
+    engine terminated to DOS. Stock Cave Story data does not hit this,
+    but third-party mods / future opcodes do. Fixed by replacing "%s"
+    with "{}", matching the already-correct sibling call at tsc.cpp:1395.
+
+  * src/map.cpp:1732 -- LOG_DEBUG used "{:%02d}", which is not valid fmt
+    replacement-field grammar ('%' is not a legal fill/align/type), so
+    fmt throws format_error while parsing the field. This is DEBUG level
+    and the DJGPP logger short-circuits below the default INFO threshold
+    before formatting, so it is latent today -- but it becomes a hard
+    crash the moment anyone raises the log level (e.g. to diagnose an
+    unrelated issue) and an object appears on a flag. Fixed to "{:02d}".
+
+Both are pure log-string corrections: placeholder count now equals
+argument count and every field's presentation type matches its argument
+type. No behavior change on any non-crashing path; no new hint, killswitch,
+or banner.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/map.cpp | 2 +-
+ src/tsc.cpp | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 355ed9ab..1de7701b 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1729,7 +1729,7 @@ bool load_entities(const std::string &fname)
+         if (game.flags[id1])
+         {
+           addobject = true;
+-          LOG_DEBUG("Appearing object {:%02d} ({}) because flag {} is set", id2, DescribeObjectType(type), id1);
++          LOG_DEBUG("Appearing object {:02d} ({}) because flag {} is set", id2, DescribeObjectType(type), id1);
+         }
+       }
+       else if (flags & FLAG_DISAPPEAR_ON_FLAGID)
+diff --git a/src/tsc.cpp b/src/tsc.cpp
+index f9ae6c43..b1b2341d 100644
+--- a/src/tsc.cpp
++++ b/src/tsc.cpp
+@@ -1388,7 +1388,7 @@ void TSC::ExecScript(ScriptInstance *s)
+       {
+         if (cmd < OP_COUNT)
+         {
+-          LOG_WARN("- unimplemented opcode %s; script #{:#04d} halted.", cmd_table[cmd].mnemonic, s->scriptno);
++          LOG_WARN("- unimplemented opcode {}; script #{:#04d} halted.", cmd_table[cmd].mnemonic, s->scriptno);
+         }
+         else
+         {
+-- 
+2.47.3
+
