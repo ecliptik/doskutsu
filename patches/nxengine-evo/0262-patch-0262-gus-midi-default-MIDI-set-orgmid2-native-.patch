@@ -1,0 +1,72 @@
+From 339219d445910b0f06b2ea9e0a2ba2711ce4b021 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 6 Jul 2026 11:33:34 -0700
+Subject: [PATCH] patch 0262 -- gus/midi: default MIDI set = orgmid2 (native GM
+ percussion)
+
+Operator A/B on g2k (2026-07-06): OrgMIDI v2 (data/orgmid2, our org2mid native-GM
+conversion) beat the default WiiWare set -- distinct GM drums (0 clamped vs 3)
+and richer arrangements. Make orgmid2 the default MIDI set for all MIDI backends.
+
+- Unset/empty SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE now resolves to orgmid2.
+- orgmid1/orgmid2 become first-class named sets (SETUP writes MIDI_SET=orgmid2),
+  each checked for >=1 .mid with graceful fallback to wiimidi (data/midi/) if a
+  setup has not run 'make convert-music' -- so a fresh install is never silent.
+- WiiWare stays selectable (MIDI_SET=wiimidi) via the SETUP MIDI-set row.
+---
+ src/sound/SoundManager.cpp | 32 +++++++++++++++++++++++++++++++-
+ 1 file changed, 31 insertions(+), 1 deletion(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index b1b73e6d..0d8c6137 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -796,7 +796,13 @@ bool SoundManager::init()
+     const bool variant_set = is_v1 || is_v2;
+     const char *variant_str = is_v1 ? "v1" : (is_v2 ? "v2" : "(unset; legacy)");
+ 
+-    if (src == nullptr || src[0] == '\0' || std::strcmp(src, "wiimidi") == 0)
++    // nx0262: the default MIDI set is now orgmid2 (native GM percussion;
++    // operator choice 2026-07-06, docs/SOUND.md). Unset/empty -> orgmid2,
++    // resolved by the orgmid1/orgmid2 branch below, which checks the dir holds
++    // >=1 .mid and falls back to wiimidi if a setup has not run the converter.
++    if (src == nullptr || src[0] == '\0') src = "orgmid2";
++
++    if (std::strcmp(src, "wiimidi") == 0)
+     {
+       _midi_source_dir = "midi";
+       if (variant_set)
+@@ -842,6 +848,30 @@ bool SoundManager::init()
+                "legacy ORGMID transcription preserved from wave-41).",
+                variant_str, _midi_source_dir);
+     }
++    else if (std::strcmp(src, "orgmid2") == 0 || std::strcmp(src, "orgmid1") == 0)
++    {
++      // nx0262: orgmid1/orgmid2 as first-class MIDI sets (orgmid2 = the shipped
++      // default). Unlike the variant-suffix A/B path above, these are selectable
++      // by name (SETUP writes MIDI_SET=orgmid2). Check the dir holds >=1 .mid and
++      // fall back to wiimidi if a setup has not generated it (docs/ASSETS.md
++      // "make convert-music") -- so a fresh install without the converted set is
++      // never left silent.
++      const std::string dirpath =
++          ResourceManager::getInstance()->getPathForDir(src);
++      if (_midi_dir_has_mid(dirpath))
++      {
++        _midi_source_dir = src;
++        LOG_INFO("MidiScheduler: MIDI source = '{}' (native-GM org2mid set; "
++                 "resolves to data/{}/<name>.mid).", src, _midi_source_dir);
++      }
++      else
++      {
++        _midi_source_dir = "midi";
++        LOG_WARN("MidiScheduler: MIDI set '{}' has no data/{}/*.mid -- run "
++                 "`make convert-music` (docs/ASSETS.md Step 4.5). Falling back "
++                 "to 'wiimidi' (data/midi/).", src, src);
++      }
++    }
+     else
+     {
+       // patch 0226 (#39b): custom user MIDI drop-in dir passthrough. Before
+-- 
+2.47.3
+

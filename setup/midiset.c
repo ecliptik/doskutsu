@@ -23,8 +23,8 @@ static const struct
   const char *label;
 } MIDISET_KNOWN[] =
 {
-  { "wiimidi", "midi",   "WiiWare" },
-  { "orgmid",  "orgmid", "OrgMIDI" }, /* display name only; engine hint value stays "orgmid" */
+  { "orgmid2", "orgmid2", "OrgMIDI" }, /* default: our org2mid v2, native GM percussion */
+  { "wiimidi", "midi",    "WiiWare" }, /* the external WiiWare arrangement set          */
 };
 #define MIDISET_KNOWN_N ((int)(sizeof(MIDISET_KNOWN) / sizeof(MIDISET_KNOWN[0])))
 

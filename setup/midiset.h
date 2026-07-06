@@ -14,11 +14,11 @@
  * CLOSED SET of LOGICAL values to fixed directories:
  *
  *   hint value            -> data subdir   ; meaning
- *   "" / "wiimidi"        -> data/midi/    ; WiiWare arrangements (default)
- *   "orgmid"              -> data/orgmid/  ; ORGMID note-for-note transcription
- *   "orgmid" + GM_VARIANT -> data/orgmid1/ , data/orgmid2/  (dev A/B; NOT
- *                                            exposed by SETUP -- Q-A2)
- *   any other value       -> data/midi/    ; unrecognized -> fallback + warn
+ *   "" / "orgmid2"        -> data/orgmid2/ ; org2mid v2, native GM (DEFAULT)
+ *   "orgmid1"             -> data/orgmid1/ ; org2mid v1
+ *   "wiimidi"             -> data/midi/    ; external WiiWare arrangements
+ *   "orgmid" (+ GM_VARIANT) -> data/orgmid/ (legacy) / orgmid1 / orgmid2
+ *   any other value       -> data/<dir>/ if it holds .mid, else wiimidi + warn
  *
  * SETUP offers the KNOWN logical sets whose directory is present on disk
  * (WiiWare/OrgMIDI), and -- since #39b (engine patch 0226) -- ALSO any other
@@ -57,11 +57,13 @@ typedef struct
 int midiset_scan(const char *data_dir, midiset_t *sets, int max);
 
 /* Index into sets[] whose value matches `value` (case-insensitive), treating
- * an empty/NULL value as the default "wiimidi". Returns -1 if not present. */
+ * an empty/NULL value as the default "orgmid2". Returns -1 if not present. */
 int midiset_index_by_value(const midiset_t *sets, int n, const char *value);
 
-/* The default MIDI_SET value (the engine's byte-neutral default). */
-#define MIDISET_DEFAULT_VALUE "wiimidi"
+/* The default MIDI_SET value -- MUST match the engine default in
+ * SoundManager.cpp (nx0262). "orgmid2" = our org2mid v2 native-GM set; the
+ * engine falls back to wiimidi if data/orgmid2/ was not generated. */
+#define MIDISET_DEFAULT_VALUE "orgmid2"
 
 #ifdef __cplusplus
 } /* extern "C" */
