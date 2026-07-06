@@ -431,6 +431,8 @@ BANNER_REGEX=(
   "gus SFX rendersafe \[nx0257\]: (ON|OFF \(default\))"
   "gus SFX voice routing \[nx0259\]:"
   "gus SFX gain \[nx0259\]: [0-9]+%"
+  "sdl: SDL/0115 BANK-GRAN-FIX (ENABLED|DISABLED)"
+  "sdl: SDL/0116 VBLANK-BOUND (ENABLED|DISABLED)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -563,6 +565,8 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "optional"
+  "required"
+  "required"
 )
 # BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 108 entries;
 # the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
@@ -685,6 +689,8 @@ BANNER_LABEL=(
   "0234 Campaign 2 AdLib backend selection (OPTIONAL -- 'audio backend: adlib (Campaign 2 -- native OPL2 FM synthesis ...)' emits at selectBackendFromEnv ONLY under SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib. The default smoke leaves AUDIO_BACKEND unset (-> opl3 default) so this is ABSENT, expected, not a failure (same OPTIONAL gating as the wave-44 AUDIO_BACKEND=opl3/wb selection banners). The witness is the dedicated AdLib cell: a no-Sound-Blaster DOSBox config (sbtype=none + oplmode=opl2) with SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib. Embed witness = strings|grep 'audio backend: adlib'. BANNER_REGEX idx 108.)"
   "0234 Campaign 2 AdLib no-mixer init path (OPTIONAL -- 'Sound system: AdLib (OPL2) path -- AUDIO_BACKEND=adlib. Skipping SB16 + SDL_mixer bring-up ...' emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib. ABSENT in the default smoke (no adlib), expected. The runtime witness that the THIRD boot mode engaged: main.cpp omitted SDL_INIT_AUDIO yet kept SoundManager::init, which then skipped MIX_Init/MIX_CreateMixerDevice and took the OPL2 path. MUSIC ONLY -- a DAC-less AdLib card has no PCM SFX. Embed witness = strings|grep 'AdLib (OPL2) path'. BANNER_REGEX idx 109.)"
   "0235 Campaign 2 AdLib PIT/IRQ-0 OPL music pump started (OPTIONAL -- 'adlib: OPL music pump STARTED at N Hz (PIT ch0 / IRQ-0 drives MidiScheduler::tick_isr; BIOS 18.2 Hz tick chained; restored on exit) ...' emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib AND when SDL_DOSOplTimerPumpStart succeeded (OPL2 detected, SB not hot, hz in [19,1000]). This is THE decisive runtime witness that the no-SB music clock engaged -- on a real AdLib/OPL2 card or PicoGUS /mode adlib the 8253 PIT ch0 is reprogrammed to N Hz (default 120; override SDL_HINT_DOSKUTSU_OPL_TIMER_HZ) and IRQ-0 drives the SAME tick_isr the SB path drives. ABSENT in the default smoke (no adlib), expected. NB per [[dosbox_not_proxy]] DOSBox-X confirms the banner/boot path but NOT real PIT/IRQ-0 timing -- the g2k AdLib iter is the perf/correctness witness (incl. PIT-restore-on-quit + BIOS-tick correctness). Embed witness = strings|grep 'OPL music pump STARTED'. BANNER_REGEX idx 110.)"
+  "SDL/0115 banked-blit granularity fix (REQUIRED -- 'sdl: SDL/0115 BANK-GRAN-FIX (ENABLED|DISABLED) ...' emits once at DOSVESA_CreateWindowFramebuffer on EVERY boot, before the first flush. Proves the WinGranularity<WinSize multi-bank-walk correction (patches/SDL/0115) is in the binary AND ran. Default-ON; strict-'0' killswitch SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0 flips the text to DISABLED (still matches). On g2k gran==size==64KB the corrected walk is byte-identical to the legacy bank++ sequence. Embed witness = strings|grep 'BANK-GRAN-FIX'.)"
+  "SDL/0116 bounded WaitForVBlank (REQUIRED -- 'sdl: SDL/0116 VBLANK-BOUND (ENABLED|DISABLED) ...' emits once at DOSVESA_CreateWindowFramebuffer on EVERY boot. Proves the mainline vblank-spin HW-IO-hang guard (patches/SDL/0116) is in the binary AND ran. Default-ON; strict-'0' killswitch SDL_HINT_DOSKUTSU_VBLANK_BOUND=0 flips the text to DISABLED (still matches). Embed witness = strings|grep 'VBLANK-BOUND'.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

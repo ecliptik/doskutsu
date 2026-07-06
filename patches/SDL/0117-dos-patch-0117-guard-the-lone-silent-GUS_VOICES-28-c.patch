@@ -1,0 +1,58 @@
+From 39fbffaed995bd3c73d3545fd9d94c36a742fcda Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 6 Jul 2026 11:57:42 -0700
+Subject: [PATCH] dos: patch 0117 -- guard the lone silent GUS_VOICES==28 count
+
+gus_resolve_voices clamped the GUS_VOICES hint only to [14,32]. The value
+28 is documented in this file's own header (and in the GUS campaign notes)
+as the single dead count: 28 active voices sets the GF1 output rate to
+exactly 22050 Hz, which collides with a PicoGUS firmware special-case
+(SCALE_22K_TO_44K forces 28-channel output up to 44.1 kHz) while the
+driver assumes 22050 -> rate mismatch -> dead silence on g2k. Every other
+count in range is audible; 28 is uniquely silent.
+
+The shipped default (20) never hits it, but for a PUBLIC release a stale
+autoexec or hand-set SDL_HINT_DOSKUTSU_GUS_VOICES=28 would silently kill
+all music with no diagnostic -- a documented hazard with zero code
+enforcement. This nudges 28 -> 27 (nearest audible count) and logs a loud
+"SDL/0117 GUS-VOICES-GUARD" line explaining why; the nudged count also
+shows through the existing SDL/0112 detect banner (voices=/rate=). No new
+killswitch: GUS_VOICES itself is the control (any other value is honored).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_gus.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
+index 1447fb233..b4a634734 100644
+--- a/src/audio/dos/SDL_dosaudio_gus.c
++++ b/src/audio/dos/SDL_dosaudio_gus.c
+@@ -596,6 +596,24 @@ static void gus_resolve_voices(void)
+     if (v > GUS_MAX_VOICES) {
+         v = GUS_MAX_VOICES;
+     }
++    /* DOSKUTSU patch 0117 (v1.6.1 public-HW): guard the lone dead voice-count.
++       28 active voices drives the GF1 output rate to exactly 22050 Hz, which
++       collides with a PicoGUS firmware special-case (SCALE_22K_TO_44K forces
++       28-channel output up to 44.1 kHz) while our driver assumes 22050 -> rate
++       mismatch -> dead silence on g2k (see the voice-count/rate note at the top
++       of this file, and gus_campaign_picogus_diag_wedge). Every other count in
++       [14,32] is audible; 28 is the single silent value. The default (20) never
++       hits it, but a hint/stale-autoexec SDL_HINT_DOSKUTSU_GUS_VOICES=28 would
++       silently kill music with no diagnostic. Nudge 28 -> 27 (nearest audible,
++       one extra voice of polyphony vs 27's neighbor) and make it loud so the
++       operator sees why. The resulting count flows into the SDL/0112 detect
++       banner (voices=%d rate=%dHz), so the nudge is visible there too. */
++    if (v == 28) {
++        doskutsu_dbg_log("audio: SDL/0117 GUS-VOICES-GUARD: requested 28 voices "
++                         "== the PicoGUS 22050Hz/SCALE_22K_TO_44K dead-silence "
++                         "special-case; nudged to 27 (nearest audible count)");
++        v = 27;
++    }
+     g_gus_voices = v;
+ }
+ 
+-- 
+2.47.3
+

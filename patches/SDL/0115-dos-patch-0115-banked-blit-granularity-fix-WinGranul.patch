@@ -1,0 +1,232 @@
+From 254b906694e7bfb6a1de4cb8143c029e6e8f04e6 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 6 Jul 2026 11:56:13 -0700
+Subject: [PATCH] dos: patch 0115 -- banked-blit granularity fix
+ (WinGranularity<WinSize)
+
+BankedDosmemput advanced banks with `bank++; off_in_win=0` after each
+window-full write. That is only correct when WinGranularity==WinSize.
+On any VBE card where the granularity is finer than the window (a legal
+and not-rare config, e.g. gran=4KB / size=64KB) the physical VRAM offset
+advances by one full window per iteration but the bank index advances by
+only one granularity unit, so every post-bank-0 chunk lands one gran unit
+past bank 0 instead of one window ahead -> ~60KB of each frame overwritten
+and the tail never lands -> scrambled lower screen.
+
+For a PUBLIC source release the port runs on hardware we do not control,
+so this latent banked-path corruption must be closed. The correct walk --
+recompute bank=offset/gran and off_in_win=offset%gran from the running
+VRAM offset each iteration (advancing the bank by win_size/gran units per
+window) -- already ships in this same tree for the mode-set blank loop
+(SDL_dosmodes.c:1024-1062); this patch brings the flush path in line.
+
+DEFAULT-ON with a strict-"0" killswitch (SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0)
+reverting to the legacy bank++ walk for field rollback / A-B, plus a
+one-shot boot banner "SDL/0115 BANK-GRAN-FIX" for the smoke banner gate.
+Includes WinGranularity==0 and WinGranularity>WinSize clamps (defensive,
+exact no-ops for every sane config) to stop a malformed BIOS underflowing
+the aperture arithmetic.
+
+g2k invariant: Cirrus CL-GD5430 + UniVBE 6.70 report gran==size==64KB, so
+offset/gran advances by exactly 1 per window and off_in_win is 0 at each
+boundary -- the new loop issues byte-for-byte the same SwitchBank +
+dosmemput sequence as the legacy walk. Zero behavioral change on the
+reference target; the fix only engages on gran<size cards.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c | 166 +++++++++++++++++++++--------
+ 1 file changed, 120 insertions(+), 46 deletions(-)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index dddb5f357..741bd4a4f 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -855,8 +855,34 @@ static bool populate_fb_state_for_direct_fb(SDL_VideoDevice *device,
+     return true;
+ }
+ 
++// DOSKUTSU patch 0115 (v1.6.1 public-HW): runtime lever for the banked
++// multi-bank-blit granularity fix. DEFAULT-ON; strict-"0" killswitch
++// SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0 reverts BankedDosmemput to the legacy
++// bank++ walk (only correct when WinGranularity==WinSize). Resolved once at
++// surface creation so the boot banner is emitted before the first flush.
++static int g_bank_gran_fix = 1;
++
+ bool DOSVESA_CreateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window, SDL_PixelFormat *format, void **pixels, int *pitch)
+ {
++    // DOSKUTSU patch 0115 (v1.6.1 public-HW): one-shot resolve + boot banner
++    // for the banked-blit granularity-fix killswitch. Emitted at surface
++    // creation (before any banked flush) so tests/run-gameplay-smoke.sh can
++    // witness "SDL/0115 BANK-GRAN-FIX" in the boot log.
++    {
++        static bool _bg_resolved = false;
++        if (!_bg_resolved) {
++            _bg_resolved = true;
++            const char *h = SDL_GetHint("SDL_HINT_DOSKUTSU_BANK_GRAN_FIX");
++            g_bank_gran_fix = (h && SDL_strcmp(h, "0") == 0) ? 0 : 1;
++            doskutsu_dbg_log("sdl: SDL/0115 BANK-GRAN-FIX %s "
++                             "(banked multi-bank walk recomputes bank=offset/gran "
++                             "each step; correct for WinGranularity<WinSize cards; "
++                             "g2k gran==size degenerates to the prior bank++ walk; "
++                             "killswitch SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0)",
++                             g_bank_gran_fix ? "ENABLED" : "DISABLED");
++        }
++    }
++
+     // DOSKUTSU diagnostic (patches/SDL/0008 + 0009): per-call entry trace
+     // for EVERY CreateWindowFramebuffer invocation. Patch 0008 caught only
+     // the final invocation in a real-HW capture; the new sequence counter
+@@ -1015,55 +1041,103 @@ SDL_FORCE_INLINE void BankedDosmemput(const Uint8 *src, Uint32 total_bytes, Uint
+                                       Uint32 win_base, Uint32 win_func_ptr,
+                                       int *current_bank)
+ {
+-    Uint32 src_off = 0;
+-    // DOS-PORT (wave 16.2): explicit bank index + per-bank offset, advanced
+-    // by `bank++; off_in_win = 0` at end of each iteration. Avoids the
+-    // `dst_offset / win_gran_bytes` and `dst_offset % win_gran_bytes`
+-    // recomputation that wave-16.1 sentinel evidence suggests was silently
+-    // miscompiling the bank-1 dosmemput dst.
+-    int bank = (int)(dst_offset / win_gran_bytes);
+-    Uint32 off_in_win = dst_offset - (Uint32)bank * win_gran_bytes;
+-    while (total_bytes > 0) {
+-        Uint32 avail = win_size_bytes - off_in_win;
+-        Uint32 n = total_bytes;
+-        if (n > avail) {
+-            n = avail;
++    // DOSKUTSU patch 0115 (v1.6.1 public-HW): defensive window-arithmetic
++    // clamps applied before either walk. No real VBE reports WinGranularity==0
++    // or WinGranularity>WinSize; these only keep `avail`/`n` from underflowing
++    // Uint32 (-> a wild dosmemput) on a malformed BIOS, and are EXACT no-ops
++    // for every sane config -- including g2k gran==size==64KB and the
++    // WinGranularity<WinSize cards this patch fixes (gran<size -> no clamp).
++    if (win_gran_bytes == 0) {
++        win_gran_bytes = win_size_bytes ? win_size_bytes : 1;
++    }
++    if (win_gran_bytes > win_size_bytes) {
++        win_gran_bytes = win_size_bytes;
++    }
++
++    if (g_bank_gran_fix) {
++        // DOSKUTSU patch 0115 (v1.6.1 public-HW): CORRECT multi-bank walk
++        // (DEFAULT-ON). Recompute the bank index + aperture offset from the
++        // running VRAM offset every iteration:
++        //     bank       = offset / win_gran_bytes
++        //     off_in_win = offset % win_gran_bytes
++        // so a full window advances the bank by win_size/gran granularity
++        // units, NOT the hard-coded +1 the legacy walk used. This mirrors the
++        // proven blank-loop walk in SDL_dosmodes.c:1024-1062 (the same file
++        // already ships this correct form). On a card where WinGranularity <
++        // WinSize (e.g. gran=4KB / size=64KB) the legacy bank++ landed each
++        // subsequent window one granularity unit past bank 0 instead of one
++        // full window ahead -> scrambled lower screen; this form is correct.
++        // CAUTION / g2k invariant: when gran==size (Cirrus+UniVBE reports
++        // 64KB/64KB), offset/gran advances by exactly 1 per window and
++        // off_in_win aligns to 0 at each window boundary, so this loop issues
++        // byte-for-byte the same SwitchBank + dosmemput sequence as the legacy
++        // walk -> zero behavioral change on the reference target.
++        const Uint32 end = dst_offset + total_bytes;
++        Uint32 offset = dst_offset;
++        Uint32 src_off = 0;
++        while (offset < end) {
++            const int bank = (int)(offset / win_gran_bytes);
++            const Uint32 off_in_win = offset % win_gran_bytes;
++            Uint32 n = win_size_bytes - off_in_win;
++            if (n > end - offset) {
++                n = end - offset;
++            }
++            SwitchBank(bank, current_bank, win_func_ptr);
++            dosmemput(src + src_off, n, win_base + off_in_win);
++            {
++                static int _p115_logged = 0;
++                if (bank > 0 && _p115_logged == 0) {
++                    _p115_logged = 1;
++                    doskutsu_dbg_log(
++                        "SDL/0115 BANK-GRAN-WALK: bank=%d off_in_win=%lu bytes=%lu "
++                        "win_gran=%lu win_size=%lu (first non-bank-0 write; "
++                        "offset/gran recompute active)",
++                        bank, (unsigned long)off_in_win, (unsigned long)n,
++                        (unsigned long)win_gran_bytes, (unsigned long)win_size_bytes);
++                }
++            }
++            // DOSKUTSU patch 0027 (wave 16 banked-flush audit): byte counter.
++            _dbg_bytes_written_total += n;
++            src_off += n;
++            offset += n;
+         }
+-        SwitchBank(bank, current_bank, win_func_ptr);
+-        const Uint32 dst_phys = win_base + off_in_win;
+-        dosmemput(src + src_off, n, dst_phys);
+-        // DOSKUTSU patch 0029 (wave 16.2 bank-1 offset fix) one-shot
+-        // diagnostic: log the math the FIRST time we issue a non-bank-0
+-        // dosmemput, so SDLDBG.LOG positively confirms src_off, dst_off,
+-        // bytes, and win_base for the bank-1 (and any subsequent bank)
+-        // write. Build-qa greps `strings build/doskutsu.exe` for
+-        // "WAVE16-2-BANK1-FIX" to verify the fix landed in the binary.
+-        {
+-            static int _w162_logged = 0;
+-            if (bank > 0 && _w162_logged == 0) {
+-                _w162_logged = 1;
+-                doskutsu_dbg_log(
+-                    "WAVE16-2-BANK1-FIX: bank=%d src_off=%lu dst_off=%lu "
+-                    "bytes=%lu win_base=0x%08lx win_gran=%lu win_size=%lu "
+-                    "(first non-bank-0 dosmemput; defensive offset rewrite "
+-                    "active)",
+-                    bank, (unsigned long)src_off, (unsigned long)off_in_win,
+-                    (unsigned long)n, (unsigned long)win_base,
+-                    (unsigned long)win_gran_bytes, (unsigned long)win_size_bytes);
++        return;
++    }
++
++    // Legacy bank++ walk (killswitch SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0). Only
++    // correct when gran==size; retained verbatim for field rollback / A-B.
++    {
++        Uint32 src_off = 0;
++        int bank = (int)(dst_offset / win_gran_bytes);
++        Uint32 off_in_win = dst_offset - (Uint32)bank * win_gran_bytes;
++        while (total_bytes > 0) {
++            Uint32 avail = win_size_bytes - off_in_win;
++            Uint32 n = total_bytes;
++            if (n > avail) {
++                n = avail;
++            }
++            SwitchBank(bank, current_bank, win_func_ptr);
++            const Uint32 dst_phys = win_base + off_in_win;
++            dosmemput(src + src_off, n, dst_phys);
++            {
++                static int _w162_logged = 0;
++                if (bank > 0 && _w162_logged == 0) {
++                    _w162_logged = 1;
++                    doskutsu_dbg_log(
++                        "WAVE16-2-BANK1-FIX: bank=%d src_off=%lu dst_off=%lu "
++                        "bytes=%lu win_base=0x%08lx win_gran=%lu win_size=%lu "
++                        "(first non-bank-0 dosmemput; legacy bank++ walk)",
++                        bank, (unsigned long)src_off, (unsigned long)off_in_win,
++                        (unsigned long)n, (unsigned long)win_base,
++                        (unsigned long)win_gran_bytes, (unsigned long)win_size_bytes);
++                }
+             }
++            _dbg_bytes_written_total += n;
++            src_off += n;
++            total_bytes -= n;
++            bank++;
++            off_in_win = 0;
+         }
+-        // DOSKUTSU patch 0027 (wave 16 banked-flush audit): count
+-        // bytes pushed through the banked window. Used to confirm the
+-        // full fb_size lands per flush at 8bpp (76,800 B) vs falling
+-        // off after the first bank (would show ~65,536 B / flush).
+-        _dbg_bytes_written_total += n;
+-        src_off += n;
+-        total_bytes -= n;
+-        // DOS-PORT (wave 16.2): advance to next bank explicitly. The
+-        // next iteration writes from offset 0 of the new bank, not
+-        // dst_offset % win_gran_bytes of an accumulated dst_offset.
+-        bank++;
+-        off_in_win = 0;
+     }
+ }
+ 
+-- 
+2.47.3
+
