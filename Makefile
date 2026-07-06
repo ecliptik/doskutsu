@@ -294,7 +294,14 @@ fetch-binaries-lfn:
 # convenience target below so the build fails before producing a binary
 # that silently lacks a patch's effects.
 
-.PHONY: patches verify-patches-applied
+.PHONY: sources patches verify-patches-applied
+# `make sources` clones the vendored upstreams per vendor/sources.manifest --
+# a convenience alias for ./scripts/fetch-sources.sh so the documented
+# `make sources` command (CLAUDE.md build-chain summary) resolves. Symmetric
+# with `make patches` below.
+sources:
+	@$(REPO_ROOT)/scripts/fetch-sources.sh
+
 patches:
 	@$(REPO_ROOT)/scripts/apply-patches.sh
 

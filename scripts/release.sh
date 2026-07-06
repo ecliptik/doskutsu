@@ -100,15 +100,29 @@ release_gitea_api() {
     fi
     echo "  Created release ID: $release_id"
 
-    local file filename
+    local file filename upload upload_code upload_body upload_id
     for file in "${RELEASE_FILES[@]}"; do
         filename=$(basename "$file")
         echo "  Uploading $filename..."
-        curl -s -X POST \
+        # Capture body + trailing HTTP status so a failed upload aborts LOUD
+        # instead of leaving a published release with a missing/partial asset.
+        # A curl transport failure (nonzero exit) is caught first; then the
+        # forge API must answer 201 Created with an attachment .id.
+        if ! upload=$(curl -s -w $'\n%{http_code}' -X POST \
             "$base_url/api/v1/repos/$repo/releases/$release_id/assets?name=$filename" \
             -H "Authorization: token $token" \
             -H "Content-Type: application/octet-stream" \
-            --data-binary @"$file" > /dev/null
+            --data-binary @"$file"); then
+            echo "UPLOAD_FAILED: $forge asset $filename -- curl transport error" >&2
+            return 1
+        fi
+        upload_code="${upload##*$'\n'}"
+        upload_body="${upload%$'\n'*}"
+        upload_id=$(echo "$upload_body" | jq -r '.id // empty')
+        if [ "$upload_code" != "201" ] || [ -z "$upload_id" ]; then
+            echo "UPLOAD_FAILED: $forge asset $filename (HTTP $upload_code): $upload_body" >&2
+            return 1
+        fi
     done
     echo "  $forge release complete: $base_url/$repo/releases/tag/$tag"
 }

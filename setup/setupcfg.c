@@ -151,6 +151,18 @@ int scfg_save(const scfg_t *c, const char *path)
     fprintf(f, "%s=%s\r\n", k->cfg_key, c->values[i]);
   }
 
-  fclose(f);
+  /* A partial write (disk full / write-protected CF detected mid-stream) sets
+   * the stream error indicator; fclose() flushes the stdio buffer, so a
+   * flush/close failure surfaces here even when the earlier fprintf()s all
+   * returned. Report either as -1 so cfg_write_toast()'s "disk full / read-only"
+   * branch fires instead of falsely claiming "Settings saved" over a truncated
+   * DOSKUTSU.CFG. */
+  if (ferror(f))
+  {
+    fclose(f);
+    return -1;
+  }
+  if (fclose(f) != 0)
+    return -1;
   return 0;
 }
