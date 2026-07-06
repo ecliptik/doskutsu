@@ -429,6 +429,8 @@ BANNER_REGEX=(
   "audio: SDL/0113 GUS SFX bank-align: ENGAGED \(8-bit no-straddle 256K guard\)"
   "gus SFX DRAM-straddle diag \[nx0256\]"
   "gus SFX rendersafe \[nx0257\]: (ON|OFF \(default\))"
+  "gus SFX voice routing \[nx0259\]:"
+  "gus SFX gain \[nx0259\]: [0-9]+%"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -535,6 +537,8 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
+  "optional"
   "optional"
   "optional"
   "optional"

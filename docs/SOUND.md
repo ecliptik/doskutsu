@@ -157,6 +157,12 @@ count*. Combine `/gus44k 1` with **32 voices** to run maximum polyphony
 (32 simultaneous notes) at full 44.1 kHz fidelity -- the premium config. It is
 experimental and PicoGUS-specific.
 
+This is also the best config once you enable **sound effects** on the GUS:
+effects share the GF1 voices with the music (see below), so the extra polyphony
+keeps a burst of effects from thinning the music. On the default 20-voice
+config the effects reserve a few voices for themselves so they never cut music
+notes, but the `/gus44k 1` + 32-voice setup gives both the most room.
+
 ### Sound effects on the GUS
 
 GUS sound effects **play on the GF1 wavetable** alongside the music -- no Sound

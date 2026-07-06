@@ -1,0 +1,162 @@
+From 95001550ba77b68939288776e271d8fad03f6bda Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 5 Jul 2026 20:57:14 -0700
+Subject: [PATCH] patch 0259 -- gus SFX (#38 iter-5): route SFX to reserved GF1
+ voice slice + SFX/music gain balance
+
+Two fidelity-tuning changes on the AUDIO_BACKEND=gus SFX path, both
+hint-tunable so the g2k ear-judge dials them.
+
+1. RESERVED-VOICE ROUTING. Pixtone::_gusPlay allocated SFX voices from
+   the general GF1 pool via SDL_DOSGusAllocVoice -- the same pool the
+   IRQ-0 music note_on path uses -- so an SFX burst could claim a voice
+   the music pump was using (pool-full -> music LRU-steals its own
+   oldest note -> scratchy/choppy music). Route SFX through the new
+   SDL_DOSGusAllocVoiceSfx (sdl-engine SDL/0114 GF1 voice-pool
+   partition, task #11) which hands out only the reserved top slice
+   [g_gus_voices - reserve, g_gus_voices). The reserve SIZE is
+   driver-owned (SDL_HINT_DOSKUTSU_GUS_SFX_VOICES, default 4); the
+   engine just requests an SFX voice. Same signature as AllocVoice
+   (int, void, -1 on exhaustion), so the existing drop-on-exhaustion
+   path is unchanged and music voices stay protected.
+
+2. SFX/MUSIC GAIN BALANCE. SFX voices played at the full mixer SFX
+   volume while MidiBackendGus scales every music note by velocity x
+   CC7 x CC11, so SFX came out louder than music on g2k. New hint
+   SDL_HINT_DOSKUTSU_GUS_SFX_GAIN (percent, default 70 -- an ear-tuned
+   starting point, not a measured constant) attenuates the GF1 SFX
+   voice volume in Pixtone::setVolume:
+     _gus_sfx_vol_255 = (sfx_volume_0_100 * 255 * gain_pct) / 10000
+   Read once (cached at first setVolume); clamped 0..150 so a modest
+   boost is also reachable (100 reproduces the pre-0259 level; 0
+   silences SFX). Parsed with strtol (base-10), out-of-range clamps.
+
+Boot witnesses (unconditional on the gus path, for the smoke gate):
+  gus SFX voice routing [nx0259]: SFX allocate from the reserved GF1
+      voice slice (SDL/0114 partition); music voices protected.
+  gus SFX gain [nx0259]: N% (SDL_HINT_DOSKUTSU_GUS_SFX_GAIN; ...)
+
+DOS-specific: the GF1 voice-pool contention only bites on real
+hardware where the IRQ-0 music pump and main-loop SFX genuinely
+compete; DOSBox-X confirms the banners + boot path but not the
+polyphony behavior (per dosbox_not_proxy). Only consulted under
+AUDIO_BACKEND=gus. Pairs with SDL/0114.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp | 69 +++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 64 insertions(+), 5 deletions(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index e8829930..0e68529b 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -542,6 +542,11 @@ bool Pixtone::init()
+   return true;
+ }
+ 
++// patch 0259 (iter-5): forward decl so initGusSfx can warm the cached GUS SFX
++// gain read (and emit its banner) once at boot on the gus path -- the definition
++// lives just below setVolume. See gus_sfx_gain_pct() there.
++static int gus_sfx_gain_pct();
++
+ // patch 0239 (Campaign 3 GUS, #28): render the 117 .pxt and upload them into
+ // the GF1 card's DRAM as 8-bit UNSIGNED mono @ 22050 Hz. Replaces init() on the
+ // AUDIO_BACKEND=gus path (no SDL3_mixer device exists). Runs in main-loop init
+@@ -645,6 +650,18 @@ bool Pixtone::initGusSfx()
+   LOG_INFO("gus SFX rendersafe [nx0257]: {} (SDL_HINT_DOSKUTSU_GUS_SFX_RENDERSAFE; "
+            "opt-in pre-render budget skip; per-substep load/render instrumentation "
+            "rides on GUS_DIAG).", _rendersafe ? "ON" : "OFF (default)");
++  // patch 0259 (iter-5): witness that SFX now allocate from the RESERVED GF1
++  // voice slice (sdl-engine SDL/0114 partition) rather than the general pool, so
++  // SFX no longer steal music's voices. Unconditional on the gus path (smoke-gate
++  // two-witness). The reserve SIZE is driver-owned (SDL side); _gusPlay just calls
++  // SDL_DOSGusAllocVoiceSfx().
++  LOG_INFO("gus SFX voice routing [nx0259]: SFX allocate from the reserved GF1 "
++           "voice slice (SDL/0114 partition); music voices protected.");
++  // patch 0259 (iter-5): warm the cached GUS SFX gain read here so its banner
++  // ("gus SFX gain [nx0259]: N%") emits DETERMINISTICALLY at boot on the gus
++  // path -- co-located with the routing banner above -- regardless of when the
++  // first setVolume runs. First-call is the only call that logs (cached after).
++  (void)gus_sfx_gain_pct();
+   std::string path = ResourceManager::getInstance()->getPathForDir("pxt/");
+   int uploaded = 0, failed = 0, skipped = 0;
+   uint32_t sfx_used = 0;
+@@ -901,12 +918,19 @@ int Pixtone::_gusPlay(int32_t slot, int32_t loop, uint32_t percent)
+     _sound_fx[slot].channel = -1;
+   }
+ 
+-  int v = SDL_DOSGusAllocVoice();
++  // patch 0259 (iter-5): allocate from the RESERVED SFX voice slice (SDL/0114
++  // GF1 voice-pool partition, sdl-engine task #11) instead of the general pool,
++  // so SFX no longer steal music's voices. Signature mirrors SDL_DOSGusAllocVoice
++  // (int return, void params, -1 on exhaustion) -- coordinated with sdl-engine.
++  // The reserve SIZE is owned entirely by the driver (SDL side, its own hint);
++  // the engine just requests an SFX voice here. Drop-on-exhaustion preserved so
++  // the music voices stay protected.
++  int v = SDL_DOSGusAllocVoiceSfx();
+   if (v < 0 || v >= 32)
+   {
+-    // Shared pool exhausted (music holds the voices). Drop the SFX -- a
+-    // legitimate resource-pressure outcome, not an error.
+-    LOG_DEBUG("gus SFX: no free GF1 voice for slot {} (shared pool full).", slot);
++    // SFX reserve exhausted. Drop the SFX -- a legitimate resource-pressure
++    // outcome, not an error (music voices are untouched by design).
++    LOG_DEBUG("gus SFX: no free GF1 voice for slot {} (SFX reserve full).", slot);
+     return -1;
+   }
+ 
+@@ -1099,6 +1123,36 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+   }
+ }
+ 
++// patch 0259 (iter-5 GUS SFX fidelity balance): GUS SFX gain scalar. Pixtone
++// SFX play at full _gus_sfx_vol_255 while MidiBackendGus music scales each note
++// by velocity * CC7 (channel volume) * CC11 (expression), so SFX come out LOUDER
++// than music on g2k (ear-observed). This hint attenuates the SFX voice volume so
++// the two balance. Percent, default 70 (an ear-tuned starting point on g2k, not a
++// measured constant -- the g2k ear-judge dials it). Read ONCE (cached); clamp
++// 0..150 so a modest boost is also reachable. Banner on first read for the smoke
++// gate + operator witness. strtol from <cstdlib> (already included).
++static int _gus_sfx_gain_decided = -1;  // <0 = not parsed yet; else the percent
++static int gus_sfx_gain_pct()
++{
++  if (_gus_sfx_gain_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_SFX_GAIN");
++    int pct = 70;  // default (ear-tuned starting point)
++    if (e && e[0])
++    {
++      long v = strtol(e, nullptr, 10);
++      if (v < 0)   v = 0;
++      if (v > 150) v = 150;  // allow modest boost above unity
++      pct = (int)v;
++    }
++    _gus_sfx_gain_decided = pct;
++    LOG_INFO("gus SFX gain [nx0259]: {}% (SDL_HINT_DOSKUTSU_GUS_SFX_GAIN; scales "
++             "the GF1 SFX voice volume to balance against velocity/CC-scaled GUS "
++             "music; default 70, clamp 0..150).", pct);
++  }
++  return _gus_sfx_gain_decided;
++}
++
+ void Pixtone::setVolume(int volume_0_100)
+ {
+   // DOS-PORT: SDL2_mixer's Mix_Volume(-1, int_0_128) was a global
+@@ -1124,7 +1178,12 @@ void Pixtone::setVolume(int volume_0_100)
+   // (0..255) scale used by _gusPlay -> SDL_DOSGusSetVoiceVol. Affects voices
+   // started after this call (GF1 volume is per-voice, set at start).
+   {
+-    int g255 = (volume_0_100 * 255) / 100;
++    // patch 0259 (iter-5): apply the GUS SFX gain scalar so SFX balance against
++    // the velocity/CC-scaled music. (volume_0_100 * 255 * gain_pct) / 10000 --
++    // max 100*255*150 = 3,825,000, well within int32. gain_pct=100 reproduces the
++    // pre-0259 level exactly.
++    const int gain_pct = gus_sfx_gain_pct();
++    int g255 = (volume_0_100 * 255 * gain_pct) / (100 * 100);
+     if (g255 < 0)   g255 = 0;
+     if (g255 > 255) g255 = 255;
+     _gus_sfx_vol_255 = g255;
+-- 
+2.47.3
+

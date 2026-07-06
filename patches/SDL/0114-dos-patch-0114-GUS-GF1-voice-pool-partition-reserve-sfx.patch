@@ -1,0 +1,214 @@
+From 9809e9c7fb511c73c851bfe98548f34353e65db3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 5 Jul 2026 20:54:04 -0700
+Subject: [PATCH] dos: patch 0114 -- GUS GF1 voice-pool partition (reserve SFX
+ voices, #38)
+
+Why DOS needs this: on the native Gravis Ultrasound (GF1) backend the
+hardware voice pool was one flat first-free FCFS scan
+(SDL_DOSGusAllocVoice) shared between the IRQ-0 music note_on path
+(MidiBackendGus) and the main-loop Pixtone SFX path. When the pool
+filled, the music backend LRU-stole its OWN oldest note, so every SFX
+burst starved music polyphony -- the "scratchy / choppy music at the
+default 20 voices" heard on g2k (the /gus44k+32-voice premium path, with
+far more headroom, sounds markedly cleaner).
+
+Partition the pool so SFX get a reserved TOP slice and can never eat into
+music's voices:
+  - g_gus_sfx_reserve, from SDL_HINT_DOSKUTSU_GUS_SFX_VOICES (default 4),
+    clamped to <= g_gus_voices/4 so music always keeps >= 3/4 of the pool.
+    Resolved in Init after gus_resolve_voices (voices already known).
+  - SDL_DOSGusAllocVoice (music) scans ONLY [0, voices - reserve).
+  - NEW SDL_DOSGusAllocVoiceSfx (engine SFX) scans ONLY
+    [voices - reserve, voices); exported in SDL3/SDL_dosgus.h for the
+    Pixtone _gusPlay path to call.
+
+Both keep the SAME IRQ-safe DOS_DisableInterrupts/EnableInterrupts window
+over the shared busy-list (music allocs from the PIT IRQ, SFX from the
+main loop; find-free+claim must be atomic across the two) and the same
+-1-on-exhaustion contract (caller's steal/drop policy unchanged). This is
+a pure software allocation policy over the SAME g_gus_voices hardware
+voices -- it does NOT change the active-voice count (0x0E) or the GF1
+output rate. reserve==0 (GUS_SFX_VOICES=0) makes AllocVoiceSfx always
+return -1 (music regains the full pool). Always-on banner
+"audio: SDL/0114 GF1 voice pool = N music + K sfx" for the smoke witness.
+
+Workspace-local; never upstreamed (patches/SDL/).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dosgus.h        | 27 +++++++++++
+ src/audio/dos/SDL_dosaudio_gus.c | 83 ++++++++++++++++++++++++++++++--
+ 2 files changed, 105 insertions(+), 5 deletions(-)
+
+diff --git a/include/SDL3/SDL_dosgus.h b/include/SDL3/SDL_dosgus.h
+index ae67412f5..e5f47861c 100644
+--- a/include/SDL3/SDL_dosgus.h
++++ b/include/SDL3/SDL_dosgus.h
+@@ -179,6 +179,33 @@ extern SDL_DECLSPEC void SDLCALL SDL_DOSGusResetDram(Uint32 keep_bytes);
+  */
+ extern SDL_DECLSPEC int SDLCALL SDL_DOSGusAllocVoice(void);
+ 
++/**
++ * Allocate a hardware voice from the RESERVED SFX partition.
++ *
++ * Identical contract to SDL_DOSGusAllocVoice, but scans ONLY the top
++ * SDL_HINT_DOSKUTSU_GUS_SFX_VOICES-sized slice of the pool -- the voices at
++ * [num_voices - reserve, num_voices). Main-loop Pixtone SFX call THIS (music
++ * note_on keeps calling SDL_DOSGusAllocVoice, the complementary
++ * [0, num_voices - reserve) slice) so an SFX burst can never claim a voice the
++ * IRQ-0 music pump is using -- music polyphony (hence fidelity) stays intact
++ * under heavy SFX. The reserve is clamped to <= num_voices/4 at device open, so
++ * music always keeps at least 3/4 of the pool. This is a pure software policy
++ * over the SAME hardware voices: it does not change the active-voice count or
++ * output rate.
++ *
++ * IRQ-safe: shares the same cli/sti critical section (and the same busy-list)
++ * as SDL_DOSGusAllocVoice, so a main-loop SFX alloc and a PIT-IRQ music note_on
++ * cannot double-claim a voice.
++ *
++ * \returns a voice index in [num_voices - reserve, num_voices), or -1 if the
++ *          SFX partition is exhausted (caller does its own steal/drop policy,
++ *          unchanged). Returns -1 unconditionally when the reserve is 0
++ *          (SDL_HINT_DOSKUTSU_GUS_SFX_VOICES=0).
++ *
++ * \since DOSKUTSU patch SDL/0114.
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSGusAllocVoiceSfx(void);
++
+ /**
+  * Start a hardware voice playing a resident DRAM sample.
+  *
+diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
+index 362bd2ee1..e7bd0d251 100644
+--- a/src/audio/dos/SDL_dosaudio_gus.c
++++ b/src/audio/dos/SDL_dosaudio_gus.c
+@@ -152,6 +152,7 @@ static bool g_gus_vol_ramp = true;         /* gus-14 #39 FIX: drive volume via t
+ static bool g_gus_dac_irq = true;          /* gus-15 #39 FIX: set 0x4C bit2 (master-IRQ-enable) -- may gate the DAC clock (default ON; killswitch GUS_NO_DAC_IRQBIT) */
+ static bool g_gus_fullcanon = false;       /* gus-15 #39 FULLCANON hedge: + 160us reset settle + mixer latch-enable bit3 (opt-in GUS_FULLCANON) */
+ static bool g_gus_sfx_bankalign = false;   /* gussfx-1 #38: also keep 8-bit allocs inside one 256K bank (default OFF; opt-in GUS_SFX_BANKALIGN) */
++static int  g_gus_sfx_reserve = 0;         /* gustune-1 #38: GF1 voices reserved for main-loop SFX (music keeps [0, voices-reserve), SFX takes [voices-reserve, voices)); hint GUS_SFX_VOICES, default 4 clamped to voices/4. Computed in Init after gus_resolve_voices. */
+ 
+ /* voice allocation pool (busy = currently allocated to a caller). The ENGINE
+    owns this lifecycle -- the driver only sets it in AllocVoice and clears it
+@@ -929,6 +930,34 @@ bool SDL_DOSGusInit(void)
+        8-bit allocs too (Pixtone SFX). OFF reproduces the crash; =1 engages the
+        guard -- both from the SAME binary for the g2k A/B. */
+     g_gus_sfx_bankalign = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SFX_BANKALIGN");
++    /* gustune-1 #38 fidelity: partition the GF1 voice pool so main-loop SFX get a
++       reserved TOP slice and never LRU-steal music's voices. Pre-partition the
++       pool was one flat FCFS scan shared between IRQ-0 music note_on and main-loop
++       SFX; when it filled, MidiBackendGus stole music's own oldest note, so every
++       SFX burst starved music polyphony (the scratchy music at 20 voices). The
++       reserve count comes from SDL_HINT_DOSKUTSU_GUS_SFX_VOICES (default 4), and
++       is CLAMPED to <= g_gus_voices/4 so music always keeps >= 3/4 of the pool.
++       Music allocs from [0, g_gus_voices - reserve) (SDL_DOSGusAllocVoice); SFX
++       from [g_gus_voices - reserve, g_gus_voices) (SDL_DOSGusAllocVoiceSfx). This
++       is a pure software allocation policy over the SAME g_gus_voices hardware
++       voices -- it does NOT change the active-voice count (0x0E) or output rate.
++       Read like gus_resolve_voices (numeric hint via SDL_GetHint); g_gus_voices
++       is already resolved above so the voices/4 clamp is valid here. */
++    {
++        const char *h = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_SFX_VOICES");
++        int want = 4;                    /* default reserve */
++        int cap = g_gus_voices / 4;      /* music keeps >= 3/4 of the pool */
++        if (h && h[0]) {
++            want = (int)SDL_strtol(h, NULL, 10);
++        }
++        if (want < 0) {
++            want = 0;
++        }
++        if (want > cap) {
++            want = cap;
++        }
++        g_gus_sfx_reserve = want;
++    }
+     g_gus_dr_head = g_gus_dr_tail = 0; /* arm the IRQ-safe diag ring */
+     skip = gus_hint_is_one("SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION");
+ 
+@@ -1006,6 +1035,14 @@ bool SDL_DOSGusInit(void)
+                      g_gus_pio_autoinc ? "+autoinc" : "",
+                      g_gus_force_maxvol ? " maxvol=ON" : "");
+ 
++    /* gustune-1 #38 REQUIRED banner (always-on) -- anchored format "SDL/0114 GF1
++       voice pool = " for the smoke two-witness. Reports the music/SFX partition
++       of the SAME g_gus_voices hardware voices. */
++    doskutsu_dbg_log("audio: SDL/0114 GF1 voice pool = %d music + %d sfx "
++                     "(GUS_SFX_VOICES; total %d)",
++                     g_gus_voices - g_gus_sfx_reserve, g_gus_sfx_reserve,
++                     g_gus_voices);
++
+     /* gussfx-1 #38 ENGAGE banner (only when the guard is on) -- anchored format
+        "SDL/0113 GUS SFX bank-align: ENGAGED" for the smoke two-witness. */
+     if (g_gus_sfx_bankalign) {
+@@ -1213,18 +1250,54 @@ void SDL_DOSGusResetDram(Uint32 keep_bytes)
+ int SDL_DOSGusAllocVoice(void)
+ {
+     int v, found = -1;
++    /* gustune-1 #38: MUSIC partition = the low [0, g_gus_voices - reserve) slice.
++       The reserved top slice is handed out by SDL_DOSGusAllocVoiceSfx instead, so
++       a main-loop SFX burst can never claim (and force this music path to
++       LRU-steal) a voice the IRQ-0 pump is playing. reserve is clamped to
++       voices/4 in Init, so music_top is always >= 3/4 of the pool and > 0. */
++    int music_top = g_gus_voices - g_gus_sfx_reserve;
+     if (!g_gus_active) {
+         return -1;
+     }
+     /* IRQ-SAFE: the voice pool is shared between main-loop SFX (Pixtone
+-       playSfx -> AllocVoice) and IRQ-0-pump music note_on (MidiBackendGus ->
+-       AllocVoice). A main-loop AllocVoice can be preempted mid-scan by the
++       playSfx -> AllocVoiceSfx) and IRQ-0-pump music note_on (MidiBackendGus ->
++       AllocVoice). A main-loop AllocVoiceSfx can be preempted mid-scan by the
+        pump IRQ firing a note_on that also allocates; without a critical
+        section both see the same free slot and double-claim it. cli/sti makes
+        the find-free + claim atomic across the IRQ boundary. (StartVoice /
+-       StopVoice mutate the busy-list inside their own cli/sti windows too.) */
++       StopVoice mutate the busy-list inside their own cli/sti windows too.)
++       The two partitions share one busy-list, so the SAME critical section
++       serializes them even though they scan disjoint ranges. */
+     DOS_DisableInterrupts();
+-    for (v = 0; v < g_gus_voices; v++) {
++    for (v = 0; v < music_top; v++) {
++        if (!g_gus_voice_busy[v]) {
++            g_gus_voice_busy[v] = true;
++            found = v;
++            break;
++        }
++    }
++    DOS_EnableInterrupts();
++    return found; /* -1 if music partition exhausted -- caller does its own steal policy */
++}
++
++int SDL_DOSGusAllocVoiceSfx(void)
++{
++    int v, found = -1;
++    /* gustune-1 #38: SFX partition = the reserved top [g_gus_voices - reserve,
++       g_gus_voices) slice. Main-loop Pixtone SFX alloc from here so an SFX burst
++       stays out of music's polyphony. Same IRQ-safe cli/sti window as
++       SDL_DOSGusAllocVoice -- SFX allocs from the main loop while music note_on
++       allocs from the PIT IRQ, and they share one busy-list, so find-free+claim
++       must be atomic across the IRQ boundary. When reserve==0
++       (SDL_HINT_DOSKUTSU_GUS_SFX_VOICES=0) the slice is empty -> always -1 (the
++       caller falls back to its own steal/drop policy, i.e. the pre-partition
++       behavior). */
++    int music_top = g_gus_voices - g_gus_sfx_reserve;
++    if (!g_gus_active) {
++        return -1;
++    }
++    DOS_DisableInterrupts();
++    for (v = music_top; v < g_gus_voices; v++) {
+         if (!g_gus_voice_busy[v]) {
+             g_gus_voice_busy[v] = true;
+             found = v;
+@@ -1232,7 +1305,7 @@ int SDL_DOSGusAllocVoice(void)
+         }
+     }
+     DOS_EnableInterrupts();
+-    return found; /* -1 if pool exhausted -- caller does its own steal policy */
++    return found; /* -1 if SFX partition exhausted -- caller does its own steal/drop policy */
+ }
+ 
+ void SDL_DOSGusStartVoice(int voice, Uint32 start, Uint32 end, Uint32 loopstart, Uint32 flags)
+-- 
+2.47.3
+
