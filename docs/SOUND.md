@@ -120,17 +120,22 @@ the canonical Gravis filenames, so any works with doskutsu unchanged):
 | Set | What it is | Best for |
 |-----|-----------|----------|
 | **Full Gravis stock** (`dgguspat`) | The complete ~5.6 MB original Gravis patch set | Fixing missing instruments; baseline quality. Start here if tracks sound incomplete. |
-| **Pro Patches Lite** | Higher-quality replacements, deliberately compact | **The sweet spot on a 1 MB card** -- better fidelity that still fits the GF1 DRAM budget. |
-| **EAWPATS** | Large, high-quality GM collection (Ultrasound / Midia / Roland / etc.) | Best raw fidelity, but large -- see the DRAM note. |
+| **Pro Patches Lite** | Higher-quality replacements, deliberately compact | **RECOMMENDED on a 1 MB card (g2k-validated).** Better fidelity, and small enough that 5-8 instruments fit per song at full quality. Best overlaid on the stock set so nothing is missing. |
+| **EAWPATS** | Large, high-quality GM collection | **NOT recommended on a real 1 MB card.** Its patches are so big the GF1 holds only 2-3 per song, so most of the arrangement goes *silent* -- g2k-measured, a track that plays 5-8 instruments under Pro Patches Lite drops to 2-3 under EAWPATS. It is built for RAM-rich softsynths (TiMidity), not the GF1. |
 
 > **GF1 DRAM ceiling: 1 MB.** The GF1 mixes instruments from on-board DRAM, and
 > the chip's 20-bit address space caps that at **1 MB** -- on a real GUS *and* on
 > the PicoGUS, which emulates the GF1, so the same architectural limit applies
 > (you cannot raise it). doskutsu loads only the instruments each song needs and
-> trims multisamples if a song would overflow, so any set stays *safe*; but a
-> very large set (full EAWPATS) may lose some per-note sample coverage on a busy
-> song. The stock set and Pro Patches Lite avoid that. Pairing a good set with
-> `pgusinit /gus44k 1` + 32 voices (below) gives the best overall result.
+> trims multisamples to fit -- but there is a hard limit: **a set whose patches
+> are too big overflows the DRAM and whole instruments go SILENT (dropped, not
+> just trimmed)**, which is exactly why EAWPATS fails on the GF1 and a compact
+> set wins. Enabling GUS **sound effects** makes this tighter still: the effect
+> bank uses ~700 KB of the 1 MB, leaving only ~300 KB for a song's instruments --
+> so a compact patch set matters even more with SFX on. If you want the richest
+> *music* and can do without effects, run with `SFX_DEVICE=none` to free the
+> whole 1 MB for instruments. Pairing a compact set with `pgusinit /gus44k 1` +
+> 32 voices (below) gives the best overall result.
 
 ### Voice count
 
