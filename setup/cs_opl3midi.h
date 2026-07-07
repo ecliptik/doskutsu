@@ -9,8 +9,9 @@
  * note -> (fnum, block) table, note-on/off/control-change/program-change. It
  * drives the real OPL3 chip through the SDL DOS core's SDL_DOSOpl3* helpers
  * (the same primitives audiotest_sdl.c already uses for the single-voice
- * arpeggio). The runtime opl3-patches.dat loader is intentionally omitted --
- * SETUP just needs the built-in 8-patch placeholder.
+ * arpeggio). Loads the same data/opl3bank.dat 128-program DMXOPL bank the game's
+ * OPL3 backend loads, so the SETUP preview matches the game; the built-in
+ * 8-patch placeholder remains the fallback when the bank file is absent/short.
  *
  * Single static instance (SETUP plays one title theme at a time). The sink
  * callbacks ignore the `user` pointer. ASCII-only.
@@ -18,9 +19,14 @@
 
 #include "cs_smf.h"
 
-/* Detect + initialize the OPL3 chip. Returns 1 if a chip is present and the
- * backend is ready, 0 otherwise (caller falls back). */
+/* Detect + initialize the OPL3 chip and load data/opl3bank.dat. Returns 1 if a
+ * chip is present and the backend is ready, 0 otherwise (caller falls back). */
 int  cs_opl3midi_init(void);
+
+/* Number of GM programs loaded from data/opl3bank.dat (0 = the file was
+ * absent/short and the 8-patch placeholder is in use). For the SETUP log so the
+ * g2k trace confirms which bank the OPL3 preview played. Valid after init. */
+int  cs_opl3midi_bank_programs(void);
 
 /* Reset all voices + per-channel GM state (engine on_song_start). Call before
  * starting the scheduler. */

@@ -16,11 +16,11 @@
  *     Shutdown) -- NO OPL3-mode enable (0x105) and NO secondary bank
  *     (0x38A/0x38B); voices 0-8 reuse the bank-agnostic SDL_DOSOpl3* transport.
  *
- * Like cs_opl3midi, the runtime opl3bank.dat loader is intentionally omitted --
- * SETUP just needs the built-in 8-patch placeholder to preview the AdLib music
- * path (the game loads the DMXOPL bank, but the SETUP OPL3 test does not either,
- * so the two SETUP previews stay consistent). AdLib is MUSIC-ONLY: a DAC-less
- * OPL chip has no PCM sound effects.
+ * Loads the same data/opl3bank.dat 128-program DMXOPL bank the game's OPL2
+ * backend loads, so the SETUP preview sounds like the game (not a thinner
+ * placeholder). The built-in 8-patch placeholder remains the fallback when the
+ * bank file is absent or short, so an incomplete install still previews. AdLib
+ * is MUSIC-ONLY: a DAC-less OPL chip has no PCM sound effects.
  *
  * Single static instance (SETUP plays one title theme at a time). The sink
  * callbacks ignore the `user` pointer. ASCII-only.
@@ -29,9 +29,14 @@
 #include "cs_smf.h"
 
 /* Detect + initialize the OPL2 chip (direct port I/O at 0x388; needs no
- * SDL_INIT_AUDIO and no SDL3_mixer). Returns 1 if an OPL chip is present and
- * the backend is ready, 0 otherwise (caller falls back). */
+ * SDL_INIT_AUDIO and no SDL3_mixer) and load data/opl3bank.dat. Returns 1 if an
+ * OPL chip is present and the backend is ready, 0 otherwise (caller falls back). */
 int  cs_opl2midi_init(void);
+
+/* Number of GM programs loaded from data/opl3bank.dat (0 = the file was
+ * absent/short and the 8-patch placeholder is in use). For the SETUP log so the
+ * g2k trace confirms which bank the AdLib preview played. Valid after init. */
+int  cs_opl2midi_bank_programs(void);
 
 /* Reset all voices + per-channel GM state (engine on_song_start). Call before
  * starting the scheduler. */

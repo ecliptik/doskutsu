@@ -20,6 +20,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Real-chip primitives exported by libSDL3.a (SDL DOS core). The OPL2 chip
@@ -58,12 +59,66 @@ static const uint8_t PATCH_PAD[12] = {
 static const uint8_t PATCH_DRUM[12] = {
   0x0F, 0x00, 0xFF, 0x0F, 0x07, 0xF0, 0x0F, 0x00, 0xFF, 0x0F, 0x07, 0x00 };
 
-/* GM program (0-127) -> patch family bucket (MidiBackendOpl2.cpp). */
+/* Runtime 128-program bank loaded from data/opl3bank.dat (the SAME DMXOPL bank
+ * + file the game's OPL2 backend loads). g_bank_count == 0 means the file was
+ * absent/short and program_to_patch uses the 8-patch placeholder below. */
+#define OPL_BANK_PATH "data/opl3bank.dat"
+static uint8_t g_bank[128][12];
+static int     g_bank_count = 0;
+
+/* Load data/opl3bank.dat (DOPL3v1: a 12-byte header -- 8-byte magic "DOPL3v1\n",
+ * version byte, program-count byte, 2 reserved zero bytes -- followed by
+ * count*12 patch bytes). Ported from MidiBackendOpl2::_try_load_opl2_bank.
+ * Returns 1 on success; on ANY failure leaves g_bank_count = 0 so the 8-patch
+ * placeholder is used (an incomplete install still previews). fopen "rb" --
+ * DJGPP text mode would CRLF-corrupt the binary bank. OPL2 ignores the SBI
+ * panning nibble; the loaded patches are used verbatim by the transport. */
+static int load_bank(void)
+{
+  static const uint8_t magic[8] = { 'D', 'O', 'P', 'L', '3', 'v', '1', 0x0A };
+  uint8_t  header[12];
+  unsigned nprog, payload;
+  FILE    *fp;
+
+  g_bank_count = 0;
+  fp = fopen(OPL_BANK_PATH, "rb");
+  if (!fp)
+    return 0;
+  if (fread(header, 1, sizeof header, fp) != sizeof header ||
+      memcmp(header, magic, 8) != 0)
+  {
+    fclose(fp);
+    return 0;
+  }
+  if (header[8] != 0x01 || header[9] == 0 || header[9] > 128 ||
+      header[10] != 0 || header[11] != 0)
+  {
+    fclose(fp);
+    return 0;
+  }
+  nprog   = (unsigned)header[9];
+  payload = nprog * 12u;                 /* <= 1536; no 32-bit overflow */
+  if (fread(g_bank, 1, payload, fp) != payload)
+  {
+    fclose(fp);
+    return 0;                            /* g_bank_count stays 0 -> placeholder */
+  }
+  fclose(fp);
+  g_bank_count = (int)nprog;
+  return 1;
+}
+
+int cs_opl2midi_bank_programs(void) { return g_bank_count; }
+
+/* GM program (0-127) -> patch. A loaded opl3bank.dat program wins; otherwise the
+ * 8-patch family bucket (MidiBackendOpl2.cpp). */
 static const uint8_t *program_to_patch(int program)
 {
   int bucket;
   if (program < 0 || program > 127)
     return PATCH_PIANO;
+  if (program < g_bank_count)
+    return g_bank[program];              /* runtime opl3bank.dat program */
   bucket = program / 8;
   switch (bucket)
   {
@@ -236,6 +291,7 @@ int cs_opl2midi_init(void)
     return 0;
   }
   SDL_DOSOpl2InitChip();
+  load_bank();                           /* opl3bank.dat if present; else placeholder */
   memset(g_voices, 0, sizeof(g_voices));
   memset(g_channel_program, 0, sizeof(g_channel_program));
   g_voice_alloc_count = 0;

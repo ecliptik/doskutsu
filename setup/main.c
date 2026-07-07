@@ -1091,12 +1091,19 @@ static void screen_sound(void)
 /* ---- Sound Hardware screen (BLASTER A/I/DMA/P/T; DMA derives D+H) --- */
 
 /* Traditional Sound Blaster family name for a BLASTER T-code. */
+/* BLASTER "T" card-type codes per the Creative / pgusinit /sbtype standard:
+ *   1 = SB 1.x, 2 = SB Pro (SB Pro 1, dual OPL2), 3 = SB 2.0,
+ *   4 = SB Pro 2 (OPL3), 6 = SB16.
+ * DISPLAY-ONLY: hw_type_vals[] and every numeric T path are unchanged; this
+ * function only maps a code to its shown name. The pre-fix table had 2/3/4
+ * mislabelled (T3 read "Pro 2.0", T4 read "Pro", T2 read "2.0"), so picking the
+ * OPL3 card ("Sound Blaster Pro 2 (OPL3)") now correctly names T4 instead of T3. */
 static const char *sb_type_name(int t)
 {
   return (t == 6) ? "Sound Blaster 16"
-       : (t == 4) ? "Sound Blaster Pro"
-       : (t == 3) ? "Sound Blaster Pro 2.0"
-       : (t == 2) ? "Sound Blaster 2.0"
+       : (t == 4) ? "Sound Blaster Pro 2 (OPL3)"
+       : (t == 3) ? "Sound Blaster 2.0"
+       : (t == 2) ? "Sound Blaster Pro"
        : (t == 1) ? "Sound Blaster" : "?";
 }
 
@@ -1526,6 +1533,26 @@ static int cfg_dma(void)
   return (h >= 6) ? h : d;
 }
 
+/* Is the Sound Blaster actually in use in the current config? True when the
+ * music backend is SB-family (auto / opl3 / organya / wb -- all drive the SB16:
+ * OPL3 FM, the WaveBlaster header, or the SB DAC) OR the SFX device is the SB
+ * DAC. The two no-SB native cards are AdLib (OPL at 0x388, no SB) and Gravis
+ * (GF1). When SB is NOT in use, the Card/Port/IRQ/DMA detail is meaningless and
+ * the UI shows the music device + "n/a" instead of a stale SB card. sfx_sb
+ * mirrors sfx_native_name(): SFX rides the SB DAC unless the card is adlib/gus
+ * or effects are off (SFX_DEVICE=none). scfg_get never returns NULL (empty when
+ * unset), so the strcmp()s are safe -- same pattern as sfx_current_name(). */
+static int sb_in_use(void)
+{
+  const char *be = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
+  const char *sd = scfg_get(&g_cfg, scfg_index("SFX_DEVICE"));
+  int music_sb = !(strcmp(be, "adlib") == 0 || strcmp(be, "gus") == 0 ||
+                   strcmp(be, "none") == 0);   /* empty/auto -> SB */
+  int sfx_sb   = !(strcmp(be, "adlib") == 0 || strcmp(be, "gus") == 0) &&
+                 strcmp(sd, "none") != 0;
+  return music_sb || sfx_sb;
+}
+
 /* COMPACT music-backend name for the main-menu SYSTEM PROFILE "Sound" line,
  * which pairs it with the SB card type ("Sound Blaster 16, OPL3"). Deliberately
  * shorter than the verbose Select-Music-Card labels (snd_backend_name) -- this
@@ -1626,7 +1653,13 @@ static void draw_profile_panel(int x, int y, int w)
    * the configured BLASTER T-field (else the detected card); backend from
    * AUDIO_BACKEND. The full Port/IRQ/DMA detail lives in the Sound submenu
    * banner + Custom setup. */
-  snprintf(v, sizeof(v), "%s, %s", sb_type_name(cfg_card_type()), cfg_backend_name());
+  /* Show "<SB card>, <backend>" only when the SB is actually in use; for a
+   * no-SB config (AdLib / Gravis music with non-SB SFX) show just the music
+   * device, never a stale SB card type. */
+  if (sb_in_use())
+    snprintf(v, sizeof(v), "%s, %s", sb_type_name(cfg_card_type()), cfg_backend_name());
+  else
+    snprintf(v, sizeof(v), "%s", cfg_backend_name());
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Sound ....", v);
 
   /* T-DFUX-P2: the Video line carries the measured video-memory fill speed
@@ -2171,14 +2204,29 @@ static void draw_sound_banner(int x, int y, int w)
          music_card_name());
   tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Sound FX .",
          sfx_current_name());
-  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Card .....",
-         sb_type_name(cfg_card_type()));
-  snprintf(v, sizeof(v), "0x%X", cfg_io_port());
-  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Port .....", v);
-  snprintf(v, sizeof(v), "%d", cfg_irq());
-  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "IRQ ......", v);
-  snprintf(v, sizeof(v), "%d", cfg_dma());
-  tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "DMA ......", v);
+  /* Card/Port/IRQ/DMA describe the SB16 -- meaningful only when the SB is in
+   * use. On a no-SB config (AdLib OPL or Gravis GF1 music with non-SB SFX) the
+   * SB hardware is idle, so show the music device as the Card and "n/a" for the
+   * SB-specific Port/IRQ/DMA. All 6 rows stay (box height unchanged). */
+  if (sb_in_use())
+  {
+    tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Card .....",
+           sb_type_name(cfg_card_type()));
+    snprintf(v, sizeof(v), "0x%X", cfg_io_port());
+    tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Port .....", v);
+    snprintf(v, sizeof(v), "%d", cfg_irq());
+    tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "IRQ ......", v);
+    snprintf(v, sizeof(v), "%d", cfg_dma());
+    tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "DMA ......", v);
+  }
+  else
+  {
+    tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Card .....",
+           music_card_name());
+    tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "Port .....", "n/a");
+    tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "IRQ ......", "n/a");
+    tui_kv(kx, row++, vw, PAL->body, PAL->value, PAL->bg, "DMA ......", "n/a");
+  }
 }
 
 /* T-DFUX-P2: Express setup -- DF's one-key "Detect", reimagined. (1) a red

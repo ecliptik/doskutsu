@@ -1230,15 +1230,23 @@ static int play_title_smf(void)
 
   if (g_music_mode == MUS_OPL3)
   {
+    int bp;
     if (!g_opl3_ok) return 1;
     cs_opl3midi_init();        /* idempotent -- chip already up via device_open */
+    bp = cs_opl3midi_bank_programs();
+    trace("title: opl3 bank = %s (%d programs)",
+          bp > 0 ? "opl3bank.dat" : "8-patch placeholder", bp);
     cs_opl3midi_song_start();
     cs_opl3midi_get_sink(&sink);
   }
   else if (g_music_mode == MUS_OPL2)
   {
+    int bp;
     if (!g_opl2_ok) return 1;
     cs_opl2midi_init();        /* T80: idempotent -- chip already up via device_open */
+    bp = cs_opl2midi_bank_programs();
+    trace("title: opl2 bank = %s (%d programs)",
+          bp > 0 ? "opl3bank.dat" : "8-patch placeholder", bp);
     cs_opl2midi_song_start();
     cs_opl2midi_get_sink(&sink);
   }
