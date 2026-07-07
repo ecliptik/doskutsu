@@ -231,6 +231,34 @@ of these ride on the single standard `BLASTER` variable the engine already
 reads at startup. Two SB16 mixer levels are separately adjustable: **voice
 volume** (PCM/SFX) and **FM volume** (OPL3 music), each 0-31.
 
+### PicoGUS in Sound Blaster mode
+
+A PicoGUS booted with `pgusinit /mode sb` presents as a Sound Blaster (OPL3 FM
+music, MPU-401/WaveBlaster header, and 8-bit PCM effects), so it drives the
+`opl3`, `wb`, and `organya` backends just like a real card. Three things to know:
+
+- **The IRQ and DMA are set by physical jumpers on the card**, not by software.
+  Your `BLASTER` variable (and SETUP's Sound Hardware screen) **must match the
+  jumpers** -- `pgusinit` even prints "(must match jumper settings!)". If they
+  disagree, the card detects fine but never fires its interrupt, and **all
+  Sound Blaster audio is silent** with no error. Read the jumpers, then set
+  `BLASTER` to match (e.g. a PicoGUS jumpered IRQ 7 / DMA 3 needs
+  `BLASTER=A220 I7 D3 P330`).
+- **`pgusinit /mode sb` does not program the card's port/IRQ/DMA** -- run
+  `pgusinit /sbenv` afterwards to push your `BLASTER` values onto the card
+  (plain `pgusinit` only validates them).
+- **Card type: choose SB Pro 2** (`T4` in `BLASTER`, "Sound Blaster Pro 2.0" in
+  SETUP). It advertises the OPL3 the music backend uses, keeps the simple 8-bit
+  DSP path (DOSKUTSU forces 8-bit mono, so SB Pro's stereo mode cannot cause the
+  old "chipmunk" pitch bug), and avoids the SB16 (`T6`) firmware rule that the
+  low and high DMA channels must match. `T6` gives nothing extra on the PicoGUS
+  (it is an 8-bit card with no true 16-bit DMA). On a **real** Sound Blaster 16,
+  `T6` remains the best choice.
+
+A WaveBlaster daughterboard (e.g. DreamBlaster S2) mounted on the PicoGUS's
+wavetable header plays through this same MPU-401 path -- select **WaveBlaster**
+as the music card.
+
 ## Sound effects
 
 Cave Story's sound effects are digital samples synthesized at runtime from the
@@ -306,6 +334,11 @@ Work down this checklist:
    cards. Switch to **20** (the default) or any non-28 count.
 5. **Sound Blaster: hardware correct?** Check the **Sound Hardware** screen's
    port / IRQ / DMA against your `BLASTER` variable.
+5a. **PicoGUS in SB mode: IRQ/DMA match the jumpers?** The PicoGUS asserts its
+   interrupt on the physically *jumpered* IRQ/DMA regardless of what `BLASTER`
+   says; a mismatch detects fine but is silent. Set `BLASTER` to the jumpers,
+   run `pgusinit /sbenv`, and prefer card type SB Pro 2 (`T4`). See [PicoGUS in
+   Sound Blaster mode](#picogus-in-sound-blaster-mode).
 6. **Volumes up?** Check `SB16_VOICE_VOL` (effects) and `SB16_FM_VOL` (OPL3
    music) are not at 0.
 7. **Test it.** Use **Test SFX / Music** in SETUP to confirm each path before
