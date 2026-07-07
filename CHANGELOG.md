@@ -5,9 +5,10 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
-## [1.6.2] - 2026-07-07
+## [Unreleased]
 
 SETUP.EXE fixes (the game binary is unchanged from 1.6.1). g2k-validated.
+Staged on main; not yet tagged.
 
 ### Fixed
 
