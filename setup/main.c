@@ -1782,10 +1782,13 @@ static void screen_autodetect(void)
            g_prof.cpu_desc[0] ? g_prof.cpu_desc : cpu_class_name(g_prof.cpu_class));
   if (g_prof.snd_detected)
     /* HDMA omitted here too (operator: it lives only on the Sound Hardware
-     * screen). This also resolves the old "1/5" wording + a width risk. */
-    snprintf(snd, sizeof(snd), "Port 0x%X, IRQ %d, DMA %d, Type T%d",
+     * screen). This also resolves the old "1/5" wording + a width risk. The
+     * DMA seed source (card self-report vs BLASTER env) is shown so a PicoGUS
+     * in SB mode -- which self-reports no DMA -- reads "DMA 1 (BLASTER)" rather
+     * than a bare, mysterious channel number. */
+    snprintf(snd, sizeof(snd), "Port 0x%X, IRQ %d, DMA %d (%s), Type T%d",
              g_prof.snd_base, g_prof.snd_irq, g_prof.snd_dma,
-             g_prof.snd_type);
+             snd_dma_src_name(g_prof.snd_dma_src), g_prof.snd_type);
   else
     snprintf(snd, sizeof(snd), "no BLASTER detected");
   synth_list_str(synth, (int)sizeof(synth));

@@ -17,6 +17,19 @@ typedef enum
   CPU_586           /* Pentium / OverDrive and faster                */
 } cpu_class_t;
 
+/* Where the effective DMA channel(s) in the profile came from. The SB16
+ * self-reports its DMA config in mixer register 0x81; a PicoGUS in SB mode
+ * does NOT emulate that register (reads back 0), so its DMA is only knowable
+ * from the ambient BLASTER env -- hence the "DMA shown 0" oddity this tracks.
+ * The UI shows the source so the operator can tell a card-confirmed channel
+ * from one merely seeded off BLASTER. */
+typedef enum
+{
+  SND_DMA_SRC_NONE = 0, /* no DMA known (no BLASTER D/H field, card silent)  */
+  SND_DMA_SRC_CARD,     /* read from the SB16 mixer DMA register (0x81)      */
+  SND_DMA_SRC_BLASTER   /* seeded from the ambient BLASTER env D/H field     */
+} snd_dma_src_t;
+
 typedef struct
 {
   /* CPU */
@@ -36,6 +49,7 @@ typedef struct
   int         snd_irq;        /* e.g. 5                                  */
   int         snd_dma;        /* 8-bit DMA channel                       */
   int         snd_hdma;       /* 16-bit DMA channel                      */
+  int         snd_dma_src;    /* snd_dma_src_t: where snd_dma/_hdma came */
   int         snd_type;       /* BLASTER Tn type code, 0 if absent       */
   int         dsp_major;      /* SB DSP version major, 0 if no response  */
   int         dsp_minor;
@@ -55,6 +69,9 @@ void profile_detect(sysprofile_t *p);
 
 /* Human label for a CPU class. */
 const char *cpu_class_name(cpu_class_t c);
+
+/* Short tag ("card" / "BLASTER" / "none") for a snd_dma_src_t value. */
+const char *snd_dma_src_name(int src);
 
 /* Dump the detected profile to LOGS\PROFILE.LOG (one key=value per line,
  * per-line fsync; creates LOGS\ if absent). Lets a real-HW iter capture the

@@ -33,6 +33,17 @@ const char *cpu_class_name(cpu_class_t c)
   }
 }
 
+/* Short human tag for the DMA source, shown next to the DMA value in the UI. */
+const char *snd_dma_src_name(int src)
+{
+  switch (src)
+  {
+    case SND_DMA_SRC_CARD:    return "card";
+    case SND_DMA_SRC_BLASTER: return "BLASTER";
+    default:                  return "none";
+  }
+}
+
 /* Dump the detected profile to LOGS\PROFILE.LOG so a real-HW iter captures the
  * displayed values deterministically (the 486 MHz-divisor calibration + the
  * physical-RAM acceptance become log-witnessed instead of hand-transcribed
@@ -59,6 +70,7 @@ int profile_write_log(const sysprofile_t *p)
   PL("snd_detected=%d", p->snd_detected);
   PL("snd=port 0x%X irq %d dma %d hdma %d type T%d",
      p->snd_base, p->snd_irq, p->snd_dma, p->snd_hdma, p->snd_type);
+  PL("snd_dma_src=%d (%s)", p->snd_dma_src, snd_dma_src_name(p->snd_dma_src));
   PL("dsp=%d.%d", p->dsp_major, p->dsp_minor);
   PL("has_opl3=%d", p->has_opl3);
   PL("has_waveblaster=%d", p->has_waveblaster);
@@ -80,8 +92,10 @@ int profile_write_log(const sysprofile_t *p)
 static void parse_blaster(sysprofile_t *p)
 {
   const char *b = getenv("BLASTER");
+  int have_dfield = 0;   /* a D or H field was present in the string */
   p->snd_detected = 0;
   p->snd_base = p->snd_irq = p->snd_dma = p->snd_hdma = p->snd_type = 0;
+  p->snd_dma_src = SND_DMA_SRC_NONE;
   if (!b) return;
 
   while (*b)
@@ -91,12 +105,16 @@ static void parse_blaster(sysprofile_t *p)
     if (c == ' ' || c == '\t') continue;
     if (c == 'A' || c == 'a') { v = (int)strtol(b, (char **)&b, 16); p->snd_base = v; }
     else if (c == 'I' || c == 'i') { v = (int)strtol(b, (char **)&b, 10); p->snd_irq = v; }
-    else if (c == 'D' || c == 'd') { v = (int)strtol(b, (char **)&b, 10); p->snd_dma = v; }
-    else if (c == 'H' || c == 'h') { v = (int)strtol(b, (char **)&b, 10); p->snd_hdma = v; }
+    else if (c == 'D' || c == 'd') { v = (int)strtol(b, (char **)&b, 10); p->snd_dma = v; have_dfield = 1; }
+    else if (c == 'H' || c == 'h') { v = (int)strtol(b, (char **)&b, 10); p->snd_hdma = v; have_dfield = 1; }
     else if (c == 'T' || c == 't') { v = (int)strtol(b, (char **)&b, 10); p->snd_type = v; }
     else { while (*b && *b != ' ' && *b != '\t') ++b; }
   }
   if (p->snd_base) p->snd_detected = 1;
+  /* Baseline provenance: the BLASTER env is the DMA source until (and unless) a
+   * card self-report overrides it (detect_dma_source, DOS build). A D/H field
+   * with any value -- including an explicit 0 -- counts as BLASTER-seeded. */
+  if (have_dfield) p->snd_dma_src = SND_DMA_SRC_BLASTER;
   /* SB16 (T6) and SB Pro (T4/5) carry an OPL3/OPL2; treat >=T4 as FM-capable */
   if (p->snd_type >= 4) p->has_opl3 = 1;
 }
@@ -450,6 +468,55 @@ static void dsp_version(sysprofile_t *p)
     if (inportb(base + 0xE) & 0x80) { p->dsp_minor = inportb(base + 0xA); break; }
 }
 
+/* SB16 DMA self-report via mixer register 0x81 (the "DMA shown 0" fix). A real
+ * SB16 stores its assigned DMA channels in the CT1745 mixer's 0x81 register:
+ * bits 0/1/3 select the 8-bit channel (DMA 0/1/3), bits 5/6/7 the 16-bit
+ * channel (DMA 5/6/7). Reading it lets SETUP show the CARD's actual DMA rather
+ * than only what the BLASTER string claims. A PicoGUS in SB mode does NOT
+ * emulate this register (reads back 0x00), so it self-reports nothing and the
+ * profile keeps the BLASTER-seeded value -- exactly the case this distinguishes
+ * in the UI. Standard SB16 mixer I/O: write the register index to base+0x4,
+ * read the data from base+0x5. Bounded, no polling loop -> never hangs.
+ *
+ * Card self-report is PRIMARY: when the mixer reports a channel it overrides the
+ * BLASTER-seeded value and the source becomes "card". When it reports nothing
+ * the BLASTER seed (parse_blaster) stands. Killswitch: SETUP env
+ * DOSKUTSU_SETUP_DMA_SELFREPORT=0 skips the mixer read (source stays BLASTER)
+ * for any card where poking the mixer port is undesirable. */
+static void detect_dma_source(sysprofile_t *p)
+{
+  int base = p->snd_base;
+  unsigned char cfg;
+  int cd = -1, ch = -1;
+  const char *ks;
+
+  if (base <= 0) return;              /* no SB base -> nothing to query */
+  if (p->dsp_major == 0) return;      /* DSP silent -> do not poke the mixer */
+
+  ks = getenv("DOSKUTSU_SETUP_DMA_SELFREPORT");
+  if (ks && strcmp(ks, "0") == 0) return;   /* killswitch: keep BLASTER seed */
+
+  /* Select mixer register 0x81, read its value. */
+  outportb(base + 0x4, 0x81);
+  cfg = inportb(base + 0x5);
+  if (cfg == 0x00 || cfg == 0xFF)     /* 0x00 = card silent; 0xFF = no mixer */
+    return;                           /* keep the BLASTER-seeded DMA + source */
+
+  if (cfg & 0x01)      cd = 0;
+  else if (cfg & 0x02) cd = 1;
+  else if (cfg & 0x08) cd = 3;
+  if (cfg & 0x20)      ch = 5;
+  else if (cfg & 0x40) ch = 6;
+  else if (cfg & 0x80) ch = 7;
+
+  if (cd >= 0 || ch >= 0)
+  {
+    if (cd >= 0) p->snd_dma  = cd;
+    if (ch >= 0) p->snd_hdma = ch;
+    p->snd_dma_src = SND_DMA_SRC_CARD;
+  }
+}
+
 /* MPU-401 (WaveBlaster header) presence: reset via the command port and
  * look for an ACK (0xFE) on the data port. Conservative; the user can
  * override in the UI. Default MPU base 0x330. */
@@ -624,6 +691,11 @@ void profile_detect(sysprofile_t *p)
   /* SB16 DSP version (0xE1) on the BLASTER base port -- fixes dsp=0.0. */
   dsp_version(p);
 
+  /* SB16 DMA self-report (mixer 0x81) -- card DMA wins over the BLASTER seed;
+   * a PicoGUS in SB mode reports nothing so the BLASTER seed stands. Runs after
+   * dsp_version so the DSP-silent gate is meaningful. */
+  detect_dma_source(p);
+
   /* Video Speed fill bench LAST (it leaves a mode flash; runs before tui_init
    * which retakes the screen). DF-UX Phase 2. */
   detect_video_speed(p);
@@ -646,6 +718,7 @@ void profile_detect(sysprofile_t *p)
   {
     p->snd_detected = 1; p->snd_base = 0x220; p->snd_irq = 5;
     p->snd_dma = 1; p->snd_hdma = 5; p->snd_type = 6;
+    p->snd_dma_src = SND_DMA_SRC_CARD;   /* representative SB16 self-report (host) */
   }
   p->dsp_major = 4; p->dsp_minor = 13; /* representative SB16 DSP (g2k) */
   p->has_opl3 = 1;
