@@ -231,7 +231,11 @@ enum { MUS_PCM = 0, MUS_OPL3, MUS_WB, MUS_OPL2, MUS_GUS };
  * synth (the game's MidiBackendGus) is out of scope for a hardware test button.
  * A dedicated later task can add the real title theme on GUS. */
 #define GUS_WAVE_PERIOD 50            /* samples/cycle: rate/50 = output Hz      */
-#define GUS_WAVE_LEN    2000          /* 40 whole cycles -> seamless loop        */
+/* 160 whole cycles (multiple of the period). Sized so a ONE-SHOT play lasts
+ * longer than ARP_ON_MS even at the arpeggio's highest playback rate
+ * (26163 Hz: 8000/26163 ~= 306 ms > 280 ms), so each note sustains its whole
+ * hold as a one-shot -- no forever-loop voice on the card (see play_gus_arpeggio). */
+#define GUS_WAVE_LEN    8000
 #define GUS_VOL         200           /* 0..255 linear voice volume (headroom)   */
 /* Per-arpeggio-note GF1 playback rate = midi_hz(note) * GUS_WAVE_PERIOD, so the
  * looping period-50 sample sounds at the note pitch. Parallel to ARP_NOTES
@@ -1128,12 +1132,21 @@ static int play_opl2_arpeggio(void)
   return 0;
 }
 
-/* A2: play a C-E-G-C arpeggio on the real Gravis GF1. One looping square-wave
- * sample is uploaded to card DRAM; the GF1 replays it at a per-note sample rate
+/* A2: play a C-E-G-C arpeggio on the real Gravis GF1. One square-wave sample is
+ * uploaded to card DRAM; the GF1 replays it at a per-note sample rate
  * (GUS_ARP_HZ) so the fixed period-50 waveform sounds at the note pitch -- the
- * wavetable pitch trick. Mirrors the SDL/0112 test-tone order (Freq -> Vol ->
- * Pan -> StartVoice). No SB ring; pump_service just paces + polls ESC (its
- * SDL_DOSAudioPump no-ops with no SB device open). Assumes device_open() ran. */
+ * wavetable pitch trick.
+ *
+ * Each note is a ONE-SHOT (flags=0, NOT a loop), mirroring the SDL/0112 driver's
+ * own gus_emit_test_tone: per the driver author, a forever-looping voice can
+ * wedge the PicoGUS firmware (the g2k GUS test card) -- it keeps reading DRAM and
+ * contends, and even a wave-ended-but-still-allocated loop voice contends. The
+ * sample is sized (GUS_WAVE_LEN) so a one-shot outlasts ARP_ON_MS at every note
+ * rate, so the note sustains its whole hold with no loop. Order per the driver
+ * (Freq -> Vol -> Pan -> StartVoice); StopVoice between notes quiesces before the
+ * next StartVoice; device_close StopAllVoices before Shutdown. No SB ring;
+ * pump_service just paces + polls ESC (SDL_DOSAudioPump no-ops with no SB
+ * device). Assumes device_open() ran. */
 static int play_gus_arpeggio(void)
 {
   static Uint8 wave[GUS_WAVE_LEN];   /* static: keep it off the stack */
@@ -1152,16 +1165,13 @@ static int play_gus_arpeggio(void)
   {
     SDL_DOSGusSetVoiceFreq(v, GUS_ARP_HZ[i]);
     SDL_DOSGusSetVoiceVol(v, GUS_VOL);
-    if (i == 0)
-    {
-      SDL_DOSGusSetVoicePan(v, 128);   /* center */
-      /* LOOP the whole buffer so the note sustains for ARP_ON_MS. Safe in SETUP:
-       * nothing else pokes the GF1, and StopVoice/StopAllVoices quiesce it. */
-      SDL_DOSGusStartVoice(v, addr, addr + GUS_WAVE_LEN - 1, addr, SDL_DOSGUS_LOOP);
-    }
-    trace("gus arp: note %d hz=%lu", ARP_NOTES[i], (unsigned long)GUS_ARP_HZ[i]);
-    if (pump_service("gus", ARP_ON_MS, 0) == 27) break;
-    SDL_DOSGusSetVoiceVol(v, 0);       /* gap: silence, keep the voice looping */
+    SDL_DOSGusSetVoicePan(v, 128);     /* center */
+    /* ONE-SHOT (flags=0): plays the buffer once; long enough to cover ARP_ON_MS.
+     * StopVoice below ends the note; no lingering loop voice on the PicoGUS. */
+    SDL_DOSGusStartVoice(v, addr, addr + GUS_WAVE_LEN - 1, addr, 0);
+    trace("gus arp: note %d hz=%lu (one-shot)", ARP_NOTES[i], (unsigned long)GUS_ARP_HZ[i]);
+    if (pump_service("gus", ARP_ON_MS, 0) == 27) { SDL_DOSGusStopVoice(v); break; }
+    SDL_DOSGusStopVoice(v);            /* end the note + quiesce before the next */
     if (pump_service("gus", ARP_GAP_MS, 0) == 27) break;
   }
   SDL_DOSGusStopVoice(v);
