@@ -119,7 +119,10 @@ int scfg_save(const scfg_t *c, const char *path)
   if (!f) return -1;
 
   fputs("; DOSKUTSU.CFG -- written by SETUP.EXE.\r\n", f);
-  fputs("; Edit by hand with care. A real DOS `SET` overrides any line here.\r\n", f);
+  fputs("; Edit by hand with care. Precedence: for most keys a real DOS `SET`\r\n", f);
+  fputs("; overrides the line here (env > file > default). The one exception is\r\n", f);
+  fputs("; BLASTER (sound hardware): its line here overrides an ambient AUTOEXEC\r\n", f);
+  fputs("; `SET BLASTER` (file > env), since SETUP's hardware choice is authoritative.\r\n", f);
   fputs("; schema=1\r\n", f);
   fputs(";\r\n", f);
 
