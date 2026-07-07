@@ -146,31 +146,13 @@ echo "  skipped/missing: ${skipped} files"
 echo "  destination: claude:${WAVE_DIR}/"
 
 echo
-echo "[final] sync + unmount CF"
+echo "[final] sync (LEAVE CF MOUNTED)"
 sync
 echo "  sync done"
-if mountpoint -q "${CF_MOUNT}"; then
-  cf_device=$(findmnt -no SOURCE "${CF_MOUNT}" 2>/dev/null || true)
-  echo "  CF device: ${cf_device:-(none found)}"
-  unmounted=0
-  if [ -n "${cf_device}" ] && udisksctl unmount -b "${cf_device}"; then
-    echo "  PASS: unmounted via udisksctl"
-    unmounted=1
-  elif sudo -n umount "${CF_MOUNT}" 2>&1; then
-    echo "  PASS: unmounted via sudo umount"
-    unmounted=1
-  elif umount "${CF_MOUNT}" 2>&1; then
-    echo "  PASS: unmounted via umount"
-    unmounted=1
-  fi
-  if [ ${unmounted} -eq 0 ]; then
-    echo "  WARN: auto-unmount failed; CF still mounted at ${CF_MOUNT}"
-    echo "  Run manually:"
-    echo "    udisksctl unmount -b ${cf_device:-${CF_MOUNT}}"
-    echo "    OR: sudo umount ${CF_MOUNT}"
-  fi
-else
-  echo "  CF already unmounted"
-fi
+# Operator preference (2026-07-07): the LOGBACK does NOT unmount -- the CF stays
+# mounted after pulling logs so the operator can re-inspect / re-run without a
+# remount. Only the INSTALL script unmounts (so the CF can move to g2k safely).
+echo "  CF left mounted at ${CF_MOUNT} (unmount manually when done:"
+echo "    udisksctl unmount -b \$(findmnt -no SOURCE ${CF_MOUNT}) )"
 echo
 echo "Next: flush-instr decomp at docs/PHASE11-${WAVE_TAG^^}-FINDINGS.md"

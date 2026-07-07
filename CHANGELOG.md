@@ -5,6 +5,34 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.6.2] - 2026-07-07
+
+SETUP.EXE fixes (the game binary is unchanged from 1.6.1). g2k-validated.
+
+### Fixed
+
+- **SETUP "Test music" failed on an AdLib configuration** with "Not a Sound
+  Blaster at port 0x220": the audio test opened the Sound Blaster device
+  unconditionally. AdLib now drives the OPL2 chip directly (no SB device), so
+  the music test plays on an OPL/AdLib-only machine. Effects are correctly
+  reported as unavailable (an AdLib card has no DAC).
+- **SETUP FM music tests sounded different from the game.** The AdLib and OPL3
+  music tests used a small placeholder instrument bank; they now load the same
+  128-program DMXOPL bank (`data/opl3bank.dat`) the game uses, so the preview
+  matches in-game audio.
+- **Sound Blaster card-type labels were wrong.** SETUP mislabelled the BLASTER
+  "T" codes (it called T3 "Sound Blaster Pro 2.0" and T4 "Sound Blaster Pro").
+  Corrected to the Creative standard: T2 = Sound Blaster Pro, T3 = Sound Blaster
+  2.0, T4 = Sound Blaster Pro 2 (OPL3). Picking the OPL3 card now writes the
+  correct type -- important on a real Sound Blaster (the wrong code selects an
+  OPL2-only card).
+- **The Sound screen showed a Sound Blaster even for a no-SB config.** With a
+  non-Sound-Blaster music card (AdLib / Gravis) and no SB effects, the summary
+  now shows the actual music device with Port/IRQ/DMA as "n/a" instead of a
+  stale Sound Blaster type.
+- **The Sound hub's DESCRIPTION box overdrew the menu box border.** Fixed the
+  box geometry so they no longer overlap.
+
 ## [1.6.1] - 2026-07-06
 
 Robustness fixes for hardware beyond the reference machine, from the
