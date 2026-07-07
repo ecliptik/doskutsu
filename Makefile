@@ -545,7 +545,26 @@ $(BUILD_DIR)/doskutsu.exe: $(SYSROOT)/lib/libSDL3_mixer.a $(SYSROOT)/lib/libSDL3
 # assembler -- same trap org2mid solves (see the org2mid recipe note).
 
 SETUP_DIR := $(REPO_ROOT)/setup
+# Dev scaffold stub (AUDIOTEST=0). Consumed by `make stage` (DOSBox-X smoke +
+# run-setup-review.sh) -- no SDL link, stays green with an empty build/sysroot.
 SETUP_EXE := $(BUILD_DIR)/setup/setup.exe
+# Release configurator (AUDIOTEST=1 real SDL3 audio-test backend). DISTINCT path
+# from the stub so a dev `make stage` can never clobber it (the v1.6.2
+# shipped-stub regression). Consumed by dist + stage-release. Built by
+# setup-release, which the setup/Makefile writes to this exact name.
+SETUP_RELEASE_EXE := $(BUILD_DIR)/setup/setup-release.exe
+
+# Ship-gate assertion: the SETUP.EXE about to be packaged MUST be the AUDIOTEST=1
+# backend, not the dev scaffold stub. $(call ASSERT_SETUP_NOT_STUB,<file>) fails
+# the build hard if the stub marker strings are present. This is the missing
+# SETUP half of the game-binary two-witness (v1.6.2 shipped-stub regression).
+define ASSERT_SETUP_NOT_STUB
+	@if strings "$(1)" | grep -qiE 'scaffold|not yet linked|audiotest_stub'; then \
+	  echo "error: $(1) is the AUDIOTEST=0 SCAFFOLD STUB -- refusing to package. Run 'make setup-release' and package $(SETUP_RELEASE_EXE)." >&2; \
+	  exit 1; \
+	fi
+	@echo "[setup-ship-gate] OK: $(1) is the AUDIOTEST=1 backend (no scaffold/stub markers)."
+endef
 
 .PHONY: setup
 setup: | djgpp-check
@@ -2312,7 +2331,7 @@ dist-list:
 	@printf '   target zip: %s\n\n' "$(CF_ZIP)"
 	@printf 'top-level files:\n'
 	@$(call _dist_list_entry,DOSKUTSU.EXE,$(BUILD_DIR)/doskutsu.exe,binary (rename to upper-case))
-	@$(call _dist_list_entry,SETUP.EXE,$(SETUP_EXE),DOS configurator (writes DOSKUTSU.CFG))
+	@$(call _dist_list_entry,SETUP.EXE,$(SETUP_RELEASE_EXE),DOS configurator AUDIOTEST=1 (writes DOSKUTSU.CFG))
 	@printf '  %-22s %-55s %s\n' "SETUP.BAT" "(generated)" "SETUP.EXE launcher [CRLF]"
 	@$(call _dist_list_entry,CWSDPMI.EXE,$(CWSDPMI_EXE),DPMI host (vendored in repo))
 	@$(call _dist_list_entry,CWSDPMI.DOC,$(CWSDPMI_DOC),CWSDPMI redistribution terms)
@@ -2356,7 +2375,7 @@ endef
 .PHONY: dist
 dist: $(BUILD_DIR)/doskutsu.exe setup-release | fetch-binaries
 	@test -f "$(CWSDPMI_EXE)"   || (echo "error: $(CWSDPMI_EXE) missing -- run ./scripts/fetch-vendor-binaries.sh" >&2; exit 1)
-	@test -f "$(SETUP_EXE)"     || (echo "error: $(SETUP_EXE) missing -- 'make setup-release' failed?" >&2; exit 1)
+	@test -f "$(SETUP_RELEASE_EXE)" || (echo "error: $(SETUP_RELEASE_EXE) missing -- 'make setup-release' failed?" >&2; exit 1)
 	@test -f "$(CWSDPMI_DOC)"   || (echo "error: $(CWSDPMI_DOC) missing" >&2; exit 1)
 	@test -f "$(NX_LICENSE)"    || (echo "error: $(NX_LICENSE) missing -- run scripts/fetch-sources.sh" >&2; exit 1)
 	@test -d "$(NX_DATA_SRC)"   || (echo "error: $(NX_DATA_SRC) missing -- run scripts/fetch-sources.sh" >&2; exit 1)
@@ -2365,7 +2384,8 @@ dist: $(BUILD_DIR)/doskutsu.exe setup-release | fetch-binaries
 	@rm -rf "$(CF_STAGE)" "$(CF_ZIP)"
 	@mkdir -p "$(CF_STAGE)"
 	@install -m 0644 $(BUILD_DIR)/doskutsu.exe "$(CF_STAGE)/DOSKUTSU.EXE"
-	@install -m 0644 $(SETUP_EXE)             "$(CF_STAGE)/SETUP.EXE"
+	@install -m 0644 $(SETUP_RELEASE_EXE)      "$(CF_STAGE)/SETUP.EXE"
+	$(call ASSERT_SETUP_NOT_STUB,$(CF_STAGE)/SETUP.EXE)
 	@install -m 0644 $(CWSDPMI_EXE)            "$(CF_STAGE)/CWSDPMI.EXE"
 	@install -m 0644 $(CWSDPMI_DOC)            "$(CF_STAGE)/CWSDPMI.DOC"
 	@# SETUP.BAT launcher (CRLF) so users can `SETUP` to configure before play.
@@ -2442,6 +2462,28 @@ stage: $(BUILD_DIR)/doskutsu.exe setup | fetch-binaries
 	@$(REPO_ROOT)/scripts/stage-tas.sh --quiet 2>/dev/null \
 	  && echo "staged PLAY.TAS (canonical recording)" \
 	  || echo "note: no canonical PLAY.TAS staged -- gameplay smoke will boot-only"
+
+# --- Runtime staging for the SHIP / real-HW iter path ------------------------
+#
+# `make stage` deliberately stages the AUDIOTEST=0 dev scaffold SETUP.EXE (no
+# SDL link -- keeps the DOSBox smoke + run-setup-review.sh green with an empty
+# build/sysroot). But the real-HW iter / g2k operator NEEDS the AUDIOTEST=1
+# configurator (the live SDL3 audio-test backend). `make stage-release` builds
+# the real backend (setup-release) and OVERWRITES the staged SETUP.EXE with it,
+# then HARD-ASSERTS it is not the scaffold stub. This is the packaging entry
+# point for the iter tarball -- pull SETUP.EXE from $(STAGE_DIR)/ after this.
+#
+# The `stage` prereq stages everything (incl. the stub SETUP.EXE) first; this
+# recipe replaces SETUP.EXE last, so the final staged tree carries the AUDIOTEST=1
+# binary regardless of prereq scheduling. setup-release writes a DISTINCT file
+# ($(SETUP_RELEASE_EXE)), so `stage`'s dev `setup` (AUDIOTEST=0) can never clobber
+# it -- the v1.6.2 shipped-stub regression is structurally impossible here.
+.PHONY: stage-release
+stage-release: stage setup-release
+	@test -f "$(SETUP_RELEASE_EXE)" || (echo "error: $(SETUP_RELEASE_EXE) missing -- 'make setup-release' failed?" >&2; exit 1)
+	@install -m 0644 $(SETUP_RELEASE_EXE)     "$(STAGE_DIR)/SETUP.EXE"
+	$(call ASSERT_SETUP_NOT_STUB,$(STAGE_DIR)/SETUP.EXE)
+	@echo "stage-release: $(STAGE_DIR)/SETUP.EXE = AUDIOTEST=1 release backend (ship this)."
 
 # --- org-cache: pre-render the build-sha-keyed Organya PCM cache ------------
 #

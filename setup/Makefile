@@ -22,6 +22,12 @@ CC       := i586-pc-msdosdjgpp-gcc
 STUBEDIT := stubedit
 
 OUT_DIR := $(REPO_ROOT)/build/setup
+# EXE path is AUDIOTEST-dependent (set in the ifeq block below). The dev
+# scaffold stub (AUDIOTEST=0) and the release audio-backend build (AUDIOTEST=1)
+# MUST NOT share an output path -- v1.6.2 shipped the AUDIOTEST=0 stub because
+# both wrote build/setup/setup.exe and a `make stage` (dev `setup`, AUDIOTEST=0)
+# re-clobbered the AUDIOTEST=1 release binary. Separate filenames make that
+# clobber impossible. Default here is the stub name; the ifeq overrides for =1.
 EXE     := $(OUT_DIR)/setup.exe
 
 # DPMI min stack. The scaffold (AUDIOTEST_LINKED=0) build does not strictly
@@ -53,6 +59,10 @@ CFLAGS  := -std=gnu99 -Wall -Wextra -Werror -march=i486 -mtune=pentium -O2 \
 AUDIOTEST ?= 0
 
 ifeq ($(AUDIOTEST),1)
+  # Distinct output name so a dev `make stage`/`make setup` (AUDIOTEST=0, writes
+  # setup.exe) can NEVER clobber the shipped release binary. dist / stage-release
+  # in the top Makefile consume THIS file.
+  EXE         := $(OUT_DIR)/setup-release.exe
   CPPFLAGS    := -DAUDIOTEST_LINKED=1
   # SDL3 / SDL3_mixer public headers.
   CFLAGS      += -I$(SYSROOT)/include
@@ -104,7 +114,7 @@ $(OUT_DIR):
 	mkdir -p $(OUT_DIR)
 
 clean:
-	rm -f $(EXE) $(OUT_DIR)/.audiotest-*
+	rm -f $(OUT_DIR)/setup.exe $(OUT_DIR)/setup-release.exe $(OUT_DIR)/.audiotest-*
 
 # Host-side logic tests (no DOS toolchain): config loader + recommend matrix.
 # Runs with the ORIGINAL PATH so the host cc does not pick up DJGPP's `as`.

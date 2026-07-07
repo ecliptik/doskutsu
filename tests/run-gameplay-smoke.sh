@@ -111,6 +111,26 @@ fi
 log "make stage..."
 make -C "$REPO_ROOT" stage >>"$RESULTS" 2>&1
 
+# SETUP-stub gate (v1.6.2 shipped-stub regression, [[build_cache_hygiene]] two-witness
+# gap). The RELEASE configurator build/setup/setup-release.exe (AUDIOTEST=1) must be the
+# real SDL3 audio-test backend, NOT the AUDIOTEST=0 scaffold stub. We check the RELEASE
+# binary, NOT the dev-staged SETUP.EXE -- `make stage` deliberately stages the stub (no
+# SDL link needed to drive the TUI in a smoke), so asserting no-stub on the staged file
+# would false-fail every dev run. If setup-release.exe is absent (pure dev smoke that
+# never built the release backend) this is skipped with a note. When present it fails
+# HARD on any scaffold/stub marker -- the missing SETUP half of the game-binary two-witness.
+SETUP_RELEASE_EXE="$REPO_ROOT/build/setup/setup-release.exe"
+if [[ -f "$SETUP_RELEASE_EXE" ]]; then
+  if strings "$SETUP_RELEASE_EXE" | grep -qiE 'scaffold|not yet linked|audiotest_stub'; then
+    log "FAIL: $SETUP_RELEASE_EXE is the AUDIOTEST=0 SCAFFOLD STUB -- shipped-stub regression."
+    log "      Fix: rm build/setup/setup-release.exe build/setup/.audiotest-* && make setup-release"
+    exit 6
+  fi
+  log "setup-stub gate: OK -- setup-release.exe is the AUDIOTEST=1 backend (no scaffold markers)."
+else
+  log "setup-stub gate: SKIP -- no build/setup/setup-release.exe (dev smoke; release backend not built)."
+fi
+
 # PLAY.TAS sanity check (catches the wave-44 stub regression). When a
 # PLAY.TAS is present at the stage root, it must be a STRUCTURALLY VALID
 # DTASv1 recording, not a header-only stub that auto-exits immediately the
@@ -346,7 +366,7 @@ BANNER_REGEX=(
   "audio: SDL/0070 v2 Pixtone probe pix_active histogram \\+ irq_delta fold-in"
   "audio: SDL/0071 pixtone IRQ-mix: (ENABLED|DISABLED|REQUESTED)"
   "audio: SDL/0072 midi tick from ISR: (ENABLED|DISABLED)"
-  "audio mid-gap pump: (ENABLED \(opt-in\)|DISABLED \(default\))"
+  "audio mid-gap pump: (ENABLED|DISABLED)"
   "data cache: (ENABLED \(opt-in\)|DISABLED \(default\))"
   "audio tick-boundary pump: (ENABLED \(opt-in\)|DISABLED \(default\))"
   "pixtone multi-source probe: (ENABLED \(opt-in\)|DISABLED \(default\))"
@@ -433,6 +453,8 @@ BANNER_REGEX=(
   "gus SFX gain \[nx0259\]: [0-9]+%"
   "sdl: SDL/0115 BANK-GRAN-FIX (ENABLED|DISABLED)"
   "sdl: SDL/0116 VBLANK-BOUND (ENABLED|DISABLED)"
+  "Sound system: AdLib PC-speaker SFX beeps -- engine SFX->beep mapping WIRED"
+  "audio: SDL/0118 \[pcspk\] square-wave SFX (ENABLED|DISABLED)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -567,8 +589,12 @@ BANNER_SEVERITY=(
   "optional"
   "required"
   "required"
+  "optional"
+  "optional"
 )
-# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (all three are 108 entries;
+# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (the two gate-critical arrays
+# are 134 entries each and MUST stay equal-length; BANNER_LABEL is display-only and has
+# historically run shorter -- the `${BANNER_LABEL[$i]:-}` guard below tolerates the gap).
 # the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
 # add a BANNER_REGEX + BANNER_SEVERITY entry, add a matching BANNER_LABEL line at the same
 # index. (v1.0.5 #16 re-aligned these -- v1.0.4 had a 2-entry tail gap from the P2 banners,
@@ -691,6 +717,8 @@ BANNER_LABEL=(
   "0235 Campaign 2 AdLib PIT/IRQ-0 OPL music pump started (OPTIONAL -- 'adlib: OPL music pump STARTED at N Hz (PIT ch0 / IRQ-0 drives MidiScheduler::tick_isr; BIOS 18.2 Hz tick chained; restored on exit) ...' emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib AND when SDL_DOSOplTimerPumpStart succeeded (OPL2 detected, SB not hot, hz in [19,1000]). This is THE decisive runtime witness that the no-SB music clock engaged -- on a real AdLib/OPL2 card or PicoGUS /mode adlib the 8253 PIT ch0 is reprogrammed to N Hz (default 120; override SDL_HINT_DOSKUTSU_OPL_TIMER_HZ) and IRQ-0 drives the SAME tick_isr the SB path drives. ABSENT in the default smoke (no adlib), expected. NB per [[dosbox_not_proxy]] DOSBox-X confirms the banner/boot path but NOT real PIT/IRQ-0 timing -- the g2k AdLib iter is the perf/correctness witness (incl. PIT-restore-on-quit + BIOS-tick correctness). Embed witness = strings|grep 'OPL music pump STARTED'. BANNER_REGEX idx 110.)"
   "SDL/0115 banked-blit granularity fix (REQUIRED -- 'sdl: SDL/0115 BANK-GRAN-FIX (ENABLED|DISABLED) ...' emits once at DOSVESA_CreateWindowFramebuffer on EVERY boot, before the first flush. Proves the WinGranularity<WinSize multi-bank-walk correction (patches/SDL/0115) is in the binary AND ran. Default-ON; strict-'0' killswitch SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0 flips the text to DISABLED (still matches). On g2k gran==size==64KB the corrected walk is byte-identical to the legacy bank++ sequence. Embed witness = strings|grep 'BANK-GRAN-FIX'.)"
   "SDL/0116 bounded WaitForVBlank (REQUIRED -- 'sdl: SDL/0116 VBLANK-BOUND (ENABLED|DISABLED) ...' emits once at DOSVESA_CreateWindowFramebuffer on EVERY boot. Proves the mainline vblank-spin HW-IO-hang guard (patches/SDL/0116) is in the binary AND ran. Default-ON; strict-'0' killswitch SDL_HINT_DOSKUTSU_VBLANK_BOUND=0 flips the text to DISABLED (still matches). Embed witness = strings|grep 'VBLANK-BOUND'.)"
+  "0264 AdLib PC-speaker SFX->beep mapping WIRED (OPTIONAL -- engine SFX->beep map; emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib, the MUSIC-ONLY AdLib path; ABSENT in the default opl3 smoke, expected; witnessed via the dedicated AdLib DOSBox cell (sbtype=none + oplmode=opl2 + SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib). SDL owns the default-ON killswitch SDL_HINT_DOSKUTSU_PCSPK_SFX=0. Embed witness = strings|grep 'AdLib PC-speaker SFX beeps'. BANNER_REGEX idx 108.)"
+  "SDL/0118 PC-speaker square-wave SFX decision (OPTIONAL -- 'audio: SDL/0118 [pcspk] square-wave SFX (ENABLED|DISABLED)' on the SDL-log channel (SDLDBG.LOG); emits at the PC-speaker beep-path bring-up on the AdLib path only; ABSENT in the default opl3 smoke, expected; killswitch SDL_HINT_DOSKUTSU_PCSPK_SFX=0 -> v1.5.0 music-only byte-identical. Embed witness = strings|grep 'SDL/0118'. BANNER_REGEX idx 109.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
