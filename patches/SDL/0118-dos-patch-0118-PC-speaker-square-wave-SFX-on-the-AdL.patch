@@ -1,0 +1,470 @@
+From 32fbec6b40418aaf5d5c3d77788f893fd9f8a4d0 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 7 Jul 2026 13:24:31 -0700
+Subject: [PATCH] dos: patch 0118 -- PC-speaker square-wave SFX on the AdLib
+ path (shared PIT ch0)
+
+Campaign 2 Phase 2 (SDL side). Extends the SDL/0110 AdLib OPL music pump so a
+no-SB AdLib box (real AdLib / OPL-only card, or a PicoGUS in /mode adlib) also
+gets Cave Story sound effects via the motherboard PC speaker. A pure OPL card
+has no DAC/DMA, so the PC speaker is the only sound-effect out it has.
+
+Why DOS needs this: the shipped AdLib path (SDL/0110 + engine MidiBackendOpl2)
+is SFX-silent by hardware -- it drives OPL2 music only. The one PCM-out an
+OPL-only box has is the PC speaker. The parked PWM-DAC experiment (SDL/0111 on
+feat/adlib-opl2, never merged) fed the speaker per-sample and rendered clean
+tones as static on a filterless speaker. This patch instead programs PIT ch2 in
+MODE 3 -- the 8253's hardware square-wave generator: the chip synthesizes the
+tone itself, and the existing ~120 Hz ch0 music-pump ISR merely counts each
+note's duration down and gates the speaker off when it elapses. No per-sample
+feed, no second timer. ch2 does NOT touch BIOS timekeeping (ch0 does), so it is
+clock-safe alongside the music pump; it reuses ONLY the ch2/0x61 acquire +
+restore-on-exit discipline of the parked PWM patch, not its sample loop.
+
+Mechanism (extends the SDL/0110 pump; DEFAULT ON on the AdLib path):
+- Killswitch SDL_HINT_DOSKUTSU_PCSPK_SFX resolved at pump Start via a strict-"0"
+  test (only the literal env "0" disables; unset / anything else = ON). Since
+  pump Start only runs on the no-SB AdLib path, this is inherently AdLib-scoped
+  -- the repo's idiomatic "production lever default-ON with a killswitch"
+  pattern. When off, the unchanged SDL/0110 music-only OplPitISR is installed:
+  byte-identical to shipped v1.5.0, no ch2/0x61 touch.
+- Engine-facing API (include/SDL3/SDL_dosopltimer.h; nx-engine maps Pixtone SFX
+  IDs to (freq,duration) square-wave descriptors and calls it at the SFX
+  trigger point): void SDL_DOSPcSpkBeep(Uint16 freq_hz, Uint16 duration_ms,
+  int flush) + bool SDL_DOSPcSpkSfxEnabled(void). freq_hz==0 is a timed REST
+  (for the gap in a two-note SFX); flush=1 PREEMPTS (clear queue + sounding
+  note, start now), flush=0 APPENDS to a depth-4 note ring (plays after the
+  current note) -- monophonic speaker sequencing for two-note SFX (pickup,
+  up-chirp).
+- A PC-speaker-capable ISR (OplPitBeepISR) is installed INSTEAD of OplPitISR
+  only when the killswitch is on: identical clock advance + music tick + BIOS-
+  INT8 chain, plus a note-duration countdown that pops the next queued note (or
+  silences the speaker) on expiry. The ISR does ZERO divide -- SDL_DOSPcSpkBeep
+  precomputes the ch2 divisor + duration-in-fires on the engine thread and
+  stores them in the ring. Ring mutation + note start are wrapped in
+  DOS_DisableInterrupts on the engine thread (single-producer vs the IRQ-0
+  consumer); the ISR + ring + BeepStartNote helper are DPMI-locked at Start.
+- Restore on exit (extends SDL/0110 Stop, which is also the engine's atexit
+  teardown): silence the speaker + restore ch2 (benign mode 3) + port 0x61 to
+  its pre-pump value, in addition to the ch0-divisor restore + IRQ-0 unhook. A
+  left-on square wave is a stuck tone -- the same quit-path hazard class as the
+  PIT ch0 restore.
+
+Boot banner "audio: SDL/0118 [pcspk] square-wave SFX ..." (emits on the AdLib
+path only, at pump Start) for the smoke gate.
+
+SB-present path is unchanged: the pump is never started when an SB is hot
+(SDL/0110 refuses), so SDL_DOSPcSpkBeep no-ops (guarded on pump-active) and ch2
+is never touched on any SB / OPL3 / WB / GUS config.
+
+g2k-validation items ([[dosbox_not_proxy]], DOSBox-X cannot validate real IRQ-0
+timing or the analog speaker): (1) SFX audibly square-wave + music coexists on
+the AdLib path; (2) clean-quit restore -- PIT ch0 back to 18.2065 Hz, ch2/0x61
+restored, DOS TIME correct, no stuck tone; (3) killswitch=0 = music-only,
+byte-identical to v1.5.0.
+
+Workspace-local patch; not upstreamed (sdl_ai_policy).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dosopltimer.h     |  59 +++++++
+ src/core/dos/SDL_dos_audio_synth.c | 259 ++++++++++++++++++++++++++++-
+ 2 files changed, 311 insertions(+), 7 deletions(-)
+
+diff --git a/include/SDL3/SDL_dosopltimer.h b/include/SDL3/SDL_dosopltimer.h
+index fc1d35863..3f516035e 100644
+--- a/include/SDL3/SDL_dosopltimer.h
++++ b/include/SDL3/SDL_dosopltimer.h
+@@ -100,6 +100,65 @@ extern SDL_DECLSPEC void SDLCALL SDL_DOSOplTimerPumpStop(void);
+  */
+ extern SDL_DECLSPEC bool SDLCALL SDL_DOSOplTimerPumpActive(void);
+ 
++/*
++ * DOSKUTSU patch (SDL/0118, Campaign 2 Phase 2): PC-speaker square-wave SFX.
++ *
++ * On the no-SB AdLib path the shared PIT ch0 pump (above) also gates the
++ * motherboard PC speaker as a monophonic square-wave SFX source: a pure OPL
++ * card has no DAC/DMA, so the PC speaker is the only sound-effect out it has.
++ * Unlike the PARKED PWM-DAC experiment (which fed the speaker per-sample and
++ * rendered clean tones as static on a filterless speaker), this uses PIT ch2
++ * in MODE 3 (the 8253's hardware square-wave generator): the chip synthesizes
++ * the tone itself, and the ~120 Hz ch0 pump ISR merely counts the note's
++ * duration down and gates the speaker off when it elapses -- no per-sample
++ * feed, no second timer, and ch2 does not touch BIOS timekeeping (ch0 does).
++ *
++ * Gated by SDL_HINT_DOSKUTSU_PCSPK_SFX: DEFAULT ON on the AdLib path, resolved
++ * at pump Start via a strict-"0" killswitch (only the literal env "0" disables;
++ * when off, the pump is music-only and byte-identical to the shipped v1.5.0
++ * AdLib path -- no ch2/0x61 touch). The engine (nx-engine) maps Pixtone SFX IDs
++ * to (freq,duration) square-wave descriptors and calls SDL_DOSPcSpkBeep below.
++ */
++
++/**
++ * Play a monophonic PC-speaker square-wave note (or a timed rest).
++ *
++ * Programs PIT ch2 (mode 3) to `freq_hz` and routes the speaker (port 0x61
++ * bits 0-1); the ch0 OPL pump ISR gates it OFF after `duration_ms`. Enqueue
++ * ONLY from the engine thread (never an ISR) -- the ring mutation is guarded
++ * internally with a brief interrupt-disable against the IRQ-0 consumer.
++ *
++ * A single PC speaker is monophonic, so two-note SFX (pickup, up-chirp) need
++ * sequencing: `flush` selects preempt-vs-queue.
++ *
++ * \param freq_hz square-wave frequency in Hz (clamped to [20,20000]); 0 == a
++ *                timed REST (speaker silent for `duration_ms`, for the gap in a
++ *                two-note sequence).
++ * \param duration_ms note length in milliseconds (clamped to [1,5000]);
++ *                    granularity is ~1 ch0 pump tick (~8 ms at 120 Hz).
++ * \param flush 1 = PREEMPT: clear the queue + any sounding note and start THIS
++ *              note immediately (a new one-shot, or the first note of a
++ *              sequence). 0 = APPEND to a small (depth-4) note ring; it plays
++ *              after the current note finishes (the later notes of a sequence).
++ *
++ * No-op unless PC-speaker SFX is enabled (SDL_DOSPcSpkSfxEnabled()) AND the ch0
++ * pump is active, so a stray call on a non-AdLib / killswitch-off build is
++ * harmless (never bangs ch2/0x61). Not a per-call hint lookup -- a cached bool.
++ *
++ * \since SDL 3 -- doskutsu workspace-local patch 0118, 2026-07-07.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSPcSpkBeep(Uint16 freq_hz, Uint16 duration_ms, int flush);
++
++/**
++ * \returns true if PC-speaker square-wave SFX is ENABLED for this process
++ *          (SDL_HINT_DOSKUTSU_PCSPK_SFX != "0", resolved at pump Start on the
++ *          AdLib path). The engine gates its SFX->beep mapping on this. False
++ *          when the killswitch is "0" or the pump never started (e.g. an SB is
++ *          present, so the pump refused and the AdLib path is not in use).
++ * \since SDL 3 -- doskutsu workspace-local patch 0118, 2026-07-07.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSPcSpkSfxEnabled(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 285180bb0..29751d626 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -1264,6 +1264,67 @@ static volatile Uint64   s_now_ms = 0;        /* monotonic ms for the tick cb */
+ static volatile uint32_t s_bios_accum = 0;    /* fractional toward the 18.2 Hz BIOS tick */
+ static SDL_DOSMidiTickCallback s_pump_tick_cb = NULL;
+ 
++/* ========================================================================
++ * DOSKUTSU patch (SDL/0118, Campaign 2 Phase 2): PC-speaker square-wave SFX
++ * ========================================================================
++ * Extends the SDL/0110 pump so a no-SB AdLib box also gets Cave Story SFX via
++ * the motherboard PC speaker -- but using PIT ch2 in MODE 3 (the 8253 hardware
++ * square-wave generator), NOT the parked SDL/0111 PWM-DAC (which fed the
++ * speaker per-sample and rendered clean tones as static). The chip synthesizes
++ * the tone; the ch0 pump ISR only counts each note's duration down and gates
++ * the speaker off, then advances a small note ring (for two-note SFX). ch2 does
++ * NOT touch BIOS timekeeping (ch0 does), so it is clock-safe alongside the music
++ * pump. DEFAULT ON on the AdLib path via the strict-"0" killswitch
++ * SDL_HINT_DOSKUTSU_PCSPK_SFX (resolved at Start); when off, the unchanged
++ * SDL/0110 music-only ISR is installed (byte-identical to v1.5.0, no ch2/0x61
++ * touch). Engine-facing API contract: include/SDL3/SDL_dosopltimer.h. */
++
++#define PCSPK_NOTE_RING   4              /* queued-note ring depth (power of two) */
++#define PCSPK_NOTE_MASK   (PCSPK_NOTE_RING - 1)
++#define PCSPK_FREQ_MIN    20u
++#define PCSPK_FREQ_MAX    20000u
++#define PCSPK_DUR_MAX     5000u
++
++/* Killswitch + restore state (resolved / captured once at pump Start). */
++static bool     s_pcspk_sfx_enabled = false; /* SDL_HINT_DOSKUTSU_PCSPK_SFX != "0" (default ON) */
++static Uint8    s_pcspk_saved_61    = 0;     /* port 0x61 saved at Start, restored at Stop */
++static uint32_t s_pcspk_fire_hz     = 0;     /* ch0 pump fire rate, for ms->tick conversion */
++
++/* Currently-sounding note (ISR-owned; engine thread only writes under cli). */
++static volatile uint32_t s_beep_ticks   = 0;    /* ch0-pump fires remaining (0 == idle) */
++static volatile bool     s_beep_playing = false;
++
++/* Queue of not-yet-started notes. div + tick count are PRECOMPUTED on the
++   engine thread (SDL_DOSPcSpkBeep) so the ISR does ZERO divide; div==0 == a
++   timed REST (speaker silent for the duration). Monotonic int cursors, mutated
++   under DOS_DisableInterrupts vs the IRQ-0 consumer. DPMI-locked at Start. */
++static volatile struct { uint16_t div; uint16_t ticks; } s_beep_ring[PCSPK_NOTE_RING];
++static volatile int s_beep_wr = 0;
++static volatile int s_beep_rd = 0;
++
++/* Start a note NOW: program ch2 mode-3 square wave + route the speaker (or, for
++   a rest, gate the speaker off), then arm the countdown. outportb-only, no
++   divide -- called from BOTH the engine thread (under cli, in SDL_DOSPcSpkBeep)
++   and the IRQ-0 ISR (on note advance). DPMI-locked at Start. */
++static void BeepStartNote(uint16_t div, uint16_t ticks)
++{
++    if (div == 0u) {
++        /* timed REST: speaker + ch2 gate off, but keep the countdown running. */
++        outportb(0x61, (Uint8)(inportb(0x61) & ~0x03));
++    } else {
++        /* ch2: control 0x43 = 0xB6 (ch2, lobyte+hibyte, MODE 3 square wave,
++           binary), divisor to 0x42, then speaker on (0x61 bit0 = ch2 gate,
++           bit1 = speaker data). */
++        outportb(0x43, 0xB6);
++        outportb(0x42, (Uint8)(div & 0xFF));
++        outportb(0x42, (Uint8)((div >> 8) & 0xFF));
++        outportb(0x61, (Uint8)(inportb(0x61) | 0x03));
++    }
++    s_beep_ticks   = ticks ? ticks : 1u;
++    s_beep_playing = true;
++}
++static void BeepStartNote_End(void) {}
++
+ /* Chain to the original BIOS INT 8 (it issues its own EOI). Simulate the
+    interrupt entry: push flags, far-call the saved protected-mode vector; the
+    handler's IRET pops EIP/CS/EFLAGS, balancing the CALL's CS/EIP + our pushfl.
+@@ -1315,6 +1376,58 @@ static void OplPitISR(void)
+ }
+ static void OplPitISR_End(void) {}
+ 
++/* DOSKUTSU patch (SDL/0118): PC-speaker-capable IRQ-0 ISR. Installed (instead
++   of the unchanged OplPitISR) ONLY when the PC-speaker SFX killswitch is on
++   (SDL_HINT_DOSKUTSU_PCSPK_SFX != "0", the default on the AdLib path). Same
++   clock advance + music tick + BIOS-INT8 chain as OplPitISR, plus: when a
++   square-wave note is sounding, count it down and -- on expiry -- advance to
++   the next queued note (or silence the speaker + go idle). outportb-only, no
++   divide (the note ring holds precomputed divisors). DPMI-locked. */
++static void OplPitBeepISR(void)
++{
++    /* 1. advance the monotonic clock (identical to OplPitISR). */
++    s_us_frac += s_us_per_tick;
++    while (s_us_frac >= 1000u) {
++        s_us_frac -= 1000u;
++        s_now_ms++;
++    }
++
++    /* 2. drive the music (the engine's ISR-safe MidiScheduler::tick_isr). */
++    if (s_pump_tick_cb) {
++        s_pump_tick_cb(s_now_ms);
++    }
++
++    /* 3. SDL/0118: PC-speaker note duration + monophonic sequencing. When the
++       current note's countdown hits zero, pop the next queued note (mode-3
++       square wave via BeepStartNote) or, if the ring is empty, gate the speaker
++       off and go idle. Nothing here runs while idle (s_beep_playing == false),
++       so an idle beep-ISR is one bool test heavier than OplPitISR. */
++    if (s_beep_playing) {
++        if (--s_beep_ticks == 0u) {
++            if (s_beep_rd != s_beep_wr) {
++                const int i = s_beep_rd & PCSPK_NOTE_MASK;
++                const uint16_t d = s_beep_ring[i].div;
++                const uint16_t t = s_beep_ring[i].ticks;
++                s_beep_rd++;
++                BeepStartNote(d, t);
++            } else {
++                outportb(0x61, (Uint8)(inportb(0x61) & ~0x03)); /* speaker + gate off */
++                s_beep_playing = false;
++            }
++        }
++    }
++
++    /* 4. preserve the BIOS 18.2065 Hz tick (identical to OplPitISR). */
++    s_bios_accum += s_pit_div;
++    if (s_bios_accum >= 65536u) {
++        s_bios_accum -= 65536u;
++        OplPitChainOld();      /* original BIOS INT 8 runs + EOIs */
++    } else {
++        DOS_EndOfInterrupt(0); /* master-PIC EOI (IRQ-0) */
++    }
++}
++static void OplPitBeepISR_End(void) {}
++
+ bool SDL_DOSOplTimerPumpStart(int hz)
+ {
+     if (s_opl_pump_active) {
+@@ -1351,17 +1464,48 @@ bool SDL_DOSOplTimerPumpStart(int hz)
+        (SDL_DOSMidiTickRegister) BEFORE Start, mirroring the SB init order. */
+     s_pump_tick_cb = SDL_DOSMidiTickGetRegistered();
+ 
+-    /* Install IRQ-0 via the REPLACE variant: an IRET wrapper enters OplPitISR
++    /* SDL/0118: resolve the PC-speaker SFX killswitch (strict-"0", DEFAULT ON;
++       pump Start only runs on the no-SB AdLib path, so this is inherently
++       AdLib-scoped). When "0", install the unchanged SDL/0110 music-only ISR
++       below -- byte-identical to v1.5.0, no ch2/0x61 touch. Also cache the ch0
++       fire rate (for ms->tick conversion) + snapshot port 0x61 for restore. */
++    {
++        const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_PCSPK_SFX");
++        s_pcspk_sfx_enabled = !(e && e[0] == '0' && e[1] == '\0');
++    }
++    s_pcspk_fire_hz = (uint32_t)(DOS_PIT_INPUT_HZ / (s_pit_div ? s_pit_div : 1u));
++    if (s_pcspk_fire_hz == 0u) {
++        s_pcspk_fire_hz = 1u;
++    }
++    if (s_pcspk_sfx_enabled) {
++        s_beep_wr = s_beep_rd = 0;
++        s_beep_ticks = 0;
++        s_beep_playing = false;
++        s_pcspk_saved_61 = (Uint8)inportb(0x61);
++    }
++
++    /* Install IRQ-0 via the REPLACE variant: an IRET wrapper enters the handler
+        as the terminal handler, so we own the EOI + the manual every-Nth chain
+        (the chaining variant would run the old handler every fire == BIOS clock
+-       ~6.6x fast at 120 Hz). */
+-    DOS_HookInterruptReplace(0, OplPitISR, &s_opl_pit_hook);
++       ~6.6x fast at 120 Hz). SDL/0118: install the PC-speaker-capable ISR when
++       the killswitch is on, else the unchanged SDL/0110 music-only ISR (so the
++       flag-off path is byte-identical to v1.5.0). */
++    DOS_HookInterruptReplace(0, s_pcspk_sfx_enabled ? OplPitBeepISR : OplPitISR,
++                             &s_opl_pit_hook);
+     s_old_int8_vec.off = (uint32_t)s_opl_pit_hook.original_irq_handler_seginfo.pm_offset;
+     s_old_int8_vec.sel = (uint16_t)s_opl_pit_hook.original_irq_handler_seginfo.pm_selector;
+ 
+-    /* DPMI-lock the ISR + chain helper + all ISR-touched data BEFORE arming
+-       the fast PIT rate so no page-fault can occur in interrupt context. */
+-    DOS_LockCode(OplPitISR, OplPitISR_End);
++    /* DPMI-lock the installed ISR + chain helper + all ISR-touched data BEFORE
++       arming the fast PIT rate so no page-fault can occur in interrupt context.
++       SDL/0118: lock the PC-speaker-capable ISR + BeepStartNote helper when the
++       killswitch is on (the ISR calls BeepStartNote on note advance); else the
++       unchanged music-only ISR. */
++    if (s_pcspk_sfx_enabled) {
++        DOS_LockCode(OplPitBeepISR, OplPitBeepISR_End);
++        DOS_LockCode(BeepStartNote, BeepStartNote_End);
++    } else {
++        DOS_LockCode(OplPitISR, OplPitISR_End);
++    }
+     DOS_LockCode(OplPitChainOld, OplPitChainOld_End);
+     DOS_LockVariable(s_pit_div);
+     DOS_LockVariable(s_us_per_tick);
+@@ -1371,6 +1515,15 @@ bool SDL_DOSOplTimerPumpStart(int hz)
+     DOS_LockVariable(s_pump_tick_cb);
+     DOS_LockVariable(s_old_int8_vec);
+     DOS_LockVariable(s_opl_pump_active);
++    if (s_pcspk_sfx_enabled) {
++        /* SDL/0118: lock the note ring + all PC-speaker ISR-touched state. */
++        DOS_LockVariable(s_beep_ring);
++        DOS_LockVariable(s_beep_wr);
++        DOS_LockVariable(s_beep_rd);
++        DOS_LockVariable(s_beep_ticks);
++        DOS_LockVariable(s_beep_playing);
++        DOS_LockVariable(s_pcspk_fire_hz);
++    }
+ 
+     /* Program PIT ch0: control 0x43 = 0x36 (ch0, lobyte+hibyte, mode 3,
+        binary), then divisor low+high to 0x40. */
+@@ -1388,6 +1541,11 @@ bool SDL_DOSOplTimerPumpStart(int hz)
+                      (unsigned)(65536u / div),
+                      s_pump_tick_cb ? "registered"
+                                     : "NULL(no MidiScheduler tick registered!)");
++    doskutsu_dbg_log("audio: SDL/0118 [pcspk] square-wave SFX %s (PIT ch2 mode-3; "
++                     "ch0 pump %u Hz gates note duration; ring depth %d; killswitch "
++                     "SDL_HINT_DOSKUTSU_PCSPK_SFX=0 -> v1.5.0 music-only byte-identical)",
++                     s_pcspk_sfx_enabled ? "ENABLED" : "disabled (killswitch=0)",
++                     (unsigned)s_pcspk_fire_hz, PCSPK_NOTE_RING);
+     return true;
+ }
+ 
+@@ -1402,6 +1560,21 @@ void SDL_DOSOplTimerPumpStop(void)
+     outportb(0x43, 0x36);
+     outportb(0x40, 0x00);
+     outportb(0x40, 0x00);
++    if (s_pcspk_sfx_enabled) {
++        /* SDL/0118: tear down the PC speaker -- silence + restore ch2 to a
++           benign mode-3 state + port 0x61 to its pre-pump value. A left-on
++           square wave is a stuck tone, the same quit-path hazard class as the
++           PIT ch0 restore. This runs on normal Stop AND the engine's atexit
++           Stop (the single teardown path the AdLib pump wires), so ch2/0x61 are
++           always restored on exit. */
++        outportb(0x43, 0xB6);
++        outportb(0x42, 0x00);
++        outportb(0x42, 0x00);
++        outportb(0x61, s_pcspk_saved_61);
++        s_beep_playing = false;
++        s_beep_ticks = 0;
++        s_beep_wr = s_beep_rd = 0;
++    }
+     s_opl_pump_active = false;
+     DOS_EnableInterrupts();
+ 
+@@ -1410,7 +1583,9 @@ void SDL_DOSOplTimerPumpStop(void)
+     DOS_UnhookInterrupt(&s_opl_pit_hook, false);
+ 
+     doskutsu_dbg_log("audio: SDL/0110 OPL timer pump STOPPED (PIT ch0 restored "
+-                     "to 18.2065 Hz; IRQ-0 unhooked; timer left unmasked)");
++                     "to 18.2065 Hz; IRQ-0 unhooked; timer left unmasked)%s",
++                     s_pcspk_sfx_enabled ? "; SDL/0118 PC-speaker restored (ch2+0x61)"
++                                         : "");
+ }
+ 
+ bool SDL_DOSOplTimerPumpActive(void)
+@@ -1427,6 +1602,76 @@ bool SDL_DOSMidiIsrAnyActive(void)
+     return SDL_DOSMidiIsrTickActive() || SDL_DOSOplTimerPumpActive();
+ }
+ 
++/* ========================================================================
++ * DOSKUTSU patch (SDL/0118): PC-speaker square-wave SFX engine-facing API.
++ * The engine (nx-engine) maps Pixtone SFX IDs to (freq,duration) descriptors
++ * and calls SDL_DOSPcSpkBeep at its SFX trigger point. Contract:
++ * include/SDL3/SDL_dosopltimer.h.
++ * ======================================================================== */
++
++bool SDL_DOSPcSpkSfxEnabled(void)
++{
++    return s_pcspk_sfx_enabled;
++}
++
++void SDL_DOSPcSpkBeep(Uint16 freq_hz, Uint16 duration_ms, int flush)
++{
++    /* Safe no-op unless PC-speaker SFX is enabled (SDL-resolved at Start) AND
++       the ch0 pump is running -- so a stray call on a non-AdLib / killswitch-off
++       build never bangs ch2/0x61. A cached-bool read, NOT a per-call hint
++       lookup (the engine also gates its mapping on SDL_DOSPcSpkSfxEnabled()). */
++    if (!s_pcspk_sfx_enabled || !s_opl_pump_active) {
++        return;
++    }
++
++    /* Precompute the ch2 divisor + duration-in-fires HERE (engine thread) so the
++       IRQ-0 ISR does ZERO divide. freq_hz == 0 => a timed REST (div 0). */
++    uint16_t div;
++    if (freq_hz == 0) {
++        div = 0;
++    } else {
++        uint32_t f = freq_hz;
++        if (f < PCSPK_FREQ_MIN) f = PCSPK_FREQ_MIN;
++        if (f > PCSPK_FREQ_MAX) f = PCSPK_FREQ_MAX;
++        uint32_t d = DOS_PIT_INPUT_HZ / f;
++        if (d < 1u)     d = 1u;
++        if (d > 65535u) d = 65535u;
++        div = (uint16_t)d;
++    }
++    uint32_t dur = duration_ms ? (uint32_t)duration_ms : 1u;
++    if (dur > PCSPK_DUR_MAX) dur = PCSPK_DUR_MAX;
++    uint32_t ticks = (dur * s_pcspk_fire_hz + 999u) / 1000u; /* round up */
++    if (ticks < 1u)     ticks = 1u;
++    if (ticks > 65535u) ticks = 65535u;
++
++    /* Mutate the ring + note state under a brief interrupt-disable vs the IRQ-0
++       consumer (this runs on the engine thread only, never from an ISR). */
++    DOS_DisableInterrupts();
++    if (flush) {
++        /* PREEMPT: drop the queue + any sounding note, start THIS note now. */
++        s_beep_rd = s_beep_wr = 0;
++        BeepStartNote(div, (uint16_t)ticks);
++    } else {
++        /* APPEND to the note ring (drop-new if full); start it immediately only
++           if nothing is currently sounding (else the ISR pops it on advance). */
++        const int queued = s_beep_wr - s_beep_rd;
++        if (queued < PCSPK_NOTE_RING) {
++            const int i = s_beep_wr & PCSPK_NOTE_MASK;
++            s_beep_ring[i].div   = div;
++            s_beep_ring[i].ticks = (uint16_t)ticks;
++            s_beep_wr++;
++        }
++        if (!s_beep_playing && s_beep_rd != s_beep_wr) {
++            const int i = s_beep_rd & PCSPK_NOTE_MASK;
++            const uint16_t d = s_beep_ring[i].div;
++            const uint16_t t = s_beep_ring[i].ticks;
++            s_beep_rd++;
++            BeepStartNote(d, t);
++        }
++    }
++    DOS_EnableInterrupts();
++}
++
+ /* ========================================================================
+  * Audio IRQ-5 idle-pause coordination
+  *
+-- 
+2.47.3
+
