@@ -76,6 +76,7 @@
 #include "cs_orgcache.h"           /* T36: reader for the engine's pre-rendered Organya PCM cache (organya-mode title snippet) */
 #include <SDL3/SDL.h>
 #include <SDL3_mixer/SDL_mixer.h>
+#include <SDL3/SDL_dosgus.h>        /* A2: native Gravis GF1 voice primitives (SDL/0112) -- the no-SB GUS test path */
 #include <SDL3/SDL_dosaudio_pump.h> /* SDL/0067-v2: ring-service pump -- T14 drives the SB16 like the engine main loop */
 #include <SDL3/SDL_dosmidi_tick.h>  /* T56 route A: SDL/0072 Lever-2b IRQ-5 MIDI tick (Register/IsrTickActive) */
 #include <dpmi.h>                   /* T56 route A: _go32_dpmi_lock_data for the g_title_smf pointer the ISR thunk reads */
@@ -216,7 +217,27 @@ static void opl3_note_to_fnum_block(int note, uint16_t *out_fnum, uint8_t *out_b
 
 /* ---- state ----------------------------------------------------------------*/
 
-enum { MUS_PCM = 0, MUS_OPL3, MUS_WB, MUS_OPL2 };
+enum { MUS_PCM = 0, MUS_OPL3, MUS_WB, MUS_OPL2, MUS_GUS };
+
+/* A2: native Gravis GF1 test path. Like AdLib (MUS_OPL2), a GUS-only box has NO
+ * Sound Blaster -- SETUP does SDL_Init(0) (no audio device, no mixer) and drives
+ * the GF1 wavetable directly through the SDL_DOSGus* primitives (SDL/0112). The
+ * music test plays a C-E-G-C arpeggio: one looping square-wave sample uploaded
+ * to card DRAM, replayed at a per-note sample rate so the GF1 pitches it (the
+ * wavetable trick), which end-to-end proves DRAM upload + voice + DAC output --
+ * the exact thing an operator needs to confirm their card makes sound in the
+ * game. The SFX test plays the real Polar Star (Pixtone) one-shot on a GF1
+ * voice (S8 render -> U8 for the GF1's unsigned 8-bit DAC). Full GM .pat MIDI
+ * synth (the game's MidiBackendGus) is out of scope for a hardware test button.
+ * A dedicated later task can add the real title theme on GUS. */
+#define GUS_WAVE_PERIOD 50            /* samples/cycle: rate/50 = output Hz      */
+#define GUS_WAVE_LEN    2000          /* 40 whole cycles -> seamless loop        */
+#define GUS_VOL         200           /* 0..255 linear voice volume (headroom)   */
+/* Per-arpeggio-note GF1 playback rate = midi_hz(note) * GUS_WAVE_PERIOD, so the
+ * looping period-50 sample sounds at the note pitch. Parallel to ARP_NOTES
+ * {60,64,67,72} = C4/E4/G4/C5 (261.63/329.63/392.00/523.25 Hz). */
+static const Uint32 GUS_ARP_HZ[ARP_COUNT] = { 13082, 16481, 19600, 26163 };
+static int g_gus_ok = 0;              /* GF1 detected + brought up (device_open) */
 
 static MIX_Mixer *g_mixer    = NULL;
 static MIX_Audio *g_sfx_aud  = NULL;   /* sine blip (always created; SFX fallback) */
@@ -324,6 +345,24 @@ static void apply_blaster(const scfg_t *c)
   const char *v = cfg_val(c, "BLASTER", "");
   if (v && v[0])
     SDL_setenv_unsafe("BLASTER", v, 1);
+}
+
+/* A2: bridge the operator's real ULTRASND / ULTRADIR env vars into the SDL GUS
+ * hints, EXACTLY as the engine does (main.cpp patch 0238): SDL_DOSGusInit reads
+ * SDL_HINT_DOSKUTSU_GUS_ULTRASND (via SDL_GetHint, whose env fallback is the
+ * SAME hint NAME, not "ULTRASND"), so without this bridge the GF1 detect fails
+ * with "no ULTRASND hint" even on a correctly-configured Gravis box. GUS_VOICES
+ * already rides apply_hints() (its cfg env_name IS SDL_HINT_DOSKUTSU_GUS_VOICES).
+ * Must run before SDL_DOSGusInit; safe before SDL_Init (the hint store is
+ * independent). No-op on a non-GUS box (the vars are absent). */
+static void apply_ultrasnd(void)
+{
+  const char *us = SDL_getenv("ULTRASND");
+  const char *ud = SDL_getenv("ULTRADIR");
+  if (us && us[0])
+    SDL_SetHintWithPriority("SDL_HINT_DOSKUTSU_GUS_ULTRASND", us, SDL_HINT_OVERRIDE);
+  if (ud && ud[0])
+    SDL_SetHintWithPriority("SDL_HINT_DOSKUTSU_GUS_ULTRADIR", ud, SDL_HINT_OVERRIDE);
 }
 
 /* ---- T14 freeze trace -----------------------------------------------------
@@ -437,6 +476,7 @@ int audiotest_init(const scfg_t *c)
 
   apply_hints(c);
   apply_blaster(c);
+  apply_ultrasnd();   /* A2: real ULTRASND/ULTRADIR env -> GUS hints (before SDL_DOSGusInit) */
 
   /* T80: resolve the music path from the configured backend BEFORE SDL_Init so
    * the AdLib (OPL2) path can skip the SB audio device entirely. The OPL chip
@@ -452,17 +492,20 @@ int audiotest_init(const scfg_t *c)
     g_music_mode = MUS_OPL3;
   else if (strcmp(backend, "adlib") == 0)
     g_music_mode = MUS_OPL2;
+  else if (strcmp(backend, "gus") == 0)
+    g_music_mode = MUS_GUS;
   else if (strcmp(backend, "wb") == 0)
     g_music_mode = MUS_WB;
   else
     g_music_mode = MUS_PCM;   /* organya / auto / pcm / off-list */
   g_is_organya = (strcmp(backend, "organya") == 0);
 
-  if (g_music_mode == MUS_OPL2)
+  if (g_music_mode == MUS_OPL2 || g_music_mode == MUS_GUS)
   {
-    /* AdLib is MUSIC-ONLY on a DAC-less OPL chip: no SB device, no Mixer.
-     * SDL_Init(0) still brings up the base library so SDL_GetHint /
-     * SDL_GetTicks / the hints apply_hints() pushed all work. */
+    /* AdLib (OPL) + Gravis (GF1) drive their own synth chip with NO Sound
+     * Blaster: no SB device, no Mixer. SDL_Init(0) still brings up the base
+     * library so SDL_GetHint / SDL_GetTicks / the hints apply_hints() pushed
+     * all work. (AdLib is music-only; GUS also plays GF1-native SFX.) */
     if (!SDL_Init(0))
     {
       SDL_snprintf(g_msg, sizeof(g_msg), "SDL_Init failed: %s", SDL_GetError());
@@ -535,7 +578,7 @@ int audiotest_init(const scfg_t *c)
    * detect+init, MPU-401 init) is still deferred to device_open() so the device
    * is live only during a serviced test (T14), never while the menu blocks in
    * getch(). */
-  trace("init: tier2=%d backend=%s mode=%d organya=%d biosclk=%d (0=pcm 1=opl3 2=wb 3=opl2)",
+  trace("init: tier2=%d backend=%s mode=%d organya=%d biosclk=%d (0=pcm 1=opl3 2=wb 3=opl2 4=gus)",
         g_tier2, backend, g_music_mode, g_is_organya, g_midi_biosclk);
 
   /* Review-3 item 13 (T28 status-text rewrite): plain natural prose describing
@@ -555,6 +598,12 @@ int audiotest_init(const scfg_t *c)
         "The Music test plays the title theme on the sound card's FM synth "
         "(AdLib / OPL2). AdLib has no sound effects (music only).",
         sizeof(g_msg));
+      break;
+    case MUS_GUS:
+      SDL_strlcpy(g_msg,
+        "The Music test plays a note arpeggio on the Gravis UltraSound (GF1) "
+        "wavetable. The Sound Effects test plays the Polar Star shot on the "
+        "GF1.", sizeof(g_msg));
       break;
     case MUS_WB:
       SDL_strlcpy(g_msg,
@@ -576,6 +625,7 @@ int audiotest_init(const scfg_t *c)
 /* ---- device lifecycle + ring servicing (T14 freeze fix) ------------------*/
 
 static void device_close(void);   /* fwd: device_open() unwinds via it on error */
+static int  play_gus_sfx(void);    /* A2 fwd: audiotest_play_sfx (below) uses it */
 
 /* T28: synthesize the real Polar Star effect once per SETUP session
  * (device-independent: always S8 mono 22050). Sets g_sfx_pcm/_len on success,
@@ -640,6 +690,40 @@ static int device_open(void)
     }
     g_dev_open = 1;
     trace("device_open: done (opl2 path, no mixer)");
+    return 0;
+  }
+
+  /* A2: Gravis GF1 music/SFX path -- native wavetable, NO SB device and NO
+   * SDL3_mixer (none was inited; see audiotest_init). SDL_DOSGusInit (SDL/0112)
+   * parses the ULTRASND hint apply_ultrasnd() bridged, resets the GF1, DRAM-
+   * detects, and enables the DAC; it hooks no IRQ and starts no pump, so it is
+   * self-contained for SETUP. Return early, skipping the SB16 + mixer + SFX/tone
+   * block below (there is no SB device to open on a Gravis box). Voices are
+   * commanded directly (SetVoiceFreq/Vol/Pan + StartVoice); pacing/ESC uses the
+   * same pump_service loop (its SDL_DOSAudioPump no-ops with no SB device). */
+  if (g_music_mode == MUS_GUS)
+  {
+    g_gus_ok = 0;
+    trace("device_open: gus GF1 init (SDL_DOSGusInit; no SB device; native wavetable)");
+    if (SDL_DOSGusInit())
+    {
+      SDL_DOSGusState st;
+      g_gus_ok = 1;
+      if (SDL_DOSGusGetState(&st))
+        trace("device_open: gus ready (base=0x%X voices=%d rate=%dHz dram=%dKB)",
+              (unsigned)st.base_port, st.num_voices, (int)st.output_rate,
+              (int)(st.dram_size / 1024));
+      else
+        trace("device_open: gus ready (state unavailable)");
+    }
+    else
+    {
+      SDL_snprintf(g_msg, sizeof(g_msg),
+        "No Gravis UltraSound found: %s", SDL_GetError());
+      trace("device_open: gus init FAILED: %s", SDL_GetError());
+    }
+    g_dev_open = 1;
+    trace("device_open: done (gus path, no mixer)");
     return 0;
   }
 
@@ -848,12 +932,16 @@ static int device_open(void)
  * the device is already closed (idempotent). Leaves SDL_Init/MIX_Init alive. */
 static void device_close(void)
 {
-  trace("device_close: begin (opl3=%d opl2=%d wb=%d)", g_opl3_ok, g_opl2_ok, g_wb_ok);
+  trace("device_close: begin (opl3=%d opl2=%d wb=%d gus=%d)", g_opl3_ok, g_opl2_ok, g_wb_ok, g_gus_ok);
   if (g_opl3_ok) { SDL_DOSOpl3VoiceNoteOff(OPL3_VOICE); SDL_DOSOpl3Shutdown(); g_opl3_ok = 0; }
   /* T80: OPL2 (AdLib) path -- all-notes-off + 0xBD clear + SDL_DOSOpl2Shutdown.
    * The mixer/track/audio handles below are all NULL on this path (never
    * created), so their guarded destroys no-op. */
   if (g_opl2_ok) { cs_opl2midi_shutdown(); g_opl2_ok = 0; }
+  /* A2: Gravis GF1 path -- stop every voice, then shut the card down (parks the
+   * GF1 in reset). Like OPL2, the mixer/track/audio handles below are all NULL
+   * on this path so their guarded destroys no-op. */
+  if (g_gus_ok) { SDL_DOSGusStopAllVoices(); SDL_DOSGusShutdown(); g_gus_ok = 0; }
   if (g_wb_ok)
   {
     /* All Sound Off (CC 120) + All Notes Off (CC 123) before MPU shutdown. */
@@ -958,6 +1046,26 @@ int audiotest_play_sfx(void)
     trace("play_sfx: adlib/opl2 -- no PCM SFX (music only); skipped");
     return 0;
   }
+  /* A2: Gravis GF1 SFX -- the Polar Star plays on a GF1 voice (native wavetable
+   * DAC), NOT the SB16 (a GUS-only box has none). Bring the GF1 up via
+   * device_open (no mixer/SFX-track on this path) and play the real Pixtone
+   * one-shot, else a GF1 square blip. */
+  if (g_music_mode == MUS_GUS)
+  {
+    int real;
+    if (device_open() != 0) return 1;
+    if (!g_gus_ok) { device_close(); return 1; }   /* g_msg set by device_open */
+    test_progress_begin(SFX_MS + 300);
+    real = play_gus_sfx();
+    audiotest_progress(1000);
+    SDL_strlcpy(g_msg, real
+                  ? "Real Polar Star shot on the Gravis UltraSound (GF1)."
+                  : "Test blip -- Cave Story SFX data not found (data/pxt/fx20.pxt).",
+                sizeof(g_msg));
+    device_close();
+    trace("play_sfx: done gus (real=%d)", real);
+    return 0;
+  }
   if (device_open() != 0) return 1;
   /* SFX is always the SB16 PCM path regardless of music backend. */
   trace("play_sfx: MIX_PlayTrack");
@@ -1017,6 +1125,103 @@ static int play_opl2_arpeggio(void)
     if (pump_service("opl2", ARP_GAP_MS, 0) == 27) break;
   }
   cs_opl2midi_all_notes_off();
+  return 0;
+}
+
+/* A2: play a C-E-G-C arpeggio on the real Gravis GF1. One looping square-wave
+ * sample is uploaded to card DRAM; the GF1 replays it at a per-note sample rate
+ * (GUS_ARP_HZ) so the fixed period-50 waveform sounds at the note pitch -- the
+ * wavetable pitch trick. Mirrors the SDL/0112 test-tone order (Freq -> Vol ->
+ * Pan -> StartVoice). No SB ring; pump_service just paces + polls ESC (its
+ * SDL_DOSAudioPump no-ops with no SB device open). Assumes device_open() ran. */
+static int play_gus_arpeggio(void)
+{
+  static Uint8 wave[GUS_WAVE_LEN];   /* static: keep it off the stack */
+  Uint32 addr;
+  int    v, i;
+  if (!g_gus_ok) return 1;
+
+  for (i = 0; i < GUS_WAVE_LEN; ++i)
+    wave[i] = ((i % GUS_WAVE_PERIOD) < (GUS_WAVE_PERIOD / 2)) ? 0xFF : 0x00;
+  addr = SDL_DOSGusUploadSample(wave, (Uint32)sizeof(wave), 0);
+  if (addr == SDL_DOSGUS_BAD_ADDR) { trace("gus arp: DRAM upload FAILED"); return 1; }
+  v = SDL_DOSGusAllocVoice();
+  if (v < 0) { trace("gus arp: no free voice"); return 1; }
+
+  for (i = 0; i < ARP_COUNT; ++i)
+  {
+    SDL_DOSGusSetVoiceFreq(v, GUS_ARP_HZ[i]);
+    SDL_DOSGusSetVoiceVol(v, GUS_VOL);
+    if (i == 0)
+    {
+      SDL_DOSGusSetVoicePan(v, 128);   /* center */
+      /* LOOP the whole buffer so the note sustains for ARP_ON_MS. Safe in SETUP:
+       * nothing else pokes the GF1, and StopVoice/StopAllVoices quiesce it. */
+      SDL_DOSGusStartVoice(v, addr, addr + GUS_WAVE_LEN - 1, addr, SDL_DOSGUS_LOOP);
+    }
+    trace("gus arp: note %d hz=%lu", ARP_NOTES[i], (unsigned long)GUS_ARP_HZ[i]);
+    if (pump_service("gus", ARP_ON_MS, 0) == 27) break;
+    SDL_DOSGusSetVoiceVol(v, 0);       /* gap: silence, keep the voice looping */
+    if (pump_service("gus", ARP_GAP_MS, 0) == 27) break;
+  }
+  SDL_DOSGusStopVoice(v);
+  return 0;
+}
+
+/* A2: play a one-shot PCM sample on a single GF1 voice at `rate` Hz, capped to
+ * ms_cap. `u8` is unsigned 8-bit (GF1 native DAC encoding). Serviced/ESC-able.
+ * Uploads into DRAM (freed from DRAM on the next device_close's Shutdown). */
+static void gus_play_pcm8(const Uint8 *u8, Uint32 len, Uint32 rate, int ms_cap)
+{
+  Uint32 addr;
+  int    v, dur;
+  addr = SDL_DOSGusUploadSample(u8, len, 0);
+  if (addr == SDL_DOSGUS_BAD_ADDR) { trace("gus pcm: DRAM upload FAILED"); return; }
+  v = SDL_DOSGusAllocVoice();
+  if (v < 0) { trace("gus pcm: no free voice"); return; }
+  SDL_DOSGusSetVoiceFreq(v, rate);
+  SDL_DOSGusSetVoiceVol(v, GUS_VOL);
+  SDL_DOSGusSetVoicePan(v, 128);
+  SDL_DOSGusStartVoice(v, addr, addr + len - 1, addr, 0);   /* one-shot, no loop */
+  dur = (int)(((Uint64)len * 1000) / (Uint64)rate);
+  if (dur > ms_cap) dur = ms_cap;
+  pump_service("gus-sfx", dur + 200, 0);
+  SDL_DOSGusStopVoice(v);
+}
+
+/* A2: GUS SFX test -- the real Polar Star on the GF1. The Pixtone render is S8
+ * mono 22050 (device-independent, cached); convert to the GF1's unsigned 8-bit
+ * and play it one-shot. Returns 1 if it played the real effect, 0 if it played
+ * the fallback square blip (no .pxt data). Either way it produces sound so the
+ * operator can confirm the GF1 SFX path. Assumes device_open() ran. */
+static int play_gus_sfx(void)
+{
+  if (!g_gus_ok) return 0;
+  ensure_sfx_render();
+  if (g_sfx_pcm && g_sfx_pcm_len > 0)
+  {
+    Uint8   *u8 = (Uint8 *)malloc(g_sfx_pcm_len);
+    if (u8)
+    {
+      Uint32 i;
+      for (i = 0; i < g_sfx_pcm_len; ++i)
+        u8[i] = (Uint8)((int)g_sfx_pcm[i] + 128);   /* S8 -> U8 (GF1 DAC) */
+      gus_play_pcm8(u8, g_sfx_pcm_len, SFX_PXT_RATE, 4000);
+      free(u8);
+      trace("gus sfx: real Polar Star played (%lu samples)", (unsigned long)g_sfx_pcm_len);
+      return 1;
+    }
+  }
+  /* Fallback: a short square blip so the SFX path still makes sound. */
+  {
+    static Uint8 blip[3000];   /* ~136 ms at 22050 */
+    int i, period = (int)(SFX_PXT_RATE / SFX_HZ);   /* 22050/880 ~= 25 */
+    if (period < 2) period = 2;
+    for (i = 0; i < (int)sizeof(blip); ++i)
+      blip[i] = ((i % period) < (period / 2)) ? 0xF0 : 0x10;
+    gus_play_pcm8(blip, (Uint32)sizeof(blip), SFX_PXT_RATE, 1000);
+    trace("gus sfx: real Polar Star unavailable -> square blip");
+  }
   return 0;
 }
 
@@ -1513,6 +1718,7 @@ int audiotest_play_music(void)
     {
       case MUS_OPL3: rc = play_opl3_arpeggio(); break;
       case MUS_OPL2: rc = play_opl2_arpeggio(); break;   /* T80 */
+      case MUS_GUS:  rc = play_gus_arpeggio();  break;   /* A2 */
       case MUS_WB:   rc = play_wb_arpeggio();   break;
       default:
         trace("play_music: MIX_PlayTrack (pcm)");
@@ -1544,6 +1750,9 @@ int audiotest_play_music(void)
         g_music_mode == MUS_OPL3 ? "OPL3"
         : g_music_mode == MUS_OPL2 ? "AdLib (OPL2)"   /* T80 */
         : "WaveBlaster");
+    else if (g_music_mode == MUS_GUS)
+      SDL_strlcpy(g_msg, "Note arpeggio on the Gravis UltraSound (GF1).",
+                  sizeof(g_msg));
     else if (g_music_mode == MUS_OPL3 || g_music_mode == MUS_OPL2 ||
              g_music_mode == MUS_WB)
       SDL_strlcpy(g_msg, "Test arpeggio -- Cave Story MIDI data not found "
@@ -1566,6 +1775,17 @@ const char *audiotest_about(int phase)
 {
   if (phase == 0)   /* Sound Effects test */
   {
+    if (g_music_mode == MUS_GUS)
+    {
+      if (g_real_sfx)
+      {
+        ensure_sfx_render();
+        if (g_sfx_pcm)
+          return "Plays Polar Star sound effect on the Gravis GF1";
+        return "Plays a test blip on the Gravis GF1 - game data not found";
+      }
+      return "Plays a test blip on the Gravis GF1";
+    }
     if (g_real_sfx)
     {
       ensure_sfx_render();
@@ -1575,6 +1795,11 @@ const char *audiotest_about(int phase)
     }
     return "Plays a test sound";
   }
+
+  /* A2: Gravis GF1 -- the music test is a native wavetable arpeggio (no GM .pat
+   * MIDI synth in SETUP; that is a later task). */
+  if (g_music_mode == MUS_GUS)
+    return "Plays a note arpeggio on the Gravis UltraSound (GF1)";
 
   /* Music test. Real title theme only for the synth backends; organya/pcm and
    * the killswitch-off / data-missing cases describe the tone/tune fallback. */
@@ -1629,10 +1854,11 @@ void audiotest_shutdown(void)
   /* T36: free the cached Organya snippet PCM. */
   if (g_org_pcm) { free(g_org_pcm); g_org_pcm = NULL; }
   g_org_samples = 0; g_org_tried = 0;
-  /* T80: the AdLib (OPL2) path inited SDL with SDL_Init(0) -- no audio subsystem
-   * and no MIX_Init -- so do NOT MIX_Quit / SDL_QuitSubSystem(AUDIO) (there is
-   * nothing to quit). SDL_Quit() tears down the base library on every path. */
-  if (g_music_mode != MUS_OPL2)
+  /* T80/A2: the AdLib (OPL2) + Gravis (GF1) paths inited SDL with SDL_Init(0) --
+   * no audio subsystem and no MIX_Init -- so do NOT MIX_Quit /
+   * SDL_QuitSubSystem(AUDIO) (there is nothing to quit). SDL_Quit() tears down
+   * the base library on every path. */
+  if (g_music_mode != MUS_OPL2 && g_music_mode != MUS_GUS)
   {
     MIX_Quit();
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
