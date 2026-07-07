@@ -1,0 +1,85 @@
+From 5ed0115f9459f5de8c8522c7b46dfa6a5d40ae6e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 7 Jul 2026 13:29:00 -0700
+Subject: [PATCH] dos: patch 0119 -- SB16 WaveBlaster music volume (CT1745
+ Line-In + CD)
+
+Task #7 (A4) SDL side. Exposes a user-facing WaveBlaster/wavetable music volume
+control that the existing SETUP "Music volume" cannot reach.
+
+Why DOS needs this: SETUP's "Music volume" maps to SDL_HINT_DOSKUTSU_SB16_FM_VOL,
+which programs only the CT1745 FM register (0x34/0x35 = OPL3 FM music). A
+WaveBlaster/DreamBlaster daughterboard on the SB16 header is a SEPARATE MIDI
+device whose ANALOG output is summed into the SB16 mixer via a different input --
+Line-In (0x38/0x39) or CD (0x36/0x37), NOT the OPL3 FM path -- so the FM slider
+does nothing for WB music, and WB users have no volume control (operator note:
+WB music quieter than OPL3). Which input the header feeds is HW-uncertain across
+cards; the existing SDL/0100 LINEIN_VOL/CD_VOL knobs A/B-pin it on g2k.
+
+New hint SDL_HINT_DOSKUTSU_WB_MUSIC_VOL (0..31, CT1745 5-bit level<<3) programs
+BOTH candidate inputs to the requested level: the input the WB does not use
+carries no signal on the WB config, so programming it too is harmless, and one
+SETUP slider then works regardless of which input is live -- no shipped register
+guess. DEFAULT UNSET = mixer untouched = byte-identical to SDL/0100 (killswitch
+by absence). Applied BEFORE the individual LINEIN_VOL/CD_VOL knobs so an A/B
+setting one of those still overrides + isolates the live input for the docs.
+Scoped to is_sb16 + the same SDL_HINT_DOSKUTSU_SB16_MIXER_PROGRAM killswitch as
+the rest of the CT1745 balance block. Banner: "audio: SDL/0119 SB16 WaveBlaster
+music vol=N (...)".
+
+Config key WB_MUSIC_VOL -> env SDL_HINT_DOSKUTSU_WB_MUSIC_VOL, surfaced by SETUP
+(coordinated with setup-eng). g2k: A/B a few levels (and LINEIN-only vs CD-only
+via the SDL/0100 knobs) to confirm WB responds + pin the live input for docs.
+
+Workspace-local patch; not upstreamed (sdl_ai_policy).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 31 +++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 00e091b9f..dec93dfcc 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -3010,6 +3010,37 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+                    to is_sb16 + the same SDL_HINT_DOSKUTSU_SB16_MIXER_PROGRAM
+                    killswitch as the rest of this block. */
+                 {
++                    /* DOSKUTSU patch (SDL/0119, task #7): user-facing WaveBlaster
++                       music volume. SETUP's "Music volume" only drives OPL3 FM
++                       (SB16_FM_VOL / 0x34-0x35 above), so it does NOT affect
++                       WaveBlaster/DreamBlaster MIDI music -- the WB daughterboard's
++                       analog output is summed into the SB16 mixer via Line-In
++                       (0x38/0x39) or CD (0x36/0x37), NOT the OPL3 FM path. Which of
++                       the two the header feeds is HW-uncertain (the SDL/0100 knobs
++                       below A/B-pin it on g2k), so this single SETUP-facing knob
++                       programs BOTH candidate inputs to `wv`: the input the WB does
++                       NOT use carries no signal on the WB config, so programming it
++                       too is harmless and the slider works regardless of which one
++                       is live -- no shipped register guess. Value 0..31 (CT1745
++                       5-bit level<<3, like the rest of this block). DEFAULT UNSET =
++                       not programmed = byte-identical to SDL/0100 (killswitch by
++                       absence). Applied BEFORE the individual LINEIN_VOL/CD_VOL
++                       knobs below so an A/B setting one of those still OVERRIDES
++                       this and isolates the live input for the docs. Config key
++                       WB_MUSIC_VOL -> env SDL_HINT_DOSKUTSU_WB_MUSIC_VOL (SETUP /
++                       nx-engine, task A4). Scoped to is_sb16 + the same
++                       SDL_HINT_DOSKUTSU_SB16_MIXER_PROGRAM killswitch. */
++                    const char *wb = SDL_GetHint("SDL_HINT_DOSKUTSU_WB_MUSIC_VOL");
++                    if (wb && wb[0] != '\0') {
++                        int wv = SDL_atoi(wb); wv = (wv < 0) ? 0 : (wv > 31) ? 31 : wv;
++                        outportb(mixer_addr, 0x38); outportb(mixer_data, (Uint8)(wv << 3)); // Line-In L
++                        outportb(mixer_addr, 0x39); outportb(mixer_data, (Uint8)(wv << 3)); // Line-In R
++                        outportb(mixer_addr, 0x36); outportb(mixer_data, (Uint8)(wv << 3)); // CD L
++                        outportb(mixer_addr, 0x37); outportb(mixer_data, (Uint8)(wv << 3)); // CD R
++                        doskutsu_dbg_log("audio: SDL/0119 SB16 WaveBlaster music vol=%d "
++                                         "(CT1745 Line-In 0x38/0x39 + CD 0x36/0x37; both "
++                                         "WB-candidate inputs; SETUP WB_MUSIC_VOL)", wv);
++                    }
+                     const char *li = SDL_GetHint("SDL_HINT_DOSKUTSU_SB16_LINEIN_VOL");
+                     const char *cd = SDL_GetHint("SDL_HINT_DOSKUTSU_SB16_CD_VOL");
+                     if (li && li[0] != '\0') {
+-- 
+2.47.3
+
