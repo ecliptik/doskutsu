@@ -1154,25 +1154,33 @@ static const hwfield_t HW_FIELDS[] = {
 #define HW_ROW_SOUND  (HW_NFIELDS)
 #define HW_ROW_SFXVOL (HW_NFIELDS + 1)
 #define HW_ROW_MUSVOL (HW_NFIELDS + 2)
-#define HW_NROWS      (HW_NFIELDS + 3)
+#define HW_ROW_WBVOL  (HW_NFIELDS + 3)   /* A4: WaveBlaster music level (wb only) */
+#define HW_NROWS      (HW_NFIELDS + 4)
+#define HW_NXROWS     (HW_NROWS - HW_NFIELDS)  /* live rows after the fields */
 
-/* The scfg key for a live Custom-setup row (Sound/SFX/Music), or NULL. */
+/* The scfg key for a live Custom-setup row (Sound/SFX/Music/WB), or NULL. */
 static const char *hw_live_key(int row)
 {
   if (row == HW_ROW_SOUND)  return "AUDIO_OFF";
   if (row == HW_ROW_SFXVOL) return "SB16_VOICE_VOL";
   if (row == HW_ROW_MUSVOL) return "SB16_FM_VOL";
+  if (row == HW_ROW_WBVOL)  return "WB_MUSIC_VOL";
   return NULL;
 }
 
 /* Is a Custom-setup row selectable? R-M: the BLASTER fields are always live
- * (no override gate). The two volume rows grey when sound is disabled; the
- * field rows + the Sound on/off row are always live. */
+ * (no override gate). The volume rows grey when sound is disabled; the WB
+ * music-level row is additionally WaveBlaster-only (greyed unless the music
+ * backend is wb). The field rows + the Sound on/off row are always live. */
 static int hw_row_active(int row)
 {
   if (row < HW_NFIELDS)    return 1; /* A/I/DMA/P/T -- always editable */
   if (row == HW_ROW_SOUND) return 1;
-  return strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_OFF")), "1") != 0; /* vols */
+  if (strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_OFF")), "1") == 0)
+    return 0;                        /* all volume rows grey when sound is off */
+  if (row == HW_ROW_WBVOL)           /* A4: WB level only on the wb music path */
+    return strcmp(scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND")), "wb") == 0;
+  return 1;                          /* SFX / Music (OPL3 FM) volumes */
 }
 
 static int hw_find_index(const hwfield_t *f, int val)
@@ -1268,6 +1276,10 @@ static const char *hw_help(int sel)
   if (sel == HW_ROW_MUSVOL)
     return "Sound Blaster 16 mixer level for OPL3 FM music (0-31). Lower it if "
            "the music is too loud next to the sound effects.";
+  if (sel == HW_ROW_WBVOL)
+    return "Sound Blaster 16 mixer level for WaveBlaster / wavetable MIDI music "
+           "(0-31), which feeds the mixer's Line-In. Raise it if WaveBlaster "
+           "music is too quiet next to the effects. Default leaves it unchanged.";
   switch (HW_FIELDS[sel].letter) /* R-M: field rows are 0-based (no override) */
   {
     case 'A': return "Sound Blaster I/O port, almost always 0x220.";
@@ -1378,9 +1390,9 @@ static void screen_hardware(void)
   {
     int k;
     /* D: center the option box between the title bar and the DESCRIPTION box. */
-    int boxy = menu_box_top(3, TUI_DESC_TOP(5), HW_NFIELDS + 6);
+    int boxy = menu_box_top(3, TUI_DESC_TOP(5), HW_NFIELDS + 7);
     tui_titlebar("SOUND HARDWARE");
-    tui_box(9, boxy, 64, HW_NFIELDS + 6, "SOUND"); /* R-O: centered (8/8 margins) */
+    tui_box(9, boxy, 64, HW_NFIELDS + 7, "SOUND"); /* R-O: centered (8/8 margins) */
 
     /* Rows 0..N-1: the BLASTER fields. R-M: always editable (no override). */
     for (i = 0; i < HW_NFIELDS; ++i)
@@ -1398,9 +1410,10 @@ static void screen_hardware(void)
     /* Rows after the fields (R-B): Sound on/off + the SB16 mixer volume levels,
      * edited live; the two volume rows grey when sound is disabled. */
     {
-      static const char *xlabel[3] = { "Sound", "SFX volume", "Music volume" };
+      static const char *xlabel[HW_NXROWS] =
+        { "Sound", "SFX volume", "Music volume", "WaveBlaster music volume" };
       int base = boxy + 1 + HW_NFIELDS, xi;
-      for (xi = 0; xi < 3; ++xi)
+      for (xi = 0; xi < HW_NXROWS; ++xi)
       {
         int rowno  = HW_ROW_SOUND + xi;
         int active = hw_row_active(rowno);
@@ -1413,6 +1426,10 @@ static void screen_hardware(void)
         if (rowno == HW_ROW_SOUND) /* AUDIO_OFF shown inverted */
           snprintf(val, sizeof(val), "%s",
                    strcmp(scfg_get(&g_cfg, kidx), "1") == 0 ? "Disabled" : "Enabled");
+        else if (rowno == HW_ROW_WBVOL && atoi(scfg_get(&g_cfg, kidx)) < 0)
+          /* A4: the -1 sentinel means "leave the mixer unchanged" -- show that,
+           * not a bare "-1". Cycling right off -1 lands on 0..31 real levels. */
+          snprintf(val, sizeof(val), "Default (unchanged)");
         else
           fmt_value(kidx, val, (int)sizeof(val));
         snprintf(row, sizeof(row), " %-61.61s", xlabel[xi]);

@@ -150,6 +150,19 @@ int scfg_save(const scfg_t *c, const char *path)
       continue;
     }
 
+    /* An optional INT whose range admits a negative sentinel (imin < 0) omits
+     * its line while the value is negative, so the engine hint stays ABSENT --
+     * "leave unchanged" (A4 WB_MUSIC_VOL default -1). Writing "-1" instead would
+     * make the SDL SB16 backend (SDL/0119, guard `wb && wb[0]`) run and CLAMP the
+     * negative to 0 -> muting the WaveBlaster Line-In/CD input, the opposite of a
+     * no-op. Only WB_MUSIC_VOL has imin < 0, so this is scoped to it. */
+    if (k->type == DKT_INT && k->imin < 0 && c->values[i][0] == '-')
+    {
+      fprintf(f, "; %s  (omitted -> leave the mixer level unchanged)\r\n",
+              k->cfg_key);
+      continue;
+    }
+
     fprintf(f, "; %s\r\n", k->help);
     fprintf(f, "%s=%s\r\n", k->cfg_key, c->values[i]);
   }

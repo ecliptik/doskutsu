@@ -410,6 +410,23 @@ static const dkt_key_t DKT_KEYS[] =
     DKT_ENUM, DKC_SOUND, "waveblaster", 0, 0, dkt_midi_dev_vals,
     "MIDI device",
     "SETUP-only (AUDIO_BACKEND=wb): genmidi=external GM module via MPU-401, waveblaster=daughterboard on the SB header", 0 },
+
+  /* WaveBlaster / wavetable music level (A4). A DreamBlaster/WaveBlaster
+   * daughterboard is analog-summed into the SB16 CT1745 mixer's Line-In (or CD)
+   * input -- a SEPARATE mixer register from SB16_FM_VOL (which is OPL3 FM only),
+   * so the existing "Music volume" control cannot move WaveBlaster MIDI music.
+   * When set to 0..31 the SDL SB16 backend programs that mixer input at device
+   * init (slot ~0119, hint SDL_HINT_DOSKUTSU_WB_MUSIC_VOL). The SENTINEL -1
+   * (the production default) means LEAVE THE MIXER UNCHANGED -- current behavior,
+   * so a non-WB or un-tuned config gets no surprise Line-In level change. Same
+   * loader passthru as SB16_FM_VOL (the shim SETs the full hint name from this
+   * key). SETUP surfaces it only on the WaveBlaster music path (greyed
+   * otherwise). Raw 0..31 for parity with the two adjacent SB16 mixer levels.
+   * APPEND-ONLY: at the end so positional indices are unchanged. */
+  { "WB_MUSIC_VOL", "SDL_HINT_DOSKUTSU_WB_MUSIC_VOL",
+    DKT_INT, DKC_SOUND, "-1", -1, 31, NULL,
+    "WaveBlaster music volume",
+    "SB16 mixer level for WaveBlaster/wavetable MIDI music, 0-31 (-1 = leave unchanged)", 0 },
 };
 
 #define DKT_KEY_COUNT ((int)(sizeof(DKT_KEYS) / sizeof(DKT_KEYS[0])))
