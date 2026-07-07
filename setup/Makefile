@@ -59,9 +59,10 @@ ifeq ($(AUDIOTEST),1)
   # T28/T36: audiotest_sdl.c + the standalone Cave Story audio cores (all pure
   # C, no engine link): cs_pixtone.c (Pixtone SFX synth, +libm) for the real
   # Polar Star; cs_smf.c (SMF parser/scheduler) + cs_opl3midi.c (OPL3 MIDI
-  # voice backend) for the real title theme; cs_orgcache.c (pre-rendered
-  # Organya PCM cache reader) for the Organya-mode title snippet.
-  AUDIOTEST_SRC := audiotest_sdl.c cs_pixtone.c cs_smf.c cs_opl3midi.c cs_orgcache.c
+  # voice backend) + cs_opl2midi.c (T80: OPL2/AdLib MIDI voice backend, the
+  # music-only AdLib test path) for the real title theme; cs_orgcache.c
+  # (pre-rendered Organya PCM cache reader) for the Organya-mode title snippet.
+  AUDIOTEST_SRC := audiotest_sdl.c cs_pixtone.c cs_smf.c cs_opl3midi.c cs_opl2midi.c cs_orgcache.c
   # Static-link the audio stack. Order matters for static archives: dependents
   # before dependencies (mixer -> image -> SDL3 -> libm). SDL3_mixer (stb_vorbis
   # + WAV) and SDL3_image (stb_image PNG) carry no external codec deps in this

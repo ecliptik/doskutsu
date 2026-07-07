@@ -72,6 +72,7 @@
 #include "cs_pixtone.h"            /* T28: standalone Pixtone synth -- real Polar Star SFX from the user's data/pxt/fx20.pxt */
 #include "cs_smf.h"                /* T28: standalone SMF parser/scheduler -- real Title theme from data/midi/curly.mid */
 #include "cs_opl3midi.h"           /* T28: OPL3 MIDI voice backend (18-voice allocator + GM bank) for the title theme */
+#include "cs_opl2midi.h"           /* T80: OPL2 (AdLib) MIDI voice backend (9-voice) -- the music-only AdLib test path */
 #include "cs_orgcache.h"           /* T36: reader for the engine's pre-rendered Organya PCM cache (organya-mode title snippet) */
 #include <SDL3/SDL.h>
 #include <SDL3_mixer/SDL_mixer.h>
@@ -215,7 +216,7 @@ static void opl3_note_to_fnum_block(int note, uint16_t *out_fnum, uint8_t *out_b
 
 /* ---- state ----------------------------------------------------------------*/
 
-enum { MUS_PCM = 0, MUS_OPL3, MUS_WB };
+enum { MUS_PCM = 0, MUS_OPL3, MUS_WB, MUS_OPL2 };
 
 static MIX_Mixer *g_mixer    = NULL;
 static MIX_Audio *g_sfx_aud  = NULL;   /* sine blip (always created; SFX fallback) */
@@ -269,6 +270,7 @@ static int        g_tier2       = 1;   /* resolved engine Tier-2 (default-ON kil
 static Uint64     g_test_t0       = 0;  /* wall-clock start of the current test */
 static int        g_test_total_ms = 0;  /* planned total ms for the permille map */
 static int        g_opl3_ok    = 0;    /* OPL3 detected + chip initialized */
+static int        g_opl2_ok    = 0;    /* T80: OPL2 (AdLib) detected + chip initialized (music-only path) */
 static int        g_wb_ok      = 0;    /* MPU-401 (blind) initialized */
 static uint16_t   g_wb_port    = 0x330;
 
@@ -436,17 +438,51 @@ int audiotest_init(const scfg_t *c)
   apply_hints(c);
   apply_blaster(c);
 
-  if (!SDL_Init(SDL_INIT_AUDIO))
+  /* T80: resolve the music path from the configured backend BEFORE SDL_Init so
+   * the AdLib (OPL2) path can skip the SB audio device entirely. The OPL chip
+   * is direct port I/O at 0x388 (SDL_DOSOpl2* helpers) and needs neither
+   * SDL_INIT_AUDIO nor SDL3_mixer; opening the SB device on a no-SB AdLib box
+   * is exactly the "Not a SoundBlaster at port 0x220" failure this fixes. This
+   * resolution reads the config struct (not an SDL hint), so it is safe to run
+   * before SDL_Init. Every other backend keeps the SB device + mixer bring-up
+   * unchanged. (backend/g_music_mode/g_is_organya are re-used by the trace +
+   * status text below.) */
+  backend = cfg_val(c, "AUDIO_BACKEND", "auto");
+  if (strcmp(backend, "opl3") == 0)
+    g_music_mode = MUS_OPL3;
+  else if (strcmp(backend, "adlib") == 0)
+    g_music_mode = MUS_OPL2;
+  else if (strcmp(backend, "wb") == 0)
+    g_music_mode = MUS_WB;
+  else
+    g_music_mode = MUS_PCM;   /* organya / auto / pcm / off-list */
+  g_is_organya = (strcmp(backend, "organya") == 0);
+
+  if (g_music_mode == MUS_OPL2)
   {
-    SDL_snprintf(g_msg, sizeof(g_msg), "SDL_Init(AUDIO) failed: %s", SDL_GetError());
-    return 1;
+    /* AdLib is MUSIC-ONLY on a DAC-less OPL chip: no SB device, no Mixer.
+     * SDL_Init(0) still brings up the base library so SDL_GetHint /
+     * SDL_GetTicks / the hints apply_hints() pushed all work. */
+    if (!SDL_Init(0))
+    {
+      SDL_snprintf(g_msg, sizeof(g_msg), "SDL_Init failed: %s", SDL_GetError());
+      return 1;
+    }
   }
-  if (!MIX_Init())
+  else
   {
-    SDL_snprintf(g_msg, sizeof(g_msg), "MIX_Init failed: %s", SDL_GetError());
-    SDL_QuitSubSystem(SDL_INIT_AUDIO);
-    SDL_Quit();
-    return 1;
+    if (!SDL_Init(SDL_INIT_AUDIO))
+    {
+      SDL_snprintf(g_msg, sizeof(g_msg), "SDL_Init(AUDIO) failed: %s", SDL_GetError());
+      return 1;
+    }
+    if (!MIX_Init())
+    {
+      SDL_snprintf(g_msg, sizeof(g_msg), "MIX_Init failed: %s", SDL_GetError());
+      SDL_QuitSubSystem(SDL_INIT_AUDIO);
+      SDL_Quit();
+      return 1;
+    }
   }
 
   /* T24: silence SDL INFO/WARN console logging (the SB16 device-open banners)
@@ -494,23 +530,12 @@ int audiotest_init(const scfg_t *c)
     g_midi_biosclk = (bc && bc[0] == '1' && bc[1] == 0);
   }
 
-  /* Resolve the music path from the configured backend. The chip bring-up
-   * (OPL3 detect/init, MPU-401 init) is deferred to device_open() so the
-   * device is live only during a serviced test (T14), never while the menu
-   * blocks in getch(). */
-  backend = cfg_val(c, "AUDIO_BACKEND", "auto");
-  if (strcmp(backend, "opl3") == 0)
-    g_music_mode = MUS_OPL3;
-  else if (strcmp(backend, "wb") == 0)
-    g_music_mode = MUS_WB;
-  else
-    g_music_mode = MUS_PCM;   /* organya / auto / pcm / off-list */
-
-  /* T36: Organya mode (distinct from auto/pcm within MUS_PCM) gates the
-   * pre-rendered title snippet. */
-  g_is_organya = (strcmp(backend, "organya") == 0);
-
-  trace("init: tier2=%d backend=%s mode=%d organya=%d biosclk=%d (0=pcm 1=opl3 2=wb)",
+  /* T80: g_music_mode / g_is_organya were resolved above (before SDL_Init) so
+   * the AdLib path could skip SDL_INIT_AUDIO. The chip bring-up (OPL2/OPL3
+   * detect+init, MPU-401 init) is still deferred to device_open() so the device
+   * is live only during a serviced test (T14), never while the menu blocks in
+   * getch(). */
+  trace("init: tier2=%d backend=%s mode=%d organya=%d biosclk=%d (0=pcm 1=opl3 2=wb 3=opl2)",
         g_tier2, backend, g_music_mode, g_is_organya, g_midi_biosclk);
 
   /* Review-3 item 13 (T28 status-text rewrite): plain natural prose describing
@@ -523,6 +548,12 @@ int audiotest_init(const scfg_t *c)
       SDL_strlcpy(g_msg,
         "The Sound Effects test plays the Polar Star shot. The Music test "
         "plays the title theme on the sound card's FM synth (OPL3).",
+        sizeof(g_msg));
+      break;
+    case MUS_OPL2:
+      SDL_strlcpy(g_msg,
+        "The Music test plays the title theme on the sound card's FM synth "
+        "(AdLib / OPL2). AdLib has no sound effects (music only).",
         sizeof(g_msg));
       break;
     case MUS_WB:
@@ -585,6 +616,32 @@ static int device_open(void)
 
   if (!g_inited) return 1;
   if (g_dev_open) return 0;
+
+  /* T80: AdLib (OPL2) music path -- direct OPL chip I/O at 0x388, with NO SB
+   * device and NO SDL3_mixer (none was inited; see audiotest_init). Detect +
+   * bring up the OPL2 chip and return early, skipping the entire
+   * MIX_CreateMixerDevice + SFX/tone/track block below -- there is no audio
+   * device to open, and attempting it is the "Not a SoundBlaster" failure this
+   * path avoids. Music dispatches from the SDL_GetTicks SMF clock (route B), the
+   * same cooperative service loop the OPL3 test uses (no SB IRQ-5 tick). AdLib
+   * is music-only: a DAC-less OPL chip has no PCM sound effects. */
+  if (g_music_mode == MUS_OPL2)
+  {
+    g_opl2_ok = 0;
+    trace("device_open: adlib/opl2 detect+init @0x388 (no SB device; music-only)");
+    if (cs_opl2midi_init())
+    {
+      g_opl2_ok = 1;
+      trace("device_open: opl2 ready (9-voice single-bank; SDL_GetTicks clock)");
+    }
+    else
+    {
+      trace("device_open: opl2 detect=0 (no OPL chip at 0x388)");
+    }
+    g_dev_open = 1;
+    trace("device_open: done (opl2 path, no mixer)");
+    return 0;
+  }
 
   /* T48 / SDL/0096: DOOM-faithful COLD-INIT reorder for the WB music test --
    * enter MPU UART mode on the COLD ISA bus (before the SB16 autoinit-DMA +
@@ -791,8 +848,12 @@ static int device_open(void)
  * the device is already closed (idempotent). Leaves SDL_Init/MIX_Init alive. */
 static void device_close(void)
 {
-  trace("device_close: begin (opl3=%d wb=%d)", g_opl3_ok, g_wb_ok);
+  trace("device_close: begin (opl3=%d opl2=%d wb=%d)", g_opl3_ok, g_opl2_ok, g_wb_ok);
   if (g_opl3_ok) { SDL_DOSOpl3VoiceNoteOff(OPL3_VOICE); SDL_DOSOpl3Shutdown(); g_opl3_ok = 0; }
+  /* T80: OPL2 (AdLib) path -- all-notes-off + 0xBD clear + SDL_DOSOpl2Shutdown.
+   * The mixer/track/audio handles below are all NULL on this path (never
+   * created), so their guarded destroys no-op. */
+  if (g_opl2_ok) { cs_opl2midi_shutdown(); g_opl2_ok = 0; }
   if (g_wb_ok)
   {
     /* All Sound Off (CC 120) + All Notes Off (CC 123) before MPU shutdown. */
@@ -886,6 +947,17 @@ int audiotest_play_sfx(void)
 {
   if (!g_inited) return 1;
   trace("play_sfx: enter");
+  /* T80: AdLib (OPL2) is music-only -- a DAC-less OPL chip has no PCM sound
+   * effects, and there is no SB device / mixer open on this path. Report it
+   * cleanly instead of touching the (NULL) SFX track. SETUP's SFX picker
+   * already offers only "No Sound FX" for AdLib; this is a defensive guard in
+   * case the SFX test is reached anyway. */
+  if (g_music_mode == MUS_OPL2)
+  {
+    SDL_strlcpy(g_msg, "AdLib has no sound effects (music only).", sizeof(g_msg));
+    trace("play_sfx: adlib/opl2 -- no PCM SFX (music only); skipped");
+    return 0;
+  }
   if (device_open() != 0) return 1;
   /* SFX is always the SB16 PCM path regardless of music backend. */
   trace("play_sfx: MIX_PlayTrack");
@@ -921,6 +993,30 @@ static int play_opl3_arpeggio(void)
     SDL_DOSOpl3VoiceNoteOff(OPL3_VOICE);
     if (pump_service("opl3", ARP_GAP_MS, 0) == 27) break;
   }
+  return 0;
+}
+
+/* T80: play the same short arpeggio on the real OPL2 (AdLib) chip, driven
+ * through the cs_opl2midi 9-voice backend (its sink callbacks) so it exercises
+ * the real allocator + patch path -- the AdLib fallback when data/midi/curly.mid
+ * is absent. No SB ring to service (music-only path); pump_service no-ops the
+ * SDL_DOSAudioPump but still paces + polls the keyboard for ESC. */
+static int play_opl2_arpeggio(void)
+{
+  cs_smf_sink sink;
+  int i;
+  if (!g_opl2_ok) return 1;
+  cs_opl2midi_song_start();
+  cs_opl2midi_get_sink(&sink);
+  for (i = 0; i < ARP_COUNT; ++i)
+  {
+    trace("opl2 arp: note %d on", ARP_NOTES[i]);
+    sink.note_on(sink.user, 0, ARP_NOTES[i], 100);
+    if (pump_service("opl2", ARP_ON_MS, 0) == 27) { sink.note_off(sink.user, 0, ARP_NOTES[i], 0); break; }
+    sink.note_off(sink.user, 0, ARP_NOTES[i], 0);
+    if (pump_service("opl2", ARP_GAP_MS, 0) == 27) break;
+  }
+  cs_opl2midi_all_notes_off();
   return 0;
 }
 
@@ -1139,6 +1235,13 @@ static int play_title_smf(void)
     cs_opl3midi_song_start();
     cs_opl3midi_get_sink(&sink);
   }
+  else if (g_music_mode == MUS_OPL2)
+  {
+    if (!g_opl2_ok) return 1;
+    cs_opl2midi_init();        /* T80: idempotent -- chip already up via device_open */
+    cs_opl2midi_song_start();
+    cs_opl2midi_get_sink(&sink);
+  }
   else /* MUS_WB */
   {
     if (!g_wb_ok) return 1;
@@ -1277,8 +1380,9 @@ static int play_title_smf(void)
   }
 
   /* Silence whatever is still sounding before the device tears down. */
-  if (g_music_mode == MUS_OPL3) cs_opl3midi_all_notes_off();
-  else                          wb_all_notes_off();
+  if (g_music_mode == MUS_OPL3)      cs_opl3midi_all_notes_off();
+  else if (g_music_mode == MUS_OPL2) cs_opl2midi_all_notes_off();
+  else                               wb_all_notes_off();
   pump_service("title-drain", 60, 0);   /* brief serviced drain */
   return 0;
 }
@@ -1363,10 +1467,13 @@ int audiotest_play_music(void)
   g_music_used_real = 0;
   use_smf = 0;
   use_org = 0;
-  if (g_real_music && (g_music_mode == MUS_OPL3 || g_music_mode == MUS_WB))
+  if (g_real_music && (g_music_mode == MUS_OPL3 || g_music_mode == MUS_OPL2 ||
+                       g_music_mode == MUS_WB))
   {
     if (ensure_title_loaded())
-      use_smf = (g_music_mode == MUS_OPL3) ? g_opl3_ok : g_wb_ok;
+      use_smf = (g_music_mode == MUS_OPL3) ? g_opl3_ok
+              : (g_music_mode == MUS_OPL2) ? g_opl2_ok
+              : g_wb_ok;
   }
   else if (g_real_music && g_is_organya)
   {
@@ -1397,6 +1504,7 @@ int audiotest_play_music(void)
     switch (g_music_mode)
     {
       case MUS_OPL3: rc = play_opl3_arpeggio(); break;
+      case MUS_OPL2: rc = play_opl2_arpeggio(); break;   /* T80 */
       case MUS_WB:   rc = play_wb_arpeggio();   break;
       default:
         trace("play_music: MIX_PlayTrack (pcm)");
@@ -1425,8 +1533,11 @@ int audiotest_play_music(void)
     else if (g_music_used_real)
       SDL_snprintf(g_msg, sizeof(g_msg),
         "Real Title theme (data/midi/curly.mid) via %s.",
-        g_music_mode == MUS_OPL3 ? "OPL3" : "WaveBlaster");
-    else if (g_music_mode == MUS_OPL3 || g_music_mode == MUS_WB)
+        g_music_mode == MUS_OPL3 ? "OPL3"
+        : g_music_mode == MUS_OPL2 ? "AdLib (OPL2)"   /* T80 */
+        : "WaveBlaster");
+    else if (g_music_mode == MUS_OPL3 || g_music_mode == MUS_OPL2 ||
+             g_music_mode == MUS_WB)
       SDL_strlcpy(g_msg, "Test arpeggio -- Cave Story MIDI data not found "
                          "(data/midi/curly.mid).", sizeof(g_msg));
     else if (g_is_organya)
@@ -1459,12 +1570,13 @@ const char *audiotest_about(int phase)
 
   /* Music test. Real title theme only for the synth backends; organya/pcm and
    * the killswitch-off / data-missing cases describe the tone/tune fallback. */
-  if (g_music_mode == MUS_OPL3 || g_music_mode == MUS_WB)
+  if (g_music_mode == MUS_OPL3 || g_music_mode == MUS_OPL2 ||
+      g_music_mode == MUS_WB)
   {
     if (g_real_music && ensure_title_loaded())
-      return (g_music_mode == MUS_OPL3)
-        ? "Plays Title Theme Music on OPL3"
-        : "Plays Title Theme Music on WaveBlaster";
+      return (g_music_mode == MUS_OPL3) ? "Plays Title Theme Music on OPL3"
+           : (g_music_mode == MUS_OPL2) ? "Plays Title Theme Music on AdLib"  /* T80 */
+           : "Plays Title Theme Music on WaveBlaster";
     if (g_real_music)
       return "Plays a test tone - game data not found";
     return "Plays a test tone";
@@ -1509,8 +1621,14 @@ void audiotest_shutdown(void)
   /* T36: free the cached Organya snippet PCM. */
   if (g_org_pcm) { free(g_org_pcm); g_org_pcm = NULL; }
   g_org_samples = 0; g_org_tried = 0;
-  MIX_Quit();
-  SDL_QuitSubSystem(SDL_INIT_AUDIO);
+  /* T80: the AdLib (OPL2) path inited SDL with SDL_Init(0) -- no audio subsystem
+   * and no MIX_Init -- so do NOT MIX_Quit / SDL_QuitSubSystem(AUDIO) (there is
+   * nothing to quit). SDL_Quit() tears down the base library on every path. */
+  if (g_music_mode != MUS_OPL2)
+  {
+    MIX_Quit();
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+  }
   SDL_Quit();
   SDL_SetLogPriorities(SDL_LOG_PRIORITY_INFO);   /* T24: restore default verbosity */
   g_inited = 0;

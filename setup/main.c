@@ -2292,7 +2292,14 @@ static void screen_sound_menu(void)
   const int n = (int)(sizeof(items) / sizeof(items[0]));
   const int bx = 11, bw = 60;     /* R-O: x=11 centers a 60-wide box (10/10) */
   const int vcol = bx + 1 + 30;   /* value/badge column for the value rows    */
-  const int my = 12; /* menu box top row (the SOUND banner occupies rows 3-10) */
+  /* Bottom-anchor the menu box just above the DESCRIPTION box instead of a
+   * fixed top row. The banner occupies rows 3-10; the DESCRIPTION box is
+   * TUI_DESC_TOP(4)=20..23. A fixed my=12 put the (n+2)-tall box at rows
+   * 12..20, so its bottom border collided with the DESCRIPTION top border
+   * (row 20). Anchoring to TUI_DESC_TOP(4)-(n+2)=11 lands it at rows 11..19,
+   * abutting the banner above and the DESCRIPTION below with no overlap, and
+   * stays correct if the row count changes. */
+  const int my = TUI_DESC_TOP(4) - (n + 2);
   int sel = 0, res_sfx = -2, res_music = -2;
 
   tui_clear();
