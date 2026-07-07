@@ -1,0 +1,188 @@
+From ddbce99b05bde4262733f762da0da2d3afbd437e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 7 Jul 2026 13:30:35 -0700
+Subject: [PATCH] patch 0264 -- #B1-nx: AdLib PC-speaker SFX beeps (engine
+ SFX->beep map + trigger)
+
+The AdLib (AUDIO_BACKEND=adlib) path is music-only: a DAC-less OPL2 card has
+no PCM, so Pixtone SFX are a no-op there (patch 0236) and gameplay is silent
+for hits/jumps/pickups. On real OPL-only / no-SB hardware (or PicoGUS /mode
+adlib) that leaves the player with music but zero action feedback.
+
+Map the common Pixtone SFX ids to a monophonic PC-speaker square-wave beep
+(one or two notes; freq_hz, duration_ms) emitted through sdl-engine's SDL/0118
+primitive SDL_DOSPcSpkBeep (PIT ch2 mode-3 hardware square-wave; the ~120 Hz
+ch0 music-pump ISR counts each note's duration down + gates the speaker off,
+advancing a depth-4 note ring). AdLib-path-only -- every other backend already
+has real PCM SFX, so this only fires when _adlib_path.
+
+Categories: fire=high blip, jump=up-chirp (2-note), hurt/bump=low, pickup=
+rising 2-note, door/block=low thud, explosion=lowest thud, menu=short blip,
+menu-confirm=2-note. The two-note SFX use the SDL_DOSPcSpkBeep `flush` ring:
+note 1 flush=1 (PREEMPT -- clears ring + any sounding note, so a fresh SFX
+always wins = the priority rule for a 1-voice speaker), note 2 flush=0 (APPEND).
+Unmapped SFX beep nothing so the speaker does not chatter.
+
+Gating: loop==0 (never beep looping stream/propeller/motor -- a continuous
+speaker tone is intolerable) AND SDL_DOSPcSpkSfxEnabled() (SDL-side default-ON
+killswitch SDL_HINT_DOSKUTSU_PCSPK_SFX=0 disables) AND !_sfx_off (engine
+4-state SFX-off) AND settings->sound_enabled.
+
+Boot banner "AdLib PC-speaker SFX beeps -- engine SFX->beep mapping WIRED"
+emitted at SoundManager::init on the AdLib path for the smoke gate + embed
+witness. Cross-depends on sdl-engine SDL/0118 exports SDL_DOSPcSpkBeep /
+SDL_DOSPcSpkSfxEnabled in SDL3/SDL_dosopltimer.h (already #included).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 125 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 121 insertions(+), 4 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index 0d8c6137..bbff538b 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -347,6 +347,15 @@ bool SoundManager::init()
+              "via native OPL2 FM on the PIT/IRQ-0 pump. MUSIC ONLY: a "
+              "DAC-less AdLib card has no PCM SFX. See "
+              "docs/internal/ADLIB-NATIVE-DESIGN.md.");
++    // patch 0264 (#B1-nx / v1.6.2): the AdLib DAC-less path now emits basic
++    // PC-speaker SFX beeps (engine SFX->beep mapping in playSfx ->
++    // _pcspkr_beep_for_sfx, calling SDL/0118 SDL_DOSPcSpkBeep). WIRED here as
++    // the smoke-gate / embed witness; the actual default-ON killswitch is owned
++    // SDL-side at OPL-pump Start (SDL_HINT_DOSKUTSU_PCSPK_SFX=0 disables).
++    LOG_INFO("Sound system: AdLib PC-speaker SFX beeps -- engine SFX->beep "
++             "mapping WIRED (patch 0264; SDL owns default-ON killswitch "
++             "SDL_HINT_DOSKUTSU_PCSPK_SFX=0 to disable). See "
++             "docs/internal/ADLIB-PCSPK-SFX-DESIGN.md.");
+   }
+ 
+   // patch 0240 (#31): resolve the independent music/SFX dispatch gates (the
+@@ -1498,12 +1507,120 @@ void SoundManager::shutdown()
+   LOG_INFO("Sound system shutdown");
+ }
+ 
++// DOS-PORT (patch 0264, #B1-nx / v1.6.2): AdLib (music-only) path PC-speaker
++// SFX feedback. The AdLib backend has no DAC/mixer, so Pixtone PCM SFX are a
++// no-op there (patch 0236) -- gameplay is otherwise silent for hits/jumps/
++// pickups. This maps the common Pixtone SFX ids to a monophonic square-wave
++// "beep" (freq_hz, duration_ms) -- one or two notes -- emitted through the SDL
++// PC-speaker primitive SDL_DOSPcSpkBeep (SDL/0118 OPL-pump extension: PIT ch2
++// mode-3 hardware square-wave; the ~120 Hz ch0 music-pump ISR counts each
++// note's duration down + gates the speaker off, then advances a depth-4 ring).
++//
++// Deliberately MINIMAL (per the task "basic audible feedback, not fancy"):
++//   - ONE or TWO notes per SFX. SDL_DOSPcSpkBeep's `flush` gives us the ring:
++//     note 1 with flush=1 (PREEMPT -- clears the ring + any sounding note and
++//     starts now, so a fresh SFX always wins = the priority rule for a 1-voice
++//     speaker); the optional note 2 with flush=0 (APPEND -- plays after note 1
++//     finishes), which is how the jump up-chirp + the two-note pickup/confirm
++//     sequence on a monophonic speaker.
++//   - Unmapped / rare / ambient SFX beep NOTHING (default: return) so the
++//     speaker doesn't chatter on incidental sounds.
++// Callers gate this: playSfx only reaches here on _adlib_path with loop==0
++// (never beep a looping stream/propeller/motor SFX -- a continuous speaker tone
++// is intolerable), SDL_DOSPcSpkSfxEnabled() true (SDL default-ON killswitch
++// SDL_HINT_DOSKUTSU_PCSPK_SFX), !_sfx_off, and settings->sound_enabled.
++static void _pcspkr_beep_for_sfx(NXE::Sound::SFX snd)
++{
++  // up to two notes: (f1,d1) always emitted; (f2,d2) emitted only when f2>0.
++  int f1 = 0, d1 = 0, f2 = 0, d2 = 0;
++  switch (snd)
++  {
++    // fire -- short high blip (all weapon shots)
++    case SFX::SND_POLAR_STAR_L1_2:
++    case SFX::SND_POLAR_STAR_L3:
++    case SFX::SND_SNAKE_FIRE:
++    case SFX::SND_FIREBALL:
++    case SFX::SND_EM_FIRE:
++    case SFX::SND_BUBBLER_FIRE:
++    case SFX::SND_NEMESIS_FIRE:
++    case SFX::SND_SPUR_FIRE_1:
++    case SFX::SND_SPUR_FIRE_2:
++    case SFX::SND_SPUR_FIRE_3:
++      f1 = 1400; d1 = 16; break;
++
++    // jump -- quick up-chirp (low -> high)
++    case SFX::SND_PLAYER_JUMP:
++      f1 = 700; d1 = 10; f2 = 1100; d2 = 14; break;
++
++    // bump / hurt -- short low tone
++    case SFX::SND_PLAYER_HURT:
++    case SFX::SND_BONK_HEAD:
++    case SFX::SND_TINK:
++    case SFX::SND_THUD:
++    case SFX::SND_SHOT_HIT:
++      f1 = 220; d1 = 32; break;
++
++    // pickup -- two-note rising bright (item / xp / missile / refill / level-up)
++    case SFX::SND_GET_ITEM:
++    case SFX::SND_GET_XP:
++    case SFX::SND_GET_MISSILE:
++    case SFX::SND_HEALTH_REFILL:
++    case SFX::SND_LEVEL_UP:
++      f1 = 1200; d1 = 16; f2 = 1700; d2 = 22; break;
++
++    // door / block -- low thud
++    case SFX::SND_DOOR:
++    case SFX::SND_CHEST_OPEN:
++    case SFX::SND_BLOCK_DESTROY:
++      f1 = 140; d1 = 45; break;
++
++    // explosion / crash -- lowest thud (distinct from door)
++    case SFX::SND_EXPLOSION1:
++    case SFX::SND_EXPLOSION2:
++    case SFX::SND_FUNNY_EXPLODE:
++    case SFX::SND_EXPL_SMALL:
++    case SFX::SND_LITTLE_CRASH:
++    case SFX::SND_BIG_CRASH:
++    case SFX::SND_MISSILE_HIT:
++      f1 = 90; d1 = 55; break;
++
++    // menu move / weapon-switch / computer -- short blip
++    case SFX::SND_MENU_MOVE:
++    case SFX::SND_SWITCH_WEAPON:
++    case SFX::SND_COMPUTER_BEEP:
++      f1 = 1000; d1 = 12; break;
++
++    // menu select / prompt -- two-note confirm
++    case SFX::SND_MENU_SELECT:
++    case SFX::SND_MENU_PROMPT:
++      f1 = 1050; d1 = 12; f2 = 1400; d2 = 16; break;
++
++    default:
++      return; // unmapped: stay silent
++  }
++  SDL_DOSPcSpkBeep((Uint16)f1, (Uint16)d1, 1); // flush=1: preempt, new SFX wins
++  if (f2)
++    SDL_DOSPcSpkBeep((Uint16)f2, (Uint16)d2, 0); // flush=0: append 2nd note
++}
++
+ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
+ {
+-  // patch 0236 (#19): no PCM SFX on the AdLib path (no DAC/mixer). No-op so
+-  // gameplay doesn't spam "Pixtone::play: not rendered" against a null mixer.
+-  // Covers startPropSound (delegates here) too.
+-  if (_adlib_path || _sfx_off)  // patch 0240 (#31): _sfx_off = SFX disabled (SFX_OFF/SFX_DEVICE=none); adlib stays music-only
++  // patch 0264 (#B1-nx): AdLib music-only path -- no PCM/mixer, but emit a
++  // PC-speaker beep (one or two notes) for basic SFX feedback (see
++  // _pcspkr_beep_for_sfx), then return. loop!=0 (stream/propeller/motor) never
++  // beeps. The SDL-side default-ON killswitch (SDL_HINT_DOSKUTSU_PCSPK_SFX=0 to
++  // disable, via SDL_DOSPcSpkSfxEnabled) plus the engine 4-state SFX-off
++  // (_sfx_off) plus the in-game sound toggle all gate it.
++  if (_adlib_path)
++  {
++    if (loop == 0 && !_sfx_off && settings->sound_enabled &&
++        SDL_DOSPcSpkSfxEnabled())
++      _pcspkr_beep_for_sfx(snd);
++    return;
++  }
++  // patch 0236 (#19) / patch 0240 (#31): _sfx_off = SFX disabled
++  // (SFX_OFF/SFX_DEVICE=none) -- no PCM SFX (AdLib handled above).
++  if (_sfx_off)
+     return;
+   if (!settings->sound_enabled)
+     return;
+-- 
+2.47.3
+
