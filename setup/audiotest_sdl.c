@@ -637,6 +637,7 @@ int audiotest_init(const scfg_t *c)
 
 static void device_close(void);   /* fwd: device_open() unwinds via it on error */
 static int  play_gus_sfx(void);    /* A2 fwd: audiotest_play_sfx (below) uses it */
+static void gus_play_pcm8(const Uint8 *u8, Uint32 len, Uint32 rate, int ms_cap); /* rc4 fwd: play_gus_arpeggio routes each note through it */
 
 /* T28: synthesize the real Polar Star effect once per SETUP session
  * (device-independent: always S8 mono 22050). Sets g_sfx_pcm/_len on success,
@@ -1000,11 +1001,12 @@ static void test_progress_begin(int total_ms)
 static int pump_service(const char *what, int ms, int stop_on_any_key)
 {
   Uint64 start = SDL_GetTicks();
-  int hb = 0;
+  int      iters = 0;         /* outer-loop iterations (~one per SDL_Delay(5))    */
+  unsigned long serviced = 0; /* # SDL_DOSAudioPump() calls that DID work (ring)  */
   trace("pump[%s]: begin ms=%d (first SDL_DOSAudioPump next -- locks device + iterates)", what, ms);
   for (;;)
   {
-    while (SDL_DOSAudioPump()) { /* top the SB16 ring to full */ }
+    while (SDL_DOSAudioPump()) { ++serviced; /* top the SB16 ring to full */ }
 
     /* T24: forward OVERALL test progress (elapsed-since-begin / planned). */
     if (g_test_total_ms > 0)
@@ -1014,12 +1016,7 @@ static int pump_service(const char *what, int ms, int stop_on_any_key)
       if (pm > 1000) pm = 1000;
       audiotest_progress(pm);
     }
-
-    /* Heartbeat ~every 320 ms: proves the ring is being serviced (vs wedged
-     * inside the pump). If the trace stops at "begin", the first pump wedged;
-     * if it stops at a heartbeat, servicing wedged mid-stream. */
-    if ((++hb & 63) == 0)
-      trace("pump[%s]: hb=%d serviced", what, hb);
+    ++iters;
 
     if (kbhit())
     {
@@ -1027,14 +1024,20 @@ static int pump_service(const char *what, int ms, int stop_on_any_key)
       if (k == 0 || k == 0xE0) { (void)getch(); k = 27; } /* extended key -> treat as stop */
       if (k == 27 /*ESC*/ || stop_on_any_key)
       {
-        trace("pump[%s]: key=%d -> end", what, k);
+        trace("pump[%s]: key=%d -> end (iters=%d serviced=%lu)", what, k, iters, serviced);
         return k;
       }
     }
 
     if (ms >= 0 && (SDL_GetTicks() - start) >= (Uint64)ms)
     {
-      trace("pump[%s]: timeout -> end", what);
+      /* rc4 diag: report iters + ACTUAL ring-servicing count at EVERY return,
+       * unconditionally -- the old heartbeat only printed at iter 64/128/... so a
+       * sub-320ms pump (e.g. a 280ms arpeggio note) logged NO servicing line and
+       * looked unserviced when it was fine. On the GUS path there is no SB device
+       * (SDL_Init(0)), so serviced is EXPECTED 0 -- the GF1 plays autonomously
+       * from DRAM and needs no ring pump; iters>0 proves the loop ran. */
+      trace("pump[%s]: timeout -> end (iters=%d serviced=%lu)", what, iters, serviced);
       return 0;
     }
 
@@ -1154,8 +1157,7 @@ static int play_opl2_arpeggio(void)
 static int play_gus_arpeggio(void)
 {
   static Uint8 wave[GUS_NOTE_LEN];   /* static: keep it off the stack */
-  Uint32 addr[ARP_COUNT];
-  int    v, i, j;
+  int    i, j;
 
   /* rc4 INSTRUMENTATION (task #14, 3rd attempt): the SETUP GUS MUSIC test is
    * still silent on g2k while the GUS SFX test (gus_play_pcm8) + in-game GUS
@@ -1168,55 +1170,28 @@ static int play_gus_arpeggio(void)
         g_gus_ok, ARP_COUNT, GUS_NOTE_LEN, GUS_NATIVE_HZ);
   if (!g_gus_ok) { trace("gus arp: g_gus_ok=0 -> BAIL (silent, GF1 not up)"); return 1; }
 
-  /* Safe here: no voice is busy at entry (fresh device / SFX freed its voice),
-   * so GetState's mask loop does ZERO GF1 port reads. Logs the DRAM/voice state
-   * the uploads will use. */
-  {
-    SDL_DOSGusState st;
-    if (SDL_DOSGusGetState(&st))
-      trace("gus arp: state base=0x%X voices=%d rate=%dHz dram=%luKB used=%luB mask=0x%lX",
-            (unsigned)st.base_port, st.num_voices, (int)st.output_rate,
-            (unsigned long)(st.dram_size / 1024), (unsigned long)st.dram_used,
-            (unsigned long)st.voice_active_mask);
-    else
-      trace("gus arp: GetState returned false (?!)");
-  }
-
-  /* Upload all four note samples first (each a full-swing square of its period),
-   * so nothing pokes card DRAM while a voice is playing. */
+  /* rc5 FIX: route EACH note through gus_play_pcm8 -- the EXACT code path the
+   * WORKING GUS SFX test uses (fresh upload + fresh AllocVoice + SetFreq/Vol/Pan
+   * + StartVoice + serviced pump + StopVoice, one self-contained sound). The rc4
+   * g2k trace diff showed the silent music path and the audible SFX path issued
+   * identical, valid GF1 commands (same base/voices/rate, uploads OK, AllocVoice
+   * v=0, valid START params) -- the pump "services 0 vs 64" was a heartbeat-
+   * threshold logging artifact (64 iters ~= 320ms > a 280ms note; and on the GUS
+   * path SDL_DOSAudioPump is a no-op, the GF1 plays autonomously). The only real
+   * divergence was STRUCTURAL: the old arpeggio did 4 UP-FRONT uploads + reused
+   * ONE voice across 4 StartVoice/StopVoice cycles, none of which the proven SFX
+   * path does. Reusing gus_play_pcm8 per note eliminates every structural
+   * difference at once. Each note's pitch is in the uploaded square's PERIOD,
+   * played at the native GUS_NATIVE_HZ (the SFX rate). */
   for (i = 0; i < ARP_COUNT; ++i)
   {
     int p = GUS_ARP_PERIOD[i];
     for (j = 0; j < GUS_NOTE_LEN; ++j)
       wave[j] = ((j % p) < (p / 2)) ? 0xFF : 0x00;
-    addr[i] = SDL_DOSGusUploadSample(wave, (Uint32)sizeof(wave), 0);
-    trace("gus arp: upload note %d (period %d, %d bytes) -> addr=0x%lX%s",
-          i, p, GUS_NOTE_LEN, (unsigned long)addr[i],
-          addr[i] == SDL_DOSGUS_BAD_ADDR ? " *** BAD_ADDR ***" : "");
-    if (addr[i] == SDL_DOSGUS_BAD_ADDR)
-    { trace("gus arp: DRAM upload FAILED (note %d) -> BAIL before any note plays (SILENT)", i); return 1; }
+    trace("gus arp: note %d period=%d -> gus_play_pcm8 (SFX-identical path)", i, p);
+    gus_play_pcm8(wave, (Uint32)GUS_NOTE_LEN, GUS_NATIVE_HZ, ARP_ON_MS);
+    if (pump_service("gus-gap", ARP_GAP_MS, 0) == 27) break;
   }
-  v = SDL_DOSGusAllocVoice();
-  trace("gus arp: AllocVoice -> v=%d", v);
-  if (v < 0) { trace("gus arp: no free voice -> BAIL (SILENT)"); return 1; }
-
-  for (i = 0; i < ARP_COUNT; ++i)
-  {
-    SDL_DOSGusSetVoiceFreq(v, GUS_NATIVE_HZ);   /* native rate -- pitch is in the sample */
-    SDL_DOSGusSetVoiceVol(v, GUS_VOL);
-    SDL_DOSGusSetVoicePan(v, 128);              /* center */
-    /* ONE-SHOT (flags=0): plays the buffer once; long enough to cover ARP_ON_MS.
-     * StopVoice below ends the note; no lingering loop voice on the PicoGUS. */
-    SDL_DOSGusStartVoice(v, addr[i], addr[i] + GUS_NOTE_LEN - 1, addr[i], 0);
-    trace("gus arp: START note %d v=%d addr=0x%lX end=0x%lX freq=%d vol=%d pan=128 flags=0 (one-shot)",
-          i, v, (unsigned long)addr[i], (unsigned long)(addr[i] + GUS_NOTE_LEN - 1),
-          GUS_NATIVE_HZ, GUS_VOL);
-    if (pump_service("gus", ARP_ON_MS, 0) == 27) { SDL_DOSGusStopVoice(v); break; }
-    SDL_DOSGusStopVoice(v);            /* end the note + quiesce before the next */
-    trace("gus arp: STOP note %d (held %dms)", i, ARP_ON_MS);
-    if (pump_service("gus", ARP_GAP_MS, 0) == 27) break;
-  }
-  SDL_DOSGusStopVoice(v);
   trace("gus arp: DONE (all %d notes issued)", ARP_COUNT);
   return 0;
 }
