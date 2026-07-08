@@ -197,6 +197,23 @@ rm -f "$REPO_ROOT/build/stage/LOGS/DEBUG.LOG" \
 # AFTER this point.)
 rm -f "$REPO_ROOT/build/stage/DOSKUTSU.CFG"
 
+# Cold-cache detection for the precache-window hardening below. When the game
+# binary's sha changes, the org PCM cache (keyed to DOSKUTSU_BUILD_SHA12) is
+# cold, so the first boot runs the one-time 0266 organya auto-precache (~41
+# songs, tens of seconds). That precache can outlast the fixed milestone window
+# below, leaving boot stuck mid-render BEFORE the menu -- so the REQUIRED 0224
+# menu-slide banner (emitted at the post-textbox.Init menu eval) is never
+# REACHED, and the gate false-fails "REQUIRED banner absent / code path dead"
+# even though the banner is embedded and healthy. The gate's contention retry
+# clears LOGS but not the CACHE, so BOTH attempts burn their window precaching
+# and the false-fail reproduces. This is [[smoke_gate_discipline]]'s SECOND
+# 0224-false-blame mechanism: precache-window-starvation, distinct from the
+# first (shared-log contention). Detect cold here; wait it out after launch.
+CACHE_WAS_COLD=0
+if ! ls "$REPO_ROOT"/build/stage/CACHE/*/READY.* >/dev/null 2>&1; then
+  CACHE_WAS_COLD=1
+fi
+
 log "launching DOSBox-X (flags: ${LAUNCHER_FLAGS[*]})"
 "$LAUNCHER" "${LAUNCHER_FLAGS[@]}" >"$OUT_DIR/launcher.log" 2>&1 &
 LAUNCH_PID=$!
@@ -221,6 +238,31 @@ for _ in $(seq 1 10); do
   fi
   sleep 0.5
 done
+
+# Precache-window hardening: if the org cache was cold at launch, wait for the
+# one-time 0266 auto-precache to complete (its READY sentinel appears) before
+# the fixed milestone sequence, so boot advances to the menu and the REQUIRED
+# 0224 banner is reached within the window. Faithful to the default config
+# (autocache stays ON -- we WAIT it out rather than disabling it). Bounded; if
+# the sentinel never appears we fall through and let the gate report honestly
+# (a real precache hang would then surface, not be masked).
+if [[ "$CACHE_WAS_COLD" == 1 ]]; then
+  log "cold org cache: waiting for the one-time 0266 precache to finish (up to 240s)..."
+  precache_done=0
+  for _ in $(seq 1 240); do
+    if ls "$REPO_ROOT"/build/stage/CACHE/*/READY.* >/dev/null 2>&1; then
+      precache_done=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$precache_done" == 1 ]]; then
+    log "precache complete; letting boot settle to the title menu."
+    sleep 4   # boot advances from precache-exit to the title menu
+  else
+    log "WARN: precache did not finish within 240s -- proceeding; gate will report honestly."
+  fi
+fi
 
 # Milestone sequence. Timing comes from observation: under --fast the engine
 # init-to-title takes ~3-4s; the title-screen menu accepts input immediately.
