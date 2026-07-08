@@ -497,6 +497,7 @@ BANNER_REGEX=(
   "sdl: SDL/0116 VBLANK-BOUND (ENABLED|DISABLED)"
   "Sound system: AdLib PC-speaker SFX beeps -- engine SFX->beep mapping WIRED"
   "audio: SDL/0118 \[pcspk\] square-wave SFX (ENABLED|DISABLED)"
+  "load_stage ring\+DMA silence flush: (ENABLED|DISABLED)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -633,6 +634,7 @@ BANNER_SEVERITY=(
   "required"
   "optional"
   "optional"
+  "optional"
 )
 # BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (the two gate-critical arrays
 # are 134 entries each and MUST stay equal-length; BANNER_LABEL is display-only and has
@@ -761,6 +763,7 @@ BANNER_LABEL=(
   "SDL/0116 bounded WaitForVBlank (REQUIRED -- 'sdl: SDL/0116 VBLANK-BOUND (ENABLED|DISABLED) ...' emits once at DOSVESA_CreateWindowFramebuffer on EVERY boot. Proves the mainline vblank-spin HW-IO-hang guard (patches/SDL/0116) is in the binary AND ran. Default-ON; strict-'0' killswitch SDL_HINT_DOSKUTSU_VBLANK_BOUND=0 flips the text to DISABLED (still matches). Embed witness = strings|grep 'VBLANK-BOUND'.)"
   "0264 AdLib PC-speaker SFX->beep mapping WIRED (OPTIONAL -- engine SFX->beep map; emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib, the MUSIC-ONLY AdLib path; ABSENT in the default opl3 smoke, expected; witnessed via the dedicated AdLib DOSBox cell (sbtype=none + oplmode=opl2 + SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib). SDL owns the default-ON killswitch SDL_HINT_DOSKUTSU_PCSPK_SFX=0. Embed witness = strings|grep 'AdLib PC-speaker SFX beeps'. BANNER_REGEX idx 108.)"
   "SDL/0118 PC-speaker square-wave SFX decision (OPTIONAL -- 'audio: SDL/0118 [pcspk] square-wave SFX (ENABLED|DISABLED)' on the SDL-log channel (SDLDBG.LOG); emits at the PC-speaker beep-path bring-up on the AdLib path only; ABSENT in the default opl3 smoke, expected; killswitch SDL_HINT_DOSKUTSU_PCSPK_SFX=0 -> v1.5.0 music-only byte-identical. Embed witness = strings|grep 'SDL/0118'. BANNER_REGEX idx 109.)"
+  "0267 load_stage ring+DMA silence flush (OPTIONAL -- 'load_stage ring+DMA silence flush: (ENABLED|DISABLED)'; nx 0267 PicoGUS-SB cave-transition screech fix; LOG_INFO on first load_stage (first cave entry) narrating default-ON (calls the shipped SDL/0092 ring+DMA-zero at stage-load entry) vs DISABLED via killswitch SDL_HINT_DOSKUTSU_LOADSTAGE_SILENCE=0. Emits when the smoke drives into a stage; INFO-level so present on the verbose smoke. The screech-elimination effect is g2k-only (PicoGUS-in-SB-mode); DOSBox witnesses the banner/decision, not the audible screech per [[dosbox_not_proxy]]. Embed witness = strings|grep 'load_stage ring+DMA silence flush'.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
