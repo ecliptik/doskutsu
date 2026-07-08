@@ -1,0 +1,168 @@
+From 1bb5a254a13b935e0f50b6ca757aa7d4ab220ab1 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 8 Jul 2026 15:44:02 -0700
+Subject: [PATCH] dos: patch 0119 -- flush also quiesces the Lever-3 Pixtone
+ IRQ-mix source (+ probe)
+
+Task #17 (rc3/rc4 PicoGUS-SB cave-transition screech). Latent-bug fix to the
+SDL/0092 silence-flush: it advertised "hard-silence the physical audio path" but
+did NOT actually silence it when a Pixtone SFX was active.
+
+Why DOS needs this: SDL_DOSAudioFlushRingSilence zeroes the software ring + the
+physical DMA double-buffer + collapses the cursors -- but it left the Lever-3
+Pixtone IRQ-mix source running. PixtoneISRMix (in SoundBlasterIRQHandler) walks
+g_dos_pix_chan[] and adds active Pixtone SFX PCM DIRECTLY into the DMA buffer on
+EVERY ISR fire, AFTER the ring-copy/underrun-silence branch -- bypassing the ring
+entirely. So after the flush, the next IRQ re-injected the still-active door /
+transition SFX into the DMA buffer; when a load_stage sub-loader (flushSheets /
+load_map) then starved the ISR, the SB16 auto-init DMA looped that re-injected
+fragment = the screech. The flush zeroing the buffer was defeated one IRQ later.
+This is code-confirmed (SoundBlasterIRQHandler PixtoneISRMix call; the flush not
+touching g_dos_pix_chan[]) and unifies the intermittency (screech iff a Pixtone
+SFX was active at the transition).
+
+Fix: in SDL_DOSAudioFlushRingSilence, under the SAME DOS_DisableInterrupts block
+that collapses the cursors, deactivate every g_dos_pix_chan[] (active=false,
+channel_id=-1) and zero g_dos_pixtone_active_count -- so PixtoneISRMix injects
+nothing after the flush and a starved ISR loops the zeroed buffer (= silence).
+UNCONDITIONAL (no separate SDL killswitch): the rc5 A/B toggles the nx-side call
+gate SDL_HINT_DOSKUTSU_LOADSTAGE_SILENCE (whether the load_stage flush fires),
+not this. Benign at the shared cold-render (nx 0206/0209) call sites too -- a
+scene reset should stop SFX anyway. Banner label genericized "pre-cold-render
+quiesce" -> "ring+DMA silence quiesce"; the flush banner now prints
+pixtone_quiesced=N.
+
+Probe (rides along; zero hot-path cost): SDL_DOSAudioIsrRingWrite() exposes the
+software-ring producer byte cursor for the engine's per-cave [loadband-stat]
+line (SDL_HINT_DOSKUTSU_LOADBAND_STAT, engine-gated). The other two STAT counters
+-- doskutsu_audio_irq_count (fires) and g_dos_pixtone_active_count (the screech
+discriminator, the path the ring cursor is blind to) -- are already extern
+globals, read directly. No new SDL env var.
+
+g2k confirm (rc5): fix-ON (LOADSTAGE_SILENCE=1) SFX-active transition ->
+pixtone_quiesced>0 + pix_active_entry==0 + screech gone; fix-OFF -> pix_active>0
++ screech. Real-HW witness ([[dosbox_not_proxy]]).
+
+Workspace-local patch; not upstreamed (sdl_ai_policy).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dosaudio_pump.h | 30 +++++++++++++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c  | 42 +++++++++++++++++++++++++++++---
+ 2 files changed, 69 insertions(+), 3 deletions(-)
+
+diff --git a/include/SDL3/SDL_dosaudio_pump.h b/include/SDL3/SDL_dosaudio_pump.h
+index 44ead6553..a176fb217 100644
+--- a/include/SDL3/SDL_dosaudio_pump.h
++++ b/include/SDL3/SDL_dosaudio_pump.h
+@@ -404,6 +404,36 @@ extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioFlushRingSilence(void);
+  */
+ extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioPhysicalCapacityFrames(void);
+ 
++/*
++ * DOSKUTSU patch (SDL/0119, task #17): load-band audio-starvation probe
++ * accessors. Workspace-local; never upstreamed.
++ *
++ * The engine snapshots the load-band counters at load_stage entry (AFTER
++ * SDL_DOSAudioFlushRingSilence) and exit -- gated engine-side by
++ * SDL_HINT_DOSKUTSU_LOADBAND_STAT -- and emits one per-cave [loadband-stat] line
++ * to disambiguate the rc3/rc4 PicoGUS-SB cave-transition screech (whether stale
++ * audio is looping because a post-flush RING write, an active Pixtone IRQ-mix
++ * channel, or an IRQ-starved DMA replay). The other two STAT counters are read
++ * directly from their existing extern globals: doskutsu_audio_irq_count (fires)
++ * and g_dos_pixtone_active_count (active Pixtone IRQ-mix channels -- THE screech
++ * discriminator, exported in SDL3/SDL_dospixtone.h).
++ */
++
++/**
++ * Cumulative software-ring PRODUCER (enqueue) cursor, in BYTES. Frames =
++ * value / bytes-per-frame (1 on the 8-bit U8-mono path). A positive delta
++ * across a load_stage band means the mixer wrote NEW samples into the ring
++ * AFTER the entry-flush (a ring-path post-flush write). NOTE: this is BLIND to
++ * the Lever-3 Pixtone IRQ-mix, which writes the DMA buffer directly (bypassing
++ * the ring) -- use the g_dos_pixtone_active_count global (SDL_dospixtone.h) for
++ * that path.
++ *
++ * \returns the monotonic producer byte cursor (0 when no device is open).
++ * \threadsafety Aligned 32-bit read; safe from the engine main thread.
++ * \since doskutsu workspace-local patch, task #17.
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioIsrRingWrite(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 00e091b9f..68a96e940 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -1091,12 +1091,33 @@ int SDL_DOSAudioFlushRingSilence(void)
+      * the frozen producer write position so avail == 0 -> the ISR takes its
+      * underrun-silence memset path. Mirror into the hidden producer cursors so
+      * the audio thread's own bookkeeping stays coherent when it resumes. */
++    int pix_quiesced = 0;
+     DOS_DisableInterrupts();
+     isr_ring_read = isr_ring_write;
+     if (hidden) {
+         hidden->ring_read = isr_ring_write;
+         hidden->ring_write = isr_ring_write;
+     }
++    /* DOSKUTSU patch (SDL/0119, task #17): quiesce the Lever-3 Pixtone IRQ-mix
++       source too -- a LATENT-BUG FIX so this "hard-silence" primitive finally
++       delivers true physical silence. Zeroing the ring + DMA above does NOT
++       silence the path when a Pixtone SFX is active: PixtoneISRMix (in
++       SoundBlasterIRQHandler) re-injects the still-active g_dos_pix_chan[]
++       straight into the DMA buffer on the NEXT ISR fire -- so during a load_stage
++       block a starved ISR loops that re-injected SFX = the rc3/rc4 cave-transition
++       screech. Deactivating the channels here (same cli, atomic vs the ISR) closes
++       that hole. UNCONDITIONAL (no separate SDL gate): the rc5 A/B toggles the
++       nx-side call gate SDL_HINT_DOSKUTSU_LOADSTAGE_SILENCE (whether the load_stage
++       flush fires at all), not this. Benign at the cold-render (nx 0206/0209) call
++       sites too -- a scene reset should stop SFX. */
++    for (int c = 0; c < DOS_PIXTONE_CHANNELS; ++c) {
++        if (g_dos_pix_chan[c].active) {
++            g_dos_pix_chan[c].active = false;
++            g_dos_pix_chan[c].channel_id = -1;
++            pix_quiesced++;
++        }
++    }
++    g_dos_pixtone_active_count = 0;
+     DOS_EnableInterrupts();
+ 
+     const int ring_frames = isr_ring_size / bpf;
+@@ -1104,14 +1125,29 @@ int SDL_DOSAudioFlushRingSilence(void)
+     const int total_frames = ring_frames + dma_frames;
+     doskutsu_dbg_log("audio: SDL/0092 FlushRingSilence -- ring+DMA zeroed "
+                      "(silence_frames_flushed=%d = ring_frames=%d + "
+-                     "dma_frames=%d; ring_bytes=%d dma_bytes=%d) "
+-                     "pre-cold-render quiesce",
++                     "dma_frames=%d; ring_bytes=%d dma_bytes=%d; "
++                     "pixtone_quiesced=%d) ring+DMA silence quiesce",
+                      total_frames, ring_frames, dma_frames,
+-                     isr_ring_size, isr_dma_halfdma * 2);
++                     isr_ring_size, isr_dma_halfdma * 2, pix_quiesced);
+     /* Nonzero == both buffers fully zeroed (== PhysicalCapacityFrames()). */
+     return total_frames;
+ }
+ 
++/* DOSKUTSU patch (SDL/0119, task #17): load-band audio-starvation probe
++   accessor for the software-ring producer cursor. The engine snapshots this at
++   load_stage entry (POST-flush) + exit (gated by SDL_HINT_DOSKUTSU_LOADBAND_STAT
++   engine-side) for the per-cave [loadband-stat] line: a delta > 0 across the band
++   means the mixer wrote new SFX into the RING after the flush. (The OTHER two STAT
++   counters are read directly: doskutsu_audio_irq_count + g_dos_pixtone_active_count
++   are already extern -- see SDL_dos_audio_synth.h / the public SDL_dospixtone.h;
++   g_dos_pixtone_active_count is THE screech discriminator, the path this ring
++   cursor is blind to.) Plain aligned read of already-maintained state -> zero
++   hot-path cost; no SDL-side gate (the engine gates the snapshot/emit). */
++int SDL_DOSAudioIsrRingWrite(void)
++{
++    return isr_ring_write;
++}
++
+ /* DOSKUTSU patch (SDL/0092): true total physical silence-flush capacity, in
+  * frames. This is the denominator for the flush-instr witness
+  * silence_frames_flushed >= ring_capacity_frames: the FULL physical depth that
+-- 
+2.47.3
+
