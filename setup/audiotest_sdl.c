@@ -230,17 +230,24 @@ enum { MUS_PCM = 0, MUS_OPL3, MUS_WB, MUS_OPL2, MUS_GUS };
  * voice (S8 render -> U8 for the GF1's unsigned 8-bit DAC). Full GM .pat MIDI
  * synth (the game's MidiBackendGus) is out of scope for a hardware test button.
  * A dedicated later task can add the real title theme on GUS. */
-#define GUS_WAVE_PERIOD 50            /* samples/cycle: rate/50 = output Hz      */
-/* 160 whole cycles (multiple of the period). Sized so a ONE-SHOT play lasts
- * longer than ARP_ON_MS even at the arpeggio's highest playback rate
- * (26163 Hz: 8000/26163 ~= 306 ms > 280 ms), so each note sustains its whole
- * hold as a one-shot -- no forever-loop voice on the card (see play_gus_arpeggio). */
-#define GUS_WAVE_LEN    8000
 #define GUS_VOL         200           /* 0..255 linear voice volume (headroom)   */
-/* Per-arpeggio-note GF1 playback rate = midi_hz(note) * GUS_WAVE_PERIOD, so the
- * looping period-50 sample sounds at the note pitch. Parallel to ARP_NOTES
- * {60,64,67,72} = C4/E4/G4/C5 (261.63/329.63/392.00/523.25 Hz). */
-static const Uint32 GUS_ARP_HZ[ARP_COUNT] = { 13082, 16481, 19600, 26163 };
+/* CRITICAL (g2k GUS music-test silence fix): pitch the arpeggio by the uploaded
+ * sample PERIOD at a FIXED native playback rate, NOT by varying the GF1 playback
+ * rate. Every GF1 path proven audible on the g2k PicoGUS drives SetVoiceFreq at
+ * the native 22050 Hz -- the SDL/0112 driver's own gus_emit_test_tone AND this
+ * file's GUS SFX test (gus_play_pcm8 @ SFX_PXT_RATE=22050). The earlier arpeggio
+ * drove non-native pitch-computed rates (13-26 kHz); those produced NO output on
+ * the PicoGUS (consistent with the documented #39-class firmware quirks, where
+ * arithmetically-valid register values still yield silence). Playing every note
+ * at 22050 and setting pitch via the period removes that sole variable. */
+#define GUS_NATIVE_HZ   22050         /* the ONLY playback rate validated on g2k  */
+/* Per-note square-wave period in samples: output pitch = 22050/period ~= note.
+ * Parallel to ARP_NOTES {60,64,67,72} = C4/E4/G4/C5 (262/330/392/523 Hz):
+ * 22050/84=262, /67=329, /56=394, /42=525. */
+static const int GUS_ARP_PERIOD[ARP_COUNT] = { 84, 67, 56, 42 };
+/* One-shot sample length: >= ARP_ON_MS at 22050 (280 ms -> 6174 samples) so a
+ * note sustains its whole hold as a one-shot; 6720 = ~305 ms. */
+#define GUS_NOTE_LEN    6720
 static int g_gus_ok = 0;              /* GF1 detected + brought up (device_open) */
 
 static MIX_Mixer *g_mixer    = NULL;
@@ -1132,44 +1139,49 @@ static int play_opl2_arpeggio(void)
   return 0;
 }
 
-/* A2: play a C-E-G-C arpeggio on the real Gravis GF1. One square-wave sample is
- * uploaded to card DRAM; the GF1 replays it at a per-note sample rate
- * (GUS_ARP_HZ) so the fixed period-50 waveform sounds at the note pitch -- the
- * wavetable pitch trick.
- *
- * Each note is a ONE-SHOT (flags=0, NOT a loop), mirroring the SDL/0112 driver's
- * own gus_emit_test_tone: per the driver author, a forever-looping voice can
- * wedge the PicoGUS firmware (the g2k GUS test card) -- it keeps reading DRAM and
- * contends, and even a wave-ended-but-still-allocated loop voice contends. The
- * sample is sized (GUS_WAVE_LEN) so a one-shot outlasts ARP_ON_MS at every note
- * rate, so the note sustains its whole hold with no loop. Order per the driver
- * (Freq -> Vol -> Pan -> StartVoice); StopVoice between notes quiesces before the
- * next StartVoice; device_close StopAllVoices before Shutdown. No SB ring;
- * pump_service just paces + polls ESC (SDL_DOSAudioPump no-ops with no SB
- * device). Assumes device_open() ran. */
+/* A2: play a C-E-G-C arpeggio on the real Gravis GF1. Pitch is set by the
+ * uploaded sample PERIOD, with EVERY note played at the fixed native 22050 Hz
+ * (GUS_NATIVE_HZ) -- the only GF1 playback rate validated audible on the g2k
+ * PicoGUS (the driver's gus_emit_test_tone + this file's GUS SFX both use it).
+ * The prior version varied the playback rate per note (13-26 kHz) and was SILENT
+ * on g2k while the SFX test worked; see the GUS_NATIVE_HZ note above. The four
+ * period-varied samples are uploaded UP FRONT (no DRAM pokes during playback,
+ * PicoGUS-safe), then each is played as a ONE-SHOT (flags=0, not a loop -- a
+ * forever-loop voice can wedge the PicoGUS). Order per the driver (Freq -> Vol ->
+ * Pan -> StartVoice); StopVoice between notes quiesces before the next;
+ * device_close StopAllVoices before Shutdown. No SB ring; pump_service paces +
+ * polls ESC (SDL_DOSAudioPump no-ops with no SB device). device_open() ran. */
 static int play_gus_arpeggio(void)
 {
-  static Uint8 wave[GUS_WAVE_LEN];   /* static: keep it off the stack */
-  Uint32 addr;
-  int    v, i;
+  static Uint8 wave[GUS_NOTE_LEN];   /* static: keep it off the stack */
+  Uint32 addr[ARP_COUNT];
+  int    v, i, j;
   if (!g_gus_ok) return 1;
 
-  for (i = 0; i < GUS_WAVE_LEN; ++i)
-    wave[i] = ((i % GUS_WAVE_PERIOD) < (GUS_WAVE_PERIOD / 2)) ? 0xFF : 0x00;
-  addr = SDL_DOSGusUploadSample(wave, (Uint32)sizeof(wave), 0);
-  if (addr == SDL_DOSGUS_BAD_ADDR) { trace("gus arp: DRAM upload FAILED"); return 1; }
+  /* Upload all four note samples first (each a full-swing square of its period),
+   * so nothing pokes card DRAM while a voice is playing. */
+  for (i = 0; i < ARP_COUNT; ++i)
+  {
+    int p = GUS_ARP_PERIOD[i];
+    for (j = 0; j < GUS_NOTE_LEN; ++j)
+      wave[j] = ((j % p) < (p / 2)) ? 0xFF : 0x00;
+    addr[i] = SDL_DOSGusUploadSample(wave, (Uint32)sizeof(wave), 0);
+    if (addr[i] == SDL_DOSGUS_BAD_ADDR)
+    { trace("gus arp: DRAM upload FAILED (note %d)", i); return 1; }
+  }
   v = SDL_DOSGusAllocVoice();
   if (v < 0) { trace("gus arp: no free voice"); return 1; }
 
   for (i = 0; i < ARP_COUNT; ++i)
   {
-    SDL_DOSGusSetVoiceFreq(v, GUS_ARP_HZ[i]);
+    SDL_DOSGusSetVoiceFreq(v, GUS_NATIVE_HZ);   /* native rate -- pitch is in the sample */
     SDL_DOSGusSetVoiceVol(v, GUS_VOL);
-    SDL_DOSGusSetVoicePan(v, 128);     /* center */
+    SDL_DOSGusSetVoicePan(v, 128);              /* center */
     /* ONE-SHOT (flags=0): plays the buffer once; long enough to cover ARP_ON_MS.
      * StopVoice below ends the note; no lingering loop voice on the PicoGUS. */
-    SDL_DOSGusStartVoice(v, addr, addr + GUS_WAVE_LEN - 1, addr, 0);
-    trace("gus arp: note %d hz=%lu (one-shot)", ARP_NOTES[i], (unsigned long)GUS_ARP_HZ[i]);
+    SDL_DOSGusStartVoice(v, addr[i], addr[i] + GUS_NOTE_LEN - 1, addr[i], 0);
+    trace("gus arp: note %d period=%d @%dHz (one-shot)",
+          ARP_NOTES[i], GUS_ARP_PERIOD[i], GUS_NATIVE_HZ);
     if (pump_service("gus", ARP_ON_MS, 0) == 27) { SDL_DOSGusStopVoice(v); break; }
     SDL_DOSGusStopVoice(v);            /* end the note + quiesce before the next */
     if (pump_service("gus", ARP_GAP_MS, 0) == 27) break;
