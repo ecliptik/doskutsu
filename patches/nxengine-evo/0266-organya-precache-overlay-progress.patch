@@ -1,0 +1,128 @@
+From bc74da8d348e36ec2bd0584bf672ddcb5fb19689 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 8 Jul 2026 11:23:39 -0700
+Subject: [PATCH] patch 0266 -- #16: real progress on the organya first-launch
+ precache overlay
+
+On a 486 the organya first-launch auto-precache cold-renders each song for
+~10-14 s, and the whole set takes minutes. The existing overlay drew a coarse
+"song N/M" line + a thin intra-song bar, but during one song only that thin bar
+creeps -- on g2k the operator read it as a hang, quit mid-render, so the READY
+sentinel was never written and the batch re-triggered on every launch (the
+returned PCACH/CAVE0/CAVE1 logs end right at "rendering all songs" with no
+per-song trace).
+
+Make the overlay obviously ALIVE + reassuring (cosmetic only; rides the existing
+default-ON SDL_HINT_DOSKUTSU_ORG_AUTOCACHE gate, no new lever):
+- A spinner (|/-\) that advances on EVERY draw, so the screen visibly changes
+  even mid-song.
+- Reassurance text: "First-run music setup", "Rendering music to cache (one
+  time).", and a footer "Please wait -- one time, a few minutes.  ESC = skip"
+  (the ESC prompt only in the first-launch batch; an in-game cold render keeps
+  ESC as the gameplay key).
+- A ~250 ms heartbeat: the per-beat callback now redraws on intra-song bar
+  pixel-advance OR every ~250 ms (SDL_GetTicks), so the spinner keeps moving
+  through the slow stretches within one song. Bounded (~2%) render overhead.
+- A per-song LOG_INFO ("rendering song N/M (name)") so a returned DEBUG.LOG
+  shows real batch progress and confirms the loop iterated -- the current gap
+  (start + completion only) left a mid-render quit with zero trace, and this
+  line also decisively distinguishes the perception fix from any present-path
+  bug on the next iter.
+
+No behavior change to the render itself; the sentinel / ESC-skip / cache logic
+is untouched.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 40 +++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index c1937bb3..4f8d4e45 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1279,6 +1279,14 @@ static int         g_oc_song_idx      = 0;     // 1-based current song (batch)
+ static int         g_oc_song_total    = 0;     // song count excluding the [0] sentinel (batch)
+ static std::string g_oc_song_name;             // current song basename
+ static int         g_oc_last_inner_px = -1;    // flip-throttle: last drawn intra-song bar pixel
++// DOS-PORT (patch 0266, #16 / v1.6.2): overlay-liveness state. On a 486 a single
++// song cold-renders for ~10-14 s, so the coarse "song N/M" line + the thin
++// intra-song bar can look frozen -- the g2k operator mistook it for a hang and
++// quit, so the batch never completed + kept re-triggering. g_oc_spin drives a
++// spinner that advances every draw; g_oc_last_draw_ms drives a ~250 ms heartbeat
++// redraw so the spinner keeps moving through the slow stretches within one song.
++static unsigned    g_oc_spin          = 0;     // spinner frame (advances each draw)
++static uint32_t    g_oc_last_draw_ms  = 0;     // heartbeat: wall-clock of last _oc_draw_progress
+ 
+ // Readable basename for the coarse line: strip dir + ".org" extension.
+ static std::string _oc_basename(const std::string &path)
+@@ -1309,7 +1317,15 @@ static void _oc_draw_progress(uint32_t cur_beat, uint32_t total_beats)
+   const int H = r->screenHeight;
+   r->clearScreen(0, 0, 0);
+ 
+-  const char *line1 = "Rendering music (one time)...";
++  // Spinner: advances every draw so the screen is VISIBLY alive even while ONE
++  // song renders for ~10-14 s on a 486 (patch 0266, #16 -- the operator mistook
++  // the slow per-song render for a hang and quit before it finished).
++  static const char spin[4] = {'|', '/', '-', '\\'};
++  char head[64];
++  snprintf(head, sizeof head, "First-run music setup  %c", spin[(g_oc_spin++) & 3]);
++  r->font.draw((W - (int)r->font.getWidth(head)) / 2, H / 2 - 42, head, 0xFFFFFF, true);
++
++  const char *line1 = "Rendering music to cache (one time).";
+   r->font.draw((W - (int)r->font.getWidth(line1)) / 2, H / 2 - 30, line1, 0xFFFFFF, true);
+ 
+   const int bx0 = 40;
+@@ -1318,7 +1334,7 @@ static void _oc_draw_progress(uint32_t cur_beat, uint32_t total_beats)
+   // coarse "song N/M" bar -- batch mode only (single in-game renders have no N/M)
+   if (g_oc_batch_active && g_oc_song_total > 0)
+   {
+-    char buf[80];
++    char buf[96];
+     snprintf(buf, sizeof buf, "song %d/%d  %s", g_oc_song_idx, g_oc_song_total,
+              g_oc_song_name.c_str());
+     r->font.draw((W - (int)r->font.getWidth(buf)) / 2, H / 2 - 14, buf, 0xC0C0C0, true);
+@@ -1341,6 +1357,15 @@ static void _oc_draw_progress(uint32_t cur_beat, uint32_t total_beats)
+       r->fillRect(bx0 + 1, iy + 1, bx0 + 1 + fillw, iy + 5, 0x40, 0xC0, 0xFF);
+   }
+ 
++  // Reassurance footer so a long one-time render does not read as a hang. The
++  // ESC-skip prompt only applies to the first-launch batch (an in-game cold
++  // render keeps ESC as the gameplay key -- the beat cb never aborts there).
++  const char *foot = g_oc_batch_active
++                         ? "Please wait -- one time, a few minutes.  ESC = skip"
++                         : "Please wait...";
++  r->font.draw((W - (int)r->font.getWidth(foot)) / 2, H / 2 + 30, foot, 0x909090, true);
++
++  g_oc_last_draw_ms = (uint32_t)SDL_GetTicks();
+   r->flip();
+ }
+ 
+@@ -1363,7 +1388,11 @@ static int _oc_progress_beat_cb(uint32_t cur_beat, uint32_t total_beats)
+   const int px   = (total_beats > 0)
+                        ? (int)(((uint64_t)span * cur_beat) / total_beats)
+                        : 0;
+-  if (px != g_oc_last_inner_px)
++  // Redraw when the intra-song bar advances a pixel OR at least every ~250 ms
++  // (patch 0266, #16 heartbeat) -- the latter keeps the spinner animating
++  // through the slow stretches of one song so the screen never looks frozen.
++  const uint32_t now = (uint32_t)SDL_GetTicks();
++  if (px != g_oc_last_inner_px || (uint32_t)(now - g_oc_last_draw_ms) >= 250u)
+   {
+     g_oc_last_inner_px = px;
+     _oc_draw_progress(cur_beat, total_beats);
+@@ -1922,6 +1951,11 @@ int main(int argc, char *argv[])
+         g_oc_song_idx      = i;
+         g_oc_song_name     = _oc_basename(path);
+         g_oc_last_inner_px = -1;          // reset the intra-song bar for the new song
++        // patch 0266 (#16): log per song so a returned DEBUG.LOG shows real batch
++        // progress (previously the batch logged only start + completion, so a
++        // mid-render quit left no trace of how far it got).
++        LOG_INFO("organya auto-precache: rendering song {}/{} ({})", i,
++                 g_oc_song_total, g_oc_song_name.c_str());
+         _oc_draw_progress(0, 0);          // coarse N/M update + empty inner bar + flip
+         _oc_poll_esc();                   // catch ESC pressed between songs
+         if (g_oc_abort)
+-- 
+2.47.3
+
