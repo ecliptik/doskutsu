@@ -1156,7 +1156,31 @@ static int play_gus_arpeggio(void)
   static Uint8 wave[GUS_NOTE_LEN];   /* static: keep it off the stack */
   Uint32 addr[ARP_COUNT];
   int    v, i, j;
-  if (!g_gus_ok) return 1;
+
+  /* rc4 INSTRUMENTATION (task #14, 3rd attempt): the SETUP GUS MUSIC test is
+   * still silent on g2k while the GUS SFX test (gus_play_pcm8) + in-game GUS
+   * music both work. Two prior fixes (loop-rate, then native-22050) missed
+   * because nothing logged what the music path actually does vs the SFX path.
+   * This trace mirrors gus_play_pcm8's instrumentation so the g2k log can be
+   * DIFFed. SETUP-side values only (no GF1 status reads after StartVoice -- that
+   * contends with the just-started voice and can wedge the PicoGUS, gus-8). */
+  trace("gus arp: ENTER g_gus_ok=%d ARP_COUNT=%d NOTE_LEN=%d native=%dHz",
+        g_gus_ok, ARP_COUNT, GUS_NOTE_LEN, GUS_NATIVE_HZ);
+  if (!g_gus_ok) { trace("gus arp: g_gus_ok=0 -> BAIL (silent, GF1 not up)"); return 1; }
+
+  /* Safe here: no voice is busy at entry (fresh device / SFX freed its voice),
+   * so GetState's mask loop does ZERO GF1 port reads. Logs the DRAM/voice state
+   * the uploads will use. */
+  {
+    SDL_DOSGusState st;
+    if (SDL_DOSGusGetState(&st))
+      trace("gus arp: state base=0x%X voices=%d rate=%dHz dram=%luKB used=%luB mask=0x%lX",
+            (unsigned)st.base_port, st.num_voices, (int)st.output_rate,
+            (unsigned long)(st.dram_size / 1024), (unsigned long)st.dram_used,
+            (unsigned long)st.voice_active_mask);
+    else
+      trace("gus arp: GetState returned false (?!)");
+  }
 
   /* Upload all four note samples first (each a full-swing square of its period),
    * so nothing pokes card DRAM while a voice is playing. */
@@ -1166,11 +1190,15 @@ static int play_gus_arpeggio(void)
     for (j = 0; j < GUS_NOTE_LEN; ++j)
       wave[j] = ((j % p) < (p / 2)) ? 0xFF : 0x00;
     addr[i] = SDL_DOSGusUploadSample(wave, (Uint32)sizeof(wave), 0);
+    trace("gus arp: upload note %d (period %d, %d bytes) -> addr=0x%lX%s",
+          i, p, GUS_NOTE_LEN, (unsigned long)addr[i],
+          addr[i] == SDL_DOSGUS_BAD_ADDR ? " *** BAD_ADDR ***" : "");
     if (addr[i] == SDL_DOSGUS_BAD_ADDR)
-    { trace("gus arp: DRAM upload FAILED (note %d)", i); return 1; }
+    { trace("gus arp: DRAM upload FAILED (note %d) -> BAIL before any note plays (SILENT)", i); return 1; }
   }
   v = SDL_DOSGusAllocVoice();
-  if (v < 0) { trace("gus arp: no free voice"); return 1; }
+  trace("gus arp: AllocVoice -> v=%d", v);
+  if (v < 0) { trace("gus arp: no free voice -> BAIL (SILENT)"); return 1; }
 
   for (i = 0; i < ARP_COUNT; ++i)
   {
@@ -1180,13 +1208,16 @@ static int play_gus_arpeggio(void)
     /* ONE-SHOT (flags=0): plays the buffer once; long enough to cover ARP_ON_MS.
      * StopVoice below ends the note; no lingering loop voice on the PicoGUS. */
     SDL_DOSGusStartVoice(v, addr[i], addr[i] + GUS_NOTE_LEN - 1, addr[i], 0);
-    trace("gus arp: note %d period=%d @%dHz (one-shot)",
-          ARP_NOTES[i], GUS_ARP_PERIOD[i], GUS_NATIVE_HZ);
+    trace("gus arp: START note %d v=%d addr=0x%lX end=0x%lX freq=%d vol=%d pan=128 flags=0 (one-shot)",
+          i, v, (unsigned long)addr[i], (unsigned long)(addr[i] + GUS_NOTE_LEN - 1),
+          GUS_NATIVE_HZ, GUS_VOL);
     if (pump_service("gus", ARP_ON_MS, 0) == 27) { SDL_DOSGusStopVoice(v); break; }
     SDL_DOSGusStopVoice(v);            /* end the note + quiesce before the next */
+    trace("gus arp: STOP note %d (held %dms)", i, ARP_ON_MS);
     if (pump_service("gus", ARP_GAP_MS, 0) == 27) break;
   }
   SDL_DOSGusStopVoice(v);
+  trace("gus arp: DONE (all %d notes issued)", ARP_COUNT);
   return 0;
 }
 
@@ -1197,9 +1228,24 @@ static void gus_play_pcm8(const Uint8 *u8, Uint32 len, Uint32 rate, int ms_cap)
 {
   Uint32 addr;
   int    v, dur;
+  /* rc4 INSTRUMENTATION (task #14): this is the WORKING SFX path -- trace it in
+   * the SAME shape as play_gus_arpeggio so the g2k log can be DIFFed to find why
+   * the (structurally identical) music path is silent. */
+  trace("gus pcm: ENTER g_gus_ok=%d len=%luB rate=%dHz", g_gus_ok, (unsigned long)len, (int)rate);
+  {
+    SDL_DOSGusState st;
+    if (SDL_DOSGusGetState(&st))
+      trace("gus pcm: state base=0x%X voices=%d rate=%dHz dram=%luKB used=%luB mask=0x%lX",
+            (unsigned)st.base_port, st.num_voices, (int)st.output_rate,
+            (unsigned long)(st.dram_size / 1024), (unsigned long)st.dram_used,
+            (unsigned long)st.voice_active_mask);
+  }
   addr = SDL_DOSGusUploadSample(u8, len, 0);
+  trace("gus pcm: upload (%luB) -> addr=0x%lX%s", (unsigned long)len, (unsigned long)addr,
+        addr == SDL_DOSGUS_BAD_ADDR ? " *** BAD_ADDR ***" : "");
   if (addr == SDL_DOSGUS_BAD_ADDR) { trace("gus pcm: DRAM upload FAILED"); return; }
   v = SDL_DOSGusAllocVoice();
+  trace("gus pcm: AllocVoice -> v=%d", v);
   if (v < 0) { trace("gus pcm: no free voice"); return; }
   SDL_DOSGusSetVoiceFreq(v, rate);
   SDL_DOSGusSetVoiceVol(v, GUS_VOL);
@@ -1207,8 +1253,11 @@ static void gus_play_pcm8(const Uint8 *u8, Uint32 len, Uint32 rate, int ms_cap)
   SDL_DOSGusStartVoice(v, addr, addr + len - 1, addr, 0);   /* one-shot, no loop */
   dur = (int)(((Uint64)len * 1000) / (Uint64)rate);
   if (dur > ms_cap) dur = ms_cap;
+  trace("gus pcm: START v=%d addr=0x%lX end=0x%lX freq=%d vol=%d pan=128 flags=0 dur=%dms",
+        v, (unsigned long)addr, (unsigned long)(addr + len - 1), (int)rate, GUS_VOL, dur);
   pump_service("gus-sfx", dur + 200, 0);
   SDL_DOSGusStopVoice(v);
+  trace("gus pcm: STOP (played %dms)", dur);
 }
 
 /* A2: GUS SFX test -- the real Polar Star on the GF1. The Pixtone render is S8
