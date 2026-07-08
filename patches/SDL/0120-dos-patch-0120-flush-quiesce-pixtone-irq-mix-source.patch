@@ -1,12 +1,16 @@
-From 1bb5a254a13b935e0f50b6ca757aa7d4ab220ab1 Mon Sep 17 00:00:00 2001
+From 3f7e025d4bfd5ea89a3456efc0d50cef10e3b506 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
-Date: Wed, 8 Jul 2026 15:44:02 -0700
-Subject: [PATCH] dos: patch 0119 -- flush also quiesces the Lever-3 Pixtone
+Date: Wed, 8 Jul 2026 15:47:34 -0700
+Subject: [PATCH] dos: patch 0120 -- flush also quiesces the Lever-3 Pixtone
  IRQ-mix source (+ probe)
 
 Task #17 (rc3/rc4 PicoGUS-SB cave-transition screech). Latent-bug fix to the
 SDL/0092 silence-flush: it advertised "hard-silence the physical audio path" but
 did NOT actually silence it when a Pixtone SFX was active.
+
+(Slot 0120: 0119 is a self-documenting gap -- it was the dropped WB_MUSIC_VOL/A4
+patch, documented as such across the findings/plan; reusing that number would make
+"0119" ambiguous in the record.)
 
 Why DOS needs this: SDL_DOSAudioFlushRingSilence zeroes the software ring + the
 physical DMA double-buffer + collapses the cursors -- but it left the Lever-3
@@ -17,9 +21,8 @@ entirely. So after the flush, the next IRQ re-injected the still-active door /
 transition SFX into the DMA buffer; when a load_stage sub-loader (flushSheets /
 load_map) then starved the ISR, the SB16 auto-init DMA looped that re-injected
 fragment = the screech. The flush zeroing the buffer was defeated one IRQ later.
-This is code-confirmed (SoundBlasterIRQHandler PixtoneISRMix call; the flush not
-touching g_dos_pix_chan[]) and unifies the intermittency (screech iff a Pixtone
-SFX was active at the transition).
+Code-confirmed + unifies the intermittency (screech iff a Pixtone SFX was active
+at the transition).
 
 Fix: in SDL_DOSAudioFlushRingSilence, under the SAME DOS_DisableInterrupts block
 that collapses the cursors, deactivate every g_dos_pix_chan[] (active=false,
@@ -52,7 +55,7 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>
  2 files changed, 69 insertions(+), 3 deletions(-)
 
 diff --git a/include/SDL3/SDL_dosaudio_pump.h b/include/SDL3/SDL_dosaudio_pump.h
-index 44ead6553..a176fb217 100644
+index 44ead6553..a5244c91a 100644
 --- a/include/SDL3/SDL_dosaudio_pump.h
 +++ b/include/SDL3/SDL_dosaudio_pump.h
 @@ -404,6 +404,36 @@ extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioFlushRingSilence(void);
@@ -60,7 +63,7 @@ index 44ead6553..a176fb217 100644
  extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioPhysicalCapacityFrames(void);
  
 +/*
-+ * DOSKUTSU patch (SDL/0119, task #17): load-band audio-starvation probe
++ * DOSKUTSU patch (SDL/0120, task #17): load-band audio-starvation probe
 + * accessors. Workspace-local; never upstreamed.
 + *
 + * The engine snapshots the load-band counters at load_stage entry (AFTER
@@ -93,7 +96,7 @@ index 44ead6553..a176fb217 100644
  }
  #endif
 diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
-index 00e091b9f..68a96e940 100644
+index 00e091b9f..f67964209 100644
 --- a/src/audio/dos/SDL_dosaudio_sb.c
 +++ b/src/audio/dos/SDL_dosaudio_sb.c
 @@ -1091,12 +1091,33 @@ int SDL_DOSAudioFlushRingSilence(void)
@@ -107,7 +110,7 @@ index 00e091b9f..68a96e940 100644
          hidden->ring_read = isr_ring_write;
          hidden->ring_write = isr_ring_write;
      }
-+    /* DOSKUTSU patch (SDL/0119, task #17): quiesce the Lever-3 Pixtone IRQ-mix
++    /* DOSKUTSU patch (SDL/0120, task #17): quiesce the Lever-3 Pixtone IRQ-mix
 +       source too -- a LATENT-BUG FIX so this "hard-silence" primitive finally
 +       delivers true physical silence. Zeroing the ring + DMA above does NOT
 +       silence the path when a Pixtone SFX is active: PixtoneISRMix (in
@@ -145,7 +148,7 @@ index 00e091b9f..68a96e940 100644
      return total_frames;
  }
  
-+/* DOSKUTSU patch (SDL/0119, task #17): load-band audio-starvation probe
++/* DOSKUTSU patch (SDL/0120, task #17): load-band audio-starvation probe
 +   accessor for the software-ring producer cursor. The engine snapshots this at
 +   load_stage entry (POST-flush) + exit (gated by SDL_HINT_DOSKUTSU_LOADBAND_STAT
 +   engine-side) for the per-cave [loadband-stat] line: a delta > 0 across the band
