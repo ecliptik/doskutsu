@@ -1,13 +1,13 @@
-From 14f6e83cb865ba21bc6894318888f11c870e337d Mon Sep 17 00:00:00 2001
+From 6d279ae5bf225d6e83425dd6e85eae6fe8cf45b3 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
 Date: Wed, 8 Jul 2026 15:48:08 -0700
 Subject: [PATCH] patch 0268 -- #17 diag: load-band audio-underrun probe
  (LOADBAND_STAT) for the rc5 screech A/B
 
 Opt-in diagnostic (default-OFF, SDL_HINT_DOSKUTSU_LOADBAND_STAT=1) that witnesses
-the PicoGUS-SB cave-transition screech fix. The rc5 fix is SDL-side (sdl-engine
-SDL/0119 folds a Pixtone-channel quiesce into SDL_DOSAudioFlushRingSilence,
-gated by its own SDL_HINT_DOSKUTSU_FLUSH_QUIESCE_PIXTONE lever); this probe just
+the PicoGUS-SB cave-transition screech fix. The rc5 fix is SDL-side: sdl-engine
+SDL/0119 folds a Pixtone-channel quiesce UNCONDITIONALLY into
+SDL_DOSAudioFlushRingSilence() (the export 0267 already calls). This probe just
 records the load-band audio state so the A/B has a log witness alongside the ear.
 
 A LoadBandStatGuard RAII object declared at load_stage entry RIGHT AFTER the
@@ -16,14 +16,16 @@ A LoadBandStatGuard RAII object declared at load_stage entry RIGHT AFTER the
 SDL_GetTicks timer; dtor (all return paths) re-reads and emits one line per cave:
   [loadband-stat cave=N dur_ms=D pix_active_entry=P irq_delta=A ring_write_delta=B irq_expected=E]
 with E = D/46 (the healthy 512-frame autoinit IRQ period at 11025 Hz). The
-discriminator is pix_active_entry: 0 when the flush-quiesce ran (fix ON), >0 when
-FLUSH_QUIESCE_PIXTONE=0 skipped it (fix OFF, an SFX still resident in the ring).
+discriminator is pix_active_entry: since the SDL/0119 quiesce is unconditional,
+the A/B toggles LOADSTAGE_SILENCE (0267) -- default runs the flush+quiesce ->
+pix_active_entry=0 (fix ON); LOADSTAGE_SILENCE=0 skips the whole flush ->
+pix_active_entry>0 (fix OFF, an SFX still resident + the screech reproduces).
 
-Gated by LOADBAND_STAT ALONE -- independent of both LOADSTAGE_SILENCE (0267) and
-the SDL FLUSH_QUIESCE_PIXTONE lever -- so BOTH A/B cells emit. No fix logic, no
-pump, the 0267 call is unchanged (honors the no-slowdown guardrail). Zero-cost
-when off (cached bool -> ctor/dtor no-op); ships in v1.6.2 dormant, not stripped
-post-validation (stripping would change the binary + force a re-validate).
+Gated by LOADBAND_STAT ALONE (independent of LOADSTAGE_SILENCE) so BOTH A/B cells
+emit. No fix logic, no pump, the 0267 call is unchanged (honors the no-slowdown
+guardrail). Zero-cost when off (cached bool -> ctor/dtor no-op); ships in v1.6.2
+dormant, not stripped post-validation (stripping would change the binary + force
+a re-validate).
 
 Counters via SDL/0119: doskutsu_audio_irq_count (bare extern, core header not on
 the nx include path -> declared here), SDL_DOSAudioIsrRingWrite() getter
@@ -32,11 +34,11 @@ SDL_dospixtone.h, now included). Types verified against the SDL headers.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- src/map.cpp | 74 ++++++++++++++++++++++++++++++++++++++++++++++++++++-
- 1 file changed, 73 insertions(+), 1 deletion(-)
+ src/map.cpp | 76 ++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 75 insertions(+), 1 deletion(-)
 
 diff --git a/src/map.cpp b/src/map.cpp
-index 1687d6d8..7dc24045 100644
+index 1687d6d8..e399ddea 100644
 --- a/src/map.cpp
 +++ b/src/map.cpp
 @@ -24,7 +24,8 @@ using namespace NXE::Graphics;
@@ -49,7 +51,7 @@ index 1687d6d8..7dc24045 100644
  
  stMap map;
  
-@@ -1349,6 +1350,69 @@ extern "C" int loadstage_current_cave(void)
+@@ -1349,6 +1350,71 @@ extern "C" int loadstage_current_cave(void)
    return g_loadstage_cave_counter;
  }
  
@@ -57,11 +59,13 @@ index 1687d6d8..7dc24045 100644
 +// diagnostic, DEFAULT-OFF (SDL_HINT_DOSKUTSU_LOADBAND_STAT=1). Snapshots the SB
 +// ISR fire count + producer/enqueue cursor + the POST-flush Pixtone-active count
 +// across the load_stage band and emits ONE [loadband-stat] line per cave, so the
-+// rc5 PicoGUS-SB screech A/B (sdl-engine's SDL/0119 FLUSH_QUIESCE_PIXTONE lever)
-+// has a log witness: pix_active_entry reads 0 when the flush-quiesce ran, >0 when
-+// it was skipped (FLUSH_QUIESCE_PIXTONE=0). Gated by LOADBAND_STAT ALONE --
-+// independent of both LOADSTAGE_SILENCE (0267) and the SDL FLUSH_QUIESCE_PIXTONE
-+// lever -- so BOTH A/B cells emit. Ships in v1.6.2 but dormant + zero-cost when
++// rc5 PicoGUS-SB screech A/B has a log witness. sdl-engine's SDL/0119 folds the
++// Pixtone-channel quiesce UNCONDITIONALLY into SDL_DOSAudioFlushRingSilence(), so
++// the A/B toggles LOADSTAGE_SILENCE (0267): default runs the flush+quiesce ->
++// pix_active_entry reads 0; LOADSTAGE_SILENCE=0 skips the whole flush ->
++// pix_active_entry reads >0 (an SFX still resident + the screech reproduces).
++// Gated by LOADBAND_STAT ALONE (independent of LOADSTAGE_SILENCE) so BOTH A/B
++// cells emit. Ships in v1.6.2 but dormant + zero-cost when
 +// off (cached bool; guard ctor/dtor no-op). Counters via SDL/0119: the irq
 +// counter is a bare core-header extern (not on the nx include path -> declared
 +// here); the ring-write cursor is the SDL_DOSAudioIsrRingWrite() getter
@@ -119,16 +123,16 @@ index 1687d6d8..7dc24045 100644
  bool load_stage(int stage_no)
  {
    char fname[MAXPATHLEN];
-@@ -1383,6 +1447,14 @@ bool load_stage(int stage_no)
+@@ -1383,6 +1449,14 @@ bool load_stage(int stage_no)
    if (loadstage_silence_active())
      SDL_DOSAudioFlushRingSilence();
  
 +  // patch 0268 (#17 diag): load-band audio-underrun probe. Declared HERE, right
 +  // AFTER the (conditional) flush call, so its ctor's pix_active_entry baseline
-+  // is POST-flush -- the screech A/B discriminator (0 = flush-quiesce ran, >0 =
-+  // FLUSH_QUIESCE_PIXTONE=0 skipped it). Gated by LOADBAND_STAT alone (NOT by
-+  // loadstage_silence_active above), so it emits in BOTH A/B cells. dtor emits
-+  // the per-cave [loadband-stat] line on every return path.
++  // is POST-flush -- the screech A/B discriminator (0 = the flush+quiesce ran,
++  // >0 = LOADSTAGE_SILENCE=0 skipped the whole flush). Gated by LOADBAND_STAT
++  // alone (NOT by loadstage_silence_active above), so it emits in BOTH A/B cells.
++  // dtor emits the per-cave [loadband-stat] line on every return path.
 +  LoadBandStatGuard _lbstat;
 +
    // patch 0206 (#31 v1.0.8): arm the organya pre-render POST-LOAD WINDOW. The
