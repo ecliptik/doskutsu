@@ -1,0 +1,94 @@
+From 165cb765228994b1b91370317feaad41aff738c3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 8 Jul 2026 14:14:18 -0700
+Subject: [PATCH] patch 0267 -- #17: silence the SB ring+DMA at cave-transition
+ load entry (PicoGUS-SB screech fix)
+
+On the PicoGUS-SB /mode sb 8-bit-low-DMA (U8) path with OPL3 music, entering a
+cave produces a screech/static during the ~1-2s stage load. Root cause (flush-
+instr + sdl-eng, doc V162-RC3-PICOGUS-SB-SCREECH-FINDINGS.md): the SB DAC ring
+carries ONLY SFX (music is on the OPL chip), and while load_stage blocks on its
+fread band the physical 8-bit autoinit DMA double-buffer's refill ISR falls
+behind, so the DMA hardware LOOPS its last ~23ms of stale SFX = the screech.
+Pre-existing (not a v1.6.2 regression), 8-bit-DMA-specific; the 16-bit Vibra path
+already replays clean silence on underrun.
+
+Fix: call the existing shipped export SDL_DOSAudioFlushRingSilence() (sdl-engine
+SDL/0092) at load_stage ENTRY, before the blocking sub-loaders. It memsets BOTH
+the software ring AND the physical DMA double-buffer to silence and collapses the
+cursors, so a starved ISR loops SILENCE instead of a stale fragment. 0092 was
+already wired at the 0206/0209 title->game cold-start points but never per-cave;
+this adds it to the cave-transition path (no "SDL/0092" banner appeared at the
+cave transition in the rc3 logs, confirming the gap).
+
+Pump-INDEPENDENT: a single memset at load entry, NOT a pump -- does not re-enable
+the mid-gap pump (0265 stays opt-in) and does not change transition speed. No-op
+on the 16-bit path and when killswitched. Default-ON killswitch
+SDL_HINT_DOSKUTSU_LOADSTAGE_SILENCE=0 (opt-OUT) so the g2k confirm cell can A/B
+screech-vs-silence on the same binary. map.cpp already includes the export's
+header (SDL3/SDL_dosaudio_pump.h, patch 0162). g2k confirm = the export's
+"SDL/0092 ring+DMA zeroed" banner at the transition + screech gone.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/map.cpp | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index f2df0224..1687d6d8 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1180,6 +1180,25 @@ static bool midgap_pump_active()
+ }
+ #define MIDGAP_PUMP() do { if (midgap_pump_active()) while (SDL_DOSAudioPump()) { } } while (0)
+ 
++// DOS-PORT (patch 0267, #17): stage-load ring+DMA silence flush killswitch.
++// DEFAULT-ON, strict-"0" opt-OUT. Gates the SDL_DOSAudioFlushRingSilence()
++// call at load_stage entry (see below) so the g2k confirm cell can A/B
++// screech-vs-silence on the same binary. Read once + cached.
++static int g_loadstage_silence_decided = -1;
++static bool loadstage_silence_active()
++{
++  if (g_loadstage_silence_decided < 0)
++  {
++    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_LOADSTAGE_SILENCE");
++    g_loadstage_silence_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    LOG_INFO("load_stage ring+DMA silence flush: {} (set "
++             "SDL_HINT_DOSKUTSU_LOADSTAGE_SILENCE=0 to disable)",
++             g_loadstage_silence_decided ? "ENABLED (default)"
++                                         : "DISABLED (killswitch =0)");
++  }
++  return g_loadstage_silence_decided == 1;
++}
++
+ // DOS-PORT (patch 0178, SFXPAUSE-012 SHIPPED FIX): skip the per-cave
+ // sprite-sheet flush. Root cause: load_stage's flushSheets() deletes
+ // ALL sprite sheets per cave entry; blitSprite-driven lazy decode
+@@ -1346,6 +1365,24 @@ bool load_stage(int stage_no)
+   // for the duration of this call; restores gameplay on every return.
+   IoAuditPhaseGuard _ioapg;
+ 
++  // DOS-PORT (patch 0267, #17): flush the SB audio ring AND the physical 8-bit
++  // autoinit DMA double-buffer to silence at stage-load ENTRY, before the
++  // blocking sub-loader fread band. On the PicoGUS-SB /mode sb 8-bit-low-DMA
++  // (U8) path with OPL3 music, the SB DAC ring carries ONLY SFX; during the
++  // ~1-2s cave-transition load the refill ISR falls behind, and the physical
++  // DMA double-buffer LOOPS its last ~23ms of stale SFX = the rc3 screech.
++  // SDL_DOSAudioFlushRingSilence() (sdl-engine SDL/0092, already shipped +
++  // used at the 0214 cold-render quiesce) memsets both the software ring and
++  // the DMA double-buffer + collapses the cursors, so a starved ISR loops
++  // SILENCE instead of a stale fragment. It was only wired at the 0206/0209
++  // title->game cold-start points, never per-cave -- this adds it to the cave
++  // path. Pump-INDEPENDENT: does not re-enable the mid-gap pump and does not
++  // touch transition speed (a single memset, not a pump). No-op on the 16-bit
++  // Vibra path (which already replays clean silence) and when killswitched.
++  // The export logs its own "SDL/0092 ring+DMA zeroed" banner = g2k witness.
++  if (loadstage_silence_active())
++    SDL_DOSAudioFlushRingSilence();
++
+   // patch 0206 (#31 v1.0.8): arm the organya pre-render POST-LOAD WINDOW. The
+   // first song-start after this load (the stage-entry <CMU) is allowed to
+   // pre-render (its ~10-14 s synth pass blends with the load pause); a later
+-- 
+2.47.3
+
