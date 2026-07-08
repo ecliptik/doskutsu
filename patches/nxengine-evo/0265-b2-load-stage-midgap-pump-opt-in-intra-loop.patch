@@ -1,0 +1,93 @@
+From 15b326e350770663264eb46546577a26740e0a2e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 8 Jul 2026 09:51:54 -0700
+Subject: [PATCH] patch 0265 -- #B2: extend the OPT-IN load_stage mid-gap pump
+ into the big fread loops
+
+The cave/stage-transition ~1-2s music dropout is caused by the blocking read
+band in load_stage draining the SB-served audio ring. The Leg A mid-gap pump
+(nx 0162-v2) services the ring at the sub-loader SEAMS but is OPT-IN (default-OFF,
+SDL_HINT_DOSKUTSU_AUDIO_MIDGAP_PUMP=1) and does not fire WITHIN a single large
+read.
+
+This patch extends the SAME opt-in mechanism into the two big chunkable read
+bands: load_map's .pxm tile loop (every 16 rows) and load_entities' .pxe loop
+(every 32 entities), both gated on the existing midgap_pump_active() predicate.
+
+DEFAULT-OFF is DELIBERATE (do not flip it on): g2k rc2 measured that defaulting
+the pump ON regressed the WB/OPL3 (MIDI) production paths -- slower door/cave
+transitions + more hanging MIDI notes -- because those backends play via the
+daughterboard / FM chip + ISR-tick and need no PCM ring service, so the pump is
+pure added load-time overhead + MIDI-tick perturbation there. The only backend
+it helps is organya (PCM), which is not the default. So the mechanism ships
+OPT-IN; the cave-transition pause remains an accepted limitation on the default
+MIDI paths.
+
+Both sub-loaders are called ONLY from load_stage, whose FtAccumulatorGuard
+freezes the FIXED_TIMESTEP accumulator for the whole call (thaws only at return),
+so the intra-loop pumps run inside the frozen window and their wall-clock stays
+masked from the catch-up tick count when the opt-in IS engaged. When the pump is
+off (the default) MIDGAP_PUMP() early-returns and this is byte-identical to
+pre-0265.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/map.cpp | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 1de7701b..f2df0224 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -1583,6 +1583,7 @@ bool load_map(const std::string &fname)
+   }
+ 
+   for (y = 0; y < map.ysize; y++)
++  {
+     for (x = 0; x < map.xsize; x++)
+     {
+       map.tiles[x][y] = fgetc(fp);
+@@ -1591,6 +1592,21 @@ bool load_map(const std::string &fname)
+         map.tiles[x][y] = 0xF; // block up/down in Main Artery
+       }
+     }
++    // DOS-PORT (patch 0265, #B2 / v1.6.2): intra-loop audio pump extending the
++    // OPT-IN Leg A mid-gap pump into the .pxm tile read (one large blocking
++    // fread band inside load_stage). Services the audio ring every 16 rows so an
++    // organya (PCM) song does not drop mid-load. GATED on midgap_pump_active() --
++    // DEFAULT-OFF (SDL_HINT_DOSKUTSU_AUDIO_MIDGAP_PUMP=1 to opt in); a no-op in
++    // the default config. Kept OPT-IN because g2k rc2 showed default-ON regressed
++    // the WB/OPL3 (MIDI) production paths -- those play via the daughterboard /
++    // FM chip + ISR-tick and need no PCM ring service, so the pump was pure added
++    // load-time overhead + MIDI-tick perturbation there. Runs INSIDE load_stage's
++    // FtAccumulatorGuard frozen window (load_map is only called from load_stage)
++    // so the pump wall-clock stays masked from the FIXED_TIMESTEP catch-up count
++    // when the opt-in IS engaged.
++    if ((y & 15) == 0)
++      MIDGAP_PUMP();
++  }
+ 
+   fclose(fp);
+ 
+@@ -1706,6 +1722,18 @@ bool load_entities(const std::string &fname)
+ 
+   for (i = 0; i < nEntities; i++)
+   {
++    // DOS-PORT (patch 0265, #B2 / v1.6.2): intra-loop audio pump extending the
++    // OPT-IN Leg A mid-gap pump into the .pxe entity read+spawn band. Services
++    // the audio ring every 32 entities so an organya (PCM) song does not drop
++    // mid-load. GATED on midgap_pump_active() -- DEFAULT-OFF
++    // (SDL_HINT_DOSKUTSU_AUDIO_MIDGAP_PUMP=1 to opt in); a no-op in the default
++    // config (kept OPT-IN after g2k rc2 showed default-ON regressed the WB/OPL3
++    // MIDI paths). Runs INSIDE load_stage's FtAccumulatorGuard frozen window
++    // (load_entities is only called from load_stage) so the pump wall-clock stays
++    // masked from the FIXED_TIMESTEP catch-up count when the opt-in IS engaged.
++    if ((i & 31) == 0)
++      MIDGAP_PUMP();
++
+     int x     = fgeti(fp);
+     int y     = fgeti(fp);
+     int id1   = fgeti(fp);
+-- 
+2.47.3
+
