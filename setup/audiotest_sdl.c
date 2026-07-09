@@ -242,7 +242,7 @@ enum { MUS_PCM = 0, MUS_OPL3, MUS_WB, MUS_OPL2, MUS_GUS };
  * silence suspect. Native 22050 (pitch is in the sine's PERIOD), single one-shot
  * (no loop, no 4x, no retrigger -- the rc5/rc6 killers). See play_gus_tone. */
 #define GUS_TONE_PERIOD 50            /* samples/cycle at 22050 -> ~441 Hz (A4)   */
-#define GUS_TONE_LEN    15000         /* 300 whole cycles -> ~0.68 s, ends clean  */
+#define GUS_TONE_LEN    22050         /* 441 whole cycles -> exactly 1.0 s, clean */
 static int g_gus_ok = 0;              /* GF1 detected + brought up (device_open) */
 
 static MIX_Mixer *g_mixer    = NULL;
