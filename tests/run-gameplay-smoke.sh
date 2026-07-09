@@ -636,16 +636,15 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
 )
-# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY (the two gate-critical arrays
-# are 134 entries each and MUST stay equal-length; BANNER_LABEL is display-only and has
-# historically run shorter -- the `${BANNER_LABEL[$i]:-}` guard below tolerates the gap).
-# the gate loop indexes label[$i] alongside regex[$i]). KEEP THEM IN LOCKSTEP: when you
-# add a BANNER_REGEX + BANNER_SEVERITY entry, add a matching BANNER_LABEL line at the same
-# index. (v1.0.5 #16 re-aligned these -- v1.0.4 had a 2-entry tail gap from the P2 banners,
-# masked by the `${BANNER_LABEL[$i]:-}` guard in the loop below; #17 re-aligned again --
-# an orphan SDL/0098 cold-init label with no matching REGEX entry had drifted the tail
-# off by one; the guard is now belt-and-suspenders, not load-bearing.) Labels are
-# DISPLAY-ONLY -- pass/fail keys on regex+severity -- but an aligned label makes the
+# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY -- ALL THREE are 137 entries
+# each and MUST stay 1:1 (re-aligned in the v1.6.2 rc5 window: the GUS Campaign-3
+# regexes idx 111-129 had no labels, so SDL/0115..0268 labels displayed against the
+# wrong regexes and the real scores printed with an empty "[]" label -- purely cosmetic,
+# but it misled a reader chasing a 0120 "emits=0" that was actually the mislabel). The
+# gate loop indexes label[$i] alongside regex[$i]. KEEP THEM IN LOCKSTEP: when you add a
+# BANNER_REGEX + BANNER_SEVERITY entry, add a matching BANNER_LABEL line at the SAME index
+# (the `${BANNER_LABEL[$i]:-}` guard below still tolerates a gap, but keep them equal).
+# Labels are DISPLAY-ONLY -- pass/fail keys on regex+severity -- but an aligned label makes the
 # gate output readable.
 BANNER_LABEL=(
   "lever-1 opaque-tile fastpath (patch 0137)"
@@ -759,6 +758,25 @@ BANNER_LABEL=(
   "0234 Campaign 2 AdLib backend selection (OPTIONAL -- 'audio backend: adlib (Campaign 2 -- native OPL2 FM synthesis ...)' emits at selectBackendFromEnv ONLY under SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib. The default smoke leaves AUDIO_BACKEND unset (-> opl3 default) so this is ABSENT, expected, not a failure (same OPTIONAL gating as the wave-44 AUDIO_BACKEND=opl3/wb selection banners). The witness is the dedicated AdLib cell: a no-Sound-Blaster DOSBox config (sbtype=none + oplmode=opl2) with SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib. Embed witness = strings|grep 'audio backend: adlib'. BANNER_REGEX idx 108.)"
   "0234 Campaign 2 AdLib no-mixer init path (OPTIONAL -- 'Sound system: AdLib (OPL2) path -- AUDIO_BACKEND=adlib. Skipping SB16 + SDL_mixer bring-up ...' emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib. ABSENT in the default smoke (no adlib), expected. The runtime witness that the THIRD boot mode engaged: main.cpp omitted SDL_INIT_AUDIO yet kept SoundManager::init, which then skipped MIX_Init/MIX_CreateMixerDevice and took the OPL2 path. MUSIC ONLY -- a DAC-less AdLib card has no PCM SFX. Embed witness = strings|grep 'AdLib (OPL2) path'. BANNER_REGEX idx 109.)"
   "0235 Campaign 2 AdLib PIT/IRQ-0 OPL music pump started (OPTIONAL -- 'adlib: OPL music pump STARTED at N Hz (PIT ch0 / IRQ-0 drives MidiScheduler::tick_isr; BIOS 18.2 Hz tick chained; restored on exit) ...' emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib AND when SDL_DOSOplTimerPumpStart succeeded (OPL2 detected, SB not hot, hz in [19,1000]). This is THE decisive runtime witness that the no-SB music clock engaged -- on a real AdLib/OPL2 card or PicoGUS /mode adlib the 8253 PIT ch0 is reprogrammed to N Hz (default 120; override SDL_HINT_DOSKUTSU_OPL_TIMER_HZ) and IRQ-0 drives the SAME tick_isr the SB path drives. ABSENT in the default smoke (no adlib), expected. NB per [[dosbox_not_proxy]] DOSBox-X confirms the banner/boot path but NOT real PIT/IRQ-0 timing -- the g2k AdLib iter is the perf/correctness witness (incl. PIT-restore-on-quit + BIOS-tick correctness). Embed witness = strings|grep 'OPL music pump STARTED'. BANNER_REGEX idx 110.)"
+  "Campaign 3 GUS backend selection (OPTIONAL -- 'audio backend: gus (Campaign 3 ...)' at selectBackendFromEnv ONLY under AUDIO_BACKEND=gus; native Gravis UltraSound GF1 path; ABSENT in the default opl3 smoke, expected. Witnessed via the dedicated GUS cell / g2k /mode gus.)"
+  "GUS (GF1) init path (OPTIONAL -- 'Sound system: GUS (GF1) path -- AUDIO_BACKEND=gus'; SoundManager GF1 bring-up; ABSENT in the default smoke, GUS-cell/g2k only.)"
+  "GUS backend ready (OPTIONAL -- 'gus backend ready: GF1 detected'; GF1 wavetable detected + armed; GUS-cell/g2k only.)"
+  "SDL/0112 GUS GF1 detect (OPTIONAL -- 'audio: SDL/0112 GUS GF1 detect: present=[01] ...'; GF1 probe result (base/irq/dma/dram/voices/rate); present=0 when no ULTRASND hint (DOSBox default). GUS-cell/g2k only.)"
+  "GUS on_song_start instrument upload (OPTIONAL -- 'gus backend: on_song_start -- uploaded N instruments'; per-song .pat instrument DRAM upload count; GUS-cell/g2k only.)"
+  "GUS SFX .pxt upload (OPTIONAL -- 'gus SFX: uploaded N of N .pxt to GF1 DRAM'; Pixtone SFX -> GF1 DRAM upload count; GUS-cell/g2k only.)"
+  "GUS path Pixtone SFX uploaded (OPTIONAL -- 'Sound system: GUS path -- Pixtone SFX uploaded to GF1 voices'; GUS SFX voice residency; GUS-cell/g2k only.)"
+  "#31 4-state audio enable (OPTIONAL -- 'Sound system: 4-state audio enable (#31) -- music=(on|OFF) sfx=(on|OFF)'; the #31 music/sfx enable matrix banner; emits per the configured state.)"
+  "#31 No-Music backend (OPTIONAL -- 'audio backend: none (No Music -- #31)'; emits under AUDIO_BACKEND=none; ABSENT in the default smoke.)"
+  "GUS MUSIC-ONLY path (OPTIONAL -- 'Sound system: GUS path -- SFX DISABLED ...MUSIC-ONLY GUS'; emits when GUS SFX is disabled (SFX_DEVICE=none frees full 1MB DRAM for music); GUS-cell/g2k only.)"
+  "SDL/0112 GUS device up (OPTIONAL -- 'audio: SDL/0112 GUS device up: base=.. irq=.. dma=.. voices=.. rate=..Hz dram=..KB upload=pio'; GF1 device bring-up summary; GUS-cell/g2k only.)"
+  "SDL/0112 GUS 16-bit TEST-TONE16 (OPTIONAL -- 'audio: SDL/0112 GUS TEST-TONE16: voice=.. addr=.. end=.. playing'; the 16-bit GF1 playback probe (#39 silence isolation); GUS-cell/g2k only.)"
+  "GUS release-ramp lever (OPTIONAL -- 'gus backend: release-ramp (ENABLED (default)|DISABLED (killswitch =0))'; nx0254 software note-off release ramp; killswitch. GUS-cell/g2k only.)"
+  "GUS multisample lever (OPTIONAL -- 'gus backend: multisample (ENABLED (default)|DISABLED (killswitch =0))'; nx0255 per-note multisample residency; killswitch. GUS-cell/g2k only.)"
+  "SDL/0113 GUS SFX bank-align (OPTIONAL -- 'audio: SDL/0113 GUS SFX bank-align: ENGAGED (8-bit no-straddle 256K guard)'; DRAM 256K bank-straddle guard for 8-bit SFX; GUS-cell/g2k only.)"
+  "GUS SFX DRAM-straddle diag (OPTIONAL -- 'gus SFX DRAM-straddle diag [nx0256]'; #38 DRAM bank-straddle observability in initGusSfx; GUS-cell/g2k only.)"
+  "GUS SFX rendersafe guard (OPTIONAL -- 'gus SFX rendersafe [nx0257]: (ON|OFF (default))'; #38 pre-render OOM guard; GUS-cell/g2k only.)"
+  "GUS SFX voice routing (OPTIONAL -- 'gus SFX voice routing [nx0259]:'; #38 SFX->reserved GF1 voice slice; GUS-cell/g2k only.)"
+  "GUS SFX gain (OPTIONAL -- 'gus SFX gain [nx0259]: N%'; #38 SFX/music gain balance; GUS-cell/g2k only.)"
   "SDL/0115 banked-blit granularity fix (REQUIRED -- 'sdl: SDL/0115 BANK-GRAN-FIX (ENABLED|DISABLED) ...' emits once at DOSVESA_CreateWindowFramebuffer on EVERY boot, before the first flush. Proves the WinGranularity<WinSize multi-bank-walk correction (patches/SDL/0115) is in the binary AND ran. Default-ON; strict-'0' killswitch SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0 flips the text to DISABLED (still matches). On g2k gran==size==64KB the corrected walk is byte-identical to the legacy bank++ sequence. Embed witness = strings|grep 'BANK-GRAN-FIX'.)"
   "SDL/0116 bounded WaitForVBlank (REQUIRED -- 'sdl: SDL/0116 VBLANK-BOUND (ENABLED|DISABLED) ...' emits once at DOSVESA_CreateWindowFramebuffer on EVERY boot. Proves the mainline vblank-spin HW-IO-hang guard (patches/SDL/0116) is in the binary AND ran. Default-ON; strict-'0' killswitch SDL_HINT_DOSKUTSU_VBLANK_BOUND=0 flips the text to DISABLED (still matches). Embed witness = strings|grep 'VBLANK-BOUND'.)"
   "0264 AdLib PC-speaker SFX->beep mapping WIRED (OPTIONAL -- engine SFX->beep map; emits at SoundManager::init ONLY under AUDIO_BACKEND=adlib, the MUSIC-ONLY AdLib path; ABSENT in the default opl3 smoke, expected; witnessed via the dedicated AdLib DOSBox cell (sbtype=none + oplmode=opl2 + SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib). SDL owns the default-ON killswitch SDL_HINT_DOSKUTSU_PCSPK_SFX=0. Embed witness = strings|grep 'AdLib PC-speaker SFX beeps'. BANNER_REGEX idx 108.)"
