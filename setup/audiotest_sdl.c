@@ -85,6 +85,7 @@
 #include <go32.h>                   /* T42: _dos_ds for the BIOS data-area peek */
 #include <pc.h>                     /* T56: inportb/outportb for the CMOS/RTC read */
 #include <stdint.h>
+#include <math.h>                   /* rc7: sinf() for the GUS FLOOR sine note (-lm linked) */
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -222,24 +223,26 @@ enum { MUS_PCM = 0, MUS_OPL3, MUS_WB, MUS_OPL2, MUS_GUS };
 /* A2: native Gravis GF1 test path. Like AdLib (MUS_OPL2), a GUS-only box has NO
  * Sound Blaster -- SETUP does SDL_Init(0) (no audio device, no mixer) and drives
  * the GF1 wavetable directly through the SDL_DOSGus* primitives (SDL/0112). The
- * music test plays a C-E-G-C arpeggio: one looping square-wave sample uploaded
- * to card DRAM, replayed at a per-note sample rate so the GF1 pitches it (the
- * wavetable trick), which end-to-end proves DRAM upload + voice + DAC output --
- * the exact thing an operator needs to confirm their card makes sound in the
- * game. The SFX test plays the real Polar Star (Pixtone) one-shot on a GF1
- * voice (S8 render -> U8 for the GF1's unsigned 8-bit DAC). Full GM .pat MIDI
- * synth (the game's MidiBackendGus) is out of scope for a hardware test button.
- * A dedicated later task can add the real title theme on GUS. */
-#define GUS_WAVE_PERIOD 50            /* samples/cycle: rate/50 = output Hz      */
-#define GUS_WAVE_LEN    2000          /* 40 whole cycles -> seamless loop        */
+ * music test (rc7 FLOOR) plays a single sustained SINE note -- one real/soft
+ * waveform uploaded to card DRAM + played one-shot at native 22050, proving
+ * end-to-end DRAM upload + voice + DAC output the exact way the confirmed-audible
+ * SFX does (see play_gus_tone for why single-sine, not a multi-note square
+ * arpeggio, after the rc5/rc6 silence). The SFX test plays the real Polar Star
+ * (Pixtone) one-shot on a GF1 voice (S8 render -> U8 for the GF1's unsigned
+ * 8-bit DAC). Full GM .pat MIDI synth (the game's MidiBackendGus) + the
+ * multi-note melody are out of scope for the hardware test button (v1.6.3+). */
 #define GUS_VOL         200           /* 0..255 linear voice volume (headroom)   */
-/* Per-arpeggio-note GF1 playback rate = midi_hz(note) * GUS_WAVE_PERIOD, so the
- * looping period-50 sample sounds at the note pitch. Parallel to ARP_NOTES
- * {60,64,67,72} = C4/E4/G4/C5 (261.63/329.63/392.00/523.00 Hz). rc6: this
- * varying-rate LOOP shape is the ORIGINAL c510b98 approach the operator heard
- * audible -- see play_gus_arpeggio for why the loop (not one-shot) is required
- * on the PicoGUS. */
-static const Uint32 GUS_ARP_HZ[ARP_COUNT] = { 13082, 16481, 19600, 26163 };
+/* rc7 FLOOR: the GUS music test is a SINGLE sustained SINE note -- register-AND-
+ * data-class-identical to the ONLY thing confirmed audible on the operator's
+ * current PicoGUS (the real Polar Star SFX: a soft, centered, real waveform on
+ * the gus_play_pcm8 one-shot path). Deliberately NOT a 0xFF/0x00 hard-rail
+ * square: the driver's "audible square" test-tone is default-OFF and never fired
+ * on this card, so a square's audibility here is UNVERIFIED -- and every square
+ * SETUP has played (rc5/rc6) was silent, making the hard-rail bytes the leading
+ * silence suspect. Native 22050 (pitch is in the sine's PERIOD), single one-shot
+ * (no loop, no 4x, no retrigger -- the rc5/rc6 killers). See play_gus_tone. */
+#define GUS_TONE_PERIOD 50            /* samples/cycle at 22050 -> ~441 Hz (A4)   */
+#define GUS_TONE_LEN    15000         /* 300 whole cycles -> ~0.68 s, ends clean  */
 static int g_gus_ok = 0;              /* GF1 detected + brought up (device_open) */
 
 static MIX_Mixer *g_mixer    = NULL;
@@ -604,7 +607,7 @@ int audiotest_init(const scfg_t *c)
       break;
     case MUS_GUS:
       SDL_strlcpy(g_msg,
-        "The Music test plays a note arpeggio on the Gravis UltraSound (GF1) "
+        "The Music test plays a musical tone on the Gravis UltraSound (GF1) "
         "wavetable. The Sound Effects test plays the Polar Star shot on the "
         "GF1.", sizeof(g_msg));
       break;
@@ -629,6 +632,7 @@ int audiotest_init(const scfg_t *c)
 
 static void device_close(void);   /* fwd: device_open() unwinds via it on error */
 static int  play_gus_sfx(void);    /* A2 fwd: audiotest_play_sfx (below) uses it */
+static void gus_play_pcm8(const Uint8 *u8, Uint32 len, Uint32 rate, int ms_cap); /* rc7 fwd: play_gus_tone (below) uses it */
 
 /* T28: synthesize the real Polar Star effect once per SETUP session
  * (device-independent: always S8 mono 22050). Sets g_sfx_pcm/_len on success,
@@ -1133,81 +1137,51 @@ static int play_opl2_arpeggio(void)
   return 0;
 }
 
-/* A2/rc6: play a C-E-G-C arpeggio on the real Gravis GF1 as ONE continuously-
- * LOOPING voice, retuned per note -- the ORIGINAL c510b98 shape the operator
- * confirmed AUDIBLE. This REVERTS fd5f2f9 (loop->one-shot) + 8197eaa
- * (native-rate), both of which were silent on the g2k PicoGUS.
+/* A2/rc7 FLOOR: play a SINGLE sustained SINE note on the real Gravis GF1. This
+ * is the guaranteed-audible floor after 6 silent attempts -- it replicates the
+ * ONE path confirmed audible on the operator's current PicoGUS (the real Polar
+ * Star SFX: a soft/centered real waveform played as a single one-shot through
+ * gus_play_pcm8). A single musical note proves "your GUS sings"; the multi-note
+ * melody is a v1.6.3 nice-to-have (task #18) if the retrigger/retune path is
+ * ever cracked cleanly.
  *
- * ROOT CAUSE (3-way converged setup-eng/sdl-eng/flush-instr, rc4 g2k trace +
- * driver review): a SINGLE one-shot voice plays fine (the SFX test + the
- * driver's gus_emit_test_tone both prove it), but the arpeggio's RAPID
- * StopVoice-then-immediately-StartVoice retrigger, 4x, does NOT re-trigger
- * cleanly on the PicoGUS -> silence. rc4's "identical valid commands, still
- * silent" was the tell: the divergence is voice-restart TIMING, not the command
- * stream, so three command-level fixes couldn't catch it. A LOOP voice is
- * started ONCE and NEVER restarted (only SetVoiceFreq + vol-gate change per
- * note), so it structurally avoids the restart race entirely.
+ * Two deliberate choices, both from the converged 3-way analysis:
+ *  - REAL SINE, not a 0xFF/0x00 hard-rail square. The driver's "audible square"
+ *    test-tone is default-OFF and never fired on this card, so a square's
+ *    audibility here is UNVERIFIED -- and every square SETUP has played (rc5/rc6)
+ *    was silent, so the hard-rail bytes are the leading silence suspect. The
+ *    sine (S8 sin -> +128 -> U8, centered on 0x80) is the same real/soft/centered
+ *    class as the confirmed-audible Polar Star, uploaded through the identical
+ *    gus_play_pcm8 path -> zero residual.
+ *  - SINGLE ONE-SHOT at native 22050 (pitch is in the sine's PERIOD). No loop,
+ *    no 4x, no SetVoiceFreq retune, no StopVoice/StartVoice retrigger -- those
+ *    were the rc5/rc6 silence risks. gus_play_pcm8 is the co-signed path the
+ *    audible SFX uses; device_close StopAllVoices+Shutdown quiesces on every
+ *    exit. Assumes device_open() ran.
  *
- * Wedge-safe in SETUP (sdl-eng sign-off, caveat withdrawn): the #39 loop-wedge
- * was a loop voice contending with a LATER gameplay on_song_start .pat poke;
- * SETUP issues no subsequent poke, and device_close() runs StopAllVoices +
- * Shutdown on EVERY exit path (including the ESC-abort break below), so the
- * voice is always fully quiesced. No SB ring; pump_service paces + polls ESC
- * (SDL_DOSAudioPump no-ops with no SB device). Assumes device_open() ran.
- *
- * Instrumentation (88eec82) kept this round for the g2k witness that the loop
- * plays; the trim is the v1.6.3 SETUP tidy (task #18). */
-static int play_gus_arpeggio(void)
+ * Instrumentation kept for the g2k witness (trim = v1.6.3 task #18). */
+static int play_gus_tone(void)
 {
-  static Uint8 wave[GUS_WAVE_LEN];   /* static: keep it off the stack */
-  Uint32 addr;
-  int    v, i;
+  static Uint8 wave[GUS_TONE_LEN];   /* static: keep it off the stack */
+  int    i;
 
-  trace("gus arp: ENTER g_gus_ok=%d ARP_COUNT=%d WAVE_LEN=%d (LOOP shape, c510b98)",
-        g_gus_ok, ARP_COUNT, GUS_WAVE_LEN);
-  if (!g_gus_ok) { trace("gus arp: g_gus_ok=0 -> BAIL (silent, GF1 not up)"); return 1; }
+  trace("gus tone: ENTER g_gus_ok=%d len=%d @22050Hz (rc7 FLOOR: single SINE note, ~441Hz)",
+        g_gus_ok, GUS_TONE_LEN);
+  if (!g_gus_ok) { trace("gus tone: g_gus_ok=0 -> BAIL (silent, GF1 not up)"); return 1; }
 
-  /* Safe: no voice busy at entry -> GetState's mask loop does 0 GF1 port reads. */
+  /* Render a full-amplitude sine (S8 -> U8): real/soft/centered like the audible
+   * SFX, NOT a hard-rail square. Silence sits at 0x80 (unsigned GF1 DAC). */
+  for (i = 0; i < GUS_TONE_LEN; ++i)
   {
-    SDL_DOSGusState st;
-    if (SDL_DOSGusGetState(&st))
-      trace("gus arp: state base=0x%X voices=%d rate=%dHz dram=%luKB used=%luB",
-            (unsigned)st.base_port, st.num_voices, (int)st.output_rate,
-            (unsigned long)(st.dram_size / 1024), (unsigned long)st.dram_used);
+    double s  = sin((2.0 * 3.14159265358979323846 * (double)(i % GUS_TONE_PERIOD))
+                    / (double)GUS_TONE_PERIOD);
+    int    s8 = (int)(s * 120.0);                 /* +/-120 of 127 -- loud, no clip */
+    wave[i]   = (Uint8)(s8 + 128);                /* S8 -> U8, silence at 0x80 */
   }
-
-  /* ONE upload of the period-50 square + ONE voice, started LOOPING once. */
-  for (i = 0; i < GUS_WAVE_LEN; ++i)
-    wave[i] = ((i % GUS_WAVE_PERIOD) < (GUS_WAVE_PERIOD / 2)) ? 0xFF : 0x00;
-  addr = SDL_DOSGusUploadSample(wave, (Uint32)sizeof(wave), 0);
-  trace("gus arp: upload (%d bytes) -> addr=0x%lX%s", GUS_WAVE_LEN, (unsigned long)addr,
-        addr == SDL_DOSGUS_BAD_ADDR ? " *** BAD_ADDR ***" : "");
-  if (addr == SDL_DOSGUS_BAD_ADDR) { trace("gus arp: DRAM upload FAILED -> BAIL"); return 1; }
-  v = SDL_DOSGusAllocVoice();
-  trace("gus arp: AllocVoice -> v=%d", v);
-  if (v < 0) { trace("gus arp: no free voice -> BAIL"); return 1; }
-
-  for (i = 0; i < ARP_COUNT; ++i)
-  {
-    /* Retune the STILL-LOOPING voice + (re)set its volume. The GF1 replays the
-     * period-50 square at GUS_ARP_HZ[i] -> that note's pitch. */
-    SDL_DOSGusSetVoiceFreq(v, GUS_ARP_HZ[i]);
-    SDL_DOSGusSetVoiceVol(v, GUS_VOL);
-    if (i == 0)
-    {
-      SDL_DOSGusSetVoicePan(v, 128);   /* center */
-      /* LOOP the whole buffer so the voice sustains -- started ONCE, never
-       * restarted (the restart race is the regression this avoids). */
-      SDL_DOSGusStartVoice(v, addr, addr + GUS_WAVE_LEN - 1, addr, SDL_DOSGUS_LOOP);
-    }
-    trace("gus arp: note %d hz=%lu (looping voice %d, retuned)",
-          ARP_NOTES[i], (unsigned long)GUS_ARP_HZ[i], v);
-    if (pump_service("gus", ARP_ON_MS, 0) == 27) break;
-    SDL_DOSGusSetVoiceVol(v, 0);       /* gap: vol-gate to silence, KEEP looping */
-    if (pump_service("gus", ARP_GAP_MS, 0) == 27) break;
-  }
-  SDL_DOSGusStopVoice(v);              /* device_close also StopAllVoices on exit */
-  trace("gus arp: DONE (looping voice stopped)");
+  /* SINGLE one-shot via the proven gus_play_pcm8 path (the audible SFX uses it),
+   * native 22050. ~0.68 s of tone (len/rate); ms_cap 1000 caps the serviced pump. */
+  gus_play_pcm8(wave, (Uint32)GUS_TONE_LEN, 22050, 1000);
+  trace("gus tone: DONE (rc7 FLOOR single sine note played)");
   return 0;
 }
 
@@ -1219,7 +1193,7 @@ static void gus_play_pcm8(const Uint8 *u8, Uint32 len, Uint32 rate, int ms_cap)
   Uint32 addr;
   int    v, dur;
   /* rc4 INSTRUMENTATION (task #14): this is the WORKING SFX path -- trace it in
-   * the SAME shape as play_gus_arpeggio so the g2k log can be DIFFed to find why
+   * the SAME shape as play_gus_tone so the g2k log can be DIFFed to find why
    * the (structurally identical) music path is silent. */
   trace("gus pcm: ENTER g_gus_ok=%d len=%luB rate=%dHz", g_gus_ok, (unsigned long)len, (int)rate);
   {
@@ -1779,7 +1753,7 @@ int audiotest_play_music(void)
     {
       case MUS_OPL3: rc = play_opl3_arpeggio(); break;
       case MUS_OPL2: rc = play_opl2_arpeggio(); break;   /* T80 */
-      case MUS_GUS:  rc = play_gus_arpeggio();  break;   /* A2 */
+      case MUS_GUS:  rc = play_gus_tone();      break;   /* A2/rc7 FLOOR single sine note */
       case MUS_WB:   rc = play_wb_arpeggio();   break;
       default:
         trace("play_music: MIX_PlayTrack (pcm)");
@@ -1812,7 +1786,7 @@ int audiotest_play_music(void)
         : g_music_mode == MUS_OPL2 ? "AdLib (OPL2)"   /* T80 */
         : "WaveBlaster");
     else if (g_music_mode == MUS_GUS)
-      SDL_strlcpy(g_msg, "Note arpeggio on the Gravis UltraSound (GF1).",
+      SDL_strlcpy(g_msg, "Musical tone on the Gravis UltraSound (GF1).",
                   sizeof(g_msg));
     else if (g_music_mode == MUS_OPL3 || g_music_mode == MUS_OPL2 ||
              g_music_mode == MUS_WB)
@@ -1857,10 +1831,10 @@ const char *audiotest_about(int phase)
     return "Plays a test sound";
   }
 
-  /* A2: Gravis GF1 -- the music test is a native wavetable arpeggio (no GM .pat
-   * MIDI synth in SETUP; that is a later task). */
+  /* A2/rc7: Gravis GF1 -- the music test is a single sustained sine tone (no GM
+   * .pat MIDI synth / melody in SETUP; that is a later task). */
   if (g_music_mode == MUS_GUS)
-    return "Plays a note arpeggio on the Gravis UltraSound (GF1)";
+    return "Plays a musical tone on the Gravis UltraSound (GF1)";
 
   /* Music test. Real title theme only for the synth backends; organya/pcm and
    * the killswitch-off / data-missing cases describe the tone/tune fallback. */
