@@ -5,10 +5,21 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
-## [Unreleased]
+## [1.6.2] - 2026-07-09
 
-SETUP.EXE fixes (the game binary is unchanged from 1.6.1). g2k-validated.
-Staged on main; not yet tagged.
+New audio and input features plus a batch of SETUP.EXE fixes. The game binary
+changes from 1.6.1. g2k-validated on the reference machine.
+
+### Added
+
+- **PC-speaker sound effects on the AdLib path.** With `AUDIO_BACKEND=adlib`
+  (OPL2 music, no DAC), the game now emits minimal PC-speaker beeps for jumping,
+  picking up items, and menu confirmation, so an OPL-only machine has audible
+  effect feedback. Hardware square-wave tones on PIT channel 2; default-on,
+  `SDL_HINT_DOSKUTSU_PCSPK_SFX=0` disables.
+- **SETUP audio test for the Gravis UltraSound.** SETUP now drives the GF1
+  directly (no Sound Blaster device), so a GUS / PicoGUS machine can verify its
+  wavetable card from the "Test music" and "Test sound effects" buttons.
 
 ### Fixed
 
@@ -33,6 +44,34 @@ Staged on main; not yet tagged.
   stale Sound Blaster type.
 - **The Sound hub's DESCRIPTION box overdrew the menu box border.** Fixed the
   box geometry so they no longer overlap.
+- **PicoGUS-SB cave-transition screech.** On a PicoGUS in Sound Blaster mode,
+  entering a new area could emit a brief screech while the level loaded. The
+  load-time audio-silence flush now also quiesces the effect mixer, so no stale
+  effect is re-injected into the DMA buffer during the blocking load. Default-on;
+  `SDL_HINT_DOSKUTSU_LOADSTAGE_SILENCE=0` disables it.
+- **SETUP GUS "Test music" was silent on a PicoGUS.** It now plays an audible
+  reference tone through the card's confirmed wavetable path.
+- **SETUP showed "DMA 0" for a PicoGUS.** The DMA field is now seeded from the
+  BLASTER environment when the card does not report one, and the summary shows
+  the seed source.
+- **SETUP.EXE could ship as a non-functional scaffold** in an intermediate
+  build; the build now asserts the real configurator is staged before packaging.
+- **A backwards BLASTER-precedence comment** in the SETUP config template that
+  disagreed with the actual env-wins loader behavior.
+
+### Changed
+
+- **WaveBlaster music-volume control removed.** It routed through a mixer input
+  the DreamBlaster daughterboard does not use, so it had no audible effect;
+  removed rather than ship a misleading control.
+
+### Known issues
+
+- The one-time Organya music-cache build (organya backend, first launch only)
+  shows a static "Loading.." screen with no progress bar. It is not frozen --
+  press ESC to skip and render songs on demand instead.
+- SETUP GUS "Test music" plays a single sustained tone rather than a melody; a
+  real GUS tune is planned for a later release.
 
 ## [1.6.1] - 2026-07-06
 
