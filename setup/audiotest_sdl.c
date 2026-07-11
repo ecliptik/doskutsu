@@ -73,6 +73,7 @@
 #include "cs_smf.h"                /* T28: standalone SMF parser/scheduler -- real Title theme from data/midi/curly.mid */
 #include "cs_opl3midi.h"           /* T28: OPL3 MIDI voice backend (18-voice allocator + GM bank) for the title theme */
 #include "cs_opl2midi.h"           /* T80: OPL2 (AdLib) MIDI voice backend (9-voice) -- the music-only AdLib test path */
+#include "cs_gusmidi.h"            /* T90 v2: native GF1 GM .pat wavetable MIDI -- game-accurate GUS music test */
 #include "cs_orgcache.h"           /* T36: reader for the engine's pre-rendered Organya PCM cache (organya-mode title snippet) */
 #include <SDL3/SDL.h>
 #include <SDL3_mixer/SDL_mixer.h>
@@ -482,6 +483,11 @@ static void trace(const char *fmt, ...)
   fsync(fileno(g_trace_fp));   /* OS + DOS buffers + CF write cache -> disk */
 }
 
+/* T90 v2: adapter so cs_gusmidi's plain-string trace hook lands in SETUP.LOG
+ * via trace() (cs_gusmidi is a separate TU with no access to the file-static
+ * trace/g_trace_fp; it pre-formats + hands us the finished line). */
+static void gusmidi_trace_thunk(const char *msg) { trace("%s", msg); }
+
 static void trace_close(void)
 {
   if (g_trace_fp)
@@ -753,6 +759,12 @@ static int device_open(void)
               (int)(st.dram_size / 1024));
       else
         trace("device_open: gus ready (state unavailable)");
+      /* T90 v2: prepare the real GF1 GM .pat synth (respects num_voices ==
+       * configured GUS_VOICES). Idempotent; reads GetState. The music test
+       * plays real curly.mid through this when data/midi/curly.mid + ULTRADIR
+       * .pat are present, else falls back to the sine preview. */
+      cs_gusmidi_set_trace(gusmidi_trace_thunk);
+      cs_gusmidi_init();
     }
     else
     {
@@ -992,7 +1004,7 @@ static void device_close(void)
   /* A2: Gravis GF1 path -- stop every voice, then shut the card down (parks the
    * GF1 in reset). Like OPL2, the mixer/track/audio handles below are all NULL
    * on this path so their guarded destroys no-op. */
-  if (g_gus_ok) { SDL_DOSGusStopAllVoices(); SDL_DOSGusShutdown(); g_gus_ok = 0; }
+  if (g_gus_ok) { cs_gusmidi_shutdown(); SDL_DOSGusStopAllVoices(); SDL_DOSGusShutdown(); g_gus_ok = 0; }  /* T90 v2 */
   if (g_wb_ok)
   {
     /* All Sound Off (CC 120) + All Notes Off (CC 123) before MPU shutdown. */
@@ -1755,6 +1767,15 @@ static int play_title_smf(void)
     cs_opl2midi_song_start();
     cs_opl2midi_get_sink(&sink);
   }
+  else if (g_music_mode == MUS_GUS)
+  {
+    /* T90 v2: real GF1 GM .pat wavetable MIDI. The .pat were pre-uploaded by
+     * cs_gusmidi_song_prescan (in the use_smf gate below) -- here we only reset
+     * channel/voice state + bind the dispatch sink. */
+    if (!g_gus_ok) return 1;
+    cs_gusmidi_song_start();
+    cs_gusmidi_get_sink(&sink);
+  }
   else /* MUS_WB */
   {
     if (!g_wb_ok) return 1;
@@ -1777,7 +1798,10 @@ static int play_title_smf(void)
    * clock the ISR feeds (a different epoch than SDL_GetTicks); song starts ~1
    * tick (~23 ms) late -- benign. On lock-fail, fall back to the main-line tick. */
   g_smf_isr_driven = 0;
-  if (SDL_DOSMidiIsrTickActive() && cs_smf_isr_lock(g_title_smf))
+  /* T90 v2: the GUS path has NO Sound Blaster -> no IRQ-5 MIDI tick; force the
+   * main-loop (route B) dispatch. (SDL_DOSMidiIsrTickActive is already false on
+   * a GUS-only box, but guard explicitly so the intent is clear.) */
+  if (g_music_mode != MUS_GUS && SDL_DOSMidiIsrTickActive() && cs_smf_isr_lock(g_title_smf))
   {
     _go32_dpmi_lock_data((void *)&g_title_smf, (unsigned long)sizeof(g_title_smf));
     cs_smf_start(g_title_smf, 0);
@@ -1895,6 +1919,7 @@ static int play_title_smf(void)
   /* Silence whatever is still sounding before the device tears down. */
   if (g_music_mode == MUS_OPL3)      cs_opl3midi_all_notes_off();
   else if (g_music_mode == MUS_OPL2) cs_opl2midi_all_notes_off();
+  else if (g_music_mode == MUS_GUS)  cs_gusmidi_all_notes_off();   /* T90 v2 */
   else                               wb_all_notes_off();
   pump_service("title-drain", 60, 0);   /* brief serviced drain */
   return 0;
@@ -1987,6 +2012,20 @@ int audiotest_play_music(void)
       use_smf = (g_music_mode == MUS_OPL3) ? g_opl3_ok
               : (g_music_mode == MUS_OPL2) ? g_opl2_ok
               : g_wb_ok;
+  }
+  else if (g_real_music && g_music_mode == MUS_GUS && g_gus_ok)
+  {
+    /* T90 v2: real GF1 GM .pat wavetable MIDI. Pre-scan the song + upload its
+     * instruments from ULTRADIR now (main-loop file I/O, BEFORE the progress
+     * bar starts). If nothing uploaded (no ULTRASND / .pat missing) fall through
+     * to the sine preview so a patch-less GUS box is never silent. */
+    if (ensure_title_loaded())
+    {
+      int up = cs_gusmidi_song_prescan(g_title_smf);
+      use_smf = (up > 0);
+      if (!use_smf)
+        trace("play_music: gus prescan uploaded 0 .pat -> sine-preview fallback");
+    }
   }
   else if (g_real_music && g_is_organya)
   {
