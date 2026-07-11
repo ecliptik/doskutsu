@@ -243,6 +243,28 @@ enum { MUS_PCM = 0, MUS_OPL3, MUS_WB, MUS_OPL2, MUS_GUS };
  * (no loop, no 4x, no retrigger -- the rc5/rc6 killers). See play_gus_tone. */
 #define GUS_TONE_PERIOD 50            /* samples/cycle at 22050 -> ~441 Hz (A4)   */
 #define GUS_TONE_LEN    22050         /* 441 whole cycles -> exactly 1.0 s, clean */
+
+/* T90 (task #4, v1.6.3): the GUS music test plays a real TUNE -- curly.mid's
+ * melody line rendered to a native-22050 U8 PCM buffer and played as ONE
+ * gus_play_pcm8 one-shot. This stays strictly inside the rc7-confirmed audible
+ * envelope (see play_gus_tone): the SAME soft/centered REAL waveform, the SAME
+ * native 22050 rate, the SAME single one-shot -- the melody lives in the PCM
+ * DATA (the pitch varies sample-to-sample), NOT in voice control, so none of the
+ * rc5/rc6 silence killers (0xFF/0x00 square bytes / non-native SetVoiceFreq
+ * retune / StopVoice->StartVoice per-note retrigger / loop) are ever touched.
+ * Monophonic first version: the sounding pitch is the highest held non-
+ * percussion note (melody = top voice); polyphony is a later refinement. Falls
+ * back to the rc7 single sine tone (play_gus_tone) when curly.mid is absent or
+ * yields too few notes, so a data-less GUS box is never silent. */
+#define GUS_MEL_RATE    22050              /* native GF1 playback rate (no retune)   */
+#define GUS_MEL_SECS    5                  /* preview cap (4-6 s window)             */
+#define GUS_MEL_LEN     (GUS_MEL_RATE * GUS_MEL_SECS) /* 110250 samples (~110 KB)    */
+#define GUS_MEL_STEP_MS 4                  /* virtual-clock step for offline capture */
+#define GUS_MEL_MAXEV   2048               /* captured note-event cap                */
+#define GUS_MEL_MINEV   8                  /* < this -> fall back to the sine tone   */
+#define GUS_MEL_AMP     110               /* S8 peak (soft/centered, like rc7 tone)  */
+#define GUS_MEL_RAMP    110               /* ~5 ms attack/release ramp (click guard) */
+
 static int g_gus_ok = 0;              /* GF1 detected + brought up (device_open) */
 
 static MIX_Mixer *g_mixer    = NULL;
@@ -607,9 +629,9 @@ int audiotest_init(const scfg_t *c)
       break;
     case MUS_GUS:
       SDL_strlcpy(g_msg,
-        "The Music test plays a musical tone on the Gravis UltraSound (GF1) "
-        "wavetable. The Sound Effects test plays the Polar Star shot on the "
-        "GF1.", sizeof(g_msg));
+        "The Music test plays the Cave Story title theme on the Gravis "
+        "UltraSound (GF1) wavetable. The Sound Effects test plays the Polar "
+        "Star shot on the GF1.", sizeof(g_msg));
       break;
     case MUS_WB:
       SDL_strlcpy(g_msg,
@@ -1391,6 +1413,164 @@ static int ensure_title_loaded(void)
   return g_title_smf != NULL;
 }
 
+/* ---- T90 (task #4): GUS real-melody render (curly.mid -> one PCM one-shot) --*/
+
+static Uint8       g_mel_pcm[GUS_MEL_LEN];  /* rendered melody (U8, GF1 DAC), BSS  */
+static signed char g_sinlut[256];           /* one sine cycle, +/-GUS_MEL_AMP (S8) */
+static int         g_sinlut_ready = 0;
+
+/* Captured monophonic note timeline. The offline SMF capture dispatches events
+ * in ascending time order, so this array is already time-sorted. */
+typedef struct { Uint32 t_ms; int on; int note; } gus_mel_ev;
+static gus_mel_ev  g_mel_ev[GUS_MEL_MAXEV];
+static int         g_mel_nev = 0;
+static Uint32      g_mel_now = 0;            /* virtual clock the capture sink stamps */
+
+static void mel_push(int on, int note)
+{
+  if (g_mel_nev >= GUS_MEL_MAXEV) return;
+  g_mel_ev[g_mel_nev].t_ms = g_mel_now;
+  g_mel_ev[g_mel_nev].on   = on;
+  g_mel_ev[g_mel_nev].note = note;
+  g_mel_nev++;
+}
+/* cs_smf capture sink: RECORD ONLY -- no GF1 access (the render is offline).
+ * Skip channel 10 (0-based index 9) percussion: it is non-melodic and would
+ * corrupt the top-note pick. A note_on with velocity 0 is a note_off (running-
+ * status convention), so it collapses to an off event. */
+static void mel_cb_on(void *u, int ch, int note, int vel)
+{
+  (void)u;
+  if (ch == 9 || note < 0 || note > 127) return;
+  mel_push(vel > 0 ? 1 : 0, note);
+}
+static void mel_cb_off(void *u, int ch, int note, int vel)
+{
+  (void)u; (void)vel;
+  if (ch == 9 || note < 0 || note > 127) return;
+  mel_push(0, note);
+}
+
+/* Render curly.mid's monophonic top-note melody into g_mel_pcm. Returns the
+ * sample count (0 = unavailable / too few notes -> caller falls back to the rc7
+ * sine tone). All hot-loop math is integer (256-entry sine LUT + 16.16 fixed-
+ * point phase + integer envelope), so the one-time render is a fraction of a
+ * second even on the POD-83 SETUP runs on (no per-sample libm call). */
+static Uint32 gus_render_melody(void)
+{
+  cs_smf_sink sink;
+  Uint32 win_ms, t, pos, phase, phase_inc;
+  int    i, ev, held, top, prev_top, amp, amp_t;
+  int    active[128];
+
+  if (!g_title_smf) return 0;
+
+  if (!g_sinlut_ready)
+  {
+    for (i = 0; i < 256; ++i)
+      g_sinlut[i] = (signed char)(sin((2.0 * 3.14159265358979323846 * (double)i)
+                                      / 256.0) * (double)GUS_MEL_AMP);
+    g_sinlut_ready = 1;
+  }
+
+  /* 1. Offline capture: step a virtual clock; the sink records note on/off with
+   *    timestamps. No GF1 access here. cs_smf loops at end-of-song, so a song
+   *    shorter than the window simply repeats to fill it. */
+  g_mel_nev = 0;
+  sink.note_on        = mel_cb_on;
+  sink.note_off       = mel_cb_off;
+  sink.control_change = NULL;
+  sink.program_change = NULL;
+  sink.dispatch       = NULL;
+  sink.user           = NULL;
+  cs_smf_set_sink(g_title_smf, &sink);
+  cs_smf_start(g_title_smf, 0);
+  win_ms = (Uint32)(((Uint64)GUS_MEL_LEN * 1000) / GUS_MEL_RATE);
+  for (t = 0; t <= win_ms; t += GUS_MEL_STEP_MS)
+  {
+    g_mel_now = t;
+    cs_smf_tick(g_title_smf, t);
+    if (g_mel_nev >= GUS_MEL_MAXEV) break;
+  }
+  trace("gus melody: captured %d note events over %lu ms (min=%d to accept)",
+        g_mel_nev, (unsigned long)win_ms, GUS_MEL_MINEV);
+  if (g_mel_nev < GUS_MEL_MINEV) return 0;
+
+  /* 2. Walk the timeline sample-by-sample; the sounding pitch is the highest
+   *    held note (melody = top voice). Phase-CONTINUOUS oscillator + a short
+   *    linear attack/release envelope (amp ramps toward full while a note sounds,
+   *    toward 0 in the gaps) removes the note-boundary clicks. The 128-entry top
+   *    scan runs only when an event changes the active set, not per sample. */
+  for (i = 0; i < 128; ++i) active[i] = 0;
+  held = 0; ev = 0; top = -1; prev_top = -2;
+  phase = 0; phase_inc = 0; amp = 0;
+  for (pos = 0; pos < GUS_MEL_LEN; ++pos)
+  {
+    Uint32 now_ms = (Uint32)(((Uint64)pos * 1000) / GUS_MEL_RATE);
+    int    changed = 0, s8, idx;
+    while (ev < g_mel_nev && g_mel_ev[ev].t_ms <= now_ms)
+    {
+      int n = g_mel_ev[ev].note;
+      if (g_mel_ev[ev].on) { if (active[n]++ == 0) ++held; }
+      else                 { if (active[n] > 0 && --active[n] == 0) --held; }
+      ++ev; changed = 1;
+    }
+    if (changed)
+    {
+      top = -1;
+      if (held > 0) for (i = 127; i >= 0; --i) if (active[i]) { top = i; break; }
+    }
+    if (top != prev_top)
+    {
+      if (top >= 0)
+      {
+        double f  = 440.0 * pow(2.0, (double)(top - 69) / 12.0);
+        phase_inc = (Uint32)((f / (double)GUS_MEL_RATE) * 256.0 * 65536.0);
+      }
+      prev_top = top;
+    }
+    amp_t = (top >= 0) ? 256 : 0;
+    if      (amp < amp_t) { amp += (256 / GUS_MEL_RAMP); if (amp > amp_t) amp = amp_t; }
+    else if (amp > amp_t) { amp -= (256 / GUS_MEL_RAMP); if (amp < amp_t) amp = amp_t; }
+    if (amp > 0 && phase_inc)
+    {
+      idx    = (int)((phase >> 16) & 0xFF);
+      s8     = ((int)g_sinlut[idx] * amp) >> 8;   /* +/-GUS_MEL_AMP scaled by envelope */
+      phase += phase_inc;
+    }
+    else s8 = 0;
+    g_mel_pcm[pos] = (Uint8)(s8 + 128);           /* S8 -> U8 (GF1 unsigned DAC, 0x80=silence) */
+  }
+  return GUS_MEL_LEN;
+}
+
+/* A2/T90: GUS music test -- play curly.mid's real melody as ONE gus_play_pcm8
+ * one-shot. Returns 1 if the real tune played, 0 if it fell back to the rc7
+ * single sine tone (still audible). Assumes device_open() (g_gus_ok) ran. */
+static int play_gus_melody(void)
+{
+  Uint32 n;
+  if (!g_gus_ok) { trace("gus melody: g_gus_ok=0 -> BAIL (GF1 not up)"); return 0; }
+  if (!ensure_title_loaded())
+  {
+    trace("gus melody: no data/midi/curly.mid -> rc7 single-sine-tone fallback");
+    play_gus_tone();
+    return 0;
+  }
+  n = gus_render_melody();
+  if (n == 0)
+  {
+    trace("gus melody: too few melody notes -> rc7 single-sine-tone fallback");
+    play_gus_tone();
+    return 0;
+  }
+  trace("gus melody: ENTER real curly.mid melody len=%lu @%dHz (top-note mono, single one-shot)",
+        (unsigned long)n, GUS_MEL_RATE);
+  gus_play_pcm8(g_mel_pcm, n, GUS_MEL_RATE, GUS_MEL_SECS * 1000);
+  trace("gus melody: DONE (real tune played)");
+  return 1;
+}
+
 /* T42: BIOS 18.2065 Hz tick counter at 0040:006C -- a real-time reference
  * independent of uclock's PIT-channel-0 reprogramming (DJGPP's uclock chains
  * INT 8, so the BIOS tick keeps advancing at 18.2 Hz). Cross-checking
@@ -1753,7 +1933,10 @@ int audiotest_play_music(void)
     {
       case MUS_OPL3: rc = play_opl3_arpeggio(); break;
       case MUS_OPL2: rc = play_opl2_arpeggio(); break;   /* T80 */
-      case MUS_GUS:  rc = play_gus_tone();      break;   /* A2/rc7 FLOOR single sine note */
+      case MUS_GUS:                                       /* T90: real curly.mid tune */
+        if (play_gus_melody()) g_music_used_real = 1;     /* 0 = rc7 sine-tone fallback */
+        rc = 0;
+        break;
       case MUS_WB:   rc = play_wb_arpeggio();   break;
       default:
         trace("play_music: MIX_PlayTrack (pcm)");
@@ -1779,6 +1962,10 @@ int audiotest_play_music(void)
   {
     if (g_music_used_real && g_is_organya)
       SDL_strlcpy(g_msg, "Real Title theme on Organya (pre-rendered).", sizeof(g_msg));
+    else if (g_music_used_real && g_music_mode == MUS_GUS)   /* T90 */
+      SDL_strlcpy(g_msg,
+        "Real Title theme (data/midi/curly.mid) on the Gravis UltraSound (GF1).",
+        sizeof(g_msg));
     else if (g_music_used_real)
       SDL_snprintf(g_msg, sizeof(g_msg),
         "Real Title theme (data/midi/curly.mid) via %s.",
@@ -1831,10 +2018,14 @@ const char *audiotest_about(int phase)
     return "Plays a test sound";
   }
 
-  /* A2/rc7: Gravis GF1 -- the music test is a single sustained sine tone (no GM
-   * .pat MIDI synth / melody in SETUP; that is a later task). */
+  /* A2/T90: Gravis GF1 -- the music test plays curly.mid's melody line (rendered
+   * to PCM + one GF1 one-shot), or a single sine tone if the MIDI data is absent. */
   if (g_music_mode == MUS_GUS)
+  {
+    if (g_real_music && ensure_title_loaded())
+      return "Plays Title Theme Music on the Gravis UltraSound (GF1)";
     return "Plays a musical tone on the Gravis UltraSound (GF1)";
+  }
 
   /* Music test. Real title theme only for the synth backends; organya/pcm and
    * the killswitch-off / data-missing cases describe the tone/tune fallback. */
