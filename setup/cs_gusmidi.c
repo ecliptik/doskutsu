@@ -466,9 +466,20 @@ static int allocate_voice(void)
   v = SDL_DOSGusAllocVoice();
   if (v < 0 || v >= g_num_voices)
   {
-    lru = 0;
-    for (i = 1; i < g_num_voices; ++i)
-      if (g_voices[i].last_used < g_voices[lru].last_used) lru = i;
+    /* Music partition full -> LRU-steal the oldest ACTIVE music voice. Restrict
+     * the search to ACTIVE voices (sdl-eng co-review): SETUP has no SFX source,
+     * so the driver's reserved SFX slots are never active and their last_used
+     * stays 0 forever -- a full-pool search would ALWAYS pick a reserved slot as
+     * the LRU minimum, bleeding music into the reserved region (more polyphony
+     * than the game = a less-accurate preview). AllocVoice==-1 after the reap
+     * means every music voice is genuinely busy, so an active voice to steal
+     * always exists (the lru<0 guard is purely defensive). */
+    lru = -1;
+    for (i = 0; i < g_num_voices; ++i)
+      if (g_voices[i].active &&
+          (lru < 0 || g_voices[i].last_used < g_voices[lru].last_used))
+        lru = i;
+    if (lru < 0) lru = 0;
     SDL_DOSGusStopVoice(lru);
     g_voices[lru].active = 0;
     v = SDL_DOSGusAllocVoice();
