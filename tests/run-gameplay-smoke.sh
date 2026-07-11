@@ -498,6 +498,7 @@ BANNER_REGEX=(
   "\[loadband-stat cave=[0-9]+"
   "\[pxt-cache\] (init|initGusSfx)\(\): (HIT|BUILT|DISABLED)"
   "present-probe SUMMARY \["
+  "present-probe: ARMED hint=1"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -632,6 +633,7 @@ BANNER_SEVERITY=(
   "optional"
   "required"
   "required"
+  "optional"
   "optional"
   "optional"
   "optional"
@@ -790,6 +792,7 @@ BANNER_LABEL=(
   "0268 load-band audio-underrun probe (OPTIONAL -- '[loadband-stat cave=N dur_ms=N pix_active_entry=N irq_delta=N ...]' one line per cave; nx 0268 #17 diag, DEFAULT-OFF (opt-in SDL_HINT_DOSKUTSU_LOADBAND_STAT=1). Gated independently of LOADSTAGE_SILENCE so both screech A/B cells can carry it. ABSENT in the default smoke (hint unset), expected. The rc5 SCRA/SCRB g2k cells set it to snapshot the SB across the load_stage band. Embed witness = strings|grep 'loadband-stat'.)"
   "0270 Pixtone SFX render cache (OPTIONAL -- '[pxt-cache] init(): HIT|BUILT|DISABLED' (SB16/OPL3/organya DAC path) or '[pxt-cache] initGusSfx(): ...' (GUS path) at boot. Caches the ~51s stPXSound::render() synth output (S8 mono @22050, tier-independent) to CACHE\\PXT\\PXTSFX.BIN so subsequent boots skip the render (task #3). Default-ON killswitch SDL_HINT_DOSKUTSU_PXT_AUTOCACHE=0. Kept OPTIONAL: emits under any backend that inits Pixtone SFX (default OPL3 smoke DOES -> present), but ABSENT under the DAC-less AUDIO_BACKEND=adlib PLAY cell (music-only, no Pixtone::init) -- so a required-gate would false-fail an adlib-cell log. First run = BUILT (still ~51s, once, + writes cache); later runs = HIT. Embed witness = strings|grep 'pxt-cache'.)"
   "0269 organya-precache present-path probe (OPTIONAL -- 'present-probe SUMMARY [precache-batch]: flips=N DV-true=N ...' at the end of the first-launch organya precache batch; nx 0269 #1 diagnostic, DEFAULT-OFF (opt-in strict-1 SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1). ABSENT in the default smoke (hint unset) AND absent whenever the precache batch does not run (cache already complete, or non-organya backend) -- both expected. The iter-2 org cell sets the hint to witness why the precache overlay reads as a static 'Loading..' on g2k (present-path breakdown + palette-version pair). Embed witness = strings|grep 'present-probe'.)"
+  "0271 organya-precache present-BRACKET probe ARMED banner (OPTIONAL -- 'present-probe: ARMED hint=1 ...' emitted once when setPresentProbeActive engages under SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1; nx 0271 #1 round-2 diagnostic that BRACKETS each present sub-stage (ENTER/EXIT drain/dv-getstate-resnap/dv-presentfull/sdl-partial/sdl-full/palette-program) + the gen-bump signal + org_precache_one entry, so the LAST fsync'd line names the wedging op. DEFAULT-OFF; ABSENT in the default smoke (hint unset) -- expected. 0271-specific revert-detector (0269's SUMMARY banner alone would not catch a 0271 revert). Embed witness = strings|grep 'ENTER dv-presentfull'.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
