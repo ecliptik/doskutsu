@@ -1,0 +1,224 @@
+From 9130c38c46c30e6910709205bd1360b5f09b6f74 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 11 Jul 2026 14:06:42 -0700
+Subject: [PATCH] patch 0271 -- #1 round-2: organya-precache present-BRACKET
+ probe (name the wedge)
+
+Round 1 (0269) localized the cold-cache organya first-run HANG to the first
+precache overlay flip()'s present -- but 0269 tallied AFTER the present, so a
+wedge INSIDE the present is invisible to it (zero probe lines, log ends at
+"rendering all songs"). This round-2 probe BRACKETS each present sub-stage with
+ENTER/EXIT lines so the LAST fsync'd line (0036) names the exact wedging op.
+
+nx+sdl co-specced (sdl-eng authors the SDL 0121 breadcrumbs inside the banked
+flush). Engine half, all gated by the shared strict-"1" hint
+SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE + the precache-batch bracket
+(setPresentProbeActive) -- default-inert:
+  - ARMED boot banner (hint-state never ambiguous again; round 1 had to infer it
+    from the BAT).
+  - THE gen-bump discriminator in _direct_vesa_present: gen_now / cur_gen /
+    was_valid / will_resnapshot. showLoadingScreen's flip worked in this SAME
+    mode moments earlier, so the wedge needs something to CHANGE -- a gen bump
+    forcing a GetState re-snapshot (+ SDL-side lazy fb-reinit) in the pre-title
+    blocking context is the prime candidate.
+  - ENTER/EXIT brackets: drain(dv) / dv-getstate-resnap / palette-program /
+    dv-presentfull (the key one -- it straddles BankedDosmemput -> SwitchBank ->
+    the VBE window-function FAR-CALL that g2k force-banks per SDL/0019, sdl-eng's
+    prime wedge suspect) / sdl-partial / sdl-full (Cell B DIRECT_VESA=0 route).
+  - org_precache_one ENTRY bracket (Organya.cpp): separates "wedged in present"
+    from "wedged in first-song synth setup" -> prevents a round 3.
+
+ts=SDL_GetTicks() ms on every line so the SDL 0121 breadcrumbs interleave by
+timestamp. No behavior change; the FIX rides a later patch once the log names
+the stage. Run plan: Cell A DIRECT_VESA=1 + Cell B DIRECT_VESA=0, both
+cold-cache + hint set.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 80 ++++++++++++++++++++++++++++++++++++++-
+ src/sound/Organya.cpp     | 11 ++++++
+ 2 files changed, 89 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 1c6fcc3e..36652463 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -599,6 +599,14 @@ inline bool _present_probe_enabled()
+   return v;
+ }
+ 
++// patch 0271 (#1 round-2): guarded present-stage bracket predicate. Member
++// context (reads _present_probe_active). True only while main() has the organya
++// precache batch bracketed AND the shared hint is set. Bracket lines stamp
++// ts=SDL_GetTicks() ms so the SDL-side breadcrumbs (SDL 0121) interleave by
++// timestamp; per-line fsync (0036) makes the LAST line survive a hard wedge and
++// name the stage. Default-inert (both the flag and the hint are off normally).
++#define PP_ON() (_present_probe_active && _present_probe_enabled())
++
+ // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): per-phase flip()
+ // timing brackets opt-in. Strict "1" match, default OFF (instrumentation
+ // has its own cost -- 5 SDL_GetTicksNS calls per flip + per-100-flip
+@@ -4608,6 +4616,12 @@ void Renderer::setPresentProbeActive(bool on)
+     _pp_flips = _pp_dv_true = _pp_dv_fallback = _pp_partial = _pp_full = 0;
+     _pp_first_n = _pp_force_full = _pp_detail_logged = _pp_winsurf_changes = 0;
+     _pp_last_winsurf = nullptr;
++    // patch 0271 (#1 round-2): one-shot ARMED banner so a returned log
++    // unambiguously shows the probe hint was READ (round-1 had to infer
++    // hint-state from the BAT). Present-stage brackets follow during the batch.
++    if (_present_probe_enabled())
++      LOG_INFO("present-probe: ARMED hint=1 (organya precache present-path "
++               "bracket; ts field = SDL_GetTicks ms)");
+   }
+ }
+ 
+@@ -4916,8 +4930,23 @@ bool Renderer::_direct_vesa_present()
+     _flip_phase_samples_get_generation[_flip_phase_idx_gg++] =
+         SDL_GetTicksNS() - _gg_t0;
+   }
++  // patch 0271 (#1 round-2): THE gen-bump discriminator. showLoadingScreen's
++  // flip worked in this SAME mode moments earlier, so the wedge needs something
++  // to CHANGE by the precache flip. A gen bump here forces a GetState
++  // re-snapshot (+ SDL-side lazy fb-reinit) in the pre-title blocking context.
++  // will_resnapshot mirrors the branch condition below.
++  if (PP_ON())
++    LOG_INFO("present-probe[ts={} flip={}]: dv-attempt gen_now={} cur_gen={} "
++             "was_valid={} will_resnapshot={}",
++             (unsigned long)SDL_GetTicks(), _flip_total, (unsigned long)gen_now,
++             (unsigned long)_direct_vesa_generation, (int)_direct_vesa_state.valid,
++             (int)(!_direct_vesa_state.valid || gen_now != _direct_vesa_generation));
+   if (!_direct_vesa_state.valid || gen_now != _direct_vesa_generation)
+   {
++    if (PP_ON())
++      LOG_INFO("present-probe[ts={} flip={}]: ENTER dv-getstate-resnap "
++               "(SDL GetState / lazy fb-reinit)",
++               (unsigned long)SDL_GetTicks(), _flip_total);
+     // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): bump gen-bump
+     // counter for the per-100-flip phase audit ONLY on true mid-run
+     // re-inits (state was already valid + gen counter advanced). The
+@@ -4961,7 +4990,13 @@ bool Renderer::_direct_vesa_present()
+   // intentionally bypassing. Per sdl-engine task #1 audit R1.
+   if (_renderer_queue_dirty)
+   {
++    if (PP_ON())
++      LOG_INFO("present-probe[ts={} flip={}]: ENTER drain(dv)",
++               (unsigned long)SDL_GetTicks(), _flip_total);
+     SDL_FlushRenderer(_renderer);
++    if (PP_ON())
++      LOG_INFO("present-probe[ts={} flip={}]: EXIT drain(dv)",
++               (unsigned long)SDL_GetTicks(), _flip_total);
+     _renderer_queue_dirty = false;
+   }
+ 
+@@ -5007,6 +5042,11 @@ bool Renderer::_direct_vesa_present()
+   if (_indexed_mode && _master_palette
+       && _master_palette->version != _direct_vesa_palette_version)
+   {
++    if (PP_ON())
++      LOG_INFO("present-probe[ts={} flip={}]: ENTER palette-program "
++               "master_ver={} dv_ver={}", (unsigned long)SDL_GetTicks(),
++               _flip_total, (unsigned long)_master_palette->version,
++               (unsigned long)_direct_vesa_palette_version);
+     const Uint64 _pp_t0 = _flip_instr_now ? SDL_GetTicksNS() : 0;
+     SDL_DOSVesaDirectProgramPalette(_master_palette);
+     if (_flip_instr_now && _flip_phase_idx_pp < _flip_phase_block_size)
+@@ -5015,14 +5055,34 @@ bool Renderer::_direct_vesa_present()
+           SDL_GetTicksNS() - _pp_t0;
+     }
+     _direct_vesa_palette_version = _master_palette->version;
++    if (PP_ON())
++      LOG_INFO("present-probe[ts={} flip={}]: EXIT palette-program",
++               (unsigned long)SDL_GetTicks(), _flip_total);
+   }
+ 
+   // Single-call full-frame present. PresentFull internally dispatches:
+   //   - LFB path (use_dosmemput=false)         -> SDL_memcpy(vram_ptr, pixels, fb_size)
+   //   - banked single-bank (banked_multibank=false) -> dosmemput(pixels, fb_size, vram_phys)
+   //   - banked multi-bank (banked_multibank=true)   -> SDL_DOSVesaDirectBankedFlush()
+-  if (!SDL_DOSVesaDirectPresentFull(&_direct_vesa_state,
+-                                     _cached_window_surface->pixels))
++  // patch 0271 (#1 round-2): THE key bracket. PresentFull internally does the
++  // banked BankedDosmemput -> SwitchBank -> VBE window-function FAR-CALL (g2k is
++  // force-banked per SDL/0019), sdl-eng's prime wedge suspect. A surviving
++  // "ENTER dv-presentfull" as the last engine line + the SDL 0121 per-bank
++  // breadcrumb pins the wedge to the far-call with its bank arg.
++  if (PP_ON())
++    LOG_INFO("present-probe[ts={} flip={} gen={}]: ENTER dv-presentfull "
++             "banked_multibank={} use_dosmemput={} vram_phys=0x{:08x}",
++             (unsigned long)SDL_GetTicks(), _flip_total,
++             (unsigned long)_direct_vesa_generation,
++             (int)_direct_vesa_state.banked_multibank,
++             (int)_direct_vesa_state.use_dosmemput,
++             (unsigned long)_direct_vesa_state.vram_phys);
++  const bool _pf_ok = SDL_DOSVesaDirectPresentFull(&_direct_vesa_state,
++                                                   _cached_window_surface->pixels);
++  if (PP_ON())
++    LOG_INFO("present-probe[ts={} flip={}]: EXIT dv-presentfull ok={}",
++             (unsigned long)SDL_GetTicks(), _flip_total, (int)_pf_ok);
++  if (!_pf_ok)
+     return false;
+ 
+   return true;
+@@ -5390,6 +5450,11 @@ void Renderer::flip()
+     // patch 0087 (wave 20 Lever A): bracket the actual flush call.
+     // Folds into _present_ns + bumps the partial path-mix counter.
+     {
++      // patch 0271 (#1 round-2): SDL partial-present bracket (Cell B DIRECT_VESA=0
++      // present route -> DOSVESA_UpdateWindowFramebuffer -> the same banked flush).
++      if (PP_ON())
++        LOG_INFO("present-probe[ts={} flip={}]: ENTER sdl-partial",
++                 (unsigned long)SDL_GetTicks(), _flip_total);
+       const Uint64 _t = _flip_instr_on ? SDL_GetTicksNS() : 0;
+       if (bbox.w > 0 && bbox.h > 0)
+       {
+@@ -5406,6 +5471,9 @@ void Renderer::flip()
+         _present_ns += SDL_GetTicksNS() - _t;
+         ++_present_path_partial_block;
+       }
++      if (PP_ON())
++        LOG_INFO("present-probe[ts={} flip={}]: EXIT sdl-partial ok={}",
++                 (unsigned long)SDL_GetTicks(), _flip_total, (int)ok);
+     }
+     ++_dr_dirty_path_taken_block;
+   }
+@@ -5413,8 +5481,16 @@ void Renderer::flip()
+   {
+     // patch 0087 (wave 20 Lever A): bracket SDL_RenderPresent. Folds
+     // into _present_ns + bumps the render path-mix counter.
++    // patch 0271 (#1 round-2): SDL full-present bracket (Cell B DIRECT_VESA=0
++    // full route, and any first-N-forced flip -> DOSVESA banked flush).
++    if (PP_ON())
++      LOG_INFO("present-probe[ts={} flip={}]: ENTER sdl-full",
++               (unsigned long)SDL_GetTicks(), _flip_total);
+     const Uint64 _t = _flip_instr_on ? SDL_GetTicksNS() : 0;
+     ok = SDL_RenderPresent(_renderer);
++    if (PP_ON())
++      LOG_INFO("present-probe[ts={} flip={}]: EXIT sdl-full ok={}",
++               (unsigned long)SDL_GetTicks(), _flip_total, (int)ok);
+     if (_flip_instr_on)
+     {
+       _present_ns += SDL_GetTicksNS() - _t;
+diff --git a/src/sound/Organya.cpp b/src/sound/Organya.cpp
+index 5a39095c..28d16f9d 100644
+--- a/src/sound/Organya.cpp
++++ b/src/sound/Organya.cpp
+@@ -979,6 +979,17 @@ extern "C" long org_precache_one(const char *org_path)
+     return -1;
+   const std::string path  = org_path;
+   const std::string cname = _org_cache_name(path);
++  // patch 0271 (#1 round-2): probe entry bracket. Logs BEFORE any per-song work
++  // so a wedge in first-song synth setup (vs the precache PRESENT, which the
++  // Renderer brackets cover) leaves THIS as the last line -- separating the two
++  // failure modes and preventing a round 3. Gated on the shared present-probe
++  // hint (per-line fsync 0036 makes it crash/hang-survivable).
++  {
++    const char *_ppe = std::getenv("SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE");
++    if (_ppe && _ppe[0] == '1' && _ppe[1] == '\0')
++      LOG_INFO("present-probe[ts={}]: org_precache_one ENTER song={}",
++               (unsigned long)SDL_GetTicks(), cname.c_str());
++  }
+   Song tmp;
+   if (!tmp.Load(path))
+   {
+-- 
+2.47.3
+
