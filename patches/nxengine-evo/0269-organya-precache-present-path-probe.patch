@@ -1,0 +1,227 @@
+From 7d3186f1ccf4d7397c2f41888fafcc6e325ecd9b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 10 Jul 2026 18:06:38 -0700
+Subject: [PATCH] patch 0269 -- #1 diag: organya-precache present-path probe
+ (ORGCACHE_PRESENT_PROBE)
+
+The organya first-launch precache overlay reads as a static "Loading.." on g2k
+(operator quits thinking it hung). Two prior blind fixes failed; sdl-eng's
+SDL-side audit shows _direct_vesa_present() already drains + full-presents every
+call, so the present PRIMITIVE is not the gap. Rather than guess a third fix,
+this is the diagnostic (engine-only round 1, nx+sdl co-specced): a present-path
+witness over the precache window that splits the lane in one returned log.
+
+main() brackets the first-launch precache batch with
+Renderer::setPresentProbeActive(true/false). While active AND the strict-"1"
+opt-in hint SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE is set, flip() tallies which
+present path each precache flip took (direct-VESA true / DV fell back to SDL /
+SDL partial UpdateWindowSurfaceRects / SDL full RenderPresent / first-N-forced),
+counts _force_full_refresh frames + _cached_window_surface pointer changes, and
+emits a detail line for the first few flips. logPresentProbeSummary() dumps the
+totals at batch exit. Reads:
+  - many DV-true but screen static -> present reaches VRAM at the wrong
+    page/palette -> round 2 = sdl-eng's SDL page/CRTC-start probe (same hint).
+  - few flips -> the synth starves flip() at the precache seam (engine fix).
+
+The first-flip detail also logs master_pal_ver vs dv_pal_ver (+ whether they are
+equal), testing sdl-eng's DAC-gate hypothesis: _direct_vesa_present only calls
+ProgramPalette on a palette-version bump, so if both are stale-equal at the
+first overlay DV flip the DAC is never (re)programmed for the overlay -> stale
+colors -> "static". That pair may pin the root cause without a round 2.
+
+Default-inert: the probe hint is default-OFF (strict "1"), and the counters only
+tally while main() has the batch bracketed. No behavior change to the render.
+Diagnostic-only; the FIX rides a later patch once the log names the stage.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 84 +++++++++++++++++++++++++++++++++++++++
+ src/graphics/Renderer.h   | 23 +++++++++++
+ src/main.cpp              |  7 ++++
+ 3 files changed, 114 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 05ce1ac3..1c6fcc3e 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -585,6 +585,20 @@ inline bool _abl_direct_vesa()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0269, #1): strict-"1" opt-in gate for the organya-precache
++// present-path probe. Default OFF (pure diagnostic; on only for the iter that
++// carries it). Shared hint name with the SDL side -- round 2 (if needed) reads
++// the SAME SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE via SDL_GetHint per the
++// nx/sdl cross-side coordination, so there is no rename between rounds.
++inline bool _present_probe_enabled()
++{
++  static const bool v = []() {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE");
++    return (e && e[0] == '1' && e[1] == 0);  // strict "1" opt-in
++  }();
++  return v;
++}
++
+ // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): per-phase flip()
+ // timing brackets opt-in. Strict "1" match, default OFF (instrumentation
+ // has its own cost -- 5 SDL_GetTicksNS calls per flip + per-100-flip
+@@ -4581,6 +4595,33 @@ void Renderer::showLoadingScreen()
+   flip();
+ }
+ 
++// DOS-PORT (patch 0269, #1): present-path probe controls. main() brackets the
++// organya first-launch precache batch with these so flip() can tally which
++// present path each precache flip took -- diagnosing the "static Loading"
++// overlay (present-reach vs call-frequency vs palette-DAC gate). Engine-only
++// round 1; the actual tally is gated by SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE.
++void Renderer::setPresentProbeActive(bool on)
++{
++  _present_probe_active = on;
++  if (on)
++  {
++    _pp_flips = _pp_dv_true = _pp_dv_fallback = _pp_partial = _pp_full = 0;
++    _pp_first_n = _pp_force_full = _pp_detail_logged = _pp_winsurf_changes = 0;
++    _pp_last_winsurf = nullptr;
++  }
++}
++
++void Renderer::logPresentProbeSummary(const char *tag)
++{
++  if (!_present_probe_enabled())
++    return;
++  LOG_INFO("present-probe SUMMARY [{}]: flips={} DV-true={} DV-fallback={} "
++           "partial={} full={} first_n_forced={} force_full={} "
++           "winsurf_changes={} (SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1)",
++           tag ? tag : "", _pp_flips, _pp_dv_true, _pp_dv_fallback, _pp_partial,
++           _pp_full, _pp_first_n, _pp_force_full, _pp_winsurf_changes);
++}
++
+ SDL_Renderer* Renderer::renderer()
+ {
+   return _renderer;
+@@ -5233,6 +5274,10 @@ void Renderer::flip()
+   }
+ 
+   const bool first_n_force = (_dirty_first_n_frames_remaining > 0);
++  // patch 0269 (#1): capture _force_full_refresh BEFORE the present branches
++  // consume it (the full-present branch clears it), so the precache probe below
++  // can report whether this flip was a forced-full frame.
++  const bool _pp_was_force_full = _force_full_refresh;
+   // DOS-PORT (patch 0084, Phase 9 wave 17.5): threshold check now uses
+   // bbox area against the 75% threshold (DIRTY_BBOX_THRESHOLD_PIXELS).
+   // The legacy DIRTY_THRESHOLD_PIXELS (50%) is preserved as a fallback
+@@ -5388,6 +5433,45 @@ void Renderer::flip()
+   }
+   Uint64 _present_ms = SDL_GetTicks() - _t0;
+   ++_flip_total;
++  // DOS-PORT (patch 0269, #1): organya-precache present-path witness. Active
++  // only while main() has bracketed the first-launch precache batch AND the
++  // probe hint is set. _cached_window_surface here is still THIS flip's surface
++  // (housekeeping re-fetches it just below). Splits the "static Loading" lane:
++  // many DV-true but static -> present reaches VRAM (page/palette -- round 2 /
++  // the palette-version pair below); few flips -> synth starves flip(). The
++  // master_pal_ver vs dv_pal_ver pair tests sdl-eng's DAC-gate hypothesis
++  // (ProgramPalette only fires on a version bump; stale-equal at the first
++  // overlay DV flip => the DAC is never (re)programmed for the overlay).
++  if (_present_probe_active && _present_probe_enabled())
++  {
++    ++_pp_flips;
++    if (_direct_vesa_done)       ++_pp_dv_true;
++    else if (_dv_attempt)        ++_pp_dv_fallback;
++    else if (can_use_dirty_path) ++_pp_partial;
++    else                         ++_pp_full;
++    if (first_n_force)      ++_pp_first_n;
++    if (_pp_was_force_full) ++_pp_force_full;
++    if (_cached_window_surface != _pp_last_winsurf)
++    {
++      if (_pp_flips > 1) ++_pp_winsurf_changes;
++      _pp_last_winsurf = _cached_window_surface;
++    }
++    if (_pp_detail_logged < 6)
++    {
++      ++_pp_detail_logged;
++      const char *pth = _direct_vesa_done ? "DV"
++                        : (_dv_attempt ? "DV-fallback"
++                        : (can_use_dirty_path ? "partial" : "full"));
++      LOG_INFO("present-probe: flip#{} path={} first_n={} force_full={} "
++               "winsurf=0x{:08x} master_pal_ver={} dv_pal_ver={} pal_reprogrammed={}",
++               _pp_flips, pth, (int)first_n_force, (int)_pp_was_force_full,
++               (unsigned long)(uintptr_t)_cached_window_surface,
++               (unsigned long)(_master_palette ? _master_palette->version : 0u),
++               (unsigned long)_direct_vesa_palette_version,
++               (int)(_master_palette
++                     && _master_palette->version == _direct_vesa_palette_version));
++    }
++  }
+   // DOS-PORT (patch 0050, Phase 9 wave 8): refresh the cached window
+   // surface post-present. SDL_RenderPresent (SW renderer) may swap or
+   // invalidate the underlying window surface -- re-querying once per
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index db53f023..e09a7140 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -252,6 +252,13 @@ class Renderer
+ 
+     void tintScreen();
+     void flip();
++    // DOS-PORT (patch 0269, #1): organya-precache present-path probe. main()
++    // wraps the first-launch precache batch with setPresentProbeActive(true/
++    // false); flip() then tallies which present path each precache flip took
++    // (gated additionally by SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1).
++    // logPresentProbeSummary() dumps the totals at batch exit. Diagnostic-only.
++    void setPresentProbeActive(bool on);
++    void logPresentProbeSummary(const char *tag);
+     SDL_Renderer* renderer();
+     SDL_Window* window();
+     Font font;
+@@ -451,6 +458,22 @@ class Renderer
+     SDL_Palette *_master_palette = nullptr;
+     std::unordered_map<std::string, std::array<Uint8, 256>> _palmap_cache;
+ 
++    // DOS-PORT (patch 0269, #1): organya-precache present-path probe counters.
++    // Reset on setPresentProbeActive(true); tallied in flip() only while
++    // _present_probe_active AND the probe hint is set; dumped by
++    // logPresentProbeSummary(). Pure diagnostic (default-inert).
++    bool     _present_probe_active = false;
++    uint32_t _pp_flips             = 0;  // precache flips seen
++    uint32_t _pp_dv_true           = 0;  // direct-VESA present succeeded
++    uint32_t _pp_dv_fallback       = 0;  // DV attempted but fell back to SDL
++    uint32_t _pp_partial           = 0;  // SDL_UpdateWindowSurfaceRects path
++    uint32_t _pp_full              = 0;  // SDL_RenderPresent full path
++    uint32_t _pp_first_n           = 0;  // flips forced full by first-N guard
++    uint32_t _pp_force_full        = 0;  // flips with _force_full_refresh set
++    uint32_t _pp_detail_logged     = 0;  // first-few detail lines emitted
++    uint32_t _pp_winsurf_changes   = 0;  // _cached_window_surface ptr changed
++    void    *_pp_last_winsurf      = nullptr;
++
+     // DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): on-disk loaders for
+     // the master palette + per-asset palmap. Formats are frozen at
+     // /tmp/wave-16-1-palette-format.md sec.1 / sec.2; both are produced by
+diff --git a/src/main.cpp b/src/main.cpp
+index c1937bb3..9431a68b 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1911,6 +1911,10 @@ int main(int argc, char *argv[])
+                "binary/tier -- rendering all songs to CACHE now (one-time; press "
+                "ESC to skip and let songs render on demand instead).");
+       g_oc_batch_active = true;
++      // patch 0269 (#1): bracket the precache batch for the present-path probe
++      // (inert unless SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1). Diagnoses why
++      // the overlay reads as a static "Loading.." on g2k.
++      Renderer::getInstance()->setPresentProbeActive(true);
+       const int n = SoundManager::getInstance()->orgMusicCount();
+       g_oc_song_total = n - 1; // [0] is the "" stop sentinel entry
+       int rendered = 0, skipped = 0, failed = 0;
+@@ -1932,6 +1936,9 @@ int main(int argc, char *argv[])
+         else             ++failed;
+       }
+       g_oc_batch_active = false;
++      // patch 0269 (#1): dump the present-path tally + stop the probe.
++      Renderer::getInstance()->logPresentProbeSummary("precache-batch");
++      Renderer::getInstance()->setPresentProbeActive(false);
+       if (g_oc_abort)
+         LOG_INFO("organya auto-precache: ESC -- batch skipped (rendered={} "
+                  "skipped={} failed={}); remaining songs cold-render on demand "
+-- 
+2.47.3
+
