@@ -365,7 +365,22 @@ static void apply_hints(const scfg_t *c)
   {
     const char *env = DKT_KEYS[i].env_name;
     if (env && strncmp(env, "SDL_HINT_", 9) == 0)
-      SDL_SetHint(env, scfg_get(c, i));
+      /* AUTHORITATIVE: push the operator's just-configured value at OVERRIDE
+       * priority (mirrors apply_blaster's overwrite=1). A plain SDL_SetHint is
+       * NORMAL priority, which SDL_SetHintWithPriority REJECTS when a matching
+       * environment variable exists (SDL_hints.c: "An environment variable is
+       * taking priority"). The game's launcher/AUTOEXEC does SET
+       * SDL_HINT_DOSKUTSU_GUS_VOICES=<cfg> (main.cpp bridges it via getenv), so
+       * if SETUP runs in that environment a NORMAL SetHint would be dropped and
+       * the SETUP audio test would IGNORE the operator's menu selection -- i.e.
+       * the GUS voice count (and every other SDL_HINT_ config key) would read
+       * the ambient env value regardless of what the menu picked. That is
+       * exactly the operator's "sounds the same even when I selected different
+       * voices" report. OVERRIDE makes the just-made menu selection win, so the
+       * preview reflects the configuration under test. Also lets an in-session
+       * re-test (change field -> Test music again) re-apply cleanly, since
+       * OVERRIDE replaces the prior OVERRIDE value. */
+      SDL_SetHintWithPriority(env, scfg_get(c, i), SDL_HINT_OVERRIDE);
   }
 }
 
