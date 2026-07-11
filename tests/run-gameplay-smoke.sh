@@ -496,6 +496,7 @@ BANNER_REGEX=(
   "load_stage ring\+DMA silence flush: (ENABLED|DISABLED)"
   "ring\+DMA silence quiesce"
   "\[loadband-stat cave=[0-9]+"
+  "\[pxt-cache\] (init|initGusSfx)\(\): (HIT|BUILT|DISABLED)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -630,6 +631,7 @@ BANNER_SEVERITY=(
   "optional"
   "required"
   "required"
+  "optional"
   "optional"
   "optional"
   "optional"
@@ -784,6 +786,7 @@ BANNER_LABEL=(
   "0267 load_stage ring+DMA silence flush (OPTIONAL -- 'load_stage ring+DMA silence flush: (ENABLED|DISABLED)'; nx 0267 PicoGUS-SB cave-transition screech fix; LOG_INFO on first load_stage (first cave entry) narrating default-ON (calls the shipped SDL/0092 ring+DMA-zero at stage-load entry) vs DISABLED via killswitch SDL_HINT_DOSKUTSU_LOADSTAGE_SILENCE=0. Emits when the smoke drives into a stage; INFO-level so present on the verbose smoke. The screech-elimination effect is g2k-only (PicoGUS-in-SB-mode); DOSBox witnesses the banner/decision, not the audible screech per [[dosbox_not_proxy]]. Embed witness = strings|grep 'load_stage ring+DMA silence flush'.)"
   "SDL/0120 flush-quiesce Pixtone-IRQ-mix screech fix (OPTIONAL -- '...pixtone_quiesced=N) ring+DMA silence quiesce' on the SDL-log channel; SDL_DOSAudioFlushRingSilence now also quiesces the Lever-3 Pixtone IRQ-mix source (task #17 screech). Emits at every FlushRingSilence call (organya cold-render 0206/0209 AND load_stage entry via 0267), so witnessable in the DEFAULT smoke -- distinct from the AdLib-only [pcspk] banner. Per-cave g2k witness = pixtone_quiesced=N in the same line. Embed witness = strings|grep 'ring+DMA silence quiesce'; new export SDL_DOSAudioIsrRingWrite. Kept OPTIONAL (emit is cold-render/load_stage-path dependent).)"
   "0268 load-band audio-underrun probe (OPTIONAL -- '[loadband-stat cave=N dur_ms=N pix_active_entry=N irq_delta=N ...]' one line per cave; nx 0268 #17 diag, DEFAULT-OFF (opt-in SDL_HINT_DOSKUTSU_LOADBAND_STAT=1). Gated independently of LOADSTAGE_SILENCE so both screech A/B cells can carry it. ABSENT in the default smoke (hint unset), expected. The rc5 SCRA/SCRB g2k cells set it to snapshot the SB across the load_stage band. Embed witness = strings|grep 'loadband-stat'.)"
+  "0270 Pixtone SFX render cache (OPTIONAL -- '[pxt-cache] init(): HIT|BUILT|DISABLED' (SB16/OPL3/organya DAC path) or '[pxt-cache] initGusSfx(): ...' (GUS path) at boot. Caches the ~51s stPXSound::render() synth output (S8 mono @22050, tier-independent) to CACHE\\PXT\\PXTSFX.BIN so subsequent boots skip the render (task #3). Default-ON killswitch SDL_HINT_DOSKUTSU_PXT_AUTOCACHE=0. Kept OPTIONAL: emits under any backend that inits Pixtone SFX (default OPL3 smoke DOES -> present), but ABSENT under the DAC-less AUDIO_BACKEND=adlib PLAY cell (music-only, no Pixtone::init) -- so a required-gate would false-fail an adlib-cell log. First run = BUILT (still ~51s, once, + writes cache); later runs = HIT. Embed witness = strings|grep 'pxt-cache'.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
