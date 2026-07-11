@@ -1,0 +1,223 @@
+From db89d2871b1e739be6788a581bb83014c1aa8f1b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 11 Jul 2026 14:07:04 -0700
+Subject: [PATCH] dos: patch 0121 -- org-precache first-flip WEDGE present-path
+ HW breadcrumbs
+
+v1.6.3 task #1: the organya first-run precache shows a static "Loading.."
+that looks frozen, and round-1 (nx/0271 engine probe) localized it to a HARD
+WEDGE on the FIRST precache flip's present -- before org render even starts,
+and specific to the precache-context flip (showLoadingScreen's flip #1
+completed in the same video mode moments earlier). The engine half brackets
+flip()'s present branches; nx's probe tallies AFTER the present, so a hang
+INSIDE the present is invisible to it. This SDL half brackets the HW ops those
+branches funnel into, so the LAST per-line-fsync'd log line before the machine
+hangs names the exact wedging op.
+
+Gated by the SHARED opt-in hint SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE
+(strict-"1", default OFF, cache-at-boot) -- the same hint nx/0271 reads, so one
+env var arms both halves. Default OFF == a single cached-int check, zero
+hot-path perturbation; this is diagnostic instrumentation, not a shipping lever.
+
+Breadcrumbs (ENTER straddling the op / EXIT after), ranked by suspicion:
+  - FINEST: SwitchBank -- straddles the banked VBE window-function FAR-CALL
+    (__dpmi_simulate_real_mode_procedure_retf) / INT 0x10 0x4F05. This is the
+    prime suspect: g2k Cirrus is force-banked (patch 0019 LFB-aperture bug), and
+    BOTH present routes -- DV PresentFull and slow UpdateWindowFramebuffer --
+    converge on BankedDosmemput -> SwitchBank, so this straddle catches the wedge
+    in either A/B cell (DIRECT_VESA=1 or =0). Logs bank + cur + winptr + via.
+  - dv-presentfull-hw ENTER/EXIT (Cell A DV path) with sub= lfb-memcpy /
+    banked-multibank / single-dosmemput.
+  - uwfb-banked-copy ENTER/EXIT (Cell B slow path).
+  - dv-getstate ENTER (low: cheap snapshot, no VBE/LFB HW op -- bootstrap runs at
+    mode-set, not here) + palette-program ENTER/EXIT (low: bounded 256-DAC-write,
+    no poll; SDL/0116 already bounds vblank).
+
+Join key with nx/0271: ts=SDL_GetTicks() ms (primary) + gen=GetGeneration()
+(secondary), same column order, so the two logs interleave by timestamp.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c | 117 +++++++++++++++++++++++++++++
+ 1 file changed, 117 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index a95b41218..dde73e0ed 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -78,6 +78,37 @@ static Uint32 _doskutsu_dvd_generation = 0;
+ // DOSVESA_UpdateWindowFramebuffer call.
+ static int _instr_enabled_cached = -1;
+ 
++// DOSKUTSU patch 0121 (v1.6.3 task #1, org-precache first-flip WEDGE probe):
++// present-path HW-IO breadcrumbs. Gated by the SHARED opt-in hint
++// SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE (strict-"1", default OFF,
++// cache-at-boot), coordinated with nx-engine/0271 -- the engine half brackets
++// flip()'s present branches (ENTER dv-presentfull / sdl-full ...), this SDL half
++// brackets the HW ops those branches funnel into so the LAST fsync'd line before
++// a hard wedge names the exact op. doskutsu_dbg_log already per-line fsyncs, so
++// an ENTER with no matching EXIT == the machine hung inside that op. Prime
++// suspect: the banked VBE window-function FAR-CALL in SwitchBank (g2k Cirrus is
++// force-banked per patch 0019), reached from BankedDosmemput on BOTH the DV
++// (PresentFull) and slow (UpdateWindowFramebuffer) present routes -- so the
++// SwitchBank straddle is the convergence point for both A/B cells. Diagnostic
++// only; default OFF == a single cached-int check, zero hot-path perturbation.
++// Join key with 0271: ts=SDL_GetTicks() ms (primary) + gen (secondary).
++static int _orgcache_probe_cached = -1;
++static int _orgcache_probe_active(void)
++{
++    if (_orgcache_probe_cached < 0) {
++        const char *h = SDL_GetHint("SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE");
++        _orgcache_probe_cached = (h && h[0] == '1' && h[1] == 0) ? 1 : 0;
++        if (_orgcache_probe_cached) {
++            // One-time SDL-side ARM witness (mirrors nx/0271's "present-probe:
++            // ARMED hint=1") so the two logs agree the gate resolved live.
++            doskutsu_dbg_log("present-probe[ts=%lu]: SDL-side ARMED hint=1 "
++                             "(SDL/0121 present-path HW breadcrumbs active)",
++                             (unsigned long)SDL_GetTicks());
++        }
++    }
++    return _orgcache_probe_cached;
++}
++
+ // Sample buffers (uint64 nanoseconds). Sized to DOSKUTSU_INSTR_BLOCK_SAMPLES;
+ // counters track how many slots are populated so we don't emit stats over
+ // uninitialized entries (palette_dac in particular is sparsely populated --
+@@ -1010,6 +1041,21 @@ SDL_FORCE_INLINE void SwitchBank(int bank, int *current_bank, Uint32 win_func_pt
+     SDL_zero(regs);
+     regs.x.bx = 0; // Window A
+     regs.x.dx = (Uint16)bank;
++    // DOSKUTSU patch 0121: FINEST breadcrumb -- straddle the bank-switch HW call.
++    // The ENTER line is per-line fsync'd BEFORE the (possibly wedging) far-call /
++    // INT 0x10, so a hard hang here leaves "switchbank ENTER ... via=rmproc-farcall
++    // bank=B cur=C winptr=0xXXXX" as the last surviving log line -- the exact op
++    // + bank arg + window-function pointer at the wedge. This is the prime suspect
++    // (g2k Cirrus force-banked; both A/B present routes converge here).
++    const int _p121 = _orgcache_probe_active();
++    if (_p121) {
++        doskutsu_dbg_log("present-probe[ts=%lu gen=%lu]: switchbank ENTER bank=%d "
++                         "cur=%d winptr=0x%08lx via=%s",
++                         (unsigned long)SDL_GetTicks(),
++                         (unsigned long)SDL_DOSVesaDirectGetGeneration(),
++                         bank, *current_bank, (unsigned long)win_func_ptr,
++                         win_func_ptr ? "rmproc-farcall" : "int10-4F05");
++    }
+     if (win_func_ptr) {
+         regs.x.cs = (Uint16)(win_func_ptr >> 16);
+         regs.x.ip = (Uint16)(win_func_ptr & 0xFFFF);
+@@ -1018,6 +1064,11 @@ SDL_FORCE_INLINE void SwitchBank(int bank, int *current_bank, Uint32 win_func_pt
+         regs.x.ax = 0x4F05;
+         __dpmi_int(0x10, &regs);
+     }
++    if (_p121) {
++        doskutsu_dbg_log("present-probe[ts=%lu gen=%lu]: switchbank EXIT  ok=1 bank=%d",
++                         (unsigned long)SDL_GetTicks(),
++                         (unsigned long)SDL_DOSVesaDirectGetGeneration(), bank);
++    }
+     *current_bank = bank;
+     // DOSKUTSU patch 0027 (wave 16 banked-flush audit): count actual
+     // BIOS-issued bank switches. Per-flush deltas are computed in
+@@ -1585,8 +1636,28 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                                                    fb_state.vram_w,
+                                                    fb_state.vram_h)) {
+                     // Contiguous: stream the entire framebuffer through banks.
++                    // DOSKUTSU patch 0121: bracket the slow-path (Cell B,
++                    // DIRECT_VESA=0) banked copy. Pairs with nx/0271's "ENTER
++                    // sdl-full"; the SwitchBank breadcrumb fires inside. Both A/B
++                    // cells thus converge on the same SwitchBank far-call straddle.
++                    const int _p121_uw = _orgcache_probe_active();
++                    if (_p121_uw) {
++                        doskutsu_dbg_log("present-probe[ts=%lu gen=%lu]: uwfb-banked-copy "
++                                         "ENTER fb_size=%lu gran=%lu wsize=%lu wfunc=0x%08lx",
++                                         (unsigned long)SDL_GetTicks(),
++                                         (unsigned long)SDL_DOSVesaDirectGetGeneration(),
++                                         (unsigned long)fb_state.fb_size,
++                                         (unsigned long)gran, (unsigned long)wsize,
++                                         (unsigned long)wfunc);
++                    }
+                     BankedDosmemput(pixels, fb_state.fb_size, 0,
+                                     gran, wsize, wbase, wfunc, &current_bank);
++                    if (_p121_uw) {
++                        doskutsu_dbg_log("present-probe[ts=%lu gen=%lu]: uwfb-banked-copy "
++                                         "EXIT  ok=1",
++                                         (unsigned long)SDL_GetTicks(),
++                                         (unsigned long)SDL_DOSVesaDirectGetGeneration());
++                    }
+                 } else {
+                     // Per-rect with bank switching.
+                     for (int i = 0; i < numrects; i++) {
+@@ -2529,6 +2600,16 @@ bool SDL_DOSVesaDirectGetState(SDL_DOSVesaDirectState *out)
+     const Uint64 _instr_t_entry =
+         _instr_enabled_cached ? SDL_GetTicksNS() : 0;
+ 
++    // DOSKUTSU patch 0121: low-suspicion entry breadcrumb (GetState is a cheap
++    // snapshot of already-populated fb_state -- no VBE/LFB HW op here; the VBE
++    // bootstrap runs at mode-set, not from this path). ENTER-only: the next
++    // present-probe line (dv-presentfull-hw / uwfb-banked-copy) proves it returned.
++    if (_orgcache_probe_active()) {
++        doskutsu_dbg_log("present-probe[ts=%lu gen=%lu]: dv-getstate ENTER",
++                         (unsigned long)SDL_GetTicks(),
++                         (unsigned long)SDL_DOSVesaDirectGetGeneration());
++    }
++
+     if (!out) {
+         _instr_record_dv_phase(_instr_dv_get_state_samples,
+                                &_instr_dv_get_state_n,
+@@ -2678,7 +2759,22 @@ void SDL_DOSVesaDirectProgramPalette(const SDL_Palette *palette)
+     // const-correctness on the public API is just hygiene for callers
+     // who hold a const palette pointer (e.g. from SDL_GetSurfacePalette
+     // when iterating).
++    // DOSKUTSU patch 0121: low-suspicion DAC-write straddle. Bounded 256-entry
++    // write to ports 0x3C8/0x3C9 (ProgramVGADAC); no poll, and SDL/0116 already
++    // bounds any vblank wait -- so unlikely to be the wedge, but bracketed so the
++    // log positively rules it in/out.
++    const int _p121_pp = _orgcache_probe_active();
++    if (_p121_pp) {
++        doskutsu_dbg_log("present-probe[ts=%lu gen=%lu]: palette-program ENTER",
++                         (unsigned long)SDL_GetTicks(),
++                         (unsigned long)SDL_DOSVesaDirectGetGeneration());
++    }
+     ProgramVGADAC((SDL_Palette *)palette);
++    if (_p121_pp) {
++        doskutsu_dbg_log("present-probe[ts=%lu gen=%lu]: palette-program EXIT  ok=1",
++                         (unsigned long)SDL_GetTicks(),
++                         (unsigned long)SDL_DOSVesaDirectGetGeneration());
++    }
+     _instr_record_dv_phase(_instr_dv_palette_samples,
+                            &_instr_dv_palette_n,
+                            &_instr_dv_palette_calls_block,
+@@ -2786,6 +2882,22 @@ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+     }
+ 
+     // Not engaged: legacy copy-present (byte-identical to pre-0061).
++    // DOSKUTSU patch 0121: bracket the DV present dispatch (Cell A, DIRECT_VESA=1).
++    // Pairs with nx/0271's "ENTER dv-presentfull" -- the SwitchBank breadcrumb
++    // fires INSIDE the banked branch below. sub=lfb-memcpy / banked-multibank /
++    // single-dosmemput names which HW write path this present took.
++    const int _p121_pf = _orgcache_probe_active();
++    if (_p121_pf) {
++        doskutsu_dbg_log("present-probe[ts=%lu gen=%lu]: dv-presentfull-hw ENTER "
++                         "sub=%s fb_size=%lu page_off=0x%08lx",
++                         (unsigned long)SDL_GetTicks(),
++                         (unsigned long)SDL_DOSVesaDirectGetGeneration(),
++                         !st->use_dosmemput ? "lfb-memcpy"
++                             : (st->banked_multibank ? "banked-multibank"
++                                                     : "single-dosmemput"),
++                         (unsigned long)st->fb_size,
++                         (unsigned long)st->page_offset);
++    }
+     if (!st->use_dosmemput) {
+         if (!st->vram_ptr) {
+             _instr_record_dv_present_at_exit(_instr_t_entry);
+@@ -2800,6 +2912,11 @@ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+     } else {
+         dosmemput(pixels, st->fb_size, st->vram_phys + st->page_offset);
+     }
++    if (_p121_pf) {
++        doskutsu_dbg_log("present-probe[ts=%lu gen=%lu]: dv-presentfull-hw EXIT  ok=1",
++                         (unsigned long)SDL_GetTicks(),
++                         (unsigned long)SDL_DOSVesaDirectGetGeneration());
++    }
+ 
+     _instr_record_dv_present_at_exit(_instr_t_entry);
+     return true;
