@@ -245,23 +245,32 @@ enum { MUS_PCM = 0, MUS_OPL3, MUS_WB, MUS_OPL2, MUS_GUS };
 #define GUS_TONE_LEN    22050         /* 441 whole cycles -> exactly 1.0 s, clean */
 
 /* T90 (task #4, v1.6.3): the GUS music test plays a real TUNE -- curly.mid's
- * melody line rendered to a native-22050 U8 PCM buffer and played as ONE
+ * LEAD MELODY line rendered to a native-22050 U8 PCM buffer and played as ONE
  * gus_play_pcm8 one-shot. This stays strictly inside the rc7-confirmed audible
  * envelope (see play_gus_tone): the SAME soft/centered REAL waveform, the SAME
  * native 22050 rate, the SAME single one-shot -- the melody lives in the PCM
  * DATA (the pitch varies sample-to-sample), NOT in voice control, so none of the
  * rc5/rc6 silence killers (0xFF/0x00 square bytes / non-native SetVoiceFreq
  * retune / StopVoice->StartVoice per-note retrigger / loop) are ever touched.
- * Monophonic first version: the sounding pitch is the highest held non-
- * percussion note (melody = top voice); polyphony is a later refinement. Falls
- * back to the rc7 single sine tone (play_gus_tone) when curly.mid is absent or
- * yields too few notes, so a data-less GUS box is never silent. */
+ *
+ * Melody-CHANNEL pick (host-validated on curly.mid): an across-all-channel
+ * top-note pick rendered from t=0 catches only the intro VAMP (curly's real
+ * lead melody sits on a channel that ENTERS ~13.6 s in, after the vamp) and
+ * reads as an oscillating drone. Instead we capture the whole song, pick the
+ * single smoothest-moving voice in the singable register (>= middle C, moving
+ * not a held pad, dense enough), and render a ~5 s slice starting at THAT
+ * channel's first note -- so the operator hears the actual hummable theme, not
+ * the intro. Monophonic (top-of-channel); polyphony is a later refinement.
+ * Fallback chain (never silent): no clear lead channel -> all-channel top-note
+ * from song start -> too few notes / no curly.mid -> the rc7 single sine tone. */
 #define GUS_MEL_RATE    22050              /* native GF1 playback rate (no retune)   */
-#define GUS_MEL_SECS    5                  /* preview cap (4-6 s window)             */
+#define GUS_MEL_SECS    5                  /* preview slice length (4-6 s window)    */
 #define GUS_MEL_LEN     (GUS_MEL_RATE * GUS_MEL_SECS) /* 110250 samples (~110 KB)    */
 #define GUS_MEL_STEP_MS 4                  /* virtual-clock step for offline capture */
-#define GUS_MEL_MAXEV   2048               /* captured note-event cap                */
-#define GUS_MEL_MINEV   8                  /* < this -> fall back to the sine tone   */
+#define GUS_MEL_CAPMS   30000              /* whole-song capture cap (melody may enter late) */
+#define GUS_MEL_MAXEV   4096               /* captured note-event cap (curly ~1200/30s) */
+#define GUS_MEL_MINEV   8                  /* < this total -> fall back to sine tone  */
+#define GUS_MEL_MINPITCH 60                /* lead must sit >= middle C (exclude bass) */
 #define GUS_MEL_AMP     110               /* S8 peak (soft/centered, like rc7 tone)  */
 #define GUS_MEL_RAMP    110               /* ~5 ms attack/release ramp (click guard) */
 
@@ -1432,49 +1441,55 @@ static Uint8       g_mel_pcm[GUS_MEL_LEN];  /* rendered melody (U8, GF1 DAC), BS
 static signed char g_sinlut[256];           /* one sine cycle, +/-GUS_MEL_AMP (S8) */
 static int         g_sinlut_ready = 0;
 
-/* Captured monophonic note timeline. The offline SMF capture dispatches events
- * in ascending time order, so this array is already time-sorted. */
-typedef struct { Uint32 t_ms; int on; int note; } gus_mel_ev;
+/* Captured note timeline (channel-tagged). The offline SMF capture dispatches
+ * events in ascending time order, so this array is already time-sorted. */
+typedef struct { Uint32 t_ms; int ch; int on; int note; } gus_mel_ev;
 static gus_mel_ev  g_mel_ev[GUS_MEL_MAXEV];
 static int         g_mel_nev = 0;
 static Uint32      g_mel_now = 0;            /* virtual clock the capture sink stamps */
 
-static void mel_push(int on, int note)
+static void mel_push(int ch, int on, int note)
 {
   if (g_mel_nev >= GUS_MEL_MAXEV) return;
   g_mel_ev[g_mel_nev].t_ms = g_mel_now;
+  g_mel_ev[g_mel_nev].ch   = ch;
   g_mel_ev[g_mel_nev].on   = on;
   g_mel_ev[g_mel_nev].note = note;
   g_mel_nev++;
 }
 /* cs_smf capture sink: RECORD ONLY -- no GF1 access (the render is offline).
- * Skip channel 10 (0-based index 9) percussion: it is non-melodic and would
- * corrupt the top-note pick. A note_on with velocity 0 is a note_off (running-
- * status convention), so it collapses to an off event. */
+ * Skip channel 10 (0-based index 9) percussion: it is non-melodic and must never
+ * be chosen as the lead or bleed into the top-note fallback. A note_on with
+ * velocity 0 is a note_off (running-status convention), so it collapses to an
+ * off event. */
 static void mel_cb_on(void *u, int ch, int note, int vel)
 {
   (void)u;
   if (ch == 9 || note < 0 || note > 127) return;
-  mel_push(vel > 0 ? 1 : 0, note);
+  mel_push(ch, vel > 0 ? 1 : 0, note);
 }
 static void mel_cb_off(void *u, int ch, int note, int vel)
 {
   (void)u; (void)vel;
   if (ch == 9 || note < 0 || note > 127) return;
-  mel_push(0, note);
+  mel_push(ch, 0, note);
 }
 
-/* Render curly.mid's monophonic top-note melody into g_mel_pcm. Returns the
- * sample count (0 = unavailable / too few notes -> caller falls back to the rc7
- * sine tone). All hot-loop math is integer (256-entry sine LUT + 16.16 fixed-
- * point phase + integer envelope), so the one-time render is a fraction of a
- * second even on the POD-83 SETUP runs on (no per-sample libm call). */
+/* Render curly.mid's lead melody into g_mel_pcm. Returns the sample count (0 =
+ * unavailable / too few notes -> caller falls back to the rc7 sine tone). All
+ * hot-loop math is integer (256-entry sine LUT + 16.16 fixed-point phase +
+ * integer envelope), so the one-time render is a fraction of a second even on
+ * the POD-83 SETUP runs on (no per-sample libm call). */
 static Uint32 gus_render_melody(void)
 {
   cs_smf_sink sink;
-  Uint32 win_ms, t, pos, phase, phase_inc;
-  int    i, ev, held, top, prev_top, amp, amp_t;
+  Uint32 t, pos, phase, phase_inc, start_ms;
+  int    i, ev, held, top, prev_top, amp, amp_t, mel_ch;
   int    active[128];
+  int    cnt[16], last[16];
+  long   pmoves[16];
+  double psum[16];
+  Uint32 first[16];
 
   if (!g_title_smf) return 0;
 
@@ -1486,9 +1501,8 @@ static Uint32 gus_render_melody(void)
     g_sinlut_ready = 1;
   }
 
-  /* 1. Offline capture: step a virtual clock; the sink records note on/off with
-   *    timestamps. No GF1 access here. cs_smf loops at end-of-song, so a song
-   *    shorter than the window simply repeats to fill it. */
+  /* 1. Offline capture of the WHOLE song (cap GUS_MEL_CAPMS) -- channel-tagged,
+   *    no GF1 access. cs_smf loops at end-of-song; the cap bounds a long song. */
   g_mel_nev = 0;
   sink.note_on        = mel_cb_on;
   sink.note_off       = mel_cb_off;
@@ -1498,35 +1512,93 @@ static Uint32 gus_render_melody(void)
   sink.user           = NULL;
   cs_smf_set_sink(g_title_smf, &sink);
   cs_smf_start(g_title_smf, 0);
-  win_ms = (Uint32)(((Uint64)GUS_MEL_LEN * 1000) / GUS_MEL_RATE);
-  for (t = 0; t <= win_ms; t += GUS_MEL_STEP_MS)
+  for (t = 0; t <= GUS_MEL_CAPMS; t += GUS_MEL_STEP_MS)
   {
     g_mel_now = t;
     cs_smf_tick(g_title_smf, t);
     if (g_mel_nev >= GUS_MEL_MAXEV) break;
   }
-  trace("gus melody: captured %d note events over %lu ms (min=%d to accept)",
-        g_mel_nev, (unsigned long)win_ms, GUS_MEL_MINEV);
+  trace("gus melody: captured %d note events (cap %d ms; min=%d to accept)",
+        g_mel_nev, GUS_MEL_CAPMS, GUS_MEL_MINEV);
   if (g_mel_nev < GUS_MEL_MINEV) return 0;
 
-  /* 2. Walk the timeline sample-by-sample; the sounding pitch is the highest
-   *    held note (melody = top voice). Phase-CONTINUOUS oscillator + a short
-   *    linear attack/release envelope (amp ramps toward full while a note sounds,
-   *    toward 0 in the gaps) removes the note-boundary clicks. The 128-entry top
-   *    scan runs only when an event changes the active set, not per sample. */
+  /* 2. Per-channel stats -> lead-channel pick: the smoothest-moving voice in the
+   *    singable register (>= middle C), moving (avg step >= 1, not a held pad),
+   *    dense enough (>= GUS_MEL_MINEV notes). Locks onto ONE coherent line so a
+   *    late-entering melody is not missed by a from-t=0 across-channel top-note. */
+  for (i = 0; i < 16; ++i) { cnt[i] = 0; pmoves[i] = 0; psum[i] = 0.0; last[i] = -1; first[i] = 0xFFFFFFFFu; }
+  for (ev = 0; ev < g_mel_nev; ++ev)
+  {
+    int c = g_mel_ev[ev].ch, n = g_mel_ev[ev].note;
+    if (!g_mel_ev[ev].on) continue;
+    cnt[c]++; psum[c] += (double)n;
+    if (last[c] >= 0) { int d = n - last[c]; pmoves[c] += (d < 0 ? -d : d); }
+    last[c] = n;
+    if (g_mel_ev[ev].t_ms < first[c]) first[c] = g_mel_ev[ev].t_ms;
+  }
+  mel_ch = -1;
+  {
+    double best = 1.0e9;
+    for (i = 0; i < 16; ++i)
+    {
+      double avgp, avgm;
+      if (cnt[i] < GUS_MEL_MINEV) continue;
+      avgp = psum[i] / cnt[i];
+      if (avgp < GUS_MEL_MINPITCH) continue;      /* bass / low pad -- not the lead */
+      avgm = (cnt[i] > 1) ? (double)pmoves[i] / (cnt[i] - 1) : 0.0;
+      if (avgm < 1.0) continue;                   /* held drone/pad -- not a melody */
+      if (avgm < best) { best = avgm; mel_ch = i; }
+    }
+  }
+
+  /* 3. Render start + source. Lead channel found -> start at ITS first note (skip
+   *    the intro) and render only that channel. Else -> all-channel top-note from
+   *    song start (the previous behavior, kept as the graceful fallback). */
+  if (mel_ch >= 0)
+  {
+    start_ms = first[mel_ch];
+    trace("gus melody: lead=ch%d (%d notes, avgpitch=%d, enters @%lums) -> slice from there",
+          mel_ch, cnt[mel_ch], (int)(psum[mel_ch] / cnt[mel_ch]), (unsigned long)start_ms);
+  }
+  else
+  {
+    start_ms = 0;
+    trace("gus melody: no clear lead channel -> all-channel top-note from song start");
+  }
+
+  /* 4. Slice render: monophonic top-of-source, phase-CONTINUOUS oscillator + a
+   *    short linear attack/release envelope (click guard). The 128-entry top scan
+   *    runs only when an event changes the active set, not per sample. */
   for (i = 0; i < 128; ++i) active[i] = 0;
   held = 0; ev = 0; top = -1; prev_top = -2;
   phase = 0; phase_inc = 0; amp = 0;
+  /* pre-roll: fold in source-channel events before the slice start so any note
+   * already sounding at start_ms is active (strict < ; events AT start_ms are
+   * consumed by the main loop's first iteration). */
+  while (ev < g_mel_nev && g_mel_ev[ev].t_ms < start_ms)
+  {
+    int c = g_mel_ev[ev].ch, n = g_mel_ev[ev].note;
+    if (mel_ch < 0 || c == mel_ch)
+    {
+      if (g_mel_ev[ev].on) { if (active[n]++ == 0) ++held; }
+      else                 { if (active[n] > 0 && --active[n] == 0) --held; }
+    }
+    ++ev;
+  }
   for (pos = 0; pos < GUS_MEL_LEN; ++pos)
   {
-    Uint32 now_ms = (Uint32)(((Uint64)pos * 1000) / GUS_MEL_RATE);
+    Uint32 now_ms = start_ms + (Uint32)(((Uint64)pos * 1000) / GUS_MEL_RATE);
     int    changed = 0, s8, idx;
     while (ev < g_mel_nev && g_mel_ev[ev].t_ms <= now_ms)
     {
-      int n = g_mel_ev[ev].note;
-      if (g_mel_ev[ev].on) { if (active[n]++ == 0) ++held; }
-      else                 { if (active[n] > 0 && --active[n] == 0) --held; }
-      ++ev; changed = 1;
+      int c = g_mel_ev[ev].ch, n = g_mel_ev[ev].note;
+      if (mel_ch < 0 || c == mel_ch)
+      {
+        if (g_mel_ev[ev].on) { if (active[n]++ == 0) ++held; }
+        else                 { if (active[n] > 0 && --active[n] == 0) --held; }
+        changed = 1;
+      }
+      ++ev;
     }
     if (changed)
     {
@@ -1577,7 +1649,7 @@ static int play_gus_melody(void)
     play_gus_tone();
     return 0;
   }
-  trace("gus melody: ENTER real curly.mid melody len=%lu @%dHz (top-note mono, single one-shot)",
+  trace("gus melody: ENTER real curly.mid melody len=%lu @%dHz (lead-channel mono, single one-shot)",
         (unsigned long)n, GUS_MEL_RATE);
   gus_play_pcm8(g_mel_pcm, n, GUS_MEL_RATE, GUS_MEL_SECS * 1000);
   trace("gus melody: DONE (real tune played)");
