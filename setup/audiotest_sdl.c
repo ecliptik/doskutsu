@@ -962,6 +962,19 @@ static int device_open(void)
 static void device_close(void)
 {
   trace("device_close: begin (opl3=%d opl2=%d wb=%d gus=%d)", g_opl3_ok, g_opl2_ok, g_wb_ok, g_gus_ok);
+  /* v1.6.3 task #2 (sdl-eng diagnosis, co-signed): hard-silence the SB16 ring +
+   * physical DMA double-buffer BEFORE MIX_DestroyMixer tears the device down.
+   * The mixer teardown (StopAllTracks -> stream destroy -> audio-thread join)
+   * runs while the autoinit DMA is still live but the pump has stopped, so the
+   * physical buffer would otherwise loop its last non-silent fragment (SFX tail /
+   * PCM tone) until CloseDevice issues the DSP RESET -- the PicoGUS-SB /mode sb
+   * screech. Same protection the game runs at load_stage entry
+   * (SDL_DOSAudioFlushRingSilence, SDL/0092+0120). Self-guards to a no-op on the
+   * GUS/OPL2 paths (no SB device open -> returns 0). */
+  {
+    int flushed = SDL_DOSAudioFlushRingSilence();
+    trace("device_close: SB ring+DMA silence flush (frames=%d)", flushed);
+  }
   if (g_opl3_ok) { SDL_DOSOpl3VoiceNoteOff(OPL3_VOICE); SDL_DOSOpl3Shutdown(); g_opl3_ok = 0; }
   /* T80: OPL2 (AdLib) path -- all-notes-off + 0xBD clear + SDL_DOSOpl2Shutdown.
    * The mixer/track/audio handles below are all NULL on this path (never
