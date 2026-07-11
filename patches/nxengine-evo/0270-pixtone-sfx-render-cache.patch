@@ -1,0 +1,525 @@
+From 936cf868da21acb90c77bc549133451a27c8f44b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 10 Jul 2026 17:51:18 -0700
+Subject: [PATCH] patch 0270 -- #3: cache the Pixtone SFX render output (skip
+ the ~51s boot synth)
+
+On a Pentium-class DOS box, Pixtone::init() (SB16/OPL3/organya DAC) and
+Pixtone::initGusSfx() (GF1) each synthesise all 0x75 (117) fxNN.pxt from
+scratch at boot via stPXSound::render() -- the per-sample wavetable synth.
+That is ~51 s of pure CPU, paid on EVERY launch and identical across all
+audio backends (both init paths run the same render()). The operator quits
+thinking the game hung.
+
+The organya PCM cache (patch 0215 / ORG_AUTOCACHE) already solves this shape
+for music -- render once, persist, load next boot -- but it is organya-only;
+Pixtone was never cached. This caches the render() OUTPUT
+(stPXSound::final_buffer, int8_t S8 mono @ 22050 Hz), which is
+TIER-INDEPENDENT and feeds BOTH backends (init() resamples it to the runtime
+S16 tier; initGusSfx() uploads it to GF1 DRAM). One tier-independent blob
+CACHE\PXT\PXTSFX.BIN {header magic 'PXC1' + build SHA12 + num_sounds; per-slot
+index; concatenated S8 PCM} thus skips the 51 s render on every backend and
+every tier, and is the smallest possible artifact.
+
+First launch renders every slot once + writes the blob (still ~51 s, once);
+subsequent launches load the blob and skip render entirely. Keyed to the full
+DOSKUTSU_BUILD_SHA12 in file CONTENT (a rebuild that changes the synth math or
+NUM_SOUNDS invalidates); like ORG_AUTOCACHE, a .pxt swap without a rebuild does
+not invalidate (accepted + documented). fopen is always "rb"/"wb" (DJGPP text
+mode would corrupt the binary PCM). Best-effort write: a full / read-only CF
+logs + removes any partial blob and re-renders next boot.
+
+Killswitch: default-ON; disabled only by the exact string
+SDL_HINT_DOSKUTSU_PXT_AUTOCACHE=0 (strict-killswitch idiom, mirrors
+ORG_AUTOCACHE / PIXTONE_IRQ_MIX). Off = byte-identical boot, just slow.
+
+The GF1 loop now consumes cached PCM via a non-owning stPXSound view, so its
+per-slot load()/RENDERSAFE-render-skip/render() steps + the fx6e/fx6d
+render/load heap breadcrumbs (patch 0257, triaging a now-FIXED crash) are gone;
+the UPLOAD-path crash guards (0242 pad / 0247 bracket / 0256 straddle) and
+render()'s own 0246 OOM-silence guard are preserved. The cache is built from a
+FULL render of every slot so a GUS-only first boot still produces a complete,
+reusable cache; the music-priority budget still governs GF1 uploads.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp | 412 +++++++++++++++++++++++++++++++++---------
+ 1 file changed, 322 insertions(+), 90 deletions(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 382e1777..0f8fc0df 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -48,6 +48,7 @@ extern "C" {
+ #include <functional>
+ #include <iomanip>
+ #include <sstream>
++#include <sys/stat.h>  // patch 0270 (#3): mkdir for the PXT SFX render cache dir
+ #include <vector>
+ 
+ // using std::fgetc;
+@@ -449,6 +450,268 @@ void stPXChannel::synth()
+   }
+ }
+ 
++// ---------------------------------------------------------------------------
++// DOS-PORT (patch 0270, #3 -- v1.6.3): Pixtone SFX render-output disk cache.
++//
++// Both Pixtone::init() (SB16/OPL3/organya DAC path) and Pixtone::initGusSfx()
++// (GF1 path) synthesise every fxNN.pxt from scratch at boot via stPXSound::
++// render() -- the per-sample wavetable synth. Across the 0x75 (117) SFX that is
++// ~51 s of pure CPU on a Pentium-class box, paid on EVERY launch and IDENTICAL
++// across all audio backends (both init paths run the same render()).
++//
++// This is the shape the organya PCM cache (patch 0215 / ORG_AUTOCACHE) already
++// solves for music: render once on first launch, persist to disk, load the
++// cache on subsequent boots. That cache is organya-only; Pixtone was never
++// cached (hence the 51 s). This patch caches the render() OUTPUT --
++// stPXSound::final_buffer (int8_t, S8 mono @ 22050 Hz, final_size bytes). That
++// artifact is TIER-INDEPENDENT (always S8/mono/22050; init() resamples it to
++// the runtime S16 tier, initGusSfx() uploads it to GF1 DRAM), so ONE cache
++// skips the render on every backend and every tier -- and it is the smallest
++// possible artifact (8-bit mono, single copy, not one-per-tier).
++//
++// Blob: CACHE\PXT\PXTSFX.BIN =
++//   PxtCacheHeader { magic 'PXC1', build DOSKUTSU_BUILD_SHA12, num_sounds }
++//   + num_sounds x PxtCacheIndex { present, size }        (slot i = entry i-1)
++//   + concatenated S8 PCM for every present slot, `size` bytes each, in order.
++// A single blob (not one file per slot) keeps the CF FAT directory to one
++// entry. The version key is the FULL build SHA in the file CONTENT -- a rebuild
++// (which may change the synth math or NUM_SOUNDS) invalidates the cache; like
++// ORG_AUTOCACHE, swapping the .pxt data WITHOUT a rebuild will not invalidate
++// (accepted + documented). fopen is always "rb"/"wb" (DJGPP text mode would
++// corrupt the binary PCM).
++//
++// Killswitch: default-ON, disabled only by the exact string
++// SDL_HINT_DOSKUTSU_PXT_AUTOCACHE=0 (strict-killswitch idiom, mirrors
++// ORG_AUTOCACHE / PIXTONE_IRQ_MIX). With it off the slots render as before and
++// NO cache is read or written (byte-identical boot, just slow).
++// ---------------------------------------------------------------------------
++extern "C" bool io_audit_enabled(void);
++extern "C" void io_audit_emit(const char *op, const char *path, long bytes,
++                              unsigned long long usec);
++
++#define _DOSKUTSU_PXTCACHE_STRINGIFY(x) #x
++#define _DOSKUTSU_PXTCACHE_STR(x) _DOSKUTSU_PXTCACHE_STRINGIFY(x)
++#ifndef DOSKUTSU_BUILD_SHA12
++#define DOSKUTSU_BUILD_SHA12 UNKNOWN_____
++#endif
++
++struct PxtCacheHeader
++{
++  char     magic[4];    // 'P','X','C','1'
++  char     build[16];   // DOSKUTSU_BUILD_SHA12 (12 chars + nul pad)
++  uint32_t num_sounds;  // NUM_SOUNDS at build time
++  uint32_t reserved;    // 0 (future use)
++};
++
++struct PxtCacheIndex
++{
++  uint32_t present;     // 0/1 -- slot has a .pxt (matches a successful load())
++  uint32_t size;        // final_size bytes for this slot (0 when absent)
++};
++
++struct PxtCacheSlot
++{
++  bool                present = false;
++  std::vector<int8_t> pcm;  // render() final_buffer: S8 mono @ 22050, final_size bytes
++};
++
++enum class PxtCacheResult { Disabled, Hit, Built, BuildWriteFailed };
++
++// Strict-killswitch: default ON; only the exact "0" disables. Sentinel-cached.
++static bool _pxt_autocache_enabled(void)
++{
++  static int decided = -1;
++  if (decided < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_PXT_AUTOCACHE");
++    decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++  }
++  return decided != 0;
++}
++
++static std::string _pxt_cache_base_dir(void)
++{
++  return ResourceManager::getInstance()->getBasePath() + "CACHE";
++}
++static std::string _pxt_cache_dir(void)
++{
++  return _pxt_cache_base_dir() + "/PXT";
++}
++static std::string _pxt_cache_file(void)
++{
++  return _pxt_cache_dir() + "/PXTSFX.BIN";  // 8.3-safe
++}
++
++// Render ONE slot's fxNN.pxt to its S8 final_buffer. Returns false if the .pxt
++// is absent (mirrors load()==false -> "slot has no SFX"). On success `out`
++// holds the render() output; the transient stPXSound is freed here.
++static bool _pxt_render_slot(uint32_t slot, std::vector<int8_t> &out)
++{
++  std::string path = ResourceManager::getInstance()->getPathForDir("pxt/");
++  std::ostringstream fn;
++  fn << path << "fx" << std::hex << std::setw(2) << std::setfill('0') << slot << ".pxt";
++  stPXSound snd;
++  if (!snd.load(fn.str()))
++    return false;
++  snd.render();  // -> final_buffer: S8 mono @ 22050 (0246 OOM guard -> silence)
++  if (snd.final_buffer && snd.final_size > 0)
++    out.assign(snd.final_buffer, snd.final_buffer + snd.final_size);
++  else
++    out.clear();
++  snd.freeBuf();
++  return true;
++}
++
++// Try to load the cache blob into `slots` (sized num_sounds+1, slot-indexed).
++// Returns true only on a fully-validated hit; on any miss/mismatch/short-read
++// `slots` is reset so the caller renders + rebuilds.
++static bool _pxt_cache_try_load(uint32_t num_sounds, std::vector<PxtCacheSlot> &slots)
++{
++  const bool   _ioa = io_audit_enabled();
++  const Uint64 _t0  = _ioa ? SDL_GetTicksNS() : 0;
++  FILE *fp = fopen(_pxt_cache_file().c_str(), "rb");
++  if (!fp)
++    return false;
++
++  PxtCacheHeader h;
++  bool ok = (fread(&h, 1, sizeof h, fp) == sizeof h)
++            && h.magic[0] == 'P' && h.magic[1] == 'X'
++            && h.magic[2] == 'C' && h.magic[3] == '1'
++            && strncmp(h.build, _DOSKUTSU_PXTCACHE_STR(DOSKUTSU_BUILD_SHA12),
++                       sizeof h.build) == 0
++            && h.num_sounds == num_sounds;
++
++  std::vector<PxtCacheIndex> idx;
++  if (ok)
++  {
++    idx.resize(num_sounds);
++    ok = (fread(idx.data(), sizeof(PxtCacheIndex), num_sounds, fp) == num_sounds);
++  }
++
++  long total = 0;
++  if (ok)
++  {
++    for (uint32_t i = 0; i < num_sounds && ok; ++i)
++    {
++      if (!idx[i].present)
++        continue;
++      const uint32_t s = i + 1;
++      slots[s].present = true;
++      slots[s].pcm.resize(idx[i].size);
++      if (idx[i].size)
++      {
++        ok = (fread(slots[s].pcm.data(), 1, idx[i].size, fp) == idx[i].size);
++        total += (long)idx[i].size;
++      }
++    }
++  }
++  fclose(fp);
++
++  if (!ok)
++    slots.assign(num_sounds + 1, PxtCacheSlot());  // corrupt/stale -> discard
++
++  if (_ioa)
++    io_audit_emit("pxt_sfx_cache", _pxt_cache_file().c_str(),
++                  ok ? total : 0,
++                  (unsigned long long)((SDL_GetTicksNS() - _t0) / 1000ull));
++  return ok;
++}
++
++// Persist `slots` to the blob. Best-effort: a write failure (full / read-only
++// CF) removes any partial file + returns false; the in-RAM slots still serve
++// this boot (just uncached next boot).
++static bool _pxt_cache_write(uint32_t num_sounds, const std::vector<PxtCacheSlot> &slots)
++{
++  mkdir(_pxt_cache_base_dir().c_str(), 0777);  // best-effort; EEXIST is fine
++  mkdir(_pxt_cache_dir().c_str(), 0777);
++  FILE *fp = fopen(_pxt_cache_file().c_str(), "wb");
++  if (!fp)
++  {
++    LOG_WARN("[pxt-cache] could not open {} for write; SFX will re-render next "
++             "boot.", _pxt_cache_file());
++    return false;
++  }
++
++  PxtCacheHeader h;
++  memset(&h, 0, sizeof h);
++  h.magic[0] = 'P'; h.magic[1] = 'X'; h.magic[2] = 'C'; h.magic[3] = '1';
++  snprintf(h.build, sizeof h.build, "%s",
++           _DOSKUTSU_PXTCACHE_STR(DOSKUTSU_BUILD_SHA12));
++  h.num_sounds = num_sounds;
++  h.reserved   = 0;
++
++  bool ok = (fwrite(&h, 1, sizeof h, fp) == sizeof h);
++
++  std::vector<PxtCacheIndex> idx(num_sounds);
++  for (uint32_t i = 0; i < num_sounds; ++i)
++  {
++    const uint32_t s = i + 1;
++    idx[i].present = slots[s].present ? 1u : 0u;
++    idx[i].size    = slots[s].present ? (uint32_t)slots[s].pcm.size() : 0u;
++  }
++  ok = ok && (fwrite(idx.data(), sizeof(PxtCacheIndex), num_sounds, fp) == num_sounds);
++
++  long total = 0;
++  for (uint32_t i = 0; i < num_sounds && ok; ++i)
++  {
++    const uint32_t s = i + 1;
++    if (idx[i].present && idx[i].size)
++    {
++      ok = (fwrite(slots[s].pcm.data(), 1, idx[i].size, fp) == idx[i].size);
++      total += (long)idx[i].size;
++    }
++  }
++  fclose(fp);
++
++  if (!ok)
++  {
++    remove(_pxt_cache_file().c_str());  // don't leave a truncated blob to load
++    LOG_WARN("[pxt-cache] write failed/short -> removed partial {}.",
++             _pxt_cache_file());
++    return false;
++  }
++  LOG_INFO("[pxt-cache] wrote cache: {} bytes PCM across {} slots -> {} "
++           "(CF footprint).", total, (int)num_sounds, _pxt_cache_file());
++  return ok;
++}
++
++// Load the SFX render cache if valid, else render every slot once + write it.
++// Fills `slots` (slot-indexed, 1..num_sounds). Single point both init() and
++// initGusSfx() call before their per-slot consume loops.
++static PxtCacheResult _pxt_load_or_build_cache(uint32_t num_sounds,
++                                               std::vector<PxtCacheSlot> &slots)
++{
++  slots.assign(num_sounds + 1, PxtCacheSlot());
++
++  const bool use_cache = _pxt_autocache_enabled();
++  if (use_cache && _pxt_cache_try_load(num_sounds, slots))
++    return PxtCacheResult::Hit;
++
++  // Miss (or disabled): render every present slot once. Only one slot's synth
++  // buffers are resident at a time (freed inside _pxt_render_slot); the S8 PCM
++  // accumulates in `slots` (~1-2 MB total for the full set).
++  for (uint32_t s = 1; s <= num_sounds; ++s)
++    slots[s].present = _pxt_render_slot(s, slots[s].pcm);
++
++  if (!use_cache)
++    return PxtCacheResult::Disabled;
++
++  return _pxt_cache_write(num_sounds, slots) ? PxtCacheResult::Built
++                                             : PxtCacheResult::BuildWriteFailed;
++}
++
++static const char *_pxt_cache_result_str(PxtCacheResult r)
++{
++  switch (r)
++  {
++    case PxtCacheResult::Hit:              return "HIT (loaded cache; render skipped)";
++    case PxtCacheResult::Built:            return "BUILT (rendered once + wrote cache)";
++    case PxtCacheResult::BuildWriteFailed: return "BUILT (rendered; cache WRITE FAILED)";
++    case PxtCacheResult::Disabled:         return "DISABLED (killswitch; rendered, no cache)";
++  }
++  return "?";
++}
++
+ Pixtone::Pixtone() {}
+ Pixtone::~Pixtone() {}
+ 
+@@ -501,20 +764,30 @@ bool Pixtone::init()
+ 
+   LOG_INFO("Loading Sound FX...");
+ 
+-  std::string path = ResourceManager::getInstance()->getPathForDir("pxt/");
++  // patch 0270 (#3): consult the SFX render cache (see the PXT cache module
++  // above). On a hit this skips the ~51 s stPXSound::render() synth entirely;
++  // on a miss it renders every slot once + writes the cache for next boot.
++  std::vector<PxtCacheSlot> pxt_slots;
++  const PxtCacheResult pcr = _pxt_load_or_build_cache(NUM_SOUNDS, pxt_slots);
++  LOG_INFO("[pxt-cache] init(): {}", _pxt_cache_result_str(pcr));
++
+   for (slot = 1; slot <= NUM_SOUNDS; slot++)
+   {
+-    std::ostringstream filename;
+-    filename << path << "fx" << std::hex << std::setw(2) << std::setfill('0') << slot << ".pxt";
+-    stPXSound snd;
+-
+-    if (!snd.load(filename.str()))
++    if (!pxt_slots[slot].present || pxt_slots[slot].pcm.empty())
+       continue;
+-    snd.render();
+ 
+-    // upscale the sound to 16-bit for SDL_mixer then throw away the now unnecessary 8-bit data
++    // Non-owning stPXSound view over the cached S8 PCM so _prepareToPlay reads
++    // final_buffer/final_size exactly as it did off a fresh render(). The pcm
++    // vector owns the bytes (freed with pxt_slots at scope end); we MUST NOT
++    // freeBuf() this carrier. Value-init zeroes channels[].buffer so even an
++    // accidental freeBuf would be a no-op, and stPXSound has no destructor.
++    stPXSound snd{};
++    snd.final_buffer = pxt_slots[slot].pcm.data();
++    snd.final_size   = (uint32_t)pxt_slots[slot].pcm.size();
++
++    // upscale the sound to 16-bit for SDL_mixer (tier-scoped); the cached S8
++    // stays owned by pxt_slots.
+     _prepareToPlay(&snd, slot);
+-    snd.freeBuf();
+   }
+ 
+   sfxCallback = std::bind(&Pixtone::pxtSoundDone, this, std::placeholders::_1);
+@@ -666,95 +939,52 @@ bool Pixtone::initGusSfx()
+   // path -- co-located with the routing banner above -- regardless of when the
+   // first setVolume runs. First-call is the only call that logs (cached after).
+   (void)gus_sfx_gain_pct();
+-  std::string path = ResourceManager::getInstance()->getPathForDir("pxt/");
++  // patch 0270 (#3): the per-slot pxt filename is now built inside the cache
++  // module (_pxt_render_slot); the GF1 loop below consumes cached PCM, so the
++  // old local `path` here is gone.
+   int uploaded = 0, failed = 0, skipped = 0;
+   uint32_t sfx_used = 0;
++
++  // patch 0270 (#3): consult the SFX render cache BEFORE the upload loop so the
++  // GF1 path skips the ~51 s render() too (see the PXT cache module above). The
++  // cache is built from a FULL render of every slot (not the music-priority
++  // budget subset), so a GUS-only first boot still produces a complete,
++  // reusable cache; the per-slot budget cap below still governs what is
++  // UPLOADED to GF1 DRAM. NOTE: with the cache there is no per-slot render()
++  // inside this loop, so patch 0257's RENDERSAFE pre-render skip + the
++  // before-load / after-load / after-render heap breadcrumbs (which triaged the
++  // now-FIXED fx6e render/load crash) are gone; the UPLOAD-path crash guards
++  // (0242 pad / 0247 bracket / 0256 straddle) and render()'s own 0246 OOM guard
++  // (in _pxt_render_slot) are all preserved.
++  std::vector<PxtCacheSlot> pxt_slots;
++  const PxtCacheResult pcr = _pxt_load_or_build_cache(NUM_SOUNDS, pxt_slots);
++  LOG_INFO("[pxt-cache] initGusSfx(): {}", _pxt_cache_result_str(pcr));
++
+   for (uint32_t slot = 1; slot <= NUM_SOUNDS; slot++)
+   {
+-    // patch 0246 (#38): once the SFX bank has reached its budget, STOP -- don't
+-    // even load/render the remaining .pxt (they'd all be cap-skipped anyway).
+-    // Cuts the wasted synth work + middle_buffer allocations after the budget,
+-    // shrinking the host-memory-pressure window during the upload band.
++    // patch 0246 (#38): once the SFX bank has reached its budget, STOP -- the
++    // remaining slots would all be cap-skipped anyway.
+     if (sfx_used >= sfx_budget)
+     {
+       ++skipped;
+       continue;
+     }
+-    std::ostringstream filename;
+-    filename << path << "fx" << std::hex << std::setw(2) << std::setfill('0') << slot << ".pxt";
+-    stPXSound snd;
+-    // patch 0257 (#38 iter-2): per-substep instrumentation (GUS_DIAG-gated, init-
+-    // time, memory-only). Pre-0257 the FIRST per-slot line fired only AFTER render
+-    // + sign-flip, so a crash in load()/render() left NO log naming the slot (the
+-    // fx6e fault is exactly this case). These breadcrumbs -- before-load,
+-    // after-load, after-render -- flush per-line (patch 0036) so the LAST line on
+-    // disk after a quit-to-DOS names the exact crashing sub-step.
+-    if (_gusdiag)
+-    {
+-      // patch 0257 (#38 iter-2): host-heap-state at the BEFORE-load point. The
+-      // prior iteration's snd.freeBuf() already ran (loop tail), so this samples
+-      // the STEADY-STATE heap with no transient render buffers resident -- a
+-      // monotonic climb of uordblks (in-arena leak) or brk (sbrk growth) across
+-      // the ~109 slots toward fx6e is the heap-exhaustion/leak signature the lead
+-      // wants this swap to decide. mallinfo() is sampled BEFORE LOG_INFO formats
+-      // (whose own transient allocs are freed by the next slot's sample), so the
+-      // cross-slot delta is clean. The audit found NO live per-slot leak on the
+-      // gus path (initGusSfx never calls _prepareToPlay, so resampled[]/chunk/
+-      // raw_master_buf stay null; snd is a value re-freeBuf'd each iteration) --
+-      // so the expectation is a FLAT trace, which would REFUTE heap-exhaustion
+-      // and point the corruptor outside Pixtone (DPMI/CWSDPMI page commit, or a
+-      // non-Pixtone engine alloc). A climb would reveal a leak the audit missed.
+-#ifdef __DJGPP__
+-      struct mallinfo _mi  = mallinfo();
+-      const unsigned    _brk = (unsigned)(uintptr_t)sbrk(0);
+-      LOG_INFO("gus SFX diag: fx{:02x} (slot {}) BEFORE load '{}' [host-heap: "
+-               "uordblks={} fordblks={} arena={} brk=0x{:x}]...", slot, slot,
+-               filename.str(), _mi.uordblks, _mi.fordblks, _mi.arena, _brk);
+-#else
+-      LOG_INFO("gus SFX diag: fx{:02x} (slot {}) BEFORE load '{}'...", slot, slot,
+-               filename.str());
+-#endif
+-    }
+-    if (!snd.load(filename.str()))
+-      continue;
+-    if (_gusdiag)
+-      LOG_INFO("gus SFX diag: fx{:02x} load OK -- computing render budget...", slot);
+-
+-    // patch 0257 (#38 iter-2): RENDERSAFE pre-render budget skip. final_size after
+-    // render == max(enabled-channel nsamples, 64). Predict it from the just-loaded
+-    // nsamples (load() populated them) and skip render of any slot that cannot fit
+-    // the remaining music-priority budget. Same upload SELECTION as the post-render
+-    // cap below; only the doomed slot's render() is skipped. freeBuf() here is safe
+-    // (load set channels[].buffer = nullptr; render/allocBuf was never called).
+-    if (_rendersafe)
+-    {
+-      uint32_t _pred = 64u;  // allocBuf() topbufsize floor
+-      for (int ci = 0; ci < PXT_NO_CHANNELS; ++ci)
+-        if (snd.channels[ci].enabled && snd.channels[ci].nsamples > _pred)
+-          _pred = snd.channels[ci].nsamples;
+-      if (sfx_used + _pred > sfx_budget)
+-      {
+-        ++skipped;
+-        if (_gusdiag)
+-          LOG_INFO("gus SFX diag: fx{:02x} RENDERSAFE pre-render SKIP (pred_size={} "
+-                   "sfx_used={} budget={}); render NOT run.", slot, (unsigned)_pred,
+-                   (unsigned)sfx_used, (unsigned)sfx_budget);
+-        snd.freeBuf();
+-        continue;
+-      }
+-    }
+ 
+-    snd.render();  // -> final_buffer: 8-bit SIGNED mono @ 22050 Hz, final_size bytes
++    // patch 0270 (#3): feed the cached S8 render output instead of load()+
++    // render(). A non-owning stPXSound view lets the GF1 upload block below read
++    // snd.final_buffer/final_size byte-for-byte as it did off a fresh render();
++    // we MUST NOT freeBuf() it (the pcm vector owns the bytes). We already hold
++    // the TRUE final_size, so the music-priority budget check below (real n) is
++    // the sole gate -- RENDERSAFE's size prediction is redundant + gone.
++    if (!pxt_slots[slot].present || pxt_slots[slot].pcm.empty())
++      continue;
++    stPXSound snd{};
++    snd.final_buffer = pxt_slots[slot].pcm.data();
++    snd.final_size   = (uint32_t)pxt_slots[slot].pcm.size();
+     if (_gusdiag)
+-    {
+-      uint32_t _maxns = 0;
+-      for (int ci = 0; ci < PXT_NO_CHANNELS; ++ci)
+-        if (snd.channels[ci].enabled && snd.channels[ci].nsamples > _maxns)
+-          _maxns = snd.channels[ci].nsamples;
+-      LOG_INFO("gus SFX diag: fx{:02x} render OK (final_size={} max_nsamples={}) -- "
+-               "sign-flipping + uploading...", slot, (unsigned)snd.final_size,
+-               (unsigned)_maxns);
+-    }
++      LOG_INFO("gus SFX diag: fx{:02x} (slot {}) cached final_size={} -- "
++               "checking budget + uploading...", slot, slot,
++               (unsigned)snd.final_size);
+ 
+     if (snd.final_buffer && snd.final_size > 0)
+     {
+@@ -764,8 +994,7 @@ bool Pixtone::initGusSfx()
+       if (sfx_used + n > sfx_budget)
+       {
+         ++skipped;
+-        snd.freeBuf();
+-        continue;
++        continue;  // patch 0270: no freeBuf -- snd is a non-owning cache view
+       }
+       // patch 0242 (#38): defensive guard pad. The GF1 upload transport (PIO
+       // poke OR DMA bounce) reads the source buffer in word/dword-aligned units,
+@@ -859,7 +1088,10 @@ bool Pixtone::initGusSfx()
+         }
+       }
+     }
+-    snd.freeBuf();
++    // patch 0270 (#3): no snd.freeBuf() here -- snd is a non-owning view over
++    // pxt_slots[slot].pcm (which owns + frees the S8 bytes). freeBuf() would
++    // double-free the vector data. channels[].buffer are nullptr (value-init;
++    // never allocBuf'd on the cache path), so there is nothing else to free.
+   }
+ 
+   SDL_DOSGusState st2;
+-- 
+2.47.3
+
