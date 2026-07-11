@@ -28,8 +28,8 @@
 # not a substring a banner could also contain).
 #
 # Two-phase readiness:
-#   - The SETUP -> DOSKUTSU.CFG half (steps 1-3) needs only build/setup/setup.exe
-#     and runs standalone.
+#   - The SETUP -> DOSKUTSU.CFG half (steps 1-3) needs only the SETUP binary
+#     (build/setup/setup-release.exe, the AUDIOTEST=1 build) and runs standalone.
 #   - The DOSKUTSU-banner + audio half (steps 4-5) needs build/doskutsu.exe
 #     (nx-engine's config-loading 0216 build). When that binary is absent the
 #     banner/audio half is SKIPPED with a loud note and the run still exercises
@@ -50,7 +50,14 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE_DIR="$REPO_ROOT/build/stage"
-SETUP_EXE="$REPO_ROOT/build/setup/setup.exe"
+# ensure_stage builds the AUDIOTEST=1 variant (SDL-linked live-audio, the dist
+# build), which the setup Makefile writes to setup-release.exe since the v1.6.2
+# stub/release output split (`make setup` default = the AUDIOTEST=0 scaffold
+# setup.exe; AUDIOTEST=1 = setup-release.exe). This suite needs the AUDIOTEST=1
+# build for every scenario (its audio bring-up + the config half both work in
+# it), so point at setup-release.exe. (Was setup.exe -> pre-split path, which
+# made ensure_stage's post-build existence check exit 5 "missing setup.exe".)
+SETUP_EXE="$REPO_ROOT/build/setup/setup-release.exe"
 DOSKUTSU_EXE="$REPO_ROOT/build/doskutsu.exe"
 CWSDPMI_EXE="$REPO_ROOT/vendor/cwsdpmi/cwsdpmi.exe"
 CONF_PARITY="$REPO_ROOT/tools/dosbox-x.conf"
