@@ -1,41 +1,24 @@
-From d3c12ffbd86dd6ea217f85de8efbd95ebd5d7340 Mon Sep 17 00:00:00 2001
+From 1d60eadfc5c087186185ba8a01ec1f6173180f83 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
-Date: Sat, 11 Jul 2026 20:46:57 -0700
-Subject: [PATCH] patch 0273 -- #1 FIX: organya-precache OOM guard-fallback +
- DPMI-unlock under organya
+Date: Sat, 11 Jul 2026 20:50:22 -0700
+Subject: [PATCH] patch 0273 -- #1 FIX: organya-precache exception GUARD
+ (graceful on-demand fallback)
 
-The g2k cold-cache organya first-launch precache exits-to-DOS via an uncaught
-exception (leading cause: std::bad_alloc / OOM -- the 875 KB DPMI-locked pixtone
-cache + organya near-exhausting the heap) -> terminate -> abort. Two structural
-fixes, both killswitch-gated, that do NOT depend on the exact failing alloc:
-
-1. EXCEPTION GUARD (main.cpp, default ON, SDL_HINT_DOSKUTSU_ORG_PRECACHE_GUARD):
-   the try/catch around the precache batch (added diagnostic in 0272) now, on any
-   std::exception OR catch(...), degrades gracefully -- LOG + abort the batch +
-   do NOT write READY.OK -> songs cold-render on demand in-game (the warm
-   game-loop context that works, == the ORG_AUTOCACHE=0 path). No crash,
-   regardless of which alloc threw. =0 restores the old hard-exit (A/B). A
-   one-shot "exception GUARD ENABLED" banner fires on the batch path (witness).
-
-2. DPMI-UNLOCK under organya (Pixtone.cpp, default = smart,
-   SDL_HINT_DOSKUTSU_PXT_DPMI_LOCK): the unconditional _go32_dpmi_lock_data of the
-   pixtone master buffer exists for the SB16 IRQ-5 Lever-3 mix -- but L3 is
-   FORCE-OFF under AUDIO_BACKEND=organya, so locking the ~875 KB cache
-   non-pageable there is pointless. Skip it under organya -> frees the cache from
-   the CWSDPMI lock table (attacks the OOM root; harmless if CWSDPMI isn't
-   paging). =1 forces the old unconditional lock.
-
-Guard = the guaranteed fix (crash -> graceful degradation). DPMI-unlock = the
-targeted-but-uncertain root reduction (the 0272 mallinfo heap trace will confirm
-whether memory is the real constraint). Ships bundled with the 0272 probe so one
-g2k run both FIXES (organya boots through) and CONFIRMS (0272 logs the exception
-type + heap wall up to the now-caught throw).
-
-Co-Authored-By: Claude Code <noreply@anthropic.com>
+The g2k cold-cache organya precache exits-to-DOS via an uncaught exception
+(leading cause std::bad_alloc / OOM). Default-ON killswitch
+SDL_HINT_DOSKUTSU_ORG_PRECACHE_GUARD: the precache try/catch (added by 0272) now,
+on any std::exception OR catch(...), degrades gracefully -- LOG + abort the batch
++ do NOT write READY.OK -> songs cold-render on demand in-game (the warm
+game-loop context that works, == ORG_AUTOCACHE=0). No crash regardless of which
+alloc threw. =0 restores the old hard-exit (A/B / FXOFF cell). One-shot
+"exception GUARD ENABLED" banner on the batch path. The 0272 diagnostic
+try/catch + mallinfo still run on the catch path, so bundled with 0272 one g2k
+run FIXES (boots through) AND CONFIRMS (logs type + heap wall). The DPMI-unlock
+memory relief is split out to 0274 (default-dormant this card for a clean
+heap-wall baseline). Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- src/main.cpp          | 54 +++++++++++++++++++++++++++++++++++++++++--
- src/sound/Pixtone.cpp | 24 ++++++++++++++++++-
- 2 files changed, 75 insertions(+), 3 deletions(-)
+ src/main.cpp | 54 ++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 52 insertions(+), 2 deletions(-)
 
 diff --git a/src/main.cpp b/src/main.cpp
 index dc9d0b50..584fec1c 100644
@@ -129,48 +112,6 @@ index dc9d0b50..584fec1c 100644
        else
        {
          org_cache_sentinel_write();
-diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
-index 0f8fc0df..1bbdb043 100644
---- a/src/sound/Pixtone.cpp
-+++ b/src/sound/Pixtone.cpp
-@@ -1804,6 +1804,26 @@ void Pixtone::pxtSoundDone(int channel)
-   }
- }
- 
-+// patch 0273 (#1 FIX): whether to DPMI-lock the pixtone master buffer. The lock
-+// exists so the SB16 IRQ-5 ISR (Lever 3 Pixtone IRQ-mix) can read the buffer in
-+// IRQ context -- but L3 is FORCE-OFF under AUDIO_BACKEND=organya, so locking the
-+// ~875 KB SFX cache non-pageable there is pointless and adds CWSDPMI memory
-+// pressure (a suspect in the organya cold-precache OOM). Default = smart (lock
-+// only when the backend is NOT organya, i.e. L3 could engage); set
-+// SDL_HINT_DOSKUTSU_PXT_DPMI_LOCK=1 to force the old unconditional lock.
-+static bool _pxt_should_dpmi_lock(void)
-+{
-+  static int forced = -2;  // -2 = undecided
-+  if (forced == -2)
-+  {
-+    const char *e = std::getenv("SDL_HINT_DOSKUTSU_PXT_DPMI_LOCK");
-+    forced = (e && e[0] == '1' && e[1] == '\0') ? 1 : -1;  // 1 = always; -1 = smart
-+  }
-+  if (forced == 1)
-+    return true;  // revert: always lock
-+  return NXE::Diag::g_p10_audio_backend_active != NXE::Diag::AudioBackend::organya;
-+}
-+
- void Pixtone::_prepareToPlay(stPXSound *snd, int32_t slot)
- {
-   // convert the buffer from 8-bit mono signed (.pxt on-disk format)
-@@ -1873,7 +1893,9 @@ void Pixtone::_prepareToPlay(stPXSound *snd, int32_t slot)
-   // free of SDL internals. See LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.7
-   // (DPMI lock + risk management).
- #ifdef __DJGPP__
--  if (sound_buf && converted_len > 0)
-+  // patch 0273 (#1 FIX): skip the lock under organya (L3 can't engage there) to
-+  // free ~875 KB of non-pageable CWSDPMI memory -- the cold-precache OOM suspect.
-+  if (sound_buf && converted_len > 0 && _pxt_should_dpmi_lock())
-     _go32_dpmi_lock_data(sound_buf, (unsigned long)converted_len);
- #endif
- }
 -- 
 2.47.3
 

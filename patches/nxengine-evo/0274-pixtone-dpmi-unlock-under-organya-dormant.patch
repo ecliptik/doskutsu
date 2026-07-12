@@ -1,0 +1,72 @@
+From 1f124c044aa74649bff8b9dcc45e620875d959b2 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 11 Jul 2026 20:52:51 -0700
+Subject: [PATCH] patch 0274 -- #1 FIX: DPMI-unlock the pixtone cache under
+ organya (default-dormant)
+
+Targeted memory relief for the organya cold-precache OOM (0273 is the guaranteed
+guard-fallback; this attacks the root). The unconditional _go32_dpmi_lock_data of
+the pixtone master buffer exists for the SB16 IRQ-5 Lever-3 mix, but L3 is
+FORCE-OFF under AUDIO_BACKEND=organya, so locking the ~875 KB SFX cache
+non-pageable there is pointless. SDL_HINT_DOSKUTSU_PXT_DPMI_LOCK: DEFAULT DORMANT
+(always lock, old behavior) so a card measures the CLEAN heap-wall baseline (0272
+mallinfo) without this relief masking it; =0 ENGAGES the relief (skip the lock
+under organya, freeing ~875 KB from the CWSDPMI lock table), A/B'd next round by
+flipping the hint (no rebuild). Ships dormant this card.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp | 30 +++++++++++++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 0f8fc0df..e46edaa6 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -1804,6 +1804,31 @@ void Pixtone::pxtSoundDone(int channel)
+   }
+ }
+ 
++// patch 0274 (#1 FIX): whether to DPMI-lock the pixtone master buffer. The lock
++// exists so the SB16 IRQ-5 ISR (Lever 3 Pixtone IRQ-mix) can read the buffer in
++// IRQ context -- but L3 is FORCE-OFF under AUDIO_BACKEND=organya, so locking the
++// ~875 KB SFX cache non-pageable there is pointless and adds CWSDPMI memory
++// pressure (a suspect in the organya cold-precache OOM).
++//
++// DEFAULT = DORMANT (always lock, the old behavior) so a card measures the CLEAN
++// heap-wall baseline (0272 mallinfo) without this relief masking it. Set
++// SDL_HINT_DOSKUTSU_PXT_DPMI_LOCK=0 to ENGAGE the relief -- skip the lock under
++// organya, freeing ~875 KB from the CWSDPMI lock table. A/B'd next round by
++// flipping the hint, no rebuild.
++static bool _pxt_should_dpmi_lock(void)
++{
++  static int decided = -2;  // -2 = undecided
++  if (decided == -2)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_PXT_DPMI_LOCK");
++    decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;  // "0" = relief; else lock
++  }
++  if (decided != 0)
++    return true;  // default: always lock (dormant)
++  // relief engaged: skip the lock only under organya (where L3 can't run)
++  return NXE::Diag::g_p10_audio_backend_active != NXE::Diag::AudioBackend::organya;
++}
++
+ void Pixtone::_prepareToPlay(stPXSound *snd, int32_t slot)
+ {
+   // convert the buffer from 8-bit mono signed (.pxt on-disk format)
+@@ -1873,7 +1898,10 @@ void Pixtone::_prepareToPlay(stPXSound *snd, int32_t slot)
+   // free of SDL internals. See LEVER3-PIXTONE-IRQ-MIX-DESIGN.md sec.7
+   // (DPMI lock + risk management).
+ #ifdef __DJGPP__
+-  if (sound_buf && converted_len > 0)
++  // patch 0274 (#1 FIX): gate the lock -- default locks (dormant); PXT_DPMI_LOCK=0
++  // skips it under organya to free ~875 KB non-pageable (the cold-precache OOM
++  // suspect). See _pxt_should_dpmi_lock above.
++  if (sound_buf && converted_len > 0 && _pxt_should_dpmi_lock())
+     _go32_dpmi_lock_data(sound_buf, (unsigned long)converted_len);
+ #endif
+ }
+-- 
+2.47.3
+
