@@ -1,0 +1,268 @@
+From 5ddcd6c279aafd2f96d495a3efc3f133070a7035 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 11 Jul 2026 20:37:56 -0700
+Subject: [PATCH] patch 0272 -- #1 crash probe: organya-precache pre-render
+ breadcrumbs + in-LOG fault handler
+
+iter-3 A/B (0271+0121) showed the cold-cache organya precache EXITS to DOS on
+g2k right after the "ARMED" banner, before the first present -- a deliberate/
+normal exit (operator: no register/fault dump, BAT post-run message appears),
+nothing logged after ARMED despite per-line fsync (0036). DV-independent, so the
+DV/SwitchBank/palette suspects are dead (video refuted). Static trace: the two
+exit(1) families in the reachable path (fgeti/fgetl, ASSERT) both LOG before
+exiting, so they're ruled out by the silence -> leading cause is an UNCAUGHT
+C++ exception (std::bad_alloc / OOM: the 875 KB DPMI-locked pixtone cache +
+organya at precache time) -> terminate -> abort, which bypasses the LOG path
+(silent) and prints no CPU fault dump.
+
+This combined single-lever probe (reuses the existing
+SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE hint -- the ORGD0/1 BAT already sets it;
+default-inert) resolves it regardless of the exit mechanism:
+- STEP BREADCRUMBS: fsync'd LOG after each pre-render step (orgMusicCount /
+  orgMusicPath / _oc_basename / draw ENTER / after clearScreen / after font.draw /
+  before+after flip), first-song(s) only, each carrying a DJGPP mallinfo/sbrk
+  heap snapshot -> the LAST flushed line names the dying step + the heap trace
+  shows if an alloc is about to fail (OOM).
+- IN-LOG FAULT HANDLER: SIGSEGV/SIGFPE/SIGILL handlers for the precache window
+  write __djgpp_exception_state eip/ebp + the EBP-chain traceback EIPs raw
+  (alloc-free fprintf to the engine log FILE* + fsync -- survives OOM; eip
+  fsync'd before the risky walk) so nx-eng addr2line's them vs the frozen exe.
+  A DJGPP on-screen dump printf's to the B800 text buffer, invisible under a
+  VESA LFB -- so the LOG is the only place to capture it.
+- try/catch around the precache loop names an uncaught exception's TYPE + what()
+  (the leading OOM/bad_alloc case; SIGABRT's saved register state is stale), then
+  re-throws so behavior is UNCHANGED.
+
+Diagnostic only; the FIX (graceful try/catch fallback to on-demand render +
+dropping the pointless DPMI-lock on the organya path) rides a later patch once
+the log names the step/exception.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 173 ++++++++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 158 insertions(+), 15 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 9431a68b..dc9d0b50 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -44,6 +44,11 @@ extern "C" {
+ #include <SDL3/SDL_dosaudio_pump.h>  // patch 0164: SDL_DOSAudioPump for the tick-boundary audio pump
+ #include <SDL3/SDL_dosopltimer.h>  // patch 0234 (Campaign 2 AdLib): SDL_DOSOplTimerPumpStop for the PIT-restore atexit
+ #include <cstring>  // patch 0234 (Campaign 2 AdLib): std::strcmp for the AUDIO_BACKEND=adlib boot-mode check
++#include <csignal>  // patch 0272 (#1 crash probe): SIGSEGV/SIGFPE/SIGILL/SIGABRT handlers for the precache window
++#ifdef __DJGPP__
++#include <setjmp.h>       // patch 0272: __djgpp_exception_state is a jmp_buf (include BEFORE sys/exceptn.h)
++#include <sys/exceptn.h>  // patch 0272: __djgpp_exception_state -> fault eip/ebp for the in-LOG fault handler
++#endif
+ using namespace NXE::Graphics;
+ #include "ResourceManager.h"
+ #include "caret.h"
+@@ -1302,15 +1307,114 @@ static void _oc_poll_esc(void)
+       g_oc_abort = true;
+ }
+ 
++// ---------------------------------------------------------------------------
++// DOS-PORT (patch 0272, #1 crash probe): the organya cold-cache first-launch
++// precache EXITS to DOS on g2k after the "ARMED" banner, before the first
++// present -- deliberate/normal exit (no fault dump), nothing logged after ARMED
++// despite per-line fsync (0036). iter-3 A/B ruled out DV / SwitchBank / palette
++// (DV-independent). This probe pins the dying step + captures the fault (if any)
++// TO THE LOG (a DJGPP fault dump printf's to the B800 text buffer, invisible
++// under a VESA LFB, so the on-screen dump is a dead end). All gated by the
++// existing SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE hint (the ORGD0/1 BAT
++// already sets it) -- default-inert. Diagnostic only; the FIX rides a later
++// patch once the log names the step/exception.
++#ifdef __DJGPP__
++extern "C" {
++  // Minimal mallinfo slice (mirrors patch 0257's GUS-path decl) -- DJGPP has
++  // _mallinfo in libc but its header lacks extern "C", so declare it here.
++  struct _oc_mallinfo { int arena, ordblks, smblks, hblks, hblkhd, usmblks,
++                            fsmblks, uordblks, fordblks, keepcost; };
++  struct _oc_mallinfo mallinfo(void);
++}
++#endif
++
++static bool _oc_present_probe_on(void)
++{
++  static int decided = -1;
++  if (decided < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE");
++    decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++  }
++  return decided != 0;
++}
++
++// fsync'd pre-render step breadcrumb + heap snapshot. First-song(s) only (the
++// crash is iter 1). The LAST flushed line names the dying step; the heap trace
++// (uordblks climbing toward fordblks==0 / arena) shows if a subsequent alloc is
++// about to fail (OOM -- the leading hypothesis). LOG_INFO -> per-line fsync.
++static void _oc_step(const char *what)
++{
++  if (!_oc_present_probe_on() || g_oc_song_idx > 2)
++    return;
++#ifdef __DJGPP__
++  struct _oc_mallinfo mi = mallinfo();
++  const unsigned brk = (unsigned)(uintptr_t)sbrk(0);
++  LOG_INFO("precache-step: {} [heap uordblks={} fordblks={} arena={} brk=0x{:x}]",
++           what, mi.uordblks, mi.fordblks, mi.arena, brk);
++#else
++  LOG_INFO("precache-step: {}", what);
++#endif
++}
++
++#ifdef __DJGPP__
++// In-LOG fault handler for the precache window. ALLOC-FREE (raw fprintf of ints
++// to the engine log FILE* + fsync) so it survives even if the fault is OOM --
++// fmt-based LOG_ could re-fault allocating during OOM. Writes the fault eip +
++// the EBP-chain call-frame traceback EIPs, which nx-eng addr2line's (nm-nearest-
++// symbol) against the frozen exe -> exact fn+line. Captures to the LOG what a
++// DJGPP on-screen dump can't show under a VESA graphics mode.
++static void _oc_precache_fault_handler(int sig)
++{
++  std::FILE *fp = ::NXE::Utils::Logger::djgpp_log_fp;
++  if (fp)
++  {
++    const unsigned eip = (unsigned)__djgpp_exception_state->__eip;
++    const unsigned ebp = (unsigned)__djgpp_exception_state->__ebp;
++    std::fprintf(fp, "precache-FAULT: sig=%d eip=0x%08x ebp=0x%08x\n", sig, eip, ebp);
++    std::fflush(fp);
++    ::fsync(::fileno(fp));  // guarantee the eip survives even if the walk faults
++    unsigned *frame = (unsigned *)ebp;
++    for (int i = 0; i < 20 && frame; ++i)
++    {
++      const unsigned ret = frame[1];  // return address at [ebp+4]
++      std::fprintf(fp, "precache-FAULT: frame[%d] eip=0x%08x\n", i, ret);
++      const unsigned nb = frame[0];   // saved ebp at [ebp]
++      if (nb <= (unsigned)(uintptr_t)frame || nb == 0)
++        break;                        // stop on non-ascending / null chain
++      frame = (unsigned *)nb;
++    }
++    std::fflush(fp);
++    ::fsync(::fileno(fp));
++  }
++  std::signal(sig, SIG_DFL);
++  std::raise(sig);  // let the default handler finish the (ab)normal exit
++}
++
++static void _oc_install_fault_handlers(bool on)
++{
++  void (*h)(int) = on ? _oc_precache_fault_handler : SIG_DFL;
++  // Genuine CPU faults only -- __djgpp_exception_state is valid for these.
++  // SIGABRT (abort from an uncaught exception) is left to the try/catch, whose
++  // catch names the exception type (abort's saved register state is stale).
++  std::signal(SIGSEGV, h);
++  std::signal(SIGFPE, h);
++  std::signal(SIGILL, h);
++}
++#endif  // __DJGPP__
++
+ static void _oc_draw_progress(uint32_t cur_beat, uint32_t total_beats)
+ {
+   Renderer *r = Renderer::getInstance();
++  _oc_step("draw ENTER");
+   const int W = r->screenWidth;
+   const int H = r->screenHeight;
+   r->clearScreen(0, 0, 0);
++  _oc_step("after clearScreen");
+ 
+   const char *line1 = "Rendering music (one time)...";
+   r->font.draw((W - (int)r->font.getWidth(line1)) / 2, H / 2 - 30, line1, 0xFFFFFF, true);
++  _oc_step("after font.draw line1");
+ 
+   const int bx0 = 40;
+   const int bx1 = W - 40;
+@@ -1341,7 +1445,9 @@ static void _oc_draw_progress(uint32_t cur_beat, uint32_t total_beats)
+       r->fillRect(bx0 + 1, iy + 1, bx0 + 1 + fillw, iy + 5, 0x40, 0xC0, 0xFF);
+   }
+ 
++  _oc_step("before flip");
+   r->flip();
++  _oc_step("after flip");
+ }
+ 
+ // The per-beat callback Organya invokes from inside _org_render_song. Returns
+@@ -1915,27 +2021,64 @@ int main(int argc, char *argv[])
+       // (inert unless SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1). Diagnoses why
+       // the overlay reads as a static "Loading.." on g2k.
+       Renderer::getInstance()->setPresentProbeActive(true);
++#ifdef __DJGPP__
++      // patch 0272 (#1 crash probe): install the in-LOG fault handlers for the
++      // precache window (SIGSEGV/SIGFPE/SIGILL -- genuine CPU faults, where
++      // __djgpp_exception_state is valid). SIGABRT (uncaught-exception ->
++      // terminate -> abort) is handled by the try/catch below instead, which
++      // names the exception type; the SIGABRT register-state would be stale.
++      if (_oc_present_probe_on()) _oc_install_fault_handlers(true);
++#endif
++      _oc_step("orgMusicCount pre");
+       const int n = SoundManager::getInstance()->orgMusicCount();
++      _oc_step("orgMusicCount post");
+       g_oc_song_total = n - 1; // [0] is the "" stop sentinel entry
+       int rendered = 0, skipped = 0, failed = 0;
+-      for (int i = 1; i < n && !g_oc_abort; ++i)
++      try
++      {
++        for (int i = 1; i < n && !g_oc_abort; ++i)
++        {
++          const std::string path = SoundManager::getInstance()->orgMusicPath(i);
++          if (path.empty())
++            continue;
++          g_oc_song_idx      = i;
++          _oc_step("after orgMusicPath");
++          g_oc_song_name     = _oc_basename(path);
++          _oc_step("after _oc_basename");
++          g_oc_last_inner_px = -1;          // reset the intra-song bar for the new song
++          _oc_draw_progress(0, 0);          // coarse N/M update + empty inner bar + flip
++          _oc_poll_esc();                   // catch ESC pressed between songs
++          if (g_oc_abort)
++            break;
++          const long b = org_precache_one(path.c_str()); // beat cb fires inside
++          if (b > 0)       ++rendered;
++          else if (b == 0) ++skipped;       // already cached, or aborted (empty buffer)
++          else             ++failed;
++        }
++      }
++      // patch 0272 (#1 crash probe): name an UNCAUGHT exception directly -- the
++      // leading hypothesis is std::bad_alloc (OOM) -> terminate -> abort, and the
++      // step breadcrumb just before this names WHERE it threw. Re-throw so
++      // behavior is UNCHANGED (the batch still exits, as today). Log gated by the
++      // probe hint (default-off = silent).
++      catch (const std::exception &e)
++      {
++        if (_oc_present_probe_on())
++          LOG_CRITICAL("precache: caught std::exception what='{}' at song={}",
++                       e.what(), g_oc_song_idx);
++        throw;
++      }
++      catch (...)
+       {
+-        const std::string path = SoundManager::getInstance()->orgMusicPath(i);
+-        if (path.empty())
+-          continue;
+-        g_oc_song_idx      = i;
+-        g_oc_song_name     = _oc_basename(path);
+-        g_oc_last_inner_px = -1;          // reset the intra-song bar for the new song
+-        _oc_draw_progress(0, 0);          // coarse N/M update + empty inner bar + flip
+-        _oc_poll_esc();                   // catch ESC pressed between songs
+-        if (g_oc_abort)
+-          break;
+-        const long b = org_precache_one(path.c_str()); // beat cb fires inside
+-        if (b > 0)       ++rendered;
+-        else if (b == 0) ++skipped;       // already cached, or aborted (empty buffer)
+-        else             ++failed;
++        if (_oc_present_probe_on())
++          LOG_CRITICAL("precache: caught UNKNOWN (non-std) exception at song={}",
++                       g_oc_song_idx);
++        throw;
+       }
+       g_oc_batch_active = false;
++#ifdef __DJGPP__
++      if (_oc_present_probe_on()) _oc_install_fault_handlers(false);
++#endif
+       // patch 0269 (#1): dump the present-path tally + stop the probe.
+       Renderer::getInstance()->logPresentProbeSummary("precache-batch");
+       Renderer::getInstance()->setPresentProbeActive(false);
+-- 
+2.47.3
+
