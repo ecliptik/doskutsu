@@ -41,7 +41,12 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE_DIR="$REPO_ROOT/build/stage"
-SETUP_EXE="$REPO_ROOT/build/setup/setup.exe"
+# AUDIOTEST=1 output is setup-release.exe since the v1.6.2 stub/release split
+# (setup/Makefile EXE := setup-release.exe under AUDIOTEST=1). Staging the old
+# build/setup/setup.exe path installs the AUDIOTEST=0 scaffold stub -> the Test
+# SFX/Music popup shows "not yet linked" instead of playing. Mirrors the
+# tests/run-setup-e2e.sh fix (c2b0a72).
+SETUP_EXE="$REPO_ROOT/build/setup/setup-release.exe"
 CWSDPMI_DIR="$REPO_ROOT/vendor/cwsdpmi"
 CONF_PARITY="$REPO_ROOT/tools/dosbox-x.conf"
 CONF_FAST="$REPO_ROOT/tools/dosbox-x-fast.conf"
@@ -351,16 +356,17 @@ walk() {
   # + write the composed BLASTER live. Card type carries the "Name (Tn)" name.
   # ESC backs out SILENTLY (no Save-setting prompt -- edits are live).
   send_keys Home Return; sleep 0.8      # main idx0 Sound -> submenu
-  # STALE (#9 sound-hub reorder -- FIXME, tracked in task #5): submenu row1 is
-  # now "Select Music Card" (a picker), NOT "Custom setup". There is no longer a
-  # standalone Sound-card-hardware screen -- SB Port/IRQ/DMA is configured INLINE
-  # by whichever picker puts the SB into use (main.c screen_sound_menu comment).
-  # So the shots 30-35 below now open the Music-Card picker, not screen_hardware;
-  # this section needs a rewrite to the inline-BLASTER flow (with Xvfb verify,
-  # build-qa harness). The audio-test (40-43) + music-options (20-25) nav above
-  # is already corrected for the +1 row shift.
-  send_keys Home Down Return; sleep 1   # (stale) submenu row1 -> Select Music Card picker
-  shoot "30-sound-hardware"             # (stale) now the Music-Card picker, not screen_hardware
+  # #9 sound-hub reorder (task #5, build-qa rewrite): the old "Custom setup" row
+  # is GONE. SB Port/IRQ/DMA now lives in screen_hardware(), reached INLINE by
+  # picking an SB-family music card in the "Select Music Card" picker (submenu
+  # row1). The deterministic baseline is AUDIO_BACKEND=opl3, and MUSIC_CARDS[]
+  # index 3 = opl3 = MCARD_SUB_SB, so the picker opens with opl3 pre-selected as
+  # "(current)"; one Return picks it -> screen_hardware() opens (main.c
+  # snd_pick_music_card, case MCARD_SUB_SB). Picking the already-current card is
+  # a no-op on the CFG (not dirty) but still walks the sub-screen. Xvfb-verified.
+  send_keys Home Down Return; sleep 1   # submenu row1 -> Select Music Card picker (opl3 current)
+  send_keys Return; sleep 1             # pick opl3 (MCARD_SUB_SB) -> screen_hardware() opens
+  shoot "30-sound-hardware"             # the real BLASTER hardware screen (Port/IRQ/DMA/Type)
   send_keys Home; shoot "31-hw-ioport-row"         # row0 I/O port + DESCRIPTION
   send_keys Return; sleep 0.8           # R-I: Enter opens the I/O port pick-list
   shoot "35-hw-ioport-picklist"         # 0x220 (detected) + Other... popup, dimmed backdrop
