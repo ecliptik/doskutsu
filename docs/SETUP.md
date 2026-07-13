@@ -34,17 +34,22 @@ SETUP opens a full-screen menu:
   removed and the benchmark now does a safe mode-13h (320x200) memory fill,
   validated no-hang on the S3 ViRGE, Cirrus CL-GD5430, and ATI Mach64. Disable
   it with `DOSKUTSU_SETUP_VIDEOBENCH=0` (the profile then shows "(speed n/a)").
-- **Sound setup** -- two device pickers: **Select Music Card** (Auto-detect /
-  General MIDI / WaveBlaster / Sound Blaster / AdLib / Gravis UltraSound /
-  Organya / No Music) and **Select Sound FX Device** (narrowed to the devices the chosen
-  music card can drive -- Sound Blaster or No Sound FX on the SB-family cards,
-  Gravis on the GUS card, No Sound FX only on AdLib). General MIDI and
+- **Sound setup** -- two device pickers: **Select Music Type** and **Select
+  Sound FX Device**. The music picker asks the *type* first -- **Organya**
+  (Cave Story's built-in software synth; no sound card needed), **MIDI** (music
+  on a synth chip or module), **Auto-detect**, or **No Music** -- and choosing
+  **MIDI** opens a second **Select MIDI Synth** list whose rows name the
+  hardware: **OPL3 FM (Sound Blaster 16/Pro)**, **WaveBlaster daughterboard**,
+  **General MIDI (external module)**, **AdLib (OPL2, music only)**, **Gravis
+  UltraSound**. ESC at either level backs out with no change. General MIDI and
   WaveBlaster both use the engine's MPU-401 MIDI path (`AUDIO_BACKEND=wb`); they
   differ only in the MPU-401 port (an external module's port vs the SB header's
   0x330) and which name SETUP shows -- a SETUP-only `MIDI_DEV` key the engine
-  ignores. Picking a card walks its
-  setup inline (Sound Blaster port/IRQ/DMA, or the **GUS voices** value list, or
-  the Organya pre-render suggestion). A **Music options** screen holds the
+  ignores. **Select Sound FX Device** is narrowed to the devices the chosen
+  music card can drive (Sound Blaster or No Sound FX on the SB-family choices,
+  Gravis on the GUS card, No Sound FX only on AdLib). Picking a music type or
+  synth walks its setup inline (Sound Blaster port/IRQ/DMA, or the **GUS
+  voices** value list, or the Organya pre-render suggestion). A **Music options** screen holds the
   per-card extras (MIDI music set, GUS voices, GUS high fidelity, Organya
   pre-render, audio quality). It also offers an **Express setup** that
   auto-detects the sound hardware in one step: it warns, probes the card
@@ -107,8 +112,8 @@ FIXED_TIMESTEP=1
 
 | Key | Values | Meaning |
 |---|---|---|
-| `AUDIO_BACKEND` | auto / wb / opl3 / organya / adlib / gus / none | Music backend, written by the **Select Music Card** picker (auto = detect). `auto` is omitted from the file so the engine's detection runs. `adlib` = native OPL2 FM on a no-Sound-Blaster card (music only); `gus` = native Gravis Ultrasound GF1 wavetable; `none` = **No Music** (music off, sound effects still play). |
-| `MIDI_DEV` | genmidi / waveblaster | SETUP-only discriminator for the two **Select Music Card** rows that both write `AUDIO_BACKEND=wb`: `genmidi` = "General MIDI" (MPU-401 to an external module), `waveblaster` = "WaveBlaster" (daughterboard on the SB header, default). The engine ignores this key -- it only controls which name SETUP shows and which MPU-401 port default it suggests. |
+| `AUDIO_BACKEND` | auto / wb / opl3 / organya / adlib / gus / none | Music backend, written by the **Select Music Type** picker -- directly for `organya` / `auto` / `none`, or via its **Select MIDI Synth** second level for `opl3` / `wb` / `adlib` / `gus` (auto = detect). `auto` is omitted from the file so the engine's detection runs. `adlib` = native OPL2 FM on a no-Sound-Blaster card (music only); `gus` = native Gravis Ultrasound GF1 wavetable; `none` = **No Music** (music off, sound effects still play). |
+| `MIDI_DEV` | genmidi / waveblaster | SETUP-only discriminator for the two **Select MIDI Synth** rows that both write `AUDIO_BACKEND=wb`: `genmidi` = "General MIDI" (MPU-401 to an external module), `waveblaster` = "WaveBlaster" (daughterboard on the SB header, default). The engine ignores this key -- it only controls which name SETUP shows and which MPU-401 port default it suggests. |
 | `MIDI_SET` | wiimidi / orgmid | Which MIDI music set the `wb` / `opl3` MIDI backends play: `wiimidi` (shown as "WiiWare", the WiiWare arrangements, `data/midi/`; default) or `orgmid` (shown as "OrgMIDI", the note-for-note transcription, `data/orgmid/`). SETUP only shows the **MIDI music set** row when a MIDI backend is selected AND at least two sets are installed on disk; otherwise the default applies. Ignored by the Organya backend. |
 | `GUS_VOICES` | 14 / 16 / 20 / 24 / 28 / 32 | Gravis Ultrasound active-voice count (only meaningful for `AUDIO_BACKEND=gus`). The GF1 DAC output rate is `617400 / voices`, so the voice count sets the music sample rate: 14 = 44100 Hz (highest fidelity), 16 = 38587 Hz, 20 = 30870 Hz (default -- best balance of fidelity and polyphony), 24 = 25725 Hz (more polyphony), 28 = 22050 Hz (**may be silent** on some PicoGUS cards -- a firmware rate quirk; use any other value), 32 = 19293 Hz. SETUP shows the **GUS voices** row (a "Select GUS Voices" value list) only when the Gravis Ultrasound backend is selected. |
 | `GUS_HIFI` | 0 / 1 | Gravis Ultrasound multi-sample fidelity (only meaningful for `AUDIO_BACKEND=gus`). 1 (default) = upload the full multi-sample `.pat` set per instrument for the best fidelity across the keyboard; 0 = a single sample per instrument (the low-on-card-memory fallback). SETUP shows the **GUS high fidelity** row only when the Gravis Ultrasound backend is selected. Written from the **Music options** screen. |
@@ -159,8 +164,9 @@ The Sound Hardware screen lets you pick the Sound Blaster I/O port, IRQ, 8-bit
 DMA, 16-bit DMA (HDMA), MPU-401 / WaveBlaster MIDI port, and card type (shown
 by its traditional name, e.g. `T6 (Sound Blaster 16)`). It is reached **inline**
 from whichever picker puts the Sound Blaster into use -- selecting a Sound
-Blaster-family music card (OPL3 / WaveBlaster / Organya / auto) in **Select
-Music Card**, or selecting "Sound Blaster" in **Select Sound FX Device** (for a
+Blaster-family music choice (**Organya** or **Auto-detect** in **Select Music
+Type**, or **OPL3 FM** / **WaveBlaster** / **General MIDI** in **Select MIDI
+Synth**), or selecting "Sound Blaster" in **Select Sound FX Device** (for a
 No-Music or non-SB-music setup that still uses the SB for effects). There is no
 separate menu entry for it; re-select the card or device to edit the hardware
 again. The screen is seeded from the detected `BLASTER` (review and confirm).

@@ -16,8 +16,8 @@ runtime variable see [docs/CONFIG.md](./CONFIG.md).
 
 There are two independent decisions:
 
-1. **Which card plays the music** -- chosen in SETUP's **Sound** menu under
-   **Select Music Card**.
+1. **How the music plays** -- chosen in SETUP's **Sound** menu under **Select
+   Music Type**.
 2. **Which device plays the sound effects** -- chosen under **Select Sound FX
    Device**.
 
@@ -27,13 +27,42 @@ auto-detects sensible defaults.
 
 ## Choosing your hardware
 
-### Select Music Card
+### Select Music Type
 
-The first picker lists the eight music backends (described below). Picking a
-Sound Blaster-family card walks you straight into the inline **Sound Hardware**
-screen (port / IRQ / DMA); picking Gravis UltraSound walks you into the
-**Select GUS Voices** value list; picking Organya offers the pre-render
-suggestion.
+The first picker asks what **kind** of music you want -- not which card you
+own:
+
+| Music type | What it means |
+|---|---|
+| **Organya** | Cave Story's original built-in software synth. **No sound card needed** -- it renders the music on the CPU and plays it through the Sound Blaster DAC. The exact 2004 sound. |
+| **MIDI** | Music played by a synth chip or module. Picking this opens **Select MIDI Synth** (below). |
+| **Auto-detect** | Probe the installed sound hardware and choose for you. The safe default. |
+| **No Music** | Music off; sound effects still play. |
+
+Picking **Organya** walks you into the **Sound Hardware** screen (port / IRQ /
+DMA, for the DAC) and then offers the pre-render suggestion. Picking
+**Auto-detect** walks the same hardware screen.
+
+### Select MIDI Synth
+
+Choosing **MIDI** opens the synth list. Each row names the **hardware** the
+synth lives on, so you never have to guess which entry matches your card:
+
+| MIDI synth | Hardware |
+|---|---|
+| **OPL3 FM (Sound Blaster 16/Pro)** | The OPL3 (Yamaha YMF262) FM chip on a Sound Blaster 16 / Pro. |
+| **WaveBlaster daughterboard** | A wavetable daughterboard on the Sound Blaster's MIDI header (e.g. DreamBlaster S2). |
+| **General MIDI (external module)** | An outboard GM module on the MPU-401 port (e.g. an SC-55-class synth). |
+| **AdLib (OPL2, music only)** | A real AdLib / OPL2 card, or a PicoGUS in `/mode adlib`. **Music only** -- no sound effects. |
+| **Gravis UltraSound** | A Gravis UltraSound, or a PicoGUS in `/mode gus`. |
+
+Picking an SB-family synth (OPL3 FM / WaveBlaster / General MIDI) walks you
+straight into the inline **Sound Hardware** screen (port / IRQ / DMA); picking
+**Gravis UltraSound** walks you into the **Select GUS Voices** value list.
+Pressing **ESC** in either picker backs out without changing anything.
+
+The Sound menu's banner shows the result as the type, qualified by the synth
+when it is MIDI -- e.g. `MIDI: OPL3 FM`, or just `Organya`.
 
 ### Select Sound FX Device
 
@@ -42,7 +71,7 @@ door chimes, and so on). The FX-device picker is deliberately **narrowed to the
 devices the chosen music card can actually drive**, so you can never pick an
 impossible combination:
 
-- A **Sound Blaster-family** music card (Sound Blaster / WaveBlaster / General
+- A **Sound Blaster-family** music choice (OPL3 FM / WaveBlaster / General
   MIDI / Organya / Auto-detect) offers **Sound Blaster** or **No Sound FX**.
 - **AdLib** (OPL2) has no DAC, so it offers only **No Sound FX**.
 - **Gravis UltraSound** offers **Gravis UltraSound** (the default -- effects on)
@@ -57,12 +86,16 @@ hardware; the picker walks you through the SB hardware screen for the effects.
 
 ## Music backends
 
-| Music card | Hardware | What it is |
+The table below is the full backend list. In SETUP these are reached as a
+**type** (Organya / Auto-detect / No Music) or, for the four synth backends, as
+a **MIDI synth** (**Select Music Type** -> **MIDI**).
+
+| Music backend | Hardware | What it is |
 |---|---|---|
 | **Auto-detect** | Any | Probes for a WaveBlaster first, then falls back to Sound Blaster OPL3 FM. The safe default. |
 | **General MIDI** | External GM module on the MPU-401 port | Sends MIDI to an outboard General MIDI synth (e.g. an SC-55-class module). Real wavetable timbre off the CPU. |
 | **WaveBlaster** | WaveBlaster daughterboard on the SB MIDI header | Same MPU-401 MIDI path as General MIDI, but to a daughterboard on the Sound Blaster's wavetable header (default MPU port 0x330). |
-| **Sound Blaster** | Sound Blaster OPL3 (Yamaha YMF262) FM chip | OPL3 FM-synth music plus PCM sound effects on the SB DAC. Works on any Sound Blaster; the most reliable choice. |
+| **OPL3 FM** | Sound Blaster OPL3 (Yamaha YMF262) FM chip | OPL3 FM-synth music plus PCM sound effects on the SB DAC. Works on any Sound Blaster; the most reliable choice. |
 | **AdLib** | A real AdLib / OPL2 card, or a PicoGUS in `/mode adlib` | Native OPL2 FM music on a machine with **no Sound Blaster**, clocked off the PIT timer. **Music only** -- a DAC-less OPL card cannot play the digital effects. |
 | **Gravis UltraSound** | A Gravis UltraSound, or a PicoGUS in `/mode gus` | Wavetable (sampled-instrument) General MIDI music on the GF1 chip, with **no Sound Blaster** in the machine. Richer than FM and cheap on a slow CPU. See the detailed section below. |
 | **Organya** | Sound Blaster (PCM/DMA) | Cave Story's original software synth -- the exact 2004 sound, mixed on the CPU. Heavier than the MIDI/FM backends. |
@@ -256,8 +289,8 @@ music, MPU-401/WaveBlaster header, and 8-bit PCM effects), so it drives the
   `T6` remains the best choice.
 
 A WaveBlaster daughterboard (e.g. DreamBlaster S2) mounted on the PicoGUS's
-wavetable header plays through this same MPU-401 path -- select **WaveBlaster**
-as the music card.
+wavetable header plays through this same MPU-401 path -- select **MIDI** ->
+**WaveBlaster daughterboard**.
 
 ## Sound effects
 
@@ -308,7 +341,7 @@ over the file. See [docs/CONFIG.md](./CONFIG.md) for the authoritative table.
 
 | CFG key | Env / SDL hint | Values | Default | Meaning |
 |---|---|---|---|---|
-| `AUDIO_BACKEND` | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | auto / wb / opl3 / organya / adlib / gus / none | auto | Music card (Select Music Card). |
+| `AUDIO_BACKEND` | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | auto / wb / opl3 / organya / adlib / gus / none | auto | Music backend (Select Music Type, + Select MIDI Synth for the synth backends). |
 | `GUS_VOICES` | `SDL_HINT_DOSKUTSU_GUS_VOICES` | 14 / 16 / 20 / 24 / 28 / 32 | 20 | GUS voice count; rate = 617400/voices. 28 may be silent. |
 | `GUS_HIFI` | `SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE` | 0 / 1 | 1 | GUS multi-sample high fidelity (on by default). |
 | `SFX_DEVICE` | `SDL_HINT_DOSKUTSU_SFX_DEVICE` | sb / none (omitted = native DAC) | (native DAC) | Sound FX device (Select Sound FX Device). `none` = effects off. |
@@ -323,8 +356,9 @@ over the file. See [docs/CONFIG.md](./CONFIG.md) for the authoritative table.
 
 Work down this checklist:
 
-1. **Right card picked?** Run SETUP -> Sound and confirm **Select Music Card**
-   matches your actual hardware (and that it is not set to **No Music**).
+1. **Right card picked?** Run SETUP -> Sound and confirm **Select Music Type**
+   (and, under **MIDI**, **Select MIDI Synth**) matches your actual hardware
+   (and that it is not set to **No Music**).
 2. **Sound FX device set?** Confirm **Select Sound FX Device** is not on **No
    Sound FX** (and remember AdLib and Gravis have no effects today).
 3. **Gravis: patches installed?** GUS music needs the Gravis `.pat` set under
