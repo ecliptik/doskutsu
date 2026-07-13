@@ -676,9 +676,14 @@ static const char *snd_help(int row)
              "OrgMIDI = note-for-note transcription of the original Organya "
              "music. Only sets you have installed under data appear here.";
     case SND_PRERENDER:
-      return "Organya only. The first time each song plays it is rendered to a "
-             "disk cache so playback stays smooth afterward. Costs a few seconds "
-             "and some disk space per song, less demanding on CPU at playback.";
+      /* Post-0275: an EAGER all-songs batch precache on FIRST LAUNCH (not the
+       * old lazy per-song-on-first-play). ~20 min / ~47 MB measured on the
+       * POD-83 reference machine (iter-5); a 486 takes longer. Fits the 4x68
+       * DESCRIPTION box (tui_wrap TUI_DESC_TW=68, 4 lines). */
+      return "Organya only. First launch pre-renders all songs to disk: a "
+             "one-time ~20 min (longer on 486), ~47 MB. Later launches skip it. "
+             "The MIDI backends (OPL3, WaveBlaster, AdLib, GUS) need no "
+             "pre-render. ESC skips the render.";
     case SND_QUALITY:
       return "On = 11025 Hz mono mixing (default, lighter on the CPU). Off = a "
              "higher legacy sample rate (heavier, only a marginal gain). Leave "
@@ -2000,7 +2005,8 @@ static const struct
   { "gus",     NULL,          MCARD_SUB_GUS,
     "GF1 wavetable. Gravis UltraSound / PicoGUS." },
   { "organya", NULL,          MCARD_SUB_ORGANYA,
-    "Cave Story software synth, via the DAC." },
+    "Cave Story software synth via the DAC. First launch pre-renders all songs "
+    "to disk (one-time wait)." },
   { "none",    NULL,          MCARD_SUB_NONE,
     "No music." }
 };
