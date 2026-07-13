@@ -1,60 +1,76 @@
-From 2ba23444c892930a439c99d9f26ed499e3996504 Mon Sep 17 00:00:00 2001
+From ad694804e1b373dac29e1df6eba777c730833710 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
-Date: Mon, 13 Jul 2026 10:37:04 -0700
-Subject: [PATCH] patch 0275 -- #1 FIX (real root): null-guard rtl() --
- game.lang NULL before I18N init
+Date: Mon, 13 Jul 2026 10:44:23 -0700
+Subject: [PATCH] patch 0275 -- #1 FIX (real root): null-guard game.lang access
+ macros (rtl + _())
 
 THE fix for the organya cold-cache precache crash. Patch 0272's in-LOG fault
-handler named it decisively (refuting the OOM hypothesis): it is a SIGSEGV null
-deref, not bad_alloc. eip=I18N::isRTL()+0x7 <- Font::getWidth+0x23 <-
-_oc_draw_progress+0x1a0 (heap was fine, uordblks ~3.36MB with 250-850KB free).
+handler named it decisively, REFUTING the OOM hypothesis: a SIGSEGV null deref,
+not bad_alloc. eip=I18N::isRTL()+0x7 <- Font::getWidth+0x23 <-
+_oc_draw_progress+0x1a0 (heap fine: uordblks ~3.36MB, 250-850KB free).
 
-Root: the rtl() macro (game.h:194) = `game.lang->isRTL()` with no null guard, and
-game.lang (I18N*, game.h:70) is new'd at game.cpp:99 -- AFTER the first-launch
-organya precache runs. So the precache progress-overlay's text measure
-(_oc_draw_progress -> Font::getWidth -> rtl()) dereferences a NULL game.lang.
-Benign on DOSBox (null page readable -> precache completes) but a hard SIGSEGV on
-g2k/CWSDPMI -- and since it fires in a VESA graphics mode the DJGPP register dump
-lands on the unshown text buffer, which is why the operator saw a "silent
-quit-to-DOS" across 4 iters. (0273's exception guard can't catch a signal, so it
-was ineffective; 0274 moot.)
+Root: the rtl() macro (game.h) = `game.lang->isRTL()` with no null guard, and
+game.lang (I18N*) is new'd at game.cpp:99 -- AFTER the first-launch organya
+precache. So the precache progress-overlay's text measure (_oc_draw_progress ->
+Font::getWidth -> rtl()) dereferences a NULL game.lang. Benign on DOSBox (null
+page readable -> precache completes) but a hard SIGSEGV on g2k/CWSDPMI -- and
+since it fires in VESA graphics mode the DJGPP register dump lands on the unshown
+text buffer, hence the operator's "silent quit-to-DOS" across 4 iters. (0273's
+exception guard can't catch a signal, so it was ineffective; 0274 moot -- both
+dropped.)
 
-Fix: `#define rtl() (game.lang ? game.lang->isRTL() : false)`. LTR default when
-game.lang is uninitialized (the pre-title overlay text is English/LTR -- correct);
-zero behavior change once game.lang is set; fixes ALL early rtl() callers, not
-just the precache. The sibling `_(x)` translate macro has the same latent null
-deref but is not in the precache path (literal text) so it is left minimal.
-
-Keep 0272 riding for the re-verify (organya cold-cache should now boot THROUGH,
-no precache-FAULT line).
+Fix: null-guard BOTH game.lang-access macros to close the whole class of pre-I18N
+null derefs:
+  rtl() -> (game.lang ? game.lang->isRTL() : false)   [LTR default]
+  _()   -> inline _i18n_tr() returning game.lang ? translate(key) : key
+Note: _() uses an inline helper, NOT a ternary macro -- translate() returns
+`const std::string&`, so a `game.lang ? translate(x) : x` ternary would collapse
+to a by-VALUE copy for string-literal keys (perf + dangling hazard); the helper
+preserves the const-ref return. Its null branch returns the key ref (valid for
+the immediate-use pattern _() is always used in). LTR / raw-key defaults are
+correct pre-I18N (overlay text is literal English); zero change once game.lang is
+set. Keep 0272 riding for the re-verify (organya cold-cache now boots THROUGH).
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- src/game.h | 15 ++++++++++++++-
- 1 file changed, 14 insertions(+), 1 deletion(-)
+ src/game.h | 28 ++++++++++++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
 
 diff --git a/src/game.h b/src/game.h
-index 1f03da4d..4ee92e1f 100644
+index 1f03da4d..8f25e3e7 100644
 --- a/src/game.h
 +++ b/src/game.h
-@@ -191,7 +191,20 @@ struct Game
+@@ -190,8 +190,32 @@ struct Game
+ #define NXFLAG_SLOW_WHEN_HURT (NXFLAG_SLOW_X_WHEN_HURT | NXFLAG_SLOW_Y_WHEN_HURT)
  
  extern Game game;
- #define _(x) game.lang->translate(x)
+-#define _(x) game.lang->translate(x)
 -#define rtl() game.lang->isRTL()
-+// DOS-PORT (patch 0275, #1 FIX): null-guard rtl() -- game.lang (I18N*) is new'd
-+// at game.cpp:99 AFTER the organya first-launch precache runs, so the precache's
-+// progress-overlay text (_oc_draw_progress -> Font::getWidth/draw -> rtl()) calls
-+// rtl() while game.lang is NULL. On g2k/CWSDPMI that null `this` deref is a hard
-+// SIGSEGV (confirmed by patch 0272's fault handler: eip=I18N::isRTL()+0x7 <-
-+// Font::getWidth+0x23 <- _oc_draw_progress+0x1a0). Benign on DOSBox (null page
-+// readable) but fatal on real HW -- the 4-iter "silent quit-to-DOS" root cause
-+// (the DJGPP dump landed on the unshown VESA text buffer). LTR default when
-+// uninitialized is correct (the pre-title overlay text is English/LTR); no
-+// behavior change once game.lang is set. Fixes ALL early rtl() callers, not just
-+// the precache. (The sibling `_(x)` translate macro has the same latent null-
-+// game.lang deref but is NOT in the precache path -- overlay text is literal,
-+// never translated -- so it is left minimal here.)
++// DOS-PORT (patch 0275, #1 FIX): null-guard the game.lang access macros.
++// game.lang (I18N*, above) is new'd at game.cpp:99 -- AFTER the organya
++// first-launch precache runs. The precache progress-overlay text
++// (_oc_draw_progress -> Font::getWidth/draw -> rtl()) calls rtl() while game.lang
++// is NULL. On g2k/CWSDPMI that null `this` deref is a hard SIGSEGV (confirmed by
++// patch 0272's fault handler: eip=I18N::isRTL()+0x7 <- Font::getWidth+0x23 <-
++// _oc_draw_progress+0x1a0) -- benign on DOSBox (null page readable), fatal on
++// real HW, and invisible (the DJGPP dump lands on the unshown VESA text buffer).
++// This closes the whole CLASS of pre-I18N game.lang-null derefs, not just the
++// one instance. LTR / raw-key defaults are correct pre-I18N (the overlay text is
++// literal English); zero behavior change once game.lang is set.
++//
++// _() uses an inline helper (NOT a `game.lang ? translate(x) : x` ternary) on
++// purpose: translate() returns `const std::string&`, so the ternary with a
++// string-literal key would collapse to a by-VALUE std::string (an extra copy per
++// call + a dangling-ref hazard). The helper preserves the const-ref return. Its
++// null branch returns the key ref, valid for the immediate-use pattern _() is
++// always used in (font.draw(_("..."))); a `const std::string& s = _(x)` binding
++// while game.lang is NULL (early boot only) would be the sole caveat, and no
++// early code does that.
++inline const std::string &_i18n_tr(const std::string &key)
++{
++  return game.lang ? game.lang->translate(key) : key;
++}
++#define _(x) _i18n_tr(x)
 +#define rtl() (game.lang ? game.lang->isRTL() : false)
  extern TextBox textbox;
  

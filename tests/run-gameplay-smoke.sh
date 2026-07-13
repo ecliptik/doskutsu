@@ -501,7 +501,6 @@ BANNER_REGEX=(
   "present-probe: ARMED hint=1"
   "present-probe.*SDL-side ARMED hint=1"
   "precache-step: "
-  "organya auto-precache: exception GUARD (ENABLED|DISABLED)"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -636,7 +635,6 @@ BANNER_SEVERITY=(
   "optional"
   "required"
   "required"
-  "optional"
   "optional"
   "optional"
   "optional"
@@ -801,7 +799,6 @@ BANNER_LABEL=(
   "0271 organya-precache present-BRACKET probe ARMED banner (OPTIONAL -- 'present-probe: ARMED hint=1 ...' emitted once when setPresentProbeActive engages under SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1; nx 0271 #1 round-2 diagnostic that BRACKETS each present sub-stage (ENTER/EXIT drain/dv-getstate-resnap/dv-presentfull/sdl-partial/sdl-full/palette-program) + the gen-bump signal + org_precache_one entry, so the LAST fsync'd line names the wedging op. DEFAULT-OFF; ABSENT in the default smoke (hint unset) -- expected. 0271-specific revert-detector (0269's SUMMARY banner alone would not catch a 0271 revert). Embed witness = strings|grep 'ENTER dv-presentfull'.)"
   "0121 organya-precache present-path HW-breadcrumb probe -- SDL side (OPTIONAL -- 'present-probe[ts=N]: SDL-side ARMED hint=1 (SDL/0121 present-path HW breadcrumbs active)' emitted once when the shared gate SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1 first resolves in the SDL flush path; SDL/0121 #1 round-2 diagnostic that brackets the present-path HW ops (ENTER/EXIT switchbank far-call / dv-presentfull-hw / uwfb-banked-copy / dv-getstate / palette-program) so the LAST fsync'd SDL line names the wedging HW op on a hard freeze. Prime suspect = the banked VBE window-func far-call in SwitchBank (g2k Cirrus force-banked per 0019), where both A/B present routes converge. DEFAULT-OFF; ABSENT in the default smoke (hint unset) -- expected. 0121-specific revert-detector (nx 0271's engine ARMED banner alone would not catch a 0121 revert). Embed witness = strings|grep 'switchbank ENTER'.)"
   "0272 organya-precache crash breadcrumbs + in-LOG fault handler (OPTIONAL -- 'precache-step: <step> [heap uordblks=..]' after each pre-render step + 'precache-FAULT: sig=.. eip=0x..' / 'precache: caught std::exception what=..' on a crash; nx 0272 #1 crash probe, gated by SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1. Pins the step that exits-to-DOS on g2k cold-cache organya precache + captures the fault eip TO THE LOG (a DJGPP dump is invisible under VESA LFB). DEFAULT-OFF; ABSENT in the default smoke (hint unset) -- expected. Embed witness = strings|grep 'precache-step'.)"
-  "0273 organya-precache OOM guard-fallback (OPTIONAL -- 'organya auto-precache: exception GUARD ENABLED (default)' fires on every organya cold-cache first-boot batch path; nx 0273 #1 FIX. On a precache exception (OOM) the guard degrades to on-demand cold-render instead of exit-to-DOS; killswitch SDL_HINT_DOSKUTSU_ORG_PRECACHE_GUARD=0 restores the old hard-exit. Also DPMI-unlocks the pixtone cache under organya (SDL_HINT_DOSKUTSU_PXT_DPMI_LOCK). Fires in an organya cold-cache smoke cell; ABSENT under non-organya / warm-cache. Embed witness = strings|grep 'exception GUARD'.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
