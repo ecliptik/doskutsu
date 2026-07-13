@@ -305,12 +305,17 @@ walk() {
   # destructive Music-and-volumes note-demo). T47: the tests are inline rows now
   # (the separate chooser was retired) -- Enter on a test row opens the device +
   # auto-plays, then "Did you hear it?" Yes/No (default-Yes; y/n shortcuts).
-  send_keys Home Down Down Down; sleep 0.5   # submenu row3 Test sound effects
+  # #9 SOUND-HUB REORDER: the submenu is now { 0 Express, 1 Select Music Card,
+  # 2 Select Sound FX Device, 3 Music options, 4 Test sound effects, 5 Test
+  # music, 6 Back } (screen_sound_menu ROW_* enum). The test rows shifted +1 vs
+  # the old { ...2 Music+volumes, 3 Test SFX, 4 Test music } -- so Test SFX is
+  # ROW_TESTSFX=4 (Down x4 from Home), Test music ROW_TESTMUS=5 (one more Down).
+  send_keys Home Down Down Down Down; sleep 0.5   # submenu ROW_TESTSFX=4 Test sound effects
   send_keys Return; sleep 1.5           # run SFX test -> "Playing..." popup auto-plays
   shoot "40-test-sfx-playing"
-  send_keys y; sleep 0.8                 # 'y' = Yes -> back to submenu (row3 badge)
+  send_keys y; sleep 0.8                 # 'y' = Yes -> back to submenu (row4 badge)
   shoot "41-test-sfx-badge-working"
-  send_keys Down; sleep 0.3             # submenu row4 Test music
+  send_keys Down; sleep 0.3             # submenu ROW_TESTMUS=5 Test music
   send_keys Return; sleep 1.0           # run music test (real Title theme via OPL3, until-key)
   shoot "42-test-music-playing"
   send_keys space; sleep 0.5            # stop the until-key play -> "Did you hear it?"
@@ -320,7 +325,7 @@ walk() {
   # --- Music (submenu row2): R-B trimmed it to backend / pre-render / quality
   # (Sound on/off + volume moved to Custom setup). Rows: 0 backend, 1 Organya
   # pre-render [grey unless organya], 2 Audio quality [grey unless organya].
-  send_keys Home Down Down Return; sleep 1   # submenu row2 Music -> screen_sound
+  send_keys Home Down Down Down Return; sleep 1   # submenu ROW_MUSOPTS=3 Music options -> screen_sound
   shoot "20-music-default"             # backend MIDI (OPL3); pre-render+quality greyed
   send_keys Home;  shoot "21-music-backend-help"   # row0 backend help (full names)
   # Cycle backend opl3->organya (1 Right) so pre-render + Audio quality UN-grey;
@@ -346,8 +351,16 @@ walk() {
   # + write the composed BLASTER live. Card type carries the "Name (Tn)" name.
   # ESC backs out SILENTLY (no Save-setting prompt -- edits are live).
   send_keys Home Return; sleep 0.8      # main idx0 Sound -> submenu
-  send_keys Home Down Return; sleep 1   # submenu row1 Custom setup -> screen_hardware
-  shoot "30-sound-hardware"             # full screen incl. Sound + SFX/Music volume rows
+  # STALE (#9 sound-hub reorder -- FIXME, tracked in task #5): submenu row1 is
+  # now "Select Music Card" (a picker), NOT "Custom setup". There is no longer a
+  # standalone Sound-card-hardware screen -- SB Port/IRQ/DMA is configured INLINE
+  # by whichever picker puts the SB into use (main.c screen_sound_menu comment).
+  # So the shots 30-35 below now open the Music-Card picker, not screen_hardware;
+  # this section needs a rewrite to the inline-BLASTER flow (with Xvfb verify,
+  # build-qa harness). The audio-test (40-43) + music-options (20-25) nav above
+  # is already corrected for the +1 row shift.
+  send_keys Home Down Return; sleep 1   # (stale) submenu row1 -> Select Music Card picker
+  shoot "30-sound-hardware"             # (stale) now the Music-Card picker, not screen_hardware
   send_keys Home; shoot "31-hw-ioport-row"         # row0 I/O port + DESCRIPTION
   send_keys Return; sleep 0.8           # R-I: Enter opens the I/O port pick-list
   shoot "35-hw-ioport-picklist"         # 0x220 (detected) + Other... popup, dimmed backdrop
