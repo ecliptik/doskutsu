@@ -344,10 +344,25 @@ static void test_midiset_key(void)
 }
 
 /* #39 / T2: midiset_scan() lists ONLY the known logical sets whose data subdir
- * is present and holds >=1 .mid, mapping dir -> logical hint value + label. */
+ * is present and holds >=1 .mid, mapping dir -> logical hint value + label.
+ *
+ * ORGMID2 WORLD (main 5605db3, 2026-07-06): the known set at index 0 is now
+ * { "orgmid2", "orgmid2", "OrgMIDI" } -- our org2mid v2 native-GM conversion --
+ * and MIDISET_DEFAULT_VALUE moved wiimidi -> orgmid2 (operator g2k A/B: distinct
+ * GM drums, richer arrangements). This fixture had never been updated, so it
+ * built data/orgmid where production now expects data/orgmid2. The LEGACY
+ * data/orgmid dir is no longer a known set at all: it falls through to the #39b
+ * custom-drop-in path as "Custom (orgmid)". We now assert BOTH, so the next
+ * rename cannot silently strand this test again.
+ *
+ * NOTE (deliberately NOT asserted here): the shared registry default for the
+ * MIDI_SET key (include/doskutsu_config_keys.h) is still "wiimidi" and diverges
+ * from MIDISET_DEFAULT_VALUE. That divergence is a production question, not a
+ * test question -- test_midiset_key() below pins the registry side as it stands.
+ */
 static void test_midiset_scan(void)
 {
-  const char *base2 = "/tmp/dkt_ms_two";       /* both midi/ + orgmid/ present */
+  const char *base2 = "/tmp/dkt_ms_two";   /* midi/ + orgmid2/ + drop-ins present */
   const char *data2 = "/tmp/dkt_ms_two/data";
   const char *base1 = "/tmp/dkt_ms_one";       /* only midi/ present           */
   const char *data1 = "/tmp/dkt_ms_one/data";
@@ -356,12 +371,16 @@ static void test_midiset_scan(void)
 
   mkdir(base2, 0777); mkdir(data2, 0777);
   mkdir("/tmp/dkt_ms_two/data/midi", 0777);
-  mkdir("/tmp/dkt_ms_two/data/orgmid", 0777);
+  mkdir("/tmp/dkt_ms_two/data/orgmid2", 0777);   /* the KNOWN OrgMIDI set now */
   write_file("/tmp/dkt_ms_two/data/midi/curly.mid", "MThd");
   write_file("/tmp/dkt_ms_two/data/midi/access.mid", "MThd");
-  write_file("/tmp/dkt_ms_two/data/orgmid/curly.mid", "MThd");
+  write_file("/tmp/dkt_ms_two/data/orgmid2/curly.mid", "MThd");
   /* a non-.mid file must NOT be counted */
   write_file("/tmp/dkt_ms_two/data/midi/readme.txt", "x");
+  /* 5605db3: the LEGACY data/orgmid is NOT a known set any more -- it must
+   * surface as a plain custom drop-in, exactly like any user dir. */
+  mkdir("/tmp/dkt_ms_two/data/orgmid", 0777);
+  write_file("/tmp/dkt_ms_two/data/orgmid/curly.mid", "MThd");
   /* #39b: an unknown subdir with >=1 .mid must surface as a custom drop-in */
   mkdir("/tmp/dkt_ms_two/data/mymidi", 0777);
   write_file("/tmp/dkt_ms_two/data/mymidi/curly.mid", "MThd");
@@ -371,33 +390,41 @@ static void test_midiset_scan(void)
   write_file("/tmp/dkt_ms_two/data/org/curly.org", "Org-02");
 
   {
-    int ci;
+    int ci, li;
     n = midiset_scan(data2, sets, MIDISET_MAX);
-    CHECK(n == 3, "midiset_scan: 2 known + 1 custom drop-in -> 3 (empty dir ignored)");
+    CHECK(n == 4, "midiset_scan: 2 known + 2 custom drop-ins -> 4 (empty dir ignored)");
     wi = midiset_index_by_value(sets, n, "wiimidi");
-    oi = midiset_index_by_value(sets, n, "orgmid");
-    CHECK(wi >= 0 && strcmp(sets[wi].label, "WiiWare") == 0 &&
+    oi = midiset_index_by_value(sets, n, "orgmid2");
+    CHECK(wi >= 0 && wi < 2 && strcmp(sets[wi].label, "WiiWare") == 0 &&
           strcmp(sets[wi].dir, "midi") == 0 && sets[wi].mid_count == 2,
           "midiset_scan: wiimidi -> data/midi, label WiiWare, 2 .mid (txt ignored)");
-    CHECK(oi >= 0 && strcmp(sets[oi].label, "OrgMIDI") == 0 &&
-          strcmp(sets[oi].dir, "orgmid") == 0 && sets[oi].mid_count == 1,
-          "midiset_scan: orgmid -> data/orgmid, label OrgMIDI, 1 .mid");
+    CHECK(oi >= 0 && oi < 2 && strcmp(sets[oi].label, "OrgMIDI") == 0 &&
+          strcmp(sets[oi].dir, "orgmid2") == 0 && sets[oi].mid_count == 1,
+          "midiset_scan: orgmid2 -> data/orgmid2, label OrgMIDI, 1 .mid (5605db3)");
     /* #39b custom drop-in: value=dir, label "Custom (<dir>)", appended AFTER
-     * the known sets (idx >= MIDISET_KNOWN count). */
+     * the known sets (idx >= MIDISET_KNOWN count). The two customs are appended
+     * in readdir order, so assert only "after the known sets", never a fixed slot. */
     ci = midiset_index_by_value(sets, n, "mymidi");
     CHECK(ci >= 2 && strcmp(sets[ci].dir, "mymidi") == 0 &&
           strcmp(sets[ci].label, "Custom (mymidi)") == 0 &&
           sets[ci].mid_count == 2,
           "midiset_scan: #39b mymidi -> Custom (mymidi), value mymidi, 2 .mid, after known sets");
+    /* the 5605db3 regression guard: legacy orgmid is a CUSTOM drop-in now. */
+    li = midiset_index_by_value(sets, n, "orgmid");
+    CHECK(li >= 2 && strcmp(sets[li].dir, "orgmid") == 0 &&
+          strcmp(sets[li].label, "Custom (orgmid)") == 0 &&
+          sets[li].mid_count == 1,
+          "midiset_scan: legacy orgmid is a custom drop-in, NOT the known OrgMIDI set");
     CHECK(midiset_index_by_value(sets, n, "org") == -1,
           "midiset_scan: #39b data/org (no .mid) not offered");
   }
 
-  /* index_by_value: empty/NULL -> default wiimidi; unknown -> -1 */
-  CHECK(midiset_index_by_value(sets, n, "") == wi,
-        "midiset_index_by_value: empty -> default wiimidi");
-  CHECK(midiset_index_by_value(sets, n, NULL) == wi,
-        "midiset_index_by_value: NULL -> default wiimidi");
+  /* index_by_value: empty/NULL -> MIDISET_DEFAULT_VALUE (orgmid2 since 5605db3);
+   * unknown -> -1 */
+  CHECK(midiset_index_by_value(sets, n, "") == oi,
+        "midiset_index_by_value: empty -> default orgmid2 (MIDISET_DEFAULT_VALUE)");
+  CHECK(midiset_index_by_value(sets, n, NULL) == oi,
+        "midiset_index_by_value: NULL -> default orgmid2 (MIDISET_DEFAULT_VALUE)");
   CHECK(midiset_index_by_value(sets, n, "nope") == -1,
         "midiset_index_by_value: unknown value -> -1");
 
