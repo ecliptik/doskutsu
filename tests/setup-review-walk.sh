@@ -252,10 +252,17 @@ launch_setup() {
 #     Reach main item N = Home then Down x N, Enter. T47 indices (9 -> 7):
 #       0 Sound (SUBMENU)   1 System speed   2 Input (SUBMENU)
 #       3 Advanced          4 Auto-detect    5 Save and exit   6 Quit
-#   - T47 STRUCTURE: "Sound" is a submenu -- 0 Express setup (Phase-1 STUB info
-#     message), 1 Custom setup (-> the Sound Hardware/BLASTER screen), 2 Music
-#     and volumes (-> the old "Sound setup" screen), 3 Test sound effects, 4 Test
-#     music, 5 Back. Its ESC backs out SILENTLY. "Performance" is GONE: PERF_MODE
+#   - SOUND HUB (#9 Type-first, screen_sound_menu ROW_* enum) -- 0 Express setup,
+#     1 Select Music Type, 2 Select Sound FX Device, 3 Music options, 4 Test
+#     sound effects, 5 Test music, 6 Back. Its ESC backs out SILENTLY. There is
+#     NO "Custom setup" row: the BLASTER hardware screen is reached INLINE from
+#     whichever picker puts the SB into use (an SB-family MIDI synth, Organya,
+#     Auto-detect, or "Sound Blaster" in the FX picker).
+#   - Row 1 is TWO levels: Select Music Type (Organya / MIDI / Auto-detect / No
+#     Music) -> picking MIDI opens Select MIDI Synth (OPL3 FM / WaveBlaster /
+#     General MIDI / AdLib / Gravis). ESC at EITHER level abandons with no cfg
+#     write. Both pickers START on the row derived from the live cfg (the
+#     "(current)" tag), so this walk never sends Home inside them. "Performance" is GONE: PERF_MODE
 #     + FIXED_TIMESTEP are the first two rows of Advanced (idx3). "Input" (idx2)
 #     is a submenu: row0 Joystick on/off (live), rows 1-3 GREYED (Phase 3), 4
 #     Back; ESC silent. "System speed" (idx1) is a tui_picklist popup.
@@ -327,45 +334,42 @@ walk() {
   send_keys y; sleep 0.8                 # 'y' = Yes -> back to submenu (row4 badge)
   shoot "43-test-music-badge-working"
 
-  # --- Music (submenu row2): R-B trimmed it to backend / pre-render / quality
-  # (Sound on/off + volume moved to Custom setup). Rows: 0 backend, 1 Organya
-  # pre-render [grey unless organya], 2 Audio quality [grey unless organya].
-  send_keys Home Down Down Down Return; sleep 1   # submenu ROW_MUSOPTS=3 Music options -> screen_sound
-  shoot "20-music-default"             # backend MIDI (OPL3); pre-render+quality greyed
-  send_keys Home;  shoot "21-music-backend-help"   # row0 backend help (full names)
-  # Cycle backend opl3->organya (1 Right) so pre-render + Audio quality UN-grey;
-  # the NOTE box follows the highlighted row.
-  send_keys Right; sleep 0.5
-  shoot "22-music-organya-note-backend-row"
-  send_keys Down;  shoot "23-music-prerender-row-note"     # row1 pre-render note + help
-  send_keys Down; sleep 0.3; shoot "24-music-audioquality-11025hz"  # row2 "11025Hz" + organya note
-  send_keys Right; sleep 0.3; shoot "25-music-audioquality-22050hz" # toggled "22050Hz"
-  send_keys Left; sleep 0.3            # back to 11025Hz
-  # T52: ESC from this CHANGED screen (backend=organya) pops "Save setting?"
-  # (default Yes) -- Return keeps. -> Sound submenu, then ESC -> main. (Walk never
-  # saves + ensure_stage rewrites the baseline each run, so this is harmless.)
-  send_keys Escape; sleep 0.5          # ESC (changed screen) -> "Save setting?"
-  send_keys Return; sleep 0.5          # Return = Yes = keep -> Sound submenu
-  send_keys Escape; sleep 0.5          # Sound submenu -> main (silent)
+  # --- #9 TYPE-FIRST music selection (submenu ROW_MUSTYPE=1) ---------------
+  # The flat "Select Music Card" list is GONE. Row 1 is now "Select Music Type":
+  #   Select Music Type   rows: 0 Organya, 1 MIDI, 2 Auto-detect, 3 No Music
+  #     -> picking MIDI opens "Select MIDI Synth":
+  #        rows: 0 OPL3 FM (Sound Blaster 16/Pro), 1 WaveBlaster daughterboard,
+  #              2 General MIDI (external module), 3 AdLib (OPL2, music only),
+  #              4 Gravis UltraSound
+  # NO Home inside either picker: the start row is DERIVED from the live cfg
+  # (music_type_of / midi_synth_index) and carries the "(current)" tag -- Home
+  # would jump off it to row 0 and desync the fixed Down-counts below. With the
+  # deterministic baseline AUDIO_BACKEND=opl3: type picker starts on MIDI (row1,
+  # "(current)"), synth picker starts on OPL3 FM (row0, "(current)").
+  send_keys Home Down Return; sleep 1   # submenu row1 -> Select Music Type picker
+  shoot "16-music-type-picklist"        # Organya/MIDI/Auto-detect/No Music; MIDI (current)
+  send_keys Up; sleep 0.4               # row1 MIDI -> row0 Organya
+  shoot "17-music-type-organya-row"     # Organya desc: "No sound card needed" + pre-render note
+  send_keys Down; sleep 0.4             # back to row1 MIDI
 
-  # --- Custom setup (Sound submenu row1 -> the BLASTER screen) ------------
-  # Rows (R-M removed the override row -- fields always editable): 0 I/O port,
-  # 1 IRQ, 2 DMA channel, 3 MPU-401 port, 4 Card type, then the R-B live rows
-  # 5 Sound, 6 SFX volume, 7 Music volume. R-I: Enter on a BLASTER field OPENS a
-  # DF pick-list (detected tagged, Other... on A / P); Right/Left cycle in place
-  # + write the composed BLASTER live. Card type carries the "Name (Tn)" name.
-  # ESC backs out SILENTLY (no Save-setting prompt -- edits are live).
-  send_keys Home Return; sleep 0.8      # main idx0 Sound -> submenu
-  # #9 sound-hub reorder (task #5, build-qa rewrite): the old "Custom setup" row
-  # is GONE. SB Port/IRQ/DMA now lives in screen_hardware(), reached INLINE by
-  # picking an SB-family music card in the "Select Music Card" picker (submenu
-  # row1). The deterministic baseline is AUDIO_BACKEND=opl3, and MUSIC_CARDS[]
-  # index 3 = opl3 = MCARD_SUB_SB, so the picker opens with opl3 pre-selected as
-  # "(current)"; one Return picks it -> screen_hardware() opens (main.c
-  # snd_pick_music_card, case MCARD_SUB_SB). Picking the already-current card is
-  # a no-op on the CFG (not dirty) but still walks the sub-screen. Xvfb-verified.
-  send_keys Home Down Return; sleep 1   # submenu row1 -> Select Music Card picker (opl3 current)
-  send_keys Return; sleep 1             # pick opl3 (MCARD_SUB_SB) -> screen_hardware() opens
+  # (a) MIDI -> ESC = abandon at the SECOND level: no cfg write at all. The hub
+  #     banner must still read "MIDI: OPL3 FM" after backing out.
+  send_keys Return; sleep 0.8           # MIDI -> Select MIDI Synth picker
+  shoot "18-midi-synth-picklist"        # OPL3 FM (current) / WB / GenMIDI / AdLib / Gravis
+  send_keys Escape; sleep 0.8           # ESC in the synth picker -> abandon, NO change
+  shoot "19-midi-synth-esc-backout"     # back at the hub; banner unchanged
+
+  # (b) MIDI -> OPL3 FM: writes AUDIO_BACKEND=opl3 (already current -> not dirty)
+  #     and walks the SB-family sub-screen, which is how the BLASTER hardware
+  #     screen is reached (there is no standalone "Custom setup" hub row).
+  #     Rows there (R-M removed the override row): 0 I/O port, 1 IRQ, 2 DMA,
+  #     3 MPU-401 port, 4 Card type, then the R-B live rows 5 Sound, 6 SFX
+  #     volume, 7 Music volume. R-I: Enter on a BLASTER field OPENS a DF
+  #     pick-list (detected tagged, Other... on A / P); Right/Left cycle in place
+  #     + write the composed BLASTER live. ESC backs out SILENTLY (edits live).
+  send_keys Home Down Return; sleep 1   # submenu row1 -> type picker (MIDI current)
+  send_keys Return; sleep 0.8           # MIDI -> synth picker (OPL3 FM current, row0)
+  send_keys Return; sleep 1             # pick OPL3 FM -> screen_hardware() opens
   shoot "30-sound-hardware"             # the real BLASTER hardware screen (Port/IRQ/DMA/Type)
   send_keys Home; shoot "31-hw-ioport-row"         # row0 I/O port + DESCRIPTION
   send_keys Return; sleep 0.8           # R-I: Enter opens the I/O port pick-list
@@ -375,6 +379,48 @@ walk() {
   shoot "33-hw-cardtype-traditional-name"          # "Sound Blaster 16 (T6)" + help
   send_keys Escape; sleep 0.5           # browse + ESC -> submenu (silent)
   shoot "34-hw-esc-clean"
+
+  # (c) Organya: the type pick writes AUDIO_BACKEND=organya, walks the BLASTER
+  #     screen (Organya renders to the SB DAC), then runs the silent
+  #     recommend_org_prerender() auto-suggest -- no modal, it just sets
+  #     ORG_PRERENDER=1 on a sub-Pentium CPU. Under this conf DOSBox profiles as
+  #     sub-586, so it DOES fire: shot 20 shows the pre-render row flipped from
+  #     the baseline CFG's 0 to "On". This is the path that un-greys that row.
+  send_keys Home Down Return; sleep 1   # submenu row1 -> type picker (MIDI current, row1)
+  send_keys Up; sleep 0.4               # row0 Organya
+  send_keys Return; sleep 1.2           # pick Organya -> screen_hardware()
+  shoot "36-organya-hardware"           # the SB screen, walked by the Organya pick
+  send_keys Escape; sleep 0.8           # ESC (browse-only) -> silent back to the hub
+  shoot "37-organya-hub-banner"         # hub banner + row value now read "Organya"
+
+  # --- Music options (submenu ROW_MUSOPTS=3) -------------------------------
+  # THE UX WIN: the Organya pre-render row is now ACTIVE (un-greyed) because the
+  # type pick above set backend=organya. Under the old flat picker Organya was
+  # buried as a peer card, so this row stayed greyed and undiscoverable.
+  # Rows: GUS voices + GUS hi-fi (gus only -- not visible here), MIDI music set
+  # (only with >=2 sets installed), Organya pre-render, Audio quality.
+  send_keys Home Down Down Down Return; sleep 1   # submenu row3 -> Music options
+  shoot "20-music-options-organya"      # pre-render row SELECTABLE + its note
+  send_keys Down; sleep 0.3
+  shoot "21-music-options-quality"      # Audio quality row, "11025Hz"
+  # Leave a REAL net change (no Left back): screen_sound's ESC path compares an
+  # entry snapshot (scfg_differs), so a net-zero toggle would ESC SILENTLY and a
+  # trailing Return would land on the hub and re-open a screen. One Right =
+  # genuinely changed -> the T52 "Save setting?" modal is deterministic.
+  send_keys Right; sleep 0.3
+  shoot "22-music-options-quality-22050hz"
+  send_keys Escape; sleep 0.6           # ESC (changed) -> "Save setting?" (default Yes)
+  shoot "23-music-options-save-prompt"
+  send_keys Return; sleep 0.6           # Return = Yes = keep -> Sound submenu
+
+  # (d) Auto-detect type: writes AUDIO_BACKEND=auto + walks the BLASTER screen.
+  send_keys Home Down Return; sleep 1   # submenu row1 -> type picker (Organya current, row0)
+  send_keys Down Down; sleep 0.4        # row0 Organya -> row2 Auto-detect
+  shoot "24-music-type-autodetect-row"  # "Detect installed sound hardware."
+  send_keys Return; sleep 1.2           # pick Auto-detect -> screen_hardware()
+  send_keys Escape; sleep 0.8           # ESC -> back to the hub
+  shoot "25-music-type-auto-banner"     # hub banner + row value now read "Auto-detect"
+
   send_keys Escape; sleep 0.5           # Sound submenu -> main
 
   # --- System speed (idx1): DF-style pick-list ----------------------------
