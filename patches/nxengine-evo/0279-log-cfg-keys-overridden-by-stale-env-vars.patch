@@ -1,0 +1,129 @@
+From 7d27f7abe281bbf91a8f74b6bd78020d04d2a647 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 14 Jul 2026 13:17:04 -0700
+Subject: [PATCH] patch 0279 -- log CFG keys silently overridden by a stale env
+ var
+
+Diagnosability fix for a trap that has already cost a real-HW iter.
+
+DOSKUTSU.CFG publishes its keys with setenv(name, value, 0), so a DOS `SET`
+that is already in the environment wins. That precedence (env > file >
+default) is deliberate and stays exactly as it was. What is NOT deliberate
+is that it happens in COMPLETE SILENCE: setenv() with overwrite=0 returns 0
+(success) even when it changes nothing, so a key whose file value was thrown
+away still counts toward the "config: loaded DOSKUTSU.CFG (N keys)" banner.
+The count cannot distinguish a key that took effect from one that did not,
+and nothing else in the log mentions the loser.
+
+That is exactly how the 2026-07-13 g2k iter (R63B/R63C) burned a cycle: the
+CFG said MIDI_SET=orgmid2, a leftover session SET said wiimidi, the engine
+dutifully obeyed the environment, logged "MIDI source = 'wiimidi'", and gave
+no hint that a config value had been discarded -- so the log read like an
+engine bug for a day. realhw's A/B then showed the key-count banner reporting
+the SAME number with and without the silent discard, confirming no existing
+signal could have caught it.
+
+It is now a USER-facing trap, not just an iter-facing one: SETUP's "Save and
+run DOSKUTSU" launches the game in the same DOS session where a stale SET
+lives, so the very settings the user just saved can be defeated with no
+feedback whatsoever.
+
+The loader (include/doskutsu_config.h, shared with SETUP) now records each
+key whose file value lost to a DIFFERENT pre-existing env value; this engine
+patch names them:
+
+  config: MIDI_SET=orgmid2 (DOSKUTSU.CFG) OVERRIDDEN by env
+          SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=wiimidi -- ... Clear the stale
+          value with `SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=` ...
+
+Behavior is untouched: detection only, same setenv calls, same precedence,
+same key count. Only new output, and only on divergence.
+
+WARN rather than INFO because a divergence always means someone's intent is
+being dropped. Equal values are never recorded, so an iter BAT that
+re-asserts a value the CFG already holds stays quiet -- no chatter in the
+common case. The line is CONDITIONAL (a clean run emits nothing), so it is
+deliberately not a required smoke-gate banner.
+
+Truncation is reported rather than hidden: the loader counts every override
+it DETECTS even past the caller's buffer, and the engine says "+N further
+... not listed" instead of implying full coverage.
+
+fmt-arg discipline (nx0263): 5 placeholders / 5 args and 2 / 2. Verified with
+a DJGPP -fsyntax-only compile of main.cpp against the real sysroot.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 49 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 48 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index c627dd5e..b18ad19e 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1503,7 +1503,15 @@ int main(int argc, char *argv[])
+   // keys SETUP.EXE manages; setenv overwrite=0 keeps a real DOS `SET`
+   // authoritative (env > file > built-in default). No file = no-op =
+   // byte-identical to the no-config build. Banner emitted after Logger::init.
+-  int _cfg_keys_loaded = doskutsu_cfg_load(NULL);
++  // patch 0279: load via the _ex form so we also learn WHICH keys the file
++  // lost to a pre-existing env var. The precedence itself is unchanged (env
++  // still wins); we only capture the casualties so the banner below can name
++  // them. Logger is not live yet at top-of-main, hence the record-now /
++  // log-later split.
++  dkt_override_t _cfg_ovr[DKT_CFG_OVERRIDE_MAX];
++  int            _cfg_ovr_n     = 0;
++  int            _cfg_keys_loaded =
++      doskutsu_cfg_load_ex(NULL, _cfg_ovr, DKT_CFG_OVERRIDE_MAX, &_cfg_ovr_n);
+ 
+   bool error            = false;
+   bool freshstart;
+@@ -1571,6 +1579,45 @@ int main(int argc, char *argv[])
+     LOG_INFO("config: loaded DOSKUTSU.CFG ({} keys)", _cfg_keys_loaded);
+   else
+     LOG_INFO("config: no DOSKUTSU.CFG, using built-in defaults");
++
++  // patch 0279: name every CFG key whose value was DISCARDED because a DOS
++  // env var already held a different one. env > file is by design, but it was
++  // SILENT -- setenv(overwrite=0) reports success even when it changes
++  // nothing, so the "(N keys)" count above includes keys that never took
++  // effect. A stale `SET` left in the session therefore defeats the settings
++  // the user just saved in SETUP, invisibly. That is not hypothetical: it cost
++  // a real-HW iter on 2026-07-13 (CFG said MIDI_SET=orgmid2, a leftover
++  // session SET said wiimidi, the engine obeyed the env and said nothing), and
++  // SETUP's "Save and run DOSKUTSU" launches the game in that same session.
++  //
++  // WARN, not INFO: a divergence between the two config sources always means
++  // someone's intent is being dropped on the floor. Agreement is silent (the
++  // loader only records DIFFERING values), so an iter BAT re-asserting a value
++  // the CFG already holds does not chatter.
++  //
++  // CONDITIONAL line -- fires only when a divergence exists. Deliberately NOT
++  // a required smoke-gate banner (a clean run must not emit it).
++  {
++    const int shown =
++        (_cfg_ovr_n < DKT_CFG_OVERRIDE_MAX) ? _cfg_ovr_n : DKT_CFG_OVERRIDE_MAX;
++    for (int i = 0; i < shown; ++i)
++    {
++      LOG_WARN("config: {}={} (DOSKUTSU.CFG) OVERRIDDEN by env {}={} -- the "
++               "environment beats the config file by design (env > file > "
++               "default), so SETUP's value is NOT in effect. Clear the stale "
++               "value with `SET {}=` (empty) and relaunch if you meant the "
++               "saved setting to apply.",
++               _cfg_ovr[i].key, _cfg_ovr[i].file_val, _cfg_ovr[i].env_name,
++               _cfg_ovr[i].env_val, _cfg_ovr[i].env_name);
++    }
++    if (_cfg_ovr_n > shown)
++    {
++      // No silent caps: say what was dropped rather than imply full coverage.
++      LOG_WARN("config: (+{} further env-overridden key(s) detected but not "
++               "listed; buffer holds {})",
++               _cfg_ovr_n - shown, DKT_CFG_OVERRIDE_MAX);
++    }
++  }
+ //  SDL_LogSetAllPriority(SDL_LOG_PRIORITY_VERBOSE);
+ 
+   // DOS-PORT (patch 0225, small-polish item 2): register the atexit-chain
+-- 
+2.47.3
+
