@@ -2256,22 +2256,66 @@ CRLF := awk 'BEGIN{ORS="\r\n"} {sub(/\r$$/, ""); print}'
 #    NEVER clear BLASTER. It is the one AUTHORITATIVE key (file > env by design);
 #    clearing it buys nothing and would kill audio outright if a CFG lacks a
 #    BLASTER line.
+#    PLACEMENT: the clears run at the TOP, BEFORE SETUP.EXE -- not inside :PLAY.
+#    This is the difference between fixing the common case and missing it. A DOS
+#    BAT's `SET` lands in the LIVE COMMAND.COM and persists after the BAT ends,
+#    so clearing at the top disinfects the whole session, covering BOTH exits:
+#      - "Save and run"  (code 10): chains to DOSKUTSU.EXE -- protected either way.
+#      - "Save and exit" (code 0):  falls to :END. With the clears inside :PLAY the
+#        session env stays POISONED, so the user who then types DOSKUTSU.EXE gets
+#        the stale wiimidi while their freshly-saved CFG says orgmid2.
+#    Save-then-exit-then-run is the COMMON flow -- it is literally what the operator
+#    does on g2k (PLAY0 = SETUP + save, PLAY1 = the game) -- so clears-in-:PLAY
+#    would have shipped a fix that misses its primary real-world case.
+#    It is free: realhw proved DOS `SET VAR=` truly deletes, and SETUP itself is
+#    immune to these vars regardless (audiotest_sdl.c applies the CFG at
+#    SDL_HINT_OVERRIDE, so SETUP's own audio test beats a stale env var -- which is
+#    exactly why the operator's SETUP test sounded right and the game then did not).
+#    Residual gap after this: only a fresh boot straight into the game, which no BAT
+#    can reach -- that is what nx 0279's WARN + an AUTOEXEC cleanup are for.
 define SETUP_BAT_BODY
 @ECHO OFF
-SETUP.EXE
-IF ERRORLEVEL 11 GOTO END
-IF ERRORLEVEL 10 GOTO PLAY
-GOTO END
-:PLAY
 SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=
 SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=
 SET SDL_HINT_DOSKUTSU_MUSIC_OFF=
 SET SDL_HINT_DOSKUTSU_SFX_OFF=
 SET DOSKUTSU_NO_AUDIO=
+SETUP.EXE
+IF ERRORLEVEL 11 GOTO END
+IF ERRORLEVEL 10 GOTO PLAY
+GOTO END
+:PLAY
 DOSKUTSU.EXE
 :END
 endef
 export SETUP_BAT_BODY
+
+# Gate the GENERATED SETUP.BAT, not the source. realhw nearly packed a stale
+# 2-line no-hygiene SETUP.BAT that was structurally perfect -- valid CRLF, valid
+# 8.3, every sha gate green -- and merely WRONG. A file's existence is not
+# evidence of its content, so assert the content at both generation sites: the
+# ERRORLEVEL 11 guard must come FIRST (DOS "n or greater"), all 5 audio clears
+# must be present and must precede SETUP.EXE, BLASTER must NEVER be cleared (it is
+# the authoritative key -- clearing it kills audio on a CFG with no BLASTER line),
+# and no line may carry a double-CR.
+define ASSERT_SETUP_BAT
+	@bat="$(1)"; \
+	 sets=$$(grep -c '^SET SDL_HINT_DOSKUTSU_\|^SET DOSKUTSU_NO_AUDIO=' "$$bat" || true); \
+	 test "$$sets" -eq 5 || { echo "error: $$bat has $$sets/5 env clears" >&2; exit 1; }; \
+	 grep -q '^IF ERRORLEVEL 11 GOTO END' "$$bat" \
+	   || { echo "error: $$bat missing the ERRORLEVEL 11 guard" >&2; exit 1; }; \
+	 test "$$(grep -n '^IF ERRORLEVEL 11' "$$bat" | cut -d: -f1)" \
+	    -lt "$$(grep -n '^IF ERRORLEVEL 10' "$$bat" | cut -d: -f1)" \
+	   || { echo "error: $$bat ERRORLEVEL guard is not first" >&2; exit 1; }; \
+	 test "$$(grep -n '^SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=' "$$bat" | cut -d: -f1)" \
+	    -lt "$$(grep -n '^SETUP.EXE' "$$bat" | cut -d: -f1)" \
+	   || { echo "error: $$bat clears do not precede SETUP.EXE (Save-and-exit unprotected)" >&2; exit 1; }; \
+	 grep -q '^SET BLASTER=' "$$bat" \
+	   && { echo "error: $$bat clears BLASTER (authoritative key -- would kill audio)" >&2; exit 1; }; \
+	 ! grep -q $$'\r\r' "$$bat" \
+	   || { echo "error: $$bat has a double-CR line" >&2; exit 1; }; \
+	 echo "  SETUP.BAT gate OK: 5 clears before SETUP.EXE, guard-first, BLASTER intact"
+endef
 
 # GPL text source: the cloned NXEngine-evo tree ships its LICENSE file at the root.
 NX_LICENSE := $(NXENGINE_SRC)/LICENSE
@@ -2440,6 +2484,7 @@ dist: $(BUILD_DIR)/doskutsu.exe setup-release | fetch-binaries
 	@# "Save and run DOSKUTSU". Body defined ONCE (SETUP_BAT_BODY) so the CF dist
 	@# and the DOSBox stage cannot drift apart.
 	@printf '%s\n' "$$SETUP_BAT_BODY" | $(CRLF) > "$(CF_STAGE)/SETUP.BAT"
+	$(call ASSERT_SETUP_BAT,$(CF_STAGE)/SETUP.BAT)
 	@$(CRLF) < LICENSE           > "$(CF_STAGE)/LICENSE.TXT"
 	@$(CRLF) < $(NX_LICENSE)     > "$(CF_STAGE)/GPLV3.TXT"
 	@$(CRLF) < THIRD-PARTY.md    > "$(CF_STAGE)/3RDPARTY.TXT"
@@ -2496,6 +2541,7 @@ stage: $(BUILD_DIR)/doskutsu.exe setup | fetch-binaries
 	@# STAGE_DIR as C:) can drive SETUP.EXE then DOSKUTSU.EXE from one root.
 	@install -m 0644 $(SETUP_EXE)             "$(STAGE_DIR)/SETUP.EXE"
 	@printf '%s\n' "$$SETUP_BAT_BODY" | $(CRLF) > "$(STAGE_DIR)/SETUP.BAT"
+	$(call ASSERT_SETUP_BAT,$(STAGE_DIR)/SETUP.BAT)
 	@if [ -d "$(REPO_ROOT)/data" ]; then \
 	    rm -f "$(STAGE_DIR)/data" "$(STAGE_DIR)/DATA"; \
 	    ln -s "$(REPO_ROOT)/data" "$(STAGE_DIR)/data"; \
