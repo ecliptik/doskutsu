@@ -612,37 +612,75 @@ DOSKUTSU_PRESENT=0
 # NAV MODEL after T24/T25 (nx-engine 58d0933/5065939/9cadca7). READ THIS before
 # editing any keystroke sequence below.
 # ===========================================================================
-# MAIN MENU after T47 (the Dark Forces UX restructure): TIGHTENED 9 -> 7 items.
-# The SYSTEM PROFILE panel is still pinned above the menu (non-selectable, ZERO
-# nav effect). New item map (Home then Down x N):
-#   0 Sound               1 System speed    2 Input
-#   3 Advanced / troubleshooting            4 Auto-detect best settings
-#   5 Save and exit       6 Quit without saving
+# MAIN MENU after UX v2: 8 items. The SYSTEM PROFILE panel is still pinned above
+# the menu (non-selectable, ZERO nav effect). Item map (Home then Down x N):
+#   0 Auto-detect best settings   1 Sound          2 System speed
+#   3 Input                       4 Advanced       5 Save and run DOSKUTSU
+#   6 Save and exit               7 Quit without saving
 # Enter selects; F10 = Save and Quit; ESC quits (discard-confirm if dirty).
+# EVERY main-menu Down-count shifted by +1 vs the old map -- Auto-detect moved to
+# the FRONT and "Save and run DOSKUTSU" was inserted before Save-and-exit. The
+# scenarios below still persist with F10, which is unaffected.
 #
-# T47 STRUCTURE CHANGE -- the old top-level "Sound setup / Sound hardware /
-# Test SFX/Music / Performance" items are GONE. They moved:
-#   - "Sound" (idx 0) is now a SUBMENU; reach a sound screen via Sound -> row:
-#       0 Express setup        (Phase-1 STUB: an info message, no edit)
-#       1 Custom setup         -> the Sound Hardware (BLASTER) screen
-#       2 Music and volumes    -> the old "Sound setup" screen (rows below)
-#       3 Test sound effects   -> inline SFX test (badge)
-#       4 Test music           -> inline music test (badge)
-#       5 Back
-#     The submenu ESC backs out to the main menu SILENTLY (it is navigation, not
-#     an editing screen -- no "Save setting?" prompt).
-#   - "Performance" is GONE; PERF_MODE + FIXED_TIMESTEP are now the FIRST two
-#     rows of the Advanced screen (idx 3): 0 PERF_MODE, 1 FIXED_TIMESTEP, then
-#     the compat rows (AUDIO_WB_DIRECT_PORT [skip unless backend wb/auto],
+# DO NOT press Enter on idx5 ("Save and run DOSKUTSU") in a scenario: it saves and
+# EXITS SETUP (exit code 10, which SETUP.BAT uses to chain into the game). It is a
+# terminal action, not a navigable row.
+#
+# SOUND MENU after UX v2 (screen_sound_menu ROW_* enum):
+#   0 Express setup          1 Music Type [3-state CYCLE row]
+#   2 Select Music Card      3 Select Sound FX Card
+#   4 Music Options          5 Test music
+#   6 Test sound effects     7 Back
+# ESC backs out to the main menu SILENTLY (navigation, not an editing screen).
+#
+#   - MUSIC TYPE (row 1) is a CYCLE row, not a picker: Left/Right/Space change it
+#     IN PLACE with no popup. Enum order Organya(0) -> MIDI(1) -> No Music(2), so
+#     from the baseline (AUDIO_BACKEND=auto -> Type=MIDI) a single Left lands on
+#     Organya and a single Right lands on No Music. The cycle writes AUDIO_BACKEND
+#     and, for Organya, runs the pre-render auto-suggest SILENTLY -- it does NOT
+#     open a sub-screen, so there is nothing to dismiss after it.
+#   - SELECT MUSIC CARD (row 2) is a tui_picklist of the HARDWARE:
+#       0 Auto-detect                    1 Sound Blaster (OPL3 FM)
+#       2 AdLib (OPL2, music only)       3 WaveBlaster daughterboard
+#       4 General MIDI (external module) 5 Gravis UltraSound
+#     It opens ON the current card (tagged "(current)"), so do NOT send Home inside
+#     it -- Home would jump to row0 and desync the Down-count. Picking a card
+#     writes AUDIO_BACKEND (+ MIDI_DEV for the two wb cards) and then WALKS that
+#     card's sub-screen: the BLASTER hardware screen for the SB family, the GUS
+#     voices list for Gravis, nothing for AdLib.
+#   - TEST-AFTER-PICK: after a music- or FX-card pick finishes its sub-screen,
+#     SETUP asks "Test music now?" / "Test sound effects now?" (tui_yesno, DEFAULT
+#     YES). A scenario that picks a card MUST answer it -- send 'n' -- or it will
+#     sit through an audio test.
+#   - THERE IS NO "Custom setup" ROW. The BLASTER hardware screen is reached
+#     INLINE from whichever picker puts the SB into use. A scenario that only wants
+#     the hardware screen (and must not disturb the backend) re-picks the card that
+#     is ALREADY current: a no-op on the cfg that still walks the sub-screen.
+#
+# *** GREY RULES CHANGE THE DOWN-COUNTS -- THIS IS THE TRAP ***
+# Greyed rows are SKIPPED by Up/Down, and which rows are greyed depends on the
+# CURRENT MUSIC TYPE. So the same Down-count lands on DIFFERENT rows:
+#     Select Music Card  greyed unless Type == MIDI
+#     Test music         greyed when Type == No Music
+#     Test sound effects greyed when the FX device is No Sound FX
+# With the baseline (auto -> Type=MIDI) every row is live and the counts are the
+# plain row indices. With AUDIO_BACKEND=organya the card row VANISHES from the
+# nav, so Home(0) -> 1 -> 3 -> 4 -> 5 -> 6: "Test sound effects" is Down x5, not
+# Down x6. Count LIVE rows, never row indices. A miscount does not error -- it
+# lands on a plausible neighbouring row and does something else quietly.
+#
+#   - "Performance" is GONE; PERF_MODE + FIXED_TIMESTEP are the FIRST two rows of
+#     the Advanced screen (now main idx4): 0 PERF_MODE, 1 FIXED_TIMESTEP, then the
+#     compat rows (AUDIO_WB_DIRECT_PORT [skip unless backend wb/auto],
 #     DIRTY_RECTS, PIXEL_FORMAT_8, FORCE_PUMP_YIELD, THRASH_FULLCOVER).
-#   - "Input" (idx 2) is a SUBMENU: row 0 Joystick on/off (live), rows 1-3
+#   - "Input" (now main idx3) is a SUBMENU: row 0 Joystick on/off (live), rows 1-3
 #     (Configure keyboard / joystick / Restore defaults) GREYED + skipped
 #     (Phase-3), row 4 Back. Its ESC backs out SILENTLY (live edit kept).
-#   - System speed (idx 1) is a tui_picklist popup (Slow/Normal/Fast/Very Fast/
-#     Auto-detect); ESC cancels with no change.
+#   - System speed (now main idx2) is a tui_picklist popup (Slow/Normal/Fast/Very
+#     Fast/Auto-detect); ESC cancels with no change.
 # (Main + submenus are custom nav loops; the keys are IDENTICAL:
-# Up/Down/Home/Enter/F10/ESC. The Custom-setup screen's Enter now OPENS a
-# pick-list -- scenarios still edit fields with Right/Left, never Enter.)
+# Up/Down/Home/Enter/F10/ESC. The BLASTER screen's Enter OPENS a pick-list --
+# scenarios still edit its fields with Right/Left, never Enter.)
 #
 # HOME ANCHOR (key Home, DOS scan 0x47): jumps to the first selectable row on
 # EVERY screen (main menu -> idx0; editing screens -> first active row). We start
@@ -679,41 +717,47 @@ DOSKUTSU_PRESENT=0
 #   - Greyed rows are SKIPPED by Up/Down/Home (state-dependent). Enabling state
 #     must be set first (we set backend before reaching Organya pre-render, etc.)
 #
-# MUSIC screen rows (R-B trimmed it to playback-only), top->bottom:
-#   0 Music backend  1 Organya pre-render [SKIP unless organya]  2 Audio quality
-#   [SKIP unless organya]. Sound on/off + SFX/Music volume MOVED to Custom setup.
-#   With backend!=organya, only row0 is live (rows 1,2 greyed) -> Home lands on
-#   backend; Down wraps back to row0.
-#   #39: a conditional "MIDI music set" row inserts at index 1 ONLY when a MIDI
-#   backend is selected AND >=2 MIDI sets are installed (data/midi + data/orgmid).
-#   The E2E stage ships at most one set, so the row stays HIDDEN here and the
-#   indices above are unchanged. (If a future scenario stages two sets, the row
-#   appears at index 1 and pushes pre-render/quality to 2/3 -- but these
-#   scenarios only Home+Right on row0, so they are unaffected either way.)
+# MUSIC OPTIONS screen (Sound row 4) -- v2: THE BACKEND ROW IS GONE from here.
+#   It holds only the per-card music EXTRAS, and the rows are ADAPTIVE:
+#     GUS voices / GUS high fidelity  [gus card only -- HIDDEN otherwise]
+#     MIDI music set                  [Type == MIDI and >=2 sets installed]
+#     Organya pre-render              [greyed unless Type == Organya]
+#     Audio quality                   [greyed only for AdLib + Gravis]
+#   The E2E stage ships at most one MIDI set, so the MIDI-set row stays HIDDEN
+#   here. No scenario needs this screen any more -- the backend now comes from the
+#   Sound menu's Music Type row + Select Music Card picker.
 #
-# CUSTOM SETUP rows (R-M removed the override row -- fields always editable):
-# 0 I/O port, 1 IRQ, 2 DMA channel, 3 MPU port, 4 Card type, 5 Sound
+# BLASTER HARDWARE screen (reached INLINE from a card pick -- there is no "Custom
+# setup" row): 0 I/O port, 1 IRQ, 2 DMA channel, 3 MPU port, 4 Card type, 5 Sound
 # (Enabled/Disabled), 6 SFX volume, 7 Music volume. Rows 6/7 grey when sound is
-# Disabled. ALL rows edit the session LIVE now (a BLASTER field writes the
-# composed BLASTER on each change; Sound/volume cycle their scfg key) and ESC
-# backs out SILENTLY -- there is no "Save setting?" prompt on this screen any
-# more. (The single DMA pick derives the SB16 D + H BLASTER slots.)
+# Disabled. ALL rows edit the session LIVE (a BLASTER field writes the composed
+# BLASTER on each change; Sound/volume cycle their scfg key) and ESC backs out
+# SILENTLY -- there is no "Save setting?" prompt on this screen. (The single DMA
+# pick derives the SB16 D + H BLASTER slots.) NOTE the card pick that GOT you here
+# fires the test-after-pick prompt when you ESC out -- answer it with 'n'.
 #
-# BACKEND enum (Right/Space cycles fwd): auto(0)->wb(1)->opl3(2)->organya(3).
-# Saved cfg writes the raw value; "auto" is omitted from the file.
+# AUDIO_BACKEND is no longer cycled through an enum. It is DERIVED and written by
+# the Music Type row (organya / none) and the Select Music Card picker (auto /
+# opl3 / adlib / wb / gus, + MIDI_DEV for the two wb cards). Saved cfg writes the
+# raw value; "auto" is omitted from the file.
 
 # ---- Scenario A: AUDIO_BACKEND=opl3 + PERF_MODE=1 -------------------------
 scenario_A() {
   local name="A"; SCN_RC=0
   log "=== Scenario $name: AUDIO_BACKEND=opl3 + PERF_MODE=1 ==="
-  # Sound(idx0)->submenu; Music(submenu row2): Home,Down x2,Enter -> screen_sound;
-  #   Home->row0 backend, Right x2 (auto->wb->opl3); ESC Return (keep) -> submenu;
-  #   ESC -> main (silent).
-  # Advanced(idx3): Home,Down x3,Enter; Home->row0 PERF_MODE, Right (0->1);
+  # v2: the backend is no longer a row on Music Options -- it comes from the Sound
+  # menu's Music Type row + Select Music Card picker.
+  # Sound(main idx1): Home,Down,Enter. Card picker (Sound row2): Home,Down x2,Enter
+  #   -- baseline AUDIO_BACKEND=auto derives to Type=MIDI + Card=Auto-detect, so the
+  #   card row is LIVE and the picker opens ON Auto-detect (row0, "(current)").
+  #   Down->row1 "Sound Blaster (OPL3 FM)", Enter -> writes opl3 and walks the SB
+  #   hardware sub-screen; Escape leaves it SILENTLY; 'n' declines the v2
+  #   test-after-pick prompt ("Test music now?", default Yes); Escape -> main.
+  # Advanced(main idx4): Home,Down x4,Enter; Home->row0 PERF_MODE, Right (0->1);
   #   ESC Return. Then main-menu F10 = Save and Exit (writes CFG + exits).
-  SCN_KEYS=( Home Return   Home $(rep 2 Down) Return
-             Home $(rep 2 Right) Escape Return   Escape
-             Home $(rep 3 Down) Return   Home Right Escape Return
+  SCN_KEYS=( Home Down Return   Home $(rep 2 Down) Return
+             Down Return   Escape   n   Escape
+             Home $(rep 4 Down) Return   Home Right Escape Return
              F10 )
   run_setup_phase "$name"
   assert_cfg_line AUDIO_BACKEND opl3 || note_fail
@@ -738,14 +782,18 @@ scenario_A() {
 scenario_B() {
   local name="B"; SCN_RC=0
   log "=== Scenario $name: AUDIO_BACKEND=org + USE_JOYSTICK=1 ==="
-  # Sound(idx0)->submenu; Music(row2): Home,Down x2,Enter; Home->row0 backend,
-  #   Right x3 (auto->wb->opl3->organya); ESC Return; ESC -> main. (Organya may
-  #   pop a T8 pre-render note -- harmless here.)
-  # Input(idx2)->submenu: Home,Down x2,Enter; Home->row0 Joystick, Right (0->1);
+  # v2: Organya is a MUSIC TYPE, not a backend enum value -- set it on the Sound
+  # menu's Music Type CYCLE row (Left/Right change it in place, no popup).
+  # Sound(main idx1): Home,Down,Enter. Music Type (Sound row1): Home,Down; Left
+  #   cycles MIDI -> Organya (enum order Organya=0, MIDI=1, No Music=2, so Left =
+  #   -1 lands on Organya). The cycle writes AUDIO_BACKEND=organya and runs the
+  #   pre-render auto-suggest SILENTLY -- it does NOT open a sub-screen (v2 grammar:
+  #   a cycle row changes its value in place), so there is nothing to dismiss here.
+  #   Escape -> main.
+  # Input(main idx3): Home,Down x3,Enter; Home->row0 Joystick, Right (0->1);
   #   ESC (Input submenu backs out silently, edit kept). Then F10 = Save+Exit.
-  SCN_KEYS=( Home Return   Home $(rep 2 Down) Return
-             Home $(rep 3 Right) Escape Return   Escape
-             Home $(rep 2 Down) Return   Home Right Escape
+  SCN_KEYS=( Home Down Return   Home Down   Left   Escape
+             Home $(rep 3 Down) Return   Home Right Escape
              F10 )
   run_setup_phase "$name"
   assert_cfg_line AUDIO_BACKEND organya || note_fail
@@ -771,16 +819,22 @@ scenario_B() {
 scenario_C() {
   local name="C"; SCN_RC=0
   log "=== Scenario $name: SB16_FM_VOL=20 + FIXED_TIMESTEP=0 ==="
-  # R-B/R-M: SB16 FM (Music) volume is Custom row 7 (no override row now).
-  #   Sound(idx0)->submenu; Custom(row1): Home,Down,Enter -> screen_hardware;
-  #   Home->row0 (I/O port), Down x7 -> row7 Music volume; Left x8 (28->20, live
-  #   edit); ESC (silent, no prompt) -> submenu; ESC -> main. (Backend untouched
-  #   -> auto -> omitted.)
-  # Advanced(idx3): Home,Down x3,Enter; Home->row0 PERF_MODE, Down->row1
+  # SB16 FM (Music) volume is BLASTER-screen row 7.
+  # v2: there is NO "Custom setup" row any more -- the BLASTER screen is reached
+  #   INLINE from whichever picker puts the SB into use. Cheapest route that leaves
+  #   the backend ALONE: open the card picker (Sound row2) and re-pick the card that
+  #   is ALREADY current (Auto-detect, row0). Re-picking the current card is a no-op
+  #   on the cfg (AUDIO_BACKEND stays auto -> still omitted from the file) but it
+  #   still walks the SB hardware sub-screen, which is what we want.
+  #   Sound(main idx1): Home,Down,Enter; card picker: Home,Down x2,Enter; Enter picks
+  #   Auto-detect -> screen_hardware opens. Home->row0 (I/O port), Down x7 -> row7
+  #   Music volume; Left x8 (28->20, live edit); ESC (silent, no prompt); 'n'
+  #   declines the test-after-pick prompt; Escape -> main.
+  # Advanced(main idx4): Home,Down x4,Enter; Home->row0 PERF_MODE, Down->row1
   #   FIXED_TIMESTEP, Right (1->0); ESC Return. Then main-menu F10 = Save+Exit.
-  SCN_KEYS=( Home Return   Home Down Return
-             Home $(rep 7 Down) $(rep 8 Left) Escape   Escape
-             Home $(rep 3 Down) Return   Home Down Right Escape Return
+  SCN_KEYS=( Home Down Return   Home $(rep 2 Down) Return   Return
+             Home $(rep 7 Down) $(rep 8 Left) Escape   n   Escape
+             Home $(rep 4 Down) Return   Home Down Right Escape Return
              F10 )
   run_setup_phase "$name"
   assert_cfg_line SB16_FM_VOL 20            || note_fail
@@ -806,10 +860,10 @@ scenario_AUDIO() {
   # select (proves SETUP's audio config brought the device up and selected the
   # configured backend). WAV-RMS non-silence is attempted as a best-effort
   # bonus (see assert_wav_nonsilent -- DOSBox-X headless recwave limitation).
-  # Sound(idx0)->submenu; Music(row2): Home,Down x2,Enter; Home->row0 backend,
-  #   Right x3 (->organya); ESC Return; ESC -> main. Then F10 = Save and Exit.
-  SCN_KEYS=( Home Return   Home $(rep 2 Down) Return
-             Home $(rep 3 Right) Escape Return   Escape   F10 )
+  # v2: same as scenario B -- Organya is set on the Music Type cycle row.
+  # Sound(main idx1): Home,Down,Enter; Music Type (Sound row1): Home,Down; Left
+  #   (MIDI -> Organya, in place, no sub-screen); Escape -> main; F10 = Save+Exit.
+  SCN_KEYS=( Home Down Return   Home Down   Left   Escape   F10 )
   run_setup_phase "$name"
   assert_cfg_line AUDIO_BACKEND organya || note_fail
   if [[ "$DOSKUTSU_PRESENT" == "1" ]]; then
@@ -856,13 +910,19 @@ scenario_SETUPAUDIO() {
   launch_dosbox "$CONF_FAST" -c 'SETUP.EXE' || { CAPTURE_AUDIO=0; pulse_sink_down; note_fail; return 1; }
   sleep 8                                  # SETUP boot (profile_detect + SDL link)
   shoot "${name}-01-setup-main"
-  # T47 flow: the tests are now inline rows in the Sound submenu (the separate
-  # chooser screen was retired). Home,Enter -> Sound submenu; Home,Down x3 ->
-  # "Test sound effects" (row 3); Enter runs sound_inline_test(0), which opens
-  # the SB16 device (emits the mixer-balance banner) and auto-plays the bounded
-  # SFX (blocking), then asks "Did you hear it?" (Yes/No; 'y' = immediate Yes).
-  send_keys Home Return                    # main -> Sound submenu
-  send_keys Home $(rep 3 Down) Return      # row3 Test sound effects -> SB16 opens + SFX plays
+  # v2 flow. Sound is main idx1 (Auto-detect took idx0). The Sound menu rows are
+  # 0 Express, 1 Music Type, 2 Select Music Card, 3 Select Sound FX Card,
+  # 4 Music Options, 5 Test music, 6 Test sound effects, 7 Back -- note v2 puts
+  # Test MUSIC before Test SFX (v1 had them the other way round).
+  #
+  # GREY-RULE ARITHMETIC, and it is not optional here: this scenario's CFG sets
+  # AUDIO_BACKEND=organya, so Type=Organya and the CARD row (2) is GREYED --
+  # and greyed rows are SKIPPED by nav. From Home(row0) the live sequence is
+  # 0 -> 1 -> 3 -> 4 -> 5 -> 6, so Test sound effects (row 6) is Down x5, NOT
+  # Down x6. Counting rows instead of counting LIVE rows lands on Music Options
+  # and silently tests nothing.
+  send_keys Home Down Return               # main idx1 -> Sound menu
+  send_keys Home $(rep 5 Down) Return      # row6 Test sound effects -> SB16 opens + SFX plays
   sleep 2                                  # bounded SFX play
   shoot "${name}-02-popup-sfx"
   send_keys y                              # Yes/No menu -> 'y' = Yes -> back to submenu (row3)
@@ -872,15 +932,15 @@ scenario_SETUPAUDIO() {
   # looping PCM tone, 10 s cap); the play stage consumes the stop key, the answer
   # is a SEPARATE key -- let the tone fill the window, then 'space' stops the
   # play and 'y' answers.
-  send_keys Down                           # row4 Test music
+  send_keys Up                             # row5 Test music (v2: music sits ABOVE sfx)
   local cap_pid=""
   if [[ "$captured" == "1" ]]; then ( pulse_record 6 "$wav" ) & cap_pid=$!; sleep 0.5; fi
   send_keys Return                         # play music popup; PCM tone loops until-key
   [[ -n "$cap_pid" ]] && wait "$cap_pid" 2>/dev/null   # ~6 s of tone fills the WAV
   send_keys space                          # stop the until-key play -> answer prompt
   sleep 0.5
-  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to submenu (row4)
-  send_keys Escape                         # submenu -> main menu
+  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to the Sound menu
+  send_keys Escape                         # Sound menu -> main menu
   sleep 1
   CAPTURE_AUDIO=0; pulse_sink_down
   kill_dosbox
@@ -915,10 +975,23 @@ run_setup_audio() {
   log "[$name] SETUP audio test, backend=$backend, conf=$(basename "$conf")..."
   launch_dosbox "$conf" -c 'SETUP.EXE' || { CAPTURE_AUDIO=0; pulse_sink_down; note_fail; return 1; }
   sleep 8                                  # SETUP boot
-  # T47: Test music is row 4 of the Sound submenu. Home,Enter -> submenu;
-  # Home,Down x4 -> "Test music". The device opens when Enter runs the test.
-  send_keys Home Return                    # main -> Sound submenu
-  send_keys Home $(rep 4 Down)             # row4 Test music (positioned, not yet entered)
+  # v2 nav. Sound is main idx1 (Auto-detect took idx0). "Test music" is Sound row5
+  # (rows: 0 Express, 1 Music Type, 2 Select Music Card, 3 Select Sound FX Card,
+  # 4 Music Options, 5 Test music, 6 Test sound effects, 7 Back).
+  #
+  # *** THE DOWN-COUNT DEPENDS ON $backend -- a fixed count CANNOT be right here ***
+  # The card row (2) is GREYED unless the music Type is MIDI, and greyed rows are
+  # SKIPPED by nav. This helper is called with several backends:
+  #   opl3 / wb  -> Type=MIDI    -> card row LIVE  -> 0,1,2,3,4,5 -> Test music = Down x5
+  #   organya    -> Type=Organya -> card row GONE  -> 0,1,3,4,5   -> Test music = Down x4
+  # Count LIVE rows, never row indices. Getting this wrong does not error: it lands
+  # on "Music Options" and the test never runs, so the SB16 device never opens and
+  # the run fails later with a missing-banner assertion that points nowhere near
+  # the real cause. (That is precisely how this site was caught.)
+  local downs=5
+  [[ "$backend" == "organya" ]] && downs=4
+  send_keys Home Down Return               # main idx1 -> Sound menu
+  send_keys Home $(rep "$downs" Down)      # row5 Test music (positioned, not yet entered)
   shoot "${name}-02-sound-submenu"
   # T28 popup flow (audiotest_sdl.c): Test music = Enter -> the play stage runs
   # UNTIL-KEY now, not a bounded arpeggio. With the stage's data/midi/curly.mid
@@ -936,8 +1009,8 @@ run_setup_audio() {
   [[ -n "$cap_pid" ]] && wait "$cap_pid" 2>/dev/null   # ~8 s of real song fills the WAV
   send_keys space                          # stop the until-key play -> answer prompt
   sleep 0.5
-  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to submenu (row4)
-  send_keys Escape                         # submenu -> main menu
+  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to the Sound menu
+  send_keys Escape                         # Sound menu -> main menu
   sleep 1
   CAPTURE_AUDIO=0; pulse_sink_down
   kill_dosbox
@@ -1021,17 +1094,23 @@ scenario_HWBLASTER() {
     printf 'AUDIO_BACKEND=wb\r\n'
     printf 'BLASTER=A220 I5 D1 H5 P330 T6\r\n'
   } > "$STAGE_DIR/DOSKUTSU.CFG"
-  # Sound(idx0)->submenu; Custom setup(submenu row1): Home,Down,Enter ->
-  #   screen_hardware (override row0 ON since a BLASTER is seeded, so the
-  #   A/I/D/H/P/T fields are active).
+  # v2: no "Custom setup" row -- reach the BLASTER screen inline by re-picking the
+  #   ALREADY-CURRENT card, which is a no-op on AUDIO_BACKEND but still walks the
+  #   hardware sub-screen (same trick as scenario C). This CFG sets backend=wb, so
+  #   Type=MIDI (card row LIVE) and the picker opens ON WaveBlaster ("(current)");
+  #   a bare Return re-picks it -> AUDIO_BACKEND stays wb, SB sub-screen walked.
+  #   (wb is MCARD_SUB_SB -- WaveBlaster rides the SB MIDI header.)
+  #   Sound(main idx1): Home,Down,Enter; card picker (Sound row2): Home,Down x2,
+  #   Enter; Enter picks Auto-detect -> screen_hardware.
   # In-screen (R-M: no override row): rows 0 A, 1 I, 2 DMA, 3 P, 4 T. Home->row0,
   #   Down x3 -> P field. The R-A expanded MPU list is ascending (...0x300,
   #   0x320, 0x330...), so from the seeded P330 a Left x2 lands on P300 (0x330 ->
   #   0x320 -> 0x300). The edit writes the composed BLASTER LIVE; ESC backs out
-  #   SILENTLY (no prompt) -> submenu -> main; main-menu F10 writes P300. (Custom's
-  #   Enter OPENS a pick-list, so we edit the P field with Left/Right, not Enter.)
-  SCN_KEYS=( Home Return   Home Down Return
-             Home $(rep 3 Down) $(rep 2 Left) Escape   Escape   F10 )
+  #   SILENTLY (no prompt); 'n' declines the test-after-pick prompt; Escape ->
+  #   main; main-menu F10 writes P300. (The BLASTER screen's Enter OPENS a
+  #   pick-list, so we edit the P field with Left/Right, not Enter.)
+  SCN_KEYS=( Home Down Return   Home $(rep 2 Down) Return   Return
+             Home $(rep 3 Down) $(rep 2 Left) Escape   n   Escape   F10 )
   run_setup_phase "$name" keep_cfg
   assert_cfg_line BLASTER 'A220 I5 D1 H5 P300 T6' || note_fail
   if [[ "$DOSKUTSU_PRESENT" == "1" ]]; then
@@ -1078,11 +1157,12 @@ scenario_EXPRESS() {
     printf 'AUDIO_BACKEND=organya\r\n'
     printf 'BLASTER=A240 I7 D3 H7 T1\r\n'
   } > "$STAGE_DIR/DOSKUTSU.CFG"
-  # Sound(idx0)->submenu; Express(submenu row0): Home,Return.
+  # v2: Sound is main idx1 (Auto-detect took idx0). Express is still Sound row0.
+  # Sound(main idx1): Home,Down,Enter; Express(Sound row0): Home,Return.
   #   screen_express: Return (dismiss red warning) -> profile_detect ->
   #   Return (dismiss evidence) -> 'n' (decline the Test-it-now prompt).
-  #   -> submenu; Escape -> main; F10 = Save and Exit (writes CFG).
-  SCN_KEYS=( Home Return   Home Return   Return Return n   Escape   F10 )
+  #   -> Sound menu; Escape -> main; F10 = Save and Exit (writes CFG).
+  SCN_KEYS=( Home Down Return   Home Return   Return Return n   Escape   F10 )
   run_setup_phase "$name" keep_cfg
   # Express composed the DETECTED card (ambient A220 I5 D1 H5 T6) over the stale
   # A240 baseline, and set the recommended SB16 backend opl3.
