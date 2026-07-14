@@ -737,7 +737,14 @@ static int snd_active(int row)
    * just Organya's whole-synth rate (team-lead Option A: one editor per key, so
    * SB's quality choice lives here rather than in a duplicate SB screen). It is
    * greyed only for adlib (OPL2, music-only, no PCM mix) and gus (the GF1 has
-   * its own DAC rate, set by the GUS voices row above). */
+   * its own DAC rate, set by the GUS voices row above).
+   *
+   * THIS RULE SURVIVED THE v2 REDESIGN DELIBERATELY (team-lead ruling). The v2
+   * brief summarized Music Options as "pre-render + quality for Organya", which
+   * would have made this row Organya-ONLY -- and that would have left an
+   * SB/OPL3/WB user with NO UI at all for their SFX mix rate: the same
+   * greyed-and-undiscoverable failure v2 exists to fix, just pointed the other
+   * way. Do not "simplify" it to organya-only. */
   if (row == SND_QUALITY)   return !(adlib || gus);
   return 1;
 }

@@ -2225,6 +2225,54 @@ CF_ZIP         := $(DIST_DIR)/doskutsu-cf.zip
 # CRLF filter for DOS-facing text
 CRLF := awk 'BEGIN{ORS="\r\n"} {sub(/\r$$/, ""); print}'
 
+# ---- SETUP.BAT: the shipped launcher (UX v2) --------------------------------
+# ONE definition, used by BOTH generation sites (the CF dist and the DOSBox
+# stage). They used to carry separate copies of the body -- two copies of one
+# truth, which is precisely how MIDI_SET's default drifted and shipped a bug.
+#
+# 1. ERRORLEVEL CHAIN. SETUP's "Save and run DOSKUTSU" saves, then exits with
+#    code 10 (setup/main.c SETUP_EXIT_RUN_GAME) and lets the BAT start the game.
+#    SETUP deliberately does NOT exec the game itself: it is a DJGPP DPMI client
+#    under CWSDPMI, and spawning DOSKUTSU (a far larger client wanting a 2 MB
+#    stack) while SETUP + its DPMI host are still resident risks DPMI nesting and
+#    conventional-memory exhaustion below 640K -- a passes-in-DOSBox / wedges-on-
+#    g2k trap. Exiting first releases all of it.
+#    DOS `IF ERRORLEVEL n` means "n OR GREATER", so the 11 guard MUST come first;
+#    without it any future exit code above 10 would silently launch the game.
+#
+# 2. ENV HYGIENE (realhw root-cause, v1.6.3-rc g2k logs). doskutsu_cfg_load()
+#    publishes CFG keys with setenv(..., overwrite=0), so a PRE-EXISTING DOS env
+#    var WINS over the CFG. The operator's g2k session had a stale
+#    SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=wiimidi in AUTOEXEC: the CFG said
+#    orgmid2, the engine played wiimidi, and nothing in the log said so.
+#    Save-and-run makes this WORSE than the old exit-to-prompt flow, because it
+#    launches the game in the SAME DOS session -- the leaked var is guaranteed
+#    still live, so the headline v2 feature would appear to ignore the very
+#    setting the user just picked. Clear the audio keys SETUP writes before
+#    handing over. realhw verified empirically under DOSBox-X that DOS `SET VAR=`
+#    truly DELETES the variable (it does not leave an empty one, which would make
+#    getenv() non-NULL and mask EVERY CFG key -- a far worse silent failure).
+#
+#    NEVER clear BLASTER. It is the one AUTHORITATIVE key (file > env by design);
+#    clearing it buys nothing and would kill audio outright if a CFG lacks a
+#    BLASTER line.
+define SETUP_BAT_BODY
+@ECHO OFF
+SETUP.EXE
+IF ERRORLEVEL 11 GOTO END
+IF ERRORLEVEL 10 GOTO PLAY
+GOTO END
+:PLAY
+SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=
+SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=
+SET SDL_HINT_DOSKUTSU_MUSIC_OFF=
+SET SDL_HINT_DOSKUTSU_SFX_OFF=
+SET DOSKUTSU_NO_AUDIO=
+DOSKUTSU.EXE
+:END
+endef
+export SETUP_BAT_BODY
+
 # GPL text source: the cloned NXEngine-evo tree ships its LICENSE file at the root.
 NX_LICENSE := $(NXENGINE_SRC)/LICENSE
 
@@ -2332,7 +2380,7 @@ dist-list:
 	@printf 'top-level files:\n'
 	@$(call _dist_list_entry,DOSKUTSU.EXE,$(BUILD_DIR)/doskutsu.exe,binary (rename to upper-case))
 	@$(call _dist_list_entry,SETUP.EXE,$(SETUP_RELEASE_EXE),DOS configurator AUDIOTEST=1 (writes DOSKUTSU.CFG))
-	@printf '  %-22s %-55s %s\n' "SETUP.BAT" "(generated)" "SETUP.EXE launcher [CRLF]"
+	@printf '  %-22s %-55s %s\n' "SETUP.BAT" "(generated)" "SETUP launcher + Save-and-run chain [CRLF]"
 	@$(call _dist_list_entry,CWSDPMI.EXE,$(CWSDPMI_EXE),DPMI host (vendored in repo))
 	@$(call _dist_list_entry,CWSDPMI.DOC,$(CWSDPMI_DOC),CWSDPMI redistribution terms)
 	@$(call _dist_list_entry,LICENSE.TXT,$(REPO_ROOT)/LICENSE,MIT - repo source [CRLF])
@@ -2388,8 +2436,10 @@ dist: $(BUILD_DIR)/doskutsu.exe setup-release | fetch-binaries
 	$(call ASSERT_SETUP_NOT_STUB,$(CF_STAGE)/SETUP.EXE)
 	@install -m 0644 $(CWSDPMI_EXE)            "$(CF_STAGE)/CWSDPMI.EXE"
 	@install -m 0644 $(CWSDPMI_DOC)            "$(CF_STAGE)/CWSDPMI.DOC"
-	@# SETUP.BAT launcher (CRLF) so users can `SETUP` to configure before play.
-	@printf '@ECHO OFF\nSETUP.EXE\n' | $(CRLF) > "$(CF_STAGE)/SETUP.BAT"
+	@# SETUP.BAT launcher (CRLF): the errorlevel chain + env hygiene for
+	@# "Save and run DOSKUTSU". Body defined ONCE (SETUP_BAT_BODY) so the CF dist
+	@# and the DOSBox stage cannot drift apart.
+	@printf '%s\n' "$$SETUP_BAT_BODY" | $(CRLF) > "$(CF_STAGE)/SETUP.BAT"
 	@$(CRLF) < LICENSE           > "$(CF_STAGE)/LICENSE.TXT"
 	@$(CRLF) < $(NX_LICENSE)     > "$(CF_STAGE)/GPLV3.TXT"
 	@$(CRLF) < THIRD-PARTY.md    > "$(CF_STAGE)/3RDPARTY.TXT"
@@ -2445,7 +2495,7 @@ stage: $(BUILD_DIR)/doskutsu.exe setup | fetch-binaries
 	@# SETUP.EXE + launcher next to the game so the E2E suite (which mounts
 	@# STAGE_DIR as C:) can drive SETUP.EXE then DOSKUTSU.EXE from one root.
 	@install -m 0644 $(SETUP_EXE)             "$(STAGE_DIR)/SETUP.EXE"
-	@printf '@ECHO OFF\r\nSETUP.EXE\r\n' > "$(STAGE_DIR)/SETUP.BAT"
+	@printf '%s\n' "$$SETUP_BAT_BODY" | $(CRLF) > "$(STAGE_DIR)/SETUP.BAT"
 	@if [ -d "$(REPO_ROOT)/data" ]; then \
 	    rm -f "$(STAGE_DIR)/data" "$(STAGE_DIR)/DATA"; \
 	    ln -s "$(REPO_ROOT)/data" "$(STAGE_DIR)/data"; \
