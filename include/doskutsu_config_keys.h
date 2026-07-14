@@ -229,22 +229,42 @@ static const dkt_key_t DKT_KEYS[] =
     "SETUP-only record of the chosen System Speed preset; ignored by the engine", 0 },
 
   /* MIDI music-set choice (backlog #39). env_name is the hint the engine reads
-   * once at init to pick the MIDI source set (SoundManager.cpp:545-640). The
-   * engine maps a CLOSED SET of LOGICAL values, NOT directory names:
-   *   "" / "wiimidi" -> data/midi/   (WiiWare arrangements; the default)
-   *   "orgmid"       -> data/orgmid/ (ORGMID note-for-note transcription)
-   *   anything else  -> data/midi/   (unrecognized -> fallback + a warn log)
-   * Default is "wiimidi" -- the byte-neutral value (== the engine's no-hint
-   * behavior, data/midi/) that does NOT trip the unrecognized-fallback warning
-   * a literal "midi" would. DKT_STR (the value space is logical, not a free
-   * directory). SETUP's Music screen offers only the known sets actually
-   * present on disk (setup/midiset.c); the orgmid1/orgmid2 GM_VARIANT dev sets
-   * are deliberately NOT exposed (Q-A2). Only meaningful for a MIDI backend
-   * (wb / opl3); Organya ignores it. */
+   * once at init to pick the MIDI source set (SoundManager.cpp; nx0262 + the
+   * #39b custom passthrough nx0226). The engine resolves:
+   *   ""             -> orgmid2      (nx0262: unset/empty IS the default)
+   *   "orgmid2" /
+   *   "orgmid1"      -> data/orgmid2/ | data/orgmid1/  (our org2mid native-GM
+   *                     sets; each checked for >=1 .mid, else fall back to
+   *                     wiimidi so a tree without `make convert-music` is
+   *                     never silent)
+   *   "wiimidi"      -> data/midi/   (the WiiWare arrangements)
+   *   any other dir  -> data/<dir>/  (#39b custom drop-in passthrough, nx0226,
+   *                     when it holds >=1 .mid -- this is how the LEGACY
+   *                     data/orgmid/ set still plays)
+   *   otherwise      -> data/midi/   (fallback + a warn log)
+   *
+   * Default is "orgmid2" -- OrgMIDI v2, our org2mid native-GM conversion. The
+   * operator's g2k A/B (2026-07-06, main 5605db3) picked it over WiiWare:
+   * distinct GM drums (0 clamped vs 3) and richer arrangements.
+   *
+   * This default MUST track MIDISET_DEFAULT_VALUE (setup/midiset.h) and the
+   * engine's unset-hint default (nx0262). It is NOT free to drift: SETUP writes
+   * this key into every DOSKUTSU.CFG (scfg_save omits only an EMPTY DKT_STR),
+   * so whatever sits here is what the engine actually gets -- a stale default
+   * here silently overrides the engine's. That is exactly the bug 5605db3 left
+   * behind: it flipped midiset.h + nx0262 + the docs to orgmid2 but missed this
+   * entry, so every SETUP-saved CFG pinned MIDI_SET=wiimidi and the engine never
+   * saw its own default.
+   *
+   * DKT_STR (the value space is logical + free drop-in dirs, not a closed enum).
+   * SETUP's Music screen offers only the sets actually present on disk
+   * (setup/midiset.c). Only meaningful for a MIDI backend (wb / opl3 / gus);
+   * Organya ignores it. */
   { "MIDI_SET", "SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE",
-    DKT_STR, DKC_SOUND, "wiimidi", 0, 0, NULL,
+    DKT_STR, DKC_SOUND, "orgmid2", 0, 0, NULL,
     "MIDI music set",
-    "Which MIDI music set the MIDI backend plays: wiimidi (WiiWare) or orgmid (ORGMID)", 0 },
+    "Which MIDI music set the MIDI backend plays: orgmid2 (OrgMIDI, the default), "
+    "wiimidi (WiiWare), or a custom data/<dir> drop-in", 0 },
 
   /* ---- Input bindings (Phase 3 / #40 -- patch nxengine-evo/0227) ----------
    * Per-action keyboard / gameport-button remap. The engine's BIND_* loader

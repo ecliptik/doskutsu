@@ -310,10 +310,18 @@ static void test_speed_class(void)
         "round-trip SPEED_CLASS preset");
 }
 
-/* #39 / T1: the MIDI_SET key. Default is the byte-neutral "wiimidi" (the value
- * that maps to data/midi/ WITHOUT tripping the engine's unrecognized-fallback
- * warning a literal "midi" would). It round-trips through the SETUP model and
- * the engine loader publishes it to the MIDI-source hint. */
+/* #39 / T1: the MIDI_SET key. The registry default is "orgmid2" (OrgMIDI v2,
+ * our org2mid native-GM set -- the operator's g2k A/B pick, main 5605db3). It
+ * round-trips through the SETUP model and the engine loader publishes it to the
+ * MIDI-source hint.
+ *
+ * The registry default is load-bearing, not cosmetic: scfg_save() omits only an
+ * EMPTY DKT_STR, so SETUP writes this key into EVERY DOSKUTSU.CFG -- whatever
+ * sits here is what the engine actually gets, overriding its own unset-hint
+ * default. 5605db3 flipped setup/midiset.h + nx0262 + the docs to orgmid2 but
+ * missed the registry, so every SETUP-saved CFG pinned wiimidi and silently
+ * defeated the new default. These three MUST agree; the CHECK below is the
+ * tripwire that keeps them agreeing. */
 static void test_midiset_key(void)
 {
   const char *path = "/tmp/DKT_MIDISET.CFG";
@@ -324,8 +332,12 @@ static void test_midiset_key(void)
   CHECK(idx >= 0, "MIDI_SET is a known SETUP key");
 
   scfg_defaults(&a);
-  CHECK(strcmp(scfg_get(&a, idx), "wiimidi") == 0,
-        "MIDI_SET default is wiimidi (byte-neutral, no fallback warning)");
+  CHECK(strcmp(scfg_get(&a, idx), "orgmid2") == 0,
+        "MIDI_SET registry default is orgmid2 (5605db3 intent)");
+  /* the registry default and SETUP's midiset default are the SAME value -- the
+   * exact invariant 5605db3 broke. Pin it symbolically so neither can drift. */
+  CHECK(strcmp(scfg_get(&a, idx), MIDISET_DEFAULT_VALUE) == 0,
+        "MIDI_SET registry default == MIDISET_DEFAULT_VALUE (no drift)");
 
   scfg_set(&a, idx, "orgmid");
   CHECK(scfg_save(&a, path) == 0, "scfg_save with MIDI_SET ok");
@@ -355,10 +367,11 @@ static void test_midiset_key(void)
  * custom-drop-in path as "Custom (orgmid)". We now assert BOTH, so the next
  * rename cannot silently strand this test again.
  *
- * NOTE (deliberately NOT asserted here): the shared registry default for the
- * MIDI_SET key (include/doskutsu_config_keys.h) is still "wiimidi" and diverges
- * from MIDISET_DEFAULT_VALUE. That divergence is a production question, not a
- * test question -- test_midiset_key() below pins the registry side as it stands.
+ * The shared registry default (include/doskutsu_config_keys.h) was ALSO stale --
+ * 5605db3 missed it, so it still said "wiimidi" and silently overrode the engine's
+ * orgmid2 default in every SETUP-saved CFG. Fixed under Option A; test_midiset_key()
+ * above now pins registry default == MIDISET_DEFAULT_VALUE so they cannot drift
+ * apart again.
  */
 static void test_midiset_scan(void)
 {
