@@ -104,19 +104,41 @@ static void cycle_value(int idx, int dir)
  * F10 "save settings and return to the menu" action (T17) and the main-menu
  * "Save and exit" item. */
 /* Write the session config + report. Returns 1 on success, 0 on failure.
- * v2: the return value is LOAD-BEARING for "Save and run DOSKUTSU" -- we must
- * never chain into the game on a config we failed to write, or the player would
- * silently play with the OLD settings and no clue why. */
-static int cfg_write_toast(void)
+ *
+ * The return value is LOAD-BEARING for "Save and run DOSKUTSU" -- we must never
+ * chain into the game on a config we failed to write, or the player would
+ * silently play with the OLD settings and no clue why.
+ *
+ * `run_game` selects the SUCCESS wording/behavior:
+ *
+ *   run_game = 0 ("Save and exit", F10, the ESC save-offer): the classic modal --
+ *     "Settings saved. / Run DOSKUTSU.EXE to play." -- which waits for a keypress.
+ *     Correct here: the user is going back to the DOS prompt and DOES have to
+ *     start the game themselves.
+ *
+ *   run_game = 1 ("Save and run DOSKUTSU"): NO modal at all. The old shared toast
+ *     was wrong twice over on this path -- it told the user to launch a game that
+ *     SETUP.BAT is about to launch for them, and it BLOCKED the chain on a
+ *     keypress. Both are gone. We also do not draw a "Starting..." box, because
+ *     tui_shutdown() does a clrscr() on the way out and would wipe it: it would be
+ *     theatre, not feedback. main() prints a plain console line AFTER tui_shutdown
+ *     instead, which survives into the DOS console and stays on screen while the
+ *     game loads. Classic SETUP behavior: save, get out of the way.
+ *
+ * FAILURE is deliberately IDENTICAL on both paths: a blocking modal. A failed save
+ * is the one moment the user must not be allowed to walk past. */
+static int cfg_write_toast(int run_game)
 {
   tui_clear();
   tui_titlebar("DOSKUTSU SETUP"); /* round-7 item 2: title bar on the toast too */
   if (scfg_save(&g_cfg, CFG_PATH) == 0)
   {
     const char *lines[2];
+    g_dirty = 0;
+    if (run_game)
+      return 1;  /* no modal, no keypress -- main() reports after tui_shutdown */
     lines[0] = "Settings saved.";
     lines[1] = "Run DOSKUTSU.EXE to play.";
-    g_dirty = 0;
     tui_message("Saved", lines, 2);
     return 1;
   }
@@ -1951,10 +1973,11 @@ static const char *audiotest_badge(int res)
 
 /* Returns 1 when the config actually reached disk, 0 on write failure. The
  * return value gates "Save and run DOSKUTSU" (never chain into the game on a
- * config we failed to write). */
-static int screen_save(void)
+ * config we failed to write). `run_game` picks the success wording/behavior --
+ * see cfg_write_toast. */
+static int screen_save(int run_game)
 {
-  return cfg_write_toast();
+  return cfg_write_toast(run_game);
 }
 
 /* ---- Sound submenu (T47 plan 3.3) ----------------------------------- *
@@ -3378,10 +3401,10 @@ int main(void)
          * NEVER launch on a failed save: the player would silently run with the
          * OLD settings and no clue why. On failure we stay in SETUP (the toast
          * already reported it) so they can retry or fix the disk. */
-        if (screen_save()) { g_run_game = 1; break; }
+        if (screen_save(1)) { g_run_game = 1; break; }
       }
-      else if (action == M_SAVEEXIT) { screen_save(); break; } /* Save and exit */
-      else if (action == -2) { screen_save(); break; }  /* F10 = Save and Exit */
+      else if (action == M_SAVEEXIT) { screen_save(0); break; } /* Save and exit */
+      else if (action == -2) { screen_save(0); break; }  /* F10 = Save and Exit */
       else /* action == M_QUIT (Quit without saving) or ESC (-1) */
       {
         /* Session model: every screen's edits live in the in-memory config and
@@ -3393,7 +3416,7 @@ int main(void)
         {
           if (tui_yesno("Unsaved changes", "Save your changes before exiting?", 1))
           {
-            screen_save(); /* Yes -> write the config, then exit */
+            screen_save(0); /* Yes -> write the config, then exit */
             break;
           }
           /* No -> fall through to the explicit discard confirm below. */
@@ -3410,6 +3433,25 @@ int main(void)
 #undef MENU_Y
 
   tui_shutdown();
+
+  /* NOTE on the Save-and-run path: SETUP prints NOTHING here and simply exits --
+   * the classic Doom-SETUP behavior (save, get out of the way), which is what the
+   * shipped SETUP.BAT wants: it runs DOSKUTSU.EXE on the next line and the game
+   * takes the screen immediately.
+   *
+   * I first put a `puts("Settings saved. Starting DOSKUTSU...")` right here, on
+   * the theory that a line printed AFTER tui_shutdown()'s clrscr() would survive
+   * to the DOS console. THE WALK REFUTED IT: shot 96 (setup-review-walk, the
+   * Save-and-run press) shows a bare C:\> prompt -- the line never appeared. It
+   * was removed rather than shipped as dead code under a comment claiming it
+   * renders. If a visible acknowledgement is ever wanted on this path, it needs a
+   * conio-side write (the subsystem clrscr() belongs to) and a fresh witness --
+   * do not re-add a stdio print here on the assumption it shows.
+   *
+   * The user is not left guessing: via SETUP.BAT the game starting IS the
+   * acknowledgement, and a FAILED save still raises its blocking modal, which is
+   * the only case where silence would actually cost them something. */
+
   /* v2 sec.11: exit code IS the launcher contract. 0 = plain exit; 10 = "saved,
    * now run the game" (SETUP.BAT branches on it). SETUP had exactly one exit
    * path (0) before this, so nothing else in the tree depends on the code. */

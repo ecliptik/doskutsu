@@ -480,6 +480,34 @@ walk() {
   send_keys Escape; sleep 0.5           # ESC again = No = stay -> main menu
 
   shoot "99-main-menu-final"            # (session dirty -- left live, unsaved)
+
+  # --- LAST: actually PRESS "Save and run DOSKUTSU" (idx5) -----------------
+  # This must be the FINAL action of the walk: it SAVES and EXITS SETUP, so
+  # nothing can follow it.
+  #
+  # It witnesses the task-#18 fix. The old shared save toast was wrong twice on
+  # this path -- it told the user to "Run DOSKUTSU.EXE to play" (a game SETUP.BAT
+  # is about to launch FOR them) and it BLOCKED the chain on a keypress. The fix
+  # is: no modal at all on the run path, and a plain console line printed AFTER
+  # tui_shutdown() (which clrscr()s, so anything drawn inside the TUI would have
+  # been wiped anyway).
+  #
+  # WHAT SHOT 96 MUST SHOW: a bare DOS prompt. SETUP saved and EXITED on its own,
+  # with NO "Saved / Press a key" modal. If a modal is present, SETUP is still
+  # blocking the launch chain and the fix has regressed -- that is the assertion.
+  #
+  # This shot already earned its keep: the first version of the fix ALSO printed
+  # "Settings saved. Starting DOSKUTSU..." to the console after tui_shutdown().
+  # Shot 96 showed a bare prompt -- the line never rendered -- so the print was
+  # removed rather than shipped as dead code under a comment claiming it worked.
+  # A compiler cannot see a modal, and it cannot see a line that fails to appear.
+  #
+  # (The walk runs SETUP.EXE directly, not via SETUP.BAT, so ERRORLEVEL 10 is
+  # simply ignored by COMMAND.COM and the game does not start -- which is exactly
+  # the safe-degrade path, and it keeps this capture cheap.)
+  send_keys Home Down Down Down Down Down; sleep 0.4   # idx5 Save and run DOSKUTSU
+  send_keys Return; sleep 2.0            # saves, exits: NO keypress should be needed
+  shoot "96-save-and-run-exited"         # bare DOS prompt, no modal, no keypress
 }
 
 # ---------------------------------------------------------------------------
