@@ -86,7 +86,7 @@ else
   LIBS        :=
 endif
 
-SRCS := main.c tui.c setupcfg.c recommend.c profile.c midiset.c \
+SRCS := main.c tui.c setupcfg.c recommend.c profile.c midiset.c musiccard.c \
         scancode.c bindings.c joyport.c \
         audiotest_progress.c $(AUDIOTEST_SRC)
 
@@ -123,6 +123,6 @@ clean:
 test: | $(OUT_DIR)
 	PATH="$(ORIG_PATH)" cc -std=gnu11 -Wall -Wextra -Werror \
 	   -I$(REPO_ROOT)/include -I. \
-	   tests/test_config.c setupcfg.c recommend.c profile.c midiset.c \
+	   tests/test_config.c setupcfg.c recommend.c profile.c midiset.c musiccard.c \
 	   scancode.c bindings.c \
 	   -o $(OUT_DIR)/test_config_host && $(OUT_DIR)/test_config_host

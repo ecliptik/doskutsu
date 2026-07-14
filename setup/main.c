@@ -18,6 +18,7 @@
 #include "recommend.h"
 #include "audiotest.h"
 #include "midiset.h"
+#include "musiccard.h"
 #include "bindings.h"
 #include "scancode.h"
 #include "joyport.h"
@@ -102,7 +103,11 @@ static void cycle_value(int idx, int dir)
 /* Write the in-memory config to disk and show a modal result. Used by the
  * F10 "save settings and return to the menu" action (T17) and the main-menu
  * "Save and exit" item. */
-static void cfg_write_toast(void)
+/* Write the session config + report. Returns 1 on success, 0 on failure.
+ * v2: the return value is LOAD-BEARING for "Save and run DOSKUTSU" -- we must
+ * never chain into the game on a config we failed to write, or the player would
+ * silently play with the OLD settings and no clue why. */
+static int cfg_write_toast(void)
 {
   tui_clear();
   tui_titlebar("DOSKUTSU SETUP"); /* round-7 item 2: title bar on the toast too */
@@ -113,12 +118,14 @@ static void cfg_write_toast(void)
     lines[1] = "Run DOSKUTSU.EXE to play.";
     g_dirty = 0;
     tui_message("Saved", lines, 2);
+    return 1;
   }
   else
   {
     const char *lines[1];
     lines[0] = "ERROR: could not write " CFG_PATH " (disk full / read-only?)";
     tui_message("Save failed", lines, 1);
+    return 0;
   }
 }
 
@@ -170,7 +177,7 @@ typedef struct { const char *key; const char *desc; } helprow_t;
 
 /* (#9: the per-backend help table BACKEND_HELP was REMOVED -- the music backend
  * is no longer a generic-editor row; it is the Select Music Type picker, whose
- * one-line descriptions live in the MUSIC_TYPES / MIDI_SYNTHS tables and whose
+ * one-line descriptions live in the MUSIC_TYPES / MUSIC_CARDS tables and whose
  * labels come from snd_backend_name. Keeping a second backend-description table
  * here was the same drift risk we just single-sourced for the labels.) */
 
@@ -521,8 +528,8 @@ static void screen_advanced(void)
  */
 
 /* #9: the music BACKEND is now chosen in the Sound hub's "Select Music Type"
- * picker (snd_pick_music_type, + its MIDI-synth second level), so this screen --
- * retitled "Music options" --
+ * Music Type row + Select Music Card picker, so this screen -- retitled
+ * "Music Options" --
  * holds only the per-card music EXTRAS: GUS voices + GUS high-fidelity (gus),
  * MIDI set (MIDI cards), Organya pre-render (organya), audio quality. Sound
  * enable/disable + the SFX/Music volume levels live in Sound card hardware. */
@@ -619,130 +626,17 @@ static const char *snd_label(int row)
  *
  * SINGLE-SOURCE LABEL DISCIPLINE (preserved from the flat picker): every
  * literal appears exactly ONCE, in the two tables below. The type-level
- * resolver (music_card_label) and the synth-level resolver (music_synth_name)
+ * resolver (music_card_label) and the card-level resolver (music_card_short)
  * read them; the hub banner, both pickers, Auto-detect, the Express modal and
  * the SYSTEM PROFILE panel all go through those two, so the wording cannot
  * drift between screens.
  * ====================================================================== */
 
-/* The inline param sub-screen a pick walks after committing the backend (NONE =
- * no sub-screen; SB = the BLASTER hardware screen; GUS = the voice picker;
- * ORGANYA = BLASTER hardware + the pre-render auto-suggest). */
-enum { MCARD_SUB_NONE = 0, MCARD_SUB_SB, MCARD_SUB_GUS, MCARD_SUB_ORGANYA };
-
-/* Music TYPE (row 1 of the Sound hub). Order == picker presentation order, so
- * the enum doubles as the MUSIC_TYPES index: Organya FIRST (operator: it is the
- * no-sound-card-needed choice and must not read as an afterthought). */
-enum { MTYPE_ORGANYA = 0, MTYPE_MIDI, MTYPE_AUTO, MTYPE_NONE, MTYPE_NTYPES };
-
-/* `value` is the AUDIO_BACKEND this type writes -- NULL for MIDI, whose backend
- * is decided one level down by the synth picker ("auto" => SETUP omits the line
- * so the engine's own auto-detect chain runs). `sub` is the inline sub-screen
- * walked on pick. */
-static const struct
-{
-  const char *value;
-  int         sub;
-  const char *label;
-  const char *desc;
-} MUSIC_TYPES[] = {
-  { "organya", MCARD_SUB_ORGANYA, "Organya",
-    "Built-in Cave Story music. No sound card needed. First launch pre-renders "
-    "all songs to disk (one-time wait)." },
-  { NULL,      MCARD_SUB_NONE,    "MIDI",
-    "Music on a sound card or synth. You pick the synth next." },
-  { "auto",    MCARD_SUB_SB,      "Auto-detect",
-    "Detect installed sound hardware." },
-  { "none",    MCARD_SUB_NONE,    "No Music",
-    "No music. Sound effects still play." }
-};
-
-/* The MIDI synths (row list of the second-level picker), in operator-locked
- * order. `name` is the SHORT synth name (the hub banner's "MIDI: <name>", the
- * SYSTEM PROFILE panel, the Express evidence modal); `label` is the picker row,
- * which names the HARDWARE the synth lives on -- the exact confusion the flat
- * list caused. AUDIO_BACKEND=wb is shared by TWO synths (WaveBlaster
- * daughterboard vs an external General MIDI module); the SETUP-only MIDI_DEV
- * discriminator tells them apart (the engine ignores MIDI_DEV). */
-static const struct
-{
-  const char *value;    /* AUDIO_BACKEND cfg value                      */
-  const char *midi_dev; /* MIDI_DEV discriminator; NULL unless value=="wb" */
-  int         sub;
-  const char *name;     /* short name (banner / profile / Express)      */
-  const char *label;    /* picker row label (hardware named here)       */
-  const char *desc;
-} MIDI_SYNTHS[] = {
-  { "opl3",  NULL,          MCARD_SUB_SB,   "OPL3 FM",
-    "OPL3 FM (Sound Blaster 16/Pro)",
-    "OPL3 FM synth on a Sound Blaster 16/Pro." },
-  { "wb",    "waveblaster", MCARD_SUB_SB,   "WaveBlaster",
-    "WaveBlaster daughterboard",
-    "Wavetable daughterboard on the SB MIDI header." },
-  { "wb",    "genmidi",     MCARD_SUB_SB,   "General MIDI",
-    "General MIDI (external module)",
-    "MPU-401 to an external General MIDI module." },
-  { "adlib", NULL,          MCARD_SUB_NONE, "AdLib",
-    "AdLib (OPL2, music only)",
-    "OPL2 FM synth. AdLib or OPL2 card. Music only." },
-  { "gus",   NULL,          MCARD_SUB_GUS,  "Gravis UltraSound",
-    "Gravis UltraSound",
-    "GF1 wavetable. Gravis UltraSound / PicoGUS." }
-};
-#define MIDI_NSYNTHS ((int)(sizeof(MIDI_SYNTHS) / sizeof(MIDI_SYNTHS[0])))
-
-/* The music TYPE a stored AUDIO_BACKEND belongs to (the derivation that lets
- * the Type-first UI exist with no new cfg key). Unknown/empty -> Auto-detect,
- * matching the engine's own default. */
-static int music_type_of(const char *backend)
-{
-  if (strcmp(backend, "organya") == 0) return MTYPE_ORGANYA;
-  if (strcmp(backend, "none") == 0)    return MTYPE_NONE;
-  if (strcmp(backend, "opl3") == 0 || strcmp(backend, "wb") == 0 ||
-      strcmp(backend, "adlib") == 0 || strcmp(backend, "gus") == 0)
-    return MTYPE_MIDI;
-  return MTYPE_AUTO;
-}
-
-/* Index of a (backend, midi_dev) pair in MIDI_SYNTHS, or -1 when the backend is
- * not a MIDI synth (organya / none / auto). A "wb" backend whose MIDI_DEV is
- * unset or unrecognized resolves to the WaveBlaster row (the documented
- * default), so a hand-edited CFG never lands on "no current synth". */
-static int midi_synth_index(const char *backend, const char *midi_dev)
-{
-  int i, wb_fallback = -1;
-  for (i = 0; i < MIDI_NSYNTHS; ++i)
-  {
-    if (strcmp(MIDI_SYNTHS[i].value, backend) != 0) continue;
-    if (MIDI_SYNTHS[i].midi_dev == NULL) return i;  /* non-wb: one row per value */
-    if (midi_dev && strcmp(MIDI_SYNTHS[i].midi_dev, midi_dev) == 0) return i;
-    if (strcmp(MIDI_SYNTHS[i].midi_dev, "waveblaster") == 0) wb_fallback = i;
-  }
-  return wb_fallback;
-}
-
-/* SYNTH-level resolver: the short synth name, or "" when the backend is not a
- * MIDI synth. */
-static const char *music_synth_name(const char *backend, const char *midi_dev)
-{
-  int i = midi_synth_index(backend, midi_dev);
-  return (i >= 0) ? MIDI_SYNTHS[i].name : "";
-}
-
-/* TYPE-level resolver: the full music label as every screen shows it --
- * "Organya" / "Auto-detect" / "No Music", or "MIDI: <synth>" for a MIDI
- * backend. The MIDI form is composed into a static buffer; the pointer is valid
- * until the next call, so callers must USE it (draw/copy) before calling again.
- * The only caller that keeps several at once (pick_value's list) copies. */
-static const char *music_card_label(const char *backend, const char *midi_dev)
-{
-  static char buf[40];
-  int t = music_type_of(backend);
-  if (t != MTYPE_MIDI) return MUSIC_TYPES[t].label;
-  snprintf(buf, sizeof buf, "%s: %s", MUSIC_TYPES[MTYPE_MIDI].label,
-           music_synth_name(backend, midi_dev));
-  return buf;
-}
+/* v2: the music TYPE + CARD model (tables, derivation, resolvers) now lives in
+ * setup/musiccard.{c,h} -- extracted so it can be unit-tested on the host, since
+ * main.c is a TUI binary and is NOT linked into the test. The round-trip test
+ * (setup/tests/test_config.c) drives AUDIO_BACKEND -> Type+Card -> back, which is
+ * what holds the derivation and the write path in agreement. */
 
 /* Wrapper used where only the backend value is in hand (Auto-detect / Express /
  * the generic enum picker): resolves the wb split from the CURRENT MIDI_DEV. */
@@ -828,10 +722,12 @@ static int snd_active(int row)
   int organya = strcmp(be, "organya") == 0;
   int gus     = strcmp(be, "gus") == 0;
   int adlib   = strcmp(be, "adlib") == 0;
-  /* The MIDI music-set applies only to a MIDI synth backend (WaveBlaster /
-   * OPL3, or Auto which may resolve to one). */
-  int midi    = strcmp(be, "wb") == 0 || strcmp(be, "opl3") == 0 ||
-                strcmp(be, "auto") == 0;
+  /* v2 Q2 (a LIVE BUG fixed): the MIDI music-set applies to EVERY MIDI card,
+   * which includes the Gravis -- the GF1 plays the .mid sets like any other MIDI
+   * backend, and the whole orgmid2-vs-wiimidi A/B was decided ON the GUS drums.
+   * The old gate (wb|opl3|auto) EXCLUDED gus, hiding that choice from the exact
+   * user who cares most about it. Gate on the derived Type instead. */
+  int midi    = music_type_of(be) == MTYPE_MIDI;
   if (row == SND_GUSVOICES) return gus;
   if (row == SND_GUSHIFI)   return gus;
   if (row == SND_MIDISET)   return midi;
@@ -1692,7 +1588,7 @@ static const char *cfg_backend_name(void)
   /* wb: delegate to the synth-level label source (WaveBlaster / General MIDI) --
    * its short name already fits this compact line. The rest stay compact. */
   if (strcmp(b, "wb") == 0)
-    return music_synth_name("wb", scfg_get(&g_cfg, scfg_index("MIDI_DEV")));
+    return music_card_short("wb", scfg_get(&g_cfg, scfg_index("MIDI_DEV")));
   if (strcmp(b, "opl3") == 0)    return "OPL3";
   if (strcmp(b, "organya") == 0) return "Organya";
   if (strcmp(b, "adlib") == 0)   return "AdLib";
@@ -2046,9 +1942,12 @@ static const char *audiotest_badge(int res)
  * retired -- the two tests now live inline in the Sound submenu
  * (screen_sound_menu + sound_inline_test), each with a result badge. */
 
-static void screen_save(void)
+/* Returns 1 when the config actually reached disk, 0 on write failure. The
+ * return value gates "Save and run DOSKUTSU" (never chain into the game on a
+ * config we failed to write). */
+static int screen_save(void)
 {
-  cfg_write_toast();
+  return cfg_write_toast();
 }
 
 /* ---- Sound submenu (T47 plan 3.3) ----------------------------------- *
@@ -2094,7 +1993,7 @@ static int sound_inline_test(int phase)
  * Sound-FX-device picker. Picking a music type (or, under MIDI, a synth) walks
  * that choice's inline param sub-screen(s) (fdsetup "pick -> params -> back"),
  * then the SFX list re-narrows to only the devices that card can drive. The
- * MUSIC_TYPES / MIDI_SYNTHS tables + their resolvers are defined up with
+ * MUSIC_TYPES / MUSIC_CARDS tables + their resolvers are defined up with
  * music_card_label. See docs/internal/SETUP-SOUND-UX-SPEC.md sec.4-5.
  * ====================================================================== */
 
@@ -2121,6 +2020,65 @@ static const char *sfx_current_name(void)
   if (strcmp(be, "adlib") == 0)  return "No Sound FX";
   if (strcmp(sd, "none") == 0)   return "No Sound FX";
   return sfx_native_name(be);
+}
+
+/* v2: the two inline-test result badges live at file scope now, because the
+ * test-after-pick prompt (below) runs INSIDE the pickers and must feed the very
+ * same badge the Sound menu's Test rows show. An earlier Express revision
+ * auto-played a test and DISCARDED its result, so the Test row still read "Not
+ * tested" -- the operator flagged it. Sharing the state is what stops that
+ * repeating. -2 = never tested this session. */
+static int g_res_sfx   = -2;
+static int g_res_music = -2;
+
+/* THE LAUNCHER CONTRACT (v2 sec.11). SETUP's exit code tells SETUP.BAT what to
+ * do next. Keep this in sync with dist/doskutsu-cf/SETUP.BAT:
+ *
+ *     @ECHO OFF
+ *     SETUP.EXE
+ *     IF ERRORLEVEL 11 GOTO END      <- guard FIRST: DOS "IF ERRORLEVEL n" means
+ *     IF ERRORLEVEL 10 GOTO PLAY        "n OR GREATER", so without this line any
+ *     GOTO END                          future code above 10 would launch the game
+ *     :PLAY
+ *     DOSKUTSU.EXE
+ *     :END
+ *
+ * 0 = plain exit. 10 = saved, run the game. 1-9 reserved for genuine errors.
+ * If SETUP.EXE is run directly (not via the BAT) the code is simply ignored by
+ * COMMAND.COM -- settings are still saved, so it degrades safely. */
+#define SETUP_EXIT_RUN_GAME 10
+
+/* v2 sec.11: set by "Save and run DOSKUTSU" AFTER a successful save. main()
+ * turns it into ERRORLEVEL 10, which SETUP.BAT tests to chain into the game.
+ * SETUP is fully exited by then, so the game gets a clean DOS with all of
+ * SETUP's DPMI/conventional memory released. */
+static int g_run_game = 0;
+
+/* v2 test-after-pick: right after a card's hardware sub-screen, offer to verify
+ * it. `music` selects which test (1 = music, 0 = sound effects). The result is
+ * recorded in the shared badge, so "Working" shows on the Sound menu exactly as
+ * if the user had run the Test row by hand.
+ *
+ * Default highlight is Yes (operator ask). NOTE tui_yesno resolves ESC to the
+ * DEFAULT, so ESC here means Yes -- i.e. it plays the test rather than skipping
+ * it. That is the one place v2 deviates from the spec's "ESC == No"; the two are
+ * mutually exclusive with this primitive, and playing a (stoppable) test is
+ * harmless, whereas changing tui_yesno would alter every destructive prompt that
+ * correctly relies on ESC -> No. */
+static void snd_test_after_pick(int music)
+{
+  int r;
+  tui_clear();
+  if (!tui_yesno(music ? "Test music" : "Test sound effects",
+                 music ? "Test music now?" : "Test sound effects now?", 0))
+  {
+    tui_clear();
+    return;
+  }
+  r = sound_inline_test(music);
+  if (music) g_res_music = r;
+  else       g_res_sfx   = r;
+  tui_clear();
 }
 
 /* Walk the inline param sub-screen(s) a pick requires, then return to the hub
@@ -2150,45 +2108,46 @@ static void snd_walk_sub(int sub)
  * at BOTH levels: backing out here leaves the previously-configured music type
  * and synth exactly as they were). Returns 1 when a synth was committed, 0 on
  * ESC -- so the caller knows nothing was written. */
-static int snd_pick_midi_synth(void)
+static int snd_pick_music_card(void)
 {
-  const char *items[MIDI_NSYNTHS];
-  const char *tags[MIDI_NSYNTHS];
-  const char *descs[MIDI_NSYNTHS];
+  const char *items[MUSIC_NCARDS];
+  const char *tags[MUSIC_NCARDS];
+  const char *descs[MUSIC_NCARDS];
   int beidx = scfg_index("AUDIO_BACKEND");
   int mdidx = scfg_index("MIDI_DEV");
-  /* "(current)" resolves from the LIVE cfg: -1 when the current type is not
-   * MIDI (Organya / Auto / No Music), in which case no row is tagged and the
-   * list simply starts on the first synth. */
-  int cur = midi_synth_index(scfg_get(&g_cfg, beidx), scfg_get(&g_cfg, mdidx));
+  /* "(current)" resolves from the LIVE cfg. This row is only selectable when
+   * Type == MIDI, so cur is always a real card here; the >= 0 guard is belt and
+   * braces for a future caller. */
+  int cur = music_card_index(scfg_get(&g_cfg, beidx), scfg_get(&g_cfg, mdidx));
   int i, choice, start = (cur >= 0) ? cur : 0;
 
-  for (i = 0; i < MIDI_NSYNTHS; ++i)
+  for (i = 0; i < MUSIC_NCARDS; ++i)
   {
-    items[i] = MIDI_SYNTHS[i].label;
-    descs[i] = MIDI_SYNTHS[i].desc;
+    items[i] = MUSIC_CARDS[i].label;
+    descs[i] = MUSIC_CARDS[i].desc;
     tags[i]  = (i == cur) ? "(current)" : "";
   }
 
-  choice = tui_picklist("Select MIDI Synth", 0, 0, items, tags, descs,
-                        MIDI_NSYNTHS, start, 0, NULL, NULL, 0);
-  if (choice < 0 || choice >= MIDI_NSYNTHS) return 0; /* ESC: abandon, no change */
+  choice = tui_picklist("Select Music Card", 0, 0, items, tags, descs,
+                        MUSIC_NCARDS, start, 0, NULL, NULL, 0);
+  if (choice < 0 || choice >= MUSIC_NCARDS) return 0; /* ESC: abandon, no change */
 
-  if (strcmp(scfg_get(&g_cfg, beidx), MIDI_SYNTHS[choice].value) != 0)
+  if (strcmp(scfg_get(&g_cfg, beidx), MUSIC_CARDS[choice].value) != 0)
   {
-    scfg_set(&g_cfg, beidx, MIDI_SYNTHS[choice].value);
+    scfg_set(&g_cfg, beidx, MUSIC_CARDS[choice].value);
     g_dirty = 1;
   }
-  /* For a wb synth, record WHICH one (SETUP-only label/MPU-default
-   * discriminator; the engine ignores MIDI_DEV). Non-wb synths leave it be. */
-  if (MIDI_SYNTHS[choice].midi_dev &&
-      strcmp(scfg_get(&g_cfg, mdidx), MIDI_SYNTHS[choice].midi_dev) != 0)
+  /* For a wb card, record WHICH one (SETUP-only label/MPU-default
+   * discriminator; the engine ignores MIDI_DEV). Non-wb cards leave it be. */
+  if (MUSIC_CARDS[choice].midi_dev &&
+      strcmp(scfg_get(&g_cfg, mdidx), MUSIC_CARDS[choice].midi_dev) != 0)
   {
-    scfg_set(&g_cfg, mdidx, MIDI_SYNTHS[choice].midi_dev);
+    scfg_set(&g_cfg, mdidx, MUSIC_CARDS[choice].midi_dev);
     g_dirty = 1;
   }
 
-  snd_walk_sub(MIDI_SYNTHS[choice].sub);
+  snd_walk_sub(MUSIC_CARDS[choice].sub);
+  snd_test_after_pick(1); /* v2: offer the music test right after the hardware */
   return 1;
 }
 
@@ -2204,48 +2163,81 @@ static int snd_pick_midi_synth(void)
  * the backend), so a music change re-points the derived SFX device for free.
  * ESC = abandon, no cfg change. Returns 1 (a list was shown), matching the
  * screen_sound_menu Enter contract. */
-static int snd_pick_music_type(void)
+/* v2 SESSION MEMORY of the last MIDI card, for the Organya <-> MIDI toggle.
+ *
+ * When Type is Organya or No Music, AUDIO_BACKEND holds organya/none -- so the
+ * CARD IS NOT REPRESENTABLE IN THE CFG and there is nothing to restore from the
+ * file when the user cycles back to MIDI. This is a SETUP-only, in-RAM memory
+ * (no new cfg key, never persisted): -1 = unset -> a fresh cycle into MIDI lands
+ * on Auto-detect (MUSIC_CARDS[0]), which is the operator-specified default.
+ *
+ * It is captured ON LEAVING MIDI (snd_type_cycle below), reading the live cfg --
+ * so a card picked in the picker is remembered without any extra bookkeeping.
+ *
+ * We deliberately do NOT reconstruct the card from the MIDI_DEV that survives in
+ * the cfg across an Organya round-trip: MIDI_DEV only discriminates the two wb
+ * cards, so half-recovering a card family would be more surprising than the
+ * clean Auto-detect default. Documented so nobody "fixes" it later. */
+static int g_last_card = -1;
+
+/* Cycle the Music Type row in place (Left/Right/Space/Enter). Writes
+ * AUDIO_BACKEND for the new type: Organya/No Music write their own value; MIDI
+ * writes the REMEMBERED card's backend (Auto-detect when there is no memory),
+ * so the cfg is never left in a half-state. */
+static void snd_type_cycle(int dir)
 {
-  const char *items[MTYPE_NTYPES];
-  const char *tags[MTYPE_NTYPES];
-  const char *descs[MTYPE_NTYPES];
   int beidx = scfg_index("AUDIO_BACKEND");
-  int cur = music_type_of(scfg_get(&g_cfg, beidx)); /* derived from the live cfg */
-  int i, choice;
+  int mdidx = scfg_index("MIDI_DEV");
+  const char *be = scfg_get(&g_cfg, beidx);
+  int cur = music_type_of(be);
+  int next = (cur + dir + MTYPE_NTYPES) % MTYPE_NTYPES;
 
-  for (i = 0; i < MTYPE_NTYPES; ++i)
+  if (next == cur) return;
+
+  /* Leaving MIDI: remember the card we were on (read from the LIVE cfg). */
+  if (cur == MTYPE_MIDI)
+    g_last_card = music_card_index(be, scfg_get(&g_cfg, mdidx));
+
+  if (next == MTYPE_MIDI)
   {
-    items[i] = MUSIC_TYPES[i].label;
-    descs[i] = MUSIC_TYPES[i].desc;
-    tags[i]  = (i == cur) ? "(current)" : "";
+    int c = (g_last_card >= 0) ? g_last_card : 0; /* unset -> Auto-detect */
+    if (strcmp(scfg_get(&g_cfg, beidx), MUSIC_CARDS[c].value) != 0)
+    {
+      scfg_set(&g_cfg, beidx, MUSIC_CARDS[c].value);
+      g_dirty = 1;
+    }
+    if (MUSIC_CARDS[c].midi_dev &&
+        strcmp(scfg_get(&g_cfg, mdidx), MUSIC_CARDS[c].midi_dev) != 0)
+    {
+      scfg_set(&g_cfg, mdidx, MUSIC_CARDS[c].midi_dev);
+      g_dirty = 1;
+    }
+    return;
   }
 
-  choice = tui_picklist("Select Music Type", 0, 0, items, tags, descs,
-                        MTYPE_NTYPES, cur, 0, NULL, NULL, 0);
-  if (choice < 0 || choice >= MTYPE_NTYPES) return 1; /* ESC: abandon, no change */
-
-  /* MIDI has no backend of its own -- the synth picker one level down writes
-   * it. An ESC in there commits nothing, which is exactly the contract. */
-  if (choice == MTYPE_MIDI)
+  /* Organya / No Music: write the type's own backend. SFX_DEVICE is left as-is
+   * (unset/empty -> the engine derives the native SFX device); a user who wants
+   * music-only picks "No Sound FX" in the FX picker. */
+  if (strcmp(scfg_get(&g_cfg, beidx), MUSIC_TYPES[next].value) != 0)
   {
-    tui_clear();
-    snd_pick_midi_synth();
-    tui_clear();
-    return 1;
-  }
-
-  if (strcmp(scfg_get(&g_cfg, beidx), MUSIC_TYPES[choice].value) != 0)
-  {
-    scfg_set(&g_cfg, beidx, MUSIC_TYPES[choice].value);
+    scfg_set(&g_cfg, beidx, MUSIC_TYPES[next].value);
     g_dirty = 1;
   }
 
-  /* #38 fixed: Gravis GF1 SFX now works, so no music pick forces effects off.
-   * SFX_DEVICE is left as-is (unset/empty -> the engine derives the native SFX
-   * device); a user who wants music-only picks "No Sound FX" in the FX picker. */
-
-  snd_walk_sub(MUSIC_TYPES[choice].sub);
-  return 1;
+  /* DELIBERATELY NO snd_walk_sub() HERE -- a deviation from SETUP-UX-V2-PLAN
+   * sec.4.3, found while implementing it. This is a CYCLE row: Left/Right must
+   * change the value IN PLACE (the v2 value-row grammar). Walking a sub-screen
+   * per cycle would pop the BLASTER hardware screen open on every keypress that
+   * lands on Organya -- unusable, and it would trap a user just scrubbing
+   * through the three types.
+   *
+   * Nothing is lost. Organya's SB hardware is still reachable, through the same
+   * single door as every other SB config: the Sound FX Card picker (Organya
+   * renders to the SB DAC, so Sound Blaster IS its effects device). And the
+   * pre-render auto-suggest below is silent (a cfg write, no modal), so it still
+   * fires exactly when it should. */
+  if (next == MTYPE_ORGANYA)
+    recommend_org_prerender(&g_cfg, &g_prof);
 }
 
 /* "Select Sound FX Device" picker (Sound hub row 2). The list is NARROWED by
@@ -2323,6 +2315,10 @@ static int snd_pick_sfx_device(void)
     screen_hardware();
     tui_clear();
   }
+  /* v2: offer the SFX test right after the device is configured. Skipped when
+   * the user just turned effects OFF -- there is nothing to hear. */
+  if (strcmp(scfg_get(&g_cfg, idx), "none") != 0)
+    snd_test_after_pick(0);
   return 1;
 }
 
@@ -2342,7 +2338,7 @@ static const char *music_device_name(void)
 {
   const char *be = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
   const char *md = scfg_get(&g_cfg, scfg_index("MIDI_DEV"));
-  const char *s  = music_synth_name(be, md);
+  const char *s  = music_card_short(be, md);
   return s[0] ? s : music_card_label(be, md);
 }
 
@@ -2470,36 +2466,91 @@ static void screen_express(void)
   }
 }
 
+/* Is a Sound-menu row selectable right now? Greyed rows render dimmed and are
+ * SKIPPED by navigation (the same mechanism the Music-options screen uses).
+ *
+ * v2 grey rules:
+ *   Select Music Card -- only when Type == MIDI. Under Organya / No Music there
+ *     is no card in play, but the row still DISPLAYS the remembered card (see
+ *     g_last_card) so the user can see what MIDI would return them to.
+ *   Test music        -- pointless with No Music.
+ *   Test sound effects-- pointless when the FX device is "No Sound FX".
+ * Music Options stays selectable under No Music on purpose: Audio quality still
+ * governs the SFX mix rate, so greying the row would hide a live setting. */
+static int snd_hub_active(int row, int rc_muscard, int rc_testmus, int rc_testsfx)
+{
+  if (row == rc_muscard) return music_type_of(
+      scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"))) == MTYPE_MIDI;
+  if (row == rc_testmus) return music_type_of(
+      scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"))) != MTYPE_NONE;
+  if (row == rc_testsfx) return strcmp(sfx_current_name(), "No Sound FX") != 0;
+  return 1;
+}
+
+/* Move the Sound-menu selection by dir, skipping greyed rows. Falls back to the
+ * current row if nothing else is live (cannot happen -- Express/Back always are,
+ * but the guard keeps the loop total). */
+static int snd_hub_step(int sel, int dir, int n,
+                        int rc_muscard, int rc_testmus, int rc_testsfx)
+{
+  int i, r = sel;
+  for (i = 0; i < n; ++i)
+  {
+    r = (r + dir + n) % n;
+    if (snd_hub_active(r, rc_muscard, rc_testmus, rc_testsfx)) return r;
+  }
+  return sel;
+}
+
+/* The label shown on the Select-Music-Card row. Under Type == MIDI it is the
+ * live card. Under Organya / No Music the row is greyed, but it still shows the
+ * REMEMBERED card (or Auto-detect when there is no memory) -- i.e. exactly what
+ * cycling back to MIDI would restore, so the greyed row is informative rather
+ * than blank. */
+static const char *snd_hub_card_label(void)
+{
+  const char *be = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
+  int c;
+  if (music_type_of(be) == MTYPE_MIDI)
+    c = music_card_index(be, scfg_get(&g_cfg, scfg_index("MIDI_DEV")));
+  else
+    c = g_last_card; /* -1 (unset) -> Auto-detect, the fresh default */
+  if (c < 0) c = 0;
+  return MUSIC_CARDS[c].label;
+}
+
 static void screen_sound_menu(void)
 {
-  /* #9: the hub leads with the two device pickers (Select Music Type / Select
-   * Sound FX Device), then Music options (the per-card music extras), then the
-   * inline tests. There is NO standalone "Sound card hardware" row (operator
-   * UX): SB Port/IRQ/DMA is configured inline by whichever picker puts the SB
-   * into use -- the music pick for an SB-family card, or the SFX-device pick
-   * when Sound Blaster is the effects device.
+  /* v2 Sound menu (SETUP-UX-V2-PLAN sec.3). The two questions the old flat list
+   * conflated now sit on adjacent rows: "Music Type" (what KIND of music -- an
+   * in-place 3-state CYCLE row, not a picker) and "Select Music Card" (WHICH
+   * hardware plays it -- the restored flat picker, greyed unless Type == MIDI).
+   * Then the FX picker, the adaptive Music Options, and the inline tests.
    *
-   * Row 1 asks the music TYPE first (Organya / MIDI / Auto-detect / No Music);
-   * MIDI descends into the synth list. The row ORDER is unchanged from the flat
-   * "Select Music Card" version -- only row 1's question changed. */
-  enum { ROW_EXPRESS = 0, ROW_MUSTYPE, ROW_SFXDEV, ROW_MUSOPTS,
-         ROW_TESTSFX, ROW_TESTMUS, ROW_BACK };
+   * There is NO standalone "Sound card hardware" row (operator UX): SB
+   * Port/IRQ/DMA is configured inline by whichever picker puts the SB into use --
+   * the music-card pick for an SB-family card, or the SFX pick when Sound
+   * Blaster is the effects device. */
+  enum { ROW_EXPRESS = 0, ROW_MUSTYPE, ROW_MUSCARD, ROW_SFXDEV, ROW_MUSOPTS,
+         ROW_TESTMUS, ROW_TESTSFX, ROW_BACK, ROW_NROWS };
   static const char *items[] = {
-    "Express setup", "Select Music Type", "Select Sound FX Device",
-    "Music options",
-    "Test sound effects", "Test music", "Back"
+    "Express setup",
+    "Music Type", "Select Music Card", "Select Sound FX Card",
+    "Music Options",
+    "Test music", "Test sound effects", "Back"
   };
   static const char *helps[] = {
     "Detect the sound card and set everything in one step.",
-    "Choose how music plays -- Organya (no sound card needed), MIDI on a sound "
-    "card or synth, auto-detect, or off. Sets up that hardware.",
+    "What KIND of music: Organya (built-in, no sound card needed), MIDI (played "
+    "by a synth on a sound card), or No Music. Left/Right changes it.",
+    "WHICH card plays the MIDI music. Sets up that card's hardware.",
     "Choose where sound effects play. The choices depend on the music card.",
     "Per-card music extras: GUS voices, MIDI set, Organya pre-render, quality.",
-    "Play a test sound effect to check the audio.",
     "Play a test song to check the music.",
+    "Play a test sound effect to check the audio.",
     "Return to the main menu."
   };
-  const int n = (int)(sizeof(items) / sizeof(items[0]));
+  const int n = ROW_NROWS;
   const int bx = 11, bw = 60;     /* R-O: x=11 centers a 60-wide box (10/10) */
   const int vcol = bx + 1 + 30;   /* value/badge column for the value rows    */
   /* Bottom-anchor the menu box just above the DESCRIPTION box instead of a
@@ -2510,7 +2561,10 @@ static void screen_sound_menu(void)
    * abutting the banner above and the DESCRIPTION below with no overlap, and
    * stays correct if the row count changes. */
   const int my = TUI_DESC_TOP(4) - (n + 2);
-  int sel = 0, res_sfx = -2, res_music = -2;
+  /* v2: the badges are file-scope now (g_res_sfx / g_res_music) so the
+   * test-after-pick prompt inside the pickers feeds the SAME badge these rows
+   * show. They persist for the whole SETUP session, not just this screen. */
+  int sel = 0;
 
   tui_clear();
   for (;;)
@@ -2521,43 +2575,70 @@ static void screen_sound_menu(void)
     tui_box(bx, my, bw, n + 2, "SOUND");
     for (i = 0; i < n; ++i)
     {
+      int active = snd_hub_active(i, ROW_MUSCARD, ROW_TESTMUS, ROW_TESTSFX);
       int selrow = (i == sel);
-      int fg = selrow ? PAL->sel_fg : PAL->body;
-      int bg = selrow ? PAL->sel_bg : PAL->bg;
-      int vfg = selrow ? PAL->sel_fg : PAL->value;
+      /* house convention (screen_sound / screen_advanced): dim WINS over the
+       * selection highlight, so a greyed row can never masquerade as focused. */
+      int fg = !active ? PAL->dim : (selrow ? PAL->sel_fg : PAL->body);
+      int bg = (selrow && active) ? PAL->sel_bg : PAL->bg;
+      int vfg = !active ? PAL->dim : (selrow ? PAL->sel_fg : PAL->value);
       char row[64];
       snprintf(row, sizeof(row), " %-*.*s", bw - 3, bw - 3, items[i]);
       tui_at(bx + 1, my + 1 + i, fg, bg, row);
-      /* The two picker rows show their current value; the two test rows show a
-       * result badge -- both in the value column. */
+      /* Value rows show their current value; the test rows show a result badge.
+       * The card row keeps displaying the remembered card even while greyed. */
       if (i == ROW_MUSTYPE)
-        tui_at(vcol, my + 1 + i, vfg, bg, music_card_name());
+        tui_at(vcol, my + 1 + i, vfg, bg,
+               MUSIC_TYPES[music_type_of(scfg_get(&g_cfg,
+                             scfg_index("AUDIO_BACKEND")))].label);
+      else if (i == ROW_MUSCARD)
+        tui_at(vcol, my + 1 + i, vfg, bg, snd_hub_card_label());
       else if (i == ROW_SFXDEV)
         tui_at(vcol, my + 1 + i, vfg, bg, sfx_current_name());
-      else if (i == ROW_TESTSFX || i == ROW_TESTMUS)
+      else if (i == ROW_TESTMUS || i == ROW_TESTSFX)
         tui_at(vcol, my + 1 + i, vfg, bg,
-               audiotest_badge(i == ROW_TESTSFX ? res_sfx : res_music));
+               audiotest_badge(i == ROW_TESTMUS ? g_res_music : g_res_sfx));
     }
     tui_box(TUI_DESC_X, TUI_DESC_TOP(4), TUI_DESC_W, 4, "DESCRIPTION");
     tui_wrap(TUI_DESC_TX, TUI_DESC_TOP(4) + 1, TUI_DESC_TW, 2, PAL->desc, PAL->bg, helps[sel]);
-    tui_status("Enter Select   ESC Back");
+    /* v2 value-row grammar: state the keys that actually work on THIS row. */
+    tui_status(sel == ROW_MUSTYPE ? "Left/Right Change   ESC Back"
+                                  : "Enter Select   ESC Back");
 
     k = tui_getkey();
-    if (k == TUI_KEY_UP)        sel = (sel + n - 1) % n;
-    else if (k == TUI_KEY_DOWN) sel = (sel + 1) % n;
-    else if (k == TUI_KEY_HOME) sel = 0;
+    if (k == TUI_KEY_UP)
+      sel = snd_hub_step(sel, -1, n, ROW_MUSCARD, ROW_TESTMUS, ROW_TESTSFX);
+    else if (k == TUI_KEY_DOWN)
+      sel = snd_hub_step(sel, +1, n, ROW_MUSCARD, ROW_TESTMUS, ROW_TESTSFX);
+    else if (k == TUI_KEY_HOME) sel = 0;   /* row 0 (Express) is always active */
     else if (k == TUI_KEY_ESC)  return;
+    /* v2: Music Type is a CYCLE row -- Left/Right/Space change it in place. A
+     * type change can grey the row the cursor is on (e.g. Test music under No
+     * Music), so re-seat the selection onto a live row afterwards. */
+    else if ((k == TUI_KEY_LEFT || k == TUI_KEY_RIGHT || k == ' ') &&
+             sel == ROW_MUSTYPE)
+    {
+      snd_type_cycle(k == TUI_KEY_LEFT ? -1 : +1);
+      tui_clear(); /* snd_walk_sub may have drawn a sub-screen */
+    }
     else if (k == TUI_KEY_ENTER)
     {
       if (sel == ROW_EXPRESS)       screen_express();   /* one-key detect */
-      else if (sel == ROW_MUSTYPE)  snd_pick_music_type();
+      /* Enter on the cycle row advances it, matching Right (grammar: Enter is
+       * never a dead key on a value row). */
+      else if (sel == ROW_MUSTYPE)  snd_type_cycle(+1);
+      else if (sel == ROW_MUSCARD)  snd_pick_music_card();
       else if (sel == ROW_SFXDEV)   snd_pick_sfx_device();
-      else if (sel == ROW_MUSOPTS)  screen_sound();      /* Music options */
-      else if (sel == ROW_TESTSFX)  res_sfx   = sound_inline_test(0);
-      else if (sel == ROW_TESTMUS)  res_music = sound_inline_test(1);
+      else if (sel == ROW_MUSOPTS)  screen_sound();      /* Music Options */
+      else if (sel == ROW_TESTMUS)  g_res_music = sound_inline_test(1);
+      else if (sel == ROW_TESTSFX)  g_res_sfx   = sound_inline_test(0);
       else return; /* Back */
       tui_clear(); /* a sub-screen / popup overwrote the screen; repaint clean */
     }
+    /* A cycle or a pick may have greyed the current row -- never leave the
+     * cursor parked on a dead row. */
+    if (!snd_hub_active(sel, ROW_MUSCARD, ROW_TESTMUS, ROW_TESTSFX))
+      sel = snd_hub_step(sel, +1, n, ROW_MUSCARD, ROW_TESTMUS, ROW_TESTSFX);
   }
 }
 
@@ -3200,23 +3281,31 @@ int main(void)
     /* T47 plan 3.1: tightened from 9 items to 7. Sound x3 -> one Sound submenu
      * (3.3); +System speed (3.4); Performance folded into Advanced (3.6);
      * Input/joystick renamed Input (3.5). */
+    /* v2 (SETUP-UX-V2-PLAN sec.2): Auto-detect leads -- it is the recommended
+     * FIRST action for a first-timer, and it used to sit buried at index 4.
+     * "Save and run DOSKUTSU" is new (sec.11): it saves, then exits with
+     * ERRORLEVEL 10 so SETUP.BAT can chain into the game. */
+    enum { M_AUTODET = 0, M_SOUND, M_SPEED, M_INPUT, M_ADVANCED,
+           M_SAVERUN, M_SAVEEXIT, M_QUIT };
     static const char *items[] = {
+      "Auto-detect best settings",
       "Sound",
       "System speed",
       "Input",
       "Advanced",
-      "Auto-detect best settings",
+      "Save and run DOSKUTSU",
       "Save and exit",
       "Quit without saving"
     };
     /* item 7: one short sentence per item (the operator's review-3 example
      * "Choose how music and sound effects play."). */
     static const char *helps[] = {
+      "Auto-detect hardware and best settings for this system",
       "Setup sound card, music, sound effects and volume",
       "Preset performance options depending on system speed",
       "Keyboard, Joystick and gamepad configuration",
       "Performance and compatibility options",
-      "Auto-detect hardware and best settings for this system",
+      "Save settings and start the game",
       "Save settings and quit to DOS",
       "Discard changes without saving and quit to DOS"
     };
@@ -3265,14 +3354,28 @@ int main(void)
         else if (k == TUI_KEY_ESC)   { action = -1;  break; }
       }
 
-      if (action == 0)      screen_sound_menu();
-      else if (action == 1) screen_speed();
-      else if (action == 2) screen_input();
-      else if (action == 3) screen_advanced();
-      else if (action == 4) screen_autodetect();
-      else if (action == 5) { screen_save(); break; }   /* Save and exit       */
+      if (action == M_AUTODET)       screen_autodetect();
+      else if (action == M_SOUND)    screen_sound_menu();
+      else if (action == M_SPEED)    screen_speed();
+      else if (action == M_INPUT)    screen_input();
+      else if (action == M_ADVANCED) screen_advanced();
+      else if (action == M_SAVERUN)
+      {
+        /* v2 sec.11: save, then chain into the game via SETUP.BAT's ERRORLEVEL
+         * check. We do NOT exec the game from inside SETUP -- SETUP is a DJGPP
+         * DPMI client under CWSDPMI, and spawning DOSKUTSU (a far larger client
+         * wanting a 2 MB stack) while SETUP + its DPMI host are still resident
+         * risks DPMI nesting and conventional-memory exhaustion. Exiting first
+         * releases all of it, so the game loads into a clean DOS.
+         *
+         * NEVER launch on a failed save: the player would silently run with the
+         * OLD settings and no clue why. On failure we stay in SETUP (the toast
+         * already reported it) so they can retry or fix the disk. */
+        if (screen_save()) { g_run_game = 1; break; }
+      }
+      else if (action == M_SAVEEXIT) { screen_save(); break; } /* Save and exit */
       else if (action == -2) { screen_save(); break; }  /* F10 = Save and Exit */
-      else /* action == 6 (Quit without saving) or ESC (-1) */
+      else /* action == M_QUIT (Quit without saving) or ESC (-1) */
       {
         /* Session model: every screen's edits live in the in-memory config and
          * nothing is written until "Save and exit". The ONLY discard paths are
@@ -3300,5 +3403,8 @@ int main(void)
 #undef MENU_Y
 
   tui_shutdown();
-  return 0;
+  /* v2 sec.11: exit code IS the launcher contract. 0 = plain exit; 10 = "saved,
+   * now run the game" (SETUP.BAT branches on it). SETUP had exactly one exit
+   * path (0) before this, so nothing else in the tree depends on the code. */
+  return g_run_game ? SETUP_EXIT_RUN_GAME : 0;
 }

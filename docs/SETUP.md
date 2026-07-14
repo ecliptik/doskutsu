@@ -34,28 +34,27 @@ SETUP opens a full-screen menu:
   removed and the benchmark now does a safe mode-13h (320x200) memory fill,
   validated no-hang on the S3 ViRGE, Cirrus CL-GD5430, and ATI Mach64. Disable
   it with `DOSKUTSU_SETUP_VIDEOBENCH=0` (the profile then shows "(speed n/a)").
-- **Sound setup** -- two device pickers: **Select Music Type** and **Select
-  Sound FX Device**. The music picker asks the *type* first -- **Organya**
-  (Cave Story's built-in software synth; no sound card needed), **MIDI** (music
-  on a synth chip or module), **Auto-detect**, or **No Music** -- and choosing
-  **MIDI** opens a second **Select MIDI Synth** list whose rows name the
-  hardware: **OPL3 FM (Sound Blaster 16/Pro)**, **WaveBlaster daughterboard**,
-  **General MIDI (external module)**, **AdLib (OPL2, music only)**, **Gravis
-  UltraSound**. ESC at either level backs out with no change. General MIDI and
-  WaveBlaster both use the engine's MPU-401 MIDI path (`AUDIO_BACKEND=wb`); they
-  differ only in the MPU-401 port (an external module's port vs the SB header's
-  0x330) and which name SETUP shows -- a SETUP-only `MIDI_DEV` key the engine
-  ignores. **Select Sound FX Device** is narrowed to the devices the chosen
-  music card can drive (Sound Blaster or No Sound FX on the SB-family choices,
-  Gravis on the GUS card, No Sound FX only on AdLib). Picking a music type or
-  synth walks its setup inline (Sound Blaster port/IRQ/DMA, or the **GUS
-  voices** value list, or the Organya pre-render suggestion). A **Music options** screen holds the
-  per-card extras (MIDI music set, GUS voices, GUS high fidelity, Organya
-  pre-render, audio quality). It also offers an **Express setup** that
-  auto-detects the sound hardware in one step: it warns, probes the card
-  (port / IRQ / DMA, DSP version, OPL3, WaveBlaster), shows what it found,
-  sets the card + music backend, and offers an immediate music test. Edits
-  are live in the session and are committed on Save.
+- **Sound setup** -- the Sound menu asks two questions on adjacent rows.
+  **Music Type** is a value row you change in place with Left/Right: **Organya**
+  (Cave Story's built-in software synth -- no sound card needed), **MIDI** (music
+  played by a synth on a sound card), or **No Music**. **Select Music Card** then
+  says *which* card plays the MIDI: **Auto-detect**, **Sound Blaster (OPL3 FM)**,
+  **AdLib (OPL2, music only)**, **WaveBlaster daughterboard**, **General MIDI
+  (external module)**, or **Gravis UltraSound**. The card row is greyed out
+  unless the type is MIDI. Picking a card walks its setup inline (Sound Blaster
+  port/IRQ/DMA, or the **GUS voices** list), then offers to test it straight
+  away. General MIDI and WaveBlaster both use the engine's MPU-401 MIDI path
+  (`AUDIO_BACKEND=wb`); they differ only in the MPU-401 port and which name SETUP
+  shows -- a SETUP-only `MIDI_DEV` key the engine ignores. **Select Sound FX
+  Card** is narrowed to the devices the chosen music card can drive (Sound
+  Blaster or No Sound FX on the SB-family cards, Gravis on the GUS card, No Sound
+  FX only on AdLib). A **Music Options** screen holds the per-card extras (MIDI
+  music set, GUS voices, GUS high fidelity, Organya pre-render, audio quality),
+  showing only the rows that apply to your choice. It also offers an **Express
+  setup** that auto-detects the sound hardware in one step: it warns, probes the
+  card (port / IRQ / DMA, DSP version, OPL3, WaveBlaster), shows what it found,
+  sets the card + music backend, and offers an immediate music test. Edits are
+  live in the session and are committed on Save.
 - **Test SFX / Music** -- preview the current sound settings through the real
   audio backend (plays the real Polar Star sound effect and Title theme from
   your installed game data; see "Real Cave Story sounds" below).
@@ -66,6 +65,14 @@ SETUP opens a full-screen menu:
   touch if something looks wrong on your hardware.
 - **Auto-detect best settings** -- profiles your machine and pre-selects the
   best options. You review and can override anything before saving.
+- **Save and run DOSKUTSU** -- writes `DOSKUTSU.CFG`, leaves SETUP, and starts
+  the game. This works when you launch SETUP through `SETUP.BAT` (the shipped
+  launcher): SETUP exits with a status code the batch file checks, then runs
+  `DOSKUTSU.EXE` in a fresh DOS process. SETUP deliberately does **not** start
+  the game from inside itself -- exiting first frees all of SETUP's memory, so
+  the game gets the whole machine. If you ran `SETUP.EXE` directly instead of via
+  `SETUP.BAT`, your settings are still saved; you just land back at the DOS
+  prompt and can start `DOSKUTSU.EXE` yourself.
 - **Save and exit** -- writes `DOSKUTSU.CFG` and leaves SETUP.
 - **Quit without saving** -- leaves SETUP, discarding the session (a confirm
   prompt appears if you have unsaved changes).
@@ -112,8 +119,8 @@ FIXED_TIMESTEP=1
 
 | Key | Values | Meaning |
 |---|---|---|
-| `AUDIO_BACKEND` | auto / wb / opl3 / organya / adlib / gus / none | Music backend, written by the **Select Music Type** picker -- directly for `organya` / `auto` / `none`, or via its **Select MIDI Synth** second level for `opl3` / `wb` / `adlib` / `gus` (auto = detect). `auto` is omitted from the file so the engine's detection runs. `adlib` = native OPL2 FM on a no-Sound-Blaster card (music only); `gus` = native Gravis Ultrasound GF1 wavetable; `none` = **No Music** (music off, sound effects still play). |
-| `MIDI_DEV` | genmidi / waveblaster | SETUP-only discriminator for the two **Select MIDI Synth** rows that both write `AUDIO_BACKEND=wb`: `genmidi` = "General MIDI" (MPU-401 to an external module), `waveblaster` = "WaveBlaster" (daughterboard on the SB header, default). The engine ignores this key -- it only controls which name SETUP shows and which MPU-401 port default it suggests. |
+| `AUDIO_BACKEND` | auto / wb / opl3 / organya / adlib / gus / none | Music backend. Written by the **Music Type** row for `organya` / `none`, and by **Select Music Card** for `auto` / `opl3` / `wb` / `adlib` / `gus` (auto = detect). `auto` is omitted from the file so the engine's detection runs. `adlib` = native OPL2 FM on a no-Sound-Blaster card (music only); `gus` = native Gravis Ultrasound GF1 wavetable; `none` = **No Music** (music off, sound effects still play). |
+| `MIDI_DEV` | genmidi / waveblaster | SETUP-only discriminator for the two **Select Music Card** rows that both write `AUDIO_BACKEND=wb`: `genmidi` = "General MIDI" (MPU-401 to an external module), `waveblaster` = "WaveBlaster" (daughterboard on the SB header, default). The engine ignores this key -- it only controls which name SETUP shows and which MPU-401 port default it suggests. |
 | `MIDI_SET` | orgmid2 / wiimidi / `<dir>` | Which MIDI music set the `wb` / `opl3` / `gus` MIDI backends play: `orgmid2` (shown as "OrgMIDI", our org2mid native-GM conversion, `data/orgmid2/`; **the default** -- operator g2k A/B, main 5605db3) or `wiimidi` (shown as "WiiWare", the WiiWare arrangements, `data/midi/`). Any other value names a custom `data/<dir>/` drop-in, shown as `Custom (<dir>)` -- this is how the legacy `data/orgmid/` set still plays. SETUP only shows the **MIDI music set** row when a MIDI backend is selected AND at least two sets are installed on disk; otherwise the default applies. Ignored by the Organya backend. |
 | `GUS_VOICES` | 14 / 16 / 20 / 24 / 28 / 32 | Gravis Ultrasound active-voice count (only meaningful for `AUDIO_BACKEND=gus`). The GF1 DAC output rate is `617400 / voices`, so the voice count sets the music sample rate: 14 = 44100 Hz (highest fidelity), 16 = 38587 Hz, 20 = 30870 Hz (default -- best balance of fidelity and polyphony), 24 = 25725 Hz (more polyphony), 28 = 22050 Hz (**may be silent** on some PicoGUS cards -- a firmware rate quirk; use any other value), 32 = 19293 Hz. SETUP shows the **GUS voices** row (a "Select GUS Voices" value list) only when the Gravis Ultrasound backend is selected. |
 | `GUS_HIFI` | 0 / 1 | Gravis Ultrasound multi-sample fidelity (only meaningful for `AUDIO_BACKEND=gus`). 1 (default) = upload the full multi-sample `.pat` set per instrument for the best fidelity across the keyboard; 0 = a single sample per instrument (the low-on-card-memory fallback). SETUP shows the **GUS high fidelity** row only when the Gravis Ultrasound backend is selected. Written from the **Music options** screen. |

@@ -22,6 +22,7 @@
 #include "profile.h"
 #include "recommend.h"
 #include "midiset.h"           /* MIDI music-set discovery (#39) */
+#include "musiccard.h"         /* music TYPE + CARD model (UX v2) */
 #include "scancode.h"          /* BIOS-scancode <-> SDL-keycode table (Phase 3) */
 #include "bindings.h"          /* control-binding session model (Phase 3)       */
 
@@ -453,6 +454,93 @@ static void test_midiset_scan(void)
   CHECK(n == 0, "midiset_scan: absent data dir -> 0");
 }
 
+/* UX v2: the music TYPE + CARD derivation must ROUND-TRIP.
+ *
+ * The whole v2 UI rests on deriving Type+Card from AUDIO_BACKEND (+MIDI_DEV) and
+ * writing the same mapping back in reverse, with NO new cfg key. Two directions,
+ * two places to drift -- and drift between two copies of one truth is exactly
+ * what shipped the MIDI_SET=wiimidi bug. So drive every backend all the way
+ * around: value -> Type+Card -> back to value, and require the original bytes.
+ *
+ * A backend that survives this cannot be silently mis-derived by the Sound menu. */
+static void test_musiccard_roundtrip(void)
+{
+  /* every AUDIO_BACKEND the registry accepts, + the wb/MIDI_DEV split */
+  static const struct { const char *be, *md; int type; const char *card; } CASES[] = {
+    { "organya", "",            MTYPE_ORGANYA, NULL                },
+    { "none",    "",            MTYPE_NONE,    NULL                },
+    { "auto",    "",            MTYPE_MIDI,    "Auto-detect"       },
+    { "opl3",    "",            MTYPE_MIDI,    "Sound Blaster"     },
+    { "adlib",   "",            MTYPE_MIDI,    "AdLib"             },
+    { "gus",     "",            MTYPE_MIDI,    "Gravis UltraSound" },
+    { "wb",      "waveblaster", MTYPE_MIDI,    "WaveBlaster"       },
+    { "wb",      "genmidi",     MTYPE_MIDI,    "General MIDI"      }
+  };
+  const int n = (int)(sizeof(CASES) / sizeof(CASES[0]));
+  int i;
+
+  for (i = 0; i < n; ++i)
+  {
+    int t = music_type_of(CASES[i].be);
+    int c = music_card_index(CASES[i].be, CASES[i].md);
+    char msg[128];
+
+    snprintf(msg, sizeof msg, "musiccard: %s/%s -> type %d",
+             CASES[i].be, CASES[i].md[0] ? CASES[i].md : "-", CASES[i].type);
+    CHECK(t == CASES[i].type, msg);
+
+    if (CASES[i].card == NULL)
+    {
+      /* organya / none are NOT cards -- there is no card to derive. */
+      snprintf(msg, sizeof msg, "musiccard: %s is not a card (index -1)", CASES[i].be);
+      CHECK(c == -1, msg);
+      continue;
+    }
+
+    snprintf(msg, sizeof msg, "musiccard: %s/%s -> card %s",
+             CASES[i].be, CASES[i].md[0] ? CASES[i].md : "-", CASES[i].card);
+    CHECK(c >= 0 && strcmp(MUSIC_CARDS[c].name, CASES[i].card) == 0, msg);
+
+    /* THE ROUND TRIP: writing the derived card back must reproduce the exact
+     * bytes we started from -- backend AND the wb MIDI_DEV discriminator. */
+    snprintf(msg, sizeof msg, "musiccard: %s round-trips through its card",
+             CASES[i].card);
+    CHECK(strcmp(MUSIC_CARDS[c].value, CASES[i].be) == 0, msg);
+    if (MUSIC_CARDS[c].midi_dev)
+    {
+      snprintf(msg, sizeof msg, "musiccard: %s round-trips its MIDI_DEV",
+               CASES[i].card);
+      CHECK(strcmp(MUSIC_CARDS[c].midi_dev, CASES[i].md) == 0, msg);
+    }
+  }
+
+  /* A hand-edited CFG must never land on "no current card": wb with an unset or
+   * bogus MIDI_DEV falls back to WaveBlaster (documented default), and an
+   * unknown backend falls back to Auto-detect. */
+  CHECK(strcmp(music_card_short("wb", ""), "WaveBlaster") == 0,
+        "musiccard: wb with unset MIDI_DEV -> WaveBlaster (documented default)");
+  CHECK(strcmp(music_card_short("wb", "bogus"), "WaveBlaster") == 0,
+        "musiccard: wb with unknown MIDI_DEV -> WaveBlaster");
+  CHECK(strcmp(music_card_short("zzz", ""), "Auto-detect") == 0,
+        "musiccard: unknown backend -> Auto-detect");
+  CHECK(strcmp(music_card_short("", ""), "Auto-detect") == 0,
+        "musiccard: empty backend -> Auto-detect");
+
+  /* The banner/profile resolver: non-cards show their TYPE label, cards their
+   * short name. This is the single source the banner + Express modal share. */
+  CHECK(strcmp(music_card_label("organya", ""), "Organya") == 0,
+        "musiccard: label(organya) = Organya");
+  CHECK(strcmp(music_card_label("none", ""), "No Music") == 0,
+        "musiccard: label(none) = No Music");
+  CHECK(strcmp(music_card_label("opl3", ""), "Sound Blaster") == 0,
+        "musiccard: label(opl3) = Sound Blaster");
+
+  /* Auto-detect is a CARD, not a type -- AUDIO_BACKEND=auto is Type=MIDI. This
+   * is the v1 -> v2 change most likely to be "helpfully" reverted later. */
+  CHECK(music_type_of("auto") == MTYPE_MIDI,
+        "musiccard: auto is Type=MIDI with the Auto-detect CARD (not its own type)");
+}
+
 /* Phase 3 / #40: the BIND_* per-action remap keys + the reserved JOY_CAL
  * calibration key. The engine loader (input.cpp consumes the env vars; here we
  * only verify the shim publishes them to the right names) maps BIND_<ACTION>
@@ -640,6 +728,7 @@ int main(void)
   test_speed_class();
   test_midiset_key();
   test_midiset_scan();
+  test_musiccard_roundtrip();
   test_input_bindings();
   test_scancode();
   test_bindings();
