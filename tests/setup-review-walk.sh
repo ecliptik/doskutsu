@@ -252,20 +252,21 @@ launch_setup() {
 #     Reach main item N = Home then Down x N, Enter. T47 indices (9 -> 7):
 #       0 Sound (SUBMENU)   1 System speed   2 Input (SUBMENU)
 #       3 Advanced          4 Auto-detect    5 Save and exit   6 Quit
-#   - SOUND HUB (#9 Type-first, screen_sound_menu ROW_* enum) -- 0 Express setup,
-#     1 Select Music Type, 2 Select Sound FX Device, 3 Music options, 4 Test
-#     sound effects, 5 Test music, 6 Back. Its ESC backs out SILENTLY. There is
-#     NO "Custom setup" row: the BLASTER hardware screen is reached INLINE from
-#     whichever picker puts the SB into use (an SB-family MIDI synth, Organya,
-#     Auto-detect, or "Sound Blaster" in the FX picker).
-#   - Row 1 is TWO levels: Select Music Type (Organya / MIDI / Auto-detect / No
-#     Music) -> picking MIDI opens Select MIDI Synth (OPL3 FM / WaveBlaster /
-#     General MIDI / AdLib / Gravis). ESC at EITHER level abandons with no cfg
-#     write. Both pickers START on the row derived from the live cfg (the
-#     "(current)" tag), so this walk never sends Home inside them. "Performance" is GONE: PERF_MODE
-#     + FIXED_TIMESTEP are the first two rows of Advanced (idx3). "Input" (idx2)
-#     is a submenu: row0 Joystick on/off (live), rows 1-3 GREYED (Phase 3), 4
-#     Back; ESC silent. "System speed" (idx1) is a tui_picklist popup.
+#   - UX v2 MAIN MENU (8 items): 0 Auto-detect best settings, 1 Sound, 2 System
+#     speed, 3 Input, 4 Advanced, 5 Save and run DOSKUTSU, 6 Save and exit,
+#     7 Quit without saving. Auto-detect moved to FIRST and "Save and run" is
+#     new, so EVERY main-menu Down-count shifted vs v1.
+#   - UX v2 SOUND MENU: 0 Express setup, 1 Music Type [3-state CYCLE row],
+#     2 Select Music Card [flat hardware picker], 3 Select Sound FX Card,
+#     4 Music Options, 5 Test music, 6 Test sound effects, 7 Back. ESC silent.
+#     Music Type cycles IN PLACE with Left/Right/Space (no popup); the card
+#     picker is a tui_picklist. Greyed rows are SKIPPED by nav: the card row is
+#     greyed unless Type==MIDI, Test music is greyed under No Music, Test SFX is
+#     greyed when the FX device is No Sound FX -- so the Down-counts depend on
+#     the Type. The baseline (AUDIO_BACKEND=opl3 -> Type=MIDI) keeps every row
+#     live, which is why the fixed counts below are exact.
+#   - Do NOT press Home inside a picker: its start row is derived from the live
+#     cfg and carries "(current)"; Home would jump off it.
 #   - HOME anchors the first selectable row on every screen, so captures are
 #     deterministic regardless of where the cursor last sat.
 #   - Editing screens (Music and volumes / Custom setup / Advanced): T62 model --
@@ -294,137 +295,125 @@ walk() {
   send_keys Home Home
   shoot "00-main-menu"                 # idx0 highlighted + TOP PROFILE PANEL + help box
 
-  # --- Sound submenu (idx0) -----------------------------------------------
-  send_keys Home Return; sleep 1        # main idx0 Sound -> submenu
-  shoot "10-sound-submenu"             # Express/Custom/Music+volumes/Test x2/Back + badges
+  # ===========================================================================
+  # UX v2 MAIN MENU (8 items -- Auto-detect FIRST, + Save and run DOSKUTSU):
+  #   0 Auto-detect best settings   1 Sound        2 System speed   3 Input
+  #   4 Advanced                    5 Save and run DOSKUTSU
+  #   6 Save and exit               7 Quit without saving
+  # EVERY main-menu Down-count below shifted by +1 vs v1 (Sound was idx0).
+  #
+  # UX v2 SOUND MENU (screen_sound_menu ROW_* enum):
+  #   0 Express setup       1 Music Type [CYCLE row]   2 Select Music Card
+  #   3 Select Sound FX Card 4 Music Options           5 Test music
+  #   6 Test sound effects  7 Back
+  # Music Type is a 3-state CYCLE row -- Left/Right/Space change it IN PLACE, no
+  # popup. Cycle order is Organya -> MIDI -> No Music -> Organya (MTYPE_* enum),
+  # so from the opl3 baseline (Type=MIDI) one Right lands on No Music.
+  # GREY RULES matter for nav (greyed rows are SKIPPED by Up/Down):
+  #   Select Music Card  greyed unless Type == MIDI
+  #   Test music         greyed when Type == No Music
+  #   Test sound effects greyed when the FX device is No Sound FX
+  # The deterministic baseline is AUDIO_BACKEND=opl3 -> Type=MIDI, Card=Sound
+  # Blaster, so on entry every row is live and the Down-counts are exact.
+  # ===========================================================================
 
-  # --- Express setup (Sound submenu row0): DF-UX Phase 2 one-key detect ----
-  # T-DFUX-P2: red warning modal (DF 3328) -> re-run probes (brief video-bench
-  # flash) -> evidence modal w/ DSP version (DF 3329) -> "Test it now?" Y/N. We
-  # decline the test (n) so the walk stays deterministic; Express has written the
-  # detected BLASTER + opl3 to the session (review only -- never saved).
-  send_keys Home Return; sleep 1        # submenu row0 Express -> red DANGER modal
-  shoot "12-express-warning"           # DF 3328 red "DETECTING HARDWARE" modal
-  send_keys Return; sleep 2             # dismiss -> re-run probes (mode flash) -> evidence
-  shoot "13-express-evidence"          # DF 3329 "DETECTION COMPLETE" (DSP version found)
-  send_keys Return; sleep 0.6           # dismiss -> "Test it now?" Yes/No prompt
+  # --- Sound menu (main idx1) ----------------------------------------------
+  send_keys Home Down Return; sleep 1   # main idx1 Sound -> the Sound menu
+  shoot "10-sound-menu"                # v2: Music Type + Select Music Card rows
+
+  # --- Express setup (Sound row0): DF-UX Phase 2 one-key detect -------------
+  # Red warning modal -> re-run probes (brief video-bench flash) -> evidence
+  # modal w/ DSP version -> "Test it now?" prompt. We decline (n) so the walk
+  # stays deterministic; Express has written the detected BLASTER + opl3 to the
+  # session (review only -- this walk never saves).
+  send_keys Home Return; sleep 1        # Sound row0 Express -> red DANGER modal
+  shoot "12-express-warning"
+  send_keys Return; sleep 2             # dismiss -> probes -> evidence modal
+  shoot "13-express-evidence"
+  send_keys Return; sleep 0.6           # dismiss -> "Test it now?" prompt
   shoot "14-express-test-prompt"
-  send_keys n; sleep 0.6                # decline -> back to the Sound submenu
-  shoot "15-express-back-to-submenu"
+  send_keys n; sleep 0.6                # decline -> back to the Sound menu
+  shoot "15-express-back-to-sound"
 
-  # --- Inline audio tests (Sound submenu rows 3,4): LIVE popup (AUDIOTEST=1) --
-  # CAPTURED FIRST, on the clean opl3 baseline (edits are sticky; run before the
-  # destructive Music-and-volumes note-demo). T47: the tests are inline rows now
-  # (the separate chooser was retired) -- Enter on a test row opens the device +
-  # auto-plays, then "Did you hear it?" Yes/No (default-Yes; y/n shortcuts).
-  # #9 SOUND-HUB REORDER: the submenu is now { 0 Express, 1 Select Music Card,
-  # 2 Select Sound FX Device, 3 Music options, 4 Test sound effects, 5 Test
-  # music, 6 Back } (screen_sound_menu ROW_* enum). The test rows shifted +1 vs
-  # the old { ...2 Music+volumes, 3 Test SFX, 4 Test music } -- so Test SFX is
-  # ROW_TESTSFX=4 (Down x4 from Home), Test music ROW_TESTMUS=5 (one more Down).
-  send_keys Home Down Down Down Down; sleep 0.5   # submenu ROW_TESTSFX=4 Test sound effects
-  send_keys Return; sleep 1.5           # run SFX test -> "Playing..." popup auto-plays
-  shoot "40-test-sfx-playing"
-  send_keys y; sleep 0.8                 # 'y' = Yes -> back to submenu (row4 badge)
-  shoot "41-test-sfx-badge-working"
-  send_keys Down; sleep 0.3             # submenu ROW_TESTMUS=5 Test music
-  send_keys Return; sleep 1.0           # run music test (real Title theme via OPL3, until-key)
-  shoot "42-test-music-playing"
+  # --- Inline audio tests (Sound rows 5,6) ---------------------------------
+  # Captured FIRST, on the clean opl3 baseline (edits are sticky). Test music is
+  # ROW_TESTMUS=5, Test sound effects ROW_TESTSFX=6 -- note v2 puts MUSIC BEFORE
+  # SFX (v1 had them the other way round).
+  send_keys Home Down Down Down Down Down; sleep 0.5   # row5 Test music
+  send_keys Return; sleep 1.0           # real Title theme via OPL3 (until-key)
+  shoot "40-test-music-playing"
   send_keys space; sleep 0.5            # stop the until-key play -> "Did you hear it?"
-  send_keys y; sleep 0.8                 # 'y' = Yes -> back to submenu (row4 badge)
-  shoot "43-test-music-badge-working"
+  send_keys y; sleep 0.8                # Yes -> badge Working
+  shoot "41-test-music-badge-working"
+  send_keys Down; sleep 0.3             # row6 Test sound effects
+  send_keys Return; sleep 1.5           # SFX test auto-plays
+  shoot "42-test-sfx-playing"
+  send_keys y; sleep 0.8                # Yes -> badge Working
+  shoot "43-test-sfx-badge-working"
 
-  # --- #9 TYPE-FIRST music selection (submenu ROW_MUSTYPE=1) ---------------
-  # The flat "Select Music Card" list is GONE. Row 1 is now "Select Music Type":
-  #   Select Music Type   rows: 0 Organya, 1 MIDI, 2 Auto-detect, 3 No Music
-  #     -> picking MIDI opens "Select MIDI Synth":
-  #        rows: 0 OPL3 FM (Sound Blaster 16/Pro), 1 WaveBlaster daughterboard,
-  #              2 General MIDI (external module), 3 AdLib (OPL2, music only),
-  #              4 Gravis UltraSound
-  # NO Home inside either picker: the start row is DERIVED from the live cfg
-  # (music_type_of / midi_synth_index) and carries the "(current)" tag -- Home
-  # would jump off it to row 0 and desync the fixed Down-counts below. With the
-  # deterministic baseline AUDIO_BACKEND=opl3: type picker starts on MIDI (row1,
-  # "(current)"), synth picker starts on OPL3 FM (row0, "(current)").
-  send_keys Home Down Return; sleep 1   # submenu row1 -> Select Music Type picker
-  shoot "16-music-type-picklist"        # Organya/MIDI/Auto-detect/No Music; MIDI (current)
-  send_keys Up; sleep 0.4               # row1 MIDI -> row0 Organya
-  shoot "17-music-type-organya-row"     # Organya desc: "No sound card needed" + pre-render note
-  send_keys Down; sleep 0.4             # back to row1 MIDI
+  # --- Music Type CYCLE row (Sound row1) -----------------------------------
+  # The v2 headline. Left/Right change the value in place -- NO picker popup.
+  send_keys Home Down; sleep 0.4        # row1 Music Type (value: MIDI)
+  shoot "16-musictype-midi"            # Card row LIVE, showing "Sound Blaster (OPL3 FM)"
+  send_keys Right; sleep 0.6            # MIDI -> No Music
+  shoot "17-musictype-nomusic"         # Card row + Test music now BOTH GREYED
+  send_keys Right; sleep 0.6            # No Music -> Organya
+  shoot "18-musictype-organya"         # Card row greyed but still shows the REMEMBERED card
+  send_keys Right; sleep 0.6            # Organya -> MIDI (restores the remembered card)
+  shoot "19-musictype-back-to-midi"    # Card row LIVE again, card restored
 
-  # (a) MIDI -> ESC = abandon at the SECOND level: no cfg write at all. The hub
-  #     banner must still read "MIDI: OPL3 FM" after backing out.
-  send_keys Return; sleep 0.8           # MIDI -> Select MIDI Synth picker
-  shoot "18-midi-synth-picklist"        # OPL3 FM (current) / WB / GenMIDI / AdLib / Gravis
-  send_keys Escape; sleep 0.8           # ESC in the synth picker -> abandon, NO change
-  shoot "19-midi-synth-esc-backout"     # back at the hub; banner unchanged
+  # --- Select Music Card (Sound row2): the restored FLAT hardware picker ----
+  # Baseline card = Sound Blaster (index 1), so the picker opens ON it, tagged
+  # "(current)". Do NOT press Home inside the picker -- the start row is derived
+  # from the live cfg and Home would jump off it.
+  send_keys Home Down Down; sleep 0.4   # row2 Select Music Card
+  send_keys Return; sleep 1             # -> the flat card picker
+  shoot "20-musiccard-picklist"        # Auto-detect/Sound Blaster (OPL3 FM)/AdLib/WB/GenMIDI/Gravis
+  send_keys Escape; sleep 0.8           # ESC = abandon, NO cfg write
+  shoot "21-musiccard-esc-backout"     # Sound menu unchanged
+  send_keys Return; sleep 1             # re-open the picker
+  send_keys Return; sleep 1.2           # pick Sound Blaster (current) -> BLASTER hardware
+  shoot "30-sound-hardware"            # the SB Port/IRQ/DMA screen, walked by the pick
+  send_keys Home; shoot "31-hw-ioport-row"
+  send_keys Return; sleep 0.8           # Enter opens the I/O-port pick-list
+  shoot "35-hw-ioport-picklist"
+  send_keys Escape; sleep 0.4
+  send_keys Down Down Down Down; sleep 0.4   # row0 -> row4 (Card type)
+  shoot "33-hw-cardtype-traditional-name"
+  send_keys Escape; sleep 0.8           # leave hardware -> v2 TEST-AFTER-PICK prompt
+  shoot "36-test-after-pick-prompt"    # "Test music now?" (default Yes)
+  send_keys n; sleep 0.8                # decline -> back to the Sound menu
+  shoot "37-after-pick-back-to-sound"
 
-  # (b) MIDI -> OPL3 FM: writes AUDIO_BACKEND=opl3 (already current -> not dirty)
-  #     and walks the SB-family sub-screen, which is how the BLASTER hardware
-  #     screen is reached (there is no standalone "Custom setup" hub row).
-  #     Rows there (R-M removed the override row): 0 I/O port, 1 IRQ, 2 DMA,
-  #     3 MPU-401 port, 4 Card type, then the R-B live rows 5 Sound, 6 SFX
-  #     volume, 7 Music volume. R-I: Enter on a BLASTER field OPENS a DF
-  #     pick-list (detected tagged, Other... on A / P); Right/Left cycle in place
-  #     + write the composed BLASTER live. ESC backs out SILENTLY (edits live).
-  send_keys Home Down Return; sleep 1   # submenu row1 -> type picker (MIDI current)
-  send_keys Return; sleep 0.8           # MIDI -> synth picker (OPL3 FM current, row0)
-  send_keys Return; sleep 1             # pick OPL3 FM -> screen_hardware() opens
-  shoot "30-sound-hardware"             # the real BLASTER hardware screen (Port/IRQ/DMA/Type)
-  send_keys Home; shoot "31-hw-ioport-row"         # row0 I/O port + DESCRIPTION
-  send_keys Return; sleep 0.8           # R-I: Enter opens the I/O port pick-list
-  shoot "35-hw-ioport-picklist"         # 0x220 (detected) + Other... popup, dimmed backdrop
-  send_keys Escape; sleep 0.4           # close the pick-list (no change), back on row0
-  send_keys Down Down Down Down; sleep 0.4         # row0 -> row4 (Card type)
-  shoot "33-hw-cardtype-traditional-name"          # "Sound Blaster 16 (T6)" + help
-  send_keys Escape; sleep 0.5           # browse + ESC -> submenu (silent)
-  shoot "34-hw-esc-clean"
+  # --- Music Options (Sound row4): adaptive rows ---------------------------
+  # Under Type=MIDI (opl3): MIDI music set is LIVE (v2 Q2 fix -- it is now gated
+  # on Type==MIDI, so it shows for GUS too, not just wb/opl3/auto); Organya
+  # pre-render is greyed; Audio quality is live (it governs the SFX mix rate on
+  # the SB family, which is why v2 does NOT make it Organya-only).
+  send_keys Home Down Down Down Down Return; sleep 1   # row4 Music Options
+  shoot "22-musicopts-midi"            # pre-render greyed, quality live
+  send_keys Escape; sleep 0.6           # browse-only -> silent ESC
 
-  # (c) Organya: the type pick writes AUDIO_BACKEND=organya, walks the BLASTER
-  #     screen (Organya renders to the SB DAC), then runs the silent
-  #     recommend_org_prerender() auto-suggest -- no modal, it just sets
-  #     ORG_PRERENDER=1 on a sub-Pentium CPU. Under this conf DOSBox profiles as
-  #     sub-586, so it DOES fire: shot 20 shows the pre-render row flipped from
-  #     the baseline CFG's 0 to "On". This is the path that un-greys that row.
-  send_keys Home Down Return; sleep 1   # submenu row1 -> type picker (MIDI current, row1)
-  send_keys Up; sleep 0.4               # row0 Organya
-  send_keys Return; sleep 1.2           # pick Organya -> screen_hardware()
-  shoot "36-organya-hardware"           # the SB screen, walked by the Organya pick
-  send_keys Escape; sleep 0.8           # ESC (browse-only) -> silent back to the hub
-  shoot "37-organya-hub-banner"         # hub banner + row value now read "Organya"
-
-  # --- Music options (submenu ROW_MUSOPTS=3) -------------------------------
-  # THE UX WIN: the Organya pre-render row is now ACTIVE (un-greyed) because the
-  # type pick above set backend=organya. Under the old flat picker Organya was
-  # buried as a peer card, so this row stayed greyed and undiscoverable.
-  # Rows: GUS voices + GUS hi-fi (gus only -- not visible here), MIDI music set
-  # (only with >=2 sets installed), Organya pre-render, Audio quality.
-  send_keys Home Down Down Down Return; sleep 1   # submenu row3 -> Music options
-  shoot "20-music-options-organya"      # pre-render row SELECTABLE + its note
-  send_keys Down; sleep 0.3
-  shoot "21-music-options-quality"      # Audio quality row, "11025Hz"
-  # Leave a REAL net change (no Left back): screen_sound's ESC path compares an
-  # entry snapshot (scfg_differs), so a net-zero toggle would ESC SILENTLY and a
-  # trailing Return would land on the hub and re-open a screen. One Right =
-  # genuinely changed -> the T52 "Save setting?" modal is deterministic.
-  send_keys Right; sleep 0.3
-  shoot "22-music-options-quality-22050hz"
-  send_keys Escape; sleep 0.6           # ESC (changed) -> "Save setting?" (default Yes)
-  shoot "23-music-options-save-prompt"
-  send_keys Return; sleep 0.6           # Return = Yes = keep -> Sound submenu
-
-  # (d) Auto-detect type: writes AUDIO_BACKEND=auto + walks the BLASTER screen.
-  send_keys Home Down Return; sleep 1   # submenu row1 -> type picker (Organya current, row0)
-  send_keys Down Down; sleep 0.4        # row0 Organya -> row2 Auto-detect
-  shoot "24-music-type-autodetect-row"  # "Detect installed sound hardware."
-  send_keys Return; sleep 1.2           # pick Auto-detect -> screen_hardware()
-  send_keys Escape; sleep 0.8           # ESC -> back to the hub
-  shoot "25-music-type-auto-banner"     # hub banner + row value now read "Auto-detect"
-
-  send_keys Escape; sleep 0.5           # Sound submenu -> main
+  # Now flip to Organya and re-open: the pre-render row must UN-GREY. Cycling to
+  # Organya must NOT pop a hardware screen (v2 grammar: a cycle row changes the
+  # value in place) -- if a BLASTER screen appears here, that is a regression.
+  send_keys Home Down; sleep 0.3        # row1 Music Type
+  send_keys Left; sleep 0.6             # MIDI -> Organya (Left = -1)
+  shoot "23-musictype-organya-nomodal"  # MUST still be the Sound menu, no modal
+  # Under Organya the CARD row (row2) is greyed and nav SKIPS it, so row1 -> Down
+  # lands on row3 (Select Sound FX Card) and a second Down reaches row4 (Music
+  # Options). Down x3 would overshoot onto Test music and PLAY it -- which is
+  # exactly what the first run of this walk did. Grey-skip changes the counts.
+  send_keys Down Down; sleep 0.4        # row1 -> row3 -> row4 Music Options
+  send_keys Return; sleep 1
+  shoot "24-musicopts-organya"         # Organya pre-render row now LIVE
+  send_keys Escape; sleep 0.6
+  send_keys Home Down; sleep 0.3        # back to Music Type
+  send_keys Right; sleep 0.6            # Organya -> MIDI (restore the baseline)
+  send_keys Escape; sleep 0.5           # Sound menu -> main
 
   # --- System speed (idx1): DF-style pick-list ----------------------------
-  send_keys Home Down Return; sleep 1   # main idx1 System speed -> pick-list
+  send_keys Home Down Down Return; sleep 1   # main idx2 System speed -> pick-list
   shoot "55-system-speed-picklist"      # Slow/Normal/Fast/Very Fast/Auto-detect + (recommended) + DESCRIPTION
   send_keys Escape; sleep 0.5           # ESC = cancel, no change -> main
 
@@ -432,7 +421,7 @@ walk() {
   # T47 shell: row0 Joystick on/off (live), rows 1-3 (Configure keyboard /
   # joystick / Restore defaults) GREYED as Phase-3 signposts, row4 Back. ESC
   # backs out silently (live edit kept).
-  send_keys Home Down Down Return; sleep 1
+  send_keys Home Down Down Down Return; sleep 1   # main idx3 Input
   shoot "50-input-submenu"              # row0 Joystick + greyed Configure/Restore rows
   send_keys space; sleep 0.3; shoot "51-input-joystick-on"   # toggle Joystick On
   send_keys space; sleep 0.3            # toggle back Off (baseline)
@@ -441,20 +430,20 @@ walk() {
   # --- Advanced / troubleshooting (idx3): PERF rows folded in -------------
   # T47: PERF_MODE + FIXED_TIMESTEP are now the first two rows here (Performance
   # is gone as a top-level item), followed by the compat rows.
-  send_keys Home Down Down Down Return; sleep 1
+  send_keys Home Down Down Down Down Return; sleep 1   # main idx4 Advanced
   shoot "70-advanced"                   # row0 PERF_MODE + per-line help
   send_keys Down; sleep 0.3; shoot "71-advanced-row1-help"   # row1 FIXED_TIMESTEP
   send_keys Escape; sleep 0.5           # browse-only -> silent ESC
 
   # --- Auto-detect best settings (idx4): modal message box ----------------
-  send_keys Home Down Down Down Down Return; sleep 1
+  send_keys Home Return; sleep 1   # main idx0 Auto-detect (v2: FIRST item)
   shoot "80-autodetect-port"; send_keys Return; sleep 0.4
 
   # --- R-I Enter-opens-pick-list demo (editing-screen) --------------------
   # On Advanced (idx3) Enter opens a modal pick-list for the highlighted row;
   # Space/Left/Right still cycle in place. ESC closes the list with a full clean
   # redraw (R-H -- no overlay/texture residue).
-  send_keys Home Down Down Down Return; sleep 1   # Advanced (idx3)
+  send_keys Home Down Down Down Down Return; sleep 1   # Advanced (idx4)
   send_keys Home; sleep 0.3             # row0 PERF_MODE; status bar "Enter Open list ..."
   shoot "85-advanced-perf-row"
   send_keys Return; sleep 0.5           # Enter opens the PERF_MODE pick-list
@@ -467,18 +456,21 @@ walk() {
   #     kept edit -> Save and exit highlight. Uses Advanced (idx3). We do NOT
   #     press Save and exit -- the window is left live + unsaved; ensure_stage
   #     rewrites the baseline each run, so the staged CFG is untouched.
-  send_keys Home Down Down Down Return; sleep 1   # Advanced (idx3)
+  send_keys Home Down Down Down Down Return; sleep 1   # Advanced (idx4)
   send_keys Home Right; sleep 0.3       # row0 PERF_MODE: an edit
   shoot "90-sessionedit-made"           # the edit, in-screen
   send_keys Escape; sleep 0.5           # ESC (changed) -> "Save setting?" modal
   shoot "90b-save-setting-prompt"       # T52: "Save setting?" (default Yes)
   send_keys Return; sleep 0.5           # Return = default Yes = KEEP -> main menu
   shoot "91-sessionedit-menu-unsaved"   # main menu status now shows "* UNSAVED"
-  send_keys Home Down Down Down Return; sleep 1   # re-enter Advanced
+  send_keys Home Down Down Down Down Return; sleep 1   # re-enter Advanced (idx4)
   send_keys Home; sleep 0.3             # row0 PERF_MODE
   shoot "92-sessionedit-kept"           # PERF_MODE STILL changed -> edit KEPT across ESC
   send_keys Escape; sleep 0.5           # re-enter was view-only -> silent ESC
-  send_keys Home Down Down Down Down Down; sleep 0.3  # idx5 = "Save and exit"
+  # v2: idx5 = "Save and run DOSKUTSU" (new), idx6 = "Save and exit".
+  send_keys Home Down Down Down Down Down; sleep 0.3  # idx5 = "Save and run DOSKUTSU"
+  shoot "95-save-and-run-item"          # the new Save-and-run row (ERRORLEVEL 10 chain)
+  send_keys Down; sleep 0.3                           # idx6 = "Save and exit"
   shoot "93-sessionedit-save-and-exit"  # "Save and exit" highlighted (* UNSAVED in status)
   # T52 QUIT GUARD: ESC at the main menu ALWAYS pops "Quit without saving
   # settings?" (default NO), even when clean -- capture it, then ESC again = No =
