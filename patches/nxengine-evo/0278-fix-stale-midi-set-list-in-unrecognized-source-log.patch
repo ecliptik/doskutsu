@@ -1,0 +1,60 @@
+From 499f5499643b46f7d37c7689cf8159a39b1a580b Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 13 Jul 2026 17:01:14 -0700
+Subject: [PATCH] patch 0278 -- fix stale MIDI-set list in the
+ unrecognized-MIDI_SOURCE log
+
+Diagnostic-text correctness, no behavior change.
+
+The unrecognized-value LOG_INFO still advertised the pre-nx0262 world:
+"Recognized values: wiimidi (default) | orgmid | a path-safe data/<dir>/".
+Both halves are now wrong. nx0262 (+ 5605db3 on the SETUP side) made
+orgmid2 the shipped default -- unset/empty MIDI_SOURCE resolves to orgmid2
+at SoundManager.cpp:812, not wiimidi -- and promoted orgmid1/orgmid2 to
+first-class selectable set names (the branch at :860), which the list never
+mentioned at all.
+
+This log line is the one place a user lands when they typo a set name, so a
+stale list actively misdirects: it tells them the default is wiimidi (it is
+not) and hides the two names SETUP actually writes. The list now mirrors the
+resolver branches in order -- orgmid2 (default; unset/empty resolves here) |
+orgmid1 | wiimidi | orgmid (honors GM_VARIANT v1|v2) | custom drop-in dir.
+
+Behavior is untouched by design. The unrecognized-value fallback stays
+wiimidi (_midi_source_dir = "midi"): a fresh install that has not run
+`make convert-music` has no data/orgmid2/*.mid, and wiimidi is the set that
+ships ready-to-play, so falling back there rather than to the default set is
+what keeps a typo from ending in silence. The line documents the registry;
+it does not change it.
+
+fmt-arg discipline (nx0263): the rewritten string keeps exactly three '{}'
+placeholders in the original order (src, custom-dirs, variant_str) against
+the same three arguments -- no arg-count drift.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/SoundManager.cpp | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index bbff538b..f5d9e98e 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -921,9 +921,11 @@ bool SoundManager::init()
+         _midi_source_dir = "midi";
+         LOG_INFO("MidiScheduler: unrecognized SDL_HINT_DOSKUTSU_AUDIO_MIDI_"
+                  "SOURCE value '{}'; falling back to 'wiimidi' (data/midi/). "
+-                 "Recognized values: wiimidi (default) | orgmid | a "
+-                 "path-safe data/<dir>/ holding >=1 .mid (custom-dirs={}). "
+-                 "Variant={} ignored in fallback path.",
++                 "Recognized values: orgmid2 (default; unset/empty resolves "
++                 "here) | orgmid1 | wiimidi | orgmid (honors GM_VARIANT v1|v2 "
++                 "-> data/orgmid1|orgmid2/) | a path-safe data/<dir>/ holding "
++                 ">=1 .mid (custom-dirs={}). Variant={} ignored in fallback "
++                 "path.",
+                  src, custom_enabled ? "on" : "off", variant_str);
+       }
+     }
+-- 
+2.47.3
+
