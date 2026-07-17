@@ -2230,49 +2230,33 @@ CRLF := awk 'BEGIN{ORS="\r\n"} {sub(/\r$$/, ""); print}'
 # stage). They used to carry separate copies of the body -- two copies of one
 # truth, which is precisely how MIDI_SET's default drifted and shipped a bug.
 #
-# 1. ERRORLEVEL CHAIN. SETUP's "Save and run DOSKUTSU" saves, then exits with
-#    code 10 (setup/main.c SETUP_EXIT_RUN_GAME) and lets the BAT start the game.
-#    SETUP deliberately does NOT exec the game itself: it is a DJGPP DPMI client
-#    under CWSDPMI, and spawning DOSKUTSU (a far larger client wanting a 2 MB
-#    stack) while SETUP + its DPMI host are still resident risks DPMI nesting and
-#    conventional-memory exhaustion below 640K -- a passes-in-DOSBox / wedges-on-
-#    g2k trap. Exiting first releases all of it.
-#    DOS `IF ERRORLEVEL n` means "n OR GREATER", so the 11 guard MUST come first;
-#    without it any future exit code above 10 would silently launch the game.
+# iter #3 (#20): the "Save and run DOSKUTSU" ERRORLEVEL chain was DROPPED. SETUP
+# has one exit code (0) again and SETUP.BAT just runs SETUP.EXE -- no :PLAY /
+# DOSKUTSU.EXE branch. The env-hygiene clears STAY (they are the point of having
+# a launcher BAT at all); the user starts the game with DOSKUTSU.EXE afterward.
 #
-# 2. ENV HYGIENE (realhw root-cause, v1.6.3-rc g2k logs). doskutsu_cfg_load()
-#    publishes CFG keys with setenv(..., overwrite=0), so a PRE-EXISTING DOS env
-#    var WINS over the CFG. The operator's g2k session had a stale
-#    SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=wiimidi in AUTOEXEC: the CFG said
-#    orgmid2, the engine played wiimidi, and nothing in the log said so.
-#    Save-and-run makes this WORSE than the old exit-to-prompt flow, because it
-#    launches the game in the SAME DOS session -- the leaked var is guaranteed
-#    still live, so the headline v2 feature would appear to ignore the very
-#    setting the user just picked. Clear the audio keys SETUP writes before
-#    handing over. realhw verified empirically under DOSBox-X that DOS `SET VAR=`
-#    truly DELETES the variable (it does not leave an empty one, which would make
-#    getenv() non-NULL and mask EVERY CFG key -- a far worse silent failure).
+# ENV HYGIENE (realhw root-cause, v1.6.3-rc g2k logs). doskutsu_cfg_load()
+# publishes CFG keys with setenv(..., overwrite=0), so a PRE-EXISTING DOS env
+# var WINS over the CFG. The operator's g2k session had a stale
+# SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=wiimidi in AUTOEXEC: the CFG said
+# orgmid2, the engine played wiimidi, and nothing in the log said so. Clear the
+# audio keys SETUP writes before handing over. realhw verified empirically under
+# DOSBox-X that DOS `SET VAR=` truly DELETES the variable (it does not leave an
+# empty one, which would make getenv() non-NULL and mask EVERY CFG key -- a far
+# worse silent failure).
 #
-#    NEVER clear BLASTER. It is the one AUTHORITATIVE key (file > env by design);
-#    clearing it buys nothing and would kill audio outright if a CFG lacks a
-#    BLASTER line.
-#    PLACEMENT: the clears run at the TOP, BEFORE SETUP.EXE -- not inside :PLAY.
-#    This is the difference between fixing the common case and missing it. A DOS
-#    BAT's `SET` lands in the LIVE COMMAND.COM and persists after the BAT ends,
-#    so clearing at the top disinfects the whole session, covering BOTH exits:
-#      - "Save and run"  (code 10): chains to DOSKUTSU.EXE -- protected either way.
-#      - "Save and exit" (code 0):  falls to :END. With the clears inside :PLAY the
-#        session env stays POISONED, so the user who then types DOSKUTSU.EXE gets
-#        the stale wiimidi while their freshly-saved CFG says orgmid2.
-#    Save-then-exit-then-run is the COMMON flow -- it is literally what the operator
-#    does on g2k (PLAY0 = SETUP + save, PLAY1 = the game) -- so clears-in-:PLAY
-#    would have shipped a fix that misses its primary real-world case.
-#    It is free: realhw proved DOS `SET VAR=` truly deletes, and SETUP itself is
-#    immune to these vars regardless (audiotest_sdl.c applies the CFG at
-#    SDL_HINT_OVERRIDE, so SETUP's own audio test beats a stale env var -- which is
-#    exactly why the operator's SETUP test sounded right and the game then did not).
-#    Residual gap after this: only a fresh boot straight into the game, which no BAT
-#    can reach -- that is what nx 0279's WARN + an AUTOEXEC cleanup are for.
+# NEVER clear BLASTER. It is the one AUTHORITATIVE key (file > env by design);
+# clearing it buys nothing and would kill audio outright if a CFG lacks a
+# BLASTER line.
+# PLACEMENT: the clears run at the TOP, BEFORE SETUP.EXE. A DOS BAT's `SET`
+# lands in the LIVE COMMAND.COM and persists after the BAT ends, so clearing at
+# the top disinfects the whole session -- the user who then types DOSKUTSU.EXE
+# at the same prompt gets their freshly-saved CFG, not the stale env var.
+# SETUP itself is immune to these vars regardless (audiotest_sdl.c applies the
+# CFG at SDL_HINT_OVERRIDE, so SETUP's own audio test beats a stale env var --
+# which is why the operator's SETUP test sounded right and the game then did
+# not). Residual gap after this: only a fresh boot straight into the game, which
+# no BAT can reach -- that is what nx 0279's WARN + an AUTOEXEC cleanup are for.
 define SETUP_BAT_BODY
 @ECHO OFF
 SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=
@@ -2281,40 +2265,30 @@ SET SDL_HINT_DOSKUTSU_MUSIC_OFF=
 SET SDL_HINT_DOSKUTSU_SFX_OFF=
 SET DOSKUTSU_NO_AUDIO=
 SETUP.EXE
-IF ERRORLEVEL 11 GOTO END
-IF ERRORLEVEL 10 GOTO PLAY
-GOTO END
-:PLAY
-DOSKUTSU.EXE
-:END
 endef
 export SETUP_BAT_BODY
 
 # Gate the GENERATED SETUP.BAT, not the source. realhw nearly packed a stale
 # 2-line no-hygiene SETUP.BAT that was structurally perfect -- valid CRLF, valid
 # 8.3, every sha gate green -- and merely WRONG. A file's existence is not
-# evidence of its content, so assert the content at both generation sites: the
-# ERRORLEVEL 11 guard must come FIRST (DOS "n or greater"), all 5 audio clears
-# must be present and must precede SETUP.EXE, BLASTER must NEVER be cleared (it is
-# the authoritative key -- clearing it kills audio on a CFG with no BLASTER line),
-# and no line may carry a double-CR.
+# evidence of its content, so assert the content at both generation sites: all 5
+# audio clears must be present and must precede SETUP.EXE, BLASTER must NEVER be
+# cleared (it is the authoritative key -- clearing it kills audio on a CFG with
+# no BLASTER line), and no line may carry a double-CR.
+# iter #3 (#20): the ERRORLEVEL-guard checks were dropped with the Save-and-run
+# chain -- SETUP.BAT now only clears the env and runs SETUP.EXE.
 define ASSERT_SETUP_BAT
 	@bat="$(1)"; \
 	 sets=$$(grep -c '^SET SDL_HINT_DOSKUTSU_\|^SET DOSKUTSU_NO_AUDIO=' "$$bat" || true); \
 	 test "$$sets" -eq 5 || { echo "error: $$bat has $$sets/5 env clears" >&2; exit 1; }; \
-	 grep -q '^IF ERRORLEVEL 11 GOTO END' "$$bat" \
-	   || { echo "error: $$bat missing the ERRORLEVEL 11 guard" >&2; exit 1; }; \
-	 test "$$(grep -n '^IF ERRORLEVEL 11' "$$bat" | cut -d: -f1)" \
-	    -lt "$$(grep -n '^IF ERRORLEVEL 10' "$$bat" | cut -d: -f1)" \
-	   || { echo "error: $$bat ERRORLEVEL guard is not first" >&2; exit 1; }; \
 	 test "$$(grep -n '^SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=' "$$bat" | cut -d: -f1)" \
 	    -lt "$$(grep -n '^SETUP.EXE' "$$bat" | cut -d: -f1)" \
-	   || { echo "error: $$bat clears do not precede SETUP.EXE (Save-and-exit unprotected)" >&2; exit 1; }; \
+	   || { echo "error: $$bat clears do not precede SETUP.EXE" >&2; exit 1; }; \
 	 grep -q '^SET BLASTER=' "$$bat" \
 	   && { echo "error: $$bat clears BLASTER (authoritative key -- would kill audio)" >&2; exit 1; }; \
 	 ! grep -q $$'\r\r' "$$bat" \
 	   || { echo "error: $$bat has a double-CR line" >&2; exit 1; }; \
-	 echo "  SETUP.BAT gate OK: 5 clears before SETUP.EXE, guard-first, BLASTER intact"
+	 echo "  SETUP.BAT gate OK: 5 clears before SETUP.EXE, BLASTER intact"
 endef
 
 # GPL text source: the cloned NXEngine-evo tree ships its LICENSE file at the root.
@@ -2424,7 +2398,7 @@ dist-list:
 	@printf 'top-level files:\n'
 	@$(call _dist_list_entry,DOSKUTSU.EXE,$(BUILD_DIR)/doskutsu.exe,binary (rename to upper-case))
 	@$(call _dist_list_entry,SETUP.EXE,$(SETUP_RELEASE_EXE),DOS configurator AUDIOTEST=1 (writes DOSKUTSU.CFG))
-	@printf '  %-22s %-55s %s\n' "SETUP.BAT" "(generated)" "SETUP launcher + Save-and-run chain [CRLF]"
+	@printf '  %-22s %-55s %s\n' "SETUP.BAT" "(generated)" "SETUP launcher + audio env hygiene [CRLF]"
 	@$(call _dist_list_entry,CWSDPMI.EXE,$(CWSDPMI_EXE),DPMI host (vendored in repo))
 	@$(call _dist_list_entry,CWSDPMI.DOC,$(CWSDPMI_DOC),CWSDPMI redistribution terms)
 	@$(call _dist_list_entry,LICENSE.TXT,$(REPO_ROOT)/LICENSE,MIT - repo source [CRLF])
@@ -2480,9 +2454,9 @@ dist: $(BUILD_DIR)/doskutsu.exe setup-release | fetch-binaries
 	$(call ASSERT_SETUP_NOT_STUB,$(CF_STAGE)/SETUP.EXE)
 	@install -m 0644 $(CWSDPMI_EXE)            "$(CF_STAGE)/CWSDPMI.EXE"
 	@install -m 0644 $(CWSDPMI_DOC)            "$(CF_STAGE)/CWSDPMI.DOC"
-	@# SETUP.BAT launcher (CRLF): the errorlevel chain + env hygiene for
-	@# "Save and run DOSKUTSU". Body defined ONCE (SETUP_BAT_BODY) so the CF dist
-	@# and the DOSBox stage cannot drift apart.
+	@# SETUP.BAT launcher (CRLF): the audio env-hygiene clears + SETUP.EXE. Body
+	@# defined ONCE (SETUP_BAT_BODY) so the CF dist and the DOSBox stage cannot
+	@# drift apart.
 	@printf '%s\n' "$$SETUP_BAT_BODY" | $(CRLF) > "$(CF_STAGE)/SETUP.BAT"
 	$(call ASSERT_SETUP_BAT,$(CF_STAGE)/SETUP.BAT)
 	@$(CRLF) < LICENSE           > "$(CF_STAGE)/LICENSE.TXT"

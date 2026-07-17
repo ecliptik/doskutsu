@@ -65,15 +65,10 @@ SETUP opens a full-screen menu:
   touch if something looks wrong on your hardware.
 - **Auto-detect best settings** -- profiles your machine and pre-selects the
   best options. You review and can override anything before saving.
-- **Save and run DOSKUTSU** -- writes `DOSKUTSU.CFG`, leaves SETUP, and starts
-  the game. This works when you launch SETUP through `SETUP.BAT` (the shipped
-  launcher): SETUP exits with a status code the batch file checks, then runs
-  `DOSKUTSU.EXE` in a fresh DOS process. SETUP deliberately does **not** start
-  the game from inside itself -- exiting first frees all of SETUP's memory, so
-  the game gets the whole machine. If you ran `SETUP.EXE` directly instead of via
-  `SETUP.BAT`, your settings are still saved; you just land back at the DOS
-  prompt and can start `DOSKUTSU.EXE` yourself.
-- **Save and exit** -- writes `DOSKUTSU.CFG` and leaves SETUP.
+- **Save and exit** -- writes `DOSKUTSU.CFG` and leaves SETUP. Start the game
+  afterward with `DOSKUTSU.EXE` (or by running the shipped `SETUP.BAT`, which
+  clears any stale audio environment variables before it hands back to the DOS
+  prompt).
 - **Quit without saving** -- leaves SETUP, discarding the session (a confirm
   prompt appears if you have unsaved changes).
 
