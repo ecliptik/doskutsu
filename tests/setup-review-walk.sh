@@ -61,7 +61,7 @@ CONF=""
 # Baseline audio backend for the deterministic start-state CFG. Default opl3
 # (so the music test plays the real Title theme via OPL3). Override with
 # REVIEW_BACKEND=organya to capture the organya-mode audio-test screens (the
-# T36/#11 pre-rendered-snippet feature + its cache-absent tone fallback ABOUT).
+# T36/#19 pre-rendered-preview feature + its cache-absent honest-message ABOUT).
 REVIEW_BACKEND="${REVIEW_BACKEND:-opl3}"
 
 while (($#)); do
@@ -252,19 +252,21 @@ launch_setup() {
 #     Reach main item N = Home then Down x N, Enter. T47 indices (9 -> 7):
 #       0 Sound (SUBMENU)   1 System speed   2 Input (SUBMENU)
 #       3 Advanced          4 Auto-detect    5 Save and exit   6 Quit
-#   - UX v2 MAIN MENU (8 items): 0 Auto-detect best settings, 1 Sound, 2 System
-#     speed, 3 Input, 4 Advanced, 5 Save and run DOSKUTSU, 6 Save and exit,
-#     7 Quit without saving. Auto-detect moved to FIRST and "Save and run" is
-#     new, so EVERY main-menu Down-count shifted vs v1.
-#   - UX v2 SOUND MENU: 0 Express setup, 1 Music Type [3-state CYCLE row],
-#     2 Select Music Card [flat hardware picker], 3 Select Sound FX Card,
+#   - UX v2 + iter #3 MAIN MENU (7 items): 0 Auto-detect best settings, 1 Sound,
+#     2 System speed, 3 Input, 4 Advanced, 5 Save and exit, 6 Quit without
+#     saving. iter #3 (#20) DROPPED "Save and run DOSKUTSU" -- the single
+#     Save-and-exit path is back. Auto-detect is FIRST (idx0), Sound idx1.
+#   - UX v2 + iter #3 SOUND MENU: 0 Express setup, 1 Music Type [3-state CYCLE
+#     row], 2 Select Music Card [flat hardware picker], 3 Select Sound FX Card,
 #     4 Music Options, 5 Test music, 6 Test sound effects, 7 Back. ESC silent.
 #     Music Type cycles IN PLACE with Left/Right/Space (no popup); the card
-#     picker is a tui_picklist. Greyed rows are SKIPPED by nav: the card row is
-#     greyed unless Type==MIDI, Test music is greyed under No Music, Test SFX is
-#     greyed when the FX device is No Sound FX -- so the Down-counts depend on
-#     the Type. The baseline (AUDIO_BACKEND=opl3 -> Type=MIDI) keeps every row
-#     live, which is why the fixed counts below are exact.
+#     picker is a tui_picklist. iter #3 (#21): Select Music Card is now ALWAYS
+#     selectable (never greyed), so its Down-count no longer depends on the Type.
+#     The only grey rows left are Test music (greyed under No Music) and Test SFX
+#     (greyed when the FX device is No Sound FX). Under the baseline
+#     (AUDIO_BACKEND=opl3 -> Type=MIDI) every row is live; under Organya every
+#     row is ALSO live (card row always on, Organya != No Music), so the counts
+#     match MIDI.
 #   - Do NOT press Home inside a picker: its start row is derived from the live
 #     cfg and carries "(current)"; Home would jump off it.
 #   - HOME anchors the first selectable row on every screen, so captures are
@@ -296,21 +298,19 @@ walk() {
   shoot "00-main-menu"                 # idx0 highlighted + TOP PROFILE PANEL + help box
 
   # ===========================================================================
-  # UX v2 MAIN MENU (8 items -- Auto-detect FIRST, + Save and run DOSKUTSU):
+  # UX v2 + iter #3 MAIN MENU (7 items -- Auto-detect FIRST, NO Save-and-run):
   #   0 Auto-detect best settings   1 Sound        2 System speed   3 Input
-  #   4 Advanced                    5 Save and run DOSKUTSU
-  #   6 Save and exit               7 Quit without saving
-  # EVERY main-menu Down-count below shifted by +1 vs v1 (Sound was idx0).
+  #   4 Advanced                    5 Save and exit  6 Quit without saving
   #
-  # UX v2 SOUND MENU (screen_sound_menu ROW_* enum):
+  # UX v2 + iter #3 SOUND MENU (screen_sound_menu ROW_* enum):
   #   0 Express setup       1 Music Type [CYCLE row]   2 Select Music Card
   #   3 Select Sound FX Card 4 Music Options           5 Test music
   #   6 Test sound effects  7 Back
   # Music Type is a 3-state CYCLE row -- Left/Right/Space change it IN PLACE, no
   # popup. Cycle order is Organya -> MIDI -> No Music -> Organya (MTYPE_* enum),
   # so from the opl3 baseline (Type=MIDI) one Right lands on No Music.
-  # GREY RULES matter for nav (greyed rows are SKIPPED by Up/Down):
-  #   Select Music Card  greyed unless Type == MIDI
+  # GREY RULES matter for nav (greyed rows are SKIPPED by Up/Down). iter #3 (#21)
+  # made Select Music Card ALWAYS selectable, so only two rows can grey now:
   #   Test music         greyed when Type == No Music
   #   Test sound effects greyed when the FX device is No Sound FX
   # The deterministic baseline is AUDIO_BACKEND=opl3 -> Type=MIDI, Card=Sound
@@ -356,11 +356,11 @@ walk() {
   send_keys Home Down; sleep 0.4        # row1 Music Type (value: MIDI)
   shoot "16-musictype-midi"            # Card row LIVE, showing "Sound Blaster (OPL3 FM)"
   send_keys Right; sleep 0.6            # MIDI -> No Music
-  shoot "17-musictype-nomusic"         # Card row + Test music now BOTH GREYED
+  shoot "17-musictype-nomusic"         # #21: Card row STILL LIVE; only Test music GREYS
   send_keys Right; sleep 0.6            # No Music -> Organya
-  shoot "18-musictype-organya"         # Card row greyed but still shows the REMEMBERED card
+  shoot "18-musictype-organya"         # #21: Card row LIVE, showing the REMEMBERED card
   send_keys Right; sleep 0.6            # Organya -> MIDI (restores the remembered card)
-  shoot "19-musictype-back-to-midi"    # Card row LIVE again, card restored
+  shoot "19-musictype-back-to-midi"    # Card row shows the restored MIDI card
 
   # --- Select Music Card (Sound row2): the restored FLAT hardware picker ----
   # Baseline card = Sound Blaster (index 1), so the picker opens ON it, tagged
@@ -385,26 +385,42 @@ walk() {
   send_keys n; sleep 0.8                # decline -> back to the Sound menu
   shoot "37-after-pick-back-to-sound"
 
-  # --- Music Options (Sound row4): adaptive rows ---------------------------
-  # Under Type=MIDI (opl3): MIDI music set is LIVE (v2 Q2 fix -- it is now gated
-  # on Type==MIDI, so it shows for GUS too, not just wb/opl3/auto); Organya
+  # --- Select Sound FX Card (Sound row3): iter #3 #21 always lists all 3 -------
+  # The FX list is NO LONGER narrowed by the music card. Sound Blaster / Gravis
+  # UltraSound / No Sound FX appear on every card; the description pane warns
+  # about combinations that need a matching music card, but nothing blocks.
+  send_keys Home Down Down Down; sleep 0.4   # row3 Select Sound FX Card
+  send_keys Return; sleep 1                   # -> the FX device picker (all 3 devices)
+  shoot "26-sfxdevice-picklist"              # Sound Blaster / Gravis UltraSound / No Sound FX
+  send_keys Escape; sleep 0.8                 # ESC = abandon, NO cfg write
+
+  # --- Music Options (Sound row4): adaptive rows + screen_sound's OWN T52 ------
+  # Under Type=MIDI (opl3): MIDI music set is LIVE when >=2 sets are installed
+  # (v2 Q2 fix -- gated on Type==MIDI, so it shows for GUS too); Organya
   # pre-render is greyed; Audio quality is live (it governs the SFX mix rate on
   # the SB family, which is why v2 does NOT make it Organya-only).
+  # screen_sound has its OWN ESC "Save setting?" prompt (distinct from
+  # screen_advanced's copy captured at shots 90*). Exercise it here with a real
+  # edit + ESC + keep.
   send_keys Home Down Down Down Down Return; sleep 1   # row4 Music Options
   shoot "22-musicopts-midi"            # pre-render greyed, quality live
-  send_keys Escape; sleep 0.6           # browse-only -> silent ESC
+  send_keys Home; sleep 0.3            # first live row on this MIDI card
+  send_keys Right; sleep 0.4           # a REAL edit (cycles that row's value)
+  shoot "22b-musicopts-edited"
+  send_keys Escape; sleep 0.6           # ESC (changed) -> screen_sound "Save setting?" prompt
+  shoot "22c-musicopts-save-setting-prompt"   # T52 prompt from screen_sound ITSELF
+  send_keys Return; sleep 0.6           # Return = default Yes = KEEP -> back to Sound menu
 
-  # Now flip to Organya and re-open: the pre-render row must UN-GREY. Cycling to
-  # Organya must NOT pop a hardware screen (v2 grammar: a cycle row changes the
-  # value in place) -- if a BLASTER screen appears here, that is a regression.
+  # Now flip to Organya and re-open Music Options: the pre-render row must
+  # UN-GREY. Cycling to Organya must NOT pop a hardware screen (v2 grammar: a
+  # cycle row changes the value in place) -- a BLASTER screen here is a regression.
   send_keys Home Down; sleep 0.3        # row1 Music Type
   send_keys Left; sleep 0.6             # MIDI -> Organya (Left = -1)
   shoot "23-musictype-organya-nomodal"  # MUST still be the Sound menu, no modal
-  # Under Organya the CARD row (row2) is greyed and nav SKIPS it, so row1 -> Down
-  # lands on row3 (Select Sound FX Card) and a second Down reaches row4 (Music
-  # Options). Down x3 would overshoot onto Test music and PLAY it -- which is
-  # exactly what the first run of this walk did. Grey-skip changes the counts.
-  send_keys Down Down; sleep 0.4        # row1 -> row3 -> row4 Music Options
+  # iter #3 (#21): the CARD row (row2) stays LIVE under Organya -- nav no longer
+  # skips it. From row1: Down->row2 (card), Down->row3 (SFX), Down->row4 (Music
+  # Options). So Music Options is Down x3 now (was Down x2 when the card greyed).
+  send_keys Down Down Down; sleep 0.4   # row1 -> row2 -> row3 -> row4 Music Options
   send_keys Return; sleep 1
   shoot "24-musicopts-organya"         # Organya pre-render row now LIVE
   send_keys Escape; sleep 0.6
@@ -467,47 +483,31 @@ walk() {
   send_keys Home; sleep 0.3             # row0 PERF_MODE
   shoot "92-sessionedit-kept"           # PERF_MODE STILL changed -> edit KEPT across ESC
   send_keys Escape; sleep 0.5           # re-enter was view-only -> silent ESC
-  # v2: idx5 = "Save and run DOSKUTSU" (new), idx6 = "Save and exit".
-  send_keys Home Down Down Down Down Down; sleep 0.3  # idx5 = "Save and run DOSKUTSU"
-  shoot "95-save-and-run-item"          # the new Save-and-run row (ERRORLEVEL 10 chain)
-  send_keys Down; sleep 0.3                           # idx6 = "Save and exit"
+  # iter #3 (#20): idx5 = "Save and exit", idx6 = "Quit without saving".
+  send_keys Home Down Down Down Down Down; sleep 0.3  # idx5 = "Save and exit"
   shoot "93-sessionedit-save-and-exit"  # "Save and exit" highlighted (* UNSAVED in status)
-  # T52 QUIT GUARD: ESC at the main menu ALWAYS pops "Quit without saving
-  # settings?" (default NO), even when clean -- capture it, then ESC again = No =
-  # STAY (a second ESC resolves to No, does NOT exit). Leaves the window live.
-  send_keys Escape; sleep 0.5           # ESC at main menu -> quit guard
-  shoot "94-quit-without-saving-prompt" # T52: "Quit without saving settings?" (default No)
-  send_keys Escape; sleep 0.5           # ESC again = No = stay -> main menu
+  # ESC QUIT GUARD (session is DIRTY here): main() chains TWO prompts on an ESC
+  # exit when there are unsaved edits -- first "Save your changes before
+  # exiting?" (default No), then, on No, "Discard unsaved changes and quit?"
+  # (default No). Capture BOTH, then answer the second with its default No
+  # (Return) to STAY at the main menu. (A single ESC resolves a yesno to its
+  # default No, so ESC on the first prompt advances to the second.)
+  send_keys Escape; sleep 0.5           # ESC at main menu -> "Save your changes?" prompt
+  shoot "94-save-changes-prompt"        # "Save your changes before exiting?" (default No)
+  send_keys Escape; sleep 0.5           # No -> "Discard unsaved changes and quit?" prompt
+  shoot "99-discard-quit-prompt"        # (default No)
+  send_keys Return; sleep 0.6           # Return = default No = STAY -> back to main menu
 
-  shoot "99-main-menu-final"            # (session dirty -- left live, unsaved)
-
-  # --- LAST: actually PRESS "Save and run DOSKUTSU" (idx5) -----------------
-  # This must be the FINAL action of the walk: it SAVES and EXITS SETUP, so
-  # nothing can follow it.
-  #
-  # It witnesses the task-#18 fix. The old shared save toast was wrong twice on
-  # this path -- it told the user to "Run DOSKUTSU.EXE to play" (a game SETUP.BAT
-  # is about to launch FOR them) and it BLOCKED the chain on a keypress. The fix
-  # is: no modal at all on the run path, and a plain console line printed AFTER
-  # tui_shutdown() (which clrscr()s, so anything drawn inside the TUI would have
-  # been wiped anyway).
-  #
-  # WHAT SHOT 96 MUST SHOW: a bare DOS prompt. SETUP saved and EXITED on its own,
-  # with NO "Saved / Press a key" modal. If a modal is present, SETUP is still
-  # blocking the launch chain and the fix has regressed -- that is the assertion.
-  #
-  # This shot already earned its keep: the first version of the fix ALSO printed
-  # "Settings saved. Starting DOSKUTSU..." to the console after tui_shutdown().
-  # Shot 96 showed a bare prompt -- the line never rendered -- so the print was
-  # removed rather than shipped as dead code under a comment claiming it worked.
-  # A compiler cannot see a modal, and it cannot see a line that fails to appear.
-  #
-  # (The walk runs SETUP.EXE directly, not via SETUP.BAT, so ERRORLEVEL 10 is
-  # simply ignored by COMMAND.COM and the game does not start -- which is exactly
-  # the safe-degrade path, and it keeps this capture cheap.)
-  send_keys Home Down Down Down Down Down; sleep 0.4   # idx5 Save and run DOSKUTSU
-  send_keys Return; sleep 2.0            # saves, exits: NO keypress should be needed
-  shoot "96-save-and-run-exited"         # bare DOS prompt, no modal, no keypress
+  # --- LAST: PRESS "Save and exit" (idx5) ---------------------------------
+  # The FINAL action of the walk. iter #3 (#20) dropped "Save and run DOSKUTSU",
+  # so "Save and exit" is the single save path again: it writes DOSKUTSU.CFG and
+  # shows the classic save toast ("Settings saved. / Run DOSKUTSU.EXE to play."),
+  # which waits for a keypress. Capture that toast as the terminal shot -- it is
+  # the whole save UX now. (The walk runs SETUP.EXE directly and ensure_stage
+  # rewrites the baseline CFG every run, so writing here is harmless.)
+  send_keys Home Down Down Down Down Down; sleep 0.4   # idx5 Save and exit
+  send_keys Return; sleep 1.5            # writes CFG -> "Settings saved" toast (awaits a key)
+  shoot "96-save-and-exit-toast"         # the classic save toast (single Save path)
 }
 
 # ---------------------------------------------------------------------------

@@ -195,15 +195,15 @@ ensure_stage() {
   GEN_ORGCACHE="$OUT_DIR/gen-orgcache"
   cc -O2 -o "$GEN_ORGCACHE" "$REPO_ROOT/setup/tests/gen-orgcache.c" -lm >>"$RESULTS" 2>&1 \
     || { echo "host build of gen-orgcache failed" >&2; exit 5; }
-  # Default stage is cache-ABSENT so BKORG exercises the tone fallback
+  # Default stage is cache-ABSENT so BKORG exercises the #19 honest-message path
   # deterministically (a stale real CURLY.PCM can linger in build/stage from a
   # prior prerender run; remove it -- BKORGCACHE stages its own fixture).
   rm -f "$STAGE_DIR"/CACHE/*/CURLY.PCM 2>/dev/null || true
 }
 
 # org_cache_present / org_cache_absent -- control the organya prerender cache in
-# the stage so the music test deterministically hits the loaded-snippet vs
-# tone-fallback path (CACHE/11025_1/CURLY.PCM, the Tier-2 default tier).
+# the stage so the music test deterministically hits the loaded-preview vs
+# honest-message path (CACHE/11025_1/CURLY.PCM, the Tier-2 default tier).
 org_cache_present() { "$GEN_ORGCACHE" "$STAGE_DIR" >>"$RESULTS" 2>&1; }
 org_cache_absent()  { rm -f "$STAGE_DIR"/CACHE/*/CURLY.PCM 2>/dev/null || true; }
 
@@ -364,9 +364,9 @@ SDLDBG_LOG="$OUT_DIR/sdldbg.log"
 # fflush+fsync'd). realhw's T30 calibration consumes this on g2k.
 PROFILE_LOG="$OUT_DIR/profile.log"
 # SETUP's audio-test TRACE lands at build/stage/LOGS/SETUPDBG.LOG (audiotest_sdl.c,
-# stage-root LOGS\). This carries the organya-snippet witnesses -- "org: loaded
-# CURLY snippet ..." (cache present) vs "org: no pre-rendered cache ... -> tone
-# fallback" (T36). Collected + folded into the assert_banner search set.
+# stage-root LOGS\). This carries the organya-preview witnesses -- "org: loaded
+# CURLY preview ..." (cache present) vs "org: no pre-rendered cache ... -> honest
+# message (no tone)" (#19). Collected + folded into the assert_banner search set.
 SETUP_LOG="$OUT_DIR/setupdbg.log"
 
 collect_logs() {
@@ -379,7 +379,7 @@ collect_logs() {
   # only scenario or a SETUP launch failure (the assert guards on emptiness).
   : > "$PROFILE_LOG"
   cp "$STAGE_DIR/LOGS/PROFILE.LOG"         "$PROFILE_LOG" 2>/dev/null || true
-  # SETUP audio-test trace (the org-snippet witnesses live here, NOT in SDLDBG).
+  # SETUP audio-test trace (the org-preview witnesses live here, NOT in SDLDBG).
   : > "$SETUP_LOG"
   cp "$STAGE_DIR/LOGS/SETUPDBG.LOG"        "$SETUP_LOG" 2>/dev/null || true
 }
@@ -395,7 +395,7 @@ clear_logs() {
 
 # assert_banner <human-label> <ERE> -- ERE must match >=1 line across the engine
 # logs (DEBUG/SDLDBG) OR SETUP's audio-test trace (SETUPDBG -- carries the org
-# snippet witnesses).
+# preview witnesses).
 assert_banner() {
   local label="$1" re="$2"
   if grep -hE "$re" "$DEBUG_LOG" "$SDLDBG_LOG" "$SETUP_LOG" >/dev/null 2>&1; then
@@ -612,19 +612,16 @@ DOSKUTSU_PRESENT=0
 # NAV MODEL after T24/T25 (nx-engine 58d0933/5065939/9cadca7). READ THIS before
 # editing any keystroke sequence below.
 # ===========================================================================
-# MAIN MENU after UX v2: 8 items. The SYSTEM PROFILE panel is still pinned above
-# the menu (non-selectable, ZERO nav effect). Item map (Home then Down x N):
+# MAIN MENU after UX v2 + iter #3: 7 items. The SYSTEM PROFILE panel is still
+# pinned above the menu (non-selectable, ZERO nav effect). Item map (Home then
+# Down x N):
 #   0 Auto-detect best settings   1 Sound          2 System speed
-#   3 Input                       4 Advanced       5 Save and run DOSKUTSU
-#   6 Save and exit               7 Quit without saving
+#   3 Input                       4 Advanced       5 Save and exit
+#   6 Quit without saving
 # Enter selects; F10 = Save and Quit; ESC quits (discard-confirm if dirty).
-# EVERY main-menu Down-count shifted by +1 vs the old map -- Auto-detect moved to
-# the FRONT and "Save and run DOSKUTSU" was inserted before Save-and-exit. The
-# scenarios below still persist with F10, which is unaffected.
-#
-# DO NOT press Enter on idx5 ("Save and run DOSKUTSU") in a scenario: it saves and
-# EXITS SETUP (exit code 10, which SETUP.BAT uses to chain into the game). It is a
-# terminal action, not a navigable row.
+# iter #3 (#20) DROPPED "Save and run DOSKUTSU" -- SETUP has one exit code (0)
+# again. Auto-detect is still FIRST and Sound is idx1, so the scenario Down-counts
+# to idx0-4 are UNCHANGED; the scenarios persist with F10, which is unaffected.
 #
 # SOUND MENU after UX v2 (screen_sound_menu ROW_* enum):
 #   0 Express setup          1 Music Type [3-state CYCLE row]
@@ -657,17 +654,18 @@ DOSKUTSU_PRESENT=0
 #     the hardware screen (and must not disturb the backend) re-picks the card that
 #     is ALREADY current: a no-op on the cfg that still walks the sub-screen.
 #
-# *** GREY RULES CHANGE THE DOWN-COUNTS -- THIS IS THE TRAP ***
-# Greyed rows are SKIPPED by Up/Down, and which rows are greyed depends on the
-# CURRENT MUSIC TYPE. So the same Down-count lands on DIFFERENT rows:
-#     Select Music Card  greyed unless Type == MIDI
+# *** GREY RULES CAN CHANGE THE DOWN-COUNTS ***
+# Greyed rows are SKIPPED by Up/Down. iter #3 (#21) made Select Music Card ALWAYS
+# selectable (never greyed), so only two rows can grey now, and neither depends
+# on Organya-vs-MIDI:
 #     Test music         greyed when Type == No Music
 #     Test sound effects greyed when the FX device is No Sound FX
-# With the baseline (auto -> Type=MIDI) every row is live and the counts are the
-# plain row indices. With AUDIO_BACKEND=organya the card row VANISHES from the
-# nav, so Home(0) -> 1 -> 3 -> 4 -> 5 -> 6: "Test sound effects" is Down x5, not
-# Down x6. Count LIVE rows, never row indices. A miscount does not error -- it
-# lands on a plausible neighbouring row and does something else quietly.
+# Under BOTH the MIDI baseline (auto) AND Organya every Sound-menu row is live
+# (the card row is always on and Organya != No Music), so the counts are the
+# plain row indices: "Test music" = Down x5, "Test sound effects" = Down x6. Only
+# a No-Music Type greys "Test music" and shifts the count below it. Count LIVE
+# rows, never row indices. A miscount does not error -- it lands on a plausible
+# neighbouring row and does something else quietly.
 #
 #   - "Performance" is GONE; PERF_MODE + FIXED_TIMESTEP are the FIRST two rows of
 #     the Advanced screen (now main idx4): 0 PERF_MODE, 1 FIXED_TIMESTEP, then the
@@ -707,12 +705,12 @@ DOSKUTSU_PRESENT=0
 #     (ESC from an UNCHANGED screen also backs out silently, no prompt -- e.g. the
 #     read-only audio-test chooser, or a no-edit browse of any editing screen.)
 #   - PERSIST: DOSKUTSU.CFG is written ONLY at the main menu -- F10 (Save and
-#     Exit accelerator) or Enter on "Save and exit" (item 7); both WRITE then
-#     EXIT setup with NO prompt. THE DETERMINISTIC SAVE -- every CFG-writing
+#     Exit accelerator) or Enter on "Save and exit" (item 5, iter #3); both WRITE
+#     then EXIT setup with NO prompt. THE DETERMINISTIC SAVE -- every CFG-writing
 #     scenario ends: ...edit screens ("Escape Return" each) -> main menu -> F10.
 #   - DISCARD (T52): ESC at the MAIN MENU ALWAYS pops "Quit without saving
 #     settings?" (default NO) even when clean; Y / Down+Enter exits no-write.
-#     "Quit without saving" (item 8) routes the same prompt. We don't use this
+#     "Quit without saving" (item 6) routes the same prompt. We don't use this
 #     path in the CFG-writing scenarios (F10 is the clean save).
 #   - Greyed rows are SKIPPED by Up/Down/Home (state-dependent). Enabling state
 #     must be set first (we set backend before reaching Organya pre-render, etc.)
@@ -915,31 +913,31 @@ scenario_SETUPAUDIO() {
   # 4 Music Options, 5 Test music, 6 Test sound effects, 7 Back -- note v2 puts
   # Test MUSIC before Test SFX (v1 had them the other way round).
   #
-  # GREY-RULE ARITHMETIC, and it is not optional here: this scenario's CFG sets
-  # AUDIO_BACKEND=organya, so Type=Organya and the CARD row (2) is GREYED --
-  # and greyed rows are SKIPPED by nav. From Home(row0) the live sequence is
-  # 0 -> 1 -> 3 -> 4 -> 5 -> 6, so Test sound effects (row 6) is Down x5, NOT
-  # Down x6. Counting rows instead of counting LIVE rows lands on Music Options
-  # and silently tests nothing.
+  # GREY-RULE ARITHMETIC: iter #3 (#21) made the CARD row (2) ALWAYS live, so it
+  # no longer vanishes under Organya. This CFG sets AUDIO_BACKEND=organya, but
+  # every Sound-menu row is live (card row on, Organya != No Music), so the live
+  # sequence is the plain indices 0..7 and Test sound effects (row 6) is Down x6.
   send_keys Home Down Return               # main idx1 -> Sound menu
-  send_keys Home $(rep 5 Down) Return      # row6 Test sound effects -> SB16 opens + SFX plays
+  send_keys Home $(rep 6 Down) Return      # row6 Test sound effects -> SB16 opens + SFX plays
   sleep 2                                  # bounded SFX play
   shoot "${name}-02-popup-sfx"
-  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to submenu (row3)
+  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to the Sound menu (sel stays row6)
   sleep 0.5
-  # Test music is the next row (row 4). The capture window must overlap the play,
-  # so start the host record BEFORE the Return. Music is until-key (organya ->
-  # looping PCM tone, 10 s cap); the play stage consumes the stop key, the answer
-  # is a SEPARATE key -- let the tone fill the window, then 'space' stops the
-  # play and 'y' answers.
+  # Test music sits ABOVE Test SFX (row5), so a single Up reaches it. This CFG
+  # has AUDIO_BACKEND=organya with NO cache staged, so iter #3 (#19) the music
+  # test shows the honest "run DOSKUTSU once first" message (rc != 0) instead of
+  # a tone -- the popup then waits for ONE key. device_open still runs first, so
+  # the fm=22 mixer banner (the deterministic gate) is still emitted. The 'space'
+  # dismisses the message popup; 'y' is then ignored on the Sound menu. The WAV
+  # is silent (no tone) -> a documented non-strict SKIP.
   send_keys Up                             # row5 Test music (v2: music sits ABOVE sfx)
   local cap_pid=""
   if [[ "$captured" == "1" ]]; then ( pulse_record 6 "$wav" ) & cap_pid=$!; sleep 0.5; fi
-  send_keys Return                         # play music popup; PCM tone loops until-key
-  [[ -n "$cap_pid" ]] && wait "$cap_pid" 2>/dev/null   # ~6 s of tone fills the WAV
-  send_keys space                          # stop the until-key play -> answer prompt
+  send_keys Return                         # music test -> #19 honest message popup (awaits a key)
+  [[ -n "$cap_pid" ]] && wait "$cap_pid" 2>/dev/null   # ~6 s window (silent -- no tone)
+  send_keys space                          # dismiss the honest-message popup
   sleep 0.5
-  send_keys y                              # Yes/No menu -> 'y' = Yes -> back to the Sound menu
+  send_keys y                              # ignored on the Sound menu (no play to answer)
   send_keys Escape                         # Sound menu -> main menu
   sleep 1
   CAPTURE_AUDIO=0; pulse_sink_down
@@ -979,17 +977,13 @@ run_setup_audio() {
   # (rows: 0 Express, 1 Music Type, 2 Select Music Card, 3 Select Sound FX Card,
   # 4 Music Options, 5 Test music, 6 Test sound effects, 7 Back).
   #
-  # *** THE DOWN-COUNT DEPENDS ON $backend -- a fixed count CANNOT be right here ***
-  # The card row (2) is GREYED unless the music Type is MIDI, and greyed rows are
-  # SKIPPED by nav. This helper is called with several backends:
-  #   opl3 / wb  -> Type=MIDI    -> card row LIVE  -> 0,1,2,3,4,5 -> Test music = Down x5
-  #   organya    -> Type=Organya -> card row GONE  -> 0,1,3,4,5   -> Test music = Down x4
-  # Count LIVE rows, never row indices. Getting this wrong does not error: it lands
-  # on "Music Options" and the test never runs, so the SB16 device never opens and
-  # the run fails later with a missing-banner assertion that points nowhere near
-  # the real cause. (That is precisely how this site was caught.)
+  # iter #3 (#21): the card row (2) is now ALWAYS live, so the Down-count no
+  # longer depends on $backend. Under every backend this helper is called with
+  # (opl3 / wb / organya) the Type is MIDI or Organya -- neither greys any row
+  # above Test music -- so the live sequence is the plain indices 0,1,2,3,4,5 and
+  # Test music (row 5) is Down x5. (A No-Music Type would grey Test music, but
+  # this helper is never called with one.)
   local downs=5
-  [[ "$backend" == "organya" ]] && downs=4
   send_keys Home Down Return               # main idx1 -> Sound menu
   send_keys Home $(rep "$downs" Down)      # row5 Test music (positioned, not yet entered)
   shoot "${name}-02-sound-submenu"
@@ -1054,31 +1048,34 @@ scenario_BKWB() {
 # ---- T11 per-backend: Organya / PCM (SB16 DMA) -- cache-ABSENT fallback --
 scenario_BKORG() {
   local name="BKORG"; SCN_RC=0
-  log "=== T11 per-backend: Organya/PCM cache-ABSENT (tone fallback) ==="
-  org_cache_absent                          # no CURLY.PCM -> T36 tone fallback path
+  log "=== T11 per-backend: Organya/PCM cache-ABSENT (#19 honest message, no tone) ==="
+  org_cache_absent                          # no CURLY.PCM -> #19 honest-message path
   run_setup_audio "$name" organya "$CONF_FAST"
   assert_banner "setup-sb16-open" 'SB16 mixer balance:' || note_fail
-  # T36: with no pre-rendered cache, the organya music test logs the fallback +
-  # plays the test tone. The "org:" trace is the deterministic witness; SB16 DMA
-  # PCM audibility itself is a documented headless skip (real-HW ear check).
-  assert_banner "org-fallback" 'org:.*no pre-rendered cache' || note_fail
+  # iter #3 (#19): with no pre-rendered cache the organya music test NO LONGER
+  # plays a tone -- it shows an honest "run DOSKUTSU once first" message. The
+  # "org: ... no pre-rendered cache" trace is the deterministic witness. The SB16
+  # device is still opened (device_open precedes the play), but nothing sounds,
+  # so the WAV is silent (a documented non-strict SKIP -- the SB16 DMA path is
+  # unrendered headless anyway).
+  assert_banner "org-honest-msg" 'org:.*no pre-rendered cache' || note_fail
   assert_wav_nonsilent "$WAV_OUT"
   return $SCN_RC
 }
 
-# ---- T36 Organya cache-PRESENT: real pre-rendered snippet ----------------
+# ---- T36 Organya cache-PRESENT: real pre-rendered preview ----------------
 # Stage a deterministic OPC1 fixture (CACHE/11025_1/CURLY.PCM via the host
-# generator) so the organya music test takes the pre-rendered-snippet path
-# instead of the tone fallback. Witnesses: the "org: loaded ... snippet" trace
-# (deterministic) + non-silence (the snippet is real PCM on the SB16 path).
+# generator) so the organya music test takes the pre-rendered-preview path
+# instead of the honest-message path. Witnesses: the "org: loaded ... preview"
+# trace (deterministic) + non-silence (the preview is real PCM on the SB16 path).
 scenario_BKORGCACHE() {
   local name="BKORGCACHE"; SCN_RC=0
-  log "=== T36 per-backend: Organya cache-PRESENT (pre-rendered title snippet) ==="
+  log "=== T36 per-backend: Organya cache-PRESENT (pre-rendered title preview) ==="
   org_cache_present                         # stage CACHE/11025_1/CURLY.PCM (OPC1 fixture)
   run_setup_audio "$name" organya "$CONF_FAST"
   assert_banner "setup-sb16-open" 'SB16 mixer balance:' || note_fail
-  # The music test loaded the pre-rendered snippet (not the tone fallback).
-  assert_banner "org-snippet-loaded" 'org: loaded .* snippet' || note_fail
+  # The music test loaded the pre-rendered preview (#19: full window, not a tone).
+  assert_banner "org-preview-loaded" 'org: loaded .* preview' || note_fail
   assert_banner_absent "org-no-fallback" 'org:.*no pre-rendered cache' || note_fail
   assert_wav_nonsilent "$WAV_OUT"
   org_cache_absent                          # leave the stage clean for later runs
@@ -1101,7 +1098,10 @@ scenario_HWBLASTER() {
   #   a bare Return re-picks it -> AUDIO_BACKEND stays wb, SB sub-screen walked.
   #   (wb is MCARD_SUB_SB -- WaveBlaster rides the SB MIDI header.)
   #   Sound(main idx1): Home,Down,Enter; card picker (Sound row2): Home,Down x2,
-  #   Enter; Enter picks Auto-detect -> screen_hardware.
+  #   Enter. The picker opens ON WaveBlaster (tagged "(current)", since backend=wb
+  #   -> start row = the WaveBlaster index), so the bare Return RE-PICKS WaveBlaster
+  #   -- it does NOT pick Auto-detect (row0). AUDIO_BACKEND stays wb and the SB
+  #   hardware sub-screen is walked.
   # In-screen (R-M: no override row): rows 0 A, 1 I, 2 DMA, 3 P, 4 T. Home->row0,
   #   Down x3 -> P field. The R-A expanded MPU list is ascending (...0x300,
   #   0x320, 0x330...), so from the seeded P330 a Left x2 lands on P300 (0x330 ->
