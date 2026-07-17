@@ -2277,6 +2277,11 @@ export SETUP_BAT_BODY
 # no BLASTER line), and no line may carry a double-CR.
 # iter #3 (#20): the ERRORLEVEL-guard checks were dropped with the Save-and-run
 # chain -- SETUP.BAT now only clears the env and runs SETUP.EXE.
+# iter #3 (D1): the double-CR check is dash-safe. make runs recipes under
+# /bin/sh = dash, where `$'\r\r'` is the LITERAL 4-char string "$\r\r" (dash has
+# no ANSI-C quoting), so the old `! grep -q $'\r\r'` could never match a real
+# CR-CR line -- the gate was vacuous (proven: a synthetic \r\r\n file passed).
+# Build the CR at runtime with printf instead, which dash expands correctly.
 define ASSERT_SETUP_BAT
 	@bat="$(1)"; \
 	 sets=$$(grep -c '^SET SDL_HINT_DOSKUTSU_\|^SET DOSKUTSU_NO_AUDIO=' "$$bat" || true); \
@@ -2286,7 +2291,8 @@ define ASSERT_SETUP_BAT
 	   || { echo "error: $$bat clears do not precede SETUP.EXE" >&2; exit 1; }; \
 	 grep -q '^SET BLASTER=' "$$bat" \
 	   && { echo "error: $$bat clears BLASTER (authoritative key -- would kill audio)" >&2; exit 1; }; \
-	 ! grep -q $$'\r\r' "$$bat" \
+	 cr=$$(printf '\r'); \
+	 ! grep -q "$$cr$$cr" "$$bat" \
 	   || { echo "error: $$bat has a double-CR line" >&2; exit 1; }; \
 	 echo "  SETUP.BAT gate OK: 5 clears before SETUP.EXE, BLASTER intact"
 endef
