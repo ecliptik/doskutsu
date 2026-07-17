@@ -2245,6 +2245,15 @@ CRLF := awk 'BEGIN{ORS="\r\n"} {sub(/\r$$/, ""); print}'
 # empty one, which would make getenv() non-NULL and mask EVERY CFG key -- a far
 # worse silent failure).
 #
+# iter #3 (D2): the clear list is the FULL audio key family the engine reads, not
+# just the 5 that happened to bite first. A stale SET of any of SFX_DEVICE /
+# AUDIO_TIER2 / GUS_VOICES / GUS_MULTISAMPLE / ORG_PRERENDER / SB16_VOICE_VOL /
+# SB16_FM_VOL / AUDIO_WB_DIRECT_PORT / MIDI_DEV silently beats the freshly saved
+# CFG the same way (setenv overwrite=0), so all 14 are cleared. Names are the
+# exact env_name values from include/doskutsu_config_keys.h. `SET X=` removes the
+# var, so a longer list adds no env-block growth. (MIDI_DEV is SETUP-only, but a
+# leaked SET is still noise -- cheap to sweep with the rest.)
+#
 # NEVER clear BLASTER. It is the one AUTHORITATIVE key (file > env by design);
 # clearing it buys nothing and would kill audio outright if a CFG lacks a
 # BLASTER line.
@@ -2264,6 +2273,15 @@ SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=
 SET SDL_HINT_DOSKUTSU_MUSIC_OFF=
 SET SDL_HINT_DOSKUTSU_SFX_OFF=
 SET DOSKUTSU_NO_AUDIO=
+SET SDL_HINT_DOSKUTSU_SFX_DEVICE=
+SET SDL_HINT_DOSKUTSU_AUDIO_TIER2=
+SET SDL_HINT_DOSKUTSU_GUS_VOICES=
+SET SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE=
+SET SDL_HINT_DOSKUTSU_ORG_PRERENDER=
+SET SDL_HINT_DOSKUTSU_SB16_VOICE_VOL=
+SET SDL_HINT_DOSKUTSU_SB16_FM_VOL=
+SET SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=
+SET SDL_HINT_DOSKUTSU_MIDI_DEV=
 SETUP.EXE
 endef
 export SETUP_BAT_BODY
@@ -2271,8 +2289,8 @@ export SETUP_BAT_BODY
 # Gate the GENERATED SETUP.BAT, not the source. realhw nearly packed a stale
 # 2-line no-hygiene SETUP.BAT that was structurally perfect -- valid CRLF, valid
 # 8.3, every sha gate green -- and merely WRONG. A file's existence is not
-# evidence of its content, so assert the content at both generation sites: all 5
-# audio clears must be present and must precede SETUP.EXE, BLASTER must NEVER be
+# evidence of its content, so assert the content at both generation sites: all
+# 14 audio clears must be present and must precede SETUP.EXE, BLASTER must NEVER be
 # cleared (it is the authoritative key -- clearing it kills audio on a CFG with
 # no BLASTER line), and no line may carry a double-CR.
 # iter #3 (#20): the ERRORLEVEL-guard checks were dropped with the Save-and-run
@@ -2285,7 +2303,7 @@ export SETUP_BAT_BODY
 define ASSERT_SETUP_BAT
 	@bat="$(1)"; \
 	 sets=$$(grep -c '^SET SDL_HINT_DOSKUTSU_\|^SET DOSKUTSU_NO_AUDIO=' "$$bat" || true); \
-	 test "$$sets" -eq 5 || { echo "error: $$bat has $$sets/5 env clears" >&2; exit 1; }; \
+	 test "$$sets" -eq 14 || { echo "error: $$bat has $$sets/14 env clears" >&2; exit 1; }; \
 	 test "$$(grep -n '^SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=' "$$bat" | cut -d: -f1)" \
 	    -lt "$$(grep -n '^SETUP.EXE' "$$bat" | cut -d: -f1)" \
 	   || { echo "error: $$bat clears do not precede SETUP.EXE" >&2; exit 1; }; \
@@ -2294,7 +2312,7 @@ define ASSERT_SETUP_BAT
 	 cr=$$(printf '\r'); \
 	 ! grep -q "$$cr$$cr" "$$bat" \
 	   || { echo "error: $$bat has a double-CR line" >&2; exit 1; }; \
-	 echo "  SETUP.BAT gate OK: 5 clears before SETUP.EXE, BLASTER intact"
+	 echo "  SETUP.BAT gate OK: 14 clears before SETUP.EXE, BLASTER intact"
 endef
 
 # GPL text source: the cloned NXEngine-evo tree ships its LICENSE file at the root.
