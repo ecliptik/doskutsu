@@ -40,15 +40,16 @@ SETUP opens a full-screen menu:
   played by a synth on a sound card), or **No Music**. **Select Music Card** then
   says *which* card plays the MIDI: **Auto-detect**, **Sound Blaster (OPL3 FM)**,
   **AdLib (OPL2, music only)**, **WaveBlaster daughterboard**, **General MIDI
-  (external module)**, or **Gravis UltraSound**. The card row is greyed out
-  unless the type is MIDI. Picking a card walks its setup inline (Sound Blaster
-  port/IRQ/DMA, or the **GUS voices** list), then offers to test it straight
-  away. General MIDI and WaveBlaster both use the engine's MPU-401 MIDI path
-  (`AUDIO_BACKEND=wb`); they differ only in the MPU-401 port and which name SETUP
-  shows -- a SETUP-only `MIDI_DEV` key the engine ignores. **Select Sound FX
-  Card** is narrowed to the devices the chosen music card can drive (Sound
-  Blaster or No Sound FX on the SB-family cards, Gravis on the GUS card, No Sound
-  FX only on AdLib). A **Music Options** screen holds the per-card extras (MIDI
+  (external module)**, or **Gravis UltraSound**. The card row is always
+  selectable; picking a card while the type is Organya or No Music switches the
+  type to MIDI. Picking a card walks its setup inline (Sound Blaster port/IRQ/DMA,
+  or the **GUS voices** list), then offers to test it straight away. General MIDI
+  and WaveBlaster both use the engine's MPU-401 MIDI path (`AUDIO_BACKEND=wb`);
+  they differ only in the MPU-401 port and which name SETUP shows -- a SETUP-only
+  `MIDI_DEV` key the engine ignores. **Select Sound FX Card** always lists every
+  device (Sound Blaster, Gravis UltraSound, No Sound FX); the description warns
+  about combinations that need a matching music card, but nothing is blocked.
+  A **Music Options** screen holds the per-card extras (MIDI
   music set, GUS voices, GUS high fidelity, Organya pre-render, audio quality),
   showing only the rows that apply to your choice. It also offers an **Express
   setup** that auto-detects the sound hardware in one step: it warns, probes the

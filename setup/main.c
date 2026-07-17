@@ -2085,12 +2085,18 @@ static void snd_walk_sub(int sub)
   tui_clear();
 }
 
-/* "Select MIDI Synth" -- the SECOND level, opened by picking MIDI in the type
- * picker. Writes AUDIO_BACKEND (+ MIDI_DEV for the two wb synths), then walks
- * that synth's sub-screen. ESC = abandon with NO cfg change (the contract holds
- * at BOTH levels: backing out here leaves the previously-configured music type
- * and synth exactly as they were). Returns 1 when a synth was committed, 0 on
- * ESC -- so the caller knows nothing was written. */
+/* v2 SESSION MEMORY of the last MIDI card (defined here so snd_pick_music_card
+ * can seed its start row from it -- #21). Captured on LEAVING MIDI in
+ * snd_type_cycle; -1 = unset -> a fresh cycle/pick into MIDI lands on Auto-detect
+ * (MUSIC_CARDS[0]), the operator-specified default. SETUP-only, never persisted.
+ * The full rationale lives in the comment block just above snd_type_cycle. */
+static int g_last_card = -1;
+
+/* "Select Music Card" -- the flat HARDWARE picker (Sound hub "Select Music
+ * Card" row). Writes AUDIO_BACKEND (+ MIDI_DEV for the two wb synths), then
+ * walks that card's sub-screen. #21: reachable under ANY Music Type now; picking
+ * a card writes a MIDI backend, so it also switches Type to MIDI. ESC = abandon
+ * with NO cfg change. Returns 1 when a card was committed, 0 on ESC. */
 static int snd_pick_music_card(void)
 {
   const char *items[MUSIC_NCARDS];
@@ -2098,11 +2104,13 @@ static int snd_pick_music_card(void)
   const char *descs[MUSIC_NCARDS];
   int beidx = scfg_index("AUDIO_BACKEND");
   int mdidx = scfg_index("MIDI_DEV");
-  /* "(current)" resolves from the LIVE cfg. This row is only selectable when
-   * Type == MIDI, so cur is always a real card here; the >= 0 guard is belt and
-   * braces for a future caller. */
+  /* "(current)" resolves from the LIVE cfg. #21: the row is now selectable under
+   * ANY Type, so cur may be -1 here (Organya / No Music have no card in play) --
+   * then nothing is tagged and the list starts on the remembered card
+   * (g_last_card), or Auto-detect when there is no memory. Picking a card writes
+   * a MIDI backend, which switches Type to MIDI for free. */
   int cur = music_card_index(scfg_get(&g_cfg, beidx), scfg_get(&g_cfg, mdidx));
-  int i, choice, start = (cur >= 0) ? cur : 0;
+  int i, choice, start = (cur >= 0) ? cur : (g_last_card >= 0 ? g_last_card : 0);
 
   for (i = 0; i < MUSIC_NCARDS; ++i)
   {
@@ -2119,6 +2127,11 @@ static int snd_pick_music_card(void)
   {
     scfg_set(&g_cfg, beidx, MUSIC_CARDS[choice].value);
     g_dirty = 1;
+    /* D4: the music card (backend) changed -> the prior test badges are stale.
+     * Both the music test and the backend-derived SFX test no longer describe
+     * what will play, so drop them back to "Not tested". */
+    g_res_music = -2;
+    g_res_sfx   = -2;
   }
   /* For a wb card, record WHICH one (SETUP-only label/MPU-default
    * discriminator; the engine ignores MIDI_DEV). Non-wb cards leave it be. */
@@ -2127,6 +2140,7 @@ static int snd_pick_music_card(void)
   {
     scfg_set(&g_cfg, mdidx, MUSIC_CARDS[choice].midi_dev);
     g_dirty = 1;
+    g_res_music = -2; /* D4: a different wb synth -> stale music badge */
   }
 
   snd_walk_sub(MUSIC_CARDS[choice].sub);
@@ -2160,8 +2174,9 @@ static int snd_pick_music_card(void)
  * We deliberately do NOT reconstruct the card from the MIDI_DEV that survives in
  * the cfg across an Organya round-trip: MIDI_DEV only discriminates the two wb
  * cards, so half-recovering a card family would be more surprising than the
- * clean Auto-detect default. Documented so nobody "fixes" it later. */
-static int g_last_card = -1;
+ * clean Auto-detect default. Documented so nobody "fixes" it later.
+ * (g_last_card is DEFINED above snd_pick_music_card, which now seeds its picker
+ * start row from it -- #21 made that picker reachable under Organya / No Music.) */
 
 /* Cycle the Music Type row in place (Left/Right/Space/Enter). Writes
  * AUDIO_BACKEND for the new type: Organya/No Music write their own value; MIDI
@@ -2176,6 +2191,11 @@ static void snd_type_cycle(int dir)
   int next = (cur + dir + MTYPE_NTYPES) % MTYPE_NTYPES;
 
   if (next == cur) return;
+
+  /* D4: the music type is changing -> the prior music/SFX test badges no longer
+   * describe what will play; drop them both back to "Not tested". */
+  g_res_music = -2;
+  g_res_sfx   = -2;
 
   /* Leaving MIDI: remember the card we were on (read from the LIVE cfg). */
   if (cur == MTYPE_MIDI)
@@ -2223,83 +2243,92 @@ static void snd_type_cycle(int dir)
     recommend_org_prerender(&g_cfg, &g_prof);
 }
 
-/* "Select Sound FX Device" picker (Sound hub row 2). The list is NARROWED by
- * the current music card (sec.4 / operator coupling): SB-family + Auto + No
- * Music -> { Sound Blaster, No Sound FX }; AdLib -> { No Sound FX } only
- * (DAC-less); Gravis -> { Gravis UltraSound, No Sound FX } (#38 fixed -- GF1
- * SFX plays on the wavetable alongside the music, sharing the card's voices).
- * The "no effects"/device reason rides the description pane, NOT a
- * blocking modal -- every picker is a uniform list with a No-X row. The native
- * device is the SAME hardware already configured for music, so this pick is
- * purely on/off: the native row clears SFX_DEVICE (engine derives it), "No
- * Sound FX" writes SFX_DEVICE=none. We never offer the GUS+SB cross-combo
- * (PicoGUS is single-mode; engine cannot route GF1 SFX without GUS music).
+/* "Select Sound FX Device" picker (Sound hub row 2). iter #3 (#21): the list is
+ * NO LONGER narrowed by the music card -- the operator directive is that the SFX
+ * hardware is ALWAYS selectable. Every device is offered on every music card:
+ * Sound Blaster / Gravis UltraSound / No Sound FX. Non-functional combos are
+ * allowed; the DESCRIPTION pane warns, nothing blocks. nx-eng verified (task #8)
+ * that the engine treats SFX_DEVICE as a pure ON/OFF toggle -- any non-"none"
+ * value means "SFX on via the backend's NATIVE device", so an un-honored cross
+ * combo (e.g. "gus" under OPL3 music) degrades silently to the native device,
+ * never a crash.
  *
- * When the chosen SFX device is the Sound Blaster (the native device on every
- * non-Gravis path), we walk the BLASTER Port/IRQ/DMA sub-screen inline -- the
- * same pattern the music pick uses for an SB-family synth. This is the
- * SINGLE place SB hardware is configured when SB is used for SFX but not music
- * (No Music + SB SFX, or WaveBlaster + SB SFX): the old standalone "Sound card
- * hardware" hub row is gone, so SB hardware is always reached through whichever
- * picker put SB into use. Returns 1. */
+ * Raw values kept simple and honest:
+ *   Sound Blaster     -> ""    (engine derives the native device: SB on every
+ *                               SB-family / Organya / No-Music backend)
+ *   Gravis UltraSound -> "gus" (explicit; honored only when the music is GUS,
+ *                               else the engine falls back to the native device)
+ *   No Sound FX       -> "none" (dispatch off)
+ *
+ * When Sound Blaster is picked AND it is genuinely the effects path (not under
+ * GUS or AdLib music, where the native device is the GF1 / PC speaker), we walk
+ * the BLASTER Port/IRQ/DMA sub-screen inline -- the SINGLE door to SB hardware
+ * when SB does effects but not music. Returns 1. */
 static int snd_pick_sfx_device(void)
 {
   const char *be = scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"));
   int idx = scfg_index("SFX_DEVICE");
-  const char *items[2], *descs[2], *raw[2];
-  int n = 0, start, choice;
-  int adlib = strcmp(be, "adlib") == 0;
+  const char *items[3], *descs[3], *raw[3];
   int gus   = strcmp(be, "gus") == 0;
-  /* AdLib is DAC-less (music-only): NO native SFX row. Gravis GF1 SFX is now
-   * supported (#38 fixed), so it offers a native row like Sound Blaster. */
-  int no_native = adlib;
+  int adlib = strcmp(be, "adlib") == 0;
+  const char *cur = scfg_get(&g_cfg, idx);
+  int start, choice, sb_walk;
 
-  /* Native device row (Sound Blaster) -- clears the key so the engine derives
-   * the card's native DAC. Omitted entirely for the music-only cards above. */
-  if (!no_native)
-  {
-    items[n] = sfx_native_name(be);
-    descs[n] = gus
-               ? "Sound effects play on the Gravis UltraSound GF1 wavetable, "
-                 "alongside the music (shared card voices)."
-               : "Sound effects play through the Sound Blaster DAC.";
-    raw[n] = ""; /* clear SFX_DEVICE: the engine derives the native device */
-    ++n;
-  }
+  /* Row 0: Sound Blaster ("" -> engine derives the native device). */
+  items[0] = "Sound Blaster";
+  descs[0] = gus
+    ? "Sound effects on the Sound Blaster DAC. NOTE: under Gravis UltraSound "
+      "music the effects play on the GF1 instead -- choose a Sound Blaster "
+      "music card for SB effects."
+    : adlib
+    ? "Sound effects on the Sound Blaster DAC. NOTE: AdLib (OPL2) music has no "
+      "DAC, so effects fall back to the PC speaker."
+    : "Sound effects play through the Sound Blaster DAC.";
+  raw[0] = "";
 
-  items[n] = "No Sound FX";
-  descs[n] = adlib
-             ? "AdLib (OPL2) has no DAC, so sound effects are unavailable. "
-               "Pick Organya, or a MIDI synth other than AdLib, to get effects."
-             : "Turn sound effects off. Music keeps playing.";
-  raw[n] = "none";
-  ++n;
+  /* Row 1: Gravis UltraSound ("gus"). */
+  items[1] = "Gravis UltraSound";
+  descs[1] = gus
+    ? "Sound effects play on the Gravis UltraSound GF1 wavetable, alongside the "
+      "music (shared card voices)."
+    : "Sound effects on the Gravis UltraSound GF1. NOTE: requires Gravis "
+      "UltraSound music mode to function; under other music the effects fall "
+      "back to the Sound Blaster.";
+  raw[1] = "gus";
 
-  /* The music-only cards have only the No-Sound-FX row; otherwise the current
-   * SFX_DEVICE selects which row starts highlighted. */
-  start = no_native ? 0
-                : (strcmp(scfg_get(&g_cfg, idx), "none") == 0) ? (n - 1) : 0;
+  /* Row 2: No Sound FX ("none" -> dispatch off). */
+  items[2] = "No Sound FX";
+  descs[2] = "Turn sound effects off. Music keeps playing.";
+  raw[2] = "none";
+
+  /* Start on the row matching the stored value (an explicit "gus" or "none");
+   * everything else -- "", unset, a legacy value -- is the derive-native SB row. */
+  start = (strcmp(cur, "none") == 0) ? 2 : (strcmp(cur, "gus") == 0) ? 1 : 0;
 
   choice = tui_picklist("Select Sound FX Device", 0, 0, items, NULL, descs,
-                        n, start, 0, NULL, NULL, 0);
-  if (choice < 0 || choice >= n) return 1; /* ESC: abandon, no change */
+                        3, start, 0, NULL, NULL, 0);
+  if (choice < 0 || choice >= 3) return 1; /* ESC: abandon, no change */
 
   if (strcmp(scfg_get(&g_cfg, idx), raw[choice]) != 0)
   {
     scfg_set(&g_cfg, idx, raw[choice]);
     g_dirty = 1;
+    g_res_sfx = -2; /* D4: the SFX device changed -> the old badge is stale */
   }
 
-  /* The native row (raw == "") on any non-Gravis path means Sound Blaster --
-   * walk its hardware sub-screen inline, then return to the hub. */
-  if (raw[choice][0] == '\0' && strcmp(be, "gus") != 0)
+  /* Walk the SB hardware sub-screen only when Sound Blaster is genuinely the
+   * effects path. Under GUS or AdLib music the native SFX device is the GF1 /
+   * PC speaker regardless of this pick, so the SB Port/IRQ/DMA screen would be
+   * meaningless there. */
+  sb_walk = (raw[choice][0] == '\0' && !gus && !adlib);
+  if (sb_walk)
   {
     tui_clear();
     screen_hardware();
     tui_clear();
   }
-  /* v2: offer the SFX test right after the device is configured. Skipped when
-   * the user just turned effects OFF -- there is nothing to hear. */
+  /* Offer the SFX test right after the device is configured. Skipped when the
+   * user just turned effects OFF -- there is nothing to hear. */
   if (strcmp(scfg_get(&g_cfg, idx), "none") != 0)
     snd_test_after_pick(0);
   return 1;
@@ -2452,18 +2481,18 @@ static void screen_express(void)
 /* Is a Sound-menu row selectable right now? Greyed rows render dimmed and are
  * SKIPPED by navigation (the same mechanism the Music-options screen uses).
  *
- * v2 grey rules:
- *   Select Music Card -- only when Type == MIDI. Under Organya / No Music there
- *     is no card in play, but the row still DISPLAYS the remembered card (see
- *     g_last_card) so the user can see what MIDI would return them to.
- *   Test music        -- pointless with No Music.
- *   Test sound effects-- pointless when the FX device is "No Sound FX".
+ * v2 grey rules (iter #3 #21: HARDWARE pickers never grey):
+ *   Select Music Card -- ALWAYS selectable. Operator directive: the hardware
+ *     picker is always reachable. Under Organya / No Music it still displays the
+ *     remembered card (see g_last_card); picking a card there switches Type to
+ *     MIDI (snd_pick_music_card writes that card's MIDI backend).
+ *   Test music        -- pointless with No Music (stays greyed).
+ *   Test sound effects-- pointless when the FX device is "No Sound FX" (greyed).
  * Music Options stays selectable under No Music on purpose: Audio quality still
  * governs the SFX mix rate, so greying the row would hide a live setting. */
 static int snd_hub_active(int row, int rc_muscard, int rc_testmus, int rc_testsfx)
 {
-  if (row == rc_muscard) return music_type_of(
-      scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"))) == MTYPE_MIDI;
+  (void)rc_muscard; /* #21: Select Music Card is always selectable now */
   if (row == rc_testmus) return music_type_of(
       scfg_get(&g_cfg, scfg_index("AUDIO_BACKEND"))) != MTYPE_NONE;
   if (row == rc_testsfx) return strcmp(sfx_current_name(), "No Sound FX") != 0;
@@ -2526,8 +2555,10 @@ static void screen_sound_menu(void)
     "Detect the sound card and set everything in one step.",
     "What KIND of music: Organya (built-in, no sound card needed), MIDI (played "
     "by a synth on a sound card), or No Music. Left/Right changes it.",
-    "WHICH card plays the MIDI music. Sets up that card's hardware.",
-    "Choose where sound effects play. The choices depend on the music card.",
+    "WHICH card plays the music, and sets up its hardware. Picking a card here "
+    "switches Music Type to MIDI.",
+    "Choose where sound effects play. Every device is offered; the description "
+    "warns about combinations that need a matching music card.",
     "Per-card music extras: GUS voices, MIDI set, Organya pre-render, quality.",
     "Play a test song to check the music.",
     "Play a test sound effect to check the audio.",
