@@ -168,14 +168,20 @@ static const uint8_t WB_SYSEX_XG[] = { 0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00,
 #define TITLE_MID     "data/midi/curly.mid"
 #define TITLE_MS      15000   /* bounded title-theme window (loops; until-key, capped) */
 
-/* T36: in Organya mode, the music test plays a short snippet of the real Title
- * theme from the engine's pre-rendered PCM cache (CACHE/<rate>_<ch>/CURLY.PCM,
- * written by the game when Organya pre-render is enabled). Read at runtime from
- * the user's disk; nothing committed/shipped. Absent -> fall back to the tone.
- * The song is "curly" (music(24)); the cache basename is the uppercase 8.3 org
- * basename = "CURLY". */
-#define ORG_TITLE_SONG  "CURLY"
-#define ORG_SNIPPET_MS  5000   /* first ~5 s of the pre-rendered title theme */
+/* T36: in Organya mode, the music test plays the real Title theme from the
+ * engine's pre-rendered PCM cache (CACHE/<rate>_<ch>/CURLY.PCM, written by the
+ * game when Organya pre-render is enabled). Read at runtime from the user's
+ * disk; nothing committed/shipped. The song is "curly" (music(24)); the cache
+ * basename is the uppercase 8.3 org basename = "CURLY".
+ *
+ * iter #3 (#19): the preview plays the FULL title-theme window (TITLE_MS) ONCE,
+ * not a 5 s snippet -- the operator heard the short clip as "scratchy, repeats
+ * notes". End of the loaded clip = end of the test (no wrap-loop). When the
+ * cache is ABSENT there is NO tone fallback (the generated tone is not what the
+ * game sounds like); the test shows an honest "run DOSKUTSU once first" message
+ * instead. The arpeggio/tone stays for the synth backends only. */
+#define ORG_TITLE_SONG   "CURLY"
+#define ORG_PREVIEW_MS   TITLE_MS   /* play the full title window, once (no loop) */
 
 /* Note arpeggio for the synth backends: C4 E4 G4 C5 (MIDI 60/64/67/72). */
 static const int  ARP_NOTES[] = { 60, 64, 67, 72 };
@@ -308,9 +314,10 @@ static int          g_title_tried    = 0;    /* parse attempted (success or fail
 static volatile int g_smf_isr_driven = 0;    /* T56 route A: title theme is dispatched from the SB16 IRQ-5 tick (1) vs the main loop (0) */
 static int          g_music_used_real = 0;   /* did the last music test play the real theme */
 
-/* T36 Organya-mode pre-rendered title snippet. Loaded once from the engine's
- * PCM cache, capped to ORG_SNIPPET_MS; cached for the session like the SFX/MIDI
- * data. NULL = no cache (fall back to the tone). */
+/* T36 Organya-mode pre-rendered title preview. Loaded once from the engine's
+ * PCM cache, capped to ORG_PREVIEW_MS (the full title window); cached for the
+ * session like the SFX/MIDI data. NULL = no cache (#19: show an honest message,
+ * NOT a tone). */
 static int          g_is_organya     = 0;    /* configured backend == "organya" */
 static int16_t     *g_org_pcm        = NULL; /* cached snippet (S16, g_org_rate/ch) */
 static uint32_t     g_org_samples    = 0;    /* int16 count in g_org_pcm */
@@ -1949,14 +1956,18 @@ static int ensure_org_snippet_loaded(void)
   if (!g_org_tried)
   {
     g_org_tried = 1;
+    /* #19: honor the configured tier so the preview matches what the game will
+     * actually sound like -- 22050 stereo cache dir when AUDIO_TIER2=0, else the
+     * default 11025 mono. Load the FULL title window (ORG_PREVIEW_MS), not a 5 s
+     * snippet. */
     g_org_pcm = cs_orgcache_load(ORG_TITLE_SONG,
                                  g_tier2 ? 11025 : 22050, g_tier2 ? 1 : 2,
-                                 ORG_SNIPPET_MS, &g_org_samples, &g_org_rate, &g_org_ch);
+                                 ORG_PREVIEW_MS, &g_org_samples, &g_org_rate, &g_org_ch);
     if (g_org_pcm)
-      trace("org: loaded %s snippet (%lu samples, %d Hz, %d ch)",
+      trace("org: loaded %s preview (%lu samples, %d Hz, %d ch)",
             ORG_TITLE_SONG, (unsigned long)g_org_samples, g_org_rate, g_org_ch);
     else
-      trace("org: no pre-rendered cache for %s -> tone fallback", ORG_TITLE_SONG);
+      trace("org: no pre-rendered cache for %s -> honest message (no tone)", ORG_TITLE_SONG);
   }
   return g_org_pcm != NULL;
 }
@@ -2048,23 +2059,45 @@ int audiotest_play_music(void)
   }
 
   /* OVERALL span for the progress bar. */
-  test_progress_begin(use_smf
-                        ? TITLE_MS
-                        : use_org
-                            ? (ORG_SNIPPET_MS + 200)
-                            : (g_music_mode == MUS_PCM
-                                 ? 10000
-                                 : ARP_COUNT * (ARP_ON_MS + ARP_GAP_MS)));
+  {
+    int span;
+    if (use_smf) span = TITLE_MS;
+    else if (use_org)
+      /* the actual loaded clip length (the cache may be shorter than the window),
+       * so the bar tracks the real play + a short tail (#19: full window, once). */
+      span = (int)(((Uint64)g_org_samples * 1000) /
+                   ((Uint64)g_org_rate * (Uint64)g_org_ch)) + 200;
+    else if (g_music_mode == MUS_PCM) span = 10000;
+    else span = ARP_COUNT * (ARP_ON_MS + ARP_GAP_MS);
+    test_progress_begin(span);
+  }
 
   if (use_smf)
   {
     g_music_used_real = 1;
     rc = play_title_smf();
   }
-  else if (use_org && play_org_snippet())
+  else if (g_real_music && g_is_organya)
   {
-    g_music_used_real = 1;
-    rc = 0;
+    /* #19: the Organya preview is the real rendered cache or an honest message --
+     * NEVER the generated tone. The operator heard the tone/short-snippet as
+     * "scratchy, repeats notes", and it is not what the game's Organya synth
+     * sounds like. use_org is only ever set true on this same path, so this
+     * branch owns every Organya-with-real-music case. */
+    if (use_org && play_org_snippet())
+    {
+      g_music_used_real = 1;
+      rc = 0;
+    }
+    else
+    {
+      SDL_strlcpy(g_msg,
+        "Organya preview needs the game's rendered music cache. Run DOSKUTSU "
+        "once first (with Organya pre-render on) to hear it here.",
+        sizeof(g_msg));
+      trace("play_music: organya cache unavailable -> honest message, no tone");
+      rc = 1;
+    }
   }
   else
   {
@@ -2179,15 +2212,16 @@ const char *audiotest_about(int phase)
       return "Plays a test tone - game data not found";
     return "Plays a test tone";
   }
-  /* T36: Organya mode -- the real title theme from the engine's pre-rendered
-   * PCM cache, else a tone that points the operator at how to populate it.
+  /* T36/#19: Organya mode -- the real title theme from the engine's pre-rendered
+   * PCM cache. No cache -> an honest "run the game first" note, NOT a tone (the
+   * generated tone is not what Organya sounds like).
    * (Period-free to match the operator's round-8 item-8 wording across the box.) */
   if (g_is_organya)
   {
     if (g_real_music && ensure_org_snippet_loaded())
-      return "Plays Title Theme Music on Organya (pre-rendered)";
-    return "Plays a test tone - no pre-rendered music found (enable Organya "
-           "pre-render and run the game once)";
+      return "Plays the pre-rendered Organya Title Theme (the real game music)";
+    return "Needs the game's rendered music cache - run DOSKUTSU once first "
+           "(with Organya pre-render on)";
   }
   return "Plays a test tone";   /* pcm / auto */
 }
