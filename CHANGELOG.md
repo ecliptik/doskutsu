@@ -5,6 +5,65 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.6.3] - 2026-07-22
+
+Audio fixes and a redesigned SETUP sound menu. The game binary changes from
+1.6.2. DOSBox-validated end-to-end; real-hardware confirmation rides the full
+QA pass following this release.
+
+### Added
+
+- **Real music in the SETUP Gravis UltraSound test.** "Test music" on a GUS /
+  PicoGUS now plays the actual title theme as GF1 wavetable MIDI (respecting
+  the configured voice count) instead of the v1.6.2 reference tone.
+- **Sound-effects cache.** Pixtone effects are rendered once and cached to
+  `CACHE\PXT\`, so later launches skip the render. Default-on;
+  `SDL_HINT_DOSKUTSU_PXT_AUTOCACHE=0` disables.
+- **Redesigned Sound menu.** "Music Type" is a three-state row (Organya /
+  MIDI / No Music) with a separate "Select Music Card" hardware picker
+  (Auto-detect / Sound Blaster (OPL3 FM) / AdLib / WaveBlaster / General MIDI /
+  Gravis UltraSound). Both the music and effects pickers are always
+  selectable with every device listed; incompatible combinations warn in the
+  description instead of being hidden. Auto-detect moved to the top of the
+  main menu, and picking a device offers an immediate test.
+- **Honest Organya music preview.** SETUP's Organya "Test music" plays the
+  game's own rendered music cache straight through (no looped snippet, no
+  synthetic fallback); if the cache does not exist yet it says to run the
+  game once first.
+- **Stale-environment warning.** If a DOS `SET` left in the session overrides
+  a value saved in DOSKUTSU.CFG, the game log now names the key, both values,
+  and the exact `SET` command that clears it (previously the override was
+  silent).
+- **SETUP.BAT launcher hygiene.** The shipped SETUP.BAT clears every audio
+  environment override before starting SETUP, so saved settings always take
+  effect in that session.
+
+### Fixed
+
+- **First-launch Organya crash.** On real hardware, the first launch with
+  Organya music could show "Loading..." and quit to DOS: the music pre-render
+  drew its progress overlay through an i18n path before language data was
+  initialized (a null dereference that DOS emulators masked). All 41 songs now
+  render through to gameplay.
+- **Pre-render overlay and cost disclosure.** The overlay now reads
+  "Rendering music... please wait" with a "Press ESC to skip" hint, and SETUP
+  describes the one-time cost up front (roughly 19 minutes / 47 MB on the
+  reference Pentium; later launches skip it entirely).
+- **SETUP quit screech on a PicoGUS in Sound Blaster mode** -- the audio-test
+  device teardown now flushes the DMA ring, so quitting SETUP no longer
+  screeches.
+- **GUS voice-count selection not reaching the SETUP audio test** when a
+  launcher had already set the matching environment variable.
+- **Saved configs pinned the old MIDI set.** SETUP-saved configs wrote
+  `MIDI_SET=wiimidi` even after OrgMIDI v2 became the intended default; saved
+  configs now carry `orgmid2`, and the engine log lists the valid sets
+  correctly.
+
+### Removed
+
+- **"Save and run DOSKUTSU"** from the SETUP main menu. Saving and launching
+  are separate again: "Save and exit", then run DOSKUTSU.EXE.
+
 ## [1.6.2] - 2026-07-09
 
 New audio and input features plus a batch of SETUP.EXE fixes. The game binary
