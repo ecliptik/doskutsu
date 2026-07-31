@@ -25,11 +25,9 @@ DOSKUTSU exists for preservation and the engineering challenge of running Cave S
 
 ### Demo
 
-<p align="center">
-<a href="https://www.youtube.com/watch?v=YLFztifZKQ8"><img src="https://img.youtube.com/vi/YLFztifZKQ8/maxresdefault.jpg" alt="Cave Story running on DOS (doskutsu) -- watch on YouTube" width="75%"></a>
-</p>
+https://github.com/user-attachments/assets/c0ab9766-b8d2-496b-9bd8-cb7dc9211dc4
 
-<p align="center"><a href="https://www.youtube.com/watch?v=YLFztifZKQ8">doskutsu running on Gateway 2000 reference hardware</a></p>
+<p align="center">Full demo: <a href="https://www.youtube.com/watch?v=YLFztifZKQ8">doskutsu running on Gateway 2000 reference hardware</a></p>
 
 ---
 
@@ -47,17 +45,17 @@ See [Download](#download), [Game Assets](#game-assets), [Building](#building), [
 
 ## Status
 
-DOSKUTSU plays the full game, start to finish.
-
 **Features**
 
-- `SETUP.EXE` configurator -- hardware auto-detect, live sound test, sound / performance / input settings
-- Keyboard remapping and gameport joystick / flightstick support
-- Music on OPL3 FM, WaveBlaster wavetable, AdLib, Gravis UltraSound, or the original Organya synth ([Audio backends](#audio-backends))
-- Fixed 50 Hz game speed independent of render frame rate ([Fixed-Timestep mode](#fixed-timestep-mode))
-- Music and sound-effect caching for faster boots on 486-class machines
+- DOSKUTSU plays the full game, start to finish
+- Sound Blaster, AdLib, OPL3 FM, WaveBlaster, General MIDI, Gravis UltraSound, and PicoGUS sound support
+- Original Organya soundtrack or MIDI music with selectable arrangements (see [docs/SOUND.md](./docs/SOUND.md))
+- Gameport joystick/gamepad support and input remapping
+- DOS-era like `SETUP.EXE` configuration utility
+- Up to ~30fps (depending on CPU and bus bandwidth)
+- TAS support (see [docs/TAS.md](./docs/TAS.md))
 
-Frame rate depends on the hardware and which music backend is used. Measured with a fixed input recording (TAS replay) in a heavy-music scene, on the reference board with a Cirrus CL-GD5430:
+Frame rate depends on the hardware and which music backend is used:
 
 | CPU | Music | Frame rate (median) |
 |---|---|---|
