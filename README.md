@@ -14,12 +14,10 @@ DOSKUTSU exists for preservation and the engineering challenge of running Cave S
 
 | | |
 |:---:|:---:|
-| <img src="docs/screenshots/doskutsu-title.png" alt="DOSKUTSU title screen running in DOSBox-X" width="100%"> | <img src="docs/screenshots/doskutsu-intro-dialogue.png" alt="Opening dialogue: From somewhere, a transmission..." width="100%"> |
-| **Title Screen** | **Opening Transmission** |
-| <img src="docs/screenshots/doskutsu-first-room.png" alt="First lab room with Quote and the broken teleporter" width="100%"> | <img src="docs/screenshots/doskutsu-first-cave.png" alt="First Cave with Quote, HUD, and a Heart pickup" width="100%"> |
-| **First Lab Room** | **First Cave** |
-| <img src="docs/screenshots/setup-main-menu.png" alt="SETUP.EXE main menu with detected system profile" width="100%"> | <img src="docs/screenshots/setup-sound.png" alt="SETUP.EXE sound configuration" width="100%"> |
-| **SETUP.EXE Main Menu** | **SETUP.EXE Sound Configuration** |
+| <img src="docs/screenshots/doskutsu-title.png" alt="DOSKUTSU title screen running in DOSBox-X" width="100%"> | <img src="docs/screenshots/doskutsu-first-room.png" alt="First lab room with Quote and the broken teleporter" width="100%"> |
+| **Title Screen** | **First Lab Room** |
+| <img src="docs/screenshots/doskutsu-first-cave.png" alt="First Cave with Quote, HUD, and a Heart pickup" width="100%"> | <img src="docs/screenshots/setup-main-menu.png" alt="SETUP.EXE main menu with detected system profile" width="100%"> |
+| **First Cave** | **SETUP.EXE Main Menu** |
 
 <p align="center">captures from DOSBox-X running <code>DOSKUTSU.EXE</code> and <code>SETUP.EXE</code></p>
 
