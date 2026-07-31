@@ -84,9 +84,10 @@ More detail at each step: [Download](#download), [Game Assets](#game-assets), [B
 
 ## Download
 
-Pre-built bundles will be published on the **[GitHub Releases](https://github.com/ecliptik/doskutsu/releases)** page. None are published yet -- until the first release lands, [build from source](#building): `make dist` produces the same `doskutsu-cf-<version>.zip` bundle a release will ship.
+Pre-built bundles are published on the **[GitHub Releases](https://github.com/ecliptik/doskutsu/releases)** page. Prefer to build the exact source you see here? `make dist` produces the identical `doskutsu-cf-<version>.zip` bundle -- see [Building](#building).
 
 <!-- LATEST-RELEASE:START -->
+**Latest release:** [`doskutsu-cf-1.6.3.zip`](https://github.com/ecliptik/doskutsu/releases/download/v1.6.3/doskutsu-cf-1.6.3.zip) (v1.6.3)
 <!-- LATEST-RELEASE:END -->
 
 Each bundle is a single `doskutsu-cf-<version>.zip` containing `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, the license texts, and NXEngine-evo's GPLv3 engine support data. It does **not** include Cave Story game content -- the maps, sprites, music, and SFX come from your own copy of Pixel's 2004 freeware `Doukutsu.exe` (see [Game Assets](#game-assets)). The engine is the program; the game data is yours to supply, exactly the way a Doom source port ships without an IWAD.
