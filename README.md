@@ -43,7 +43,7 @@ Frame rate depends on the hardware and which music backend is used. Measured wit
 
 Cave Story runs at 50 fps; the reference PC's hardware limits fully-detailed rendering to about 30 fps. It still plays at the correct 50 Hz speed through [Fixed-Timestep mode](#fixed-timestep-mode), which advances game logic on a fixed 50 Hz clock independent of the render rate.
 
-Since 1.0, the port has grown the `SETUP.EXE` configurator (1.1.0), keyboard remapping and gameport joystick support (1.2.0), an opt-in high-quality audio tier (1.3.0), PicoGUS Sound Blaster mode support (1.4.0), a GM instrument bank for OPL3 FM (1.4.1), music on AdLib/OPL2-only machines (1.5.0), and native Gravis UltraSound music and sound effects (1.6.0). See the [changelog](CHANGELOG.md) for the full history.
+See the [changelog](CHANGELOG.md) for development and progress details.
 
 ### Fixed-Timestep mode
 
