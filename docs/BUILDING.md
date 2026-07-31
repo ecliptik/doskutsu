@@ -282,7 +282,7 @@ DATA\                 NXEngine-evo's GPLv3 engine support data ONLY -- fonts, UI
 
 The bundle ships NXEngine-evo's GPLv3 engine support data, but **not** any Cave Story game content (maps, sprites, music, SFX). Users extract that from the 2004 freeware `Doukutsu.exe` themselves -- see [ASSETS.md](./ASSETS.md). This is the same posture as a Doom source port shipping the engine while the user supplies their own WAD.
 
-To publish this bundle as a tagged release on Forgejo / Codeberg / GitHub, see [RELEASING.md](./RELEASING.md).
+To publish this bundle as a tagged GitHub release, see [RELEASING.md](./RELEASING.md).
 
 ### Direct install to a mounted CF card
 

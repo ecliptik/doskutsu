@@ -2486,7 +2486,7 @@ dist: $(BUILD_DIR)/doskutsu.exe setup-release | fetch-binaries
 	@$(CRLF) < LICENSE           > "$(CF_STAGE)/LICENSE.TXT"
 	@$(CRLF) < $(NX_LICENSE)     > "$(CF_STAGE)/GPLV3.TXT"
 	@$(CRLF) < THIRD-PARTY.md    > "$(CF_STAGE)/3RDPARTY.TXT"
-	@url='$(shell git remote get-url origin 2>/dev/null || echo "https://forgejo.ecliptik.com/ecliptik/doskutsu")'; \
+	@url='https://github.com/ecliptik/doskutsu'; \
 	    printf '%s\n' "$$DIST_README" | \
 	    awk -v url="$$url" '{gsub(/@REPO_URL@/, url); print}' | \
 	    $(CRLF) > "$(CF_STAGE)/README.TXT"
