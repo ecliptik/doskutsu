@@ -98,7 +98,7 @@ static void cycle_value(int idx, int dir)
  * the operator's confusion). F10 stays only on the main menu as the
  * Save-and-exit accelerator. Home = top. */
 #define EDIT_STATUS "Enter Open list   Space/Left-Right Change   ESC Back"
-#define MENU_STATUS "Enter Select   F10 Save and Exit   ESC Exit (prompts to save)"
+#define MENU_STATUS "Enter Select   F10 Save and Exit   ESC Exit"
 
 /* Write the in-memory config to disk and show a modal result. Used by the
  * F10 "save settings and return to the menu" action (T17) and the main-menu

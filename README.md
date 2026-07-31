@@ -17,7 +17,7 @@ DOSKUTSU exists for preservation and the engineering challenge of running Cave S
 | <img src="docs/screenshots/doskutsu-title.png" alt="DOSKUTSU title screen running in DOSBox-X" width="100%"> | <img src="docs/screenshots/doskutsu-first-room.png" alt="First lab room with Quote and the broken teleporter" width="100%"> |
 | **Title Screen** | **First Lab Room** |
 | <img src="docs/screenshots/doskutsu-first-cave.png" alt="First Cave with Quote, HUD, and a Heart pickup" width="100%"> | <img src="docs/screenshots/setup-main-menu.png" alt="SETUP.EXE main menu with detected system profile" width="100%"> |
-| **First Cave** | **SETUP.EXE Main Menu** |
+| **First Cave** | **SETUP.EXE** |
 
 <p align="center">captures from DOSBox-X running <code>DOSKUTSU.EXE</code> and <code>SETUP.EXE</code></p>
 
