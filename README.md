@@ -72,7 +72,7 @@ MIDI plays through a hardware synthesizer, off the CPU. These settings shape the
 
 From nothing to playing, in five steps:
 
-1. **Get the binaries.** [Build from source](#building) -- or, once releases are published, download the latest `doskutsu-cf-<version>.zip` from [Download](#download) and unzip it. Either way you get `DOSKUTSU.EXE`, `SETUP.EXE`, `CWSDPMI.EXE`, and the engine `DATA\`.
+1. **Get the binaries.** [Build from source](#building) -- or, once releases are published, download the latest `doskutsu-<version>.zip` from [Download](#download) and unzip it. Either way you get `DOSKUTSU.EXE`, `SETUP.EXE`, `CWSDPMI.EXE`, and the engine `DATA\`.
 2. **Add the game data.** DOSKUTSU ships no Cave Story content. Extract it from your own 2004 freeware `Doukutsu.exe` into `DATA\` -- the [quick path in ASSETS.md](docs/ASSETS.md#quick-path-most-people-want-this) is the shortest route. (Like a Doom source port: the engine is here, you bring the game data.)
 3. **Put it on a DOS system.** Copy the whole folder to a CF card or hard disk on a Pentium-class DOS PC -- or mount it in [DOSBox-X](https://dosbox-x.com/) to try it on a modern machine first.
 4. **Configure sound.** Run `SETUP` once; it detects your sound card and lets you test it before you play.
@@ -84,13 +84,13 @@ More detail at each step: [Download](#download), [Game Assets](#game-assets), [B
 
 ## Download
 
-Pre-built bundles are published on the **[GitHub Releases](https://github.com/ecliptik/doskutsu/releases)** page. Prefer to build the exact source you see here? `make dist` produces the identical `doskutsu-cf-<version>.zip` bundle -- see [Building](#building).
+Pre-built bundles are published on the **[GitHub Releases](https://github.com/ecliptik/doskutsu/releases)** page. Prefer to build the exact source you see here? `make dist` produces the identical `doskutsu-<version>.zip` bundle -- see [Building](#building).
 
 <!-- LATEST-RELEASE:START -->
-**Latest release:** [`doskutsu-cf-1.6.3.zip`](https://github.com/ecliptik/doskutsu/releases/download/v1.6.3/doskutsu-cf-1.6.3.zip) (v1.6.3)
+**Latest release:** [`doskutsu-1.6.3.zip`](https://github.com/ecliptik/doskutsu/releases/download/v1.6.3/doskutsu-1.6.3.zip) (v1.6.3)
 <!-- LATEST-RELEASE:END -->
 
-Each bundle is a single `doskutsu-cf-<version>.zip` containing `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, the license texts, and NXEngine-evo's GPLv3 engine support data. It does **not** include Cave Story game content -- the maps, sprites, music, and SFX come from your own copy of Pixel's 2004 freeware `Doukutsu.exe` (see [Game Assets](#game-assets)). The engine is the program; the game data is yours to supply, exactly the way a Doom source port ships without an IWAD.
+Each bundle is a single `doskutsu-<version>.zip` containing `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, the license texts, and NXEngine-evo's GPLv3 engine support data. It does **not** include Cave Story game content -- the maps, sprites, music, and SFX come from your own copy of Pixel's 2004 freeware `Doukutsu.exe` (see [Game Assets](#game-assets)). The engine is the program; the game data is yours to supply, exactly the way a Doom source port ships without an IWAD.
 
 ---
 

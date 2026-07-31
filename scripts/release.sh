@@ -1,6 +1,6 @@
 #!/bin/bash
 # Create DOSKUTSU releases on GitHub with the CHANGELOG section as the body and
-# the CF bundle (doskutsu-cf-<ver>.zip) as the asset.
+# the CF-ready bundle (doskutsu-<ver>.zip) as the asset.
 #
 # Git pushes go to Forgejo (origin), which mirrors to GitHub; the release
 # object + asset are published on GitHub ONLY (the public face). Adapted from
@@ -38,20 +38,20 @@ extract_changelog() {
     sed -n "/^## \[${ver}\]/,/^## \[/{/^## \[${ver}\]/d;/^## \[/d;p}" "$SCRIPT_DIR/CHANGELOG.md"
 }
 
-# Build dist/doskutsu-cf-<ver>.zip from `make dist`.
+# Build dist/doskutsu-<ver>.zip from `make dist`.
 build_bundle() {
     local ver="$1"
     echo "Building dist bundle for $ver..."
     make -C "$SCRIPT_DIR" dist
-    cp "$SCRIPT_DIR/dist/doskutsu-cf.zip" "$SCRIPT_DIR/dist/doskutsu-cf-${ver}.zip"
-    echo "  -> dist/doskutsu-cf-${ver}.zip ($(stat -c '%s' "$SCRIPT_DIR/dist/doskutsu-cf-${ver}.zip") bytes)"
+    cp "$SCRIPT_DIR/dist/doskutsu-cf.zip" "$SCRIPT_DIR/dist/doskutsu-${ver}.zip"
+    echo "  -> dist/doskutsu-${ver}.zip ($(stat -c '%s' "$SCRIPT_DIR/dist/doskutsu-${ver}.zip") bytes)"
 }
 
 # Collect the release artifact(s) into RELEASE_FILES.
 collect_artifacts() {
     local ver="$1"
     RELEASE_FILES=()
-    local z="$SCRIPT_DIR/dist/doskutsu-cf-${ver}.zip"
+    local z="$SCRIPT_DIR/dist/doskutsu-${ver}.zip"
     [ -f "$z" ] && RELEASE_FILES+=("$z")
 }
 
@@ -90,8 +90,8 @@ update_readme_downloads() {
         echo "  No LATEST-RELEASE markers in README, skipping link update"
         return 0
     fi
-    local url="$README_DL_URL/releases/download/${tag}/doskutsu-cf-${ver}.zip"
-    local line="**Latest release:** [\`doskutsu-cf-${ver}.zip\`](${url}) (${tag})"
+    local url="$README_DL_URL/releases/download/${tag}/doskutsu-${ver}.zip"
+    local line="**Latest release:** [\`doskutsu-${ver}.zip\`](${url}) (${tag})"
     awk -v s='<!-- LATEST-RELEASE:START -->' -v e='<!-- LATEST-RELEASE:END -->' -v line="$line" '
         $0 ~ s {print; print line; skip=1; next}
         $0 ~ e {skip=0}
@@ -122,14 +122,14 @@ do_release() {
 
 ### Download
 
-\`doskutsu-cf-${ver}.zip\` is the CF-ready bundle: \`DOSKUTSU.EXE\`, \`SETUP.EXE\`, the CWSDPMI DPMI host, license texts, and NXEngine-evo's GPLv3 engine support data. It does NOT include Cave Story game content -- extract that from your own 2004 freeware \`Doukutsu.exe\` (see docs/ASSETS.md). The engine ships; the game data is yours to supply, like a Doom port and its WAD."
+\`doskutsu-${ver}.zip\` is the CF-ready bundle: \`DOSKUTSU.EXE\`, \`SETUP.EXE\`, the CWSDPMI DPMI host, license texts, and NXEngine-evo's GPLv3 engine support data. It does NOT include Cave Story game content -- extract that from your own 2004 freeware \`Doukutsu.exe\`: **[docs/ASSETS.md](https://github.com/$GITHUB_REPO/blob/${tag}/docs/ASSETS.md)** is the step-by-step extraction guide. The engine ships; the game data is yours to supply, like a Doom port and its WAD."
 
-    if [ ! -f "$SCRIPT_DIR/dist/doskutsu-cf-${ver}.zip" ]; then
+    if [ ! -f "$SCRIPT_DIR/dist/doskutsu-${ver}.zip" ]; then
         build_bundle "$ver"
     fi
     collect_artifacts "$ver"
     if [ ${#RELEASE_FILES[@]} -eq 0 ]; then
-        echo "Error: no artifact dist/doskutsu-cf-${ver}.zip"; return 1
+        echo "Error: no artifact dist/doskutsu-${ver}.zip"; return 1
     fi
     echo "  Artifact: $(basename "${RELEASE_FILES[0]}")"
 

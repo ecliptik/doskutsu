@@ -8,7 +8,7 @@ asset-free bundle.
 
 ## What ships in a release
 
-One artifact per release: **`doskutsu-cf-<version>.zip`** -- exactly what `make dist`
+One artifact per release: **`doskutsu-<version>.zip`** -- exactly what `make dist`
 produces (renamed with the version). It contains:
 
 - `DOSKUTSU.EXE` -- the game (GPLv3; the dominant license of the binary)
@@ -40,7 +40,8 @@ obligates us to make the corresponding source available. It is:
 - `CHANGELOG.md` carries one `## [MAJOR.MINOR.PATCH] - YYYY-MM-DD` section per
   version (Keep a Changelog format). The release body is that section, extracted
   verbatim.
-- The release asset is named with the bare version (no `v`): `doskutsu-cf-1.2.0.zip`.
+- The release asset is named with the bare version (no `v`, no `-cf`):
+  `doskutsu-1.2.0.zip`.
 
 ## Forges
 
@@ -103,20 +104,21 @@ What a real run does:
 - **`extract_changelog`**: the release body is the tag's `## [ver] - date` CHANGELOG
   section, extracted verbatim.
 - **`build_bundle` / `collect_artifacts`**: run `make dist`, then copy
-  `dist/doskutsu-cf.zip` -> `dist/doskutsu-cf-<ver>.zip` (the upload name); that zip
-  is the single release asset.
+  `dist/doskutsu-cf.zip` -> `dist/doskutsu-<ver>.zip` (the upload name); that zip
+  is the single release asset. The release body is the CHANGELOG section plus a
+  Download blurb linking the tag-pinned `docs/ASSETS.md` extraction guide.
 - **Tag push**: push the tag to `origin` (Forgejo, which mirrors to GitHub) and
   best-effort to a `github` remote if one is configured.
 - **`release_github`**: idempotent create-or-skip via `gh release create` + asset
   upload. `gh` missing or unauthenticated is a hard error -- there is no other
   publish target to fall back to.
 - **`update_readme_downloads`**: fill the README `LATEST-RELEASE` marker block with
-  the `releases/download/v<ver>/doskutsu-cf-<ver>.zip` link for the new tag
+  the `releases/download/v<ver>/doskutsu-<ver>.zip` link for the new tag
   (idempotent rewrite).
 - **`--hierarchical`**: backfill every `v*` tag that has no GitHub release yet.
 
 If you'd rather not use the script, a release can be cut by hand: `make dist`, rename
-the zip to `doskutsu-cf-<ver>.zip`, and create the release + upload the asset through
+the zip to `doskutsu-<ver>.zip`, and create the release + upload the asset through
 each forge's web UI, pasting the CHANGELOG section as the body.
 
 ## Notes
