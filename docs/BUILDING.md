@@ -85,7 +85,7 @@ DJGPP_PREFIX=$HOME/djgpp ./scripts/bootstrap.sh
 DJGPP_PREFIX=/path/to/djgpp ./scripts/bootstrap.sh
 ```
 
-**Option 3 -- the shared `~/emulators/` hub (maintainer convenience; new users can ignore this).** This is the doskutsu author's local multi-project layout, not something a new user needs to set up. If `~/emulators/tools/djgpp/` already exists (shared with sibling projects on the same dev host), the bootstrap auto-symlinks `tools/djgpp` to it and no `DJGPP_PREFIX` is needed. Without that hub -- the normal case for a fresh clone -- use Option 1 or 2.
+**Option 3 -- the shared `~/emulators/` hub (maintainer convenience; new users can ignore this).** This is the DOSKUTSU author's local multi-project layout, not something a new user needs to set up. If `~/emulators/tools/djgpp/` already exists (shared with sibling projects on the same dev host), the bootstrap auto-symlinks `tools/djgpp` to it and no `DJGPP_PREFIX` is needed. Without that hub -- the normal case for a fresh clone -- use Option 1 or 2.
 
 Verify the toolchain is reachable:
 

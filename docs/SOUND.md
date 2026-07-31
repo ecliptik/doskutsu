@@ -1,6 +1,6 @@
 # Sound
 
-doskutsu plays Cave Story's music and sound effects on a wide range of DOS
+DOSKUTSU plays Cave Story's music and sound effects on a wide range of DOS
 audio hardware -- from a plain Sound Blaster to a WaveBlaster daughterboard, a
 General MIDI module, an AdLib/OPL2 card, or a Gravis UltraSound. Choose
 the hardware once in `SETUP.EXE` and it writes the choice to `DOSKUTSU.CFG`;
@@ -117,7 +117,7 @@ interrupt, so it clocks playback off the PIT/IRQ-0 system timer.
 
 ### Instrument patch set (required)
 
-doskutsu loads the GUS's instruments from the **standard Gravis patch set** --
+DOSKUTSU loads the GUS's instruments from the **standard Gravis patch set** --
 the `.pat` General MIDI files a normal `ULTRASND` install places under
 `%ULTRADIR%\MIDI` (typically `C:\ULTRASND\MIDI`). We **load** the patches from
 there; we **ship none**. The driver reads the card's port/IRQ/DMA from the
@@ -131,7 +131,7 @@ SET ULTRADIR=C:\ULTRASND
 A normal Gravis install sets both. If the patch set is missing, the
 card is found but instruments play silently.
 
-**The music is only as good as the patch set.** doskutsu maps every General
+**The music is only as good as the patch set.** DOSKUTSU maps every General
 MIDI program to its canonical Gravis `.pat` name (`acpiano`, `honky`, `epiano2`,
 ...), so two things about the `ULTRASND` set decide the sound -- for the whole
 soundtrack at once, since every song resolves through the same names:
@@ -145,7 +145,7 @@ soundtrack at once, since every song resolves through the same names:
   track.
 
 Recommended sets (unzip into `C:\ULTRASND`, keep `ULTRADIR=C:\ULTRASND`; all use
-the canonical Gravis filenames, so any works with doskutsu unchanged):
+the canonical Gravis filenames, so any works with DOSKUTSU unchanged):
 
 | Set | What it is | Best for |
 |-----|-----------|----------|
@@ -156,7 +156,7 @@ the canonical Gravis filenames, so any works with doskutsu unchanged):
 > **GF1 DRAM ceiling: 1 MB.** The GF1 mixes instruments from on-board DRAM, and
 > the chip's 20-bit address space caps that at **1 MB** -- on a real GUS *and* on
 > the PicoGUS, which emulates the GF1, so the same architectural limit applies
-> (it cannot be raised). doskutsu loads only the instruments each song needs and
+> (it cannot be raised). DOSKUTSU loads only the instruments each song needs and
 > trims multisamples to fit -- but there is a hard limit: **a set whose patches
 > are too big overflows the DRAM and whole instruments go SILENT (dropped, not
 > just trimmed)**, which is exactly why EAWPATS fails on the GF1 and a compact
@@ -202,7 +202,7 @@ simultaneous notes at the cost of the lower rate.
 
 ### GUS high fidelity
 
-**GUS high fidelity** is **on by default**. When on, doskutsu uploads the full
+**GUS high fidelity** is **on by default**. When on, DOSKUTSU uploads the full
 multi-sample `.pat` set per instrument, so each note plays from the
 nearest-pitched recorded sample -- the best timbre across the keyboard, plus
 smooth note releases. Turning it off uses a single sample per instrument (a

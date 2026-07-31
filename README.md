@@ -26,10 +26,10 @@ DOSKUTSU exists for preservation and the engineering challenge of running Cave S
 ### Demo
 
 <p align="center">
-<a href="https://www.youtube.com/watch?v=YLFztifZKQ8"><img src="https://img.youtube.com/vi/YLFztifZKQ8/maxresdefault.jpg" alt="Cave Story running on DOS (doskutsu) -- watch on YouTube" width="75%"></a>
+<a href="https://www.youtube.com/watch?v=YLFztifZKQ8"><img src="https://img.youtube.com/vi/YLFztifZKQ8/maxresdefault.jpg" alt="Cave Story running on DOS (DOSKUTSU) -- watch on YouTube" width="75%"></a>
 </p>
 
-<p align="center"><a href="https://www.youtube.com/watch?v=YLFztifZKQ8">doskutsu running on Gateway 2000 reference hardware</a></p>
+<p align="center"><a href="https://www.youtube.com/watch?v=YLFztifZKQ8">DOSKUTSU running on Gateway 2000 reference hardware</a></p>
 
 ---
 
