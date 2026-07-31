@@ -2,13 +2,13 @@
 
 DOSKUTSU requires the Cave Story game data (maps, sprites, music, dialogue) at runtime. **These are not redistributed in this repository** -- they are freeware-licensed by Daisuke "Pixel" Amaya under his 2004 terms, but we keep them out of the repo and out of `dist/doskutsu-cf.zip` to avoid licensing ambiguity.
 
-This document tells you how to obtain and extract the assets yourself, and where DOSKUTSU expects to find them.
+This document covers obtaining and extracting the assets, and where DOSKUTSU expects to find them.
 
 ---
 
 ## Quick path (most people want this)
 
-If you just want a working `data/` tree for DOSBox-X or a CF deploy, this is the shortest
+For a working `data/` tree for DOSBox-X or a CF deploy, this is the shortest
 reliable route on a Linux/WSL dev host (from the repo root, after a successful `make`):
 
 ```bash
@@ -16,7 +16,7 @@ reliable route on a Linux/WSL dev host (from the repo root, after a successful `
 #    tempdir, emits data/pxt/fx*.pxt, then cleans up (no freeware persists on disk):
 python3 scripts/fetch-cs-pxt.py data/
 
-# 2. Engine blobs (Organya wavetable, stage index, end picture) from a Doukutsu.exe you have:
+# 2. Engine blobs (Organya wavetable, stage index, end picture) from a Doukutsu.exe on disk:
 scripts/extract-engine-data.py /path/to/Doukutsu.exe data/
 
 # 3. Maps / sprites / music / .org: download cavestoryen.zip from cavestory.one and copy its
@@ -24,7 +24,7 @@ scripts/extract-engine-data.py /path/to/Doukutsu.exe data/
 #    support files (fonts, UI, metadata) that ship with NXEngine-evo:
 cp -r vendor/nxengine-evo/data/* data/
 
-# 4. Optional MIDI music (for the opl3 / wb / GUS backends; skip if you only use organya).
+# 4. Optional MIDI music (for the opl3 / wb / GUS backends; skip if only using organya).
 #    (a) WiiWare arrangement set -> data/midi/ (downloaded, SHA-pinned):
 python3 scripts/fetch-cs-midi.py data/
 #    (b) OrgMIDI sets -> data/orgmid1/ (v1) + data/orgmid2/ (v2). These are NOT downloaded --
@@ -40,7 +40,7 @@ python3 tools/build-master-palette.py data/
 
 Verify with the checklist at the end of Step 4. The rest of this document explains each step
 in full, with the licensing posture and the alternatives. The internal "Phase / wave / Tier /
-Lever" labels in the headings below are development history -- safe to ignore if you are just
+Lever" labels in the headings below are development history -- safe to ignore when just
 assembling assets to play.
 
 ---
@@ -111,7 +111,7 @@ Verify the download:
 
 ## Step 2: extract the assets
 
-Cave Story's data is embedded in the resource section of `Doukutsu.exe`, plus a set of external `.pxm` / `.pxe` / `.pxa` map files and `.org` music files in the distribution's `data/` folder. You need a tool that understands both.
+Cave Story's data is embedded in the resource section of `Doukutsu.exe`, plus a set of external `.pxm` / `.pxe` / `.pxa` map files and `.org` music files in the distribution's `data/` folder. Extraction needs a tool that understands both.
 
 ### Option A: `doukutsu-rs` (recommended)
 
@@ -134,13 +134,13 @@ Copy the result to `<repo>/data/`.
 
 ### Option B: `NXExtract` (older, harder to find)
 
-Original tool for the Cave Story fan scene. Predates doukutsu-rs. Works but increasingly hard to track down a trustworthy binary. If you find it on Macintosh Garden, RHDN, or Archive.org, verify the download checksum if one is provided.
+Original tool for the Cave Story fan scene. Predates doukutsu-rs. Works but increasingly hard to track down a trustworthy binary. If found on Macintosh Garden, RHDN, or Archive.org, verify the download checksum if one is provided.
 
 ### Option C: a pre-extracted `data/` from a trusted NXEngine-evo fork
 
-Some NXEngine-evo forks (e.g., Debian packaging, retro-gaming community forks) ship pre-extracted `data/` trees. This is the fastest path but only trustworthy if the source is a known-good fork -- **not** a random archive. **Note:** older forks may use a `data/base/` layout; you'll need to flatten it (`mv data/base/* data/ && rmdir data/base`) since NXEngine-evo's source-side path resolution doesn't honour a `base/` subdir.
+Some NXEngine-evo forks (e.g., Debian packaging, retro-gaming community forks) ship pre-extracted `data/` trees. This is the fastest path but only trustworthy if the source is a known-good fork -- **not** a random archive. **Note:** older forks may use a `data/base/` layout; flatten it (`mv data/base/* data/ && rmdir data/base`) since NXEngine-evo's source-side path resolution doesn't honour a `base/` subdir.
 
-If in doubt, extract yourself via Option A.
+If in doubt, extract from scratch via Option A.
 
 ### Option D: a pre-patched English archive (cavestory.one fastest path)
 
@@ -207,7 +207,7 @@ missing slots (no-op + no log line per call) because no game code ever
 references those slot numbers.
 
 **Sourcing**: there is no upstream-distributable source for these 37
-slots. Verified 2026-05-11:
+slots. Verified:
 
 - NXEngine-evo's own `vendor/nxengine-evo/src/extract/extractpxt.cpp`
   SND[] table is byte-for-byte identical to our `scripts/extract-pxt.py`
@@ -230,7 +230,7 @@ slots. Verified 2026-05-11:
   additional SFX, but they're WAV samples owned by NICALIS -- neither
   PXT-format nor GPLv3-compatible per `CLAUDE.md sec. Licensing`.
 
-The 37 warn lines at boot are cosmetic. If you're debugging an actual
+The 37 warn lines at boot are cosmetic. When debugging an actual
 "no SFX" bug, look for slots that *do* exist in the canonical 86 set
 but fail to load (path issue, file corruption, etc.) -- the missing 37
 are noise, not signal.
@@ -259,7 +259,7 @@ done
 #         # downloads cavestoryen.zip (SHA-256-pinned), extracts Doukutsu.exe
 #         # to a tempdir, runs scripts/extract-pxt.py, removes tempdir.
 #
-#   (b) manual path (if you already have Doukutsu.exe staged from any source):
+#   (b) manual path (with Doukutsu.exe already staged from any source):
 #         mkdir -p data/pxt
 #         scripts/extract-pxt.py /path/to/Doukutsu.exe data/pxt
 #
@@ -324,14 +324,14 @@ python3 tools/build-master-palette.py data/
 The tool runs Gervautz-Purgathofer octree quantization across the corpus and
 validates each indexed asset's remap quality via PSNR. It exits non-zero if
 any indexed sprite falls below 28 dB (or 30 dB for `Face*.pbm` portraits) so
-you'll know immediately if a mod's assets broke the gate. Truecolor
+a mod's assets breaking the gate shows up immediately. Truecolor
 backgrounds (`bkHellsh.pbm` / `bkLight.pbm` / `bkSunset.pbm`) take the slow
 per-pixel nearest-color path at boot and have no PSNR floor (they dither by
 design).
 
 These two files are **derivative works of Cave Story freeware data**; they
 are NOT redistributed via this repo or `dist/doskutsu-cf.zip`. Re-run the
-tool any time you change `data/` (e.g. installing a mod or replacing a
+tool any time `data/` changes (e.g. installing a mod or replacing a
 sprite sheet).
 
 Verify (using NXEngine-source-true paths -- note: no `base/` subdir):
@@ -441,10 +441,10 @@ The script does three things in sequence (no flags or env vars required):
 
 3. **Builds Robert Hart's ORGMID converter locally** (~12 KB source archive;
    SHA-256-pinned at the rnhart.net upstream URL) and runs it against
-   your local `data/org/white.org` to produce `data/midi/white.mid`. This
+   the local `data/org/white.org` to produce `data/midi/white.mid`. This
    is the one engine-track for which no community .mid exists in any
    cavestory.one archive; ORGMID converts ORG -> MIDI deterministically
-   on your machine. ORGMID source + binary live in a tempdir during the
+   locally. ORGMID source + binary live in a tempdir during the
    build and are removed when the script finishes; never persist on disk
    or in this repo.
 
@@ -481,7 +481,7 @@ tiers but spends ~14 ms per render flip on audio IRQ wall-clock work on
 the g2k Pentium-OD-83 (per Phase 9 wave 20 measurement). The
 hardware-MIDI route trades that wall-clock cost for offloaded rendering
 on the audio device, with the aesthetic trade-off that the GM patches
-in your audio device's onboard bank don't sound like Organya waveforms.
+in the audio device's onboard bank don't sound like Organya waveforms.
 
 **Provenance + license posture:** same redistribution
 posture throughout: user-fetches-locally; sources never in our repo or
@@ -518,8 +518,8 @@ Three sets are supported today:
 
   Same fetch-and-pin, user-fetches-locally posture as the WiiWare script
   (it downloads + builds Robert Hart's ORGMID converter in a tempdir and
-  runs it against your local `data/org/*.org`; the `.mid` output stays on
-  your machine and is never redistributed from this repo). After it runs,
+  runs it against the local `data/org/*.org`; the `.mid` output stays
+  local and is never redistributed from this repo). After it runs,
   re-launch SETUP and the **MIDI music set** row offers OrgMIDI alongside
   the other installed sets.
 
@@ -528,11 +528,11 @@ SETUP flags it in the picker's description ("`N` fewer than the fullest
 set; those songs will play no music"), and the engine warns + skips the
 missing track at play time.
 
-### Bring your own MIDI set (custom drop-in)
+### Custom MIDI set (drop-in)
 
-Beyond the two built-in sets you can supply your OWN MIDI arrangement:
+Beyond the built-in sets, a custom MIDI arrangement can be supplied:
 
-1. Make a directory under `data/` and drop your `.mid` files in it, each
+1. Make a directory under `data/` and drop the `.mid` files in it, each
    named after the engine track it replaces (the same base names the
    scripts above produce in `data/midi/`, e.g. `curly.mid`, `access.mid`,
    `oside.mid`). On real DOS hardware the directory name must be 8.3-legal
@@ -544,28 +544,28 @@ Beyond the two built-in sets you can supply your OWN MIDI arrangement:
    ...
    ```
 
-2. Re-launch SETUP. The **MIDI music set** row now lists your directory as
+2. Re-launch SETUP. The **MIDI music set** row now lists the directory as
    `Custom (mymidi)` alongside the built-in sets; pick it and save. (Or set
    `MIDI_SET=mymidi` in `DOSKUTSU.CFG` / `SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=mymidi`
    by hand -- see `docs/CONFIG.md`.)
 
 The engine accepts the directory only when the name is a single safe path
 segment and the directory holds at least one `.mid`; otherwise it falls
-back to WiiWare. Tracks you do not provide simply stay silent for those
+back to WiiWare. Tracks not provided simply stay silent for those
 songs (same graceful skip as a partial built-in set). The killswitch
 `SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS=0` restricts selection back to the
-built-in sets if you ever need the old behavior.
+built-in sets if the old behavior is ever needed.
 
 **Provenance:** custom sets are entirely user-supplied -- we redistribute
-nothing and make no claim on your `.mid` files. Same user-fetches/supplies-
+nothing and make no claim on the user's `.mid` files. Same user-fetches/supplies-
 locally posture as everything else in this step.
 
 ### The OrgMIDI sets (generated by `org2mid` -- reproducible; do not hand-edit)
 
 Besides the downloaded WiiWare set, doskutsu ships a tool that **converts the
-original Organya music to Standard MIDI itself**, so you always have a
+original Organya music to Standard MIDI itself**, so there is always a
 first-party MIDI arrangement with no external download. Generate it after
-Step 3 (you need `data/org/*.org`):
+Step 3 (`data/org/*.org` must exist):
 
 ```bash
 make org2mid          # builds tools/org2mid/org2mid (host C compiler)
@@ -582,9 +582,9 @@ This produces two sets from the same sources, via the `--gm-table` option:
 > **CRITICAL -- these dirs are GENERATED, not stored.** `data/midi/` (WiiWare,
 > downloaded) and `data/orgmid*/` (converted) are **not** tracked in git and are
 > **not** in any release archive. The durable inputs are the tracked
-> `tools/org2mid/org2mid.c` tool plus your extracted `data/org/*.org` sources --
+> `tools/org2mid/org2mid.c` tool plus the extracted `data/org/*.org` sources --
 > from those, `make convert-music` recreates the MIDI sets byte-for-byte at any
-> time. If the generated dirs are ever deleted, or you find a track with wrong
+> time. If the generated dirs are ever deleted, or a track turns up with wrong
 > or missing drums, the fix is always **re-run `make org2mid && make
 > convert-music`** -- never hand-edit a generated `.mid`. (A pre-tool `data/orgmid/`
 > may linger from an older conversion with stale, out-of-GM-range drum notes;
@@ -623,7 +623,7 @@ If the title screen appears but stages don't load, the Cave Story content under 
 
 ## Deploying to real hardware
 
-`make install CF=/mnt/cf` copies the binary + CWSDPMI + (if `data/` is present) the full extracted asset tree (Cave Story content + NXEngine-evo engine data) to `C:\DOSKUTSU\` on the mounted CF card. This is a convenience for your own use -- the assets are being copied onto your own storage, not uploaded or redistributed.
+`make install CF=/mnt/cf` copies the binary + CWSDPMI + (if `data/` is present) the full extracted asset tree (Cave Story content + NXEngine-evo engine data) to `C:\DOSKUTSU\` on the mounted CF card. This is a convenience for personal use -- the assets are copied onto personally-owned storage, not uploaded or redistributed.
 
 `make dist` (for producing `dist/doskutsu-cf.zip` to share publicly) bundles NXEngine-evo's GPLv3 engine support data (fonts, UI, StgMeta, endpic) but **not** any Cave Story game content (maps, sprites, music, SFX). End users of the zip must follow this document to assemble the Cave Story assets themselves -- the engine ships, the game data does not, exactly like a Doom port and its WAD.
 

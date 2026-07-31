@@ -69,7 +69,7 @@ See the [changelog](CHANGELOG.md) for development and progress details.
 
 Cave Story's engine advances game logic once per rendered frame, so at 30 fps the game also runs at about 60% speed - sluggish. Fixed-Timestep mode decouples the two: logic advances on a fixed 50 Hz clock regardless of frame rate, so the game plays at its intended speed even though the screen draws fewer frames. The motion is less smooth; the speed is correct.
 
-It is on by default as of 1.0; set `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0` to use the legacy frame-coupled loop.
+It is on by default; set `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0` to use the legacy frame-coupled loop.
 
 ### Audio backends
 
@@ -80,7 +80,7 @@ MIDI plays through a hardware synthesizer, off the CPU. These settings shape the
 | Setting | Environment variable | Options | Picks |
 |---|---|---|---|
 | Synthesizer | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto` (default), `wb`, `opl3`, `organya`, `adlib`, `gus`, `none` | `auto`: probe WaveBlaster daughterboard first, fall back to OPL3 FM; explicit values force a specific backend. `wb`: WaveBlaster / DreamBlaster-class wavetable daughterboard on the SB16 WaveBlaster header (validated on Vibra16S CT2490 + DreamBlaster S2). `opl3`: the SB16 / Sound Blaster Pro 2 OPL3 FM chip. `organya`: software synthesis of Pixel's original Cave Story tracker format (higher CPU cost). `adlib`: native OPL2 FM for a machine with an AdLib/OPL card but **no Sound Blaster** (or a PicoGUS in `/mode adlib`); music is clocked off the PIT timer instead of the SB interrupt. **Music only** -- a DAC-less AdLib card has no sound effects. `gus`: native Gravis UltraSound (GF1) wavetable for a machine with **no Sound Blaster** (a real GUS, or a PicoGUS in `/mode gus`); plays **both music and sound effects** on the GF1's hardware voices. `none`: music off (sound effects still play). See `docs/CONFIG.md`. |
-| MIDI source | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `orgmid2` (default), `wiimidi`, `orgmid`, `<dir>` | `orgmid2`: the native-GM `org2mid` conversion (`data/orgmid2/`, generated with `make convert-music`; falls back to `wiimidi` if absent). `wiimidi`: the WiiWare arrangement, which tracks the original closely. `orgmid`: the Hart legacy `.mid` set. Any other value: a custom drop-in directory of your own `.mid` files in `data/<dir>/` (see `docs/ASSETS.md`) |
+| MIDI source | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `orgmid2` (default), `wiimidi`, `orgmid`, `<dir>` | `orgmid2`: the native-GM `org2mid` conversion (`data/orgmid2/`, generated with `make convert-music`; falls back to `wiimidi` if absent). `wiimidi`: the WiiWare arrangement, which tracks the original closely. `orgmid`: the Hart legacy `.mid` set. Any other value: a custom drop-in directory of user-supplied `.mid` files in `data/<dir>/` (see `docs/ASSETS.md`) |
 | GM variant | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | an `org2mid`-converted General MIDI variant |
 | Sound effects | `SDL_HINT_DOSKUTSU_SFX_DEVICE` | `sb` (default), `none` | `sb`: sound effects on the Sound Blaster DAC. `none`: sound effects off (music still plays). Under `gus`, effects play on the GF1 wavetable automatically |
 
@@ -96,7 +96,7 @@ See **[Releases](https://github.com/ecliptik/doskutsu/releases)** for pre-built 
 **Latest release:** [`doskutsu-1.6.3.zip`](https://github.com/ecliptik/doskutsu/releases/download/v1.6.3/doskutsu-1.6.3.zip) (v1.6.3)
 <!-- LATEST-RELEASE:END -->
 
-Each bundle is a single `doskutsu-<version>.zip` containing `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, the license texts, and NXEngine-evo's GPLv3 engine support data. It does **not** include Cave Story game content -- the maps, sprites, music, and SFX come from your own copy of Pixel's 2004 freeware `Doukutsu.exe` (see [Game Assets](#game-assets)). The engine is the program; the game data is yours to supply, exactly the way a Doom source port ships without an IWAD.
+Each bundle is a single `doskutsu-<version>.zip` containing `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, the license texts, and NXEngine-evo's GPLv3 engine support data. It does **not** include Cave Story game content -- the maps, sprites, music, and SFX come from a user-supplied copy of Pixel's 2004 freeware `Doukutsu.exe` (see [Game Assets](#game-assets)). The engine is the program; the game data is user-supplied, exactly the way a Doom source port ships without an IWAD.
 
 ---
 
@@ -180,19 +180,19 @@ Use `SETUP.EXE` to map keys and configure joystick support.
 
 ## Configuration
 
-The easy way is `SETUP.EXE` - a classic DOS-style configurator:
+Use `SETUP.EXE` to configure DOSKUTSU - sound, input and other settings:
 
 ```
 C:\DOSKUTSU> SETUP
 ```
 
-SETUP detects your hardware, recommends settings, and lets you configure sound,
-performance, and input. It can play a real sound effect and the Title theme so
-you can confirm audio works, then writes `DOSKUTSU.CFG`, which the game reads
+SETUP detects the hardware, recommends settings, and configures sound,
+performance, and input. It can play a real sound effect and the Title theme to
+confirm audio works, then writes `DOSKUTSU.CFG`, which the game reads
 at startup. See [docs/SETUP.md](./docs/SETUP.md) for the full reference and
 [docs/SOUND.md](./docs/SOUND.md) for the sound-configuration guide.
 
-You can also skip SETUP and use DOS environment variables (`SET` in
+Alternately, skip SETUP and use DOS environment variables (`SET` in
 `AUTOEXEC.BAT` or at the prompt). Precedence is **environment variable >
 `DOSKUTSU.CFG` > built-in default**. See [docs/CONFIG.md](./docs/CONFIG.md) for
 every option.
@@ -201,9 +201,15 @@ every option.
 
 ## Building
 
-Full build documentation in [docs/BUILDING.md](./docs/BUILDING.md): prerequisites, DJGPP cross-compiler install, the four-stage build (SDL3, SDL3_mixer, SDL3_image, NXEngine-evo), DOSBox-X testing, common errors.
+Building needs a Linux (or WSL) host with:
 
-Short version, once DJGPP is installed -- the one-command path:
+- the [DJGPP](https://github.com/andrewwutw/build-djgpp) cross-compiler -- the one prerequisite that isn't a package install (~30 min one-time build)
+- `cmake`, `git`, `make`, `gcc`, `python3`, `unzip`, `zip`
+- `dosbox-x` -- runs the automated build-verification smoke tests
+
+[docs/BUILDING.md](./docs/BUILDING.md) has the details: package install commands for common distros, the DJGPP install, each build stage, DOSBox-X testing, and common errors.
+
+Once DJGPP is installed -- the one-command path:
 
 ```bash
 git clone https://github.com/ecliptik/doskutsu.git   # or ssh: git@github.com:ecliptik/doskutsu.git

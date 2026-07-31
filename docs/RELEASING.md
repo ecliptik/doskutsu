@@ -117,7 +117,7 @@ What a real run does:
   (idempotent rewrite).
 - **`--hierarchical`**: backfill every `v*` tag that has no GitHub release yet.
 
-If you'd rather not use the script, a release can be cut by hand: `make dist`, rename
+Without the script, a release can be cut by hand: `make dist`, rename
 the zip to `doskutsu-<ver>.zip`, and create the release + upload the asset through
 each forge's web UI, pasting the CHANGELOG section as the body.
 

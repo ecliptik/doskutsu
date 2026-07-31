@@ -17,18 +17,18 @@ The bootstrap script orchestrates the whole pipeline:
 3. Fetches the four vendored upstreams (SDL3, SDL3_mixer, SDL3_image, NXEngine-evo) at pinned SHAs
 4. Applies the DOS-port patch series
 5. Builds the four-stage chain -> `build/doskutsu.exe`
-6. Optionally extracts Cave Story assets if you provide the freeware `Doukutsu.exe`
+6. Optionally extracts Cave Story assets when pointed at the freeware `Doukutsu.exe`
 7. Stages the runtime layout in `build/stage/`
 
 ### With Cave Story assets in one shot
 
-If you have the 2004 EN freeware `Doukutsu.exe` already, point the script at it:
+With the 2004 EN freeware `Doukutsu.exe` already on disk, point the script at it:
 
 ```bash
 ./scripts/bootstrap.sh --cave-story-exe /path/to/Doukutsu.exe
 ```
 
-The script extracts `wavetbl.dat`, `stage.dat`, and `endpic/pixel.bmp` from the EXE into `./data/`, runs the 8.3 rename helper, and stages the runtime layout. The remaining game content (sprites, maps, music, TSC scripts) you'll still need to extract via `doukutsu-rs` / `NXExtract` / `cavestory.one` and drop into `./data/` per [ASSETS.md](./ASSETS.md) -- then re-run `./scripts/rename-user-data-83.sh data && make stage` to finish.
+The script extracts `wavetbl.dat`, `stage.dat`, and `endpic/pixel.bmp` from the EXE into `./data/`, runs the 8.3 rename helper, and stages the runtime layout. The remaining game content (sprites, maps, music, TSC scripts) still needs extracting via `doukutsu-rs` / `NXExtract` / `cavestory.one` and dropping into `./data/` per [ASSETS.md](./ASSETS.md) -- then re-run `./scripts/rename-user-data-83.sh data && make stage` to finish.
 
 ### Override locations
 
@@ -52,6 +52,19 @@ Required on the dev host (Linux or WSL):
 - `scrot`, `xdotool` -- for visible DOSBox-X automation (optional, only needed for playtest + screenshots)
 - `zip` -- for `make dist`
 
+Install them on common distros:
+
+```bash
+# Debian / Ubuntu
+sudo apt install cmake git make gcc python3 unzip zip dosbox-x scrot xdotool
+
+# Fedora
+sudo dnf install cmake git make gcc python3 unzip zip dosbox-x scrot xdotool
+
+# Arch (dosbox-x is in the AUR)
+sudo pacman -S cmake git make gcc python3 unzip zip scrot xdotool
+```
+
 The bootstrap script verifies all of the above and aborts with a clear message if anything is missing.
 
 ## DJGPP
@@ -72,7 +85,7 @@ DJGPP_PREFIX=$HOME/djgpp ./scripts/bootstrap.sh
 DJGPP_PREFIX=/path/to/djgpp ./scripts/bootstrap.sh
 ```
 
-**Option 3 -- the shared `~/emulators/` hub (maintainer convenience; new users can ignore this).** This is the doskutsu author's local multi-project layout, not something you need to set up. If `~/emulators/tools/djgpp/` already exists (shared with sibling projects on the same dev host), the bootstrap auto-symlinks `tools/djgpp` to it and no `DJGPP_PREFIX` is needed. If you don't have that hub -- which is the normal case for a fresh clone -- use Option 1 or 2.
+**Option 3 -- the shared `~/emulators/` hub (maintainer convenience; new users can ignore this).** This is the doskutsu author's local multi-project layout, not something a new user needs to set up. If `~/emulators/tools/djgpp/` already exists (shared with sibling projects on the same dev host), the bootstrap auto-symlinks `tools/djgpp` to it and no `DJGPP_PREFIX` is needed. Without that hub -- the normal case for a fresh clone -- use Option 1 or 2.
 
 Verify the toolchain is reachable:
 
@@ -84,7 +97,7 @@ Expected: `i586-pc-msdosdjgpp-gcc (GCC) 12.2.0` or similar.
 
 ## CWSDPMI
 
-`CWSDPMI.EXE` and the other vendored DOS binaries (LFNDOS, DOSLFN) are no longer tracked in git as of 2026-04-30 -- they're fetched on demand from URLs + sha256 pins in `vendor/binaries.manifest`:
+`CWSDPMI.EXE` and the other vendored DOS binaries (LFNDOS, DOSLFN) are fetched on demand from URLs in `vendor/binaries.manifest`:
 
 ```bash
 ./scripts/fetch-vendor-binaries.sh           # fetch all four binaries
@@ -93,9 +106,9 @@ Expected: `i586-pc-msdosdjgpp-gcc (GCC) 12.2.0` or similar.
 
 `make stage`, `make dist`, `make install`, and `make dpmi-lfn-smoke` invoke the fetch step automatically as an order-only prerequisite -- runs once, idempotent thereafter. The accompanying license / `.doc` / `.lsm` / `COPYING` files stay tracked because the redistribution licenses require them to ship with their binaries.
 
-## Manual steps (if you want to do it without the bootstrap)
+## Manual steps (without the bootstrap)
 
-If you'd rather run each step yourself -- e.g., to debug a specific stage -- the bootstrap is just a wrapper around these:
+To run each step individually -- e.g., to debug a specific stage -- the bootstrap is just a wrapper around these:
 
 ```bash
 ./scripts/setup-symlinks.sh    # if using the ~/emulators/ hub
@@ -184,9 +197,9 @@ tools/dosbox-launch.sh --stage --exe build/doskutsu.exe      # mount build/stage
 
 **`--stage` / `-s` for real game runs.** NXEngine-evo's `ResourceManager` resolves assets via `SDL_GetBasePath() + "data/"` -- i.e. it expects `data/` to live next to the binary. The default launcher mounts the repo root as C:, which works for one-off SDL probes that don't touch `data/`, but a real game run needs the runtime layout: `DOSKUTSU.EXE` + `CWSDPMI.EXE` + `data/` co-located. `--stage` produces that layout under `build/stage/` (binary, DPMI host, and a symlink to `data/`) and mounts it as C: instead. This matches the `C:\DOSKUTSU\` install target on real CF cards. The flag invokes `make stage` automatically -- no need to run it manually.
 
-Use `--stage` whenever you're actually launching the game (title screen, playtest, smoke runs that load assets). Plain `tools/dosbox-launch.sh` is fine for SDL-driver probes (`tests/sdl3-smoke/sdltest.exe`) that don't read `data/`.
+Use `--stage` whenever actually launching the game (title screen, playtest, smoke runs that load assets). Plain `tools/dosbox-launch.sh` is fine for SDL-driver probes (`tests/sdl3-smoke/sdltest.exe`) that don't read `data/`.
 
-The DOSBox-X window opens on `DISPLAY=:0`. From the same shell, you can drive it:
+The DOSBox-X window opens on `DISPLAY=:0`. From the same shell, drive it with:
 
 ```bash
 DISPLAY=:0 scrot -u /tmp/dosbox.png                           # capture focused window
@@ -217,7 +230,7 @@ This runs the binary under `dosbox-x -silent -exit`, captures its stdout to `STD
 | Config | `cycles` | Purpose |
 |---|---|---|
 | `tools/dosbox-x.conf` | `fixed 40000` | **Parity** with Pentium-class hardware. Use for playtest gate, audio-dropout investigations, anything where real-HW-equivalent timing matters. |
-| `tools/dosbox-x-fast.conf` | `max` | **Fast iteration.** Use when you're debugging logic / UI / crash bugs and just want to get to the repro state quickly. Do not use for performance judgments -- 4-8x faster than real HW. |
+| `tools/dosbox-x-fast.conf` | `max` | **Fast iteration.** Use when debugging logic / UI / crash bugs to reach the repro state quickly. Do not use for performance judgments -- 4-8x faster than real HW. |
 
 Both configs are otherwise identical: 48 MB RAM, SB16 on IRQ 5 / DMA 1/5 / base 220, VESA SVGA (`svga_s3` machine), `quit warning = false`.
 
@@ -225,11 +238,11 @@ Both configs are otherwise identical: 48 MB RAM, SB16 on IRQ 5 / DMA 1/5 / base 
 
 `tests/run-gameplay-smoke.sh` runs DOSBox-X at parity cycles, captures the engine + SDL runtime logs, and asserts that each patch's boot banner string was actually emitted at runtime. A string embedded in the binary does not prove its code path ran; emission into the runtime log does. This is the canonical pre-ship gate for any cross-build.
 
-**Why two gates instead of one.** `strings build/doskutsu.exe | grep <banner>` proves the literal compiled into the binary; it does not prove the code path that emits the banner runs. Wave-38 shipped a binary where `patches/nxengine-evo/0138-*.patch` was silently dropped during the cross-build (stale `.obj` linked against post-patch source); the strings-grep gate false-passed because patch 0138 happened to share an env-var name with patch SDL/0059, which DID apply. The runtime banner-emit gate is the direct detector for that failure mode: if the consumer code path is missing or never invoked, the banner doesn't fire, and the gate fails.
+**Why two gates instead of one.** `strings build/doskutsu.exe | grep <banner>` proves the literal compiled into the binary; it does not prove the code path that emits the banner runs. A build once shipped with a patch silently dropped during the cross-build (stale `.obj` linked against post-patch source); the strings-grep gate false-passed because the dropped patch happened to share an env-var name with another patch that DID apply. The runtime banner-emit gate is the direct detector for that failure mode: if the consumer code path is missing or never invoked, the banner doesn't fire, and the gate fails.
 
-**Two-banner-target discipline.** Every patch must carry a patch-id-prefixed unique banner string (e.g. `sdl: SDL/0060 Cirrus BLT pattern-copy (ACTIVE|DISABLED|N/A)`); never share sentinels across patches. Sharing makes the strings-grep gate ambiguous about which patch contributed the literal -- the wave-38 failure mode.
+**Two-banner-target discipline.** Every patch must carry a patch-id-prefixed unique banner string (e.g. `sdl: SDL/0060 Cirrus BLT pattern-copy (ACTIVE|DISABLED|N/A)`); never share sentinels across patches. Sharing makes the strings-grep gate ambiguous about which patch contributed the literal -- the failure mode above.
 
-**Where banners should fire.** Init-time banners (boot-banner / framebuffer-init / `Renderer::initVideo` head) survive missing-asset early-returns and consumer-wire-up gaps. SDL-side primitives that need ship-verification should hook lazy-init into a known-fire site like `populate_fb_state_for_direct_fb()` so the banner emits even when the consumer hasn't engaged yet. Banners that live deep inside `Renderer::initVideo` after asset loads are fragile against asset-stage gaps; the wave-39 pattern is to keep banners ahead of any `return` points.
+**Where banners should fire.** Init-time banners (boot-banner / framebuffer-init / `Renderer::initVideo` head) survive missing-asset early-returns and consumer-wire-up gaps. SDL-side primitives that need ship-verification should hook lazy-init into a known-fire site like `populate_fb_state_for_direct_fb()` so the banner emits even when the consumer hasn't engaged yet. Banners that live deep inside `Renderer::initVideo` after asset loads are fragile against asset-stage gaps; the pattern is to keep banners ahead of any `return` points.
 
 **BANNERS array -- parallel arrays, severity-typed.** The gate is driven by three parallel arrays in `tests/run-gameplay-smoke.sh`: `BANNER_REGEX[]` (regex per banner, alternation-friendly to cover `ENABLED|DISABLED|ACTIVE|N/A` variants under default-flips), `BANNER_SEVERITY[]` -- one of `required` (must emit >=1 line, gate FAILs on absence), `forbidden` (must emit 0 lines, a revert-completeness guard, gate FAILs on presence), or `optional` (informational; logged but no gate effect) -- and `BANNER_LABEL[]` (human-readable label for failure messages). The gate currently ships `forbidden` entries (guarding that a reverted lever's banner is truly gone) and `optional` entries (each shipped lever's boot banner -- the runtime-emit half of the two-witness pattern, read against the captured log). No banner is `required` at present: under the pkill-on-timeout DOSBox-X smoke a clean-exit banner can legitimately not fire, so a hard `required` entry would false-FAIL; `required` stays available for a future banner that provably fires on every run regardless of the kill path. Add a row for each new lever or instrumentation patch when shipping; the gate exits 5 on FAIL.
 
@@ -290,7 +303,7 @@ To publish this bundle as a tagged GitHub release, see [RELEASING.md](./RELEASIN
 make install CF=/mnt/cf
 ```
 
-Copies the same payload to `$CF/DOSKUTSU/`. If Cave Story data is present in the repo `data/` tree at install time, the Makefile also copies it directly to `$CF/DOSKUTSU/DATA/` -- for convenience only, not legal redistribution (the copy is happening on your own CF card, not being uploaded anywhere).
+Copies the same payload to `$CF/DOSKUTSU/`. If Cave Story data is present in the repo `data/` tree at install time, the Makefile also copies it directly to `$CF/DOSKUTSU/DATA/` -- for convenience only, not legal redistribution (the copy lands on a personally-owned CF card, not uploaded anywhere).
 
 ### Pre-render the Organya PCM cache (`make org-cache`)
 
@@ -311,7 +324,7 @@ Then deploy the produced `CACHE/` tree into the target's game dir next to `DOSKU
 
 **Pixtone SFX render cache (`SDL_HINT_DOSKUTSU_PXT_AUTOCACHE`, default ON).** The 117 Cave Story sound effects are synthesized from their `.pxt` definitions at boot; on a Pentium-class box that costs ~51 s on **every** launch, identical across all audio backends. Like the organya cache above, the engine renders the SFX once on first launch, persists the S8/mono/22050 render output to a single tier-independent blob `CACHE\PXT\PXTSFX.BIN` keyed to the binary's `DOSKUTSU_BUILD_SHA12`, and loads that blob on subsequent boots to skip the synth entirely (first boot still pays the ~51 s to build the cache; later boots are fast). One blob serves every backend and every audio tier. Set `SDL_HINT_DOSKUTSU_PXT_AUTOCACHE=0` to disable (boot is byte-identical, just slow -- the synth runs and nothing is read/written). A rebuild invalidates the cache (the SHA changes); swapping the `.pxt` data without a rebuild does not (matching `ORG_AUTOCACHE`). Contributor/diagnostic killswitch, not part of the player-facing `docs/CONFIG.md` reference.
 
-**LICENSING:** the produced `CACHE/` is Cave-Story-DERIVED (rendered from the user's extracted `.org` files). It is a LOCAL / OPERATOR-DEPLOY artifact ONLY and is DELIBERATELY excluded from `make dist` -- the public zip never ships game-derived data. Generate it on your own machine; never upload or redistribute it.
+**LICENSING:** the produced `CACHE/` is Cave-Story-DERIVED (rendered from the user's extracted `.org` files). It is a LOCAL / OPERATOR-DEPLOY artifact ONLY and is DELIBERATELY excluded from `make dist` -- the public zip never ships game-derived data. Generate it locally; never upload or redistribute it.
 
 ---
 
@@ -319,7 +332,7 @@ Then deploy the produced `CACHE/` tree into the target's game dir next to `DOSKU
 
 ### `i586-pc-msdosdjgpp-gcc: command not found`
 
-DJGPP isn't on `PATH`. Ensure `tools/djgpp` is a symlink (`./scripts/setup-symlinks.sh`) and the Makefile is the entry point (not a raw `cmake` call). If you're invoking CMake directly, export PATH manually:
+DJGPP isn't on `PATH`. Ensure `tools/djgpp` is a symlink (`./scripts/setup-symlinks.sh`) and the Makefile is the entry point (not a raw `cmake` call). When invoking CMake directly, export PATH manually:
 
 ```bash
 export PATH=$PWD/tools/djgpp/bin:$PWD/tools/djgpp/i586-pc-msdosdjgpp/bin:$PATH
@@ -331,7 +344,7 @@ export PATH=$PWD/tools/djgpp/bin:$PWD/tools/djgpp/i586-pc-msdosdjgpp/bin:$PATH
 
 ### SDL3_mixer or SDL3_image build fails with "undefined reference to dlopen"
 
-A codec backend's dynamic-loader path leaked through. The Makefile passes `-DSDLMIXER_DEPS_SHARED=OFF` / `-DSDLIMAGE_DEPS_SHARED=OFF` to disable the `SDL_LoadObject` codec-loader path on DJGPP (which has no real `dlopen`). If you see this error, verify those flags survived your CMake invocation -- see the `make sdl3-mixer` / `make sdl3-image` recipes in `Makefile`.
+A codec backend's dynamic-loader path leaked through. The Makefile passes `-DSDLMIXER_DEPS_SHARED=OFF` / `-DSDLIMAGE_DEPS_SHARED=OFF` to disable the `SDL_LoadObject` codec-loader path on DJGPP (which has no real `dlopen`). On this error, verify those flags survived the CMake invocation -- see the `make sdl3-mixer` / `make sdl3-image` recipes in `Makefile`.
 
 ### `fopen("file", "r")` reads short / corrupted bytes
 
@@ -351,7 +364,7 @@ Organya synth CPU cost at 22050 stereo is the likely culprit. Fallback is `Mix_O
 
 ### `make distclean` removed my Cave Story data
 
-`distclean` only wipes `build/` and cloned `vendor/` subdirectories. The repo `data/` tree is yours -- it is gitignored but never touched by the Makefile. If it's gone, re-extract per `ASSETS.md`.
+`distclean` only wipes `build/` and cloned `vendor/` subdirectories. The repo `data/` tree is user data -- it is gitignored but never touched by the Makefile. If it's gone, re-extract per `ASSETS.md`.
 
 ---
 
@@ -366,7 +379,7 @@ If the Makefile misbehaves:
 If a patch fails to apply:
 
 - Run `./scripts/apply-patches.sh` manually and read the `patch` output
-- Individual patches are `git format-patch`-style; you can `git am` them in the vendor tree directly for triage
+- Individual patches are `git format-patch`-style; `git am` applies them in the vendor tree directly for triage
 - If upstream has drifted, re-pin the SHA in `vendor/sources.manifest` to an earlier commit, or refresh the patch against the new upstream
 
 If CMake can't find SDL3 / SDL3_mixer / SDL3_image when building a later stage:

@@ -6,19 +6,19 @@ backend.
 
 ## How to read this
 
-- **Render fps is not game speed.** Since v1.0.0, DOSKUTSU runs game logic on a
+- **Render fps is not game speed.** DOSKUTSU runs game logic on a
   fixed 50 Hz timestep that is decoupled from render framerate (Cave Story is authored
   for 50 fps). A machine that renders at 19 fps still steps the game at the intended
-  50 Hz -- the world moves at the correct speed; you see fewer drawn frames, not a slow
-  game. So treat these numbers as visual smoothness, not difficulty or pacing.
+  50 Hz -- the world moves at the correct speed; the screen draws fewer frames, not a
+  slower game. So treat these numbers as visual smoothness, not difficulty or pacing.
 - **Each cell shows two numbers: `median / floor`.** The first is the median rendered
   framerate (`fps_p50`); the second is the worst-5% "stutter floor" (`fps_p05`) -- the
   framerate during the choppiest 5% of the run. Both are measured over a fixed, replayed
   input sequence, so runs are comparable across machines and backends. See "Measurement
   method" below.
-- **The floor is what you feel in the dips.** A median of 33 with a floor of 24 is
+- **The floor is what the dips feel like.** A median of 33 with a floor of 24 is
   consistently smooth; a median of 33 with a floor of 10 means occasional visible
-  hitches the median hides. For a machine you care about, read both.
+  hitches the median hides. Read both numbers for any machine that matters.
 - **Higher is smoother.** As a rough guide on this engine: ~30+ fps reads as smooth,
   ~15-20 fps is clearly playable but visibly choppy, below ~12 fps is rough.
 
@@ -62,7 +62,7 @@ reference machine and its 486-campaign variants):
 ## The matrix -- render fps_p50 (Cirrus CL-GD5430)
 
 Audio backends:
-- **organya-prerender** -- the native Cave Story Organya music engine, with the v1.0.8
+- **organya-prerender** -- the native Cave Story Organya music engine, with the
   device-rate + pre-render path. Opt-in (see the caveat below).
 - **OPL3** -- FM synthesis on the SB16's OPL3. The recommended default 486 backend.
 - **WaveBlaster** -- a wavetable daughterboard (DreamBlaster S2) on the SB16 WaveBlaster
@@ -77,14 +77,14 @@ Each cell is `median / floor` fps (fps_p50 / fps_p05).
 | 486DX2-66    | ~19 / TBD         | ~19 / TBD      | TBD / TBD   |
 | 486DX2-50    | TBD / TBD         | ~15 / TBD      | TBD / TBD   |
 
-- OPL3 medians: v1.0.1 cross-CPU anchors (POD-83 ~33, Am5x86-133 ~32, 486DX2-66 ~19,
-  486DX2-50 ~15). Their floors were not recorded historically and fill in from the
-  WORKSTREAM A OPL3 re-confirm runs.
-- 486DX2-66 organya-prerender ~19: v1.0.8 reference-486 measurement (real-time tempo at
-  playable framerate; the device-rate fix recovered roughly +20% over the pre-v1.0.8
+- OPL3 medians: the cross-CPU anchor runs (POD-83 ~33, Am5x86-133 ~32, 486DX2-66 ~19,
+  486DX2-50 ~15). Their floors were not recorded in those runs and fill in from the
+  OPL3 re-confirm runs.
+- 486DX2-66 organya-prerender ~19: reference-486 measurement (real-time tempo at
+  playable framerate; the device-rate fix recovered roughly +20% over the earlier
   audio path, and the pre-render path runs at near-full render fps because the per-frame
   audio cost is a memory copy rather than live synthesis).
-- **TBD cells** are pending the WORKSTREAM A cross-CPU validation pass (one set of
+- **TBD cells** are pending a cross-CPU validation pass (one set of
   real-HW runs across the CPU swaps: organya-prerender / OPL3 / WaveBlaster per CPU);
   this table is filled in when that data returns.
 
@@ -102,14 +102,14 @@ organya-prerender backend is opt-in because it has two first-run costs:
    the first time. A song that changes mid-gameplay before it has been cached falls back
    to live synthesis (slower, but never a freeze).
 
-Both first-run costs are eliminated by a **pre-populated cache**. As of v1.0.8.1 the
+Both first-run costs are eliminated by a **pre-populated cache**. The
 full song cache can be pre-rendered on a fast machine and shipped on the CF card
 (version-keyed to the build); the 486 then loads PCM from the first boot and never
 cold-renders, so neither cost above is paid. The two costs apply only to a
 freshly-cleared or self-rendered cache.
 
-OPL3 and WaveBlaster have neither cost and are byte-identical to v1.0.7. Pick
-organya-prerender if you want the native Cave Story score and can accept the first-run
+OPL3 and WaveBlaster have neither cost. Pick
+organya-prerender for the native Cave Story score at the cost of the first-run
 render passes; pick OPL3/WaveBlaster for the smoothest, hitch-free audio.
 
 ---
