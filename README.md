@@ -49,6 +49,14 @@ See [Download](#download), [Game Assets](#game-assets), [Building](#building), [
 
 DOSKUTSU plays the full game, start to finish.
 
+**Features**
+
+- `SETUP.EXE` configurator -- hardware auto-detect, live sound test, sound / performance / input settings
+- Keyboard remapping and gameport joystick / flightstick support
+- Music on OPL3 FM, WaveBlaster wavetable, AdLib, Gravis UltraSound, or the original Organya synth ([Audio backends](#audio-backends))
+- Fixed 50 Hz game speed independent of render frame rate ([Fixed-Timestep mode](#fixed-timestep-mode))
+- Music and sound-effect caching for faster boots on 486-class machines
+
 Frame rate depends on the hardware and which music backend is used. Measured with a fixed input recording (TAS replay) in a heavy-music scene, on the reference board with a Cirrus CL-GD5430:
 
 | CPU | Music | Frame rate (median) |
@@ -73,18 +81,15 @@ It is on by default; set `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0` to use the legacy 
 
 ### Audio backends
 
-The soundtrack plays with either Cave Story's original Organya synthesizer or with MIDI. Organya is more faithful to the original, but has a significant performance impact; MIDI is recommended and the default for playing on DOS.
+The soundtrack plays with either Cave Story's original Organya synthesizer or with MIDI. Organya is more faithful to the original, but has a significant performance impact; MIDI plays through a hardware synthesizer, off the CPU, and is the recommended default on DOS. Supported audio hardware:
 
-MIDI plays through a hardware synthesizer, off the CPU. These settings shape the sound:
+- **Sound Blaster OPL3 FM** -- the default; works on any Sound Blaster; sound effects on the SB DAC
+- **WaveBlaster / DreamBlaster** -- wavetable daughterboard on the SB16 WaveBlaster header
+- **AdLib / OPL2** -- music on a card with no Sound Blaster (music only; no sound effects)
+- **Gravis UltraSound** (or PicoGUS) -- GF1 wavetable music *and* sound effects; no Sound Blaster needed
+- **Organya** -- Pixel's original tracker synth, in software (higher CPU cost)
 
-| Setting | Environment variable | Options | Picks |
-|---|---|---|---|
-| Synthesizer | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | `auto` (default), `wb`, `opl3`, `organya`, `adlib`, `gus`, `none` | `auto`: probe WaveBlaster daughterboard first, fall back to OPL3 FM; explicit values force a specific backend. `wb`: WaveBlaster / DreamBlaster-class wavetable daughterboard on the SB16 WaveBlaster header (validated on Vibra16S CT2490 + DreamBlaster S2). `opl3`: the SB16 / Sound Blaster Pro 2 OPL3 FM chip. `organya`: software synthesis of Pixel's original Cave Story tracker format (higher CPU cost). `adlib`: native OPL2 FM for a machine with an AdLib/OPL card but **no Sound Blaster** (or a PicoGUS in `/mode adlib`); music is clocked off the PIT timer instead of the SB interrupt. **Music only** -- a DAC-less AdLib card has no sound effects. `gus`: native Gravis UltraSound (GF1) wavetable for a machine with **no Sound Blaster** (a real GUS, or a PicoGUS in `/mode gus`); plays **both music and sound effects** on the GF1's hardware voices. `none`: music off (sound effects still play). See `docs/CONFIG.md`. |
-| MIDI source | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | `orgmid2` (default), `wiimidi`, `orgmid`, `<dir>` | `orgmid2`: the native-GM `org2mid` conversion (`data/orgmid2/`, generated with `make convert-music`; falls back to `wiimidi` if absent). `wiimidi`: the WiiWare arrangement, which tracks the original closely. `orgmid`: the Hart legacy `.mid` set. Any other value: a custom drop-in directory of user-supplied `.mid` files in `data/<dir>/` (see `docs/ASSETS.md`) |
-| GM variant | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT` | `v1`, `v2` | an `org2mid`-converted General MIDI variant |
-| Sound effects | `SDL_HINT_DOSKUTSU_SFX_DEVICE` | `sb` (default), `none` | `sb`: sound effects on the Sound Blaster DAC. `none`: sound effects off (music still plays). Under `gus`, effects play on the GF1 wavetable automatically |
-
-[docs/SOUND.md](./docs/SOUND.md) is the consolidated sound-configuration guide (per-card recommendations, GUS patch sets and voice counts); [docs/CONFIG.md](./docs/CONFIG.md) documents every variable.
+The MIDI backends play a choice of music sets: an `org2mid` conversion of the original score (the default), the WiiWare arrangement, or a custom drop-in set. Pick everything in `SETUP.EXE`; [docs/SOUND.md](./docs/SOUND.md) is the sound-configuration guide and [docs/CONFIG.md](./docs/CONFIG.md) documents every setting and environment variable.
 
 ---
 
