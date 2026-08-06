@@ -6,6 +6,9 @@ that misbehaves. Written after the 2026-08-06 campaign, where a long-standing
 replay bug cost several bench sessions to find. The point of this document is
 that nobody has to work that out again.
 
+Companion: `docs/QA-CELL-REFERENCE.md` lists the sweeps, every cell, and the
+hardware lanes -- what to run. This file is why it works.
+
 ## Why TAS at all
 
 Comparing framerates across CPUs, sound cards and video cards is only
