@@ -17,6 +17,14 @@ It is the only thing deciding which column a result lands in.
 | 486DX2-66 | 3 | `6..` |
 | 486DX2-50 | 4 | `5..` |
 
+**`PG` / `VB` / `VIDV` / `VIDC` / `VIDM` need nothing beforehand.** They take
+the CPU number, set the log tag themselves and open their own environment.
+Just `C:`, `CD \DOSKUTSU`, then the command.
+
+**Individual cells DO need `QA n` first** (`G11`...`G117`, `C1`). They refuse
+to run untagged rather than risk filing results under the wrong CPU -- you get
+`ERROR: machine not set`. Run `QA n` once, then the cells, then `EXIT`.
+
 **Do NOT run `RECORD`.** `QA.TAS` is the fixed workload for the whole
 campaign. Re-recording makes every column non-comparable.
 
