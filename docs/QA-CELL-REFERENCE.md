@@ -109,58 +109,54 @@ hardware differs, which is what makes the comparison meaningful.
 | A | POD-83 | PicoGUS | S3 ViRGE | `PG 1` | full, 10 cells |
 | B | POD-83 | Vibra16 + DreamBlaster | S3 ViRGE | `VB 1` + hands-on | full |
 | C | 486DX2-66 | PicoGUS | S3 ViRGE | `PG 3` | full -- pairs with A |
-| D | POD-83 | PicoGUS | **Cirrus CL-GD5430** | `C4` + `G51` | **video only, 2 cells** |
-| E | POD-83 | PicoGUS | **ATI Mach64** | `C4` + `G51` | **video only, 2 cells** |
-| F | Am5x86-133 | PicoGUS | S3 ViRGE | `PG 2` | optional, full |
-| G | 486DX2-50 | PicoGUS | S3 ViRGE | `PG 4` | optional, full |
+| D | POD-83 | PicoGUS | S3 ViRGE | `VIDV 1` | video only, 2 cells |
+| E | POD-83 | PicoGUS | **Cirrus CL-GD5430** | `VIDC 1` | video only, 2 cells |
+| F | POD-83 | PicoGUS | **ATI Mach64** | `VIDM 1` | video only, 2 cells |
+| G | Am5x86-133 | PicoGUS | S3 ViRGE | `PG 2` | optional, full |
+| H | 486DX2-50 | PicoGUS | S3 ViRGE | `PG 4` | optional, full |
 
 **A vs C is the point of the campaign**: same card, same modes, same reel, CPU
 the only variable.
 
-### Video lanes (D, E) are deliberately short
+### Video lanes have their own BATs
 
-A video card changes rendering, not audio, so re-running the whole audio
-matrix on each one measures the same sound nine more times for nothing. Two
-cells are enough:
+Each video card gets its own launcher, so nothing collides and the log name
+says which card produced it:
 
-- **`C4`** -- the fps anchor, same OPL3 config every other lane uses, so the
-  number drops straight into the matrix beside lanes A and C.
+| Command | Video card | Logs |
+|---|---|---|
+| `VIDV n` | S3 ViRGE | `<M>C4V`, `<M>51V` |
+| `VIDC n` | Cirrus CL-GD5430 | `<M>C4C`, `<M>51C` |
+| `VIDM n` | ATI Mach64 | `<M>C4M`, `<M>51M` |
+
+`n` is the CPU, same as everywhere else, and `<M>` is its tag -- so `VIDC 1`
+on the POD-83 writes `GC4C.LOG` and `G51C.LOG`. Every combination of CPU and
+video card lands on a distinct filename, well inside 8.3 (`GC4CSDL.LOG` is
+seven characters).
+
+Two cells each, ~10 min:
+
+- **`C4`** -- the fps anchor, the same OPL3 config every other lane uses, so
+  the number sits directly beside lanes A and C in the matrix.
 - **`G51`** -- the render witness: boot, title, backdrop scroll, on AUTO.
 
-About 10 minutes per card including boot, against ~22 for a full sweep. Run
-them by hand rather than through the sweep:
+A video card changes rendering, not audio, so re-running the whole audio
+matrix per card would measure the same sound nine more times for nothing. Each
+BAT puts the PicoGUS into sb mode itself, exactly as the full sweeps do.
 
-    QA 1
-    PGUSSB          (sb mode -- what lanes A/C use for C4)
-    C4
-    G51
-    EXIT
+**Keep everything except the video card identical**, or it is not a
+video-card comparison.
 
-Keep everything except the video card identical to lane A, or the comparison
-is not a video-card comparison.
+**`VIDC` doubles as a bridge.** The project's historical figures (~33 fps
+POD-83, ~19 fps DX2-66) were measured on the Cirrus CL-GD5430 while this
+campaign runs the ViRGE. `VIDC 1` ties the new matrix to those older numbers
+instead of comparing across different video hardware. Lane A measured 32.3 fps
+median on the ViRGE, so they look close -- `VIDC` is what makes that a fact.
 
-**Lane D also serves as a bridge.** The project's historical framerate figures
-(~33 fps POD-83, ~19 fps DX2-66) were measured on the Cirrus CL-GD5430, while
-this campaign runs the S3 ViRGE. Lane D ties the new matrix to those older
-numbers instead of comparing across different video hardware. Lane A already
-measured 32.3 fps median on the ViRGE, so the two look close -- lane D is what
-turns that impression into a fact.
-
-### Video lanes have a log-collision hazard
-
-`C4` on the Cirrus writes `GC4` -- exactly the tag `C4` on the ViRGE already
-wrote, because the tag carries the CPU and nothing else. Running lane D or E
-onto a card that still holds lane A's logs overwrites them.
-
-Procedure: **pull the logs off the CF before starting any lane that reuses a
-CPU number.** That covers D and E (same CPU, different video) and also B,
-which shares the `G..` tags with A. Pull between lanes, or the second run
-silently overwrites the first.
-
-A future kit revision could add a lane letter to the tag (`GV..` / `GC..`);
-8.3 allows it, since the longest tag today is 4 characters and the SDL
-companion log appends 3. Not done yet -- pulling logs between lanes is the
-current answer.
+Running `VIDV` as well as the full `PG` sweep is not redundant: it gives the
+ViRGE a `C4` measured under identical conditions to the Cirrus and Mach64
+runs, which is a cleaner three-way comparison than reading the ViRGE number
+out of a different launcher.
 
 ---
 
