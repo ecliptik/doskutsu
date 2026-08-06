@@ -5,6 +5,35 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.6.4] - 2026-08-05
+
+TAS record/replay fidelity fix. The game binary changes from 1.6.3; nothing
+outside TAS behaves differently.
+
+### Fixed
+
+- **TAS replay ran several times too fast after a stage load, diverging from
+  the recording.** A reel is indexed by logic tick, so faithful replay needs
+  ticks to advance at a true 50 Hz. They did not across `load_stage`: the
+  wall-clock time spent loading landed in the FIXED_TIMESTEP accumulator's
+  next delta, and the catch-up loop then drained that backlog at up to five
+  logic ticks per rendered frame. Game state stayed self-consistent under the
+  burst -- which is why ordinary play never showed it -- but the replay index
+  raced ahead of the take, so the run followed a coherent yet wrong route.
+  Measured on the reference machine: a 16715-tick (334 s) recording replayed
+  to end-of-file in 48 s.
+
+  The freeze/thaw pair that prevents this already existed, and had already
+  been written against a TAS symptom, but it was gated behind an opt-in audio
+  killswitch that is off by default, so TAS runs never received it. The gate
+  now also fires whenever a TAS record or replay stream is open. Ordinary play
+  is untouched: with no TAS stream the gate is unchanged, making this a no-op
+  outside TAS. Killswitch `SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0` restores the
+  previous behaviour. (nxengine-evo patch 0280.)
+
+  Existing `.TAS` recordings remain valid -- the file format is unchanged and
+  reels recorded before this release replay correctly against it.
+
 ## [1.6.3] - 2026-07-22
 
 Audio fixes and a redesigned SETUP sound menu. The game binary changes from

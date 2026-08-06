@@ -1,0 +1,139 @@
+From 7aab968dc113f1b0b2bea62e4825d39d6da1abe3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Wed, 5 Aug 2026 18:35:18 -0700
+Subject: [PATCH] patch 0280 -- keep load_stage wall-clock out of the FT
+ accumulator during TAS
+
+A TAS reel is indexed by tick_id, so replay fidelity depends on logic ticks
+advancing at a true 50 Hz. They do not across a stage load: load_stage's
+wall-clock lands in the FIXED_TIMESTEP accumulator's next now_ns - last_ns
+delta, and the catch-up loop then drains that backlog at up to MAX_CATCHUP
+(5) tick_state() calls per rendered frame. Game state stays self-consistent
+under that burst, which is why normal play tolerates it -- but the replay
+index races ahead of the recording and the run diverges from the take.
+
+Measured on g2k 2026-08-05: a 16715-tick (334 s) operator reel replayed to
+EOF in 48 s, roughly 7x fast, taking a coherent but wrong route.
+
+The freeze/thaw pair that fixes this already exists (0162-v2) and was already
+diagnosed against a TAS symptom -- the v1 iter's PLAY1 "missed Shack" while
+PLAY0 reached all five stages, 486-CLASS-CAMPAIGN-FINDINGS.md sec.17 -- but
+it was gated behind midgap_pump_active(), an opt-in Leg A killswitch that is
+off by default, so TAS runs never got it.
+
+Widen the gate: fire the guard when a TAS record or replay stream is open,
+independently of the pump. Adds TAS::active() for that test. Normal play is
+untouched (no TAS stream, gate unchanged), so this is a no-op outside TAS.
+Killswitch SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0 restores pre-0280 behaviour.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/map.cpp | 45 +++++++++++++++++++++++++++++++++++++++++++--
+ src/tas.cpp |  5 +++++
+ src/tas.h   |  6 ++++++
+ 3 files changed, 54 insertions(+), 2 deletions(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index e399ddea..110ca8c0 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -9,6 +9,7 @@
+ #include "graphics/Renderer.h"
+ #include "nx.h"
+ #include "tsc.h"
++#include "tas.h"
+ using namespace NXE::Graphics;
+ 
+ #include "ResourceManager.h"
+@@ -1250,16 +1251,56 @@ static bool skip_sheet_flush_active()
+ // freeze and thaw are gated on midgap_pump_active(): when the Leg A
+ // killswitch is off (the v2 default), the guard is a no-op pair
+ // (constructor + destructor each read the cached bool and return).
++// DOS-PORT (patch 0280): the guard must ALSO fire for any TAS record or
++// replay run, independently of the Leg A mid-gap pump killswitch.
++//
++// WHY: load_stage's wall-clock lands in the FIXED_TIMESTEP accumulator's
++// next `now_ns - last_ns` delta. accum_ns then carries a backlog that the
++// catch-up loop drains at up to MAX_CATCHUP (5) tick_state() calls per
++// rendered frame -- so logic advances several times faster than 50 Hz until
++// the backlog clears. Game state stays self-consistent, which is why this
++// was survivable for normal play and shipped gated off. It is NOT
++// survivable for TAS: tick_id is the replay index, so the recording's
++// inputs are consumed at the inflated rate and the run diverges from the
++// take. Measured on g2k 2026-08-05: a 16715-tick (334 s) reel replayed to
++// EOF in 48 s. The same mechanism was already diagnosed once, in the v1
++// iter's PLAY1 "missed Shack" symptom (486-CLASS-CAMPAIGN-FINDINGS.md
++// sec.17) -- it was fixed for the pump path only and left gated.
++//
++// Freeze/thaw is a pure accumulator snapshot: it discards ONLY the
++// wall-clock spent inside load_stage, which is exactly the interval the
++// player did not spend playing. Killswitch
++// SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0 restores the pre-0280 behaviour.
++static int g_tas_ft_guard_decided = -1;
++static bool tas_ft_guard_active()
++{
++  if (g_tas_ft_guard_decided < 0)
++  {
++    const char *e            = SDL_GetHint("SDL_HINT_DOSKUTSU_TAS_FT_GUARD");
++    g_tas_ft_guard_decided   = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    LOG_INFO("TAS fixed-timestep guard: {} (patch 0280; load_stage wall-clock "
++             "kept out of the FT accumulator so TAS replay advances at a true "
++             "50 Hz; set SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0 to disable)",
++             g_tas_ft_guard_decided ? "ENABLED (default)" : "DISABLED (killswitch)");
++  }
++  return g_tas_ft_guard_decided == 1;
++}
++
++static bool ft_guard_should_fire()
++{
++  return midgap_pump_active() || (TAS::active() && tas_ft_guard_active());
++}
++
+ struct FtAccumulatorGuard
+ {
+   FtAccumulatorGuard()
+   {
+-    if (midgap_pump_active())
++    if (ft_guard_should_fire())
+       ft_accumulator_freeze();
+   }
+   ~FtAccumulatorGuard()
+   {
+-    if (midgap_pump_active())
++    if (ft_guard_should_fire())
+       ft_accumulator_thaw();
+   }
+ };
+diff --git a/src/tas.cpp b/src/tas.cpp
+index 5676b5e3..3a270485 100644
+--- a/src/tas.cpp
++++ b/src/tas.cpp
+@@ -395,6 +395,11 @@ void apply_input(uint32_t tick_id, bool *inputs, int n_inputs)
+     }
+ }
+ 
++bool active()
++{
++    return _record_fp != nullptr || _replay_fp != nullptr;
++}
++
+ bool should_exit(uint32_t tick_id)
+ {
+     // 1. End-of-replay auto-exit (default ON when REPLAY is active).
+diff --git a/src/tas.h b/src/tas.h
+index c24a7af0..8927bb48 100644
+--- a/src/tas.h
++++ b/src/tas.h
+@@ -65,6 +65,12 @@ void apply_input(uint32_t tick_id, bool *inputs, int n_inputs);
+ //
+ // Returns false when env var is 0 / unset (no auto-exit; runs until
+ // operator presses ESC or QUIT event).
++// True while a TAS record or replay stream is open. Lets other subsystems
++// (notably the FIXED_TIMESTEP accumulator guard in map.cpp) tighten their
++// determinism guarantees only for the runs that actually need them, so a
++// normal play session is completely unaffected.
++bool active();
++
+ bool should_exit(uint32_t tick_id);
+ 
+ // Shutdown hook. Closes any open record/replay file. Called from

@@ -501,6 +501,9 @@ BANNER_REGEX=(
   "present-probe: ARMED hint=1"
   "present-probe.*SDL-side ARMED hint=1"
   "precache-step: "
+  # patch 0280: only emits on a TAS record/replay run (the gate's smoke is
+  # not a TAS run), hence optional -- present here so a TAS smoke witnesses it.
+  "TAS fixed-timestep guard: (ENABLED \(default\)|DISABLED \(killswitch\))"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -635,6 +638,7 @@ BANNER_SEVERITY=(
   "optional"
   "required"
   "required"
+  "optional"
   "optional"
   "optional"
   "optional"
