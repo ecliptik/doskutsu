@@ -25,126 +25,93 @@ If something sounds or looks wrong, note the **cell number** on screen
 
 ---
 
-# PART 1 -- Pentium OverDrive 83
+# PART 1 -- Pentium OverDrive 83   *(CPU never moves)*
 
-Everything here runs with the POD-83 installed. Do not touch the CPU until
-Part 2.
+| | Lane | Hardware change | Run | Time |
+|---|---|---|---|---|
+| 1.1 | A | none (current setup) | `PG 1` | 22 min |
+| 1.2 | D | none | `VIDV 1` | 10 min |
+| 1.3 | E | video -> Cirrus | `VIDC 1` | 10 min |
+| 1.4 | F | video -> Mach64 | `VIDM 1` | 10 min |
+| 1.5 | B | video -> ViRGE, sound -> Vibra | `VB 1` | 13 min |
+| 1.6 | B | none | hands-on cells | ~1.5 h |
+| 1.7 | -- | none | pull logs (*laptop*) | 2 min |
 
-## 1.1  Lane A -- PicoGUS + S3 ViRGE  *(no swap, current setup)*
-
-- [ ] `PG 1`   -- 10 cells, ~22 min, unattended
-- [ ] Check cell 1 (`C3`) runs ~2 min with the character walking. If it ends
-      in seconds, stop and report -- don't spend the other 9 cells.
-
-Logs: `GC3 GC4 G31 G51 G17 G22 G23A G23B G41 GC5`
-
-Listen for: cave-transition screech (`G31`), instruments dropping on the GUS
-voice cells, real wavetable vs thin FM on `G17`.
-
-## 1.2  Lane D -- video baseline, still ViRGE  *(no swap)*
-
-- [ ] `VIDV 1`   -- 2 cells, ~10 min
-
-Logs: `GC4V G51V`. Same hardware as lane A, run through the video launcher so
-the ViRGE number is measured under identical conditions to the other cards.
-
-## 1.3  Lane E -- Cirrus CL-GD5430  *(video swap)*
-
-- [ ] Power off
-- [ ] **S3 ViRGE OUT, Cirrus CL-GD5430 IN.** PicoGUS stays. CPU stays.
-- [ ] Boot, `C:`, `CD \DOSKUTSU`
-- [ ] `VIDC 1`   -- 2 cells, ~10 min
-
-Logs: `GC4C G51C`. This is the bridge to the project's historical numbers,
-which were measured on this card.
-
-## 1.4  Lane F -- ATI Mach64  *(video swap)*
-
-- [ ] Power off
-- [ ] **Cirrus OUT, ATI Mach64 IN.** PicoGUS stays. CPU stays.
-- [ ] Boot, `C:`, `CD \DOSKUTSU`
-- [ ] `VIDM 1`   -- 2 cells, ~10 min
-
-Logs: `GC4M G51M`
-
-## 1.5  Lane B -- Vibra16 + ViRGE  *(video back, sound swap)*
-
-- [ ] Power off
-- [ ] **Mach64 OUT, S3 ViRGE back IN** (lane B must match lane A's video)
-- [ ] **PicoGUS OUT, Vibra16 IN**
-- [ ] **Move the DreamBlaster onto the Vibra's WaveBlaster header**
-- [ ] CPU stays POD-83. Boot, `C:`, `CD \DOSKUTSU`
-
-### Sweep (~13 min)
-
-- [ ] `VB 1`
-
-Logs: `G02 G16 G17 G18 G111 G112`. `G16` is the interesting one -- auto-detect
-should pick the WaveBlaster. If it picks something else, that is a finding.
-
-### Hands-on -- you drive these (~1.5 h)
-
-Splittable: the SETUP cells can be done now and the soaks later. None of them
-block Part 2.
-
-- [ ] `G11`  SETUP Express: detect, accept profile, video bench, SAVE.
-      Should name the Vibra + DreamBlaster + ViRGE.
-- [ ] `G12`  SETUP Sound menu: under **every** Music Type both pickers open
-      and list all devices; bad combos WARN, never block.
-- [ ] `G13`  SETUP audio tests. Organya preview = **real title theme**, full
-      window, no 5-second loop, no arpeggio.
-- [ ] `G14`  SETUP save-and-exit: toast says "Run DOSKUTSU.EXE to play", no
-      auto-launch, clean exit, no stale SETs at the prompt after.
-- [ ] `G15`  SETUP input remap: rebind one key, verify in game, restore.
-- [ ] `G115` Joystick: calibrate, then axis + 4 buttons + invert-Y + keyboard
-      still works alongside. Gamepad? test the D-pad too.
-- [ ] `G116` Save / Load / quit-to-DOS x5. Watch for the quit hang.
-- [ ] `G117` Free play 20-30 min (Mimiga -> First Cave -> Egg Corridor).
-
-## 1.6  Pull the logs before changing CPU
-
-*laptop:*
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh
-
-- [ ] Logs pulled and sent
+Totals: 3 video swaps, 1 sound swap, **0 CPU swaps**. ~2 h 40 m with the
+hands-on block, ~1 h 10 m without.
 
 ---
 
-# PART 2 -- 486DX2-66
+# PART 2 -- 486DX2-66   *(one CPU swap to get here)*
 
-## 2.1  Lane C -- PicoGUS + ViRGE  *(sound back + CPU swap)*
+Lane C pairs with lane A -- same card, same modes, same reel, CPU the only
+variable. That pair is the point of the campaign; everything else in this part
+is a bonus.
 
-Pairs with lane A: same card, same modes, same reel, **CPU the only
-variable**. This pair is the point of the campaign.
+| | Lane | Hardware change | Run | Time |
+|---|---|---|---|---|
+| 2.1 | C | sound -> PicoGUS, **CPU -> DX2-66** | `PG 3` | ~28 min |
+| 2.2 | G | none | `VIDV 3` | 12 min |
+| 2.3 | H | video -> Cirrus | `VIDC 3` | 12 min |
+| 2.4 | I | video -> Mach64 | `VIDM 3` | 12 min |
+| 2.5 | J | video -> ViRGE, sound -> Vibra | `VB 3` | 16 min |
+| 2.6 | -- | none | pull logs (*laptop*) | 2 min |
 
-- [ ] Power off
-- [ ] **Vibra16 OUT, PicoGUS back IN**
-- [ ] **Move the DreamBlaster back onto the PicoGUS header** -- miss this and
-      `G17` silently measures nothing on every remaining CPU. The log must
-      read `audio backend: wb`.
-- [ ] ViRGE stays. **Swap CPU to 486DX2-66** (jumpers)
-- [ ] Boot, `C:`, `CD \DOSKUTSU`
-- [ ] `PG 3`   -- **3, not 1**. Expect it to take longer than lane A.
+Totals: 3 video swaps, 2 sound swaps, 1 CPU swap. ~1 h 25 m.
+**2.1 alone is the required part** (~30 min); 2.2-2.5 are optional depth.
 
-Logs: `6C3 6C4 631 651 617 622 623A 623B 641 6C5`
-
-## 2.2  Video lanes on the 486 *(optional)*
-
-Only if you want a CPU x video-card cross-section. Same swaps as 1.3 / 1.4.
-
-- [ ] `VIDV 3`  (ViRGE, no swap)   -- logs `6C4V 651V`
-- [ ] Cirrus IN, `VIDC 3`          -- logs `6C4C 651C`
-- [ ] Mach64 IN, `VIDM 3`          -- logs `6C4M 651M`
+No hands-on cells here -- the SETUP walk, joystick and soaks are behaviour
+checks, not benchmarks, so they only need doing once (Part 1).
 
 ---
 
-# PART 3 -- extra CPUs *(optional, skip freely)*
+# PART 3 -- Am5x86-133   *(optional)*
 
-PicoGUS + ViRGE, CPU swap only. Same 10 cells each.
+| | Lane | Hardware change | Run | Time |
+|---|---|---|---|---|
+| 3.1 | K | sound -> PicoGUS, **CPU -> Am5x86** | `PG 2` | ~26 min |
+| 3.2 | L | none | `VIDV 2` | 11 min |
+| 3.3 | M | video -> Cirrus | `VIDC 2` | 11 min |
+| 3.4 | N | video -> Mach64 | `VIDM 2` | 11 min |
+| 3.5 | O | video -> ViRGE, sound -> Vibra | `VB 2` | 15 min |
+| 3.6 | -- | none | pull logs (*laptop*) | 2 min |
 
-- [ ] Am5x86-133 -> `PG 2`
-- [ ] 486DX2-50  -> `PG 4`
+Totals: 3 video swaps, 2 sound swaps, 1 CPU swap. ~1 h 15 m.
+**3.1 alone gives the CPU row** (~26 min).
+
+---
+
+# PART 4 -- 486DX2-50   *(optional)*
+
+| | Lane | Hardware change | Run | Time |
+|---|---|---|---|---|
+| 4.1 | P | sound -> PicoGUS, **CPU -> DX2-50** | `PG 4` | ~32 min |
+| 4.2 | Q | none | `VIDV 4` | 13 min |
+| 4.3 | R | video -> Cirrus | `VIDC 4` | 13 min |
+| 4.4 | S | video -> Mach64 | `VIDM 4` | 13 min |
+| 4.5 | T | video -> ViRGE, sound -> Vibra | `VB 4` | 18 min |
+| 4.6 | -- | none | pull logs (*laptop*) | 2 min |
+
+Totals: 3 video swaps, 2 sound swaps, 1 CPU swap. ~1 h 30 m.
+**4.1 alone gives the CPU row** (~32 min).
+
+The DX2-50 is the slowest chip in the set, so its cells take the longest: the
+reel is a fixed 102 s of *game time*, and a machine that cannot render at
+50 fps replays it over a longer wall-clock. Longer is expected, not a fault.
+
+---
+
+# How much of this to actually run
+
+| Scope | Parts | Time | What you get |
+|---|---|---|---|
+| **Minimum** | 1.1-1.7, 2.1 | ~3 h 10 m | The A/C anchor pair, all audio backends, the full SETUP + hardware behaviour walk. This is the campaign as designed. |
+| **+ video** | add 1.2-1.4, 2.2-2.4 | +~1 h | Three video cards on two CPUs, plus the Cirrus bridge to the historical figures. |
+| **+ CPUs** | add Parts 3-4 | +~1 h (rows only) | Four-CPU framerate matrix. |
+| **Complete** | everything | ~6 h | Every lane on every CPU. |
+
+Split across sessions freely -- each part ends with a log pull, and nothing in
+a later part depends on an earlier one beyond the reel staying untouched.
 
 ---
 
@@ -186,12 +153,14 @@ Cell number and what you saw or heard. Terse is fine.
 
 ---
 
-# Swap count
+# Swap count, whole campaign
 
-Ordered this way, the CPU moves twice and the cards do the rest:
-
-| Part | Video swaps | Sound swaps | CPU swaps |
+| Part | Video | Sound | CPU |
 |---|---|---|---|
-| 1 (POD-83, 5 lanes) | 3 | 1 | 0 |
-| 2 (DX2-66) | 0 | 1 | 1 |
-| 3 (optional CPUs) | 0 | 0 | 1 each |
+| 1  POD-83 (5 lanes + hands-on) | 3 | 1 | 0 |
+| 2  DX2-66 | 3 | 2 | 1 |
+| 3  Am5x86 *(optional)* | 3 | 2 | 1 |
+| 4  DX2-50 *(optional)* | 3 | 2 | 1 |
+
+Running only the required lanes (1.1-1.7 and 2.1) costs **0 video swaps,
+2 sound swaps and 1 CPU swap** for the entire campaign.
