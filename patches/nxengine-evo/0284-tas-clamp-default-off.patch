@@ -1,0 +1,60 @@
+From 34f6a8db724e39a2a91bbcd7743b91623f6a4fb0 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Thu, 6 Aug 2026 12:19:51 -0700
+Subject: [PATCH] patch 0284 -- default the TAS accumulator clamp OFF
+ (benchmark validity)
+
+0281 added the clamp on the theory that tick inflation caused replay
+truncation. 0283 proved otherwise: the truncation was replay dropping held
+inputs after one tick. With 0283 in place, an A/B of clamped vs unclamped
+replay produces identical traces -- same route, same positions, the only
+difference being one map-change sample landing a single tick apart at a
+stage-load boundary.
+
+So the clamp buys no fidelity, and it actively costs benchmark validity.
+Capping logic at one tick per rendered frame makes a replay do LESS logic
+work per frame than real gameplay: at ~40 fps render, normal play runs 50
+logic ticks/s (about 1.25 per frame) while a clamped replay runs 40. Fewer
+ticks per frame renders faster, so measured fps comes out optimistically
+high and does not represent real play. The operator felt this directly --
+replay "like playing through water", 69 s against a 57 s recording.
+
+These replays exist to benchmark hardware, so the engine must behave during
+replay exactly as it does in normal play. Default the clamp OFF; keep it as
+an opt-in (SDL_HINT_DOSKUTSU_TAS_FT_GUARD=1) in case some future reel needs
+it. 0280's load_stage guard is unaffected and stays on.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index b8cb1300..44ab85c1 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -239,11 +239,22 @@ static bool tas_ft_clamp_active()
+   if (g_tas_ft_clamp_decided < 0)
+   {
+     const char *e          = SDL_GetHint("SDL_HINT_DOSKUTSU_TAS_FT_GUARD");
+-    g_tas_ft_clamp_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    // patch 0284: DEFAULT OFF. 0281 added this clamp believing tick inflation
++    // caused the replay truncation; 0283 later proved the truncation was the
++    // input-hold bug, and an A/B with 0283 in place shows clamped and
++    // unclamped replays produce identical traces (one map-change sample lands
++    // a single tick apart; route and every position match). So the clamp buys
++    // no fidelity -- and it COSTS benchmark validity: capping logic at one
++    // tick per rendered frame means a replay does less logic work per frame
++    // than real gameplay, which inflates measured fps. Since these replays
++    // exist to benchmark hardware, the engine must behave exactly as it does
++    // in normal play. Opt in with SDL_HINT_DOSKUTSU_TAS_FT_GUARD=1 if a reel
++    // ever needs it.
++    g_tas_ft_clamp_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+     LOG_INFO("TAS accumulator clamp: {} (patch 0281; caps the FT accumulator "
+              "delta at one tick during TAS so a stalled frame cannot race the "
+              "replay index; set SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0 to disable)",
+-             g_tas_ft_clamp_decided ? "ENABLED (default)" : "DISABLED (killswitch)");
++             g_tas_ft_clamp_decided ? "ENABLED (opt-in)" : "DISABLED (default)");
+   }
+   return g_tas_ft_clamp_decided == 1;
+ }

@@ -1,0 +1,106 @@
+From 98fdbb12902e19aab45514ecdd2fee0aa4791008 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Wed, 5 Aug 2026 19:04:01 -0700
+Subject: [PATCH] patch 0281 -- clamp the FT accumulator delta to one tick
+ during TAS
+
+0280 kept load_stage's wall-clock out of the FIXED_TIMESTEP accumulator.
+That was one site, not the class. Any blocking work inside the loop -- a
+music or OPL3-bank load, a MIDI parse, a PCM cache read, an audio re-init --
+lands in the same now_ns - last_ns delta, and the catch-up loop drains the
+resulting backlog at up to MAX_CATCHUP ticks per rendered frame. The replay
+index then races through the reel and reaches EOF early, so the run ends
+mid-route.
+
+Real-HW evidence (g2k, post-0280): one 4605-tick reel across three cells
+differing ONLY in audio backend produced routes 72/20/11/20, 72/20 and 72 --
+prefixes of each other, not divergent paths -- ending at dur=80s, 30s and
+14s against a faithful ~92 s. The reel is fine and the route is right; the
+runs are TRUNCATED, and how badly scales with how much that backend stalls
+the loop.
+
+Clamp the delta at TICK_NS while a TAS stream is open. No stall of any
+origin can then inflate the tick stream, so there is no remaining site to
+chase. A frame that genuinely overran now advances logic by one tick instead
+of catching up, i.e. replay runs at render rate on a machine that cannot
+hold 50 Hz -- which is what a TAS wants: state is a pure function of tick
+index and input, so a slower wall-clock replays identically, just longer.
+Recording is clamped identically, so a take stays faithful across machines.
+
+Normal play is untouched (no TAS stream -> unclamped, bit-for-bit the
+pre-0281 path). Killswitch SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0, shared with
+0280 so one switch disables the whole TAS-determinism behaviour.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 50 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index b18ad19e..36475eaf 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -183,6 +183,25 @@ void update_fps()
+ // run_tick() line is byte-unchanged.
+ static int g_tick_count = 0;
+ 
++// patch 0281: killswitch for the TAS accumulator-delta clamp above. Shares
++// SDL_HINT_DOSKUTSU_TAS_FT_GUARD with patch 0280's load_stage guard -- both
++// exist for the same reason (keep wall-clock out of the TAS tick stream), so
++// one switch turns the whole TAS-determinism behaviour off together.
++static int g_tas_ft_clamp_decided = -1;
++static bool tas_ft_clamp_active()
++{
++  if (g_tas_ft_clamp_decided < 0)
++  {
++    const char *e          = SDL_GetHint("SDL_HINT_DOSKUTSU_TAS_FT_GUARD");
++    g_tas_ft_clamp_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    LOG_INFO("TAS accumulator clamp: {} (patch 0281; caps the FT accumulator "
++             "delta at one tick during TAS so a stalled frame cannot race the "
++             "replay index; set SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0 to disable)",
++             g_tas_ft_clamp_decided ? "ENABLED (default)" : "DISABLED (killswitch)");
++  }
++  return g_tas_ft_clamp_decided == 1;
++}
++
+ // patch 0222: forward-decl of the depth-regulated audio pump (defined below at
+ // file scope alongside the TICKPUMP() macro). run_tick() sits ABOVE that
+ // definition but needs to feed the organya prerender ring at the title/menu
+@@ -761,7 +780,36 @@ static void run_tick_fixed(void)
+   }
+   else
+   {
+-    accum_ns += (now_ns - last_ns);
++    // DOS-PORT (patch 0281): under TAS, CLAMP the wall-clock delta fed to the
++    // accumulator to a single tick.
++    //
++    // WHY: any blocking work inside the loop -- a music/bank/MIDI load, a PCM
++    // cache read, an audio re-init -- lands in this delta. accum_ns then
++    // carries a backlog the catch-up loop drains at up to MAX_CATCHUP ticks
++    // per rendered frame, so the replay index races through the reel and hits
++    // EOF early. The run then ends mid-route: the reel is not corrupted and
++    // the route is not wrong, it is TRUNCATED. Measured on g2k with one
++    // 4605-tick reel across three cells that differ ONLY in audio backend --
++    // routes 72/20/11/20, 72/20 and 72, i.e. prefixes of each other, ending
++    // at dur=80s, 30s and 14s against a faithful ~92 s.
++    //
++    // Patch 0280 closed the load_stage site specifically. This closes the
++    // class: with the delta clamped, NO stall of any origin can inflate the
++    // tick stream, so there is no site left to chase. Cost is that a frame
++    // which genuinely overran advances logic by one tick instead of catching
++    // up, i.e. TAS replay runs at render rate when the machine cannot hold
++    // 50 Hz. That is exactly what a TAS wants: game state is a pure function
++    // of tick index and input, so a slower wall-clock replays IDENTICALLY --
++    // it just takes longer. Recording is clamped the same way, so a take made
++    // on one machine stays faithful on another.
++    //
++    // Normal play is untouched: outside TAS the delta is unclamped and the
++    // catch-up behaviour is bit-for-bit the pre-0281 path.
++    // Killswitch SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0 (shared with 0280).
++    Uint64 delta_ns = now_ns - last_ns;
++    if (TAS::active() && tas_ft_clamp_active() && delta_ns > TICK_NS)
++      delta_ns = TICK_NS;
++    accum_ns += delta_ns;
+     last_ns = now_ns;
+ 
+     int n = 0;

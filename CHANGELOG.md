@@ -5,6 +5,57 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.6.5] - 2026-08-06
+
+TAS record/replay correctness. The game binary changes from 1.6.4; nothing
+outside TAS behaves differently.
+
+### Fixed
+
+- **Replayed input was applied for a single tick instead of being held.** The
+  `.TAS` format coalesces -- an event is written only when the input mask
+  *changes* -- so a key held from tick 158 to 183 is two events, not 25.
+  Replay applied a mask only on ticks carrying an event, leaving the input
+  array as the live keyboard left it (empty) for every tick in between. Every
+  recorded press therefore survived exactly one tick out of however many it
+  was really held: sustained movement never happened, the player twitched in
+  place, and the run diverged immediately into a coherent but wrong route.
+
+  This is in the original TAS implementation, so playback has been wrong for
+  every recording that ever held a key longer than one tick. It is also the
+  cause of the long-standing "a clean replay is not proof of sync" behaviour
+  noted in the project's own findings -- described there, never diagnosed.
+  Found by diffing a record trace against its replay trace. (Patch 0283.)
+
+- **Stage-load wall-clock inflated the fixed-timestep tick stream during TAS.**
+  `load_stage` time landed in the accumulator's next delta and the catch-up
+  loop drained the backlog at up to five logic ticks per rendered frame,
+  racing the replay index. The freeze/thaw guard that prevents this existed
+  but was gated behind an opt-in audio killswitch that is off by default. It
+  now also fires for any open TAS stream. Ordinary play is unaffected.
+  (Patch 0280.)
+
+### Added
+
+- `SDL_HINT_DOSKUTSU_TAS_TRACE=1` emits a `[tas-trace]` tick-stream trace
+  (tick, mode, map, player position, input mask) from both tick paths.
+  Diffing a record trace against a replay trace localises any future
+  divergence to an exact tick. Default off. (Patch 0282.)
+
+### Changed
+
+- TAS replay runs at the engine's normal fixed-timestep rate. An interim
+  clamp that capped logic at one tick per rendered frame is now off by
+  default: it bought no fidelity once the input-hold bug was fixed, and it
+  made replays do less logic work per frame than real gameplay, which
+  inflated measured framerates. Since these replays exist to benchmark
+  hardware, playback must behave exactly as normal play does. Opt in with
+  `SDL_HINT_DOSKUTSU_TAS_FT_GUARD=1`. (Patches 0281, 0284.)
+
+  Recordings made before this release replay correctly; the file format is
+  unchanged. A reel captured while the interim clamp was active recorded a
+  slowed-down session, so re-recording those is worthwhile.
+
 ## [1.6.4] - 2026-08-05
 
 TAS record/replay fidelity fix. The game binary changes from 1.6.3; nothing

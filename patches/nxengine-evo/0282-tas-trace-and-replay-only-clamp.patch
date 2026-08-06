@@ -1,0 +1,175 @@
+From f9194ed8a332b723b2e66f41fa5ba8307234ef53 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Wed, 5 Aug 2026 19:46:54 -0700
+Subject: [PATCH] patch 0282 -- clamp replay only, and add a [tas-trace]
+ tick-stream diagnostic
+
+Two changes, both aimed at the record/replay round trip still not reproducing
+after 0280+0281.
+
+1. The 0281 clamp now keys off TAS::replaying() instead of TAS::active(), so
+   it applies to playback only. Clamping during RECORD tied logic to render
+   rate, so on hardware that cannot hold 50 Hz the game ran in visible slow
+   motion while the operator was trying to play it -- and the resulting reel
+   captured that slow-motion session, which is not what anyone wanted to
+   record. Recording is back to normal speed.
+
+2. New default-OFF diagnostic, SDL_HINT_DOSKUTSU_TAS_TRACE=1: emits
+   [tas-trace] t=<tick> mode= map= px= py= mask= every 25 ticks and
+   unconditionally on a map change, from BOTH the 1:1 path and the fixed
+   path (including the catch-up loop) so a session crossing between them
+   yields one continuous stream. Player position is the witness that
+   actually shows divergence.
+
+   Diffing a record-run trace against its replay-run trace localises the
+   fault by construction: identical ticks carrying different state means
+   something outside the tick stream drives game state; identical state at
+   different ticks means the replay index is misaligned. Two rounds of
+   patching from log inference got this partly right and partly wrong, so
+   measure it instead.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 56 +++++++++++++++++++++++++++++++++++++++++++++++++++-
+ src/tas.cpp  |  5 +++++
+ src/tas.h    |  5 +++++
+ 3 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 36475eaf..b8cb1300 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -20,6 +20,7 @@
+ #include "settings.h"
+ #include "statusbar.h"
+ #include "tas.h"
++#include "player.h"
+ #include "trig.h"
+ #include "tsc.h"
+ #include "doskutsu_config.h"  // patch 0216: DOSKUTSU.CFG -> env setenv shim (shared with SETUP.EXE)
+@@ -187,6 +188,51 @@ static int g_tick_count = 0;
+ // SDL_HINT_DOSKUTSU_TAS_FT_GUARD with patch 0280's load_stage guard -- both
+ // exist for the same reason (keep wall-clock out of the TAS tick stream), so
+ // one switch turns the whole TAS-determinism behaviour off together.
++// patch 0282 (DIAGNOSTIC, default OFF): per-tick state trace for pinning down
++// where a record stream and its replay part company. Emits the tick index, the
++// game mode, the current map and the player position -- position being the
++// witness that actually shows divergence. Sampled every TAS_TRACE_EVERY ticks
++// plus unconditionally on a map change, so the volume stays sane on a 486
++// writing to CF. Diff a record-run trace against its replay-run trace: the
++// FIRST differing tick localises the fault. Equal ticks with differing state
++// means something outside the tick stream drives game state; differing ticks
++// for the same state means the replay index is misaligned.
++static const int TAS_TRACE_EVERY = 25;   // 25 ticks = 0.5 s at 50 Hz
++static int g_tas_trace_decided = -1;
++static bool tas_trace_active()
++{
++  if (g_tas_trace_decided < 0)
++  {
++    const char *e        = SDL_GetHint("SDL_HINT_DOSKUTSU_TAS_TRACE");
++    g_tas_trace_decided  = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
++    if (g_tas_trace_decided)
++      LOG_INFO("TAS trace: ENABLED (patch 0282 diagnostic; [tas-trace] lines "
++               "every {} ticks + on every map change)", TAS_TRACE_EVERY);
++  }
++  return g_tas_trace_decided == 1;
++}
++
++// Emitted from both the 1:1 and fixed paths so a session that crosses between
++// them produces ONE continuous stream, which is the whole point.
++static void tas_trace_emit(int tick, const bool *inputs, int n_inputs)
++{
++  if (!tas_trace_active())
++    return;
++  static int last_map = -12345;
++  const bool map_changed = (game.curmap != last_map);
++  if (!map_changed && (tick % TAS_TRACE_EVERY) != 0)
++    return;
++  last_map = game.curmap;
++  uint32_t mask = 0;
++  for (int i = 0; i < n_inputs && i < 32; i++)
++    if (inputs[i])
++      mask |= (1u << i);
++  LOG_INFO("[tas-trace] t={} mode={} map={} px={} py={} mask={:#x}{}",
++           tick, (int)game.mode, game.curmap,
++           player ? player->x : -1, player ? player->y : -1,
++           mask, map_changed ? " MAPCHG" : "");
++}
++
+ static int g_tas_ft_clamp_decided = -1;
+ static bool tas_ft_clamp_active()
+ {
+@@ -282,6 +328,7 @@ static inline void run_tick()
+   if (can_tick)
+   {
+     game.tick();
++    tas_trace_emit(tick_count, inputs, INPUT_COUNT);
+ 
+     if (freezeframe)
+     {
+@@ -775,6 +822,7 @@ static void run_tick_fixed(void)
+     input_poll();
+     TAS::apply_input((uint32_t)++g_tick_count, inputs, INPUT_COUNT);
+     game.tick_state();
++    tas_trace_emit(g_tick_count, inputs, INPUT_COUNT);
+     accum_ns = 0;
+     last_ns  = now_ns;
+   }
+@@ -803,11 +851,16 @@ static void run_tick_fixed(void)
+     // it just takes longer. Recording is clamped the same way, so a take made
+     // on one machine stays faithful on another.
+     //
++    // patch 0282: REPLAY ONLY. Clamping during RECORD tied logic to render
++    // rate, so on hardware that cannot hold 50 Hz the game ran in visible
++    // slow motion while the operator was trying to play it -- and the reel
++    // then captured that slow-motion session. Recording now runs at the
++    // normal rate; only playback is clamped.
+     // Normal play is untouched: outside TAS the delta is unclamped and the
+     // catch-up behaviour is bit-for-bit the pre-0281 path.
+     // Killswitch SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0 (shared with 0280).
+     Uint64 delta_ns = now_ns - last_ns;
+-    if (TAS::active() && tas_ft_clamp_active() && delta_ns > TICK_NS)
++    if (TAS::replaying() && tas_ft_clamp_active() && delta_ns > TICK_NS)
+       delta_ns = TICK_NS;
+     accum_ns += delta_ns;
+     last_ns = now_ns;
+@@ -835,6 +888,7 @@ static void run_tick_fixed(void)
+       input_poll();
+       TAS::apply_input((uint32_t)++g_tick_count, inputs, INPUT_COUNT);
+       game.tick_state();
++      tas_trace_emit(g_tick_count, inputs, INPUT_COUNT);
+       accum_ns -= TICK_NS;
+       ++n;
+     }
+diff --git a/src/tas.cpp b/src/tas.cpp
+index 3a270485..b9c5766b 100644
+--- a/src/tas.cpp
++++ b/src/tas.cpp
+@@ -395,6 +395,11 @@ void apply_input(uint32_t tick_id, bool *inputs, int n_inputs)
+     }
+ }
+ 
++bool replaying()
++{
++    return _replay_fp != nullptr;
++}
++
+ bool active()
+ {
+     return _record_fp != nullptr || _replay_fp != nullptr;
+diff --git a/src/tas.h b/src/tas.h
+index 8927bb48..792dd3db 100644
+--- a/src/tas.h
++++ b/src/tas.h
+@@ -71,6 +71,11 @@ void apply_input(uint32_t tick_id, bool *inputs, int n_inputs);
+ // normal play session is completely unaffected.
+ bool active();
+ 
++// True only while a REPLAY stream is open (record does not count). The
++// FIXED_TIMESTEP clamp keys off this: clamping during RECORD tied logic to
++// render rate and made the game unplayably slow to record on.
++bool replaying();
++
+ bool should_exit(uint32_t tick_id);
+ 
+ // Shutdown hook. Closes any open record/replay file. Called from

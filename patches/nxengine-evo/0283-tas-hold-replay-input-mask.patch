@@ -1,0 +1,92 @@
+From 68f35c4887954330184b603b1629a2b2788a80bb Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Wed, 5 Aug 2026 20:45:01 -0700
+Subject: [PATCH] patch 0283 -- hold the replayed input mask between events
+ (THE TAS desync)
+
+The .TAS format coalesces: an event is written only when the input mask
+CHANGES. A key held from tick 158 to tick 183 is therefore two events, not
+25. Replay applied a mask ONLY on ticks carrying an event and returned,
+leaving inputs[] holding whatever input_poll() had just written -- nothing,
+since no human is at the keyboard during playback. Every recorded press
+survived exactly one tick out of however many it was really held.
+
+Sustained movement therefore never happened: the player twitched for a
+single tick per event and stayed put, which is the "jumps around in the same
+place" the operator reported, and the long-standing "clean replay is not
+sync proof, it desyncs into a coherent but WRONG scene" note in our own
+findings. That note described this bug without identifying it.
+
+Caught by diffing a record trace against its replay trace (patch 0282
+instrumentation) from one 90-second round trip on g2k:
+
+  record: t=175 mode=1 map=20 px=71845 py=73728 mask=0x2
+  replay: t=175 mode=1 map=20 px=66065 py=73728 mask=0x0
+
+with the reel itself carrying `t=158 mask=0x2` and `t=183 mask=0x0` -- so
+RIGHT was unambiguously held across tick 175 and replay had already dropped
+it. px frozen at the pre-input value is the proof.
+
+Fix: track the held mask, update it as events are consumed, and apply it on
+EVERY tick. This is in 0135's original replay logic, so TAS playback has
+been wrong for every reel that ever held a key longer than one tick -- i.e.
+all of them. 0280/0281 (accumulator inflation) were real and worth keeping,
+but they were not this.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/tas.cpp | 26 +++++++++++++++++++++-----
+ 1 file changed, 21 insertions(+), 5 deletions(-)
+
+diff --git a/src/tas.cpp b/src/tas.cpp
+index b9c5766b..31fff0c4 100644
+--- a/src/tas.cpp
++++ b/src/tas.cpp
+@@ -56,6 +56,19 @@ static const uint32_t TAS_STREAM_MODE_N_EVENTS = 0xFFFFFFFFu;
+ static FILE *_record_fp = nullptr;
+ static FILE *_replay_fp = nullptr;
+ 
++// patch 0283: the input mask currently HELD during replay.
++//
++// The file format coalesces -- an event is written only when the mask
++// CHANGES -- so a key held from tick 158 to tick 183 is two events, not 25.
++// Replay must therefore apply the last-seen mask on EVERY tick, not only on
++// ticks that carry an event. Applying it only on event ticks left inputs[]
++// holding whatever input_poll() had just written (nothing, since no human is
++// at the keyboard), so every recorded press survived exactly ONE tick out of
++// however many it was really held. Sustained movement never happened and the
++// run diverged immediately -- the long-standing "replays into a coherent but
++// wrong scene" symptom.
++static uint32_t _replay_held_mask = 0;
++
+ // Last-recorded input mask. Used to coalesce: we only write an event
+ // when the mask CHANGES, not on every tick. Initialized to a sentinel
+ // that can't equal any real mask so the first tick's mask is always
+@@ -367,12 +380,12 @@ void apply_input(uint32_t tick_id, bool *inputs, int n_inputs)
+     if (!_record_fp && !_replay_fp) return;
+ 
+     if (_replay_fp) {
+-        // Apply every event whose tick is <= tick_id. The <= (not ==)
+-        // tolerates the tick-skipping case per sec. E.3 of the design
+-        // (cooperative-scheduler starvation can skip a tick; we fire
+-        // the event late rather than abort).
++        // Consume every event whose tick is <= tick_id, updating the HELD
++        // mask. The <= (not ==) tolerates the tick-skipping case per sec. E.3
++        // of the design (cooperative-scheduler starvation can skip a tick; we
++        // fire the event late rather than abort).
+         while (_replay_pending_valid && _replay_pending_tick <= tick_id) {
+-            _inputs_from_mask(_replay_pending_mask, inputs, n_inputs);
++            _replay_held_mask = _replay_pending_mask;
+             if (_replay_pending_tick < tick_id) {
+                 // Late-fire diagnostic. Useful for catching divergence
+                 // in real-HW iters; intentionally LOG_DEBUG (silent in
+@@ -384,6 +397,9 @@ void apply_input(uint32_t tick_id, bool *inputs, int n_inputs)
+             }
+             _prefetch_next_event();
+         }
++        // patch 0283: apply the held mask on EVERY tick, event or not. This
++        // is what makes a held key stay held for its recorded duration.
++        _inputs_from_mask(_replay_held_mask, inputs, n_inputs);
+         return;
+     }
+ 
