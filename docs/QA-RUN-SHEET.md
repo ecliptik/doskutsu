@@ -42,11 +42,11 @@ If something sounds or looks wrong, note the **cell number** on screen
 | 1.3 | E | video -> Cirrus | `VIDC 1` | 10 min |
 | 1.4 | F | video -> Mach64 | `VIDM 1` | 10 min |
 | 1.5 | B | video -> ViRGE, sound -> Vibra | `VB 1` | 13 min |
-| 1.6 | B | none | hands-on cells | ~1.5 h |
-| 1.7 | -- | none | pull logs (*laptop*) | 2 min |
+| 1.6 | -- | none | pull logs (*laptop*) | 2 min |
 
-Totals: 3 video swaps, 1 sound swap, **0 CPU swaps**. ~2 h 40 m with the
-hands-on block, ~1 h 10 m without.
+Totals: 3 video swaps, 1 sound swap, **0 CPU swaps**. ~1 h 10 m.
+
+The hands-on SETUP walk is **deferred** -- see the end of this sheet.
 
 ---
 
@@ -68,8 +68,8 @@ is a bonus.
 Totals: 3 video swaps, 2 sound swaps, 1 CPU swap. ~1 h 25 m.
 **2.1 alone is the required part** (~30 min); 2.2-2.5 are optional depth.
 
-No hands-on cells here -- the SETUP walk, joystick and soaks are behaviour
-checks, not benchmarks, so they only need doing once (Part 1).
+No hands-on cells in any part -- the SETUP walk, joystick and soaks are
+behaviour checks rather than benchmarks. Deferred; see the end of this sheet.
 
 ---
 
@@ -113,10 +113,10 @@ reel is a fixed 102 s of *game time*, and a machine that cannot render at
 
 | Scope | Parts | Time | What you get |
 |---|---|---|---|
-| **Minimum** | 1.1-1.7, 2.1 | ~3 h 10 m | The A/C anchor pair, all audio backends, the full SETUP + hardware behaviour walk. This is the campaign as designed. |
+| **Minimum** | 1.1-1.6, 2.1 | ~1 h 40 m | The A/C anchor pair and every audio backend on two CPUs -- the benchmark matrix. |
 | **+ video** | add 1.2-1.4, 2.2-2.4 | +~1 h | Three video cards on two CPUs, plus the Cirrus bridge to the historical figures. |
 | **+ CPUs** | add Parts 3-4 | +~1 h (rows only) | Four-CPU framerate matrix. |
-| **Complete** | everything | ~6 h | Every lane on every CPU. |
+| **Complete** | everything | ~4 h 30 m | Every lane on every CPU. Add ~1.5 h if the deferred SETUP walk is picked up. |
 
 Split across sessions freely -- each part ends with a log pull, and nothing in
 a later part depends on an earlier one beyond the reel staying untouched.
@@ -161,14 +161,46 @@ Cell number and what you saw or heard. Terse is fine.
 
 ---
 
+---
+
+# DEFERRED -- hands-on SETUP walk *(not in the current run)*
+
+Cut from the flow. Nothing in Parts 1-4 depends on these, and they can be
+picked up in any later session: they need only the Vibra16 + DreamBlaster in
+the box, on any CPU.
+
+The consequence, stated plainly: these cells are the real-hardware
+confirmation of the v1.6.3 SETUP work -- the `#19` Organya preview, `#20`
+save-and-exit, `#21` sound-menu pickers -- which is what this QA campaign was
+originally created to verify. The benchmark matrix does not cover them, so
+until they run, those v1.6.3 changes stay DOSBox-validated only.
+
+Run `QA 1` once, then the cells inside that shell, then `EXIT`:
+
+    QA 1
+
+- [ ] `G11`  SETUP Express: detect, accept profile, video bench, SAVE.
+      Should name the Vibra + DreamBlaster + ViRGE.
+- [ ] `G12`  SETUP Sound menu: under **every** Music Type both pickers open
+      and list all devices; bad combos WARN, never block.
+- [ ] `G13`  SETUP audio tests. Organya preview = **real title theme**, full
+      window, no 5-second loop, no arpeggio.
+- [ ] `G14`  SETUP save-and-exit: toast says "Run DOSKUTSU.EXE to play", no
+      auto-launch, clean exit, no stale SETs at the prompt after.
+- [ ] `G15`  SETUP input remap: rebind one key, verify in game, restore.
+- [ ] `G115` Joystick: calibrate, then axis + 4 buttons + invert-Y + keyboard
+      still works alongside. Gamepad? test the D-pad too.
+- [ ] `G116` Save / Load / quit-to-DOS x5. Watch for the quit hang.
+- [ ] `G117` Free play 20-30 min (Mimiga -> First Cave -> Egg Corridor).
+
 # Swap count, whole campaign
 
 | Part | Video | Sound | CPU |
 |---|---|---|---|
-| 1  POD-83 (5 lanes + hands-on) | 3 | 1 | 0 |
+| 1  POD-83 (5 lanes) | 3 | 1 | 0 |
 | 2  DX2-66 | 3 | 2 | 1 |
 | 3  Am5x86 *(optional)* | 3 | 2 | 1 |
 | 4  DX2-50 *(optional)* | 3 | 2 | 1 |
 
-Running only the required lanes (1.1-1.7 and 2.1) costs **0 video swaps,
+Running only the required lanes (1.1-1.6 and 2.1) costs **0 video swaps,
 2 sound swaps and 1 CPU swap** for the entire campaign.
