@@ -1,0 +1,82 @@
+From c3f3b6b52f8cc8594d0e20fe919e4076ae69641f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Thu, 6 Aug 2026 13:37:52 -0700
+Subject: [PATCH] patch 0285 -- keep instrument-load wall-clock out of the FT
+ accumulator
+
+Patch 0280 excluded load_stage's wall-clock from the FIXED_TIMESTEP
+accumulator during TAS. on_song_start() is the other main-loop blocking load
+and was not covered: the GUS backend uploads .pat instruments to GF1 DRAM
+there (file I/O + FPU). That time lands in the accumulator's next delta, and
+the catch-up loop then runs up to MAX_CATCHUP extra tick_state() calls that
+represent LOADING rather than gameplay.
+
+Backlog beyond 5 ticks is already discarded, so each stall costs at most 5
+spurious ticks -- but the campaign route triggers ~10 song starts, and ~50
+spurious ticks is enough to consume the tail of a reel early.
+
+Measured on g2k (v1.6.5 b421e5a52fea, POD-83 + PicoGUS, 9 cells): 4 of 9
+clipped the reel's last two stage transitions, running 72/20/11/17/11/15/11/
+19/11 instead of the full 72/20/11/17/11/15/11/19/11/14/11. Decisively, the
+SAME configuration went either way run to run -- GC4 truncated while G31
+completed, and OPL3.CFG and PGSB.CFG are byte-identical -- so this is
+timing-dependent, not config-dependent. Cells that measured 9 stages of work
+are not comparable with cells that measured 11.
+
+Freeze/thaw excludes only the load interval, so unlike a per-frame clamp
+(0281, defaulted off in 0284) it does NOT alter the logic-to-render ratio
+during gameplay. Framerates stay representative, which is the entire point
+of these replays.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiScheduler.cpp | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/sound/MidiScheduler.cpp b/src/sound/MidiScheduler.cpp
+index 3b04314d..37e5ffe3 100644
+--- a/src/sound/MidiScheduler.cpp
++++ b/src/sound/MidiScheduler.cpp
+@@ -2,6 +2,11 @@
+  * implementation: SMF parser + tick-driven scheduler. See
+  * MidiScheduler.h for design + API contract. */
+ 
++#include "../tas.h"
++
++// patch 0285: FIXED_TIMESTEP accumulator freeze/thaw (bodies in main.cpp).
++extern "C" void ft_accumulator_freeze(void);
++extern "C" void ft_accumulator_thaw(void);
+ #include "MidiScheduler.h"
+ 
+ #include "../Utils/Logger.h"
+@@ -361,7 +366,30 @@ void MidiScheduler::start()
+   }
+   if (_backend)
+   {
++    // DOS-PORT (patch 0285): keep instrument-load wall-clock out of the
++    // FIXED_TIMESTEP accumulator during TAS, the same way patch 0280 does for
++    // load_stage.
++    //
++    // on_song_start() is main-loop context doing file I/O + FPU work -- the
++    // GUS backend uploads .pat instruments to GF1 DRAM here, which is slow.
++    // That time lands in the accumulator's next delta and the catch-up loop
++    // then runs up to MAX_CATCHUP extra tick_state() calls that represent
++    // LOADING, not gameplay. Backlog past 5 ticks is discarded, so each stall
++    // costs at most 5 spurious ticks -- but this route triggers ~10 song
++    // starts, and ~50 spurious ticks is enough to consume the tail of a reel
++    // early. Measured (v1.6.5, POD-83 + PicoGUS): 4 of 9 cells clipped the
++    // last two stage transitions, and the SAME config went either way run to
++    // run (GC4 truncated, G31 completed, byte-identical CFGs).
++    //
++    // Freeze/thaw excludes only the load interval, so unlike a per-frame
++    // clamp it does NOT change the logic-to-render ratio during actual
++    // gameplay -- framerates stay honest, which is the point of these runs.
++    const bool ft_guard = TAS::active();
++    if (ft_guard)
++      ft_accumulator_freeze();
+     _backend->on_song_start();
++    if (ft_guard)
++      ft_accumulator_thaw();
+   }
+   // Arm playback now that the backend has finished any per-song setup (GUS
+   // .pat uploads). cli/sti so the ISR sees the flip atomically vs the state
