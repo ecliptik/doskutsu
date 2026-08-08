@@ -35,7 +35,7 @@ The Sound menu asks two questions on adjacent rows.
 
 | Music type | What it means |
 |---|---|
-| **Organya** | Cave Story's original built-in software synth. **No sound card needed** -- it renders the music on the CPU and plays it through the Sound Blaster DAC. The exact 2004 sound. |
+| **Organya** | Cave Story's original built-in software synth. **No synth chip needed** -- no OPL3, wavetable, or MIDI module; it renders the music on the CPU and plays it through the Sound Blaster DAC, so a **Sound Blaster is still required**. The exact 2004 sound. |
 | **MIDI** | Music played by a synth chip or module. The card row below says which one. |
 | **No Music** | Music off; sound effects still play. |
 
@@ -95,7 +95,7 @@ the type is MIDI.
 | **OPL3 FM** | Sound Blaster OPL3 (Yamaha YMF262) FM chip | OPL3 FM-synth music plus PCM sound effects on the SB DAC. Works on any Sound Blaster; the most reliable choice. |
 | **AdLib** | A real AdLib / OPL2 card, or a PicoGUS in `/mode adlib` | Native OPL2 FM music on a machine with **no Sound Blaster**, clocked off the PIT timer. **Music only** -- a DAC-less OPL card cannot play the digital effects. |
 | **Gravis UltraSound** | A Gravis UltraSound, or a PicoGUS in `/mode gus` | Wavetable (sampled-instrument) General MIDI music on the GF1 chip, with **no Sound Blaster** in the machine. Richer than FM and cheap on a slow CPU. See the detailed section below. |
-| **Organya** | Sound Blaster (PCM/DMA) | Cave Story's original software synth -- the exact 2004 sound, mixed on the CPU. Heavier than the MIDI/FM backends. |
+| **Organya** | Sound Blaster (PCM/DMA) | Cave Story's original software synth -- the exact 2004 sound, mixed on the CPU. The only backend whose music cost lands on the CPU; see the [Organya](#organya) and [Performance](#performance) sections. |
 | **No Music** | n/a | Music off; sound effects still play (if an FX device is selected). |
 
 Each card maps to one `AUDIO_BACKEND` value: Auto-detect = `auto`, General
@@ -289,6 +289,50 @@ A WaveBlaster daughterboard (e.g. DreamBlaster S2) mounted on the PicoGUS's
 wavetable header plays through this same MPU-401 path -- set Music Type to
 **MIDI** and pick the **WaveBlaster daughterboard** card.
 
+## Organya
+
+The Organya backend (`AUDIO_BACKEND=organya`) is Cave Story's original software
+synth. The `.org` score is mixed on the CPU and played through the **Sound
+Blaster DAC** -- no synth chip is involved, which is why it sounds exactly like
+2004 on any Sound Blaster, and why it is the one backend whose music cost lands
+on the CPU instead of on a chip. Sound effects play on the same SB DAC.
+
+### Pre-render and the PCM cache
+
+**Organya pre-render** is **on by default** -- the **Organya pre-render** row in
+SETUP's Sound menu (`ORG_PRERENDER`), greyed out unless the Music Type is
+Organya. Rather than synthesizing every audio tick during play, the engine
+renders a song's full loop once into a PCM buffer, saves it to disk, and
+thereafter feeds the audio device with a memory copy. That is what keeps Organya
+playable on 486-class hardware: the per-frame audio cost becomes a copy instead
+of live synthesis.
+
+Cached songs are written next to `DOSKUTSU.EXE` in
+`CACHE\<rate>_<channels>\*.PCM` -- `CACHE\11025_1\` for the default audio tier,
+`CACHE\22050_2\` for HQ (`AUDIO_TIER2=0`). The full 41-song set is roughly 46 MB
+at the default tier. Each file is keyed to the exact game binary that rendered
+it, so a new release renders a fresh cache rather than replaying a stale one.
+
+On an empty cache there are two one-time costs:
+
+1. **First play of each song renders it.** The first time a song plays it is
+   synthesized to the cache, which is a noticeable pause with degraded audio
+   during the render. The cost is paid once per song, ever, per card.
+2. **New-area stall on a cold cache.** Entering a new area mid-game can briefly
+   stall the currently playing song while the next one renders for the first
+   time. A song that changes before it has been cached falls back to live
+   synthesis -- slower, never a freeze.
+
+Both disappear with a **pre-populated cache**: `make org-cache` renders every
+song on the build host, and copying the produced `CACHE\` tree onto the card
+next to `DOSKUTSU.EXE` means the target loads PCM from the first boot and never
+cold-renders (see [docs/BUILDING.md](./BUILDING.md#pre-render-the-organya-pcm-cache-make-org-cache)).
+The MIDI and FM backends have neither cost, which is why OPL3 stays the
+recommended default on slow CPUs.
+
+Setting `ORG_PRERENDER=0` returns to live per-tick synthesis: no cache on disk,
+no first-run render pass, and the full synth cost on every frame.
+
 ## Sound effects
 
 Cave Story's sound effects are digital samples synthesized at runtime from the
@@ -330,6 +374,29 @@ A custom `.mid` set can also be dropped into a `data/<dir>/` folder; see
 "Custom MIDI set" in [docs/ASSETS.md](./ASSETS.md). SETUP shows the MIDI
 music-set row only when at least two sets are installed; Organya ignores it.
 
+## Performance
+
+Sound-card choice is close to framerate-neutral. OPL3, AdLib, WaveBlaster,
+General MIDI and the Gravis all hand the score to a chip and the CPU only sends
+note events, so the music runs off the CPU and costs the render loop almost
+nothing. Two sound settings do move the framerate:
+
+| Setting | Cost on the reference PC |
+|---|---|
+| `AUDIO_BACKEND=organya` instead of a MIDI/FM backend | ~9 fps |
+| `AUDIO_TIER2=0` (22050 Hz stereo) instead of the 11025 Hz mono default | ~11 fps in music-heavy scenes |
+
+The Organya figure assumes pre-render on (the default) and a warm PCM cache;
+live synthesis on a cold cache costs considerably more, and on 486-class CPUs is
+the difference between real-time tempo and a stall -- see [Pre-render and the
+PCM cache](#pre-render-and-the-pcm-cache). The Gravis is the cheapest of all on
+a slow CPU: the GF1 mixes its voices in hardware, so even a busy arrangement
+leaves the CPU free.
+
+Per-CPU medians for each backend are in
+[docs/FPS-MATRIX.md](./FPS-MATRIX.md); the full list of framerate-affecting
+variables is in [docs/CONFIG.md](./CONFIG.md).
+
 ## Quick reference (config keys / env vars)
 
 These are the player-facing sound keys. Each `DOSKUTSU.CFG` key maps to the
@@ -345,7 +412,8 @@ over the file. See [docs/CONFIG.md](./CONFIG.md) for the authoritative table.
 | `MIDI_SET` | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | orgmid2 / wiimidi / `<dir>` | orgmid2 | MIDI arrangement for the OPL3 / WaveBlaster / GM / GUS backends. `orgmid2` = OrgMIDI v2 (default); `wiimidi` = WiiWare. |
 | `SB16_VOICE_VOL` | `SDL_HINT_DOSKUTSU_SB16_VOICE_VOL` | 0-31 | 28 | SB16 mixer voice (PCM/SFX) level. |
 | `SB16_FM_VOL` | `SDL_HINT_DOSKUTSU_SB16_FM_VOL` | 0-31 | 28 | SB16 mixer FM (OPL3 music) level. |
-| `AUDIO_TIER2` | `SDL_HINT_DOSKUTSU_AUDIO_TIER2` | 0 / 1 | 1 | Audio quality: 1 = 11025 Hz mono (lighter), 0 = 22050 Hz HQ. |
+| `ORG_PRERENDER` | `SDL_HINT_DOSKUTSU_ORG_PRERENDER` | 0 / 1 | 1 | Pre-render Organya songs to a disk PCM cache (Organya only). `0` = live per-tick synthesis. |
+| `AUDIO_TIER2` | `SDL_HINT_DOSKUTSU_AUDIO_TIER2` | 0 / 1 | 1 | Audio quality: 1 = 11025 Hz mono (lighter), 0 = 22050 Hz HQ (~11 fps in music-heavy scenes). |
 | `AUDIO_OFF` | `DOSKUTSU_NO_AUDIO` | 1 | unset | Disable all audio (music + effects). |
 | `MUSIC_OFF` / `SFX_OFF` | `..._MUSIC_OFF` / `..._SFX_OFF` | 1 | unset | Independently disable music / effects (same as No Music / No Sound FX). |
 
