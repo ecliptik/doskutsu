@@ -1,0 +1,97 @@
+From 038f95efb884a1e3b89312efb5cff56f0d7ccb58 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Mon, 10 Aug 2026 07:25:35 -0700
+Subject: [PATCH] patch 0289 -- emit a clock-independent framerate ([fps-true])
+
+The fps matrix has been reading inter_flip_ms medians. Those ride
+SDL_GetTicks, which on DOS is uclock, which the SDL/0110 music pump corrupts
+by reprogramming PIT ch0 under libc's feet. In any gus or adlib cell the
+timings quantise to the 55 ms BIOS tick -- the 10-40 ms band where real frames
+live is EXACTLY empty -- and a median read from them reports 18.5 fps against
+a real ~28. That produced a wrong headline finding (GUS/AdLib "cost 42% of the
+framerate"; they do not).
+
+Count flips and divide by the runmanifest's duration_s. Neither term touches
+uclock: the counter is an integer increment in the flip path, duration_s comes
+from time(). So the number is valid in EVERY cell, pump or not, and needs no
+post-hoc reconstruction from log timestamps.
+
+Emitted as its own line rather than new runmanifest fields, to avoid widening
+a struct shared with the probe tooling:
+
+  [fps-true] flips=3187 duration_s=129 fps_mean=24.7 (clock-independent: ...)
+
+Integer tenths, no float formatting on DJGPP. inter_flip_ms stays as-is: it is
+still the right per-frame diagnostic in non-pump cells, and its distribution
+is what exposes a corrupted clock in the first place.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 12 ++++++++++++
+ src/main.cpp              | 24 ++++++++++++++++++++----
+ 2 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 36652463..53991de1 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -1,5 +1,8 @@
+ #include <algorithm>
+ #include <cassert>
++
++// patch 0289: flips since process start (see the increment site below).
++unsigned long g_flip_count = 0;
+ // graphics routines
+ #include "../ResourceManager.h"
+ #include "../config.h"
+@@ -5175,6 +5178,15 @@ void Renderer::flip()
+   // the present cost dominates today, but as Lever B reduces it, the
+   // logic-side cost becomes the next bottleneck -- this counter surfaces
+   // it before we get there. First flip emits 0 (no prior frame).
++  // DOS-PORT (patch 0289): clock-independent flip counter. The per-frame
++  // timings above ride SDL_GetTicks, which on DOS is uclock, which the
++  // SDL/0110 music pump corrupts -- so in any gus/adlib cell those numbers
++  // are quantised to the 55 ms BIOS tick and a "median fps" read from them is
++  // meaningless (it reported 18.5 fps against a real ~28). A plain count of
++  // flips, divided by the runmanifest's time()-based duration_s, is immune:
++  // neither term touches uclock. Emitted as flips= / fps_mean= at shutdown so
++  // every cell yields a valid framerate whether or not the pump is running.
++  ++g_flip_count;
+   Uint64 _inter_flip_ms = (_last_flip_t0 == 0) ? 0 : (_t0 - _last_flip_t0);
+   _last_flip_t0 = _t0;
+   // DOS-PORT (patch 0060, Phase 9 wave 12.5-D): inter-flip accumulator
+diff --git a/src/main.cpp b/src/main.cpp
+index d3001d39..32a2c027 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1280,10 +1280,26 @@ static void emit_run_manifest(void)
+   // on the clean path; future iters can pipe `error` into this fn.
+   m.exit_code = 0;
+ 
+-  // Perf-vital fields (fps_p50/p95/audio_vital_status/regime) left at
+-  // runmanifest_init() defaults (NA emission). Populated by future
+-  // wave-42-iter04+ perf-logging plan iters per
+-  // docs/internal/WAVE-41-PERF-LOGGING-PLAN.md sec. 7.
++  // DOS-PORT (patch 0289): clock-independent throughput. fps_p50/p95 stay NA
++  // on purpose -- percentiles need per-frame timings, and those ride
++  // SDL_GetTicks == uclock, which the SDL/0110 music pump corrupts (PIT ch0
++  // reprogrammed under libc's feet). In a gus/adlib cell they quantise to the
++  // 55 ms BIOS tick and a median read from them says 18.5 fps against a real
++  // ~28. flips / duration_s touches neither: the counter is an integer and
++  // duration_s comes from time(). So it is valid in EVERY cell, pump or not,
++  // and is the number the fps matrix should be built from.
++  {
++    extern unsigned long g_flip_count;
++    const int dur = m.duration_s;
++    const unsigned long fl = g_flip_count;
++    // Integer tenths, no float formatting on DJGPP.
++    const unsigned long fps10 = (dur > 0) ? (fl * 10UL / (unsigned long)dur) : 0UL;
++    LOG_INFO("[fps-true] flips={} duration_s={} fps_mean={}.{} "
++             "(clock-independent: flip count / time()-based duration; use THIS "
++             "for the fps matrix, not inter_flip medians, which are invalid in "
++             "any cell running the PIT/IRQ-0 music pump)",
++             fl, dur, fps10 / 10UL, fps10 % 10UL);
++  }
+ 
+   // Banner counters + critical/warn counts: 0 placeholder. Smoke gate
+   // post-processes the produced log to fill these (sec. 4.4 of the

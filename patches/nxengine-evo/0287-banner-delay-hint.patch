@@ -1,0 +1,64 @@
+From a1132a6018cb1b2c1bf7b3ba755ef394d74a4d6f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Thu, 6 Aug 2026 14:38:48 -0700
+Subject: [PATCH] patch 0287 -- optional pre-video hold so the launcher banner
+ stays readable
+
+The QA sweeps print "[n/10] CELL <name> -- listen for X" and then start the
+engine immediately, so on fast hardware the banner flashes past before the
+operator can read what the next cell is testing.
+
+DOS offers no timed wait here: CHOICE.COM is absent on the reference machine,
+PAUSE needs a keypress and the sweeps are unattended, and a BAT busy-loop
+would run for wildly different durations on a Pentium OverDrive versus a 486
+-- the one thing a benchmark harness must not introduce. Doing it in the
+engine is the only way to get a real, CPU-independent delay.
+
+SDL_HINT_DOSKUTSU_BANNER_DELAY_MS (or DOSKUTSU_BANNER_DELAY_MS), milliseconds,
+ceiling 60 s, absent/0 = no delay so default behaviour is unchanged. Runs at
+the top of main() before SDL_Init and before any logic tick, so it cannot
+perturb a measurement: nothing has been timed yet and the TAS clock has not
+started. The sweeps set it to 10000 once.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 43843cab..a66dfcd7 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1662,6 +1662,32 @@ int main(int argc, char *argv[])
+   // Logged at engine exit via emit_run_manifest().
+   _runmanifest_boot_time = std::time(nullptr);
+ 
++  // DOS-PORT (patch 0287): optional hold before the engine takes the screen,
++  // so the DOS-side banner the launcher just printed stays readable.
++  //
++  // The QA sweeps print "[n/10] CELL <name> -- listen for X" and then start
++  // the engine immediately, which on fast hardware flashes past. DOS has no
++  // timed wait: CHOICE.COM is absent on the reference machine, PAUSE needs a
++  // keypress (the sweeps are unattended), and a BAT busy-loop would run for
++  // wildly different durations on a Pentium OverDrive versus a 486. Doing it
++  // here is the only way to get a real, CPU-independent delay.
++  //
++  // Runs before SDL_Init and before any tick, so it cannot touch a benchmark:
++  // no logic tick has happened and the TAS clock has not started.
++  {
++    const char *bd = std::getenv("SDL_HINT_DOSKUTSU_BANNER_DELAY_MS");
++    if (!bd) bd = std::getenv("DOSKUTSU_BANNER_DELAY_MS");
++    if (bd && bd[0])
++    {
++      long ms = std::strtol(bd, nullptr, 10);
++      if (ms > 0)
++      {
++        if (ms > 60000) ms = 60000;   // sanity ceiling
++        SDL_Delay((Uint32)ms);
++      }
++    }
++  }
++
+   // DOS-PORT (patch 0216): load DOSKUTSU.CFG into the environment before any
+   // getenv / SDL_GetHint read of a config key (SDL_GetHint falls back to the
+   // env var of the same name). The file is an alternate source for the SAME

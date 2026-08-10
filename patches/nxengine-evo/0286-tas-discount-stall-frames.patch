@@ -1,0 +1,111 @@
+From 78bdc818214ce8c5448c7553780eef6cad2b82cb Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Thu, 6 Aug 2026 14:34:23 -0700
+Subject: [PATCH] patch 0286 -- discount stall frames from the TAS tick stream
+ (general fix)
+
+0280 and 0285 guarded two specific blocking loads (load_stage,
+on_song_start). That approach does not scale: the g2k logs show 1-5 stalls in
+EVERY cell, including Organya cells that never touch the GUS instrument path.
+Enumerating call sites was always going to lose.
+
+Replace it with a general rule for TAS replay: a frame whose wall delta
+exceeds any plausible gameplay budget is a stall, so contribute one tick for
+it rather than its full elapsed time. The catch-up loop then cannot
+manufacture ticks that represent loading.
+
+WHY THIS BECAME VISIBLE ONLY NOW: since 0283 replay HOLDS the input mask, the
+spurious catch-up ticks a stall produces apply that held input -- the player
+walks during a load, drifts off the recorded path, and after a few stalls
+misses a doorway, ending the run short of the recorded route. Before 0283
+those ticks applied no input and were harmless. Symptom on the bench: 6 of 10
+cells reached 9 of the route's 11 stages, and the SAME config went either way
+(GC4 full, G31 truncated, byte-identical CFGs).
+
+THRESHOLD, measured rather than guessed. Across 10 cells / ~3000 frames on
+g2k: gameplay frames are 30-54 ms median, 72 ms at p99; stalls are 276-4287
+ms. NOTHING falls between 72 and 276 ms. 150 ms sits in that empty band --
+twice the worst gameplay frame, half the smallest stall.
+
+Frames below the threshold are untouched, so ordinary catch-up still holds
+logic at 50 Hz and measured framerates stay representative. That is the
+difference from 0281 (default-off since 0284), which capped every frame and
+inflated fps by making replay do less logic work per frame than real play.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 54 +++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 53 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 44ab85c1..43843cab 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -233,6 +233,25 @@ static void tas_trace_emit(int tick, const bool *inputs, int n_inputs)
+            mask, map_changed ? " MAPCHG" : "");
+ }
+ 
++// patch 0286: killswitch for the stall-frame discount. Default ON -- it is a
++// correctness fix for replay fidelity, and per project rule a correctness
++// lever ships switchable. Also the A/B handle for proving it works.
++static int g_tas_stall_decided = -1;
++static bool tas_stall_discount_active()
++{
++  if (g_tas_stall_decided < 0)
++  {
++    const char *e       = SDL_GetHint("SDL_HINT_DOSKUTSU_TAS_STALL_DISCOUNT");
++    g_tas_stall_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
++    LOG_INFO("TAS stall discount: {} (patch 0286; a replay frame over 150 ms "
++             "is a load, not slow rendering, so it contributes 1 tick instead "
++             "of its wall-clock; set SDL_HINT_DOSKUTSU_TAS_STALL_DISCOUNT=0 "
++             "to disable)",
++             g_tas_stall_decided ? "ENABLED (default)" : "DISABLED (killswitch)");
++  }
++  return g_tas_stall_decided == 1;
++}
++
+ static int g_tas_ft_clamp_decided = -1;
+ static bool tas_ft_clamp_active()
+ {
+@@ -871,7 +890,40 @@ static void run_tick_fixed(void)
+     // catch-up behaviour is bit-for-bit the pre-0281 path.
+     // Killswitch SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0 (shared with 0280).
+     Uint64 delta_ns = now_ns - last_ns;
+-    if (TAS::replaying() && tas_ft_clamp_active() && delta_ns > TICK_NS)
++
++    // DOS-PORT (patch 0286): during TAS replay, a frame that overran by more
++    // than any plausible gameplay budget is a STALL (a load), not slow
++    // rendering. Contribute a single tick for it instead of its full
++    // wall-clock, so the catch-up loop cannot manufacture ticks that
++    // represent loading.
++    //
++    // WHY IT MATTERS MORE SINCE 0283: those spurious catch-up ticks now apply
++    // the HELD input mask, so the player keeps walking through a load. Each
++    // stall nudges the character off the recorded path; a few nudges and a
++    // doorway is missed, so the run ends short of the recorded route. Before
++    // 0283 the extra ticks applied no input and were harmless -- which is why
++    // this only became visible once replay started working.
++    //
++    // THRESHOLD: measured on g2k across 10 cells / ~3000 frames, gameplay
++    // frames run 30-54 ms median and 72 ms at p99, while stalls land at
++    // 276-4287 ms. Nothing at all falls between 72 and 276 ms, so 150 ms sits
++    // in an empty band -- 2x the worst gameplay frame, half the smallest
++    // stall. Frames under it are untouched, so normal catch-up still keeps
++    // logic at 50 Hz and measured framerates stay representative. That is the
++    // distinction from 0281 (default-off), which capped EVERY frame and
++    // thereby inflated fps.
++    //
++    // General by construction: it does not care WHICH load stalled, so it
++    // needs no per-site guard. 0280/0285 (load_stage, on_song_start) remain
++    // as targeted belt-and-braces.
++    const Uint64 STALL_NS = (Uint64)150 * 1000000;   // 150 ms
++    if (TAS::replaying() && tas_stall_discount_active() && delta_ns > STALL_NS)
++    {
++      LOG_INFO("tas: stall frame {} ms -> contributing 1 tick (patch 0286)",
++                (unsigned)(delta_ns / 1000000));
++      delta_ns = TICK_NS;
++    }
++    else if (TAS::replaying() && tas_ft_clamp_active() && delta_ns > TICK_NS)
+       delta_ns = TICK_NS;
+     accum_ns += delta_ns;
+     last_ns = now_ns;

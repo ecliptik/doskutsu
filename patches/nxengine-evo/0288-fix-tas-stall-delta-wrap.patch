@@ -1,0 +1,68 @@
+From 1ccef77a651da027094fbafb8b0d0cf02e69443e Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Sun, 9 Aug 2026 21:58:33 -0700
+Subject: [PATCH] patch 0288 -- fix unsigned wrap in the TAS stall-frame delta
+
+0286 computed the per-frame accumulator delta as an unguarded unsigned
+subtraction, now_ns - last_ns. last_ns can legitimately be AHEAD of now_ns:
+now_ns is sampled once at the top of run_tick_fixed, while the freeze/thaw
+guards (0280 load_stage, 0285 on_song_start) set last_ns to "now" from inside
+the catch-up loop, after that sample. The subtraction then wrapped to a delta
+of tens of days, sailed past the 150 ms stall test, and clamped an ordinary
+gameplay frame to a single tick.
+
+Measured on g2k, v1.6.7 PG 1: 485 of 503 "stall frames" in the AdLib cell and
+478 of 488 in the GUS 20-voice cell were this wrap, every one reporting
+4154504685 ms. The OPL3 and WaveBlaster cells, which stall far less often,
+showed 12-16 discounts of 168-442 ms -- all genuine -- and replayed the full
+route. The corrupted cells did not: G22 and G23B truncated and GC5 skipped
+Assembly Hall entirely.
+
+The LOG_INFO cast to (unsigned) truncated the value to 32 bits, which is why
+it read as a merely large number instead of an obvious wrap. Widened to
+unsigned long long so a future wrap is unmistakable.
+
+Fix: treat a backwards delta as zero elapsed. The interval it would describe
+was already excluded by whichever guard moved last_ns forward, so zero is the
+correct contribution, not a clamp.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index a66dfcd7..d3001d39 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -889,7 +889,20 @@ static void run_tick_fixed(void)
+     // Normal play is untouched: outside TAS the delta is unclamped and the
+     // catch-up behaviour is bit-for-bit the pre-0281 path.
+     // Killswitch SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0 (shared with 0280).
+-    Uint64 delta_ns = now_ns - last_ns;
++    // patch 0288: last_ns can legitimately be AHEAD of this frame's now_ns.
++    // now_ns is sampled once at the top of run_tick_fixed, but the freeze/thaw
++    // guards (0280 load_stage, 0285 on_song_start) set last_ns = "now" from
++    // INSIDE the catch-up loop, i.e. after that sample. The unsigned
++    // subtraction below then wrapped, producing a delta of tens of days, which
++    // sailed past the 150 ms stall test and clamped an ordinary frame to one
++    // tick. Measured on g2k: 485 of 503 "stalls" in the AdLib cell were this,
++    // all reporting 4154504685 ms -- and the LOG_INFO cast to (unsigned)
++    // truncated the value to 32 bits, disguising it as merely a large number
++    // rather than an obvious wrap.
++    //
++    // Treat a backwards delta as zero elapsed: the interval it would describe
++    // was already excluded by whichever guard moved last_ns forward.
++    Uint64 delta_ns = (now_ns >= last_ns) ? (now_ns - last_ns) : 0;
+ 
+     // DOS-PORT (patch 0286): during TAS replay, a frame that overran by more
+     // than any plausible gameplay budget is a STALL (a load), not slow
+@@ -920,7 +933,7 @@ static void run_tick_fixed(void)
+     if (TAS::replaying() && tas_stall_discount_active() && delta_ns > STALL_NS)
+     {
+       LOG_INFO("tas: stall frame {} ms -> contributing 1 tick (patch 0286)",
+-                (unsigned)(delta_ns / 1000000));
++                (unsigned long long)(delta_ns / 1000000));
+       delta_ns = TICK_NS;
+     }
+     else if (TAS::replaying() && tas_ft_clamp_active() && delta_ns > TICK_NS)
