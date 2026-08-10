@@ -71,6 +71,10 @@ The fix is to exclude the load interval, not to cap the tick rate:
 - Patch **0285** applies it to `on_song_start()`, where the GUS backend
   uploads `.pat` instruments to GF1 DRAM.
 
+Patch **0286**'s 150 ms stall threshold was calibrated partly on frame times
+from pump-clocked cells, which are quantised rather than real -- re-derive it
+from non-pump cells, or after the timebase fix lands.
+
 If you add another slow main-loop load, wrap it the same way.
 
 ## Never clamp ticks to the frame rate
@@ -133,6 +137,45 @@ Each cell log is self-contained:
 | `>> Entering stage N` | the replayed route; compare against a known-good run |
 | `audio backend: X` | what actually initialised, vs what the CFG asked for |
 | `dur=Ns` | total run wall-clock |
+
+### Framerates from pump-clocked cells are INVALID
+
+**Never take an `inter_flip_ms` median from a cell whose log contains
+`OPL timer pump STARTED` or `PIT/IRQ-0 pump`.** That covers every `gus` and
+`adlib` cell.
+
+The SDL/0110 music pump reprograms PIT channel 0, which is also the channel
+DJGPP's `uclock()` reads -- and `uclock` is the only timebase behind
+`SDL_GetTicks` / `GetTicksNS` / `GetPerformanceCounter` / `Delay` on DOS
+(`vendor/SDL/src/timer/dos/SDL_systimer.c`). `uclock` assumes the full-65536
+divisor it programs itself, so with the count confined to a smaller range the
+clock freezes between 55 ms BIOS ticks and then jumps, with local jitter that
+can run BACKWARDS. The benchmark's timer is corrupted by the thing being
+benchmarked.
+
+**The signature is a forbidden band.** Histogram `inter_flip_ms`: on this
+hardware real frames live at 10-40 ms, and in a pump cell that band is
+*exactly empty* while hundreds of samples pile up below 10 ms and at 40-70 ms.
+No real slowdown produces that. A "median" of 18.5 fps is just 1000/54 -- the
+BIOS tick period.
+
+    G22  (GUS)    <10ms: 73   10-40ms: 0    40-70ms: 167
+    G41  (AdLib)  <10ms: 60   10-40ms: 0    40-70ms: 169
+    GC4  (OPL3)   <10ms:  2   10-40ms: 287  40-70ms:  27
+
+**Read those cells as flips / wall-clock instead** -- valid because the pump
+chains the BIOS INT8 correctly, so log timestamps stay honest. Corrected:
+AdLib is within a couple of fps of OPL3, GUS about 4 fps lower (dominated by
+GF1 DRAM `.pat` upload stalls at song boundaries, not by the pump).
+
+This cost a wrong headline finding once: GUS and AdLib were reported as
+costing 42% of the framerate. They do not.
+
+A real defect does hide underneath it: the fixed-timestep accumulator runs off
+the same staircase clock, so logic advances in bursts every 55 ms and a large
+fraction of flips repeat an unchanged frame. Those backends genuinely *feel*
+like 18 fps despite ~28 fps throughput. That is a smoothness bug, not a
+throughput one. Fix plan lives in `docs/internal/GUS-ADLIB-FPS-FINDINGS.md`.
 
 **Always check the route before trusting a framerate.** A truncated cell
 measured less work than a complete one and is not comparable. Cells whose
