@@ -133,7 +133,8 @@ Each cell log is self-contained:
 
 | Field | Use |
 |---|---|
-| `inter_flip_ms=` | per-frame timing -- median and p95 framerate |
+| **`[fps-true] flips= duration_s= fps_mean=`** | **the primary framerate.** Clock-independent, valid in every cell |
+| `inter_flip_ms=` | per-frame timing -- secondary, and only in non-pump cells |
 | `>> Entering stage N` | the replayed route; compare against a known-good run |
 | `audio backend: X` | what actually initialised, vs what the CFG asked for |
 | `dur=Ns` | total run wall-clock |
@@ -176,6 +177,20 @@ the same staircase clock, so logic advances in bursts every 55 ms and a large
 fraction of flips repeat an unchanged frame. Those backends genuinely *feel*
 like 18 fps despite ~28 fps throughput. That is a smoothness bug, not a
 throughput one. Fix plan lives in `docs/internal/GUS-ADLIB-FPS-FINDINGS.md`.
+
+### Which framerate number to quote
+
+**`[fps-true]` is the primary metric** (patch 0289). It is flips divided by
+`duration_s`, and neither term touches `uclock`, so it is the only figure
+valid across every backend -- which makes it the only one that supports a
+like-for-like matrix.
+
+It reads LOWER than an `inter_flip` median on the same cell (roughly 28 vs
+32 on the POD-83) because it is a mean over the whole run including boot and
+stage loads, where the median covers gameplay frames only. Both are correct;
+they answer different questions. Quote `[fps-true]` for the matrix and keep
+`inter_flip` as a secondary column for non-pump cells, where it is the better
+read on how the game feels moment to moment.
 
 **Always check the route before trusting a framerate.** A truncated cell
 measured less work than a complete one and is not comparable. Cells whose
