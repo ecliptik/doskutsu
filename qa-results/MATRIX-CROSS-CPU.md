@@ -1,137 +1,167 @@
-# Cross-CPU matrix -- POD-83 vs 486DX2-66
+# Cross-CPU matrix -- POD-83 vs Am5x86-133 vs 486DX2-66
 
-The point of the campaign. Lane A (`PG 1`, POD-83) and lane C (`PG 3`,
-486DX2-66) ran the same 102 s `QA.TAS` reel on the same binary
-`09e449c5a81d`, the same PicoGUS, and the same S3 ViRGE. **CPU is the only
-variable.**
+The point of the campaign. One g2k box, one motherboard, one CF, one 102 s
+`QA.TAS` reel, binary `09e449c5a81d`. Only the CPU is swapped between lanes,
+so bus speed, memory, video card and storage are held constant by construction.
 
-Sources: `2026-08-10-POD83-picogus-v170-sfx/` and `2026-08-11-DX266-full/`.
-Lane C banked 22 cells, **22/22 full route** -- the cleanest round of the
-campaign.
+| Lane | CPU | Sweep | Round |
+|---|---|---|---|
+| A / B | Pentium OverDrive 83 | `PG 1`, `VB 1` | `2026-08-10-POD83-picogus-v170-sfx/`, `2026-08-11-POD83-vibra-VB1/` |
+| G | Am5x86-133 | `PG 2`, `VB 2` | `2026-08-11-Am5x86-full/` |
+| C | 486DX2-66 | `PG 3`, `VB 3` | `2026-08-11-DX266-full/` |
 
-Decomposed per `MATRIX-POD83.md`: `per-loop fps = flips / 102`,
-`overhead_s = render_s - 102`.
+`per-loop fps = flips / 102`, `overhead_s = render_s - 102`.
 
-## The anchor rows
+---
 
-| Backend | POD-83 per-loop | DX2-66 per-loop | Ratio | POD-83 overhead_s | DX2-66 overhead_s |
-|---|---|---|---|---|---|
-| GUS 32 voices | 32.3 | 24.2 | 0.75 | 48 | 55 |
-| GUS 20 voices | 32.1 | 24.2 | 0.75 | 45 | 53 |
-| GUS 14 voices | 32.0 | 24.2 | 0.76 | 47 | 53 |
-| AdLib, SFX off | 32.2 | 24.2 | 0.75 | 18 | 25 |
-| AdLib | 32.0 | 23.6 | 0.74 | 19 | 25 |
-| music + SFX off | 31.8 | 23.8 | 0.75 | 22 | 42 |
-| AUTO | 31.6 | 23.2 | 0.73 | 25 | 43 |
-| OPL3, SFX off | 31.5 | 23.1 | 0.73 | 24 | 43 |
-| **OPL3 (`C4` anchor)** | **31.4** | **23.2** | **0.74** | 22 | 43 |
-| WaveBlaster | 30.1 | 21.6 | 0.72 | 24 | 47 |
-| Organya | 28.5 | 20.0 | 0.70 | 27 | 48 |
+## The headline: a faster CPU stops buying render speed
 
-## Two findings, and they are different in kind
+The Am5x86-133 does **not** land between the POD-83 and the DX2-66. It lands
+**on top of the POD-83**, across six card-matched cells, to within ~0.1 fps:
 
-**1. Loop speed scales almost perfectly with the CPU, and the backend ranking
-is CPU-invariant.** Every ratio lands in 0.70-0.76 against a 66/83 = 0.795
-clock ratio, so per-loop fps is close to clock-linear with a small extra
-penalty for the slower memory system. More useful: the *ordering* of backends
-is identical on both machines -- GUS fastest loop, then AdLib, then OPL3, then
-WaveBlaster, with Organya last and worst by a clear margin. An audio-backend
-decision made on one CPU transfers to the other.
+| Cell | Backend | POD-83 | Am5x86-133 | DX2-66 |
+|---|---|---|---|---|
+| `02` | AUTO | 30.51 / 23 | 30.51 / 28 | 22.40 / 44 |
+| `16` | AUTO | 30.36 / 21 | 30.47 / 29 | 22.25 / 44 |
+| `17` | WaveBlaster | 29.01 / 24 | 29.07 / 32 | 21.59 / 47 |
+| `18` | OPL3 | 30.48 / 22 | 30.46 / 30 | 22.14 / 45 |
+| `111` | Organya | 27.20 / 27 | 27.13 / 34 | 19.10 / 50 |
+| `112` | Organya-HQ | 20.41 / 55 | 20.13 / 64 | 13.56 / 96 |
 
-**2. Overhead does not scale uniformly, and the split is mechanistically
-clean.** Comparing overhead growth POD-83 -> DX2-66:
+(All six are Vibra16 cells, so the sound card is matched -- see the correction
+at the bottom for why that matters.)
 
-| Backend group | Overhead growth | Reading |
-|---|---|---|
-| AdLib (no `SDL_INIT_AUDIO` at all) | 19 -> 25 (+6) | barely moves |
-| GUS (GF1 `.pat` DRAM uploads) | 45-48 -> 53-55 (+8) | barely moves |
-| OPL3 / WB / Organya / AUTO (SB DMA ring live) | 22-27 -> 43-48 (**+21**) | roughly doubles |
+The `C4` OPL3 anchor on the PicoGUS lane says the same thing: POD-83 **31.38**,
+Am5x86-133 **31.32**, DX2-66 **23.22**.
 
-The backends that keep an SB DMA ring running pay an overhead cost that nearly
-doubles on the slower CPU, while the two that do not -- AdLib, which omits
-`SDL_INIT_AUDIO` entirely, and GUS, whose overhead is GF1 DRAM upload time --
-are almost CPU-insensitive. That is the expected signature if SB-ring
-maintenance is CPU-bound work and GF1 uploads are bus-bound: the bus does not
-get faster when the CPU does.
+Both machines run a 33 MHz bus on the same board. Going from an 83 MHz Pentium
+to a 133 MHz 486 -- 60% more clock -- buys **zero** render fps. Within the 486
+family alone, doubling the clock from 66 to 133 MHz buys only 1.35x, not 2x.
 
-Consequence: **AdLib's advantage grows on slower silicon.** On the POD-83 it
-leads OPL3 by 0.6 per-loop fps and 3 s of overhead; on the DX2-66 by 0.4
-per-loop and **18 s** of overhead. On 486-class hardware the backend choice is
-worth far more in wall-clock than the per-loop numbers alone suggest.
+**The render loop is not CPU-bound on this platform above roughly 83 MHz
+Pentium / 133 MHz 486. CPU is not the lever for the 50 fps KPI.**
 
-## Video card, cross-CPU
+### The overhead column is the discriminator
 
-`6C4V`/`6C4C` and `651V`/`651C` repeat lanes D/E on the DX2-66.
+The two machines are *not* interchangeable, and that is what makes the reading
+above more than a coincidence. Per-loop ties to within 0.1 fps; **overhead is
+consistently 5-9 s worse on the Am5x86 in every single cell** (23->28, 21->29,
+24->32, 22->30, 27->34, 55->64).
 
-| Cell pair | POD-83 ViRGE - Cirrus | DX2-66 ViRGE - Cirrus |
-|---|---|---|
-| `C4` | -1.20 | -0.77 |
-| `G51` | -1.44 | -0.73 |
+So the Pentium's advantage has not vanished -- it has moved. It shows up
+entirely in the CPU-bound work (load stalls, audio-ring servicing) and not at
+all in the render loop. If the tie on per-loop were merely a coincidence of
+effective compute -- a Pentium at 83 being worth a 486 at 133 -- overhead
+should tie as well. It does not, consistently, across six cells and both
+sweeps.
 
-The Cirrus banked-path penalty (`patches/SDL/0019`, see
-`MATRIX-VIDEO-POD83.md`) is **smaller on the slower CPU**, which is the right
-sign: when the loop is more CPU-bound, a memory-side cost is a smaller share of
-the frame. It is a real bandwidth-side cost, not an artifact.
+That is the best-supported reading, not a proven one. What would settle it is a
+machine on a **different bus speed**: lane H (486DX2-50) runs a 25 MHz bus
+where all three lanes here run 33, so it is the one remaining cell that can
+separate bus-bound from clock-bound. It was listed as optional; on this
+evidence it is the most informative lane left.
 
-The launcher check repeats too: `6C4` 23.22 vs `6C4V` 23.19 = 0.03 fps on the
-same card. The `VID*` BATs are not a variable on either machine.
+---
 
-## Where this does NOT reconcile with the historical figures
+## Full backend matrix (PicoGUS lane, ViRGE)
 
-`CURRENT-STATE.md` carried ~33 fps POD-83 and ~19 fps DX2-66 from the v1.0.1
-cross-CPU round, a ratio of 0.58 against the 0.74 measured here. It is
-tempting to read that as "the DX2-66 got 24% faster". **Do not.** These are
-not the same measurement:
+| Backend | POD-83 | Am5x86-133 | DX2-66 |
+|---|---|---|---|
+| GUS 14 voices | 32.0 / 47 | 31.90 / 45 | 24.19 / 53 |
+| GUS 20 voices | 32.1 / 45 | 31.85 / 45 | 24.24 / 53 |
+| GUS 32 voices | 32.3 / 48 | 31.84 / 46 | 24.21 / 55 |
+| AdLib, SFX off | 32.2 / 18 | 31.75 / 18 | 24.19 / 25 |
+| AdLib | 32.0 / 19 | 31.82 / 19 | 23.56 / 25 |
+| music + SFX off | 31.8 / 22 | 31.56 / 28 | 23.78 / 42 |
+| AUTO | 31.6 / 25 | 31.39 / 30 | 23.21 / 43 |
+| OPL3, SFX off | 31.5 / 24 | 31.38 / 29 | 23.10 / 43 |
+| **OPL3 (`C4` anchor)** | **31.38** / 22 | **31.32** / 27 | **23.22** / 43 |
+| Organya | 28.5 / 27 | 28.23 / 32 | 20.04 / 48 |
 
-- Historical is a scene-specific p50 at Mimiga `BK_PARALLAX`, a heavy parallax
-  backdrop. These are whole-reel figures across the full route, which includes
-  much lighter scenes.
-- A whole-reel median flatters a slow CPU more than a fast one, because the
-  slow CPU suffers disproportionately in the heavy scenes the reel averages
-  away. So the ratio is expected to look better here even with no real change.
+**The backend ordering is identical on all three CPUs** -- GUS fastest loop,
+then AdLib, then OPL3, then WaveBlaster, Organya last. A backend decision made
+on one machine transfers to the others.
 
-The DX2-66's own numbers bracket it: reel median **23.8 fps**, reel p95
-**15.2 fps**. The historical 19 sits between them, exactly where a heavy-scene
-figure should sit. Nothing here contradicts the old number and nothing here
-confirms a gain.
+### AdLib's overhead advantage tracks CPU speed, not loop speed
 
-**Use the internal comparison, not the cross-round one.** Same reel, same
-binary, same metric, one variable -- that is what the 0.74 ratio rests on.
-Any claim that 486-class performance improved since v1.0.1 needs the v1.0.1
-binary replayed against this reel, which no one has done.
+Overhead penalty of OPL3 over AdLib: POD-83 **3 s**, Am5x86-133 **8 s**,
+DX2-66 **18 s**.
 
-## Secondary: `AUTO` does not select the WaveBlaster
+Note the ordering: the Am5x86 ties the POD-83 on loop speed but pays nearly
+three times the SB-ring overhead penalty. Backends holding an SB DMA ring pay
+CPU-bound costs; AdLib omits `SDL_INIT_AUDIO` entirely and GUS's overhead is
+bus-bound GF1 DRAM upload time, so neither scales the same way. **On anything
+slower than the POD-83, AdLib's real advantage is in wall-clock, not fps.**
 
-`616` (DX2-66) and `G16` (POD-83) both initialise **`opl3`**, on machines where
-the DreamBlaster is demonstrably present and working -- `617` and `G17` both
-report `audio backend: wb`, MPU-401 found at 0x0330, cold-init succeeded, and
-dispatch bytes climbing.
+---
 
-`QA-CELL-REFERENCE.md` poses this cell as "auto-detect -- **should** pick the
-WaveBlaster. Does it?" The answer as configured is no, but the cell cannot
-settle the question it asks: `616` logs `config: loaded DOSKUTSU.CFG (1 keys)`,
-so the run is falling through to the *engine's* built-in default, which has
-been OPL3 by design since wave 46 patch 0139. It never consults SETUP's
-detection.
+## Video card, all three CPUs
 
-So this measures the engine default, not auto-detect. To answer the intended
-question the cell needs a SETUP-generated CFG, which makes it dependent on the
-deferred hands-on SETUP walk. Re-scope the cell or drop the claim from the
-reference.
+ViRGE minus Cirrus, per-loop:
 
-## Secondary: Organya-HQ is not viable on a 486
+| Cell | POD-83 | Am5x86-133 | DX2-66 |
+|---|---|---|---|
+| `C4` | -1.20 | -1.12 | -0.77 |
+| `G51` | -1.44 | -1.49 | -0.73 |
 
-`6112` (ORGHQ, 22050 stereo): **13.6 per-loop fps, 96 s overhead** -- by far
-the worst cell in the campaign on either machine, against 19.1 / 50 for the
-same content at 11025 mono (`6111`). Consistent with the ~89 ms/flip figure
-recorded when the HQ tier shipped in v1.3.0. Correctly default-off; nothing to
-fix, but worth a line in the docs if the tier is ever surfaced in SETUP on
-486-class hardware.
+The Cirrus banked-path penalty (`patches/SDL/0019`, sound -- see
+`MATRIX-VIDEO-POD83.md`) is ~1.1-1.5 on both fast machines and roughly half
+that on the DX2-66. Consistent with the DX2-66 being the only one of the three
+still CPU-bound in the loop: a memory-side cost partly hides behind CPU time
+there, and is fully exposed on the machines that are not CPU-bound. This is
+independent support for the headline reading.
 
-## Metric hygiene for this round
+Launcher check repeats a third time: `AC4` 31.32 vs `AC4V` 31.27 = 0.05 fps on
+the same card.
 
-`622`, `623A`, `623B`, `641`, `6C5`, `662` run the PIT/IRQ-0 music pump and
-their `inter_flip` medians are corrupt. Only `[fps-true]` is quoted for those
-cells. Every other cell is pump-free and its median is reported in
-`2026-08-11-DX266-full/` as an independent cross-check; where both metrics
-exist they agree on the ratio to within 0.02.
+---
+
+## Sound card costs ~1 fps -- now confirmed on three CPUs
+
+Vibra16 against PicoGUS-SB, same CPU, OPL3:
+
+| CPU | Vibra (`18`) | PicoGUS (`C4`) | Delta |
+|---|---|---|---|
+| POD-83 | 30.48 | 31.38 | -0.90 |
+| Am5x86-133 | 30.46 | 31.32 | -0.86 |
+| DX2-66 | 22.14 | 23.22 | -1.08 |
+
+Three CPUs, consistent sign and magnitude, well outside the 0.22 fps noise
+floor. Mechanism candidate remains SDL/0106's `16-bit-high-DMA` (Vibra) vs
+`8-bit-low-DMA` (PicoGUS), still **confounded with the card itself**; one cell
+with `force_8bit=1` on the Vibra separates them.
+
+`dsp_ver` differs between lanes for the PicoGUS (4 on the Am5x86, 2 on the
+other two) but the resolved DMA path is `8-bit-low-DMA` in all three, so it is
+not a confound.
+
+---
+
+## Two corrections to this file's earlier version
+
+**1. "Loop speed scales almost perfectly with the CPU" -- WITHDRAWN.** The
+earlier version reported a per-loop ratio of ~0.74 across backends against a
+66/83 = 0.795 clock ratio and read it as near-clock-linear scaling. That was a
+**two-point fit**, and the third point refutes it: the Am5x86-133 has 60% more
+clock than the POD-83 and identical per-loop fps. Scaling is strongly
+sub-linear within the 486 family and flat above it. The ratio was real; the
+mechanism read off it was not.
+
+**2. The WaveBlaster row compared two different sound cards.** The earlier
+cross-CPU table paired POD-83 `G17` (`is_sb16=0`, DreamBlaster on the
+**PicoGUS** header) against DX2-66 `617` (`is_sb16=1`, **Vibra** header). The
+provenance was noted in the DX2-66 round README and then not carried into the
+comparison. Corrected here by using the Vibra-header `17` cell on all three
+CPUs, which is card-matched.
+
+Root cause is mechanical and is a live hazard, not a one-off: **`G17`/`17`
+is written by both the `PG` and `VB` sweeps.** Running `VB n` after `PG n` on
+the same CPU overwrites the PicoGUS-header WaveBlaster cell unless `LOGS\` is
+pulled and cleared in between. That happened on the DX2-66 and again on the
+Am5x86; the POD-83 kept both only because its `PG 1` round was logged back
+before `VB 1` ran. **The PicoGUS-header WaveBlaster cell therefore exists for
+POD-83 only**, and the campaign has no cross-CPU comparison for it.
+
+Both corrections come from the same habit: reading a mechanism off a derived
+number without checking what the cells actually were. The logs said so in both
+cases.
