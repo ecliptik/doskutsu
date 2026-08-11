@@ -52,20 +52,23 @@ See [Download](#download), [Game Assets](#game-assets), [Building](#building), [
 - Original Organya soundtrack or MIDI music with selectable arrangements (see [docs/SOUND.md](./docs/SOUND.md))
 - Gameport joystick/gamepad support and input remapping
 - DOS-era like `SETUP.EXE` configuration utility
-- Up to ~30fps (depending on CPU and bus bandwidth)
+- Up to ~31fps (depending on CPU and bus bandwidth)
 - TAS support (see [docs/TAS.md](./docs/TAS.md))
 
-Frame rate depends on the hardware and which music backend is used:
+Frame rate depends on the CPU, the video card, and which music backend is used. The figures below are real-hardware measurements, replaying an identical 102-second recording in every configuration:
 
-| CPU | Music | Frame rate (median) |
-|---|---|---|
-| Pentium OverDrive 83 | MIDI (OPL3) | ~33 fps |
-| Pentium OverDrive 83 | Organya software synth | ~21 fps |
-| Am5x86-133 | MIDI (OPL3) | ~32 fps |
-| 486DX2-66 | MIDI (OPL3) | ~19 fps, playable but choppy |
-| 486DX2-50 | MIDI (OPL3) | ~15 fps, playable but choppy |
+| CPU | Frame rate | Best configuration | Why |
+|---|---|---|---|
+| Pentium OverDrive 83 | ~31 fps | OPL3 FM + S3 ViRGE | The reference machine. Wavetable (GUS/PicoGUS) renders marginally faster still, at the cost of ~25 s of instrument loading across a session |
+| Am5x86-133 | ~31 fps | OPL3 FM + S3 ViRGE | Matches the POD-83 for rendering despite 60% more clock; loads a little slower |
+| 486DX2-66 | ~23 fps | **AdLib** + S3 ViRGE | AdLib cuts ~18 s of loading versus OPL3 on this CPU. Avoid the Organya synth |
+| 486DX2-50 | ~17 fps | **AdLib** + S3 ViRGE | Same, and worth ~24 s. Playable but choppy |
 
-[docs/FPS-MATRIX.md](./docs/FPS-MATRIX.md) is the full per-CPU / per-backend matrix, including the "stutter floor" measurements and how they are taken.
+Two settings help on every CPU: an **S3 ViRGE** is worth ~1 fps over a Cirrus CL-GD5430, and **Organya-HQ (22050 Hz stereo) is not viable below a Pentium** -- it costs roughly a quarter of the frame rate.
+
+Above roughly a 486DX4-100, a faster CPU stops improving the frame rate -- the render loop is limited by something other than clock speed. It still shortens loading.
+
+[docs/BENCHMARKS.md](./docs/BENCHMARKS.md) is the full report: 89 cells across four CPUs, three video cards and three sound cards, with charts, method, and the raw logs. [docs/FPS-MATRIX.md](./docs/FPS-MATRIX.md) keeps the older per-wave history.
 
 Cave Story runs at 50 fps; the reference PC's hardware limits fully-detailed rendering to about 30 fps. It still plays at the correct 50 Hz speed through [Fixed-Timestep mode](#fixed-timestep-mode), which advances game logic on a fixed 50 Hz clock independent of the render rate.
 
