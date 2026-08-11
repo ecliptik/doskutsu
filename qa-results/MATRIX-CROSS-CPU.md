@@ -41,25 +41,74 @@ family alone, doubling the clock from 66 to 133 MHz buys only 1.35x, not 2x.
 **The render loop is not CPU-bound on this platform above roughly 83 MHz
 Pentium / 133 MHz 486. CPU is not the lever for the 50 fps KPI.**
 
-### The overhead column is the discriminator
+### Why, though -- two readings, neither established
 
-The two machines are *not* interchangeable, and that is what makes the reading
-above more than a coincidence. Per-loop ties to within 0.1 fps; **overhead is
-consistently 5-9 s worse on the Am5x86 in every single cell** (23->28, 21->29,
-24->32, 22->30, 27->34, 55->64).
+Per-loop ties to within 0.1 fps while **overhead is consistently 5-9 s worse on
+the Am5x86 in every cell** (23->28, 21->29, 24->32, 22->30, 27->34, 55->64).
+The Pentium's advantage did not vanish; it sits entirely in the load-stall and
+audio-ring work and not at all in the render loop.
 
-So the Pentium's advantage has not vanished -- it has moved. It shows up
-entirely in the CPU-bound work (load stalls, audio-ring servicing) and not at
-all in the render loop. If the tie on per-loop were merely a coincidence of
-effective compute -- a Pentium at 83 being worth a 486 at 133 -- overhead
-should tie as well. It does not, consistently, across six cells and both
-sweeps.
+**Reading 1 -- shared non-CPU ceiling.** The render loop is against something
+both machines share (33 MHz bus, memory subsystem), so extra clock cannot help
+it, while overhead remains CPU-bound and still scales.
 
-That is the best-supported reading, not a proven one. What would settle it is a
-machine on a **different bus speed**: lane H (486DX2-50) runs a 25 MHz bus
-where all three lanes here run 33, so it is the one remaining cell that can
-separate bus-bound from clock-bound. It was listed as optional; on this
-evidence it is the most informative lane left.
+**Reading 2 -- coincidence of effective compute.** A superscalar Pentium at 83
+MHz is worth roughly a 486 core at 133 MHz on *blit-shaped* work, and more than
+that on the memcpy- and I/O-shaped work in overhead. No ceiling required.
+
+An earlier version of this file argued the overhead split favoured Reading 1,
+on the grounds that equal effective compute would tie overhead too. **That
+argument does not hold**: loop and overhead are different work mixes -- the
+loop is CPU-side tile blitting, overhead is CF reads, large memcpy, PCM cache
+handling and ISA port writes -- and a superscalar core's advantage over a 486
+differs sharply between them. "Loop ties, overhead does not" is equally
+consistent with both readings.
+
+There is also a standing tension that leans *against* Reading 1:
+`memory/podp83_membw_real_hw_actuals.md` measured L1 memcpy at 40.8 MB/s, 12%
+of theoretical, and concluded the blit path is **overhead-dominated, not
+bandwidth-bound**, blaming DJGPP libc memcpy per-call cost. If that attribution
+still holds, the hot path is instruction-bound and 60% more clock should have
+moved per-loop fps. It did not. Either that attribution is stale, or Reading 2
+is correct.
+
+**Neither reading is established, and lane H cannot settle it** -- see below.
+What would settle it needs no CPU swap: vary pixel work at fixed CPU and see
+whether frame time tracks bytes. The Mach64 cell did this accidentally --
+512x384 is 2.56x the bytes of 320x240 and measured a 7.4 ms flush against the
+ViRGE's 2.9 ms, close to byte-proportional -- but that is one uncontrolled
+point. A bandwidth probe at several working-set sizes on one machine would
+answer it outright.
+
+### Lane H cannot separate bus from core -- retracted prediction
+
+An earlier version claimed the 486DX2-50 would discriminate, because it runs a
+25 MHz bus where the other three run 33. **That was wrong.** The DX2-50 is
+2x25 and the DX2-66 is 2x33.33, so *every* clock scales by the same factor:
+
+    bus  25 / 33.33  = 0.7500
+    core 50 / 66.67  = 0.7500
+
+Both hypotheses therefore predict the same `C4` anchor, **~17.4 per-loop**.
+There is no compounding: if the loop is bus-bound, time scales with the bus
+alone, not with bus x core. A mixed workload still lands on 0.75 whatever the
+mix. Logging that prediction would have produced a false confirmation whichever
+hypothesis were true.
+
+Worse, this generalises: **486 multipliers tie core speed to bus speed, so no
+CPU swap available on this board can decouple them.** The POD-83 and Am5x86
+also share the 33.33 MHz bus.
+
+Lane H is still worth running, but for a different question. The falsifiable
+prediction is **uniform 0.75 on every metric**, overhead included -- `C4`
+per-loop 17.4 and overhead ~57 s, Organya ~15.0, Organya-HQ ~10.2. The signal
+is *deviation*:
+
+- **above 0.75** implies a fixed cost that does not scale with system clock
+  (CF media latency, DRAM refresh, a vblank wait)
+- **below 0.75** implies superlinear degradation, e.g. cache pressure
+- **clean 0.75 everywhere** says the system is clock-proportional, and still
+  says nothing about bus versus core
 
 ---
 
