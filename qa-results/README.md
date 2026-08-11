@@ -6,11 +6,32 @@ run: `<date>-<cpu>-<sound card>/`.
 
 Each cell log carries, without needing anything else:
 
-- `inter_flip_ms=` per frame -- the framerate source (median + p95)
-- `>> Entering stage N` -- the replayed route, for checking TAS fidelity
+- `[fps-true] flips=N render_s=N` -- **the framerate source.** Decompose it:
+  `per-loop fps = flips / 102`, `overhead_s = render_s - 102`. A single number
+  conflates loop speed with load-stall wall time.
+- `inter_flip_ms=` per frame (median + p95) -- valid **only** in a cell whose
+  log does NOT contain `PIT/IRQ-0 pump` or `OPL timer pump STARTED`. Every
+  `gus` and `adlib` cell runs that pump, which reprograms PIT ch0 and so
+  corrupts `uclock()`, SDL's only DOS timebase. Quoting a median from one of
+  those cells has produced two retracted findings. Where it is valid it is a
+  useful independent second metric.
+- `>> Entering stage N` -- the replayed route, for checking TAS fidelity.
+  Check the route before trusting any framerate: a truncated route measured
+  less work than a complete one.
 - the audio backend that actually initialised, vs what the CFG asked for
 - `dur=` in the closing runmanifest line
 - warnings the operator could not have seen on screen
+
+Full reading rules: `docs/TAS-BENCHMARKING.md`. Cell and lane definitions:
+`docs/QA-CELL-REFERENCE.md`.
+
+## Analysis
+
+| Doc | Covers |
+|---|---|
+| `MATRIX-POD83.md` | Audio-backend matrix, POD-83 + PicoGUS + S3 ViRGE |
+| `MATRIX-VIDEO-POD83.md` | Video-card matrix, POD-83: ViRGE vs Cirrus vs Mach64 |
+| `BASELINE.md` | Pre-campaign reference figures |
 
 `QA.TAS` is the input recording that drove the run. Keep it with the logs:
 without it the routes and durations cannot be interpreted.
