@@ -7,12 +7,31 @@ GOTO END
 ECHO ERROR: machine not set. Run QA.BAT first (pick your CPU), then re-run.
 GOTO END
 :GO
+REM --- QA-INSTRUMENT v1 (matches PG/VB sweep manifests) ---
+IF "%QAM%"=="G" SET QACPU=Pentium OverDrive 83
+IF "%QAM%"=="A" SET QACPU=Am5x86-133
+IF "%QAM%"=="6" SET QACPU=486DX2-66
+IF "%QAM%"=="5" SET QACPU=486DX2-50
+IF NOT EXIST LOGS\NUL MKDIR LOGS
 ECHO ============================================================
-ECHO  GAP cells -- machine %QAM%   4 cells  about 10 min
+ECHO  SWEEP : GAP cells -- closes four measurement gaps
+ECHO  CELLS : 4 cells, ~10 min
+ECHO  CPU   : %QACPU%
+ECHO  SOUND : MIXED -- X8 needs the VIBRA; the rest run on any card
+ECHO  VIDEO : S3 ViRGE
+ECHO  LOGS  : tagged %QAM%..  in LOGS\
 ECHO ============================================================
-ECHO  Fills measurement gaps the main matrix left open.
-ECHO  Unattended: no listening required, read the logs afterwards.
+ECHO  Check the CPU and cards above match the box before starting.
+ECHO  X8 is MEANINGLESS off the Vibra -- skip or ignore it there.
 ECHO ============================================================
+ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%GAP.NFO
+ECHO sweep=GAP >> LOGS\%QAM%GAP.NFO
+ECHO cells=4 >> LOGS\%QAM%GAP.NFO
+ECHO cpu=%QACPU% >> LOGS\%QAM%GAP.NFO
+ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%GAP.NFO
+ECHO sound=MIXED -- X8 needs the VIBRA; the rest run on any card >> LOGS\%QAM%GAP.NFO
+ECHO video=S3 ViRGE >> LOGS\%QAM%GAP.NFO
+ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%GAP.NFO
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 PAUSE
 CALL CLRENV
@@ -42,7 +61,7 @@ ECHO.
 ECHO ============================================
 ECHO  [2/4] CELL X8  Vibra forced to 8-bit DMA
 ECHO  tag %QAM%X8
-ECHO  RUN ON THE VIBRA ONLY. Separates card from DMA path.
+ECHO  VIBRA ONLY. Separates card from DMA path.
 ECHO ============================================
 DOSKUTSU.EXE
 CALL CLRENV
@@ -75,6 +94,5 @@ ECHO ============================================
 DOSKUTSU.EXE
 ECHO.
 ECHO === GAP CELLS DONE. Logs %QAM%X0 %QAM%X8 %QAM%XH1 %QAM%XH2 ===
-ECHO === X8 is only meaningful on the Vibra. Skip/ignore it elsewhere. ===
 ECHO.
 :END

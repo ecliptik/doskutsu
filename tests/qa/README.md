@@ -114,20 +114,56 @@ where `gran == size`. If corruption appears there, A/B
 
 ---
 
-## Logging discipline -- two failures that already cost cells
+## Each BAT writes a hardware manifest
 
-**1. Pull and clear `LOGS\` between sweeps.** `G17`/`17` is written by BOTH
-the `PG` and `VB` sweeps by design. Running one after the other without a
-logback in between overwrites the first. This has already fired twice --
-the PicoGUS-header WaveBlaster cell is gone on the DX2-66 and the Am5x86, and
-survived on the POD-83 only because the sweeps happened to be logged back in
-the right order. The BATs here use fresh tags (`R*`, `X*`, `E*`) and do not
-collide with each other or with the existing cells, but they still collide
-with a previous run of *themselves*.
+Before the `PAUSE`, every BAT here prints a hardware banner and writes
+`LOGS\<M><SWEEP>.NFO` -- the same format the `PG`/`VB` sweeps now use, so one
+parser reads them all:
 
-**2. Bank the logs the same day.** Logs land in `/tmp` on the analysis side,
+    sweep=RB  cells=4  cpu=486DX2-66  log_tag_prefix=6
+    sound=PicoGUS -- must match the banked C3/C4/C5 anchors
+    video=S3 ViRGE
+
+**Read the banner before pressing a key.** It states which CPU and cards the
+run is supposed to be on, and the manifest records that claim next to the
+logs. This is a declaration, not a probe -- it says what the operator
+selected, not what the silicon is. It exists because the CPU was otherwise
+identified only by a digit typed into a BAT, invisible in the logs
+themselves. An engine-side measured witness is coming in the next binary;
+when it lands, keep both and cross-check them, because a disagreement means
+the wrong CPU arg was passed and every number in that run is mislabelled.
+
+`GAP.BAT` deliberately says `sound=MIXED` -- only its `X8` cell requires the
+Vibra, and running it on another card measures nothing.
+
+## Logging discipline -- failures that already cost cells
+
+**1. The `17`-tag collision is fixed at source.** `PG` now writes `<M>17P`
+and `VB` writes `<M>17V`; previously both wrote `<M>17`, so running one after
+the other silently destroyed the first -- which is what lost the
+PicoGUS-header WaveBlaster cell on the DX2-66 and the Am5x86. The BATs here
+use fresh tags (`R*`, `X*`, `E*`) that collide with nothing except a previous
+run of themselves.
+
+**2. Pull logs with a label.** `logback-qa.sh` now takes one and refuses to
+run if the destination already exists, because its old fixed path would have
+let a round-2 pull silently overwrite round-1 files of the same name:
+
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh round2-rb
+
+It collects `*.NFO` as well as `*.LOG`, so the manifests above come back with
+the logs rather than being left on the CF.
+
+**3. Bank the logs the same day.** They land in `/tmp` on the analysis side,
 which is tmpfs -- a reboot loses them. Five cells sat unreviewed for a day
 once and were nearly lost.
+
+## If you write more BATs
+
+`DATE /T` and `TIME /T` are not reliably supported on MS-DOS 6.22, and an
+unrecognised switch can PROMPT -- which would hang an unattended sweep at
+cell 1. Do not put them in a manifest block. Run order is recoverable from
+the `[HH:MM:SS]` prefixes in the cell logs anyway.
 
 ---
 
