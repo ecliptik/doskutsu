@@ -7,19 +7,37 @@ GOTO END
 ECHO ERROR: machine not set. Run QA.BAT first (pick your CPU), then re-run.
 GOTO END
 :GO
+REM --- QA-INSTRUMENT v1 (matches PG/VB sweep manifests) ---
+IF "%QAM%"=="G" SET QACPU=Pentium OverDrive 83
+IF "%QAM%"=="A" SET QACPU=Am5x86-133
+IF "%QAM%"=="6" SET QACPU=486DX2-66
+IF "%QAM%"=="5" SET QACPU=486DX2-50
+IF NOT EXIST LOGS\NUL MKDIR LOGS
 ECHO ============================================================
-ECHO  RE-BASELINE anchor set -- machine %QAM%   4 cells  about 10 min
+ECHO  SWEEP : RE-BASELINE anchor set (run after ANY new binary)
+ECHO  CELLS : 4 cells, ~10 min
+ECHO  CPU   : %QACPU%
+ECHO  SOUND : PicoGUS -- must match the banked C3/C4/C5 anchors
+ECHO  VIDEO : S3 ViRGE
+ECHO  LOGS  : tagged %QAM%..  in LOGS\
 ECHO ============================================================
-ECHO  Run this after ANY new binary. It proves the ~90 banked cells
-ECHO  are still comparable, without re-running four full sweeps.
+ECHO  Check the CPU and cards above match the box before starting.
+ECHO ============================================================
+ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%RB.NFO
+ECHO sweep=RB >> LOGS\%QAM%RB.NFO
+ECHO cells=4 >> LOGS\%QAM%RB.NFO
+ECHO cpu=%QACPU% >> LOGS\%QAM%RB.NFO
+ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%RB.NFO
+ECHO sound=PicoGUS -- must match the banked C3/C4/C5 anchors >> LOGS\%QAM%RB.NFO
+ECHO video=S3 ViRGE >> LOGS\%QAM%RB.NFO
+ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%RB.NFO
+SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
+PAUSE
 ECHO  Each cell covers a DIFFERENT change; none is redundant:
 ECHO    R4  OPL3     control -- non-pump, isolates observer effect
 ECHO    R5  AdLib    pump    -- the timebase fix touches ONLY gus/adlib
 ECHO    R3  Organya  cache   -- a new binary RE-RENDERS the PCM cache
 ECHO    R4B OPL3     repeat  -- back-to-back, measures the noise floor
-ECHO ============================================================
-SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
-PAUSE
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
@@ -79,6 +97,6 @@ DOSKUTSU.EXE
 ECHO.
 ECHO === RE-BASELINE DONE. Logs %QAM%R4 %QAM%R5 %QAM%R3 %QAM%R4B ===
 ECHO === Compare R4 against the banked C4 for this machine. ===
-ECHO === R4 vs R4B is the noise floor -- every 'inside noise' claim needs it. ===
+ECHO === R4 vs R4B is the noise floor. ===
 ECHO.
 :END
