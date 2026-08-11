@@ -57,7 +57,19 @@
 #define SMF_NTRKS         10  /* 1 metadata + 8 melody + 1 drum */
 #define ORG_TO_MIDI_NOTE_OFFSET 24
 
-#define DEFAULT_LOOP_REPS 4
+/* Loop-body replications appended after the intro+first-body pass. The
+ * engine loops the whole SMF from tick 0 at end-of-track (MidiScheduler.cpp
+ * tick_isr / tick), so every value >= 0 plays the full song content; this
+ * knob only sets how often the pre-loop_start intro re-plays. It is capped
+ * in practice by MidiScheduler's ISR event buffer (MIDI_ISR_EVENTS_MAX =
+ * 16384): under L2b (MIDI dispatch from the IRQ) any track whose flattened
+ * event count exceeds 16384 has its time-tail truncated, producing a ragged
+ * early loop-restart. reps=4 pushed 11 of the 42-track corpus (curly=27762
+ * events) over that cap. reps=1 keeps the whole corpus under it with margin
+ * (worst curly=11307) while still giving one clean loop before the intro
+ * returns. Raise per-invocation via --loop-strategy=N when a specific track
+ * wants the intro rarer AND its event count stays under 16384. */
+#define DEFAULT_LOOP_REPS 1
 
 /* GM-patch table variants. Selected via --gm-table=v1|v2 CLI flag;
  * default v2 (wave-42; addresses operator wave-41 "thumps and cowbell"
