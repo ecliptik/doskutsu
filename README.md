@@ -57,16 +57,16 @@ See [Download](#download), [Game Assets](#game-assets), [Building](#building), [
 
 Frame rate depends on the CPU, the video card, and which music backend is used. The figures below are real-hardware measurements, replaying an identical 102-second recording in every configuration:
 
-| CPU | Frame rate | Best configuration | Why |
-|---|---|---|---|
-| Pentium OverDrive 83 | ~31 fps | OPL3 FM + S3 ViRGE | The reference machine. Wavetable (GUS/PicoGUS) renders marginally faster still, at the cost of ~25 s of instrument loading across a session |
-| Am5x86-133 | ~31 fps | OPL3 FM + S3 ViRGE | Matches the POD-83 for rendering despite 60% more clock; loads a little slower |
-| 486DX2-66 | ~23 fps | **AdLib** + S3 ViRGE | AdLib cuts ~18 s of loading versus OPL3 on this CPU. Avoid the Organya synth |
-| 486DX2-50 | ~17 fps | **AdLib** + S3 ViRGE | Same, and worth ~24 s. Playable but choppy |
+| CPU | Frame rate | Best configuration |
+|---|---|---|
+| Pentium OverDrive 83 | ~31 fps | OPL3 FM + S3 ViRGE |
+| Am5x86-133 | ~31 fps | OPL3 FM + S3 ViRGE |
+| 486DX2-66 | ~23 fps | AdLib + S3 ViRGE |
+| 486DX2-50 | ~17 fps | AdLib + S3 ViRGE, choppy |
 
-Two settings help on every CPU: an **S3 ViRGE** is worth ~1 fps over a Cirrus CL-GD5430, and **Organya-HQ (22050 Hz stereo) is not viable below a Pentium** -- it costs roughly a quarter of the frame rate.
+On 486-class CPUs AdLib is the pick because it cuts loading time sharply, not because it renders faster. An S3 ViRGE is worth ~1 fps over a Cirrus CL-GD5430 on any CPU, and Organya-HQ (22050 Hz stereo) is not viable below a Pentium.
 
-Above roughly a 486DX4-100, a faster CPU stops improving the frame rate -- the render loop is limited by something other than clock speed. It still shortens loading.
+Above roughly a 486DX4-100, a faster CPU stops improving the frame rate -- the render loop is limited by something other than clock speed.
 
 [docs/BENCHMARKS.md](./docs/BENCHMARKS.md) is the full report: 89 cells across four CPUs, three video cards and three sound cards, with charts, method, and the raw logs. [docs/FPS-MATRIX.md](./docs/FPS-MATRIX.md) keeps the older per-wave history.
 
