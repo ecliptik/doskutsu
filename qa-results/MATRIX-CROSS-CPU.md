@@ -100,15 +100,47 @@ CPU swap available on this board can decouple them.** The POD-83 and Am5x86
 also share the 33.33 MHz bus.
 
 Lane H is still worth running, but for a different question. The falsifiable
-prediction is **uniform 0.75 on every metric**, overhead included -- `C4`
-per-loop 17.4 and overhead ~57 s, Organya ~15.0, Organya-HQ ~10.2. The signal
-is *deviation*:
+prediction was **uniform 0.75 on every metric**, overhead included -- `C4`
+per-loop 17.4 and overhead ~57 s. The signal is *deviation*:
 
 - **above 0.75** implies a fixed cost that does not scale with system clock
-  (CF media latency, DRAM refresh, a vblank wait)
 - **below 0.75** implies superlinear degradation, e.g. cache pressure
 - **clean 0.75 everywhere** says the system is clock-proportional, and still
   says nothing about bus versus core
+
+### Lane H result: prediction confirmed, and the deviations are structured
+
+Run 2026-08-11, 22/22 full route (`2026-08-11-DX250-full/`). `C4` predicted
+17.41, **measured 17.39** -- ratio 0.7492. Overhead predicted 57.3, measured
+56. 19 of 22 cells land within +/-1.3% of 0.75.
+
+As predicted, this says nothing about bus versus core. But the deviations are
+not noise, they are **backend-structured**, and that is the lane's real yield:
+
+| Group | Ratio | Reading |
+|---|---|---|
+| OPL3 / AUTO / WB / Vibra | 0.746-0.753 | on 0.75 |
+| **AdLib** | **0.756-0.761** | **above** -- fixed non-scaling cost |
+| GUS | 0.753-0.755 | slightly above, same direction |
+| Organya (`5C3`) | 0.7353 | below -- superlinear |
+
+**This independently corroborates the overhead split found in lanes A/C/G**, by
+an unrelated route. AdLib's 120 Hz PIT ISR writing OPL2 ports is ISA-rate work
+that does not scale with the CPU, and GUS's overhead is GF1 DRAM upload time
+already identified as bus-bound; both appear here as the predicted above-0.75
+deviation. Overhead shows the same signature from the other side, coming in
+2-7% *below* clock-proportional for every backend except Organya -- CF media
+latency does not slow down when the CPU does.
+
+**The render path shows no fixed component**: OPL3 and AUTO sit on 0.75.
+
+**Organya is the only backend that degrades worse than clock on both axes**
+(per-loop 0.7353, overhead +6.2% above prediction). Suggestive, not
+established -- the second Organya cell sits on 0.75.
+
+`5112` (Organya-HQ) measured **1.038**, i.e. the slower CPU outperformed the
+faster one, which is structurally impossible for identical work. Both it and
+`6112` need re-measuring; excluded from all conclusions.
 
 ---
 
