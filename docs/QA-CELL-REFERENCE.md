@@ -43,7 +43,7 @@ One card, no mode switching.
 | # | Cell | CFG | Measures |
 |---|---|---|---|
 | 1 | `G02` | AUTO | cold-boot baseline to title, daily-driver config |
-| 2 | `G16` | AUTO | auto-detect -- **should** pick the WaveBlaster. Does it? |
+| 2 | `G16` | AUTO | the engine's default backend selection (see the note below) |
 | 3 | `G17` | WB | WaveBlaster MIDI via the **Vibra's** own header |
 | 4 | `G18` | OPL3 | the SB16's own OPL3 -- the orgmid2 witness |
 | 5 | `G111` | ORGANYA | Organya 11025 cache-hit |
@@ -54,6 +54,18 @@ PicoGUS header in `PG` and the Vibra's in `VB`, and those are different code
 paths in the SDL layer. **The DreamBlaster has to physically move with the
 lane, or `G17` silently measures nothing.** Confirm from the log: it must say
 `audio backend: wb`.
+
+Both sweeps also write the tag `G17`/`17`. Pull and clear `LOGS\` between
+them, or the second run overwrites the first. This has already destroyed the
+PicoGUS-header cell on two machines.
+
+`G16` does not test SETUP's hardware auto-detection. With no
+SETUP-generated CFG present, the cell falls through to the engine default,
+which has been OPL3 since wave 46, and never consults detection at all --
+`G16` and its cross-CPU counterparts all initialise `opl3` while the
+neighbouring `G17` proves the DreamBlaster is present and working. Reading it
+as an auto-detect result is a mistake; testing detection requires a
+SETUP-generated CFG.
 
 ---
 
