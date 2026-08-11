@@ -57,23 +57,38 @@ photos was not.
 
 ## Open riders (not part of the root cause)
 
-If all five photos come from one run, they are mutually inconsistent with the
-margin story and something else is also happening:
+**The photos are all from one run** -- settled from the logs. Lane F produced
+only `GC4M.LOG`; `G51M.LOG` does not exist because the lane was aborted during
+`C4`, after 440 flips with the route truncated at stage 17. There was no second
+cell and no second attempt for them to span. So the "different attempts"
+explanation is out, and a second artifact does exist:
 
 - `IMG_4420` shows the expected left-62.5% box -- consistent.
-- `IMG_4417`'s cloud backdrop reaches both bezels, plus a stray misplaced
-  rectangle top-right.
-- `IMG_4418`'s inventory box spans ~93% of panel width; a 320-wide logical
-  inventory on a 512 surface should span ~48-59%. Its banding is ~every 8
-  source rows, which smells like per-tile-row artifacts rather than pitch.
+- `IMG_4417`'s cloud backdrop reaches both bezels **with a continuous, unbroken
+  horizon**, and the logo and menu are centred on the full raster. Uninitialised
+  VRAM cannot continue a cloud pattern seamlessly, and 320-wide centring would
+  not land there.
 - The garbled menu letterforms in `IMG_4417` ("2co gene" for "New game") are
   not margin-explainable.
 
-Either the photos span different attempts -- they are not currently bound to
-cell and moment -- or a second artifact exists, e.g. the backdrop tiler
-filling surface width while sprite and text draws clip at logical width.
-Re-check once a native 320x240 mode is available (M64VBE retry). If glyph
-corruption survives that, there is a second bug.
+This promotes the second explanation offered below to the leading one: **the
+geometry mismatch is not uniform across draw paths.** Backdrop fill and
+title/menu centring use the real 512x384 surface dimensions; the map draw is
+pinned to 320x240. That also accounts for the stray top-right rectangle -- a
+full-surface path showing through where logically-clipped content never lands.
+
+Useful consequence for the fix: the clear and tile paths already handle surface
+dimensions correctly, so a centre/letterbox fix is predominantly about blit
+placement and camera/viewport bounds, not about teaching every path the real
+size.
+
+Withdrawn: the earlier "`IMG_4418`'s inventory box spans ~93% of panel width"
+measurement. That photo's surround is black-on-black, so there is no reference
+edge to scale against and the figure is unreliable. Its ~8-row banding stands
+as an observation but carries no width inference.
+
+Re-check the letterforms once a native 320x240 mode is available (M64VBE
+retry). If glyph corruption survives that, there is a third bug.
 
 ## Files
 
