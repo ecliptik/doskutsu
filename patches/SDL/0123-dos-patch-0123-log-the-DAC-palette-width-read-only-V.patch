@@ -1,0 +1,80 @@
+From c1730d44c7588ec5cb5763c640919326f546ceb1 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 11 Aug 2026 16:46:04 -0700
+Subject: [PATCH 123/123] dos: patch 0123 -- log the DAC palette width
+ (read-only VBE 4F08)
+
+WHY DOS NEEDS THIS: the operator reports colours look richer on the Cirrus than
+on the S3 ViRGE. It is NOT a software path difference -- both cards set the
+identical mode (0x01F8 320x240 8bpp), ProgramVGADAC is the sole palette writer
+and always does value>>2, and the LFB-vs-banked split never touches the palette.
+The real gap: VBE function 4F08 (Get/Set DAC Palette Format) appears NOWHERE in
+the SDL tree, so the port hard-assumes a 6-bit DAC and writes 0-63. A card left
+in 8-bit DAC mode renders those values across only the bottom quarter of its
+range -- visibly washed out, per card. VBE says 6-bit is the post-modeset
+default, but that is the class of "should" real BIOSes / UNIVBE violate.
+
+This patch adds a READ-ONLY 4F08 with BL=01 (get) right after the 0x4F02 mode
+set and logs the returned width (DOSVESA-DACWIDTH line, alongside DOSVESA-
+MODESET). It does NOT change the palette write path -- diagnostic only. If it
+later reports width=8 on some card, the fix is one future line (request 6-bit
+via BL=00 BH=06, or scale writes to the reported width). This matters beyond
+colour: if a card has been running an 8-bit DAC while receiving 6-bit values,
+every cross-card visual A/B this project has done compared two different
+effective palettes. Per POST-BENCHMARK-PLAN.md 3.3b.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosmodes.c | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index e8b864888..6256cec66 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -944,6 +944,42 @@ bool DOSVESA_SetDisplayMode(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_displ
+ 
+     data->banked_mode = !use_lfb;
+ 
++    // DOSKUTSU patch (SDL/0123): read-only VBE 4F08 (Get DAC Palette Format).
++    // DIAGNOSTIC ONLY -- this does NOT change the palette write path; the sole
++    // palette writer (ProgramVGADAC in SDL_dosframebuffer.c) still hard-assumes
++    // a 6-bit DAC and writes `value >> 2` (0-63). VBE 4F08 appears NOWHERE else
++    // in the tree, so we have never confirmed the DAC width the card actually
++    // runs. VBE specifies 6-bit as the default after a mode set, but that is the
++    // class of "should" real BIOSes / UNIVBE violate per card. If a card is left
++    // in 8-bit DAC mode, our 0-63 writes cover only the bottom quarter of its
++    // output range -- a visibly washed-out image (the operator's "Cirrus colours
++    // look richer than the S3" report; POST-BENCHMARK-PLAN 3.3b). Reading this
++    // per card turns a photo-colour argument into a number.
++    //
++    // Register contract: AX=0x4F08, BL=0x01 (get subfunction). On support:
++    // AX=0x004F and BH = current DAC width in bits (6 or 8). AX!=0x004F means
++    // the BIOS does not implement 4F08 (switchable-DAC capability absent) -- in
++    // which case the width is unknowable from software and 6-bit is the VBE
++    // default assumption. MUST run AFTER the 0x4F02 mode set (the mode set is
++    // what resets the DAC toward its 6-bit default), which is where we are.
++    //
++    // If this ever reports width=8 on some card, the one-line fix (a FUTURE
++    // patch, not this one) is either to request 6-bit here (BL=0x00, BH=0x06)
++    // or to scale ProgramVGADAC's writes to the reported width.
++    {
++        regs.x.ax = 0x4F08;
++        regs.x.bx = 0x0001; // BH=0 (input-ignored), BL=1 (get)
++        __dpmi_int(0x10, &regs);
++        const bool dac_4f08_ok = (regs.x.ax == 0x004F);
++        const int  dac_width   = dac_4f08_ok ? (int)regs.h.bh : -1;
++        DOSKUTSU_MODES_LOG("DOSVESA-DACWIDTH: 4F08.get ax=0x%04X supported=%d "
++                           "width_bits=%d writer_assumes=6 (width=8 + 6-bit "
++                           "writes == washed-out palette; -1 == BIOS lacks 4F08, "
++                           "6-bit VBE default assumed; read-only diagnostic, "
++                           "palette write path unchanged)",
++                           regs.x.ax, (int)dac_4f08_ok, dac_width);
++    }
++
+     // DOSKUTSU diagnostic (patches/SDL/0003; routed through shared writer
+     // by patch 0009): every mode-set dumps the chosen mode's full
+     // attributes so we can attribute slow flushes / wrong stride /
+-- 
+2.47.3
+

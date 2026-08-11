@@ -504,6 +504,13 @@ BANNER_REGEX=(
   # patch 0280: only emits on a TAS record/replay run (the gate's smoke is
   # not a TAS run), hence optional -- present here so a TAS smoke witnesses it.
   "TAS fixed-timestep guard: (ENABLED \(default\)|DISABLED \(killswitch\))"
+  # patch SDL/0122: emits only on the AdLib/GUS PIT-pump path (the pump starts
+  # only on a no-SB backend), so OPTIONAL -- a default OPL3/SB smoke never starts
+  # the pump and this banner is correctly absent. A gus/adlib cell witnesses it.
+  "audio: SDL/0122 pump-aware timebase (ENABLED|DISABLED\(killswitch=0\))"
+  # patch SDL/0123: read-only VBE 4F08 DAC-width probe, emitted on EVERY mode set
+  # (video init, always reached before the title), so REQUIRED.
+  "DOSVESA-DACWIDTH: 4F08.get ax=0x[0-9A-Fa-f]+ supported=[01] width_bits=-?[0-9]+"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -649,6 +656,8 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "optional"
+  "optional"
+  "required"
 )
 # BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY -- ALL THREE are 137 entries
 # each and MUST stay 1:1 (re-aligned in the v1.6.2 rc5 window: the GUS Campaign-3
@@ -803,6 +812,8 @@ BANNER_LABEL=(
   "0271 organya-precache present-BRACKET probe ARMED banner (OPTIONAL -- 'present-probe: ARMED hint=1 ...' emitted once when setPresentProbeActive engages under SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1; nx 0271 #1 round-2 diagnostic that BRACKETS each present sub-stage (ENTER/EXIT drain/dv-getstate-resnap/dv-presentfull/sdl-partial/sdl-full/palette-program) + the gen-bump signal + org_precache_one entry, so the LAST fsync'd line names the wedging op. DEFAULT-OFF; ABSENT in the default smoke (hint unset) -- expected. 0271-specific revert-detector (0269's SUMMARY banner alone would not catch a 0271 revert). Embed witness = strings|grep 'ENTER dv-presentfull'.)"
   "0121 organya-precache present-path HW-breadcrumb probe -- SDL side (OPTIONAL -- 'present-probe[ts=N]: SDL-side ARMED hint=1 (SDL/0121 present-path HW breadcrumbs active)' emitted once when the shared gate SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1 first resolves in the SDL flush path; SDL/0121 #1 round-2 diagnostic that brackets the present-path HW ops (ENTER/EXIT switchbank far-call / dv-presentfull-hw / uwfb-banked-copy / dv-getstate / palette-program) so the LAST fsync'd SDL line names the wedging HW op on a hard freeze. Prime suspect = the banked VBE window-func far-call in SwitchBank (g2k Cirrus force-banked per 0019), where both A/B present routes converge. DEFAULT-OFF; ABSENT in the default smoke (hint unset) -- expected. 0121-specific revert-detector (nx 0271's engine ARMED banner alone would not catch a 0121 revert). Embed witness = strings|grep 'switchbank ENTER'.)"
   "0272 organya-precache crash breadcrumbs + in-LOG fault handler (OPTIONAL -- 'precache-step: <step> [heap uordblks=..]' after each pre-render step + 'precache-FAULT: sig=.. eip=0x..' / 'precache: caught std::exception what=..' on a crash; nx 0272 #1 crash probe, gated by SDL_HINT_DOSKUTSU_ORGCACHE_PRESENT_PROBE=1. Pins the step that exits-to-DOS on g2k cold-cache organya precache + captures the fault eip TO THE LOG (a DJGPP dump is invisible under VESA LFB). DEFAULT-OFF; ABSENT in the default smoke (hint unset) -- expected. Embed witness = strings|grep 'precache-step'.)"
+  "SDL/0122 pump-aware SDL timebase (OPTIONAL -- emitted at pump Start on the SDL-log channel (<TAG>SDL.LOG / SDLDBG.LOG) only on the no-SB AdLib/GUS PIT-pump path; a default OPL3/SB smoke never starts the pump so the banner is correctly ABSENT. ENABLED = ch0 programmed MODE 2 so SDL_GetPerformanceCounter is derived from the IRQ-0 period counter (fixes the uclock staircase that made gus/adlib feel like 18 fps); DISABLED(killswitch=0) = SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=0 reverts to MODE 3 + uclock, byte-identical to pre-0122. The A/B acceptance test is the inter_flip histogram on an adlib cell: the 10-40 ms band, EMPTY before the fix, must repopulate after. Ride-along at PumpStop: 'SDL/0122 pump teardown -- isr_count=.. expected_bios_chains=.. actual_bios_chains=.. delta=..' prints the standing clock-skew question as a number. Real-HW-only risk: MODE-2 latch reads on some board -- flag per [[dosbox_not_proxy]]; killswitch or the RTC/IRQ-8 fallback is the escape hatch.)"
+  "SDL/0123 read-only VBE 4F08 DAC-width probe (REQUIRED -- 'DOSVESA-DACWIDTH: 4F08.get ax=.. supported=.. width_bits=..' emitted on EVERY mode set (video init, always reached before the title). Read-only diagnostic: does NOT change the palette write path (ProgramVGADAC still writes 6-bit 0-63). supported=1 width_bits=8 on a card + our 6-bit writes == washed-out palette, the candidate for the operator's 'Cirrus colours look richer than S3' report (POST-BENCHMARK-PLAN 3.3b). width_bits=-1 == BIOS lacks 4F08, 6-bit VBE default assumed. If it ever reports 8 on some card the fix is one future line (request 6-bit BL=00 BH=06, or scale writes). DOSBox-X width is whatever its VBE reports; the per-card real-HW numbers are the actual deliverable.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

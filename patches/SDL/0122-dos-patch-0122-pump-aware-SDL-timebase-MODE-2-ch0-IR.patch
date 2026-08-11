@@ -1,0 +1,406 @@
+From f57de8800c876c40c1c6f436609dfd1f487d2038 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 11 Aug 2026 16:45:54 -0700
+Subject: [PATCH 122/123] dos: patch 0122 -- pump-aware SDL timebase (MODE-2
+ ch0 + IRQ-0 perf clock)
+
+WHY DOS NEEDS THIS: SDL/0110's AdLib/GUS music pump reprograms PIT ch0, the
+same counter DJGPP uclock() reads -- and uclock() is SDL's ONLY DOS timebase
+(SDL_GetTicks / SDL_GetTicksNS / SDL_GetPerformanceCounter / SDL_Delay all
+route through it). uclock() assumes it owns ch0 as a full-65536 sweep, so with
+the pump active SDL's clock freezes between 55 ms BIOS ticks (with +/-8 ms
+local jitter, going BACKWARDS) then jumps ~55 ms. The engine's fixed-timestep
+accumulator runs off that staircase, so ~40% of rendered frames repeat an
+unchanged world: on gus/adlib the game FEELS like 18 fps while rendering ~28
+(GUS-ADLIB-FPS-FINDINGS.md; the "42% deficit" was 1000/54 = the BIOS period).
+
+FIX (SDL-side only): program ch0 in MODE 2 (rate generator, control 0x34)
+instead of MODE 3 (0x36). Both fire IRQ-0 once per div counts, so the music
+tick rate and the BIOS-INT8 chain are unchanged -- but MODE 2's latched counter
+single-sweeps div->1 linearly, so sub-tick phase is readable. The pump ISR
+keeps a DPMI-locked period counter (s_isr_count); a main-line reader returns
+the monotonic PIT-clock delta since Start (isr_count*div + phase) with a
+uclock-style consistency retry around the latch; SDL_systimer.c derives
+SDL_GetPerformanceCounter (and SDL_SYS_DelayNS) from it while the pump owns ch0,
+rebased at PumpStart (s_pump_perf_base = uclock() snapshot) so the timeline is
+continuous with uclock before and after. Both sources share the ~1.193 MHz PIT
+frequency, so UCLOCKS_PER_SEC stays the perf frequency.
+
+Killswitch SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=0 (strict-"0", DEFAULT ON) reverts
+ch0 to MODE 3 + uclock -- byte-identical to pre-0122 -- the escape hatch if
+MODE-2 latch reads misbehave on some real board (the design's RTC/IRQ-8 fallback
+is the next step; see SDL_dosopltimer.h). One-shot boot banner + a PumpStop
+ride-along that prints isr_count, expected BIOS chains (isr_count*div/65536) and
+actual chains, turning the standing pump clock-skew question into a printed
+number on every run.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dosopltimer.h     |  35 +++++++
+ src/core/dos/SDL_dos_audio_synth.c | 154 ++++++++++++++++++++++++++++-
+ src/timer/dos/SDL_systimer.c       |  36 +++++--
+ 3 files changed, 216 insertions(+), 9 deletions(-)
+
+diff --git a/include/SDL3/SDL_dosopltimer.h b/include/SDL3/SDL_dosopltimer.h
+index 3f516035e..d52731ec6 100644
+--- a/include/SDL3/SDL_dosopltimer.h
++++ b/include/SDL3/SDL_dosopltimer.h
+@@ -100,6 +100,41 @@ extern SDL_DECLSPEC void SDLCALL SDL_DOSOplTimerPumpStop(void);
+  */
+ extern SDL_DECLSPEC bool SDLCALL SDL_DOSOplTimerPumpActive(void);
+ 
++/*
++ * DOSKUTSU patch (SDL/0122): pump-aware SDL timebase.
++ *
++ * SDL/0110 reprograms PIT ch0, which is the same counter DJGPP uclock() reads
++ * (and uclock is SDL's ONLY DOS timebase). While the pump runs, uclock's
++ * sub-tick value is meaningless -- SDL_GetTicks / SDL_GetPerformanceCounter
++ * staircase at the 55 ms BIOS tick, and the engine's fixed-timestep accumulator
++ * bursts logic in 2-3 ticks every 55 ms (the "feels like 18 fps on gus/adlib"
++ * regression). SDL/0122 programs ch0 in MODE 2 (readable single-sweep counter)
++ * instead of MODE 3, keeps a DPMI-locked ISR period counter, and exports a
++ * monotonic perf reader that SDL_systimer.c derives SDL_GetPerformanceCounter
++ * from while the pump owns ch0 -- rebased at Start so the timeline is
++ * continuous with uclock before and after. Killswitch
++ * SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=0 (strict-"0", DEFAULT ON) reverts to MODE 3
++ * + uclock, byte-identical to the pre-0122 path.
++ */
++
++/**
++ * \returns true when the MODE-2 pump timebase owns PIT ch0, i.e. the perf
++ *          counter MUST be read from SDL_DOSOplTimerPumpPerfCounter() rather
++ *          than uclock(). False on every SB-present config (the pump never
++ *          starts) and when the killswitch reverted the pump to MODE 3.
++ * \since SDL 3 -- doskutsu workspace-local patch 0122, 2026-08-11.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSOplTimerTimebaseActive(void);
++
++/**
++ * \returns the pump-aware performance counter in UCLOCKS_PER_SEC-compatible
++ *          units (PIT input clock, ~1.193 MHz), rebased at pump Start so it is
++ *          continuous with uclock() across the boundary. Valid only while
++ *          SDL_DOSOplTimerTimebaseActive() is true; returns 0 otherwise.
++ * \since SDL 3 -- doskutsu workspace-local patch 0122, 2026-08-11.
++ */
++extern SDL_DECLSPEC Uint64 SDLCALL SDL_DOSOplTimerPumpPerfCounter(void);
++
+ /*
+  * DOSKUTSU patch (SDL/0118, Campaign 2 Phase 2): PC-speaker square-wave SFX.
+  *
+diff --git a/src/core/dos/SDL_dos_audio_synth.c b/src/core/dos/SDL_dos_audio_synth.c
+index 29751d626..650fe671b 100644
+--- a/src/core/dos/SDL_dos_audio_synth.c
++++ b/src/core/dos/SDL_dos_audio_synth.c
+@@ -38,6 +38,8 @@
+ 
+ #if defined(SDL_PLATFORM_DOS)
+ 
++#include <time.h>  /* SDL/0122: uclock() -- snapshot the timebase at pump Start for continuity */
++
+ #include "SDL_dos_audio_synth.h"
+ #include <SDL3/SDL_dosmidi_tick.h>  /* SDL/0110: registered-tick accessor + Any-active predicate */
+ #include <SDL3/SDL_dosopltimer.h>   /* SDL/0110: AdLib PIT/IRQ-0 OPL music pump API */
+@@ -1264,6 +1266,39 @@ static volatile Uint64   s_now_ms = 0;        /* monotonic ms for the tick cb */
+ static volatile uint32_t s_bios_accum = 0;    /* fractional toward the 18.2 Hz BIOS tick */
+ static SDL_DOSMidiTickCallback s_pump_tick_cb = NULL;
+ 
++/* ========================================================================
++ * DOSKUTSU patch (SDL/0122): pump-aware SDL timebase.
++ * ========================================================================
++ * THE BUG (diagnosed in GUS-ADLIB-FPS-FINDINGS.md): SDL/0110 reprograms PIT
++ * ch0 (div=9943, MODE 3), but ch0 is the same counter DJGPP uclock() reads,
++ * and uclock() is the ONLY timebase behind SDL_GetTicks / SDL_GetTicksNS /
++ * SDL_GetPerformanceCounter / SDL_Delay on DOS. uclock() assumes it owns ch0
++ * as a full-65536 sweep, so with the pump active SDL's clock freezes between
++ * 55 ms BIOS ticks (with +/-8 ms local jitter, INCLUDING GOING BACKWARDS) and
++ * jumps ~55 ms per tick. The engine's fixed-timestep accumulator runs off that
++ * staircase, so ~40% of rendered frames repeat an unchanged world -- the game
++ * FEELS like 18 fps on the gus/adlib backends while rendering ~28.
++ *
++ * THE FIX: program ch0 in MODE 2 (rate generator, control 0x34) instead of
++ * MODE 3 (0x36). Both fire IRQ-0 once per `div` counts, so the music tick rate
++ * and the BIOS-INT8 chain are UNCHANGED -- but MODE 2's latched counter
++ * single-sweeps div->1 linearly, so sub-tick phase is readable. The ISR keeps
++ * a DPMI-locked period counter (s_isr_count); a main-line reader returns the
++ * monotonic PIT-clock delta since Start (isr_count*div + phase), and
++ * SDL_systimer.c derives SDL_GetPerformanceCounter from it, rebased at Start so
++ * the timeline is continuous with uclock before and after the pump.
++ *
++ * Killswitch SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=0 (strict-"0", DEFAULT ON) reverts
++ * ch0 to MODE 3 + uclock -- byte-identical to the pre-0122 (v1.6.x) behavior,
++ * the escape hatch if MODE-2 latch reads misbehave on some real board (the
++ * design's RTC/IRQ-8 fallback is the next step if that happens; see
++ * SDL_dosopltimer.h). All ch0-timebase state is ISR-touched -> volatile +
++ * DPMI-locked at Start. */
++static bool              s_pump_timebase   = false;  /* MODE-2 timebase engaged (main-line only) */
++static volatile uint32_t s_isr_count       = 0;      /* pump ISR fires since Start (period counter) */
++static volatile uint32_t s_bios_chain      = 0;      /* actual BIOS INT8 chains since Start (ride-along) */
++static Uint64            s_pump_perf_base   = 0;      /* uclock() snapshot at Start (continuity rebase) */
++
+ /* ========================================================================
+  * DOSKUTSU patch (SDL/0118, Campaign 2 Phase 2): PC-speaker square-wave SFX
+  * ========================================================================
+@@ -1347,6 +1382,12 @@ static void OplPitChainOld_End(void) {}
+    enters this as a plain C function). Runs with interrupts disabled. */
+ static void OplPitISR(void)
+ {
++    /* SDL/0122: one PIT-ch0 period elapsed. This counter, times div, is the
++       coarse part of the pump-aware perf clock (phase from the live latch is
++       the fine part). Bare increment; the main-line reader reconciles it
++       against the latch with a consistency retry. */
++    s_isr_count++;
++
+     /* 1. advance the monotonic clock by one fast-tick period (no 64-bit
+        divide in-ISR: collapse the us accumulator to ms with a small loop). */
+     s_us_frac += s_us_per_tick;
+@@ -1369,6 +1410,7 @@ static void OplPitISR(void)
+     s_bios_accum += s_pit_div;
+     if (s_bios_accum >= 65536u) {
+         s_bios_accum -= 65536u;
++        s_bios_chain++;        /* SDL/0122 ride-along: count actual BIOS chains */
+         OplPitChainOld();      /* original BIOS INT 8 runs + EOIs */
+     } else {
+         DOS_EndOfInterrupt(0); /* master-PIC EOI (IRQ-0) */
+@@ -1385,6 +1427,9 @@ static void OplPitISR_End(void) {}
+    divide (the note ring holds precomputed divisors). DPMI-locked. */
+ static void OplPitBeepISR(void)
+ {
++    /* SDL/0122: period counter (identical to OplPitISR -- see there). */
++    s_isr_count++;
++
+     /* 1. advance the monotonic clock (identical to OplPitISR). */
+     s_us_frac += s_us_per_tick;
+     while (s_us_frac >= 1000u) {
+@@ -1421,6 +1466,7 @@ static void OplPitBeepISR(void)
+     s_bios_accum += s_pit_div;
+     if (s_bios_accum >= 65536u) {
+         s_bios_accum -= 65536u;
++        s_bios_chain++;        /* SDL/0122 ride-along: count actual BIOS chains */
+         OplPitChainOld();      /* original BIOS INT 8 runs + EOIs */
+     } else {
+         DOS_EndOfInterrupt(0); /* master-PIC EOI (IRQ-0) */
+@@ -1464,6 +1510,21 @@ bool SDL_DOSOplTimerPumpStart(int hz)
+        (SDL_DOSMidiTickRegister) BEFORE Start, mirroring the SB init order. */
+     s_pump_tick_cb = SDL_DOSMidiTickGetRegistered();
+ 
++    /* SDL/0122: resolve the pump-aware-timebase killswitch (strict-"0", DEFAULT
++       ON). When ON, ch0 is programmed in MODE 2 so SDL_systimer.c can derive a
++       readable perf clock from the ISR period counter; when "0", ch0 stays in
++       MODE 3 and uclock is used exactly as pre-0122 (the escape hatch). Reset
++       the ISR period + BIOS-chain counters, and snapshot uclock() NOW -- while
++       ch0 is still in the pre-pump BIOS state and uclock is valid -- so the
++       derived clock is continuous with uclock across the Start boundary. */
++    {
++        const char *tb = SDL_GetHint("SDL_HINT_DOSKUTSU_PUMP_TIMEBASE");
++        s_pump_timebase = !(tb && tb[0] == '0' && tb[1] == '\0');
++    }
++    s_isr_count      = 0;
++    s_bios_chain     = 0;
++    s_pump_perf_base = (Uint64)uclock();
++
+     /* SDL/0118: resolve the PC-speaker SFX killswitch (strict-"0", DEFAULT ON;
+        pump Start only runs on the no-SB AdLib path, so this is inherently
+        AdLib-scoped). When "0", install the unchanged SDL/0110 music-only ISR
+@@ -1515,6 +1576,8 @@ bool SDL_DOSOplTimerPumpStart(int hz)
+     DOS_LockVariable(s_pump_tick_cb);
+     DOS_LockVariable(s_old_int8_vec);
+     DOS_LockVariable(s_opl_pump_active);
++    DOS_LockVariable(s_isr_count);   /* SDL/0122: ISR-touched period + chain counters */
++    DOS_LockVariable(s_bios_chain);
+     if (s_pcspk_sfx_enabled) {
+         /* SDL/0118: lock the note ring + all PC-speaker ISR-touched state. */
+         DOS_LockVariable(s_beep_ring);
+@@ -1525,10 +1588,15 @@ bool SDL_DOSOplTimerPumpStart(int hz)
+         DOS_LockVariable(s_pcspk_fire_hz);
+     }
+ 
+-    /* Program PIT ch0: control 0x43 = 0x36 (ch0, lobyte+hibyte, mode 3,
+-       binary), then divisor low+high to 0x40. */
++    /* Program PIT ch0: control 0x43 = ch0, lobyte+hibyte, binary. SDL/0122
++       selects the MODE: 0x34 (MODE 2, rate generator) when the pump-aware
++       timebase is ON so the latched counter single-sweeps div->1 linearly and
++       is readable; 0x36 (MODE 3, square wave) when the killswitch reverts it
++       (byte-identical pre-0122 path). Both fire IRQ-0 once per `div` counts, so
++       the music tick rate and the BIOS-INT8 chain are identical either way. */
++    const Uint8 ch0_ctrl = s_pump_timebase ? 0x34 : 0x36;
+     DOS_DisableInterrupts();
+-    outportb(0x43, 0x36);
++    outportb(0x43, ch0_ctrl);
+     outportb(0x40, (Uint8)(div & 0xFF));
+     outportb(0x40, (Uint8)((div >> 8) & 0xFF));
+     s_opl_pump_active = true;
+@@ -1546,6 +1614,15 @@ bool SDL_DOSOplTimerPumpStart(int hz)
+                      "SDL_HINT_DOSKUTSU_PCSPK_SFX=0 -> v1.5.0 music-only byte-identical)",
+                      s_pcspk_sfx_enabled ? "ENABLED" : "disabled (killswitch=0)",
+                      (unsigned)s_pcspk_fire_hz, PCSPK_NOTE_RING);
++    /* SDL/0122: one-shot boot banner (smoke BANNERS gate anchors on this line). */
++    doskutsu_dbg_log("audio: SDL/0122 pump-aware timebase %s (PIT ch0 MODE %d; "
++                     "SDL_GetPerformanceCounter derived from the IRQ-0 period "
++                     "counter, rebased at PumpStart perf_base=%lu; killswitch "
++                     "SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=0 -> MODE 3 + uclock "
++                     "staircase)",
++                     s_pump_timebase ? "ENABLED" : "DISABLED(killswitch=0)",
++                     s_pump_timebase ? 2 : 3,
++                     (unsigned long)s_pump_perf_base);
+     return true;
+ }
+ 
+@@ -1586,6 +1663,27 @@ void SDL_DOSOplTimerPumpStop(void)
+                      "to 18.2065 Hz; IRQ-0 unhooked; timer left unmasked)%s",
+                      s_pcspk_sfx_enabled ? "; SDL/0118 PC-speaker restored (ch2+0x61)"
+                                          : "");
++
++    /* SDL/0122 ride-along: the IRQ-0 unhook above is done, so s_isr_count and
++       s_bios_chain are now stable. Print the standing clock-skew question as a
++       number: each BIOS chain should fire once per 65536 PIT clocks worth of
++       fast ticks, i.e. expected = isr_count*div/65536. actual < expected means
++       IRQ-0 fires were missed (interrupts masked > one fast-tick period),
++       which is the only way the pump can lose DOS time. delta != 0 bounds the
++       skew on every future run without any bench time. */
++    {
++        const uint32_t div = s_pit_div ? s_pit_div : 1u;
++        const Uint64 expected = ((Uint64)s_isr_count * (Uint64)div) / 65536ULL;
++        const long   delta    = (long)((Sint64)s_bios_chain - (Sint64)expected);
++        doskutsu_dbg_log("audio: SDL/0122 pump teardown -- isr_count=%lu div=%u "
++                         "expected_bios_chains=%lu actual_bios_chains=%lu "
++                         "delta=%ld (delta<0 == IRQ-0 fires lost while interrupts "
++                         "were masked; delta==0 == no DOS time lost; timebase=%s)",
++                         (unsigned long)s_isr_count, (unsigned)div,
++                         (unsigned long)expected, (unsigned long)s_bios_chain,
++                         delta,
++                         s_pump_timebase ? "MODE2/ON" : "MODE3/off(killswitch)");
++    }
+ }
+ 
+ bool SDL_DOSOplTimerPumpActive(void)
+@@ -1593,6 +1691,56 @@ bool SDL_DOSOplTimerPumpActive(void)
+     return s_opl_pump_active;
+ }
+ 
++/* DOSKUTSU patch (SDL/0122): monotonic PIT-clock delta since pump Start, in
++   PIT-input-clock units (1.193 MHz ~= UCLOCKS_PER_SEC 1193180, within ~2 ppm --
++   negligible against SDL's ms/ns rounding). Main-line only (SDL_GetPerformance-
++   Counter). uclock-style consistency retry around the latch: if an IRQ-0 fire
++   (which bumps s_isr_count) lands between the two reads of the period counter,
++   the count we latched belongs to a different period, so retry. With interrupts
++   ENABLED the pending IRQ-0 runs immediately, so a rollover mid-read always
++   shows as c1 != c2 -- do NOT cli here (that would defer the ISR and desync
++   s_isr_count from the latched count across a wrap). */
++static Uint64 opl_pump_pit_delta(void)
++{
++    const uint32_t div = s_pit_div ? s_pit_div : 1u;
++    uint32_t c1, c2;
++    uint16_t count = (uint16_t)div;
++    int guard = 0;
++    do {
++        c1 = s_isr_count;
++        outportb(0x43, 0x00);                     /* latch ch0 (non-destructive) */
++        count  = (uint16_t)inportb(0x40);         /* LSB */
++        count |= (uint16_t)(inportb(0x40) << 8);  /* MSB */
++        c2 = s_isr_count;
++    } while (c1 != c2 && ++guard < 8);
++    /* MODE 2 counts down div..1 (never 0); phase = counts elapsed this period. */
++    {
++        const uint32_t phase = (count != 0u && count <= div) ? (div - (uint32_t)count) : 0u;
++        return ((Uint64)c2 * (Uint64)div) + (Uint64)phase;
++    }
++}
++
++/* \returns the pump-aware performance counter (perf_base + PIT delta), rebased
++   at Start for continuity with uclock. Valid only while the MODE-2 timebase is
++   engaged; returns 0 otherwise (SDL_systimer.c gates on
++   SDL_DOSOplTimerTimebaseActive() before calling). */
++Uint64 SDL_DOSOplTimerPumpPerfCounter(void)
++{
++    if (!s_pump_timebase || !s_opl_pump_active) {
++        return 0;
++    }
++    return s_pump_perf_base + opl_pump_pit_delta();
++}
++
++/* \returns true when the MODE-2 pump timebase owns ch0 and SDL_systimer.c
++   should derive the perf counter from SDL_DOSOplTimerPumpPerfCounter() instead
++   of uclock(). False on all SB-present configs (pump never starts) and when the
++   killswitch reverted the pump to MODE 3. */
++bool SDL_DOSOplTimerTimebaseActive(void)
++{
++    return s_opl_pump_active && s_pump_timebase;
++}
++
+ /* DOSKUTSU patch (SDL/0110): shared ISR-active predicate. True if either the
+    SB16 IRQ-5 MIDI tick OR the AdLib PIT/IRQ-0 pump is driving the scheduler.
+    The engine's MidiScheduler reentrancy guards switch to this so they engage
+diff --git a/src/timer/dos/SDL_systimer.c b/src/timer/dos/SDL_systimer.c
+index d47bae177..b1af263e4 100644
+--- a/src/timer/dos/SDL_systimer.c
++++ b/src/timer/dos/SDL_systimer.c
+@@ -26,17 +26,38 @@
+ #include <time.h> /* uclock, uclock_t, UCLOCKS_PER_SEC */
+ 
+ #include "../../core/dos/SDL_dos_scheduler.h"
++#include <SDL3/SDL_dosopltimer.h>  /* SDL/0122: pump-aware timebase */
+ 
+ /* DJGPP's uclock() reprograms PIT channel 0 for a higher tick rate on first
+    call, giving ~1.19 MHz resolution (UCLOCKS_PER_SEC == 1193180).  This is
+    the same approach SDL2-dos used and gives sub-microsecond precision without
+    any extra setup. */
+ 
+-Uint64 SDL_GetPerformanceCounter(void)
++/* DOSKUTSU patch (SDL/0122): pump-aware timebase.
++
++   The AdLib/GUS OPL music pump (SDL/0110) reprograms PIT ch0 -- the same
++   counter uclock() reads -- so while it runs uclock()'s sub-tick value is
++   meaningless and SDL's whole clock staircases at the 55 ms BIOS tick. When the
++   pump owns ch0 in its MODE-2 readable configuration, derive the perf counter
++   from the pump's own IRQ-0 period counter instead (rebased at PumpStart so the
++   timeline is continuous with uclock before and after). On every SB-present
++   config the pump never starts, and the killswitch reverts it to MODE 3, so in
++   both cases this falls through to the unchanged uclock() path. Both sources
++   share the ~1.193 MHz PIT frequency, so UCLOCKS_PER_SEC stays the perf
++   frequency and SDL_SYS_DelayNS's math is unaffected. */
++static Uint64 dos_perf_now(void)
+ {
++    if (SDL_DOSOplTimerTimebaseActive()) {
++        return SDL_DOSOplTimerPumpPerfCounter();
++    }
+     return (Uint64)uclock();
+ }
+ 
++Uint64 SDL_GetPerformanceCounter(void)
++{
++    return dos_perf_now();
++}
++
+ Uint64 SDL_GetPerformanceFrequency(void)
+ {
+     return (Uint64)UCLOCKS_PER_SEC;
+@@ -49,18 +70,21 @@ void SDL_SYS_DelayNS(Uint64 ns)
+         return;
+     }
+ 
+-    const uclock_t delay_start = uclock();
+-    const uclock_t target_ticks = (uclock_t)((ns * UCLOCKS_PER_SEC) / SDL_NS_PER_SECOND);
++    /* SDL/0122: read the clock through dos_perf_now() so the delay follows the
++       pump-aware timebase when the OPL pump owns ch0 (uclock is unreliable
++       there). Same UCLOCKS_PER_SEC frequency, so target_ticks is unchanged. */
++    const Uint64 delay_start = dos_perf_now();
++    const Uint64 target_ticks = (Uint64)((ns * UCLOCKS_PER_SEC) / SDL_NS_PER_SECOND);
+ 
+-    while ((uclock() - delay_start) < target_ticks) {
++    while ((dos_perf_now() - delay_start) < target_ticks) {
+         /* Always yield first so cooperative threads can run. */
+         DOS_Yield();
+ 
+         /* If more than 1 ms remains, do a short sleep to avoid burning
+            100% CPU when no other threads need to run.  DJGPP's delay()
+            is a busy-wait but it does halt-loop on the PIT, which is
+-           lighter than a tight uclock() poll. */
+-        uclock_t remaining = target_ticks - (uclock() - delay_start);
++           lighter than a tight poll. */
++        Uint64 remaining = target_ticks - (dos_perf_now() - delay_start);
+         if (remaining > (UCLOCKS_PER_SEC / 1000)) {
+             delay(1);
+         }
+-- 
+2.47.3
+
