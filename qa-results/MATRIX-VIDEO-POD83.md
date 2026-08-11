@@ -57,15 +57,35 @@ does not match the fingerprint and runs LFB.
 So **-1.2 to -1.4 fps is the measured price of the Cirrus LFB workaround** --
 the first time that guard's cost has had a number attached.
 
-**Worth one A/B cell, and the odds look favourable.** The guard's fingerprint
-names a CL-GD5434, but g2k's card is a CL-GD5430 that is *known to probe as a
-5434* (`memory/g2k_lp4ip1_hardware_identity.md`). The guard may therefore be
-keying off that same misdetection and firing on a board that does not have the
-aperture bug at all. Before trusting it, check what hardware the original
-wave-19-era aperture-bug evidence was captured on. If an A/B shows the LFB path
-is clean on the 5430, that is **+1.2 per-loop fps on the Cirrus for a one-line
-fingerprint change** -- and the Cirrus is the card the project's historical
-figures were taken on.
+**That price buys something real. An earlier draft of this file suggested the
+guard might be firing spuriously; that was wrong on both counts and is
+corrected here.**
+
+The suggestion was that the fingerprint's "matches CL-GD5434" wording might be
+keying off the known 5430-probes-as-5434 misdetection
+(`memory/g2k_lp4ip1_hardware_identity.md`). It cannot: **the fingerprint never
+tests chip identity at all.** It matches on VBE OEM vendor and product strings
+plus VRAM size -- exact arm is vendor `SciTech Software, Inc.` + product
+containing `Display Doctor` + 1024 KB. The patch says why outright: UNIVBE
+rewrites the OEM strings, so chip identity is hidden behind UNIVBE and VRAM
+size is used as the proxy. The `(matches CL-GD5434 + UNIVBE 6.7)` text is the
+human-readable reason string, not a test.
+
+And the bug it guards was **directly observed on this machine with a control**:
+the wave-5 `cirrus5` capture logged 100+ LFB writes at `vram_phys=0x78000000`
+with no visible display update, while the banked path on the same card did
+update. Aperture and displayed VRAM are decoupled below the BIOS interface.
+That is a two-armed observation, not an inference.
+
+There is also no way to run the A/B as-is: `force_banked_path` is set
+unconditionally at `SDL_dosvideo.c:167`, and `SDL_HINT_DOS_DISABLE_LFB` pushes
+the *same* direction (it forces banked too). Disabling the detection needs an
+SDL source change, which is post-matrix gated.
+
+The residual question worth testing eventually is narrower: whether anything
+since wave 5 -- display-start handling, the 0076 BIOS-VGA-detect work --
+incidentally fixed the decoupling. User guidance does not depend on the answer,
+since the ViRGE is the faster card either way.
 
 ## The historical bridge, honestly
 

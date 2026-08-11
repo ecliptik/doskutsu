@@ -1,0 +1,126 @@
+From 3f82c0b05c16c9bffcfd7b47d4cf8f9891e1a803 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Mon, 10 Aug 2026 09:58:00 -0700
+Subject: [PATCH] patch 0290 -- symmetric stall discount, and measure fps from
+ the first flip
+
+Two fixes to the benchmark harness.
+
+1. THE TRUNCATION. 0286 discounted stall frames on REPLAY only. The reel was
+   recorded with stalls inflating the tick stream normally, so during a load
+   record advanced several ticks while replay advanced one -- two different
+   tick streams for one run, and the recorded inputs land at game moments that
+   never occur on playback. The character drifts off the recorded path and
+   misses a doorway, ending the run short.
+
+   The round-over-round evidence on g2k is unambiguous, and inverted from what
+   one would want: route completeness tracked how well the discount worked.
+
+     no discount at all              4 of 9  cells completed the route
+     discount present, wrap bug      6 of 10
+     discount working (0288)         2 of 10
+
+   Fixing the wrap made truncation WORSE, because it made the asymmetry
+   effective. Gate on TAS::active() instead of TAS::replaying() so a stall
+   costs exactly one tick on both sides and the streams agree.
+
+   Reels recorded before this patch were captured under the old asymmetric
+   behaviour and must be re-recorded once.
+
+2. THE FPS WINDOW. 0289 divided flips by duration_s, which covers boot, the
+   Organya cache load and the 0287 banner hold -- about 35 s of a 135 s cell
+   with nothing rendered. That understated every backend by roughly 8%, and
+   unevenly, since boot cost varies per backend. Measure from the first flip
+   instead: one time() call for the whole run, stamped in the flip path, with
+   shutdown as the end of the window so the per-frame path stays clean. Field
+   renamed duration_s -> render_s to say what it now means.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp |  7 +++++++
+ src/main.cpp              | 36 ++++++++++++++++++++++++++++++++----
+ 2 files changed, 39 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 53991de1..b82ec001 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -2,7 +2,12 @@
+ #include <cassert>
+ 
+ // patch 0289: flips since process start (see the increment site below).
++#include <ctime>
++
+ unsigned long g_flip_count = 0;
++// patch 0290: wall-clock of the first flip, so the framerate window excludes
++// boot, cache load and the banner hold. One time() call for the whole run.
++std::time_t g_first_flip_time = 0;
+ // graphics routines
+ #include "../ResourceManager.h"
+ #include "../config.h"
+@@ -5187,6 +5192,8 @@ void Renderer::flip()
+   // neither term touches uclock. Emitted as flips= / fps_mean= at shutdown so
+   // every cell yields a valid framerate whether or not the pump is running.
+   ++g_flip_count;
++  if (g_first_flip_time == 0)
++    g_first_flip_time = std::time(nullptr);
+   Uint64 _inter_flip_ms = (_last_flip_t0 == 0) ? 0 : (_t0 - _last_flip_t0);
+   _last_flip_t0 = _t0;
+   // DOS-PORT (patch 0060, Phase 9 wave 12.5-D): inter-flip accumulator
+diff --git a/src/main.cpp b/src/main.cpp
+index 32a2c027..d3af863a 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -930,7 +930,24 @@ static void run_tick_fixed(void)
+     // needs no per-site guard. 0280/0285 (load_stage, on_song_start) remain
+     // as targeted belt-and-braces.
+     const Uint64 STALL_NS = (Uint64)150 * 1000000;   // 150 ms
+-    if (TAS::replaying() && tas_stall_discount_active() && delta_ns > STALL_NS)
++    // patch 0290: TAS::active(), NOT replaying() -- the discount must apply
++    // while RECORDING too.
++    //
++    // 0286 discounted stalls on replay only. The reel, though, was recorded
++    // with stalls inflating the tick stream normally. So during any load,
++    // record advanced several ticks and replay advanced one: two different
++    // tick streams for the same run, and the recorded inputs land at game
++    // moments that never occur on playback. Round-over-round on g2k, route
++    // completeness tracked how well the discount worked, inversely:
++    //
++    //   no discount at all       4 of 9  cells completed the route
++    //   discount + wrap bug      6 of 10
++    //   discount working (0288)  2 of 10
++    //
++    // Making it symmetric means a stall costs exactly one tick on both sides,
++    // so the streams agree. Reels recorded before this patch were captured
++    // under the old asymmetric behaviour and must be re-recorded once.
++    if (TAS::active() && tas_stall_discount_active() && delta_ns > STALL_NS)
+     {
+       LOG_INFO("tas: stall frame {} ms -> contributing 1 tick (patch 0286)",
+                 (unsigned long long)(delta_ns / 1000000));
+@@ -1290,12 +1307,23 @@ static void emit_run_manifest(void)
+   // and is the number the fps matrix should be built from.
+   {
+     extern unsigned long g_flip_count;
+-    const int dur = m.duration_s;
++    extern std::time_t g_first_flip_time;
++    // patch 0290: measure from the FIRST FLIP, not from process start.
++    // duration_s covers boot, the Organya cache load and the 0287 banner
++    // hold -- ~35 s of a ~135 s cell during which nothing is rendered.
++    // Dividing by it understated every backend by roughly 8%, unevenly,
++    // since boot cost varies per backend. The end of the window is shutdown
++    // rather than the last flip so the flip path stays free of a per-frame
++    // time() call; the gap between final flip and shutdown is negligible.
++    const std::time_t now = std::time(nullptr);
++    const int dur = (g_first_flip_time != 0 && now > g_first_flip_time)
++                      ? (int)(now - g_first_flip_time)
++                      : m.duration_s;
+     const unsigned long fl = g_flip_count;
+     // Integer tenths, no float formatting on DJGPP.
+     const unsigned long fps10 = (dur > 0) ? (fl * 10UL / (unsigned long)dur) : 0UL;
+-    LOG_INFO("[fps-true] flips={} duration_s={} fps_mean={}.{} "
+-             "(clock-independent: flip count / time()-based duration; use THIS "
++    LOG_INFO("[fps-true] flips={} render_s={} fps_mean={}.{} "
++             "(clock-independent: flips / seconds since the FIRST flip; use THIS "
+              "for the fps matrix, not inter_flip medians, which are invalid in "
+              "any cell running the PIT/IRQ-0 music pump)",
+              fl, dur, fps10 / 10UL, fps10 % 10UL);
