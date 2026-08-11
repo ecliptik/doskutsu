@@ -42,6 +42,28 @@
 # inside the measurement window. Differences under 0.5 fps are inside that
 # caveat. This tool groups cells into BANDs of 0.5 fps and you must not report
 # a within-band difference as a difference.
+#
+# ---------------------------------------------------------------------------
+# RUNMANIFEST SCHEMA VERSIONS
+#
+# The manifest is versioned and one field CHANGES MEANING across the bump, so
+# every read of it is gated on schema_version. Absent or unrecognised is v1.
+#
+#   v1  binary_sha12 is NOT a binary hash. It has been described both as the
+#       Organya cache key and as a source-diff fingerprint; this tool does
+#       not adjudicate and reports it as "provenance_key". Either way the
+#       real binary sha is not recorded anywhere in a v1 log, so this tool
+#       reports NO binary sha for a v1 round -- quoting this value under the
+#       name "binary sha" is the exact defect the v2 bump exists to fix.
+#   v2  binary_sha12 carries the real binary sha; the cache key moves to its
+#       own organya_cache_key field. Also adds organya_cache_key, per_loop_fps,
+#       overhead_s, populated fps_p50/fps_p95, a CPU/speed-class witness and
+#       per-stage fps lines -- all additive. Unknown keys are ignored, never
+#       fatal, so a future v3 still parses.
+#
+# v2 emits the literal INVALID_PUMP in inter_flip fields on gus/adlib cells.
+# The pump-detection gate below is kept regardless, because it is the only
+# thing protecting the v1 corpus -- which is all of the banked data.
 # ---------------------------------------------------------------------------
 
 set -u
@@ -138,7 +160,13 @@ cell_scan() {
 	}
 
 	# --- provenance -----------------------------------------------------
-	/^binary_sha12=/  { print "binary_sha=" substr($0, 14); next }
+	# RUNMANIFEST is versioned and binary_sha12 CHANGES MEANING between
+	# versions, so nothing here may be read without first knowing the
+	# schema. See resolve-by-schema in the shell below.
+	/^schema_version=/      { print "schema="     substr($0, 16); next }
+	/^binary_sha12=/        { print "sha12_raw="  substr($0, 14); next }
+	/^binary_sha12_src=/    { print "sha12_src="  substr($0, 18); next }
+	/^organya_cache_key=/   { print "org_key_v2=" substr($0, 19); next }
 	/^wave_tag=/      { print "wave_tag="   substr($0, 10); next }
 	/^exit_code=/     { print "exit_code="  substr($0, 11); next }
 	/^duration_s=/    { print "duration_s=" substr($0, 12); next }
@@ -259,7 +287,6 @@ for DIR in "$@"; do
 		backend=$(get backend)
 		route=$(get route)
 		wave_tag=$(get wave_tag)
-		binary_sha=$(get binary_sha)
 		seed=$(get seed)
 		end_tick=$(get end_tick)
 		exit_code=$(get exit_code)
@@ -274,6 +301,42 @@ for DIR in "$@"; do
 		dma_path=$(get dma_path)
 		gf1_voices=$(get gf1_voices)
 		gf1_dram_kb=$(get gf1_dram_kb)
+
+		# --- resolve provenance BY SCHEMA ---------------------------
+		# binary_sha12 means two different things depending on version:
+		#
+		#   v1  binary_sha12 is NOT a binary hash. It has been described
+		#       both as the Organya cache key and as a source-diff
+		#       fingerprint; this tool does not adjudicate between those
+		#       and reports it under the neutral name provenance_key.
+		#       What matters is the invariant both agree on: the real
+		#       binary sha is NOT recorded anywhere in a v1 log, so this
+		#       tool must never print one. Quoting this value as a
+		#       "binary sha" is the exact defect v2 exists to fix.
+		#   v2  binary_sha12 = the real binary sha; the v1 payload moves
+		#       to organya_cache_key (and/or binary_sha12_src).
+		#
+		# An absent or unrecognised schema_version is treated as v1.
+		schema=$(get schema)
+		sha12_raw=$(get sha12_raw)
+		sha12_src=$(get sha12_src)
+		org_key_v2=$(get org_key_v2)
+		case "$schema" in
+		2)
+			binary_sha="${sha12_raw:--}"
+			org_key="${org_key_v2:-${sha12_src:--}}"
+			;;
+		1|"")
+			[ -z "$schema" ] && schema=1
+			binary_sha="-"
+			org_key="${sha12_raw:--}"
+			;;
+		*)
+			# Unknown future schema: carry it, do not guess, do not die.
+			binary_sha="-"
+			org_key="${org_key_v2:-${sha12_src:-${sha12_raw:--}}}"
+			;;
+		esac
 
 		pumped=0
 		grep -q '^pump_opl=1$' "$K" && pumped=1
@@ -334,15 +397,15 @@ for DIR in "$@"; do
 		audio="${dma_path:--}"
 		[ -n "$gf1_voices" ] && audio="GF1-${gf1_voices}v"
 
-		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 			"$TAG" "${backend:--}" "$per_loop" "$overhead" \
 			"$flips" "$render_s" "$ifcol" "$routecol" \
 			"$card" "$audio" "$pumped" "$nif" "$inband" "$med" \
-			"${wave_tag:--}" "${binary_sha:--}" "${seed:--}" \
+			"${wave_tag:--}" "$org_key" "${seed:--}" \
 			"${end_tick:--}" "${exit_code:--}" "${pxtcache:--}" \
 			"${vram_kb:--}:${fb_base:--}:${mode:--}:${res:--}:${lfb_guard:--}" \
 			"${is_sb16:--}:${dsp_ver:--}:${dma_path:--}:${gf1_voices:--}:${gf1_dram_kb:--}" \
-			"$route" >> "$REC"
+			"$route" "$schema" "$binary_sha" >> "$REC"
 		NCELL=$((NCELL + 1))
 	done
 
@@ -363,10 +426,10 @@ for DIR in "$@"; do
 		BEGIN { OFS = FS; b = 0; lead = "" }
 		{
 			v = $3 + 0
-			if ($3 !~ /^[0-9.]+$/) { $24 = "-" }
+			if ($3 !~ /^[0-9.]+$/) { $26 = "-" }
 			else {
 				if (lead == "" || (lead - v) > band) { b++; lead = v }
-				$24 = sprintf("%c", 96 + b)
+				$26 = sprintf("%c", 96 + b)
 			}
 			print
 		}' > "$TMP/sorted.$ROUND_N"
@@ -374,13 +437,13 @@ for DIR in "$@"; do
 	if [ "$FORMAT" = tsv ]; then
 		printf 'tag\tbackend\tper_loop_fps\toverhead_s\tflips\trender_s\tinter_flip\troute\tcard\taudio\tband\n'
 		awk -F "$(printf '\t')" 'BEGIN { OFS = FS }
-			{ print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $24 }' \
+			{ print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $26 }' \
 			"$TMP/sorted.$ROUND_N"
 	else
 		{
 			printf 'TAG\tBACKEND\tPER-LOOP\tOVHD_S\tFLIPS\tRENDER_S\tINTER_FLIP\tROUTE\tBAND\tCARD\tAUDIO\n'
 			awk -F "$(printf '\t')" 'BEGIN { OFS = FS }
-				{ print $1, $2, $3, $4, $5, $6, $7, $8, $24, $9, $10 }' \
+				{ print $1, $2, $3, $4, $5, $6, $7, $8, $26, $9, $10 }' \
 				"$TMP/sorted.$ROUND_N"
 		} | column -t -s "$(printf '\t')"
 	fi
@@ -389,7 +452,7 @@ for DIR in "$@"; do
 		echo
 		echo "--- hardware witnesses (proven from the logs; card names are"
 		echo "    INFERRED from VRAM size only -- UNIVBE hides chip identity)"
-		while IFS="$(printf '\t')" read -r tag be pl ov fl rs ifc rt cd au pm nif inb med wt bs sd et ec px vidw audw rte band; do
+		while IFS="$(printf '\t')" read -r tag be pl ov fl rs ifc rt cd au pm nif inb med wt ok sd et ec px vidw audw rte sch bs band; do
 			IFS=: read -r w_vram w_fb w_mode w_res w_guard <<-EOF
 			$vidw
 			EOF
@@ -399,7 +462,13 @@ for DIR in "$@"; do
 			echo "  $tag ($be)"
 			echo "        video: vram=${w_vram}KB fb_base=$w_fb mode=$w_mode res=$w_res cirrus_lfb_guard=$w_guard"
 			echo "        audio: is_sb16=$a_sb16 dsp_ver=$a_dsp dma_path=$a_dma gf1_voices=$a_voices gf1_dram=${a_dram}KB"
-			echo "        run:   binary_sha=$bs reel_seed=$sd reel_end_tick=$et exit_code=$ec pxt_cache=$px"
+			case "$bs:$sch" in
+			-:1) bsshow="not-recorded-in-v1-logs" ;;
+			-:*) bsshow="unknown-schema-v$sch-not-asserted" ;;
+			*)   bsshow="$bs" ;;
+			esac
+			echo "        run:   runmanifest_schema=v$sch binary_sha=$bsshow provenance_key=$ok"
+			echo "               reel_seed=$sd reel_end_tick=$et exit_code=$ec pxt_cache=$px"
 			echo "        clock: inter_flip n=$nif median=${med:--}ms samples-in-10-40ms-band=$inb"
 			[ "$pm" = 1 ] && echo "               ^ PUMPED: median above is CORRUPT, never publish it"
 			echo "        route: $rte"
@@ -457,7 +526,18 @@ for DIR in "$@"; do
 
 	# GATE 3: mixed provenance in one round.
 	g3=0
-	for fld in 16:binary_sha 17:header_seed 18:reel_end_tick; do
+	# Mixing schemas inside one round is itself a provenance failure: the
+	# fields do not mean the same thing on both sides of the version bump,
+	# so no cross-schema comparison below can be trusted.
+	schemas=$(awk -F "$(printf '\t')" '{ print $24 }' "$REC" | sort -u)
+	if [ "$(echo "$schemas" | grep -c .)" -gt 1 ]; then
+		echo "  [FAIL] GATE 3 mixed RUNMANIFEST schema versions in one round:"
+		echo "$schemas" | sed 's/^/         v/'
+		echo "         binary_sha12 means different things across this"
+		echo "         boundary -- re-run the round on one binary."
+		g3=1; FAILED=1
+	fi
+	for fld in 16:provenance_key 25:binary_sha 17:header_seed 18:reel_end_tick; do
 		col=${fld%%:*}; name=${fld##*:}
 		vals=$(awk -F "$(printf '\t')" -v c="$col" '$c != "-" { print $c }' "$REC" | sort -u)
 		n=$(echo "$vals" | grep -c . )
@@ -475,7 +555,17 @@ for DIR in "$@"; do
 		echo "$stale"
 		g3=1; FAILED=1
 	fi
-	[ "$g3" -eq 0 ] && echo "  [ OK ] GATE 3 provenance -- one binary sha, one reel, no stale logs."
+	if [ "$g3" -eq 0 ]; then
+		sch1=$(echo "$schemas" | head -1)
+		if [ "$sch1" = 1 ]; then
+			echo "  [ OK ] GATE 3 provenance -- v1 round: one provenance key,"
+			echo "         one reel, no stale logs. A v1 log does NOT record the"
+			echo "         binary sha, so this tool reports none for this round."
+		else
+			echo "  [ OK ] GATE 3 provenance -- v$sch1 round: one binary sha, one"
+			echo "         provenance key, one reel, no stale logs."
+		fi
+	fi
 
 	echo
 done
@@ -525,7 +615,9 @@ echo "  per-loop fps = flips / $REEL_S      overhead_s = render_s - $REEL_S"
 echo "  Cells sharing a BAND letter are within $BAND_FPS fps of the band leader."
 echo "  A within-band difference is inside the pre-reel title-flip caveat and"
 echo "  MUST NOT be reported as a difference."
-echo "  Card names are inferred from VRAM size; UNIVBE rewrites the OEM strings."
+echo "  Card names are inferred from VRAM size; UNIVBE rewrites the OEM strings.
+  v1 RUNMANIFEST logs do NOT record a binary sha (binary_sha12 holds a
+  provenance key, not a hash); no binary sha is reported for a v1 round."
 
 if [ "$FAILED" -ne 0 ]; then
 	echo
