@@ -1,47 +1,52 @@
-From 4d8d4b181ad6f8e7f61a27324224f70165ad07ba Mon Sep 17 00:00:00 2001
+From 0f3fcc932279bd9ceeceef373458e51330d39887 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
-Date: Tue, 11 Aug 2026 17:17:43 -0700
-Subject: [PATCH 3/4] [DOSKUTSU] patch 0294 -- CPU witness: attest the running
- silicon at boot
+Date: Tue, 11 Aug 2026 17:48:23 -0700
+Subject: [PATCH 3/4] [DOSKUTSU] patch 0294 -- CPU witness + SDL/0124 hardware
+ witnesses at boot/emit
 
 Nothing in any log witnessed which CPU ran a benchmark cell. Video is provable
-from evidence (vram=4096KB LFB vs 1024KB banked) and sound from is_sb16/dsp_ver/
-highdma, but the CPU was identified ONLY by a digit the operator typed into a
-sweep BAT, which merely set the log-tag prefix. Every cross-CPU conclusion in the
-campaign rested on that one unverifiable keystroke.
+from evidence and sound from is_sb16/dsp_ver/highdma, but the CPU was identified
+ONLY by a digit the operator typed into a sweep BAT, which merely set the log-tag
+prefix. Every cross-CPU conclusion in the campaign rested on that one keystroke.
 
 Attest it in-engine at boot. Emit both identities: CPUID vendor + family/model/
-stepping is exact, free, and by itself separates Pentium (GenuineIntel family 5)
-from Am5x86 (AuthenticAMD family 4) from Intel 486; then a MHz estimate mirrored
-from setup/profile.c estimate_mhz() -- TSC-exact on Pentium, calibrated busy-loop
-on 486 with MHZ_486_LOOP_DIV=16400 UNCHANGED so engine numbers are directly
-comparable to SETUP's -- splits DX2-66 from DX2-50 within the 486 family. CPUID
-absence (early 486 steppings) falls back to the timing loop alone. cpu_class
-buckets (586 / 486_mid / 486_slow) mirror profile.c detect_cpu().
+stepping is exact, free, and separates Pentium (GenuineIntel family 5) from
+Am5x86 (AuthenticAMD family 4) from Intel 486; then a MHz estimate mirrored from
+setup/profile.c estimate_mhz() -- TSC-exact on Pentium, calibrated busy-loop on
+486 with MHZ_486_LOOP_DIV=16400 UNCHANGED so engine numbers match SETUP's --
+splits DX2-66 from DX2-50. CPUID absence falls back to the timing loop. cpu_class
+buckets mirror profile.c detect_cpu(). Runs once at main() entry after
+Logger::init, before SDL_Init and any flip, so the ~220 ms window is invisible to
+fps. Default-ON, strict killswitch SDL_HINT_DOSKUTSU_CPU_WITNESS=0.
 
-The probe runs once at main() entry, after Logger::init (the banner needs it) and
-before SDL_Init and any flip, so the ~220 ms calibration window is invisible to
-the fps measurement. Default-ON with a strict killswitch
-SDL_HINT_DOSKUTSU_CPU_WITNESS=0 (getenv, pre-SDL_Init) as fault insurance for any
-machine on which the boot-time timing loop misbehaves.
-
-Also folds the in-lane hardware witnesses the engine reliably knows into the
-manifest -- audio_backend (from the sticky backend enum) and the locked logical
-video mode -- so analysis stops grepping a second log for them. The SDL-probe
-card-identity witnesses (video vram_kb / LFB-vs-banked, audio is_sb16 / dsp_ver /
-dma_path) still live in <TAG>SDL.LOG and need SDL getter exports to consolidate;
-that is a follow-up, and nothing is lost meanwhile.
+Also folds the SDL-probe hardware witnesses into the manifest via SDL/0124 so
+analysis stops grepping <TAG>SDL.LOG: video_vram_kb + video_lfb_or_banked (the
+resolved flush path, which the 0019 Cirrus guard forces banked -- what the 1.2 fps
+Cirrus deficit tracks), and audio_is_sb16 (identity = DSP major >= 4; SDL/0124 has
+no IsSB16 by design), audio_dsp_ver, audio_dma_path, audio_force_8bit,
+audio_dma_channel. Identity, override and outcome are SEPARATE fields so the X8
+cell (a genuine SB16 forced to 8-bit to decouple card from DMA path) records
+is_sb16=1 force_8bit=1 dma_path=8bit-low instead of self-obscuring. These getters
+read persistent probe statics, so they are valid at emit even post SDL_Quit
+(unlike the live timebase query in 0293). Plus the in-lane audio_backend + locked
+logical video mode.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- src/main.cpp | 173 +++++++++++++++++++++++++++++++++++++++++++++++++++
- 1 file changed, 173 insertions(+)
+ src/main.cpp | 197 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 197 insertions(+)
 
 diff --git a/src/main.cpp b/src/main.cpp
-index 0b4be3c7..762a5963 100644
+index c9ae0280..3cc2b7f0 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
-@@ -49,6 +49,7 @@ extern "C" {
+@@ -44,11 +44,13 @@ extern "C" {
+ #include <SDL3_image/SDL_image.h>
+ #include <SDL3/SDL_dosaudio_pump.h>  // patch 0164: SDL_DOSAudioPump for the tick-boundary audio pump
+ #include <SDL3/SDL_dosopltimer.h>  // patch 0234 (Campaign 2 AdLib): SDL_DOSOplTimerPumpStop for the PIT-restore atexit
++#include <SDL3/SDL_dosident.h>  // patch 0294 + SDL/0124: video/audio hardware-witness getters
+ #include <cstring>  // patch 0234 (Campaign 2 AdLib): std::strcmp for the AUDIO_BACKEND=adlib boot-mode check
+ #include <csignal>  // patch 0272 (#1 crash probe): SIGSEGV/SIGFPE/SIGILL/SIGABRT handlers for the precache window
  #ifdef __DJGPP__
  #include <setjmp.h>       // patch 0272: __djgpp_exception_state is a jmp_buf (include BEFORE sys/exceptn.h)
  #include <sys/exceptn.h>  // patch 0272: __djgpp_exception_state -> fault eip/ebp for the in-LOG fault handler
@@ -49,7 +54,7 @@ index 0b4be3c7..762a5963 100644
  #endif
  using namespace NXE::Graphics;
  #include "ResourceManager.h"
-@@ -1250,6 +1251,152 @@ static const char *const _runmanifest_env_allowlist[] = {
+@@ -1250,6 +1252,152 @@ static const char *const _runmanifest_env_allowlist[] = {
  #endif
  #define _DOSKUTSU_BUILD_SHA12_STR _DOSKUTSU_STR(DOSKUTSU_BUILD_SHA12)
  
@@ -202,7 +207,7 @@ index 0b4be3c7..762a5963 100644
  static void emit_run_manifest(void)
  {
  #if defined(__DJGPP__)
-@@ -1429,6 +1576,26 @@ static void emit_run_manifest(void)
+@@ -1431,6 +1579,49 @@ static void emit_run_manifest(void)
    std::fprintf(fp, "per_loop_fps=%lu.%lu\n",   _perloop_x10 / 10UL, _perloop_x10 % 10UL);
    runmanifest_emit_kv_int(fp, "overhead_s",        _overhead_s);
    runmanifest_emit_kv_str(fp, "music_pump_active", _pump_active ? "1" : "0");
@@ -217,19 +222,42 @@ index 0b4be3c7..762a5963 100644
 +  runmanifest_emit_kv_int(fp, "cpu_mhz_est",    g_cpu_witness.mhz_est);
 +  runmanifest_emit_kv_int(fp, "cpu_has_fpu",    g_cpu_witness.have_fpu);
 +  runmanifest_emit_kv_str(fp, "cpu_class",      g_cpu_witness.cls);
-+  // Hardware identity the engine reliably knows in-lane (patch 0294). The
-+  // SDL-probe card-identity witnesses (video vram_kb / LFB-vs-banked; audio
-+  // is_sb16 / dsp_ver / dma_path) live in <TAG>SDL.LOG and need SDL getter
-+  // exports to fold in -- a follow-up coordination item; nothing is lost, they
-+  // are in the SDL log per tag today.
++  // Hardware identity the engine reliably knows in-lane (patch 0294).
 +  runmanifest_emit_kv_str(fp, "audio_backend",
 +      NXE::Diag::backend_to_string(NXE::Diag::g_p10_audio_backend_active));
 +  runmanifest_emit_kv_str(fp, "video_logical_wxh", "320x240");
 +  runmanifest_emit_kv_int(fp, "video_logical_bpp", 8);
-   // fps_p50/p95: percentiles need per-frame inter_flip samples -- a per-frame
-   // clock read added to the shipping flip path, which is the explicit "no
-   // per-frame instrumentation" non-goal, and that clock is pump-corrupted
-@@ -1938,6 +2105,12 @@ int main(int argc, char *argv[])
++  // SDL-probe card-identity witnesses, folded in via SDL/0124 (patch 0294). These
++  // read PERSISTENT probe statics (vram size at mode-set, DSP version + resolved
++  // DMA at audio probe), so unlike the live timebase query they are valid at emit
++  // even post SDL_Quit. Live in-process reads, not echoed values -> no provenance
++  // tag. Identity, override and outcome are SEPARATE fields (is_sb16 vs force_8bit
++  // vs dma_path) so a reader reconstructs the decision instead of guessing -- the
++  // X8 cell (a genuine SB16 forced onto the 8-bit path) records is_sb16=1,
++  // force_8bit=1, dma_path=8bit-low, which is the whole reason that cell exists.
++  runmanifest_emit_kv_int(fp, "video_vram_kb", (int)SDL_DOSVideoGetVRAMKB());
++  runmanifest_emit_kv_str(fp, "video_lfb_or_banked",
++      SDL_DOSVideoIsBankedMode() ? "banked" : "lfb");
++  {
++    const int _dmaj = SDL_DOSAudioGetDSPVersionMajor();
++    const int _dmin = SDL_DOSAudioGetDSPVersionMinor();
++    // identity = DSP major >= 4 (the standard SB16 detection; SDL/0124 has no
++    // dedicated IsSB16 getter by design -- identity comes from the DSP version).
++    runmanifest_emit_kv_str(fp, "audio_is_sb16", (_dmaj >= 4) ? "1" : "0");
++    if (_dmaj >= 0)
++      std::fprintf(fp, "audio_dsp_ver=%d.%02d\n", _dmaj, (_dmin >= 0 ? _dmin : 0));
++    else
++      runmanifest_emit_kv_str(fp, "audio_dsp_ver", "NA");
++  }
++  runmanifest_emit_kv_str(fp, "audio_dma_path",
++      SDL_DOSAudioIsHighDMAPath() ? "16bit-high" : "8bit-low");
++  runmanifest_emit_kv_str(fp, "audio_force_8bit",
++      SDL_DOSAudioIsForced8Bit() ? "1" : "0");
++  runmanifest_emit_kv_int(fp, "audio_dma_channel", SDL_DOSAudioGetResolvedDMAChannel());
+   // fps_p50/p95 (patch 0293): real percentiles, computed at exit from the flip-
+   // probe's inter_flip samples retained every 10th flip in Renderer.cpp (the exact
+   // lines the campaign's awk used), so NO new per-frame instrumentation is added.
+@@ -1988,6 +2179,12 @@ int main(int argc, char *argv[])
    else
      LOG_INFO("config: no DOSKUTSU.CFG, using built-in defaults");
  
