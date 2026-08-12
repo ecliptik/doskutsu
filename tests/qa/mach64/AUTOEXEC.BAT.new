@@ -1,0 +1,122 @@
+@ECHO OFF
+REM =====================================================================
+REM  DOSKUTSU sound-card boot menu.  Video = UniVBE for every profile.
+REM  Global defaults (all profiles): official wiimidi MIDI set + joystick OFF.
+REM  To opt into WaveBlaster wavetable / OrgMIDI, set these at the prompt
+REM  before launching the game:
+REM     SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=wb
+REM     SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=orgmid
+REM     SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_GM_VARIANT=v1
+REM =====================================================================
+
+SET TEMP=C:\TEMP
+SET TMP=C:\TEMP
+SET ULTRADIR=C:\ULTRASND
+PROMPT $p$g
+PATH C:\DOS;C:\WINDOWS;C:\PICOGUS;C:\UNISOUND;C:\UNIVBE;C:\DRIVERS
+
+REM --- video + shared TSRs (all profiles) ---
+IF NOT "%config%"=="MACH64" LH C:\UNIVBE\UNIVBE.EXE
+LH C:\WINDOWS\SMARTDRV.EXE 4096 1024 C A-
+LH C:\DRIVERS\CTMOUSE.EXE
+LH DOSKEY
+
+REM --- clean DOSKUTSU defaults for every profile ---
+SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=wiimidi
+SET DOSKUTSU_USE_JOYSTICK=0
+
+GOTO %config%
+
+REM === 1. Vibra16 (SB16/OPL3) + PicoGUS USB (CD on D: + MPU-401 MIDI) ====
+:VIBRAUSB
+SET BLASTER=A220 I5 D1 H5 T6 P330
+SET MIDI=SYNTH:1 MAP:E MODE:0
+C:\PICOGUS\PGUSINIT.EXE /mode usb
+C:\UNISOUND\UNISOUND.COM /V80
+LH C:\DOS\MSCDEX.EXE /D:MSCD000 /D:OPTICAL /M:5
+GOTO READY
+
+REM === 2. PicoGUS Sound Blaster (8-bit DMA; SB 2.0-class emulation) =====
+REM PHYSICAL JUMPERS RULE EVERYTHING: this PicoGUS is jumpered IRQ7 + DMA3
+REM (set during the GUS campaign for Vibra16 coexistence), and the SB-mode
+REM IRQ/DMA MUST match the jumpers -- pgusinit /sbirq /sbdma help says
+REM '(must match jumper settings!)' and it is literal. BLASTER therefore
+REM says I7 D3. Confirmed working 2026-07-06 (music + SFX audible).
+REM T3 = SB 2.0 class: matches the card's 8-bit-DMA reality, makes the
+REM legacy autoinit path native, and sidesteps firmware v4.x's SB16-mode
+REM 'D and H must match' rule. /sbenv PROGRAMS the card's SB registers
+REM from BLASTER (/mode sb alone does NOT; plain pgusinit only validates).
+REM FORCE_8BIT pins DOSKUTSU to the 8-bit path regardless of DSP version.
+REM Gives OPL3 (picogus-sb-dbopl3) + the WaveBlaster header (MPU-401 0x330).
+:PGSB
+SET BLASTER=A220 I7 D3 P330 T3
+SET SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT=1
+C:\PICOGUS\PGUSINIT.EXE /mode sb
+C:\PICOGUS\PGUSINIT.EXE /sbenv
+LH C:\DOS\MSCDEX.EXE /D:OPTICAL /M:5
+GOTO READY
+
+REM === 3. PicoGUS AdLib (OPL2 FM at 0x388) ==============================
+REM DOSKUTSU AdLib backend (Campaign 2): OPL2 FM music via the PIT timer
+REM pump, MUSIC ONLY (a pure AdLib card has no DAC -> no Pixtone SFX).
+REM Requires the Campaign-2 AdLib binary. Do NOT run a Sound Blaster in the
+REM same machine -- two OPL chips at 0x388 conflict.
+:PGADLIB
+SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib
+C:\PICOGUS\PGUSINIT.EXE /mode adlib
+LH C:\DOS\MSCDEX.EXE /D:OPTICAL /M:5
+GOTO READY
+
+REM === 4. PicoGUS Ultrasound (GF1) ======================================
+REM PicoGUS jumpered IRQ7 + DMA3 (leaves IRQ5/DMA1 free for the Vibra16 when it
+REM is installed -- coexistence). ULTRASND = port,playDMA,recDMA,GF1-IRQ,MIDI-IRQ
+REM and MUST match the jumpers.
+REM CARD CONFIRMED WORKING: Gravis MIDIDEMO.BAT (C:\ULTRASND) plays GUS music on
+REM every jumper config tried. Doom GUS is silent regardless (a Doom/DMX
+REM IRQ-driven quirk, NOT a card fault -- MIDIDEMO is poll-based + works). So the
+REM GUS audio path is proven; Doom is not our gate.
+REM pgusinit /mode gus swaps to GUS firmware; the SECOND pgusinit run applies the
+REM settings + the DMA interval (/gusdma 12). ULTRADIR (global, C:\ULTRASND) ->
+REM the GUS .pat patch set. doskutsu GUS backend (Campaign 3) ships next; its GF1
+REM driver is being hardened to be IRQ-INDEPENDENT (poll DMA-terminal, not the GF1
+REM IRQ) so it sounds where Doom's IRQ-driven path does not.
+:PGGUS
+SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=gus
+SET ULTRASND=240,3,3,7,7
+C:\PICOGUS\PGUSINIT.EXE /mode gus
+C:\PICOGUS\PGUSINIT.EXE /gusdma 12
+LH C:\DOS\MSCDEX.EXE /D:OPTICAL /M:5
+GOTO READY
+
+REM === 5. Vibra16 only (no PicoGUS): SB16/OPL3 + WaveBlaster on Vibra ====
+:VIBRA
+SET BLASTER=A220 I5 D1 H5 T6 P330
+SET MIDI=SYNTH:1 MAP:E MODE:0
+C:\UNISOUND\UNISOUND.COM /V80
+LH C:\DOS\MSCDEX.EXE /D:OPTICAL /M:5
+GOTO READY
+
+REM === 6. Mach64 video test: ATI M64VBE instead of UniVBE ==============
+REM Round 1's Mach64 failure was UNDER UniVBE 6.70, whose mode list for
+REM this card starts at 512x384 -- so the engine drew its 320x240 screen
+REM into the top-left corner. M64VBE documents 320x200 + 320x240 as a
+REM default-on feature, which is the mode DOSKUTSU actually wants.
+REM NOTE the mode NUMBERS differ: M64VBE exposes 320x240 8bpp as 0x0212,
+REM NOT the 0x01F8 SciTech/UniVBE uses. Match on the RESOLUTION in
+REM DOSVESA-CTRL, not on the number.
+REM Sound mirrors profile 2 (PGSB) so VIDM has a live SB DAC.
+REM If the image is still corrupt, ATI documents fallbacks -- unload with
+REM   M64VBE U   then reload as   M64VBE VW VGA   (aperture off, VGA CRT)
+REM which is their fix for the exact '1/4 of the image visible' symptom.
+:MACH64
+SET BLASTER=A220 I7 D3 P330 T3
+SET SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT=1
+LH C:\ATI\SUPPORT\64VBE221\M64VBE.COM
+C:\PICOGUS\PGUSINIT.EXE /mode sb
+C:\PICOGUS\PGUSINIT.EXE /sbenv
+LH C:\DOS\MSCDEX.EXE /D:OPTICAL /M:5
+GOTO READY
+
+:READY
+ECHO.
+ECHO [%config%] ready.  CD \DOSKUTSU  then run the game.
