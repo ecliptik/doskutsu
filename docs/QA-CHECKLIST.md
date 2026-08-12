@@ -5,6 +5,11 @@ Detail lives in `docs/QA-RUN-SHEET.md` and `tests/qa/README.md`.
 
 CPU number for `QA n`: POD-83 = 1, Am5x86 = 2, DX2-66 = 3, DX2-50 = 4.
 
+**Sound card rule.** Sweeps use whatever SB is in the box. Add `PG` only
+when a PicoGUS is fitted -- `GAP PG`, `VIDM 4 PG`. On a Vibra use plain
+`GAP` / `VIDM 4`. Passing `PG` without a PicoGUS overwrites BLASTER with
+jumper values the Vibra cannot use.
+
 ---
 
 ## Order
@@ -47,8 +52,7 @@ CPU number for `QA n`: POD-83 = 1, Am5x86 = 2, DX2-66 = 3, DX2-50 = 4.
 Load it bare -- **`M64VBE`**, no arguments. There is no `I` switch; an invalid
 one just prints help and installs nothing.
 
-Sound: entry 6 sets up the **Vibra**. `VIDM 4` uses whatever SB is in the box.
-Add `PG` (`VIDM 4 PG`) only if a PicoGUS is fitted instead.
+Entry 6 sets up the **Vibra**, so `VIDM 4` -- no `PG`.
 
 `M64VBE` says:
 
@@ -58,23 +62,21 @@ Add `PG` (`VIDM 4 PG`) only if a PicoGUS is fitted instead.
 | `M64VBE is already installed` | fine, carry on |
 | `Can not load ... adapter is not detected` | stop, report it |
 
-`VESATEST` then:
+**`VESATEST` cannot answer this -- do not read it as a verdict.** It is a
+1994 tool that only knows standard VESA mode numbers, and M64VBE puts
+320x240 at ATI's `0x0212`. Confirmed 2026-08-12: TSR resident, `320 modes
+enabled`, VESATEST still listed only 640x400 and up.
 
-| | |
+| `VESATEST` shows | |
 |---|---|
-| 320x240 listed | good -- run 2.5, expect ViRGE parity |
-| only 640x400 and up | no TSR is active -- see below |
-| 512x384 present | that is UniVBE, not M64VBE -- wrong boot entry |
+| 320x240 | confirmed present, go to 2.5 |
+| 640x400 and up only | inconclusive -- go to 2.5 anyway |
+| 512x384 | UniVBE is loaded, not M64VBE -- wrong boot entry |
 
-Match on **resolution**, not mode number. M64VBE uses `0x0212`, not `0x01F8`.
+**`DOSVESA-CTRL` in the log is the real answer.** It walks the card's own
+mode list and does pick up OEM numbers -- round 1 logged SciTech's `0x01F3`.
 
-If `VESATEST` looks unchanged, check the TSR is actually resident:
-
-| Run | Means |
-|---|---|
-| `M64VBE U` -> `successfully removed` | it was loaded |
-| `M64VBE U` -> `not resident` | it never loaded |
-| `M64VBE 3` | force 320 modes on if resident |
+Match on **resolution**, not mode number.
 
 Picture wrong but 320x240 present: `M64VBE U` then `M64VBE VW VGA`.
 
