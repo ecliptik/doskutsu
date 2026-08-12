@@ -1,7 +1,7 @@
 @ECHO OFF
 IF "%QAM%"=="" GOTO NOMACH
 IF "%1"=="GO" GOTO GO
-COMMAND /E:2048 /C %0 GO
+COMMAND /E:2048 /C %0 GO %1
 GOTO END
 :NOMACH
 ECHO ERROR: machine not set. Run QA.BAT first (pick your CPU), then re-run.
@@ -35,29 +35,22 @@ ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 PAUSE
 ECHO.
+IF NOT "%2"=="PG" GOTO NOPGUS
 ECHO ##########################################################
-ECHO  switching PicoGUS -> SB MODE (X8/XH need a live SB DAC)
-ECHO  Self-sufficient on purpose: RB and EAR leave the card in
-ECHO  adlib mode, so this must not depend on what ran before it.
+ECHO  PicoGUS box: switching to SB MODE (X8/XH need a live SB DAC)
 ECHO ##########################################################
 pgusinit /mode sb
 pgusinit /sbenv
 SET BLASTER=A220 I7 D3 P330 T3
-CALL CLRENV
-IF EXIST PROFILE.DAT DEL PROFILE.DAT
-COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
-SET SDL_HINT_DOSKUTSU_AUDIO_OFF=1
-SET DOSKUTSU_LOG_TAG=%QAM%X0
-SET DOSKUTSU_TAS_REPLAY=QA.TAS
-SET DOSKUTSU_TAS_PRNG_SEED=12345
-SET DOSKUTSU_TAS_AUTO_EXIT_TICK=30000
-ECHO.
-ECHO ============================================
-ECHO  [1/4] CELL X0  TRUE audio floor (AUDIO_OFF=1)
-ECHO  tag %QAM%X0
-ECHO  Device-level off. NOT the same as SILENT.CFG.
-ECHO ============================================
-DOSKUTSU.EXE
+GOTO CARDOK
+:NOPGUS
+ECHO ##########################################################
+ECHO  Using the SB already in the box (Vibra16, or a PicoGUS left
+ECHO  in sb mode). No pgusinit is run, so no PicoGUS is required.
+ECHO  On a PICOGUS box run  GAP PG  instead, to force sb mode --
+ECHO  RB and EAR leave the card in adlib and X8/XH need a DAC.
+ECHO ##########################################################
+:CARDOK
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
@@ -68,7 +61,7 @@ SET DOSKUTSU_TAS_PRNG_SEED=12345
 SET DOSKUTSU_TAS_AUTO_EXIT_TICK=30000
 ECHO.
 ECHO ============================================
-ECHO  [2/4] CELL X8  Vibra forced to 8-bit DMA
+ECHO  [1/4] CELL X8  Vibra forced to 8-bit DMA
 ECHO  tag %QAM%X8
 ECHO  VIBRA ONLY. Separates card from DMA path.
 ECHO ============================================
@@ -82,7 +75,7 @@ SET DOSKUTSU_TAS_PRNG_SEED=12345
 SET DOSKUTSU_TAS_AUTO_EXIT_TICK=30000
 ECHO.
 ECHO ============================================
-ECHO  [3/4] CELL XH1  Organya-HQ re-measure, run 1 of 2
+ECHO  [2/4] CELL XH1  Organya-HQ re-measure, run 1 of 2
 ECHO  tag %QAM%XH1
 ECHO  5112 gave an impossible ratio. Two runs test reproducibility.
 ECHO ============================================
@@ -96,9 +89,24 @@ SET DOSKUTSU_TAS_PRNG_SEED=12345
 SET DOSKUTSU_TAS_AUTO_EXIT_TICK=30000
 ECHO.
 ECHO ============================================
-ECHO  [4/4] CELL XH2  Organya-HQ re-measure, run 2 of 2
+ECHO  [3/4] CELL XH2  Organya-HQ re-measure, run 2 of 2
 ECHO  tag %QAM%XH2
 ECHO  If XH1 and XH2 disagree, ORGHQ is non-reproducible.
+ECHO ============================================
+DOSKUTSU.EXE
+CALL CLRENV
+IF EXIST PROFILE.DAT DEL PROFILE.DAT
+COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
+SET SDL_HINT_DOSKUTSU_AUDIO_OFF=1
+SET DOSKUTSU_LOG_TAG=%QAM%X0
+SET DOSKUTSU_TAS_REPLAY=QA.TAS
+SET DOSKUTSU_TAS_PRNG_SEED=12345
+SET DOSKUTSU_TAS_AUTO_EXIT_TICK=30000
+ECHO.
+ECHO ============================================
+ECHO  [4/4] CELL X0  TRUE audio floor (AUDIO_OFF=1)
+ECHO  tag %QAM%X0
+ECHO  Device-level off. NOT the same as SILENT.CFG.
 ECHO ============================================
 DOSKUTSU.EXE
 ECHO.
