@@ -62,40 +62,52 @@ no mode below `0x01F3 512x384`**, so the engine drew 320x240 into the top-left.
 `has_lfb=1 use_lfb=1 banked=0`, `bpp=8`, `pitch=512` -- flush, bpp and pitch
 were all correct. Open question: does a different VBE driver offer 320x240.
 
-**Use `M64VBE.COM`, not UNIVBE.** Round 1 failed *under* UNIVBE 6.70 -- its 19
-modes start at 512x384. Re-running UNIVBE just reproduces the corruption; ATI's
-vendor driver is the untested variable and the whole point of this part.
+**Use `M64VBE.COM`, not UNIVBE.** Round 1 failed *under* UNIVBE 6.70 -- its
+19-mode list for this card starts at 512x384. ATI's driver documents
+**320x200 + 320x240 as a default-on feature**, which is exactly the mode
+DOSKUTSU wants.
+
+Installed as a **6th boot-menu entry**, so the five existing profiles are
+untouched and still load UniVBE. Pick entry 6 for Mach64 work, anything else
+for normal operation -- nothing to remember to undo.
 
 | | Hardware change | Run | Time |
 |---|---|---|---|
 | 2.1 | video -> Mach64 | swap card | 5 min |
-| 2.2 | none | edit `AUTOEXEC.BAT`, reboot | 3 min |
-| 2.3 | none | `QA 4` then `VIDM 4` | ~10 min |
-| 2.4 | none | pull logs (*laptop*) | 2 min |
-| 2.5 | video -> ViRGE | restore `AUTOEXEC.BAT`, reboot | 8 min |
+| 2.2 | CF to *laptop* | `bash install-mach64.sh` (once, ever) | 2 min |
+| 2.3 | CF back in box | reboot, pick menu entry **6** | 2 min |
+| 2.4 | none | `C:\ATI\SUPPORT\64VBE221\VESATEST` | 1 min |
+| 2.5 | none | `QA 4` then `VIDM 4` | ~10 min |
+| 2.6 | none | pull logs (*laptop*) | 2 min |
+| 2.7 | video -> ViRGE | reboot, pick any other entry | 5 min |
 
-**2.2** -- already on the machine, just commented out:
-
-```
-REM C:\UTIL\UNIVBE.EXE      <- comment OUT
-C:\UTIL\M64VBE.COM          <- uncomment
-```
-
-**2.5 is not optional.** Every other lane assumes UNIVBE; leaving the vendor
-TSR loaded silently changes the video path for the ViRGE and Cirrus runs.
+**2.4 answers the question before the game runs.** `VESATEST` lists every mode
+the card currently offers. If 320x240 is there, Path A has already succeeded.
 
 ### Read `DOSVESA-CTRL` in `LOGS\5C4MSDL.LOG`
 
+**Match on the RESOLUTION, not the mode number.** M64VBE exposes 320x240 8bpp
+as **`0x0212`**, not the `0x01F8` SciTech/UniVBE uses. Looking for `0x01F8`
+would read a success as a failure.
+
 | Mode list | Verdict |
 |---|---|
-| `0x01F8 320x240` + `has_lfb=1` | Done -- a docs line in `BUILDING.md`, no engine work |
-| `0x01F8` but **banked only** | **Stop** -- see trap |
-| no 320x240 from any driver | Engine fix needed; already approved |
+| a 320x240 8bpp mode + `has_lfb=1` | Done -- a docs line in `BUILDING.md`, no engine work |
+| 320x240 present but **banked only** | **Stop** -- see trap |
+| no 320x240 at all | Engine fix needed; already approved |
 
 | Trap | |
 |---|---|
 | Banked-only 320x240 | First real-hardware exercise of SDL/0115's `gran < size` bank walk, shipped validated only where `gran == size` |
 | So | Capture `win_gran` + `win_size` from `DOSVESA-MODESET`; if corrupt, A/B `SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0` **before** blaming `M64VBE.COM` |
+
+ATI documents fallbacks for exactly our symptom. Unload with `M64VBE U`, then:
+
+| Symptom | Reload as |
+|---|---|
+| image in a corner / partial | `M64VBE VW VGA` -- their fix for "1/4 of the image visible" |
+| black screen or hang | `M64VBE VGA` -- standard VGA CRT timing |
+| mouse trails / pointer issues | `M64VBE S VGA` -- single read+write window |
 
 ### Free data while the card is seated
 
