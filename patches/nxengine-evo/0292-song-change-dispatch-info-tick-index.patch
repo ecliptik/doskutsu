@@ -1,0 +1,79 @@
+From e327139a59198ea67f5d18d2839bd04be0fa8840 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 11 Aug 2026 17:15:03 -0700
+Subject: [PATCH 1/4] [DOSKUTSU] patch 0292 -- song-change dispatch at INFO
+ with the logic-tick index
+
+SoundManager::music() logged the song change at LOG_DEBUG, so shipped INFO logs
+showed which synth was armed at init but never WHEN a track was dispatched. That
+left two QA questions answerable only by ear: whether the Shack scene's music
+actually starts, and whether AUTO routes to the WaveBlaster. Promote the line to
+LOG_INFO and stamp it with the 50 Hz logic-tick index (the same index the TAS
+reel and per-stage fps use), so a dispatch can be pinned to a stage in the log.
+
+The line fires once per real song change (the songno==_currentSong dedup gates
+it), so it stays off the per-frame path -- volume is per-scene, not per-flip,
+honouring the no-per-frame-logging telemetry constraint. g_tick_count is exposed
+via a small extern "C" accessor rather than un-static'ing it, keeping the
+1:1-path aliasing invariant and file-scope linkage in main.cpp unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp               |  8 ++++++++
+ src/sound/SoundManager.cpp | 17 ++++++++++++++++-
+ 2 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index d3af863a..5156e357 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -184,6 +184,14 @@ void update_fps()
+ // run_tick() line is byte-unchanged.
+ static int g_tick_count = 0;
+ 
++// patch 0292 (telemetry): expose the shared 50 Hz logic-tick counter so
++// SoundManager::music() can stamp the song-change DISPATCH with the tick index
++// (and future per-run diagnostics can read it too). An accessor rather than
++// un-static'ing g_tick_count keeps the 1:1-path aliasing invariant above valid
++// and the counter's file-scope linkage unchanged. Same index the TAS reel +
++// per-stage fps use, so a dispatch can be pinned to a stage.
++extern "C" int doskutsu_logic_tick(void) { return g_tick_count; }
++
+ // patch 0281: killswitch for the TAS accumulator-delta clamp above. Shares
+ // SDL_HINT_DOSKUTSU_TAS_FT_GUARD with patch 0280's load_stage guard -- both
+ // exist for the same reason (keep wall-clock out of the TAS tick stream), so
+diff --git a/src/sound/SoundManager.cpp b/src/sound/SoundManager.cpp
+index f5d9e98e..edde2f33 100644
+--- a/src/sound/SoundManager.cpp
++++ b/src/sound/SoundManager.cpp
+@@ -17,6 +17,11 @@
+ // external linkage; cross-TU resolution via the linker.
+ extern "C" void midi_scheduler_tick_isr_thunk(Uint64 now_ms);
+ 
++// patch 0292 (telemetry): read the shared 50 Hz logic-tick counter (main.cpp
++// g_tick_count) to stamp the song-change dispatch line. Cross-TU accessor so
++// g_tick_count keeps its file-scope static linkage in main.cpp.
++extern "C" int doskutsu_logic_tick(void);
++
+ #include "../ResourceManager.h"
+ #include "../common/glob.h"  // patch 0226 (#39b): scan a custom MIDI drop-in dir for >=1 .mid
+ #include "../common/misc.h"
+@@ -1702,7 +1707,17 @@ void SoundManager::music(uint32_t songno, bool resume)
+   _lastSong    = _currentSong;
+   _currentSong = songno;
+ 
+-  LOG_DEBUG(" >> music({})", songno);
++  // patch 0292 (telemetry): song-change DISPATCH at INFO with the logic-tick
++  // index. Shipped logs previously carried the backend-arm INFO lines at init
++  // (which synth is loaded) but nothing recording WHEN a track was dispatched,
++  // so "did the Shack music actually start" and "does AUTO route to the
++  // WaveBlaster" were ear-only questions. This fires once per real song change
++  // (the songno==_currentSong dedup above already gates it), so it stays off the
++  // per-frame path -- volume is per-scene, not per-flip. Correlate with the
++  // "Not playing track N because music_enabled" INFO gate below to tell a
++  // dispatched-and-started song from one suppressed by the gates.
++  LOG_INFO("[music-dispatch] tick={} song={} (prev {})",
++           doskutsu_logic_tick(), songno, _lastSong);
+ 
+   // patch 0240 (#31): music disabled (AUDIO_BACKEND=none or MUSIC_OFF=1). Track
+   // the song number (above) for dedup, but dispatch NO music. SFX are unaffected
