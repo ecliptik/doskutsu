@@ -63,7 +63,72 @@ PicoGUS into sb mode and there is no PicoGUS in the box at step 1.1.
 
 ---
 
-## PART 2 -- 486DX2-66 (one CPU swap to get here)
+## PART 2 -- ATI Mach64 (video swap + a boot-config change)
+
+Round 1 left this lane unresolved and it then fell off the round-2 matrix
+entirely -- every other configuration here is ViRGE. The root cause is already
+settled from the logs, with no bench time: **the card's VBE offers no mode
+smaller than `0x01F3 512x384`**, so the engine drew its 320x240 screen into the
+top-left corner. `has_lfb=1 use_lfb=1 banked=0`, `bpp=8`, `pitch=512` -- the
+flush, the bpp and the pitch were all correct. Not a regression either; the
+game's VESA path was never validated on this card.
+
+What is unresolved is whether a different VBE provider offers 320x240. That is
+one cell, and it gates an engine change the operator has already approved.
+
+`M64VBE.COM` is already on the machine at `C:\UTIL\M64VBE.COM`, commented out
+in `AUTOEXEC.BAT` (see `docs/internal/BOOT.md`).
+
+| | Hardware change | Run | Time |
+|---|---|---|---|
+| 2.1 | video -> Mach64 | swap the card | 5 min |
+| 2.2 | none | edit `AUTOEXEC.BAT`, reboot | 3 min |
+| 2.3 | none | `QA 4` then `VIDM 4` | ~10 min |
+| 2.4 | none | pull logs (*laptop*) | 2 min |
+| 2.5 | video -> ViRGE, restore `AUTOEXEC.BAT`, reboot | | 8 min |
+
+For 2.2, swap which VBE TSR loads:
+
+```
+REM C:\UTIL\UNIVBE.EXE        <- comment this OUT
+C:\UTIL\M64VBE.COM            <- uncomment this
+```
+
+**Put it back at 2.5.** Every other lane in this campaign assumes UNIVBE, and
+leaving the Mach64 TSR loaded would silently change the video path for the
+ViRGE and Cirrus runs.
+
+### Reading the result -- `DOSVESA-CTRL` in `LOGS\5C4MSDL.LOG`
+
+| Mode list shows | Verdict |
+|---|---|
+| `0x01F8 320x240` **and** `has_lfb=1` | Done. This is a documentation line in `BUILDING.md`, no engine work. Expect parity with the ViRGE. |
+| `0x01F8` present but **banked only** | **Stop.** See the trap below before concluding anything. |
+| no 320x240 from any provider | The engine fix is needed, and is already approved. |
+
+**The trap.** A banked-only 320x240 would be the **first real-hardware exercise
+of SDL/0115's `gran < size` bank walk**, which shipped validated only where
+`gran == size`. Capture `win_gran` and `win_size` from the `DOSVESA-MODESET`
+line, and if corruption appears, A/B `SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0`
+**before** blaming `M64VBE.COM` -- otherwise a live 0115 bug looks exactly like
+the same lane failure.
+
+### Free data while the card is in the box
+
+- [ ] Record the `DOSVESA-DACWIDTH` line from the log. The Cirrus-vs-S3 colour
+      question needs per-card readings, and a third card costs nothing here.
+- [ ] Note whether the `present` stalls appear. They were episodic, not
+      constant -- 18 ms frames alternating with 0.5-2.5 s plateaus, while the
+      flush itself was a healthy 7.4 ms. In its unstalled stretches that cell
+      hit **50 fps at 512x384**. Chase them with
+      `SDL_HINT_DOSKUTSU_VBLANK_BOUND=0` only **after** the mode question is
+      settled; they may vanish under a native 320x240.
+
+Evidence and the superseded hypotheses: `qa-results/2026-08-11-mach64-corruption/`.
+
+---
+
+## PART 3 -- 486DX2-66 (one CPU swap to get here)
 
 Only worth doing for `GAP`: `XH1`/`XH2` on this CPU are the other half of the
 round-1 Organya-HQ contradiction, where the DX2-50 scored *higher* than the
@@ -71,8 +136,8 @@ DX2-66 on the same cell. Both halves are needed to settle it.
 
 | | Hardware change | Run | Time |
 |---|---|---|---|
-| 2.1 | CPU -> DX2-66, sound -> Vibra | `QA 3` then `GAP` | ~10 min |
-| 2.2 | none | pull logs (*laptop*) | 2 min |
+| 3.1 | CPU -> DX2-66, sound -> Vibra | `QA 3` then `GAP` | ~10 min |
+| 3.2 | none | pull logs (*laptop*) | 2 min |
 
 Totals: 1 CPU swap, 1 sound swap. **~12 min.**
 
@@ -80,7 +145,7 @@ Totals: 1 CPU swap, 1 sound swap. **~12 min.**
 
 ---
 
-## PART 3 -- deferred until the round-2 payload exists
+## PART 4 -- deferred until the round-2 payload exists
 
 `RB` is the re-baseline and refuses to run until a non-round-1 binary is
 installed. When that payload lands, `RB` on each CPU is the first thing to run,
