@@ -18,6 +18,65 @@ here refuses to run without it and tells you so.
 
 ---
 
+## Lane instrumentation and log retrieval
+
+Three scripts, tracked here as the source of truth. The copies under `/tmp/`
+and `/home/claude/qa-v163-durable/` are deployment copies -- if they disagree
+with these, these win.
+
+| Script | What it does |
+|---|---|
+| `qa-instrument.py` | Adds the hardware banner, the `.NFO` lane manifest and unique WaveBlaster tags to `PG` / `VB` / `VID*` BATs in a given directory. Idempotent, preserves CRLF, backs up to `.BAK`. |
+| `instrument-cf.sh` | Wrapper that applies the above to a mounted CF, then syncs and unmounts. Only needed to instrument a card in place; a kit re-populate already carries it. |
+| `logback-qa.sh` | Pulls every cell log off the CF and ships it to `claude:/tmp/qa-v163/<label>/<MACH>/`. |
+
+### What the instrumentation adds
+
+Each sweep prints its hardware **before** the PAUSE, so the box can be checked
+against the sweep before committing to a run:
+
+    SWEEP : PicoGUS sweep (sb + gus + adlib)
+    CELLS : 13 cells, ~50 min
+    CPU   : Pentium OverDrive 83
+    SOUND : PicoGUS -- DreamBlaster on the PicoGUS header
+    VIDEO : S3 ViRGE
+
+and writes `LOGS\<M><SWEEP>.NFO` recording `cpu`, `cpu_arg`,
+`log_tag_prefix`, `sound` and `video`. **This is the only CPU witness the log
+set has** -- no engine log records the processor, so without it a lane's CPU
+rests entirely on which digit was typed. It is operator-declared rather than
+probed, so treat it as making the declaration explicit rather than as
+verification.
+
+The WaveBlaster cell is `17P` in `PG` and `17V` in `VB`. They both wrote
+`<M>17` before, so running `VB n` after `PG n` destroyed the PicoGUS-header
+cell -- it happened on two CPUs before anyone noticed.
+
+Validated under DOSBox-X with `ver=6.22`, `lfn=false`: banner renders,
+`%QACPU%` expands, the `MKDIR LOGS` guard works, the `.NFO` is written with
+CRLF, `PG 3` tags `6PG.NFO`, and `PG` with no argument creates nothing.
+
+**Do not add `DATE /T` or `TIME /T` to a sweep BAT.** MS-DOS 6.22 does not
+reliably support those switches, and an unrecognised switch can prompt --
+hanging an unattended sweep at cell 1. Run order is recoverable from the
+`[HH:MM:SS]` prefixes in the cell logs.
+
+### Retrieving logs
+
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh <label>
+
+**Label every pull.** The destination used to be a fixed
+`claude:/tmp/qa-v163/<MACH>/`, and the script ships with `scp -r`, so a later
+round silently overwrote an earlier one -- same cell names, same machine code,
+merge, older file gone. It now ships to `claude:/tmp/qa-v163/<label>/<MACH>/`,
+defaults to `run-<timestamp>`, and refuses to run if the destination exists.
+
+Pull between sweeps as well as between rounds: two sweeps on one CPU share
+cell names, and the second overwrites the first on the CF before any logback
+runs.
+
+---
+
 ## The three BATs
 
 | BAT | Cells | Time | Needs ears | Answers |
