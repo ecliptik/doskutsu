@@ -27,9 +27,26 @@ until a re-baseline establishes they are.
 
 - **Binary:** `DOSKUTSU.EXE` sha256 begins `09e449c5a81d`
 - **Organya cache key:** `f8d446b4b0e0`
-- **Kit:** v170. **Reel:** `QA.TAS`, ~5100 ticks = 102 s of game time
+- **Kit:** v170
+- **Reel:** `QA.TAS` sha256 begins **`4118561edf26b93a`**, 1956 bytes,
+  ~5100 ticks = 102 s of game time. Banked as `QA-USED.TAS` (or `QA.TAS`) in
+  each round-1 dataset directory; all copies verified identical.
 - Same motherboard, same CF card, same reel in every cell. Only the named
   component changes between datasets.
+
+**The round-1 reel is an operator recording, NOT the reel shipped in the kit.**
+The payload's `DOSKUTSU/QA.TAS` is a fallback whose sha begins `5c661a8723e5`,
+and no round-1 cell used it. `install-qa-v163.sh` stashes an existing
+non-fallback `QA.TAS` off the CF, extracts, and restores it -- so a populate
+onto a card that already holds the take preserves it.
+
+**That protection depends on the take already being on the card.** Populating a
+blank or replaced CF installs the fallback instead, and every cell would then
+replay a different reel from round 1 while looking completely normal. Any
+future round must either run on a card carrying `4118561edf26b93a` or ship it
+as the payload's reel. Check the sha before trusting a comparison; the earlier
+superseded rounds used a third reel (`30dd4b7050468eeb`, 2044 bytes), which is
+part of why they are not comparable.
 
 | Dataset | CPU | Cells | What it covers |
 |---|---|---|---|
