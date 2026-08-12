@@ -81,7 +81,13 @@ runs.
 
 `PROVE.BAT` + `prove-verdict.sh` are the automated pair that answers "is this
 binary good on real hardware" before anyone spends a full round on it.
-7 cells, ~20 min, fully unattended, one run per hardware config.
+6 cells, ~15 min, fully unattended, one run per hardware config.
+
+**Requires the PicoGUS.** The sweep switches it `sb` -> `adlib` itself, because
+the AdLib cells cannot run with a Sound Blaster hot: the PIT music pump is the
+single owner of PIT ch0 and REFUSES to start when an SB device is live. On a
+Vibra the pump never starts, both A/B arms come back identical, and the key
+measurement silently measures nothing. It leaves the card in `adlib` mode.
 
     PROVE.BAT                       (on the box, after QA.BAT sets %QAM%)
     bash /tmp/logback-qa.sh prove-G (pull, labelled)
@@ -100,7 +106,9 @@ witness is an absence.
 | **`P5K`** | **the same cell with the killswitch** -- that band must be EXACTLY EMPTY. |
 | `P3` | Organya: catches a silently different PCM cache re-render. |
 | `P0` | the true `AUDIO_OFF=1` floor (`SILENT.CFG` is not one). |
-| `P8` | forced 8-bit on the Vibra: identity, override and DMA path stay separable. |
+
+The Vibra card-vs-DMA-path check is `GAP.BAT` cell `X8`, not this sweep -- it
+needs a different card, so it cannot share a run.
 
 **`P5` vs `P5K` is the highest-information measurement in the set**, because
 it is the only test DOSBox structurally cannot perform: DOSBox does not model
