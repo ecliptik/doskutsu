@@ -39,21 +39,41 @@ CPU number for `QA n`: POD-83 = 1, Am5x86 = 2, DX2-66 = 3, DX2-50 = 4.
 | 2.1 | video -> Mach64 | -- |
 | 2.2 | CF to laptop | `bash /tmp/mach64kit/install-mach64.sh` |
 | 2.3 | CF to box | reboot, pick menu entry **6** |
-| 2.4 | -- | `VESATEST` |
+| 2.4 | -- | `M64VBE` then `VESATEST` |
 | 2.5 | -- | `QA 4` then `VIDM 4` |
 | 2.6 | -- | pull logs *laptop* |
 | 2.7 | video -> ViRGE | reboot, pick any other entry |
 
-`VESATEST` output:
+Load it bare -- **`M64VBE`**, no arguments. There is no `I` switch; an invalid
+one just prints help and installs nothing.
+
+`M64VBE` says:
+
+| | |
+|---|---|
+| `M64VBE (V2.21) is installed` | good |
+| `M64VBE is already installed` | fine, carry on |
+| `Can not load ... adapter is not detected` | stop, report it |
+
+`VESATEST` then:
 
 | | |
 |---|---|
 | 320x240 listed | good -- run 2.5, expect ViRGE parity |
-| no 320x240 | engine fix needed, stop after 2.5 |
+| only 640x400 and up | no TSR is active -- see below |
+| 512x384 present | that is UniVBE, not M64VBE -- wrong boot entry |
 
 Match on **resolution**, not mode number. M64VBE uses `0x0212`, not `0x01F8`.
 
-Picture still wrong: `M64VBE U` then `M64VBE VW VGA`.
+If `VESATEST` looks unchanged, check the TSR is actually resident:
+
+| Run | Means |
+|---|---|
+| `M64VBE U` -> `successfully removed` | it was loaded |
+| `M64VBE U` -> `not resident` | it never loaded |
+| `M64VBE 3` | force 320 modes on if resident |
+
+Picture wrong but 320x240 present: `M64VBE U` then `M64VBE VW VGA`.
 
 ---
 
