@@ -1,61 +1,125 @@
 # QA checklist -- round 2
 
-Tick as you go. Cell definitions are in `docs/QA-CELL-REFERENCE.md`; the round-1
-sequence is in `docs/QA-RUN-SHEET.md`.
+Tick as you go. Ordered to keep the CPU in the socket as long as possible and
+to start from the hardware already in the box. Cell definitions are in
+`docs/QA-CELL-REFERENCE.md`; round 1's sequence is in `docs/QA-RUN-SHEET.md`.
 
 Commands are typed **on the DOS box** unless marked *laptop*.
 
----
+**Golden rule.** `QA n` sets which CPU the logs are filed under, and it is the
+only thing deciding that. The CPU is the one component no log records.
 
-## What is on the card right now
-
-The installer populates the **round-1 binary `09e449c5a81d`**. That is
-deliberate: it proves the round-2 harness works against a known-good build
-before anything depends on it.
-
-| BAT | Runs now? | Why |
+| CPU | `n` | tag |
 |---|---|---|
-| `PROVE` | partly | 6 cells. `P5`/`P5K` are the timebase A/B and are meaningless until the round-2 binary is on the card. `P4 P4B P3 P0` are useful now. |
-| `GAP` | **yes** | 4 cells. Answers gaps round 1 left open. Nothing here needs round 2. |
-| `EAR` | **yes** | 3 cells, needs a person listening. |
-| `RB` | **no -- it refuses** | Re-baselining round 1 against round 1 agrees perfectly and proves nothing. It will print `RB REFUSES TO RUN` until a round-2 payload is installed. |
-
-`BINARY.NFO` on the card records which binary and reel are installed. Read it
-if you are ever unsure what produced a result.
+| Pentium OverDrive 83 | 1 | `G..` |
+| Am5x86-133 | 2 | `A..` |
+| 486DX2-66 | 3 | `6..` |
+| 486DX2-50 | 4 | `5..` |
 
 ---
 
-## 1. Pre-flight gate -- *laptop*, before touching the box
+## What runs on what
+
+The card carries the **round-1 binary `09e449c5a81d`** -- deliberately, so the
+round-2 harness is proven against a known-good build first.
+
+| Sweep | Sound card | Needs ears | Useful now? |
+|---|---|---|---|
+| `GAP` | **Vibra** (`X8` is meaningless elsewhere) | no | yes, fully |
+| `EAR` | **PicoGUS required** (switches sb -> adlib) | **yes** | yes, fully |
+| `PROVE` | **PicoGUS required** | no | 4 of 6 cells |
+| `RB` | PicoGUS required | no | **no -- it refuses** |
+
+`RB` prints `RB REFUSES TO RUN` on a round-1 card. That is correct: re-baselining
+round 1 against round 1 agrees perfectly and tests nothing.
+
+---
+
+## PART 1 -- 486DX2-50 (already in the box; CPU never moves)
+
+Starting hardware: **DX2-50 + S3 ViRGE + Vibra16.** `GAP` goes first because
+`X8` is the one cell that *requires* the Vibra, and `XH1`/`XH2` re-measure the
+Organya-HQ cell that contradicted itself in round 1 -- on this exact CPU.
+
+| | Hardware change | Run | Time |
+|---|---|---|---|
+| 1.1 | none (current setup) | `QA 4` then `GAP` | ~12 min |
+| 1.2 | sound -> PicoGUS | `EAR` | ~9 min + listening |
+| 1.3 | none | `PROVE` | ~18 min |
+| 1.4 | none | pull logs (*laptop*) | 2 min |
+
+Totals: 1 sound swap, 0 video swaps, 0 CPU swaps. **~40 min.**
+
+`GAP` runs as plain `GAP` here -- **not** `GAP PG`. The `PG` argument forces a
+PicoGUS into sb mode and there is no PicoGUS in the box at step 1.1.
+
+---
+
+## PART 2 -- 486DX2-66 (one CPU swap to get here)
+
+Only worth doing for `GAP`: `XH1`/`XH2` on this CPU are the other half of the
+round-1 Organya-HQ contradiction, where the DX2-50 scored *higher* than the
+DX2-66 on the same cell. Both halves are needed to settle it.
+
+| | Hardware change | Run | Time |
+|---|---|---|---|
+| 2.1 | CPU -> DX2-66, sound -> Vibra | `QA 3` then `GAP` | ~10 min |
+| 2.2 | none | pull logs (*laptop*) | 2 min |
+
+Totals: 1 CPU swap, 1 sound swap. **~12 min.**
+
+`EAR` and `PROVE` do not need repeating here -- one CPU answers both.
+
+---
+
+## PART 3 -- deferred until the round-2 payload exists
+
+`RB` is the re-baseline and refuses to run until a non-round-1 binary is
+installed. When that payload lands, `RB` on each CPU is the first thing to run,
+and its three anchor cells each catch a different class of change:
+
+| Cell | Catches |
+|---|---|
+| `R4` OPL3 | the control -- no music timer, isolates observer effect |
+| `R5` AdLib | the music-timer path, which a timebase fix changes and `R4` cannot see |
+| `R3` Organya | the re-rendered PCM cache, which nothing else exercises |
+
+`R4B` is a straight repeat of `R4` and measures the run-to-run noise floor
+directly, rather than inferring it from configurations that happened to repeat.
+
+---
+
+## Pre-flight gate -- *laptop*, before touching the box
 
 Every silent-invalidation failure found so far would have been caught here.
-Each check is seconds.
+Seconds each.
 
 - [ ] **CF mounted** at `/media/micheal/DOS`
-- [ ] **Reel is the benchmark reel.** `sha256sum /media/micheal/DOS/doskutsu/QA.TAS`
-      must begin **`4118561edf26`**. A different reel produces complete,
-      plausible, wrong numbers with no other symptom.
-- [ ] **Binary matches the round you think you are running.**
-      `cat /media/micheal/DOS/doskutsu/BINARY.NFO`
-- [ ] **`LOGS/` is empty** (the installer clears it)
-- [ ] **Logback label chosen** -- see step 4. Never reuse one.
+- [ ] **Reel is the benchmark reel:**
+      `sha256sum /media/micheal/DOS/doskutsu/QA.TAS` begins **`4118561edf26`**.
+      A different reel gives complete, plausible, wrong numbers and no other symptom.
+- [ ] **Binary is what you think:** `cat /media/micheal/DOS/doskutsu/BINARY.NFO`
+- [ ] **HQ cache present** if running `GAP`:
+      `ls /media/micheal/DOS/doskutsu/CACHE/22050_2` -- without it `XH1`/`XH2`
+      cold-render for minutes and look exactly like a hang
+- [ ] **`LOGS/` empty** (the installer clears it)
+- [ ] **Logback label chosen**, never reused
 
 Then physically:
 
-- [ ] **Correct CPU** in the socket, and you know its number: POD-83 = 1,
-      Am5x86-133 = 2, DX2-66 = 3, DX2-50 = 4
-- [ ] **Correct sound card** seated for the sweep you intend
-- [ ] **DreamBlaster on the right header** if the sweep uses WaveBlaster
-- [ ] **S3 ViRGE** seated unless you are deliberately testing another card
+- [ ] Correct **CPU** in the socket, and you know its number
+- [ ] Correct **sound card** for the sweep -- see the table above
+- [ ] **S3 ViRGE** seated
 
 ---
 
-## 2. Install -- *laptop*
+## Install -- *laptop*
 
 ```
 scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
 ```
 
-Watch for these lines. Any of them wrong means stop:
+Stop if any of these is wrong:
 
 - `PASS: DOSKUTSU.EXE <sha>` -- the build you intended
 - `installed QA.TAS (1956 B, sha 4118561edf26...) -- matches the round-1 benchmark reel`
@@ -63,105 +127,87 @@ Watch for these lines. Any of them wrong means stop:
 - `PASS: all NN BATs CRLF + ASCII`
 - `PASS: unmounted ...`
 
-The script re-fetches the 188 MB payload only if it is not already staged, so
-re-running it after a failure is cheap.
-
-If it stops at `REPLACING a different reel`, that is the guard working -- it
-found a non-benchmark reel and swapped it, keeping a backup. Read the sha it
-printed before continuing.
-
-Move the card to the box.
+Re-running is cheap: the 188 MB payload is only fetched if not already staged.
+`REPLACING a different reel` is the guard working -- it found a non-benchmark
+reel, swapped it, and kept a backup.
 
 ---
 
-## 3. Run the cells -- *DOS box*
+## Running a sweep -- *DOS box*
 
 ```
 C:
 CD \DOSKUTSU
-QA n          <- n is the CPU number. Sets the log tag for everything after.
+QA n
 ```
 
-Each sweep prints its hardware before it starts:
+Each sweep prints its hardware before the prompt:
 
 ```
 SWEEP : ...
-CPU   : Pentium OverDrive 83
-SOUND : PicoGUS -- DreamBlaster on the PicoGUS header
+CPU   : 486DX2-50
+SOUND : MIXED -- X8 needs the VIBRA; the rest run on any card
 VIDEO : S3 ViRGE
 ```
 
-- [ ] **Read that banner and stop if it disagrees with the box.** It is the
-      only check that catches the wrong CPU number, and the CPU is the one
-      component no log records.
-
-Then, in this order:
-
-- [ ] `GAP` -- 4 cells, ~10 min, unattended. Add `GAP PG` instead if the
-      PicoGUS is installed and needs initialising.
-      Cells: `X8` Vibra forced to 8-bit DMA, `XH1`/`XH2` Organya-HQ re-measure,
-      `X0` true audio floor.
-- [ ] `EAR` -- 3 cells, ~8 min, **needs a person listening**.
-      Cells: `E4` OPL3, `E3` Organya, `EA` AdLib.
-- [ ] `PROVE` -- 6 cells. `P5`/`P5K` will run but mean nothing until round 2.
-
-`RB` only after a round-2 payload is installed.
+- [ ] **Read it and stop if it disagrees with the box.** This is the only check
+      that catches a wrong CPU number.
 
 ---
 
-## 4. Retrieve the logs -- *laptop*
+## Retrieve the logs -- *laptop*
 
 ```
 scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh <label>
 ```
 
-- [ ] **Label every pull** -- `round2-gap-pod83`, `round2-ear-dx266`. The
-      destination used to be fixed per machine, which silently merged a later
-      round over an earlier one. It now refuses if the label already exists.
-- [ ] **Pull between sweeps**, not only between rounds.
-- [ ] Confirm the final line is `UPLOAD_OK:` with the file count you expect.
-- [ ] Confirm the `.NFO` came back and its `cpu=` matches the CPU actually in
-      the box.
+Suggested labels: `r2-gap-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-gap-dx266`.
+
+- [ ] **Label every pull, never reuse one.** The destination used to be fixed
+      per machine, which silently merged a later round over an earlier one. It
+      now refuses if the label exists.
+- [ ] **Pull between sweeps**, not only between parts.
+- [ ] Final line reads `UPLOAD_OK:` with the file count you expect.
+- [ ] The `.NFO` came back and its `cpu=` matches the CPU actually in the box.
 
 ---
 
-## 5. Expected -- NOT broken
+## Expected -- NOT broken
 
-Stopping a good run costs a bench session. Letting a bad one continue costs the
+Stopping a good run costs a bench session; letting a bad one continue costs the
 numbers.
 
 | Looks like | Actually |
 |---|---|
-| `X0` / `P0` play **no sound at all** | Correct. `AUDIO_OFF=1` is the true silence floor. |
-| Keyboard does nothing during a cell | Correct. The reel drives input; the cell ends itself. |
+| `X0` / `P0` play **no sound at all** | Correct. `AUDIO_OFF=1` is the true silence floor -- that is the measurement. |
+| Keyboard does nothing during a cell | Correct. The reel drives input and the cell ends itself. |
 | `RB` prints `RB REFUSES TO RUN` | Correct on a round-1 card. Not a failure. |
-| "no PicoGUS detected" from `GAP PG` on a Vibra box | You passed `PG` on the wrong card. Re-run as plain `GAP`. |
-| A cell takes minutes on the title screen | Organya-HQ cold-rendering because the 22050 cache is missing. Abort and check the card. |
-| The box appears hung immediately | Check the reel sha. A stub reel ends early while replay keeps feeding input. |
+| "no PicoGUS detected" | You ran `GAP PG`, or `EAR`/`PROVE`, without a PicoGUS in the box. |
+| `X8` results look odd on a PicoGUS | `X8` is meaningless off the Vibra. Ignore it there. |
+| A cell sits minutes on the title screen | Organya-HQ cold-rendering -- the 22050 cache is missing. Abort, check the card. |
+| The box appears hung straight away | Check the reel sha. A stub reel ends early while replay keeps feeding input. |
 
 ---
 
-## 6. Known-bad, do not bank
+## Known-bad, do not bank
 
-- Any cell run before commit `28218c0` -- those used the fallback reel.
-- `RB` results from a round-1 card, if the guard is ever bypassed.
-- `5112` / `6112` from round 1 -- self-contradictory, already excluded.
+- Anything run before commit `28218c0` -- fallback reel, different workload.
+- `RB` output from a round-1 card, if the guard is ever bypassed.
+- Round-1 `5112` / `6112` -- self-contradictory, already excluded. `XH1`/`XH2`
+  in part 1 and part 2 exist to replace them.
 
 ---
 
-## Before round 2's payload exists
+## Before the round-2 payload can be built
 
-The round-2 binary is `812447456e9a`. Building its payload needs, in order:
+New binary is `812447456e9a`. In order:
 
 1. New binary into the kit
 2. `make convert-music` -- the MIDI sets are gitignored build products, so a
-   rebuild that skips it ships old files with a new binary and nothing reveals
-   the mismatch
-3. Organya cache re-render at the new key -- the shipped caches are keyed
-   `f8d446b4b0e0` and go stale, and every Organya cell cold-renders on the
-   bench if this is missed
+   rebuild that skips it ships old files with a new binary and nothing reveals it
+3. Organya cache re-render at the new key -- shipped caches are keyed
+   `f8d446b4b0e0` and go stale; miss this and every Organya cell cold-renders
 4. `tests/qa/embed-bats.sh` after any BAT edit, then re-stage the installer
 5. Update `EXP_DOSKUTSU_SHA` and `TARBALL` in the installer
 
-Then `RB` enables itself, and the three-cell re-baseline (`R4` control,
-`R5` pump path, `R3` re-rendered cache) is the first thing to run.
+`ROUND2.OK` then writes itself and `RB` enables.
