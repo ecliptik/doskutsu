@@ -76,13 +76,15 @@ for normal operation -- nothing to remember to undo.
 | 2.1 | video -> Mach64 | swap card | 5 min |
 | 2.2 | CF to *laptop* | `bash install-mach64.sh` (once, ever) | 2 min |
 | 2.3 | CF back in box | reboot, pick menu entry **6** | 2 min |
-| 2.4 | none | `C:\ATI\SUPPORT\64VBE221\VESATEST` | 1 min |
+| 2.4 | none | `VESATEST` | 1 min |
 | 2.5 | none | `QA 4` then `VIDM 4` | ~10 min |
 | 2.6 | none | pull logs (*laptop*) | 2 min |
 | 2.7 | video -> ViRGE | reboot, pick any other entry | 5 min |
 
 **2.4 answers the question before the game runs.** `VESATEST` lists every mode
-the card currently offers. If 320x240 is there, Path A has already succeeded.
+the card currently offers -- if 320x240 is there, Path A has already succeeded.
+It lives at `C:\ATI\SUPPORT\64VBE221\`, which entry 6 puts on the PATH, so
+the bare name works. `M64VBE` does too, for the fallback switches below.
 
 ### Read `DOSVESA-CTRL` in `LOGS\5C4MSDL.LOG`
 
