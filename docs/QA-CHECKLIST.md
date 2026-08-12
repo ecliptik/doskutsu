@@ -17,7 +17,7 @@ jumper values the Vibra cannot use.
 | Part | Hardware | Time |
 |---|---|---|
 | 1 | DX2-50, ViRGE, Vibra -> PicoGUS | 45 min |
-| 2 | Mach64 | 28 min |
+| 2 | Mach64 -- **closed, skip** | -- |
 | 3 | DX2-66, Vibra | 12 min |
 | 4 | blocked -- needs round-2 payload | -- |
 
@@ -37,48 +37,20 @@ jumper values the Vibra cannot use.
 
 ---
 
-## Part 2 -- Mach64
+## Part 2 -- Mach64 -- CLOSED 2026-08-12, do not run
 
-| | Swap | Run |
-|---|---|---|
-| 2.1 | video -> Mach64 | -- |
-| 2.2 | CF to laptop | `bash /tmp/mach64kit/install-mach64.sh` |
-| 2.3 | CF to box | reboot, pick menu entry **6** |
-| 2.4 | -- | `M64VBE` then `VESATEST` |
-| 2.5 | -- | `QA 4` then `VIDM 4` (Vibra) |
-| 2.6 | -- | pull logs *laptop* |
-| 2.7 | video -> ViRGE | reboot, pick any other entry |
+**The card cannot do 320x240.** The Mach64-CT has no double scanning, and
+320x200/320x240 are double-scanned modes, so no VBE driver can provide them.
+UniVBE states this outright when it loads; ATI's own M64VBE cannot produce them
+either, and additionally hangs SDL_Init in every switch combination tried.
 
-Load it bare -- **`M64VBE`**, no arguments. There is no `I` switch; an invalid
-one just prints help and installs nothing.
+Evidence and the full write-up: `qa-results/2026-08-12-mach64-pathA/`.
 
-Entry 6 sets up the **Vibra**, so `VIDM 4` -- no `PG`.
+The fix is the engine letterbox (already approved), which needs no bench time
+and no ATI driver. Nothing further to run on this card.
 
-`M64VBE` says:
-
-| | |
-|---|---|
-| `M64VBE (V2.21) is installed` | good |
-| `M64VBE is already installed` | fine, carry on |
-| `Can not load ... adapter is not detected` | stop, report it |
-
-**`VESATEST` cannot answer this -- do not read it as a verdict.** It is a
-1994 tool that only knows standard VESA mode numbers, and M64VBE puts
-320x240 at ATI's `0x0212`. Confirmed 2026-08-12: TSR resident, `320 modes
-enabled`, VESATEST still listed only 640x400 and up.
-
-| `VESATEST` shows | |
-|---|---|
-| 320x240 | confirmed present, go to 2.5 |
-| 640x400 and up only | inconclusive -- go to 2.5 anyway |
-| 512x384 | UniVBE is loaded, not M64VBE -- wrong boot entry |
-
-**`DOSVESA-CTRL` in the log is the real answer.** It walks the card's own
-mode list and does pick up OEM numbers -- round 1 logged SciTech's `0x01F3`.
-
-Match on **resolution**, not mode number.
-
-Picture wrong but 320x240 present: `M64VBE U` then `M64VBE VW VGA`.
+If the Mach64 is still seated, put the ViRGE back and boot any normal menu
+entry -- entry 6 exists only for M64VBE and has no use now.
 
 ---
 
