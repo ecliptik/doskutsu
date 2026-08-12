@@ -28,10 +28,16 @@ EXP_SETUPBAT_SHA="ee9140aac514abe1d6eaca9d3c08817f1599201f59916b145c904b5c3ed187
 EXP_CWSDPMI_SHA="2de899fecaa90632b8b9bdfc0305cb0375e59ae252c37e32d06c1ed3f98a8f44"
 EXP_TAS_SHA="4118561edf26b93ab9b7a50e894e04ba7b0e7f089c6aa6418afcc8340ebf0bf1"  # QA.TAS ROUND-1 BENCHMARK reel (1956 B, ~5100 ticks/102 s)
 
-CF_MOUNT="/media/micheal/DOS"
+# Overridable ONLY so the script can be exercised end to end without a card --
+# every default is unchanged, so the operator command line is identical. Two of
+# three field failures were in the gap between "the source is right" and "the
+# artifact the operator fetches is right", and that gap existed because this
+# script could not be run at all without the hardware.
+CF_MOUNT="${CF_MOUNT:-/media/micheal/DOS}"
 CF_GAME_DIR="${CF_MOUNT}/doskutsu"
 CF_LOGS="${CF_GAME_DIR}/LOGS"
-STAGING="/home/micheal/Projects/gateway2000/doskutsu"
+STAGING="${STAGING:-/home/micheal/Projects/gateway2000/doskutsu}"
+DRY_RUN="${DRY_RUN:-0}"   # 1 = skip the payload fetch and the final unmount
 
 # ============================================================================
 echo "=== doskutsu v1.6.3 FULL-QA :: CF population (one-time) ==="
@@ -45,7 +51,13 @@ echo "  PASS: ${CF_MOUNT} present"
 
 echo "[2/8] fetch payload tarball claude -> laptop"
 mkdir -p "${STAGING}"
-scp "claude:/tmp/${TARBALL}" "${STAGING}/"
+if [ -f "${STAGING}/${TARBALL}" ]; then
+  echo "  already staged, not re-fetching 188 MB (delete it to force a re-fetch)"
+elif [ "${DRY_RUN}" = "1" ]; then
+  echo "  FAIL: DRY_RUN=1 but ${STAGING}/${TARBALL} is not staged"; exit 1
+else
+  scp "claude:/tmp/${TARBALL}" "${STAGING}/"
+fi
 echo "  PASS: ${STAGING}/${TARBALL}"
 
 echo "[3/8] extract payload onto CF (non-destructive overlay; base DATA preserved)"
@@ -793,7 +805,12 @@ else
 fi
 _rsha=$(sha256sum "${CF_GAME_DIR}/QA.TAS" | cut -d' ' -f1)
 _rsz=$(stat -c%s "${CF_GAME_DIR}/QA.TAS" 2>/dev/null || echo 0)
-if [ "${_rsha}" = "${EXP_TAS_SHA}" ]; then
+if [ "${KEEP_REEL:-0}" = "1" ] && [ "${_rsha}" != "${EXP_TAS_SHA}" ]; then
+  # Deliberate keep: the verification below would otherwise report an ERROR
+  # about a reel that was never written. Operators read confusing output as
+  # breakage, which is most of how tonight went.
+  echo "  QA.TAS left as the operator's own reel by request (${_rsz} B, sha ${_rsha:0:12})"
+elif [ "${_rsha}" = "${EXP_TAS_SHA}" ]; then
   echo "  installed QA.TAS (${_rsz} B, sha ${_rsha:0:12}...) -- matches the round-1 benchmark reel"
 else
   echo "  ERROR: QA.TAS wrote but sha does not match the expected benchmark reel!"
@@ -847,7 +864,9 @@ done
 [ $badbat -eq 0 ] && echo "  PASS: all $(ls "${CF_GAME_DIR}"/*.BAT | wc -l) BATs CRLF + ASCII" || { echo "  ABORT: BAT gate failed"; exit 1; }
 sync
 echo "  sync done"
-if mountpoint -q "${CF_MOUNT}"; then
+if [ "${DRY_RUN}" = "1" ]; then
+  echo "  DRY_RUN=1 -- skipping unmount"
+elif mountpoint -q "${CF_MOUNT}"; then
   dev=$(findmnt -no SOURCE "${CF_MOUNT}" 2>/dev/null || true)
   if [ -n "$dev" ] && udisksctl unmount -b "$dev" 2>/dev/null; then echo "  PASS: unmounted via udisksctl"
   elif sudo -n umount "${CF_MOUNT}" 2>/dev/null; then echo "  PASS: unmounted via sudo umount"
