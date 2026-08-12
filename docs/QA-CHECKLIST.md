@@ -104,8 +104,17 @@ Seconds each.
 
 - [ ] **CF mounted** at `/media/micheal/DOS`
 - [ ] **Reel is the benchmark reel:**
-      `sha256sum /media/micheal/DOS/doskutsu/QA.TAS` begins **`4118561edf26`**.
-      A different reel gives complete, plausible, wrong numbers and no other symptom.
+      `sha256sum /media/micheal/DOS/doskutsu/QA.TAS` begins **`4118561edf26`**
+      (1956 bytes). A different reel gives complete, plausible, wrong numbers
+      and no other symptom. **If it does not match:**
+
+      ```
+      scp claude:/tmp/QA-ROUND1.TAS claude:/tmp/fix-reel.sh /tmp/ && bash /tmp/fix-reel.sh
+      ```
+
+      A full populate also fixes it -- the installer writes this reel at step
+      5d regardless of what the payload tarball contains, which is still the
+      old fallback.
 - [ ] **Binary is what you think:** `cat /media/micheal/DOS/doskutsu/BINARY.NFO`
 - [ ] **HQ cache present** if running `GAP`:
       `ls /media/micheal/DOS/doskutsu/CACHE/22050_2` -- without it `XH1`/`XH2`
