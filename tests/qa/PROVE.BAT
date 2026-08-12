@@ -44,6 +44,7 @@ pgusinit /mode sb
 pgusinit /sbenv
 SET BLASTER=A220 I7 D3 P330 T3
 CALL CLRENV
+SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
 SET DOSKUTSU_LOG_TAG=%QAM%P4
@@ -58,6 +59,7 @@ ECHO  Non-pump. Must match the banked C4 anchor for this CPU.
 ECHO ============================================
 DOSKUTSU.EXE
 CALL CLRENV
+SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
 SET DOSKUTSU_LOG_TAG=%QAM%P4B
@@ -72,6 +74,7 @@ ECHO  P4 vs P4B spread IS the noise floor.
 ECHO ============================================
 DOSKUTSU.EXE
 CALL CLRENV
+SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ORGANYA.CFG DOSKUTSU.CFG > NUL
 SET DOSKUTSU_LOG_TAG=%QAM%P3
@@ -86,6 +89,7 @@ ECHO  Catches a silently different re-render. Match banked C3.
 ECHO ============================================
 DOSKUTSU.EXE
 CALL CLRENV
+SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
 SET SDL_HINT_DOSKUTSU_AUDIO_OFF=1
@@ -106,6 +110,7 @@ ECHO  switching PicoGUS -> ADLIB MODE  (no SB, so the PIT pump can own ch0)
 ECHO ##########################################################
 pgusinit /mode adlib
 CALL CLRENV
+SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ADLIB.CFG DOSKUTSU.CFG > NUL
 SET DOSKUTSU_LOG_TAG=%QAM%P5
@@ -120,6 +125,7 @@ ECHO  Expect 10-40ms band POPULATED, pump_clock_state=pump-timebase-ok.
 ECHO ============================================
 DOSKUTSU.EXE
 CALL CLRENV
+SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ADLIB.CFG DOSKUTSU.CFG > NUL
 SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=0
@@ -141,5 +147,6 @@ ECHO  The PicoGUS is left in ADLIB mode -- re-run pgusinit if you
 ECHO  next want sb or gus.
 ECHO  Vibra card-vs-DMA-path check is GAP.BAT cell X8, not this sweep.
 ECHO ============================================================
+SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 ECHO.
 :END
