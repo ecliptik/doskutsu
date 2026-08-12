@@ -511,6 +511,8 @@ BANNER_REGEX=(
   # patch SDL/0123: read-only VBE 4F08 DAC-width probe, emitted on EVERY mode set
   # (video init, always reached before the title), so REQUIRED.
   "DOSVESA-DACWIDTH: 4F08.get ax=0x[0-9A-Fa-f]+ supported=[01] width_bits=-?[0-9]+"
+  "\[music-dispatch\] tick="
+  "\[cpu-witness\]"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -658,6 +660,8 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
+  "optional"
 )
 # BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY -- ALL THREE are 137 entries
 # each and MUST stay 1:1 (re-aligned in the v1.6.2 rc5 window: the GUS Campaign-3
@@ -815,6 +819,8 @@ BANNER_LABEL=(
   "0280 TAS fixed-timestep guard (OPTIONAL -- 'TAS fixed-timestep guard: (ENABLED (default)|DISABLED (killswitch))'; nx 0280 emits it only on a TAS record/replay run, and the gate's smoke is not a TAS run, so it is correctly ABSENT there. Label added 2026-08-11: BANNER_LABEL was one entry SHORT from this index onward, so every later label displayed against the wrong regex -- a failing banner would have been reported under a neighbouring lever's name. Arrays are 145/145/145 again; keep them so.)"
   "SDL/0122 pump-aware SDL timebase (OPTIONAL -- emitted at pump Start on the SDL-log channel (<TAG>SDL.LOG / SDLDBG.LOG) only on the no-SB AdLib/GUS PIT-pump path; a default OPL3/SB smoke never starts the pump so the banner is correctly ABSENT. ENABLED = ch0 programmed MODE 2 so SDL_GetPerformanceCounter is derived from the IRQ-0 period counter (fixes the uclock staircase that made gus/adlib feel like 18 fps); DISABLED(killswitch=0) = SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=0 reverts to MODE 3 + uclock, byte-identical to pre-0122. The A/B acceptance test is the inter_flip histogram on an adlib cell: the 10-40 ms band, EMPTY before the fix, must repopulate after. Ride-along at PumpStop: 'SDL/0122 pump teardown -- isr_count=.. expected_bios_chains=.. actual_bios_chains=.. delta=..' prints the standing clock-skew question as a number. Real-HW-only risk: MODE-2 latch reads on some board -- flag per [[dosbox_not_proxy]]; killswitch or the RTC/IRQ-8 fallback is the escape hatch.)"
   "SDL/0123 read-only VBE 4F08 DAC-width probe (REQUIRED -- 'DOSVESA-DACWIDTH: 4F08.get ax=.. supported=.. width_bits=..' emitted on EVERY mode set (video init, always reached before the title). Read-only diagnostic: does NOT change the palette write path (ProgramVGADAC still writes 6-bit 0-63). supported=1 width_bits=8 on a card + our 6-bit writes == washed-out palette, the candidate for the operator's 'Cirrus colours look richer than S3' report (POST-BENCHMARK-PLAN 3.3b). width_bits=-1 == BIOS lacks 4F08, 6-bit VBE default assumed. If it ever reports 8 on some card the fix is one future line (request 6-bit BL=00 BH=06, or scale writes). DOSBox-X width is whatever its VBE reports; the per-card real-HW numbers are the actual deliverable.)"
+  "0292 song-change dispatch at INFO (OPTIONAL -- '[music-dispatch] tick=N song=N (prev N)' emitted by SoundManager::music() on every song change, with the logic-tick index. INFO-level, so absent on a plain untagged WARN-level run -- expected, not a failure; tagged runs and DOSKUTSU_LOG_VERBOSE=1 log at INFO. Shipped logs previously showed a song LOADING but never its DISPATCH, which is why the Shack-music question and the AUTO-vs-WaveBlaster question both needed the operator's ears; from round 2 they are answerable from the log. Embed witness = strings|grep music-dispatch.)"
+  "0294 CPU witness at boot (OPTIONAL -- '[cpu-witness] vendor=.. family/model/stepping .. mhz_est=..' or the DISABLED variant, emitted once after config load. INFO-level, so absent on an untagged WARN run -- expected, not a failure. Nothing in a log previously witnessed WHICH MACHINE ran a cell: video was provable from vram/LFB evidence and sound from is_sb16/dsp_ver, while the CPU rested entirely on a digit typed into a sweep BAT, so every cross-CPU conclusion in the campaign rested on one unverifiable assertion. Reuses the silicon-pinned MHZ_486_LOOP_DIV so engine numbers stay comparable with SETUP's. Default-ON, strict killswitch SDL_HINT_DOSKUTSU_CPU_WITNESS=0, because a boot-time calibration loop on hardware we do not control needs an escape hatch. Cross-check against the BAT-written .NFO manifest: a disagreement means the wrong sweep argument was passed and every number in that run is mislabelled. Embed witness = strings|grep cpu-witness.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
