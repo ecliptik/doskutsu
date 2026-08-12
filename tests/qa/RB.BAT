@@ -7,6 +7,23 @@ GOTO END
 ECHO ERROR: machine not set. Run QA.BAT first (pick your CPU), then re-run.
 GOTO END
 :GO
+REM --- round-2 guard: re-baselining round 1 against round 1 agrees
+REM --- perfectly and proves nothing. ROUND2.OK is written by the
+REM --- installer ONLY when the card carries a non-round-1 binary.
+IF EXIST ROUND2.OK GOTO R2OK
+ECHO ============================================================
+ECHO  RB REFUSES TO RUN
+ECHO ============================================================
+ECHO  This card carries the ROUND-1 binary. Re-baselining it against
+ECHO  round-1 numbers agrees perfectly and tests nothing.
+ECHO.
+ECHO  See BINARY.NFO on this card for what is installed.
+ECHO  Populate with a round-2 payload, then re-run RB.
+ECHO.
+ECHO  PROVE / GAP / EAR do not need round 2 and run fine now.
+ECHO ============================================================
+GOTO END
+:R2OK
 REM --- QA-INSTRUMENT v1 ---
 IF "%QAM%"=="G" SET QACPU=Pentium OverDrive 83
 IF "%QAM%"=="A" SET QACPU=Am5x86-133
