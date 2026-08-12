@@ -17,7 +17,7 @@ jumper values the Vibra cannot use.
 | Part | Hardware | Time |
 |---|---|---|
 | 1 | DX2-50, ViRGE, Vibra -> PicoGUS | 45 min |
-| 2 | Mach64 -- **held for letterbox** | 20 min |
+| 2 | Mach64 verification | 20 min |
 | 3 | DX2-66, Vibra | 12 min |
 | 4 | blocked -- needs round-2 payload | -- |
 
@@ -37,27 +37,14 @@ jumper values the Vibra cannot use.
 
 ---
 
-## Part 2 -- Mach64 -- HELD until the letterbox patch lands
+## Part 2 -- Mach64 verification
 
-**The card cannot do 320x240.** The Mach64-CT has no double scanning, and
-320x200/320x240 are double-scanned modes, so no VBE driver can provide them.
-UniVBE says so when it loads; ATI's M64VBE cannot either, and additionally
-hangs SDL_Init in every switch combination tried. Use UniVBE, not M64VBE.
+**Use UniVBE, not M64VBE.** The card cannot do 320x240 -- the Mach64-CT has no
+double scanning -- so the engine now centres the 320x240 picture inside the
+512x384 surface (`patches/nxengine-evo/0296`). M64VBE additionally hangs
+SDL_Init. Boot any normal menu entry; entry 6 has no use.
 
-Evidence: `qa-results/2026-08-12-mach64-pathA/`.
-
-The engine letterbox fix is being written. When it lands this becomes a
-**verification lane**, answering two independent questions:
-
-| | Question | Read |
-|---|---|---|
-| a | does the image land correctly? | look at the screen |
-| b | do the stalls survive? | `inter_flip_ms` spread in the log |
-
-Round 1 had **40% of frames stalled over 300 ms** while the unstalled ones hit
-20 ms -- 50 fps at 512x384. The letterbox does not address that; it is a
-separate, unexplained problem and it is what decides whether the card is
-usable.
+Two independent questions. A correct picture does **not** mean a usable card.
 
 | | Swap | Run |
 |---|---|---|
@@ -68,10 +55,25 @@ usable.
 | 2.5 | -- | pull logs *laptop* |
 | 2.6 | video -> ViRGE | -- |
 
-`VIDMK` exists so the A/B cannot overwrite its own baseline -- it tags
-`5C4MK` / `551MK` against `VIDM`'s `5C4M` / `551M`.
+**a) Does the picture land right?** Look at the screen. Expect the image
+centred with a black border, not in the corner. The log proves it engaged:
 
-Boot any normal menu entry. Entry 6 is M64VBE-only and has no use now.
+    center-oversized: ENGAGED surface=...
+    center-oversized: flush rect=320x240@96,72 bytes=76800
+
+Killswitch for an A/B: `SET SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0`.
+
+**b) Do the stalls survive?** Round 1 had **40% of frames over 300 ms** while
+the unstalled ones hit 20 ms -- 50 fps at 512x384. The letterbox does nothing
+for that; it is what decides whether the card is usable. Check the
+`inter_flip_ms` spread, then run 2.4 if they are still there.
+
+`VIDMK` tags `5C4MK` / `551MK` so the A/B cannot overwrite its own baseline.
+
+Expect the flush to be **logical-sized (76800 B), not surface-sized** -- the
+patch scopes it to the centred rect. Fewer bytes is certain; the exact
+millisecond gain is a bench question, because a sub-rect flush goes per-row
+rather than as one contiguous blast.
 
 ---
 
