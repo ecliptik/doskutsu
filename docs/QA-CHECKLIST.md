@@ -1,13 +1,11 @@
 # QA checklist -- round 2
 
-Tick as you go. Ordered to keep the CPU in the socket as long as possible and
-to start from the hardware already in the box. Cell definitions are in
-`docs/QA-CELL-REFERENCE.md`; round 1's sequence is in `docs/QA-RUN-SHEET.md`.
+Ordered to minimise swaps and start from the box as it stands. Commands are
+typed on the **DOS box** unless marked *laptop*. Cells:
+`docs/QA-CELL-REFERENCE.md`. Round 1: `docs/QA-RUN-SHEET.md`.
 
-Commands are typed **on the DOS box** unless marked *laptop*.
-
-**Golden rule.** `QA n` sets which CPU the logs are filed under, and it is the
-only thing deciding that. The CPU is the one component no log records.
+**`QA n` decides which CPU the logs are filed under, and nothing else does.**
+No log records the processor.
 
 | CPU | `n` | tag |
 |---|---|---|
@@ -16,280 +14,210 @@ only thing deciding that. The CPU is the one component no log records.
 | 486DX2-66 | 3 | `6..` |
 | 486DX2-50 | 4 | `5..` |
 
----
-
-## What runs on what
-
-The card carries the **round-1 binary `09e449c5a81d`** -- deliberately, so the
-round-2 harness is proven against a known-good build first.
-
-| Sweep | Sound card | Needs ears | Useful now? |
+| Sweep | Sound card | Ears | Useful now |
 |---|---|---|---|
-| `GAP` | **Vibra** (`X8` is meaningless elsewhere) | no | yes, fully |
-| `EAR` | **PicoGUS required** (switches sb -> adlib) | **yes** | yes, fully |
+| `GAP` | **Vibra** -- `X8` needs it | no | yes |
+| `EAR` | **PicoGUS required** | **yes** | yes |
 | `PROVE` | **PicoGUS required** | no | 4 of 6 cells |
-| `RB` | PicoGUS required | no | **no -- it refuses** |
+| `RB` | PicoGUS required | no | **no -- refuses** |
 
-`RB` prints `RB REFUSES TO RUN` on a round-1 card. That is correct: re-baselining
-round 1 against round 1 agrees perfectly and tests nothing.
+Card holds the **round-1 binary `09e449c5a81d`**, on purpose: the harness is
+proven against a known-good build first. `RB` refusing is correct.
 
 ---
 
-## PART 1 -- 486DX2-50 (already in the box; CPU never moves)
+## Run order
 
-Starting hardware: **DX2-50 + S3 ViRGE + Vibra16.** `GAP` goes first because
-`X8` is the one cell that *requires* the Vibra, and `XH1`/`XH2` re-measure the
-Organya-HQ cell that contradicted itself in round 1 -- on this exact CPU.
+| Part | Hardware | Swaps | Time |
+|---|---|---|---|
+| **1** | DX2-50 + ViRGE + Vibra -> PicoGUS | 1 sound | ~45 min |
+| **2** | Mach64 + VBE driver change | 2 video | ~28 min |
+| **3** | DX2-66 + Vibra | 1 CPU, 1 sound | ~12 min |
+| **4** | deferred -- needs the round-2 payload | -- | -- |
 
-**Populate the card first.** Everything below assumes the current installer has
-been run. Five things landed after the last populate and none are on the card
-yet: the `RB` round-2 guard, `BINARY.NFO`, `ROUND2.OK`, the `CLRENV`
-`PUMP_TIMEBASE` top-up, and the byte-level CRLF gate. Without them `RB` will
-not refuse, nothing records which binary produced a result, and a killswitch
-set by one cell survives into the next.
+---
+
+## PART 1 -- 486DX2-50 (already in the box)
 
 | | Hardware change | Run | Time |
 |---|---|---|---|
-| 1.0 | CF to the *laptop* | populate (see **Install** below) | ~5 min |
-| 1.1 | CF back in the box | `QA 4` then `GAP` | ~12 min |
+| 1.0 | CF to *laptop* | **populate -- required** | ~5 min |
+| 1.1 | CF back in box | `QA 4` then `GAP` | ~12 min |
 | 1.2 | sound -> PicoGUS | `EAR` | ~9 min + listening |
 | 1.3 | none | `PROVE` | ~18 min |
 | 1.4 | none | pull logs (*laptop*) | 2 min |
 
-Totals: 1 sound swap, 0 video swaps, 0 CPU swaps. **~45 min including the populate.**
-
-`GAP` runs as plain `GAP` here -- **not** `GAP PG`. The `PG` argument forces a
-PicoGUS into sb mode and there is no PicoGUS in the box at step 1.1.
+| | |
+|---|---|
+| Why `GAP` first | `X8` is the only cell that *requires* the Vibra; `XH1`/`XH2` re-measure the Organya-HQ cell that contradicted itself on this CPU |
+| Run it as | plain `GAP`, **not** `GAP PG` -- no PicoGUS in the box at 1.1 |
+| Why 1.0 is required | five fixes landed after the last populate: `RB` guard, `BINARY.NFO`, `ROUND2.OK`, `CLRENV` `PUMP_TIMEBASE`, byte-level CRLF gate |
 
 ---
 
-## PART 2 -- ATI Mach64 (video swap + a boot-config change)
+## PART 2 -- ATI Mach64
 
-Round 1 left this lane unresolved and it then fell off the round-2 matrix
-entirely -- every other configuration here is ViRGE. The root cause is already
-settled from the logs, with no bench time: **the card's VBE offers no mode
-smaller than `0x01F3 512x384`**, so the engine drew its 320x240 screen into the
-top-left corner. `has_lfb=1 use_lfb=1 banked=0`, `bpp=8`, `pitch=512` -- the
-flush, the bpp and the pitch were all correct. Not a regression either; the
-game's VESA path was never validated on this card.
+Root cause settled from round-1 logs, no bench time: **the card's VBE offered
+no mode below `0x01F3 512x384`**, so the engine drew 320x240 into the top-left.
+`has_lfb=1 use_lfb=1 banked=0`, `bpp=8`, `pitch=512` -- flush, bpp and pitch
+were all correct. Open question: does a different VBE driver offer 320x240.
 
-What is unresolved is whether a different VBE provider offers 320x240. That is
-one cell, and it gates an engine change the operator has already approved.
-
-`M64VBE.COM` is already on the machine at `C:\UTIL\M64VBE.COM`, commented out
-in `AUTOEXEC.BAT` (see `docs/internal/BOOT.md`).
+**Use `M64VBE.COM`, not UNIVBE.** Round 1 failed *under* UNIVBE 6.70 -- its 19
+modes start at 512x384. Re-running UNIVBE just reproduces the corruption; ATI's
+vendor driver is the untested variable and the whole point of this part.
 
 | | Hardware change | Run | Time |
 |---|---|---|---|
-| 2.1 | video -> Mach64 | swap the card | 5 min |
+| 2.1 | video -> Mach64 | swap card | 5 min |
 | 2.2 | none | edit `AUTOEXEC.BAT`, reboot | 3 min |
 | 2.3 | none | `QA 4` then `VIDM 4` | ~10 min |
 | 2.4 | none | pull logs (*laptop*) | 2 min |
-| 2.5 | video -> ViRGE, restore `AUTOEXEC.BAT`, reboot | | 8 min |
+| 2.5 | video -> ViRGE | restore `AUTOEXEC.BAT`, reboot | 8 min |
 
-For 2.2, swap which VBE TSR loads:
+**2.2** -- already on the machine, just commented out:
 
 ```
-REM C:\UTIL\UNIVBE.EXE        <- comment this OUT
-C:\UTIL\M64VBE.COM            <- uncomment this
+REM C:\UTIL\UNIVBE.EXE      <- comment OUT
+C:\UTIL\M64VBE.COM          <- uncomment
 ```
 
-**Put it back at 2.5.** Every other lane in this campaign assumes UNIVBE, and
-leaving the Mach64 TSR loaded would silently change the video path for the
-ViRGE and Cirrus runs.
+**2.5 is not optional.** Every other lane assumes UNIVBE; leaving the vendor
+TSR loaded silently changes the video path for the ViRGE and Cirrus runs.
 
-### Reading the result -- `DOSVESA-CTRL` in `LOGS\5C4MSDL.LOG`
+### Read `DOSVESA-CTRL` in `LOGS\5C4MSDL.LOG`
 
-| Mode list shows | Verdict |
+| Mode list | Verdict |
 |---|---|
-| `0x01F8 320x240` **and** `has_lfb=1` | Done. This is a documentation line in `BUILDING.md`, no engine work. Expect parity with the ViRGE. |
-| `0x01F8` present but **banked only** | **Stop.** See the trap below before concluding anything. |
-| no 320x240 from any provider | The engine fix is needed, and is already approved. |
+| `0x01F8 320x240` + `has_lfb=1` | Done -- a docs line in `BUILDING.md`, no engine work |
+| `0x01F8` but **banked only** | **Stop** -- see trap |
+| no 320x240 from any driver | Engine fix needed; already approved |
 
-**The trap.** A banked-only 320x240 would be the **first real-hardware exercise
-of SDL/0115's `gran < size` bank walk**, which shipped validated only where
-`gran == size`. Capture `win_gran` and `win_size` from the `DOSVESA-MODESET`
-line, and if corruption appears, A/B `SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0`
-**before** blaming `M64VBE.COM` -- otherwise a live 0115 bug looks exactly like
-the same lane failure.
+| Trap | |
+|---|---|
+| Banked-only 320x240 | First real-hardware exercise of SDL/0115's `gran < size` bank walk, shipped validated only where `gran == size` |
+| So | Capture `win_gran` + `win_size` from `DOSVESA-MODESET`; if corrupt, A/B `SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0` **before** blaming `M64VBE.COM` |
 
-### Free data while the card is in the box
+### Free data while the card is seated
 
-- [ ] Record the `DOSVESA-DACWIDTH` line from the log. The Cirrus-vs-S3 colour
-      question needs per-card readings, and a third card costs nothing here.
-- [ ] Note whether the `present` stalls appear. They were episodic, not
-      constant -- 18 ms frames alternating with 0.5-2.5 s plateaus, while the
-      flush itself was a healthy 7.4 ms. In its unstalled stretches that cell
-      hit **50 fps at 512x384**. Chase them with
-      `SDL_HINT_DOSKUTSU_VBLANK_BOUND=0` only **after** the mode question is
-      settled; they may vanish under a native 320x240.
+| | |
+|---|---|
+| `DOSVESA-DACWIDTH` | The Cirrus-vs-S3 colour question needs per-card readings |
+| `present` stalls | Episodic: 18 ms frames alternating with 0.5-2.5 s plateaus, flush a healthy 7.4 ms. Unstalled stretches hit **50 fps at 512x384**. Chase with `VBLANK_BOUND=0` only *after* the mode question |
 
-Evidence and the superseded hypotheses: `qa-results/2026-08-11-mach64-corruption/`.
+Evidence: `qa-results/2026-08-11-mach64-corruption/`.
 
 ---
 
-## PART 3 -- 486DX2-66 (one CPU swap to get here)
-
-Only worth doing for `GAP`: `XH1`/`XH2` on this CPU are the other half of the
-round-1 Organya-HQ contradiction, where the DX2-50 scored *higher* than the
-DX2-66 on the same cell. Both halves are needed to settle it.
+## PART 3 -- 486DX2-66
 
 | | Hardware change | Run | Time |
 |---|---|---|---|
 | 3.1 | CPU -> DX2-66, sound -> Vibra | `QA 3` then `GAP` | ~10 min |
 | 3.2 | none | pull logs (*laptop*) | 2 min |
 
-Totals: 1 CPU swap, 1 sound swap. **~12 min.**
-
-`EAR` and `PROVE` do not need repeating here -- one CPU answers both.
+`GAP` only. `XH1`/`XH2` here are the other half of the round-1 Organya-HQ
+contradiction, where the *slower* DX2-50 scored higher on the same cell.
+`EAR` and `PROVE` need one CPU only, done in part 1.
 
 ---
 
-## PART 4 -- deferred until the round-2 payload exists
+## PART 4 -- after the round-2 payload exists
 
-`RB` is the re-baseline and refuses to run until a non-round-1 binary is
-installed. When that payload lands, `RB` on each CPU is the first thing to run,
-and its three anchor cells each catch a different class of change:
+`RB` refuses until a non-round-1 binary is installed, then runs first, per CPU.
 
 | Cell | Catches |
 |---|---|
-| `R4` OPL3 | the control -- no music timer, isolates observer effect |
-| `R5` AdLib | the music-timer path, which a timebase fix changes and `R4` cannot see |
+| `R4` OPL3 | control -- no music timer, isolates observer effect |
+| `R5` AdLib | the music-timer path, which `R4` cannot see |
 | `R3` Organya | the re-rendered PCM cache, which nothing else exercises |
-
-`R4B` is a straight repeat of `R4` and measures the run-to-run noise floor
-directly, rather than inferring it from configurations that happened to repeat.
+| `R4B` | repeat of `R4` -- measures the noise floor directly |
 
 ---
 
-## Pre-flight gate -- *laptop*, before touching the box
+## Pre-flight gate -- *laptop*, every time
 
-Every silent-invalidation failure found so far would have been caught here.
-Seconds each.
+| | Check | If wrong |
+|---|---|---|
+| [ ] | CF mounted at `/media/micheal/DOS` | -- |
+| [ ] | `sha256sum .../doskutsu/QA.TAS` begins **`4118561edf26`** (1956 B) | fix below |
+| [ ] | `cat .../doskutsu/BINARY.NFO` -- the binary you expect | re-populate |
+| [ ] | `ls .../doskutsu/CACHE/22050_2` exists (for `GAP`) | re-populate |
+| [ ] | `LOGS/` empty | installer clears it |
+| [ ] | logback label chosen, never reused | -- |
+| [ ] | correct CPU, sound card, video card seated | -- |
 
-- [ ] **CF mounted** at `/media/micheal/DOS`
-- [ ] **Reel is the benchmark reel:**
-      `sha256sum /media/micheal/DOS/doskutsu/QA.TAS` begins **`4118561edf26`**
-      (1956 bytes). A different reel gives complete, plausible, wrong numbers
-      and no other symptom. **If it does not match:**
+Wrong reel:
 
-      ```
-      scp claude:/tmp/QA-ROUND1.TAS claude:/tmp/fix-reel.sh /tmp/ && bash /tmp/fix-reel.sh
-      ```
+```
+scp claude:/tmp/QA-ROUND1.TAS claude:/tmp/fix-reel.sh /tmp/ && bash /tmp/fix-reel.sh
+```
 
-      A full populate also fixes it -- the installer writes this reel at step
-      5d regardless of what the payload tarball contains, which is still the
-      old fallback.
-- [ ] **Binary is what you think:** `cat /media/micheal/DOS/doskutsu/BINARY.NFO`
-- [ ] **HQ cache present** if running `GAP`:
-      `ls /media/micheal/DOS/doskutsu/CACHE/22050_2` -- without it `XH1`/`XH2`
-      cold-render for minutes and look exactly like a hang
-- [ ] **`LOGS/` empty** (the installer clears it)
-- [ ] **Logback label chosen**, never reused
-
-Then physically:
-
-- [ ] Correct **CPU** in the socket, and you know its number
-- [ ] Correct **sound card** for the sweep -- see the table above
-- [ ] **S3 ViRGE** seated
+A populate fixes it too -- the installer writes this reel at step 5d whatever
+the payload tarball holds, which is still the old fallback.
 
 ---
 
-## Install -- *laptop*
+## Commands
 
-```
-scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
-```
+| What | Where | Command |
+|---|---|---|
+| Populate | *laptop* | `scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh` |
+| Run a sweep | DOS | `C:` then `CD \DOSKUTSU` then `QA n` then the sweep |
+| Pull logs | *laptop* | `scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh <label>` |
 
-Stop if any of these is wrong:
+Labels: `r2-gap-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-vidm-dx250`,
+`r2-gap-dx266`. **Never reuse one** -- a fixed destination once merged a later
+round over an earlier one. Pull between sweeps, not just between parts.
 
-- `PASS: DOSKUTSU.EXE <sha>` -- the build you intended
-- `installed QA.TAS (1956 B, sha 4118561edf26...) -- matches the round-1 benchmark reel`
-- `binary is the ROUND-1 build ...` **or** `ROUND2.OK written, RB enabled`
-- `PASS: all NN BATs CRLF + ASCII`
-- `PASS: unmounted ...`
+Populate output -- stop if any is wrong:
 
-Re-running is cheap: the 188 MB payload is only fetched if not already staged.
-`REPLACING a different reel` is the guard working -- it found a non-benchmark
-reel, swapped it, and kept a backup.
+| Line | Means |
+|---|---|
+| `PASS: DOSKUTSU.EXE <sha>` | the build you intended |
+| `installed QA.TAS (1956 B, sha 4118561edf26...)` | correct reel |
+| `binary is the ROUND-1 build` / `ROUND2.OK written` | which round you are in |
+| `PASS: all NN BATs CRLF + ASCII` | kit intact |
+| `PASS: unmounted` | safe to pull the card |
 
----
-
-## Running a sweep -- *DOS box*
-
-```
-C:
-CD \DOSKUTSU
-QA n
-```
-
-Each sweep prints its hardware before the prompt:
-
-```
-SWEEP : ...
-CPU   : 486DX2-50
-SOUND : MIXED -- X8 needs the VIBRA; the rest run on any card
-VIDEO : S3 ViRGE
-```
-
-- [ ] **Read it and stop if it disagrees with the box.** This is the only check
-      that catches a wrong CPU number.
-
----
-
-## Retrieve the logs -- *laptop*
-
-```
-scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh <label>
-```
-
-Suggested labels: `r2-gap-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-gap-dx266`.
-
-- [ ] **Label every pull, never reuse one.** The destination used to be fixed
-      per machine, which silently merged a later round over an earlier one. It
-      now refuses if the label exists.
-- [ ] **Pull between sweeps**, not only between parts.
-- [ ] Final line reads `UPLOAD_OK:` with the file count you expect.
-- [ ] The `.NFO` came back and its `cpu=` matches the CPU actually in the box.
+Each sweep prints CPU / SOUND / VIDEO before the prompt. **Read it and stop if
+it disagrees with the box** -- the only check that catches a wrong CPU number.
 
 ---
 
 ## Expected -- NOT broken
 
-Stopping a good run costs a bench session; letting a bad one continue costs the
-numbers.
-
 | Looks like | Actually |
 |---|---|
-| `X0` / `P0` play **no sound at all** | Correct. `AUDIO_OFF=1` is the true silence floor -- that is the measurement. |
-| Keyboard does nothing during a cell | Correct. The reel drives input and the cell ends itself. |
-| `RB` prints `RB REFUSES TO RUN` | Correct on a round-1 card. Not a failure. |
-| "no PicoGUS detected" | You ran `GAP PG`, or `EAR`/`PROVE`, without a PicoGUS in the box. |
-| `X8` results look odd on a PicoGUS | `X8` is meaningless off the Vibra. Ignore it there. |
-| A cell sits minutes on the title screen | Organya-HQ cold-rendering -- the 22050 cache is missing. Abort, check the card. |
-| The box appears hung straight away | Check the reel sha. A stub reel ends early while replay keeps feeding input. |
+| `X0` / `P0` silent | Correct -- `AUDIO_OFF=1` is the true floor. That *is* the measurement |
+| Keyboard inert during a cell | Correct -- the reel drives input, the cell ends itself |
+| `RB REFUSES TO RUN` | Correct on a round-1 card |
+| "no PicoGUS detected" | You ran `GAP PG`, or `EAR`/`PROVE`, with no PicoGUS |
+| `X8` odd on a PicoGUS | `X8` is meaningless off the Vibra -- ignore it there |
+| Minutes on the title screen | Organya-HQ cold-rendering -- 22050 cache missing. Abort |
+| Hung immediately | Check the reel sha -- a stub reel ends early while replay keeps feeding input |
 
 ---
 
-## Known-bad, do not bank
+## Do not bank
 
-- Anything run before commit `28218c0` -- fallback reel, different workload.
-- `RB` output from a round-1 card, if the guard is ever bypassed.
-- Round-1 `5112` / `6112` -- self-contradictory, already excluded. `XH1`/`XH2`
-  in part 1 and part 2 exist to replace them.
+| | Why |
+|---|---|
+| Anything run before `28218c0` | fallback reel, different workload |
+| `RB` output from a round-1 card | guard bypassed |
+| Round-1 `5112` / `6112` | self-contradictory; `XH1`/`XH2` replace them |
 
 ---
 
-## Before the round-2 payload can be built
+## Building the round-2 payload
 
-New binary is `812447456e9a`. In order:
+New binary `812447456e9a`. In order:
 
-1. New binary into the kit
-2. `make convert-music` -- the MIDI sets are gitignored build products, so a
-   rebuild that skips it ships old files with a new binary and nothing reveals it
-3. Organya cache re-render at the new key -- shipped caches are keyed
-   `f8d446b4b0e0` and go stale; miss this and every Organya cell cold-renders
-4. `tests/qa/embed-bats.sh` after any BAT edit, then re-stage the installer
-5. Update `EXP_DOSKUTSU_SHA` and `TARBALL` in the installer
+| | Step | Miss it and |
+|---|---|---|
+| 1 | new binary into the kit | -- |
+| 2 | `make convert-music` | old MIDI sets ship with a new binary, nothing reveals it |
+| 3 | Organya cache re-render at the new key | every Organya cell cold-renders on the bench |
+| 4 | `tests/qa/embed-bats.sh`, re-stage the installer | the artifact ships stale BATs -- caused two of three failed attempts |
+| 5 | update `EXP_DOSKUTSU_SHA` + `TARBALL` | sha assert fails, or asserts the wrong build |
 
 `ROUND2.OK` then writes itself and `RB` enables.
