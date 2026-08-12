@@ -158,6 +158,47 @@ the logs rather than being left on the CF.
 which is tmpfs -- a reboot loses them. Five cells sat unreviewed for a day
 once and were nearly lost.
 
+## Reading the `DOSVESA-DACWIDTH` line (the Cirrus-vs-S3 colour question)
+
+Every mode set now logs one line to the SDL channel:
+
+    DOSVESA-DACWIDTH: 4F08.get ax=0xNNNN supported=D width_bits=W writer_assumes=6
+
+The palette writer always emits 6-bit values (0-63). This line reports the
+width the card's DAC is actually in. **Read it as a number, not from a
+photograph** -- photo colour has already misled this project once, and this
+readout is the evidence.
+
+Per card:
+
+| reading | meaning |
+|---|---|
+| `supported=1 width_bits=6` | HEALTHY. DAC matches our writes; palette correct on this card. |
+| `supported=1 width_bits=8` | **SMOKING GUN.** DAC spans 0-255 but we feed 0-63, so colour covers only the bottom quarter of the range -- visibly washed out on this card. |
+| `supported=0`, `width_bits=-1` | NO DATA. The BIOS does not implement 4F08. VBE says 6-bit is the post-modeset default so 6 is assumed, but unverified. This is an absence, not a pass. |
+
+Verdict, with both cards run in the same configuration:
+
+- **Both 6** -- the software palette is identical on both, so the DAC is not
+  the cause. Fall back to the null hypothesis: analog output and monitor
+  auto-gain differences after a physical card swap.
+- **One 8, one 6** -- CONFIRMED. Consistency check that must hold: the card
+  that LOOKS worse has to be the `width_bits=8` one. If the readout and the
+  eye disagree, stop and re-check the run rather than believing either. The
+  fix is then one line (request 6-bit at mode set, or scale the writes to the
+  reported width) as a follow-up patch.
+- **Both `supported=0`** -- 4F08 cannot answer it; inconclusive.
+
+**Why this outranks a colour curiosity:** if either card has been running an
+8-bit DAC while receiving 6-bit values, then every past Cirrus-versus-S3
+visual comparison this project has made was between two different effective
+palettes, so prior "looks the same" and "looks worse" judgements need
+re-reading once both widths are known. It is a claim about work already
+banked.
+
+DOSBox-X reports `supported=1 width_bits=6` and therefore cannot exhibit the
+fault. The per-card real-hardware pair is the entire deliverable.
+
 ## If you write more BATs
 
 `DATE /T` and `TIME /T` are not reliably supported on MS-DOS 6.22, and an
