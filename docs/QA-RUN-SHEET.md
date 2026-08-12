@@ -40,91 +40,104 @@ If something sounds or looks wrong, note the **cell number** on screen
 
 ---
 
-# ROUND 2 -- prove-out of the post-benchmark binary
+# ROUND 2 -- gap-fill and prove-out
 
-Round 1 is below and is complete (89 cells, 4 CPUs). This part is what to run
-now. It is shorter on purpose: it exists to establish that a new binary is
-comparable to round 1 before anyone spends a full round on it.
+Round 1 (below) is complete: 89 cells, 4 CPUs. This is what to run now.
+Ordered to keep the SOUND CARD in as long as possible -- the opposite of
+round 1, because here the card is the thing being compared.
 
 ## Pre-flight -- tick ALL of these before the first cell
 
 Every silent-invalidation failure found so far would have been caught by one
 of these, and each takes seconds.
 
-- [ ] **Populate / refresh the card** *(laptop, CF mounted)*
-      `scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh`
-      Installs the game, the round-2 BATs, the correct reel, and purges ~141
-      stale entries left by old iters.
-- [ ] **Reel** *(laptop)* -- `sha256sum /media/micheal/DOS/doskutsu/QA.TAS`
-      must start **`4118561edf26`**. STOP if it does not.
-- [ ] **Binary** -- know which build is on the card. Round 1 is
-      `09e449c5a81d`. A prove-out against that binary tests none of the
-      round-2 changes and returns green anyway.
-- [ ] **Sound card seated** for the phase you are about to run, and the
-      DreamBlaster on that card's header if the phase needs it.
-- [ ] **Video card seated** -- the ViRGE unless the phase says otherwise.
-- [ ] **Pick the logback label now**, e.g. `round2-prove`. The pull refuses to
-      overwrite an existing one, so decide before you are tired.
+| | Check | How | Stop if |
+|---|---|---|---|
+| 0.1 | Card populated with current BATs | *laptop:* `scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh` | it errors |
+| 0.2 | **Reel is the benchmark reel** | *laptop:* `sha256sum /media/micheal/DOS/doskutsu/QA.TAS` | not `4118561edf26...` |
+| 0.3 | Binary is the one you mean to test | round 1 = `09e449c5a81d` | testing round-2 changes on it |
+| 0.4 | Sound card seated for the PART below | Vibra for Part 1, PicoGUS for Part 2 | mismatch |
+| 0.5 | Video is the S3 ViRGE | | anything else |
+| 0.6 | **Organya HQ cache present** | *laptop:* `ls /media/micheal/DOS/doskutsu/CACHE/22050_2/READY.OK` | absent -- the `XH` cells would cold-render for many minutes and look hung |
+| 0.7 | Logback label chosen | e.g. `round2-gaps` | -- |
 
-## Phase 1 -- Vibra16 + S3 ViRGE
+---
 
-Start here if the Vibra is already in the box. `GAP` needs no argument on a
-Vibra: the card already provides the Sound Blaster.
+# ROUND 2 -- PART 1 -- Vibra16   *(sound card never moves)*
 
-- [ ] **486DX2-50** -- `QA 4` then `GAP` then `EXIT`
-- [ ] **486DX2-66** -- `QA 3` then `GAP` then `EXIT`
-- [ ] **Am5x86-133** -- `QA 2` then `GAP` then `EXIT`
-- [ ] **POD-83** -- `QA 1` then `GAP` then `EXIT`
+`X8` is the cell that earns this part: it is Vibra-only and separates the
+card from the DMA path in the ~1 fps Vibra-vs-PicoGUS gap. Running it on all
+four CPUs turns a yes/no into a slope, which is what is wanted -- ring
+servicing is CPU-bound, so the recovered fraction should itself vary by CPU.
 
-`X8` is the cell that matters here and it is Vibra-only: it separates the card
-from the DMA path in the ~1 fps Vibra-vs-PicoGUS gap. Running it on all four
-CPUs turns a yes/no into a slope, which is what is wanted, because ring
-servicing is CPU-bound.
+| | Answers | Hardware change | Run | Time |
+|---|---|---|---|---|
+| 1.1 | X8 slow end, floor, ORGHQ | none (current setup) | `QA 4` then `GAP` then `EXIT` | 10 min |
+| 1.2 | X8, floor, ORGHQ | **CPU -> DX2-66** | `QA 3` then `GAP` then `EXIT` | 10 min |
+| 1.3 | X8, floor | **CPU -> Am5x86-133** | `QA 2` then `GAP` then `EXIT` | 10 min |
+| 1.4 | X8 fast end, floor | **CPU -> POD-83** | `QA 1` then `GAP` then `EXIT` | 10 min |
 
-## Swap the sound card to the PicoGUS. Leave the CPU and the ViRGE alone.
+Totals: 0 card swaps, **3 CPU swaps**. ~40 min.
 
-## Phase 2 -- PicoGUS + S3 ViRGE
+Plain `GAP` here -- the Vibra already IS the Sound Blaster, so no `pgusinit`
+runs and no PicoGUS is required.
 
-On a PicoGUS box `GAP` takes an argument: **`GAP PG`**, which switches the
-card to SB mode first. Plain `GAP` there would run the SB cells against
-whatever mode the previous sweep left behind.
+---
 
-- [ ] **POD-83** -- `QA 1` then `RB` then `EAR` then `EXIT`
-- [ ] **Am5x86-133** -- `QA 2` then `RB` then `EXIT`
-- [ ] **486DX2-66** -- `QA 3` then `RB` then `EAR` then `EXIT`
-- [ ] **486DX2-50** -- `QA 4` then `RB` then `EAR` then `EXIT`
+# ROUND 2 -- PART 2 -- PicoGUS   *(one sound swap to get here)*
 
-`RB` gives the noise floor from its adjacent `R4`/`R4B` pair -- a property of
-the machine, not the binary, so it stays valid afterwards. `EAR` needs your
-ears for about 8 minutes and needs the PicoGUS: its AdLib cell switches the
-card to adlib mode, and on a Vibra the Sound Blaster stays live, the music
-pump never starts and you would be listening to silence.
+`RB` gives the noise floor from its adjacent `R4`/`R4B` pair. That is a
+property of the machine rather than the binary, so it stays valid afterwards
+and is what makes every later "inside the noise" claim mean anything.
 
-## Post-run -- tick before you call it done
+| | Answers | Hardware change | Run | Time |
+|---|---|---|---|---|
+| 2.1 | noise floor, Shack music | **sound -> PicoGUS** (CPU stays POD-83) | `QA 1` then `RB` then `EAR` then `EXIT` | 18 min |
+| 2.2 | noise floor | **CPU -> Am5x86-133** | `QA 2` then `RB` then `EXIT` | 10 min |
+| 2.3 | noise floor, AdLib-as-486-default | **CPU -> DX2-66** | `QA 3` then `RB` then `EAR` then `EXIT` | 18 min |
+| 2.4 | noise floor, AdLib on the slowest box | **CPU -> DX2-50** | `QA 4` then `RB` then `EAR` then `EXIT` | 18 min |
+| 2.5 | -- | none | pull logs (*laptop*) | 2 min |
 
-- [ ] **Pull with the label** *(laptop)*
-      `scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh round2-prove`
-- [ ] **Cell count** -- the pull prints the tag set it found per machine.
-      Confirm it matches what you ran.
-- [ ] **`.NFO` matches reality** -- each sweep wrote `LOGS\<M><SWEEP>.NFO`
-      naming the CPU you declared. If it disagrees with the CPU that was
-      actually in the box, every number in that run is filed under the wrong
-      machine and the run must be repeated.
+Totals: 1 card swap, **3 CPU swaps**. ~1 h 6 m.
 
-## Expected, NOT broken
+`EAR` needs your ears for ~8 min and needs the PicoGUS: its AdLib cell
+switches the card to adlib mode, and on a Vibra the Sound Blaster stays live,
+the music pump never starts, and you would be judging audio quality against
+silence.
+
+On a PicoGUS box `GAP` takes an argument -- **`GAP PG`** -- which forces SB
+mode first. Plain `GAP` there would run the SB cells against whatever mode the
+previous sweep left behind.
+
+---
+
+# ROUND 2 -- send it back
+
+*laptop*, CF re-mounted:
+
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh round2-gaps
+
+| | Check | Why |
+|---|---|---|
+| 3.1 | Tag set printed matches what you ran | a missing cell is easier to re-run now than to explain later |
+| 3.2 | Each `LOGS\<M><SWEEP>.NFO` names the CPU that was actually in the box | if it disagrees, that run is filed under the wrong machine and must be repeated |
+
+---
+
+# ROUND 2 -- expected, NOT broken
 
 Three things look like failures and are not:
 
-- **`X0` plays no sound.** It is the `AUDIO_OFF=1` floor cell; silence is its
-  purpose. It runs last in `GAP` so the sweep proves it is alive first.
-- **The keyboard does nothing during a cell.** TAS replay overwrites input
-  every tick. The cell ends itself; do not intervene.
-- **`no PicoGUS detected!`** means `GAP PG` was typed on a Vibra box. Harmless
-  -- the Vibra is already a Sound Blaster -- but use plain `GAP` there.
+| Symptom | Why | Action |
+|---|---|---|
+| A cell plays **no sound** | `X0` is the `AUDIO_OFF=1` floor cell; silence is its purpose. It runs LAST in `GAP`. | none |
+| **Keyboard does nothing** during a cell | TAS replay overwrites input every tick. The cell ends itself. | wait |
+| `no PicoGUS detected!` | `GAP PG` was typed on a Vibra box | harmless; use plain `GAP` |
 
-A cell that ends almost immediately, or sits unresponsive far longer than
-~2 minutes, is usually the WRONG REEL. Re-check the pre-flight sha.
+A cell that ends almost immediately, or sits far longer than ~2 min, is
+usually the WRONG REEL -- re-check 0.2.
 
+Totals, whole round: **1 card swap, 6 CPU swaps, ~1 h 50 m.**
 
 ---
 
