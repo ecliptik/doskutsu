@@ -1,57 +1,124 @@
-From 619f24d98b3e597d6d0d76023f7a1ebec82f03e8 Mon Sep 17 00:00:00 2001
+From 12ad40b7e7c003484f4a49aacd8d988e8edc1939 Mon Sep 17 00:00:00 2001
 From: Micheal Waltz <micheal@ecliptik.com>
-Date: Tue, 11 Aug 2026 17:16:29 -0700
+Date: Tue, 11 Aug 2026 17:46:48 -0700
 Subject: [PATCH 2/4] [DOSKUTSU] patch 0293 -- RUNMANIFEST schema-v2: real
- binary hash, fps decomposition, pump-aware fields
+ binary hash, fps decomposition + percentiles, pump-aware
 
-The RUNMANIFEST block every QA cell emits was a well-designed skeleton that was
-mostly unpopulated, so the whole benchmark campaign was reconstructed by hand-
-written awk over per-frame log lines. Populate it, and fix the one field that was
-actively misleading.
+The RUNMANIFEST block every QA cell emits was a well-designed skeleton left mostly
+unpopulated, so the campaign was reconstructed by hand-written awk over per-frame
+log lines. Populate it, and fix the one field that was actively misleading.
 
-Provenance defect: binary_sha12 carried the compile-time -DDOSKUTSU_BUILD_SHA12
-value, which is a sha256-12 over the patch DIFF lines -- and by construction of
-scripts/org-cache.sh that same value is ALSO the Organya PCM cache key. So the
-one field whose job is to prove "same binary across rounds" reported the source/
-cache fingerprint under a name that says binary. The real linked-binary sha256
-(a post-link value) cannot be known at compile time, and self-hashing a 7.75 MB
-exe at exit is too costly on a 486 and lands in the #18/#32 quit window. Fix:
-  - binary_sha12 now echoes the kit-verified 12-hex from a DOSKUTSU.SHA sidecar
-    written beside the exe by the install step; UNKNOWN when absent (honest,
-    never the source fingerprint). binary_sha12_src records provenance (kit vs
-    unknown) so an echoed value is never conflated with a self-measured one.
-  - build_sha12 and organya_cache_key emit the source-diff value under honest
-    names (separate fields so a future divergence is representable).
+Provenance: binary_sha12 carried the compile-time -DDOSKUTSU_BUILD_SHA12 value, a
+sha256-12 over the patch DIFF lines -- and by construction of scripts/org-cache.sh
+that same value is ALSO the Organya PCM cache key. The field meant to prove "same
+binary across rounds" reported the source/cache fingerprint under a name that says
+binary. The real linked-binary sha256 is a post-link value unknowable at compile
+time, and self-hashing a 7.75 MB exe at exit is too costly on a 486 and lands in
+the #18/#32 quit window. So binary_sha12 now echoes the kit-verified 12-hex from a
+DOSKUTSU.SHA sidecar (UNKNOWN when absent; binary_sha12_src records kit vs
+unknown), while build_sha12 + organya_cache_key emit the source-diff value under
+honest names.
 
-fps decomposition emitted directly (previously hand-computed every round):
-fps_true_flips, fps_true_render_s, reel_ticks, reel_game_seconds (DERIVED from
-the reel's actual tick count / 50, not the assumed 102), per_loop_fps, overhead_s
--- all from integer counters, valid in every cell including pump cells.
+fps decomposition emitted directly (previously hand-computed): fps_true_flips,
+fps_true_render_s, reel_ticks, reel_game_seconds (DERIVED from ticks/50, not the
+assumed 102), per_loop_fps, overhead_s -- all integer-counter derived, valid in
+every cell including pump cells.
 
-Pump awareness: when the SDL/0110 PIT music pump is active (gus/adlib), uclock is
-corrupted and any percentile quantises to the 55 ms BIOS tick. music_pump_active
-is latched from the sticky backend enum (a live pump query reads false post
-SDL_Quit), and fps_p50/fps_p95 emit INVALID_PUMP on those cells, NA otherwise --
-a wrong-but-plausible number has already cost two published findings, so we emit
-no percentile rather than a fake one. per_loop_fps is the real per-run number.
-No per-frame sampler is added (the no-per-frame-instrumentation constraint).
+fps_p50/fps_p95 are REAL percentiles, computed at exit from the flip-probe's
+inter_flip samples. Those samples already ship (the probe emits inter_flip_ms
+every 10th flip, ungated -- the exact lines the campaign's awk parsed); Renderer.cpp
+merely retains them into a bounded, lazily heap-allocated buffer (kept off .bss per
+patch 0168-v2's TAS-determinism lesson), and this sorts them once. fps_p95 is the
+reciprocal of the slow-tail (95th-pct) frame time -- the fps 95% of frames meet or
+exceed, LOWER than fps_p50; fps_sample_n/interval label the decimation.
 
-started_utc honours a DOSKUTSU_RUN_UTC override, else the RTC (the campaign's
-2026-11-19 stamp was a mis-set CMOS, not an engine bug; the interval duration_s
-is unaffected). schema_version bumps to 2: binary_sha12 changes meaning between
-corpora, so consumers must be able to tell v1 from v2.
+Pump awareness keys on the CLOCK, not the pump. With SDL/0122's MODE-2 timebase
+active a gus/adlib cell's SDL clock is correct, so its percentiles are VALID;
+INVALID_PUMP applies only when the pump ran with that fix off. CRUCIALLY the
+timebase state is read from a RUN-TIME latch (g_timebase_was_active, set in the
+flip path) rather than SDL_DOSOplTimerTimebaseActive() at emit -- that export is a
+live ch0-ownership query and returns false post-SDL_Quit (pump stopped in
+PumpStop), which would collapse the gate to _pump_active and mark every gus/adlib
+cell invalid, the very data 0122 exists to rescue. pump_clock_state (no-pump /
+pump-uncorrected / pump-timebase-ok) is derived from the same latch.
 
-The block is open-coded via the header's exposed runmanifest_emit_kv_* helpers
-rather than extending the shared include/runmanifest.h (co-owned with HWINV,
-outside this workstream's lane); HWINV keeps emitting its own v1 block unchanged.
+started_rtc_local (renamed from the misnamed started_utc): DOS has no timezone, so
+the RTC is local wall time and no "Z" is emitted; a DOSKUTSU_RUN_UTC override is
+honoured verbatim. duration_s stays an RTC interval, unaffected by a mis-set CMOS.
+schema_version bumps to 2 (binary_sha12 changes meaning between corpora).
+
+Block is open-coded via the header's exposed runmanifest_emit_kv_* helpers rather
+than extending the shared include/runmanifest.h (co-owned with HWINV, out of lane).
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
- src/main.cpp | 206 ++++++++++++++++++++++++++++++++++++++-------------
- 1 file changed, 154 insertions(+), 52 deletions(-)
+ src/graphics/Renderer.cpp |  36 ++++++
+ src/main.cpp              | 256 ++++++++++++++++++++++++++++++--------
+ 2 files changed, 240 insertions(+), 52 deletions(-)
 
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index b82ec001..17d6018e 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -8,6 +8,25 @@ unsigned long g_flip_count = 0;
+ // patch 0290: wall-clock of the first flip, so the framerate window excludes
+ // boot, cache load and the banner hold. One time() call for the whole run.
+ std::time_t g_first_flip_time = 0;
++
++// patch 0293: whole-run inter_flip sample capture for the RUNMANIFEST fps_p50/
++// fps_p95 percentiles. The flip-probe already computes _inter_flip_ms every 10th
++// flip (ungated, ships default-on) and the campaign's awk parsed exactly those
++// log lines -- we just RETAIN the value into a bounded buffer so exit can sort
++// it. No new per-frame work, and NOT per-frame logging (append every 10th flip;
++// insertion sort happens once, after the reel). The buffer is lazily heap-alloc'd
++// so it never lands on .bss -- patch 0168-v2's lesson that a static array there
++// can displace layout and perturb TAS-replay determinism; a pointer is layout-
++// neutral, and this buffer is write-during-run / read-at-exit only and never
++// feeds game logic. g_timebase_was_active latches whether the SDL/0122 MODE-2
++// pump timebase was ever active, because SDL_DOSOplTimerTimebaseActive() is a
++// LIVE ch0-ownership query that reads false at emit (post SDL_Quit, pump stopped)
++// -- so validity of a pump cell's percentiles must be latched during the run.
++#define _IF_SAMPLE_CAP 1024   // every-10th-flip; 1024 covers ~10240 flips (reel ~5100)
++unsigned long *g_if_sample_ms      = nullptr;
++int            g_if_sample_n        = 0;
++int            g_if_sample_interval = 10;
++int            g_timebase_was_active = 0;
+ // graphics routines
+ #include "../ResourceManager.h"
+ #include "../config.h"
+@@ -30,6 +49,9 @@ std::time_t g_first_flip_time = 0;
+ 
+ #include <SDL3/SDL.h>
+ #include <SDL3_image/SDL_image.h>
++#ifdef NXE_DOS
++#  include <SDL3/SDL_dosopltimer.h>  // patch 0293: SDL_DOSOplTimerTimebaseActive (SDL/0122)
++#endif
+ #include <climits>
+ #include <cstdint>
+ #include <cstdio>
+@@ -5686,6 +5708,20 @@ void Renderer::flip()
+     LOG_INFO("flip-probe: flip #{} ok={} present={}ms inter_flip_ms={} drawcalls-since-flip={} drawcalls-total={} fail-total={} null-skips-total={}",
+              _flip_total, ok, (long long)_present_ms, (long long)_inter_flip_ms,
+              _drawcalls_since_flip, _drawcalls_total, _flip_failed, _null_tex_total);
++
++    // patch 0293: retain the sample the probe just computed, for the RUNMANIFEST
++    // fps_p50/p95 percentiles (sorted once at exit). Lazily heap-alloc the buffer
++    // (0168-v2 .bss-layout / TAS-determinism lesson: keep it off .bss).
++    if (!g_if_sample_ms)
++      g_if_sample_ms =
++          (unsigned long *)std::malloc(sizeof(unsigned long) * _IF_SAMPLE_CAP);
++    if (g_if_sample_ms && g_if_sample_n < _IF_SAMPLE_CAP && _inter_flip_ms > 0)
++      g_if_sample_ms[g_if_sample_n++] = (unsigned long)_inter_flip_ms;
++#ifdef NXE_DOS
++    // Latch whether the SDL/0122 MODE-2 pump timebase was ever active -- read now
++    // (during the run) because the export reads false at emit once the pump stops.
++    g_timebase_was_active |= (SDL_DOSOplTimerTimebaseActive() ? 1 : 0);
++#endif
+   }
+   _drawcalls_since_flip = 0;
+   if (_flip_body_instr_on) _fb_diag_logs_ns = SDL_GetTicksNS() - _fb_diag_logs_t0;
 diff --git a/src/main.cpp b/src/main.cpp
-index 5156e357..0b4be3c7 100644
+index 5156e357..c9ae0280 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -1263,9 +1263,12 @@ static void emit_run_manifest(void)
@@ -70,18 +137,20 @@ index 5156e357..0b4be3c7 100644
  
    // wave_tag from existing DOSKUTSU_LOG_TAG env var (preserves wave-37+
    // multi-PLAY log-routing convention; empty if unset).
-@@ -1285,17 +1288,25 @@ static void emit_run_manifest(void)
+@@ -1285,17 +1288,27 @@ static void emit_run_manifest(void)
                                        m.env_block_sha,
                                        sizeof m.env_block_sha);
  
 -  // Timestamps (ISO8601 UTC for started_utc; integer seconds for
 -  // duration_s).
 +  // Timestamps. duration_s: the RTC delta -- an INTERVAL, robust even when the
-+  // absolute clock is wrong. started_utc (patch 0293): the absolute RTC date is
-+  // only as trustworthy as the machine's CMOS (the campaign's g2k read
-+  // 2026-11-19 for an 2026-08-11 run because its clock was mis-set), so honour an
-+  // operator DOSKUTSU_RUN_UTC=<ISO8601> override when set; else fall back to the
-+  // RTC-derived stamp, which stays valid for intra-session ordering.
++  // absolute clock is wrong. The absolute stamp is emitted under the honest name
++  // started_rtc_local (patch 0293): DOS has no timezone concept, so the RTC is
++  // LOCAL wall time -- calling it UTC is wrong even on a correctly-set machine,
++  // and its date is only as good as the CMOS (the campaign's g2k read 2026-11-19
++  // for an 2026-08-11 run because its clock was mis-set). Honour an operator
++  // DOSKUTSU_RUN_UTC override verbatim when set; else the RTC wall clock with NO
++  // timezone suffix (no "Z"), which stays valid for intra-session ordering.
    if (_runmanifest_boot_time != 0)
 +    m.duration_s = (int)(std::time(nullptr) - _runmanifest_boot_time);
    {
@@ -94,16 +163,16 @@ index 5156e357..0b4be3c7 100644
      {
 -      std::strftime(m.started_utc, sizeof m.started_utc,
 -                    "%Y-%m-%dT%H:%M:%SZ", gm);
-+      std::tm *gm = std::gmtime(&_runmanifest_boot_time);
++      std::tm *gm = std::gmtime(&_runmanifest_boot_time);  // no TZ shift: raw RTC digits
 +      if (gm)
 +        std::strftime(m.started_utc, sizeof m.started_utc,
-+                      "%Y-%m-%dT%H:%M:%SZ", gm);
++                      "%Y-%m-%dT%H:%M:%S", gm);  // no "Z" -- not a UTC claim
      }
 -    m.duration_s = (int)(std::time(nullptr) - _runmanifest_boot_time);
    }
  
    // exit_code: reaching this code path = clean shutdown = 0. The
-@@ -1305,57 +1316,148 @@ static void emit_run_manifest(void)
+@@ -1305,57 +1318,196 @@ static void emit_run_manifest(void)
    // on the clean path; future iters can pipe `error` into this fn.
    m.exit_code = 0;
  
@@ -242,7 +311,7 @@ index 5156e357..0b4be3c7 100644
 +  runmanifest_emit_kv_str(fp, "wave_tag",      m.wave_tag);
 +  runmanifest_emit_kv_str(fp, "scene",         m.scene);
 +  runmanifest_emit_kv_str(fp, "env_block_sha", m.env_block_sha);
-+  runmanifest_emit_kv_str(fp, "started_utc",   m.started_utc);
++  runmanifest_emit_kv_str(fp, "started_rtc_local", m.started_utc);
 +  runmanifest_emit_kv_int(fp, "duration_s",    m.duration_s);
 +  runmanifest_emit_kv_int(fp, "exit_code",     m.exit_code);
 +  // fps decomposition -- the numbers the matrix is built from:
@@ -253,13 +322,61 @@ index 5156e357..0b4be3c7 100644
 +  std::fprintf(fp, "per_loop_fps=%lu.%lu\n",   _perloop_x10 / 10UL, _perloop_x10 % 10UL);
 +  runmanifest_emit_kv_int(fp, "overhead_s",        _overhead_s);
 +  runmanifest_emit_kv_str(fp, "music_pump_active", _pump_active ? "1" : "0");
-+  // fps_p50/p95: percentiles need per-frame inter_flip samples -- a per-frame
-+  // clock read added to the shipping flip path, which is the explicit "no
-+  // per-frame instrumentation" non-goal, and that clock is pump-corrupted
-+  // anyway. INVALID_PUMP on a pump cell, NA otherwise; per_loop_fps above is the
-+  // real per-run number.
-+  runmanifest_emit_kv_str(fp, "fps_p50", _pump_active ? "INVALID_PUMP" : "NA");
-+  runmanifest_emit_kv_str(fp, "fps_p95", _pump_active ? "INVALID_PUMP" : "NA");
++  // fps_p50/p95 (patch 0293): real percentiles, computed at exit from the flip-
++  // probe's inter_flip samples retained every 10th flip in Renderer.cpp (the exact
++  // lines the campaign's awk used), so NO new per-frame instrumentation is added.
++  // Validity keys on whether the CLOCK was corrupt, not on whether the pump ran:
++  // with the SDL/0122 MODE-2 timebase active a gus/adlib cell's clock is correct,
++  // so its percentiles are VALID. The timebase state is read from the RUN-TIME
++  // latch g_timebase_was_active -- NOT SDL_DOSOplTimerTimebaseActive() at emit,
++  // which is a live ch0-ownership query that reads false here (pump stopped in
++  // PumpStop during SDL_Quit) and would wrongly stamp every pump cell INVALID.
++  // fps = 1000/frametime; fps_p95 is the reciprocal of the 95th-percentile (slow-
++  // tail) frame time -- the fps 95% of sampled frames meet or exceed, LOWER than
++  // fps_p50, not a full-population high percentile. fps_sample_n/interval label
++  // the decimation so a reader knows a spike between samples can be missed.
++  {
++    extern unsigned long *g_if_sample_ms;
++    extern int g_if_sample_n, g_if_sample_interval, g_timebase_was_active;
++    const bool _clock_corrupt = _pump_active && !g_timebase_was_active;
++    if (_clock_corrupt)
++    {
++      runmanifest_emit_kv_str(fp, "fps_p50", "INVALID_PUMP");
++      runmanifest_emit_kv_str(fp, "fps_p95", "INVALID_PUMP");
++    }
++    else if (g_if_sample_ms && g_if_sample_n > 0)
++    {
++      for (int a = 1; a < g_if_sample_n; ++a)  // insertion sort ascending, once
++      {
++        const unsigned long key = g_if_sample_ms[a];
++        int b = a - 1;
++        while (b >= 0 && g_if_sample_ms[b] > key)
++        {
++          g_if_sample_ms[b + 1] = g_if_sample_ms[b];
++          --b;
++        }
++        g_if_sample_ms[b + 1] = key;
++      }
++      const unsigned long ft50 = g_if_sample_ms[(g_if_sample_n - 1) * 50 / 100];
++      const unsigned long ft95 = g_if_sample_ms[(g_if_sample_n - 1) * 95 / 100];
++      const unsigned long fps50_x10 = (ft50 > 0) ? (10000UL / ft50) : 0UL;
++      const unsigned long fps95_x10 = (ft95 > 0) ? (10000UL / ft95) : 0UL;
++      std::fprintf(fp, "fps_p50=%lu.%lu\n", fps50_x10 / 10UL, fps50_x10 % 10UL);
++      std::fprintf(fp, "fps_p95=%lu.%lu\n", fps95_x10 / 10UL, fps95_x10 % 10UL);
++    }
++    else
++    {
++      runmanifest_emit_kv_str(fp, "fps_p50", "NA");  // no samples (e.g. instant exit)
++      runmanifest_emit_kv_str(fp, "fps_p95", "NA");
++    }
++    runmanifest_emit_kv_int(fp, "fps_sample_n", g_if_sample_n);
++    runmanifest_emit_kv_int(fp, "fps_sample_interval", g_if_sample_interval);
++    // Explicit regime witness, derived from the SAME latch as the gate above.
++    runmanifest_emit_kv_str(fp, "pump_clock_state",
++        !_pump_active    ? "no-pump"
++        : _clock_corrupt ? "pump-uncorrected"
++                         : "pump-timebase-ok");
++  }
 +  // Original v1 trailing fields, preserved for schema continuity:
 +  runmanifest_emit_kv_str_or_na(fp, "audio_vital_status", m.audio_vital_status);
 +  runmanifest_emit_kv_str_or_na(fp, "regime",             m.regime);
