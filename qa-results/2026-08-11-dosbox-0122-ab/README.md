@@ -11,6 +11,7 @@ start when an SB is hot).
 |---|---|---|---|---|---|
 | `P22B` | `=0`, pre-0122 behaviour | 52 | **0** | 183 | 1 |
 | `P22A` | default ON (0122 active) | 0 | **33** | 1 | 0 |
+| `P22C` | default ON, longer clean run | 0 | **261** | 2 | 1 |
 
 The 10-40 ms band is where this machine's real frame times live. With the
 killswitch engaged it is **exactly empty** -- the same signature that
@@ -48,15 +49,28 @@ S3 reports 8, it explains the operator's "Cirrus colours look richer" report
 and retroactively qualifies every cross-card visual comparison this project
 has made.
 
-## Caveats
+## Both original caveats are now CLOSED by `P22C`
 
-- `P22A` carries only 34 flip-probe samples against `P22B`'s 236, because the
-  run hit a 2-minute harness timeout partway through the second cell. The
-  signature is unambiguous at that sample size, but a longer re-run is worth
-  banking.
-- The teardown line above is from the **killswitch** arm. `P22A` was killed
-  before a clean shutdown, so the pump never stopped and the ENABLED arm has
-  no teardown line yet. Same re-run closes it.
+`P22C` is the ENABLED arm re-run alone, to a clean end-of-replay exit:
+
+- **Sample size.** 264 samples against `P22B`'s 236, so the two arms are now
+  comparable in weight. **261 of 264 land in the 10-40 ms band that is
+  EXACTLY EMPTY (0 of 236) with the killswitch engaged.** The first run's
+  34-sample arm was directionally right and is now superseded.
+- **The ENABLED-arm teardown line exists**, and it is the one that matters,
+  because the earlier line came from the MODE-3 killswitch path:
+
+      SDL/0122 pump teardown -- isr_count=7500 div=9943
+        expected_bios_chains=1137 actual_bios_chains=1137 delta=0
+        (timebase=MODE2/ON)
+
+  **`delta=0` on the MODE-2 path.** The new timebase loses no BIOS ticks
+  either, which is the specific thing that could have gone wrong when the
+  pump switched counter modes -- the DOS time-of-day chain is intact under
+  the mode the fix actually ships.
+
+## Remaining caveat
+
 - DOSBox-X validates the mechanism, not real-hardware PIT behaviour. The
   MODE-2 latch read is the one part that could misbehave on a real board; the
   killswitch reverts instantly, and the designed fallback is an RTC/IRQ-8

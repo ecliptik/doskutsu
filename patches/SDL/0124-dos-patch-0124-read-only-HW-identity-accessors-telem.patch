@@ -1,0 +1,326 @@
+From b1910d57769a55a49e2a7bb08bb6d0c5d57351fb Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 11 Aug 2026 17:11:38 -0700
+Subject: [PATCH] dos: patch 0124 -- read-only HW-identity accessors (telemetry
+ RUNMANIFEST)
+
+WHY DOS NEEDS THIS: the card-identity values the cross-CPU QA matrix leans on
+-- video VRAM size + the LFB-vs-banked decision, audio SB16-vs-pre-SB16 + DSP
+version + the resolved DMA path -- are all computed inside SDL's own probe
+paths (GetVESAInfo, the mode-set LFB guard, the SB16 DSP + BLASTER parse) and
+only ever reach <TAG>SDL.LOG. The engine has no way to read them, so the
+telemetry RUNMANIFEST (nx-engine) cannot record the hardware witness that makes
+each banked cell self-identifying. SDL_DOSVesaDirectGetState exports framebuffer
+GEOMETRY, not the VRAM probe or the SB identity.
+
+Adds a new workspace-local public header include/SDL3/SDL_dosident.h with eight
+read-only accessors over values SDL has ALREADY computed -- no new probing, no
+I/O, no behaviour change, no per-frame cost; each returns a benign sentinel
+(0 / false / -1) before its subsystem is up:
+  Uint32 SDL_DOSVideoGetVRAMKB(void)            -- probed VRAM in KB
+  bool   SDL_DOSVideoIsBankedMode(void)         -- resolved LFB-vs-banked decision
+  bool   SDL_DOSAudioIsSB16(void)               -- CARD IDENTITY (DSP major >= 4)
+  bool   SDL_DOSAudioIsHighDMAPath(void)        -- RESOLVED path (16-high vs 8-low)
+  bool   SDL_DOSAudioIsForced8Bit(void)         -- the force-8bit override lever
+  int    SDL_DOSAudioGetDSPVersionMajor(void)   -- DSP major (-1 if unprobed)
+  int    SDL_DOSAudioGetDSPVersionMinor(void)   -- DSP minor (-1 if unprobed)
+  int    SDL_DOSAudioGetResolvedDMAChannel(void)-- channel in use (-1 if none)
+
+The SB DMA path is kept as THREE separate values (identity / override / outcome)
+rather than one collapsed is_sb16, because the round-2 `X8` cell runs a genuine
+SB16 Vibra with force-8bit=1: a single collapsed accessor would report a real
+SB16 as not-an-SB16 and erase the card-vs-path distinction that cell exists to
+measure. Same lesson as the binary_sha12 split earlier this round -- one name
+for two distinct values is how a dataset quietly starts lying.
+
+These are LIVE in-process reads, not stale echoed values, so consumers need no
+provenance tag (unlike the kit-supplied binary hash). Batched into the Tier-3
+correctness binary so the telemetry set does not cost a second Organya-cache
+re-render cycle. Per POST-BENCHMARK-PLAN.md (nx slot 0294 wires against these).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dosident.h     | 153 ++++++++++++++++++++++++++++++++
+ src/audio/dos/SDL_dosaudio_sb.c |  49 ++++++++++
+ src/video/dos/SDL_dosmodes.c    |  22 +++++
+ 3 files changed, 224 insertions(+)
+ create mode 100644 include/SDL3/SDL_dosident.h
+
+diff --git a/include/SDL3/SDL_dosident.h b/include/SDL3/SDL_dosident.h
+new file mode 100644
+index 000000000..d90bd4bc7
+--- /dev/null
++++ b/include/SDL3/SDL_dosident.h
+@@ -0,0 +1,153 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/*
++ * DOSKUTSU patch (SDL/0124): read-only hardware-identity accessors.
++ *
++ * Workspace-local; NOT upstreamed (same status as SDL_dosopltimer.h /
++ * SDL_dosmidi_tick.h).
++ *
++ * PURPOSE. The card-identity values the cross-CPU QA matrix leans on -- video
++ * VRAM size + the LFB-vs-banked decision, audio SB16-vs-pre-SB16 + DSP version
++ * + the resolved DMA path -- are all computed inside SDL's own probe paths
++ * (GetVESAInfo / the mode-set LFB guard / the SB16 DSP + BLASTER parse) and
++ * only ever reach <TAG>SDL.LOG. The engine has no way to read them, so the
++ * telemetry RUNMANIFEST (nx-engine) cannot record the hardware witness it needs
++ * to make each banked cell self-identifying. SDL_DOSVesaDirectGetState exports
++ * framebuffer GEOMETRY, not the VRAM probe or the SB identity.
++ *
++ * These are READ-ONLY accessors over values SDL has ALREADY computed at
++ * init/mode-set/OpenDevice time -- no new probing, no I/O, no behaviour change,
++ * no per-frame cost. They are LIVE in-process reads (not stale echoed values),
++ * so a consumer needs no provenance tag for them. Call once at manifest-emit
++ * time. Each returns a benign sentinel (0 / false / -1) when the corresponding
++ * subsystem has not been brought up yet.
++ */
++
++#ifndef SDL_dosident_h_
++#define SDL_dosident_h_
++
++#include <SDL3/SDL_stdinc.h>
++
++#include <SDL3/SDL_begin_code.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* ========================================================================
++ * Video identity (SDL_dosmodes.c)
++ * ======================================================================== */
++
++/**
++ * \returns the total video RAM SDL probed from VBE controller info, in KB
++ *          (VBE reports it in 64 KB pages; this returns KB). 0 if the VESA
++ *          controller info has not been queried yet / is unavailable. On the
++ *          reference targets this is 4096 on the LFB-capable ViRGE and 1024 on
++ *          the banked-forced Cirrus -- the two values the matrix keys card
++ *          identity on.
++ * \since SDL 3 -- doskutsu workspace-local patch 0124, 2026-08-11.
++ */
++extern SDL_DECLSPEC Uint32 SDLCALL SDL_DOSVideoGetVRAMKB(void);
++
++/**
++ * \returns true if the current mode uses the BANKED flush path, false if it
++ *          uses the linear framebuffer (LFB). This is the resolved LFB-vs-banked
++ *          DECISION (after the SDL/0019 Cirrus aperture guard + the LFB hints),
++ *          not merely LFB availability. false when no mode has been set yet.
++ * \since SDL 3 -- doskutsu workspace-local patch 0124, 2026-08-11.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSVideoIsBankedMode(void);
++
++/* ========================================================================
++ * Audio identity (SDL_dosaudio_sb.c)
++ * ======================================================================== */
++
++/*
++ * The SB DMA path resolves from THREE distinct values the probe keeps apart:
++ *   is_sb16 (card identity, DSP-version probe)  AND  !force_8bit (override)  AND
++ *   a valid 16-bit DMA channel  ->  the high-DMA path. They are exposed
++ *   SEPARATELY on purpose: the round-2 `X8` cell runs a genuine SB16 Vibra with
++ *   force-8bit=1, so a single collapsed "is_sb16" would report a real SB16 as
++ *   not-an-SB16 and erase the card-vs-path distinction that cell exists to
++ *   measure. Identity + override + outcome together let a reader reconstruct the
++ *   decision without inferring it.
++ */
++
++/**
++ * \returns the CARD IDENTITY as detected by the DSP-version probe: true if the
++ *          card reports SB16-class (DSP major >= 4), regardless of the force-8bit
++ *          override or DMA-channel availability. This stays true for a real SB16
++ *          even when it is forced onto the 8-bit path. false before the DSP has
++ *          been probed / no SB detected. NOT the resolved DMA path -- see
++ *          SDL_DOSAudioIsHighDMAPath().
++ * \since SDL 3 -- doskutsu workspace-local patch 0124, 2026-08-11.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSAudioIsSB16(void);
++
++/**
++ * \returns the RESOLVED DMA path: true = 16-bit-high-DMA, false = 8-bit-low-DMA.
++ *          This is is_sb16 AND !force_8bit AND a valid 16-bit DMA channel -- the
++ *          outcome the SDL/0106 "SB DMA-path decision" banner reports. false
++ *          before the audio device has been opened.
++ * \since SDL 3 -- doskutsu workspace-local patch 0124, 2026-08-11.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSAudioIsHighDMAPath(void);
++
++/**
++ * \returns the force-8bit OVERRIDE lever as resolved at OpenDevice: true if the
++ *          SB was forced onto the pre-SB16 8-bit/D-channel path via
++ *          SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT=1 (or the FORCE_SB_8BIT compile
++ *          override), regardless of card identity. false before the device is
++ *          open. Distinguishes a card that fell to 8-bit because it lacks a
++ *          valid 16-bit channel from one deliberately forced there.
++ * \since SDL 3 -- doskutsu workspace-local patch 0124, 2026-08-11.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSAudioIsForced8Bit(void);
++
++/**
++ * \returns the probed SB DSP major version (e.g. 4 for a DSP 4.xx SB16), or -1
++ *          if the DSP has not been probed / no SB was detected.
++ * \since SDL 3 -- doskutsu workspace-local patch 0124, 2026-08-11.
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioGetDSPVersionMajor(void);
++
++/**
++ * \returns the probed SB DSP minor version (the xx of DSP major.xx), or -1 if
++ *          the DSP has not been probed / no SB was detected.
++ * \since SDL 3 -- doskutsu workspace-local patch 0124, 2026-08-11.
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioGetDSPVersionMinor(void);
++
++/**
++ * \returns the DMA channel actually in use for playback -- the high (16-bit)
++ *          channel when is_sb16, else the low (8-bit) channel -- matching the
++ *          channel the OpenDevice path selects. -1 if no DMA channel is
++ *          configured / the device is not open.
++ * \since SDL 3 -- doskutsu workspace-local patch 0124, 2026-08-11.
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSAudioGetResolvedDMAChannel(void);
++
++#ifdef __cplusplus
++}
++#endif
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_dosident_h_ */
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index f67964209..3feba5fb1 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -32,6 +32,7 @@
+ #include <SDL3/SDL_dosaudio_devicerate.h> /* DOSKUTSU patch 0090: engine-callable SDL_DOSAudioSetDeviceFrameRate export (device-rate productionization) */
+ #include <SDL3/SDL_dospixtone.h>        /* DOSKUTSU patch 0071: engine-callable SDL_DOSPixtone* channel-pool API (Lever 3 IRQ-5 ISR mix) */
+ #include <SDL3/SDL_dosmidi_tick.h>      /* DOSKUTSU patch 0072: engine-registered IRQ-5 MIDI tick callback (Lever 2b MidiScheduler ISR piggyback) */
++#include <SDL3/SDL_dosident.h>          /* DOSKUTSU patch 0124: read-only SB HW-identity accessors (telemetry RUNMANIFEST) */
+ 
+ /* DOSKUTSU patch (Phase 10 patch 0038): IRQ-5 instrumentation +
+    idle-pause coordination state. The public-API state vars are defined
+@@ -73,8 +74,55 @@ static int soundblaster_highdma_channel = -1;
+ static int soundblaster_version = -1;
+ static int soundblaster_version_minor = -1;
+ static bool soundblaster_is_sb16 = false; // SDL/0106+0109: false when force-8bit (hint/#define), DSP < 4, or no VALID 16-bit DMA channel (highdma not in 5/6/7)
++static bool soundblaster_force_8bit = false; // SDL/0124: the resolved force-8bit override lever (identity/override/outcome split for telemetry)
+ static Uint8 soundblaster_silence_value = 0;
+ 
++/* DOSKUTSU patch (SDL/0124): read-only SB hardware-identity accessors for the
++   telemetry RUNMANIFEST (nx-engine). Read-only over values the DSP-probe +
++   BLASTER parse already resolved; no I/O, no behaviour change. Benign sentinels
++   before the device is up. See include/SDL3/SDL_dosident.h. */
++bool SDL_DOSAudioIsSB16(void)
++{
++    /* CARD IDENTITY, DSP-version probe: SB16-class == DSP major >= 4. Stays
++       true for a real SB16 even when it is force-8bit'd or lacks a 16-bit DMA
++       channel -- NOT the resolved path (see SDL_DOSAudioIsHighDMAPath). -1
++       (unprobed) is < 4, so this is false before the DSP is probed. */
++    return soundblaster_version >= 4;
++}
++
++bool SDL_DOSAudioIsHighDMAPath(void)
++{
++    /* RESOLVED path: is_sb16 AND !force_8bit AND a valid 16-bit DMA channel --
++       the outcome the SDL/0106 decision banner reports. */
++    return soundblaster_is_sb16;
++}
++
++bool SDL_DOSAudioIsForced8Bit(void)
++{
++    /* The force-8bit override lever (hint / compile define) as resolved at
++       OpenDevice; distinguishes a deliberate 8-bit force from a no-valid-16-bit
++       fallback. */
++    return soundblaster_force_8bit;
++}
++
++int SDL_DOSAudioGetDSPVersionMajor(void)
++{
++    return soundblaster_version;        /* -1 until the DSP is probed */
++}
++
++int SDL_DOSAudioGetDSPVersionMinor(void)
++{
++    return soundblaster_version_minor;  /* -1 until the DSP is probed */
++}
++
++int SDL_DOSAudioGetResolvedDMAChannel(void)
++{
++    /* Mirror OpenDevice's selection: high (16-bit) channel when SB16, else the
++       low (8-bit) channel. -1 if the corresponding channel is unconfigured. */
++    return soundblaster_is_sb16 ? soundblaster_highdma_channel
++                                : soundblaster_dma_channel;
++}
++
+ /* DOSKUTSU patch (Phase 11 patch 0050): killswitch state for the
+    GetDeviceBuf quiescence gate. Default ON (false = gate engages); set
+    SDL_HINT_DOSKUTSU_DOS_AUDIO_QUIESCENCE_GATE=0 to flip to true and
+@@ -4466,6 +4514,7 @@ static bool IsSoundBlasterPresent(void)
+         const bool force_8bit =
+             FORCE_SB_8BIT ||
+             (f8_hint && f8_hint[0] == '1' && f8_hint[1] == '\0');
++        soundblaster_force_8bit = force_8bit; // SDL/0124: expose the override lever to telemetry
+         /* SDL/0109 FIX: a Sound Blaster 16-bit (high) DMA channel is PHYSICALLY
+            only 5, 6, or 7 (the word-wide 8237 controller #2). The SDL/0106
+            predicate used (highdma_channel >= 0), which ALSO accepted 0..4 -- so
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 6256cec66..322232f24 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -32,6 +32,7 @@
+ // DOS declarations
+ #include "SDL_dosmodes.h"
+ #include "SDL_dosvideo.h"
++#include <SDL3/SDL_dosident.h>  // SDL/0124: read-only HW-identity accessor decls
+ #include <sys/movedata.h> // for dosmemput (banked framebuffer access)
+ #include <stdio.h>        // diagnostic file I/O (DOSKUTSU patches/SDL/0003)
+ #include <unistd.h>       // fsync -- crash-survive log writes on DOS (patch 0004)
+@@ -459,6 +460,27 @@ Uint32 DOSVESA_GetVESATotalMemory(void)
+     return info ? info->total_memory : 0;
+ }
+ 
++/* DOSKUTSU patch (SDL/0124): read-only hardware-identity accessors for the
++   telemetry RUNMANIFEST (nx-engine). Read-only over values SDL already probed;
++   no I/O, no behaviour change. See include/SDL3/SDL_dosident.h. */
++Uint32 SDL_DOSVideoGetVRAMKB(void)
++{
++    const SDL_VESAInfo *info = GetVESAInfo();
++    /* total_memory is bytes (VBE reports 64 KB pages; GetVESAInfo already
++       converted). Return KB, the unit the matrix keys on (4096 / 1024). */
++    return info ? (info->total_memory / 1024u) : 0u;
++}
++
++bool SDL_DOSVideoIsBankedMode(void)
++{
++    /* banked_mode is the RESOLVED LFB-vs-banked decision, set at mode set after
++       the SDL/0019 Cirrus aperture guard + the LFB hints. false before any
++       mode has been set. */
++    SDL_VideoDevice *dev = SDL_GetVideoDevice();
++    const SDL_VideoData *data = dev ? dev->internal : NULL;
++    return data ? data->banked_mode : false;
++}
++
+ bool DOSVESA_DetectLFBApertureBug(void)
+ {
+     const SDL_VESAInfo *info = GetVESAInfo();
+-- 
+2.47.3
+
