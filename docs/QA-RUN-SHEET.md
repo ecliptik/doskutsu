@@ -28,12 +28,107 @@ to run untagged rather than risk filing results under the wrong CPU -- you get
 **Do NOT run `RECORD`.** `QA.TAS` is the fixed workload for the whole
 campaign. Re-recording makes every column non-comparable.
 
+**Check the reel before every round.** `DOSKUTSU\QA.TAS` must be **1956 bytes,
+sha starting `4118561edf26`**. The payload used to ship a 492-byte fallback
+that no banked cell ever ran, so a blank-card populate silently swapped the
+workload while the logs stayed perfectly normal -- valid framerates, complete
+routes, nothing anywhere flagging it. A five-second check against a failure
+that only surfaces when someone tries to explain why the numbers moved.
+
 If something sounds or looks wrong, note the **cell number** on screen
 (`[n/10]`) in Notes at the bottom. The logs cannot tell me what you heard.
 
 ---
 
-# PART 1 -- Pentium OverDrive 83   *(CPU never moves)*
+# ROUND 2 -- prove-out of the post-benchmark binary
+
+Round 1 is below and is complete (89 cells, 4 CPUs). This part is what to run
+now. It is shorter on purpose: it exists to establish that a new binary is
+comparable to round 1 before anyone spends a full round on it.
+
+## Pre-flight -- tick ALL of these before the first cell
+
+Every silent-invalidation failure found so far would have been caught by one
+of these, and each takes seconds.
+
+- [ ] **Populate / refresh the card** *(laptop, CF mounted)*
+      `scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh`
+      Installs the game, the round-2 BATs, the correct reel, and purges ~141
+      stale entries left by old iters.
+- [ ] **Reel** *(laptop)* -- `sha256sum /media/micheal/DOS/doskutsu/QA.TAS`
+      must start **`4118561edf26`**. STOP if it does not.
+- [ ] **Binary** -- know which build is on the card. Round 1 is
+      `09e449c5a81d`. A prove-out against that binary tests none of the
+      round-2 changes and returns green anyway.
+- [ ] **Sound card seated** for the phase you are about to run, and the
+      DreamBlaster on that card's header if the phase needs it.
+- [ ] **Video card seated** -- the ViRGE unless the phase says otherwise.
+- [ ] **Pick the logback label now**, e.g. `round2-prove`. The pull refuses to
+      overwrite an existing one, so decide before you are tired.
+
+## Phase 1 -- Vibra16 + S3 ViRGE
+
+Start here if the Vibra is already in the box. `GAP` needs no argument on a
+Vibra: the card already provides the Sound Blaster.
+
+- [ ] **486DX2-50** -- `QA 4` then `GAP` then `EXIT`
+- [ ] **486DX2-66** -- `QA 3` then `GAP` then `EXIT`
+- [ ] **Am5x86-133** -- `QA 2` then `GAP` then `EXIT`
+- [ ] **POD-83** -- `QA 1` then `GAP` then `EXIT`
+
+`X8` is the cell that matters here and it is Vibra-only: it separates the card
+from the DMA path in the ~1 fps Vibra-vs-PicoGUS gap. Running it on all four
+CPUs turns a yes/no into a slope, which is what is wanted, because ring
+servicing is CPU-bound.
+
+## Swap the sound card to the PicoGUS. Leave the CPU and the ViRGE alone.
+
+## Phase 2 -- PicoGUS + S3 ViRGE
+
+On a PicoGUS box `GAP` takes an argument: **`GAP PG`**, which switches the
+card to SB mode first. Plain `GAP` there would run the SB cells against
+whatever mode the previous sweep left behind.
+
+- [ ] **POD-83** -- `QA 1` then `RB` then `EAR` then `EXIT`
+- [ ] **Am5x86-133** -- `QA 2` then `RB` then `EXIT`
+- [ ] **486DX2-66** -- `QA 3` then `RB` then `EAR` then `EXIT`
+- [ ] **486DX2-50** -- `QA 4` then `RB` then `EAR` then `EXIT`
+
+`RB` gives the noise floor from its adjacent `R4`/`R4B` pair -- a property of
+the machine, not the binary, so it stays valid afterwards. `EAR` needs your
+ears for about 8 minutes and needs the PicoGUS: its AdLib cell switches the
+card to adlib mode, and on a Vibra the Sound Blaster stays live, the music
+pump never starts and you would be listening to silence.
+
+## Post-run -- tick before you call it done
+
+- [ ] **Pull with the label** *(laptop)*
+      `scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh round2-prove`
+- [ ] **Cell count** -- the pull prints the tag set it found per machine.
+      Confirm it matches what you ran.
+- [ ] **`.NFO` matches reality** -- each sweep wrote `LOGS\<M><SWEEP>.NFO`
+      naming the CPU you declared. If it disagrees with the CPU that was
+      actually in the box, every number in that run is filed under the wrong
+      machine and the run must be repeated.
+
+## Expected, NOT broken
+
+Three things look like failures and are not:
+
+- **`X0` plays no sound.** It is the `AUDIO_OFF=1` floor cell; silence is its
+  purpose. It runs last in `GAP` so the sweep proves it is alive first.
+- **The keyboard does nothing during a cell.** TAS replay overwrites input
+  every tick. The cell ends itself; do not intervene.
+- **`no PicoGUS detected!`** means `GAP PG` was typed on a Vibra box. Harmless
+  -- the Vibra is already a Sound Blaster -- but use plain `GAP` there.
+
+A cell that ends almost immediately, or sits unresponsive far longer than
+~2 minutes, is usually the WRONG REEL. Re-check the pre-flight sha.
+
+
+---
+
+# ROUND 1 -- PART 1 -- Pentium OverDrive 83   *(CPU never moves)*
 
 | | Lane | Hardware change | Run | Time |
 |---|---|---|---|---|
