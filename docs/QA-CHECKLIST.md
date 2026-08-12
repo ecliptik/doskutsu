@@ -17,7 +17,7 @@ jumper values the Vibra cannot use.
 | Part | Hardware | Time |
 |---|---|---|
 | 1 | DX2-50, ViRGE, Vibra -> PicoGUS | 45 min |
-| 2 | Mach64 -- **closed, skip** | -- |
+| 2 | Mach64 -- **held for letterbox** | 20 min |
 | 3 | DX2-66, Vibra | 12 min |
 | 4 | blocked -- needs round-2 payload | -- |
 
@@ -37,20 +37,41 @@ jumper values the Vibra cannot use.
 
 ---
 
-## Part 2 -- Mach64 -- CLOSED 2026-08-12, do not run
+## Part 2 -- Mach64 -- HELD until the letterbox patch lands
 
 **The card cannot do 320x240.** The Mach64-CT has no double scanning, and
 320x200/320x240 are double-scanned modes, so no VBE driver can provide them.
-UniVBE states this outright when it loads; ATI's own M64VBE cannot produce them
-either, and additionally hangs SDL_Init in every switch combination tried.
+UniVBE says so when it loads; ATI's M64VBE cannot either, and additionally
+hangs SDL_Init in every switch combination tried. Use UniVBE, not M64VBE.
 
-Evidence and the full write-up: `qa-results/2026-08-12-mach64-pathA/`.
+Evidence: `qa-results/2026-08-12-mach64-pathA/`.
 
-The fix is the engine letterbox (already approved), which needs no bench time
-and no ATI driver. Nothing further to run on this card.
+The engine letterbox fix is being written. When it lands this becomes a
+**verification lane**, answering two independent questions:
 
-If the Mach64 is still seated, put the ViRGE back and boot any normal menu
-entry -- entry 6 exists only for M64VBE and has no use now.
+| | Question | Read |
+|---|---|---|
+| a | does the image land correctly? | look at the screen |
+| b | do the stalls survive? | `inter_flip_ms` spread in the log |
+
+Round 1 had **40% of frames stalled over 300 ms** while the unstalled ones hit
+20 ms -- 50 fps at 512x384. The letterbox does not address that; it is a
+separate, unexplained problem and it is what decides whether the card is
+usable.
+
+| | Swap | Run |
+|---|---|---|
+| 2.1 | video -> Mach64, ViRGE out | -- |
+| 2.2 | -- | `QA 4` then `VIDM 4` |
+| 2.3 | -- | pull logs *laptop* |
+| 2.4 | only if stalls persist | `VIDMK 4` -- same cells, `VBLANK_BOUND=0` |
+| 2.5 | -- | pull logs *laptop* |
+| 2.6 | video -> ViRGE | -- |
+
+`VIDMK` exists so the A/B cannot overwrite its own baseline -- it tags
+`5C4MK` / `551MK` against `VIDM`'s `5C4M` / `551M`.
+
+Boot any normal menu entry. Entry 6 is M64VBE-only and has no use now.
 
 ---
 
