@@ -13,11 +13,19 @@ cp "$SRC/M64VBE.COM" "$SRC/VESATEST.EXE" "$SRC/README.TSC" "$D/"
 echo "  installed M64VBE.COM + VESATEST.EXE -> C:\\ATI\\SUPPORT\\64VBE221\\"
 
 # 2. boot files -- back up whatever is there first
+VER="MACH64-PROFILE v2"
 for f in AUTOEXEC.BAT CONFIG.SYS; do
   if [ -f "$CF/$f" ]; then
-    if grep -qi "MACH64" "$CF/$f"; then echo "  $f already has a MACH64 profile, leaving it"; continue; fi
-    cp "$CF/$f" "$CF/$f.PREM64"
-    echo "  backed up $f -> $f.PREM64"
+    if cmp -s "$CF/$f" "$SRC/$f.new"; then echo "  $f already current, leaving it"; continue; fi
+    if grep -qi "MACH64" "$CF/$f"; then
+      # A profile is present but is not the current one -- an earlier version,
+      # or a hand edit. Updating is the point of re-running this; keep both.
+      echo "  $f has an OUTDATED MACH64 profile -- updating it"
+      grep -q "$VER" "$CF/$f" 2>/dev/null || echo "    (card has a pre-$VER profile)"
+    fi
+    # .PREM64 is the pristine pre-Mach64 original -- write it once, never again
+    if [ -f "$CF/$f.PREM64" ]; then cp "$CF/$f" "$CF/$f.BAK"; echo "    previous -> $f.BAK"
+    else cp "$CF/$f" "$CF/$f.PREM64"; echo "    original -> $f.PREM64"; fi
   fi
   cp "$SRC/$f.new" "$CF/$f"
   t=$(wc -l < "$CF/$f"); c=$(grep -c $'\r$' "$CF/$f")
