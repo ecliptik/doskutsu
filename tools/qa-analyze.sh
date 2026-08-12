@@ -15,7 +15,7 @@
 #
 # Options:
 #   -v            verbose -- print the full hardware-witness block per cell
-#   -f FORMAT     table (default) or tsv
+#   -f FORMAT     table (default), tsv, or csv (ROUND1-CELLS.csv schema)
 #   -h            this help
 #
 # Exit status:
@@ -101,9 +101,14 @@ done
 
 [ $# -ge 1 ] || usage 2
 case "$FORMAT" in
-table|tsv) ;;
-*) die "unknown format '$FORMAT' (want table or tsv)" ;;
+table|tsv|csv) ;;
+*) die "unknown format '$FORMAT' (want table, tsv or csv)" ;;
 esac
+
+# File descriptor 3 carries the human report. For the machine-readable
+# formats it goes to stderr so that stdout is pure data and can be piped or
+# redirected straight into a file without gate text landing in the dataset.
+if [ "$FORMAT" = table ]; then exec 3>&1; else exec 3>&2; fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/qa-analyze.XXXXXX") || die "cannot mktemp"
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -251,6 +256,46 @@ cell_flips() {
 }
 
 # ---------------------------------------------------------------------------
+# nfo_scan DIR
+#
+# The sweep BATs drop a LOGS\<M><SWEEP>.NFO manifest beside the logs carrying
+# cpu / log_tag_prefix / sound / video. That is a declared hardware witness
+# rather than one inferred from log lines, so where it exists it outranks the
+# inference. The format is not yet fixed, so parse defensively: tolerate CRLF,
+# surrounding spaces, any key case, comment lines and unknown keys, and treat
+# a missing or unparseable .NFO as simply absent rather than as an error.
+# Emits: <prefix>\t<cpu>\t<sound>\t<video> per .NFO found.
+# ---------------------------------------------------------------------------
+nfo_scan() {
+	for n in "$1"/*.NFO "$1"/*.nfo; do
+		[ -f "$n" ] || continue
+		awk -v fallback="$(basename "$n" | sed 's/\.[Nn][Ff][Oo]$//')" '
+		{ sub(/\r$/, "") }
+		/^[[:space:]]*[#;]/ { next }
+		{
+			line = $0
+			eq = index(line, "=")
+			if (eq == 0) next
+			k = substr(line, 1, eq - 1)
+			v = substr(line, eq + 1)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+			gsub(/^"|"$/, "", v)
+			lk = tolower(k)
+			if (lk == "log_tag_prefix" || lk == "logtagprefix" || lk == "prefix") pfx = v
+			else if (lk == "cpu") cpu = v
+			else if (lk == "sound" || lk == "audio") snd = v
+			else if (lk == "video" || lk == "card") vid = v
+		}
+		END {
+			if (pfx == "") pfx = fallback
+			if (cpu == "" && snd == "" && vid == "") exit
+			printf "%s\t%s\t%s\t%s\n", pfx, (cpu=="")?"-":cpu, (snd=="")?"-":snd, (vid=="")?"-":vid
+		}' "$n"
+	done
+}
+
+# ---------------------------------------------------------------------------
 # Per-round analysis
 # ---------------------------------------------------------------------------
 ROUND_N=0
@@ -270,6 +315,9 @@ for DIR in "$@"; do
 	REC="$TMP/rec.$ROUND_N"
 	: > "$REC"
 	NCELL=0
+	NFO="$TMP/nfo.$ROUND_N"
+	{ nfo_scan "$SRC"; nfo_scan "$DIR"; } 2>/dev/null | sort -u > "$NFO" || : > "$NFO"
+	NNFO=$(wc -l < "$NFO" | tr -d ' ')
 
 	for MAIN in "$SRC"/*.LOG; do
 		case "$MAIN" in *SDL.LOG) continue ;; esac
@@ -338,6 +386,23 @@ for DIR in "$@"; do
 			;;
 		esac
 
+		# Declared witness from the sweep manifest, if one covers this tag.
+		# Longest matching log_tag_prefix wins so a specific sweep beats a
+		# general one.
+		nfo_cpu=-; nfo_snd=-; nfo_vid=-; nfo_pfx=""
+		if [ "$NNFO" -gt 0 ]; then
+			while IFS="$(printf '\t')" read -r p c sd vd; do
+				[ -n "$p" ] || continue
+				case "$TAG" in
+				"$p"*)
+					if [ ${#p} -gt ${#nfo_pfx} ]; then
+						nfo_pfx="$p"; nfo_cpu="$c"; nfo_snd="$sd"; nfo_vid="$vd"
+					fi
+					;;
+				esac
+			done < "$NFO"
+		fi
+
 		pumped=0
 		grep -q '^pump_opl=1$' "$K" && pumped=1
 		grep -q '^pump_pit=1$' "$K" && pumped=1
@@ -397,7 +462,7 @@ for DIR in "$@"; do
 		audio="${dma_path:--}"
 		[ -n "$gf1_voices" ] && audio="GF1-${gf1_voices}v"
 
-		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 			"$TAG" "${backend:--}" "$per_loop" "$overhead" \
 			"$flips" "$render_s" "$ifcol" "$routecol" \
 			"$card" "$audio" "$pumped" "$nif" "$inband" "$med" \
@@ -405,7 +470,8 @@ for DIR in "$@"; do
 			"${end_tick:--}" "${exit_code:--}" "${pxtcache:--}" \
 			"${vram_kb:--}:${fb_base:--}:${mode:--}:${res:--}:${lfb_guard:--}" \
 			"${is_sb16:--}:${dsp_ver:--}:${dma_path:--}:${gf1_voices:--}:${gf1_dram_kb:--}" \
-			"$route" "$schema" "$binary_sha" >> "$REC"
+			"$route" "$schema" "$binary_sha" \
+			"${nfo_cpu}:${nfo_snd}:${nfo_vid}" >> "$REC"
 		NCELL=$((NCELL + 1))
 	done
 
@@ -414,9 +480,11 @@ for DIR in "$@"; do
 	# ------------------------------------------------------------------
 	# Report
 	# ------------------------------------------------------------------
+	{
 	echo
 	echo "=== ROUND: $SRC  ($NCELL cells)"
 	echo
+	} >&3
 
 	# Band assignment: sort by per-loop fps descending, then group cells
 	# within BAND_FPS of the band leader. Differences INSIDE a band are
@@ -426,33 +494,49 @@ for DIR in "$@"; do
 		BEGIN { OFS = FS; b = 0; lead = "" }
 		{
 			v = $3 + 0
-			if ($3 !~ /^[0-9.]+$/) { $26 = "-" }
+			if ($3 !~ /^[0-9.]+$/) { $(NF + 1) = "-" }
 			else {
 				if (lead == "" || (lead - v) > band) { b++; lead = v }
-				$26 = sprintf("%c", 96 + b)
+				$(NF + 1) = sprintf("%c", 96 + b)
 			}
 			print
 		}' > "$TMP/sorted.$ROUND_N"
 
-	if [ "$FORMAT" = tsv ]; then
+	if [ "$FORMAT" = csv ]; then
+		# Same column order as qa-results/ROUND1-CELLS.csv so the two are
+		# interchangeable. cpu comes from the .NFO manifest when one covers
+		# the cell; a v1 round with no .NFO cannot witness it and emits "-".
+		[ "$ROUND_N" = 1 ] && printf 'cell,cpu,dataset,backend,music_pump,flips,render_s,per_loop_fps,overhead_s,median_fps,route\n'
+		awk -F "$(printf '\t')" -v ds="$(basename "$DIR")" '
+		$3 !~ /^[0-9.]+$/ { next }   # no [fps-true]: no row, as upstream does
+		{
+			split($26, n, ":")
+			cpu = (n[1] == "" ? "-" : n[1])
+			med = ($11 == 1) ? "NA_pump" : ($14 == "" ? "-" : sprintf("%.1f", 1000 / $14))
+			route = ($8 == "full") ? "full" : "truncated"
+			printf "%s,%s,%s,%s,%d,%s,%s,%s,%s,%s,%s\n", \
+				$1, cpu, ds, $2, $11, $5, $6, $3, $4, med, route
+		}' "$TMP/sorted.$ROUND_N"
+	elif [ "$FORMAT" = tsv ]; then
 		printf 'tag\tbackend\tper_loop_fps\toverhead_s\tflips\trender_s\tinter_flip\troute\tcard\taudio\tband\n'
 		awk -F "$(printf '\t')" 'BEGIN { OFS = FS }
-			{ print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $26 }' \
+			{ print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $NF }' \
 			"$TMP/sorted.$ROUND_N"
 	else
 		{
 			printf 'TAG\tBACKEND\tPER-LOOP\tOVHD_S\tFLIPS\tRENDER_S\tINTER_FLIP\tROUTE\tBAND\tCARD\tAUDIO\n'
 			awk -F "$(printf '\t')" 'BEGIN { OFS = FS }
-				{ print $1, $2, $3, $4, $5, $6, $7, $8, $26, $9, $10 }' \
+				{ print $1, $2, $3, $4, $5, $6, $7, $8, $NF, $9, $10 }' \
 				"$TMP/sorted.$ROUND_N"
 		} | column -t -s "$(printf '\t')"
 	fi
 
 	if [ "$VERBOSE" -eq 1 ]; then
+		{
 		echo
 		echo "--- hardware witnesses (proven from the logs; card names are"
 		echo "    INFERRED from VRAM size only -- UNIVBE hides chip identity)"
-		while IFS="$(printf '\t')" read -r tag be pl ov fl rs ifc rt cd au pm nif inb med wt ok sd et ec px vidw audw rte sch bs band; do
+		while IFS="$(printf '\t')" read -r tag be pl ov fl rs ifc rt cd au pm nif inb med wt ok sd et ec px vidw audw rte sch bs nfow band; do
 			IFS=: read -r w_vram w_fb w_mode w_res w_guard <<-EOF
 			$vidw
 			EOF
@@ -473,11 +557,13 @@ for DIR in "$@"; do
 			[ "$pm" = 1 ] && echo "               ^ PUMPED: median above is CORRUPT, never publish it"
 			echo "        route: $rte"
 		done < "$TMP/sorted.$ROUND_N"
+		} >&3
 	fi
 
 	# ------------------------------------------------------------------
 	# GATES
 	# ------------------------------------------------------------------
+	{
 	echo
 	echo "--- GATES"
 
@@ -568,6 +654,7 @@ for DIR in "$@"; do
 	fi
 
 	echo
+	} >&3
 done
 
 # ---------------------------------------------------------------------------
@@ -580,6 +667,7 @@ done
 # with different hardware underneath it.
 # ---------------------------------------------------------------------------
 if [ "$ROUND_N" -gt 1 ]; then
+	{
 	echo "=== CROSS-ROUND GATES"
 	echo
 	ALL="$TMP/all"
@@ -588,7 +676,16 @@ if [ "$ROUND_N" -gt 1 ]; then
 	while [ "$i" -le "$ROUND_N" ]; do
 		src=$(cat "$TMP/src.$i")
 		awk -F "$(printf '\t')" -v s="$src" 'BEGIN { OFS = FS }
-			{ print $1, $21 ":" $22, s }' "$TMP/rec.$i" >> "$ALL"
+			{
+				# A declared manifest witness outranks one inferred from
+				# log lines; fall back to inference where no .NFO covers
+				# the cell.
+				if ($26 != "" && $26 != "-:-:-")
+					w = "nfo[" $26 "]"
+				else
+					w = "log[" $21 ":" $22 "]"
+				print $1, w, s
+			}' "$TMP/rec.$i" >> "$ALL"
 		i=$((i + 1))
 	done
 
@@ -608,8 +705,10 @@ if [ "$ROUND_N" -gt 1 ]; then
 		echo "  [ OK ] GATE 4 no duplicate tag carries differing hardware witnesses."
 	fi
 	echo
+	} >&3
 fi
 
+{
 echo "--- NOTES"
 echo "  per-loop fps = flips / $REEL_S      overhead_s = render_s - $REEL_S"
 echo "  Cells sharing a BAND letter are within $BAND_FPS fps of the band leader."
@@ -619,9 +718,13 @@ echo "  Card names are inferred from VRAM size; UNIVBE rewrites the OEM strings.
   v1 RUNMANIFEST logs do NOT record a binary sha (binary_sha12 holds a
   provenance key, not a hash); no binary sha is reported for a v1 round."
 
+} >&3
+
 if [ "$FAILED" -ne 0 ]; then
+	{
 	echo
 	echo "$PROG: one or more gates FAILED -- do not publish these numbers as-is."
+	} >&3
 	exit 1
 fi
 exit 0
