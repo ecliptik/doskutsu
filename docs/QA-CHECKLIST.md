@@ -41,14 +41,22 @@ Starting hardware: **DX2-50 + S3 ViRGE + Vibra16.** `GAP` goes first because
 `X8` is the one cell that *requires* the Vibra, and `XH1`/`XH2` re-measure the
 Organya-HQ cell that contradicted itself in round 1 -- on this exact CPU.
 
+**Populate the card first.** Everything below assumes the current installer has
+been run. Five things landed after the last populate and none are on the card
+yet: the `RB` round-2 guard, `BINARY.NFO`, `ROUND2.OK`, the `CLRENV`
+`PUMP_TIMEBASE` top-up, and the byte-level CRLF gate. Without them `RB` will
+not refuse, nothing records which binary produced a result, and a killswitch
+set by one cell survives into the next.
+
 | | Hardware change | Run | Time |
 |---|---|---|---|
-| 1.1 | none (current setup) | `QA 4` then `GAP` | ~12 min |
+| 1.0 | CF to the *laptop* | populate (see **Install** below) | ~5 min |
+| 1.1 | CF back in the box | `QA 4` then `GAP` | ~12 min |
 | 1.2 | sound -> PicoGUS | `EAR` | ~9 min + listening |
 | 1.3 | none | `PROVE` | ~18 min |
 | 1.4 | none | pull logs (*laptop*) | 2 min |
 
-Totals: 1 sound swap, 0 video swaps, 0 CPU swaps. **~40 min.**
+Totals: 1 sound swap, 0 video swaps, 0 CPU swaps. **~45 min including the populate.**
 
 `GAP` runs as plain `GAP` here -- **not** `GAP PG`. The `PG` argument forces a
 PicoGUS into sb mode and there is no PicoGUS in the box at step 1.1.
