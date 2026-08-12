@@ -34,6 +34,15 @@ ECHO video=S3 ViRGE >> LOGS\%QAM%GAP.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%GAP.NFO
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 PAUSE
+ECHO.
+ECHO ##########################################################
+ECHO  switching PicoGUS -> SB MODE (X8/XH need a live SB DAC)
+ECHO  Self-sufficient on purpose: RB and EAR leave the card in
+ECHO  adlib mode, so this must not depend on what ran before it.
+ECHO ##########################################################
+pgusinit /mode sb
+pgusinit /sbenv
+SET BLASTER=A220 I7 D3 P330 T3
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
