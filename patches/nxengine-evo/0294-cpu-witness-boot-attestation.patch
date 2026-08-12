@@ -1,0 +1,244 @@
+From 4d8d4b181ad6f8e7f61a27324224f70165ad07ba Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 11 Aug 2026 17:17:43 -0700
+Subject: [PATCH 3/4] [DOSKUTSU] patch 0294 -- CPU witness: attest the running
+ silicon at boot
+
+Nothing in any log witnessed which CPU ran a benchmark cell. Video is provable
+from evidence (vram=4096KB LFB vs 1024KB banked) and sound from is_sb16/dsp_ver/
+highdma, but the CPU was identified ONLY by a digit the operator typed into a
+sweep BAT, which merely set the log-tag prefix. Every cross-CPU conclusion in the
+campaign rested on that one unverifiable keystroke.
+
+Attest it in-engine at boot. Emit both identities: CPUID vendor + family/model/
+stepping is exact, free, and by itself separates Pentium (GenuineIntel family 5)
+from Am5x86 (AuthenticAMD family 4) from Intel 486; then a MHz estimate mirrored
+from setup/profile.c estimate_mhz() -- TSC-exact on Pentium, calibrated busy-loop
+on 486 with MHZ_486_LOOP_DIV=16400 UNCHANGED so engine numbers are directly
+comparable to SETUP's -- splits DX2-66 from DX2-50 within the 486 family. CPUID
+absence (early 486 steppings) falls back to the timing loop alone. cpu_class
+buckets (586 / 486_mid / 486_slow) mirror profile.c detect_cpu().
+
+The probe runs once at main() entry, after Logger::init (the banner needs it) and
+before SDL_Init and any flip, so the ~220 ms calibration window is invisible to
+the fps measurement. Default-ON with a strict killswitch
+SDL_HINT_DOSKUTSU_CPU_WITNESS=0 (getenv, pre-SDL_Init) as fault insurance for any
+machine on which the boot-time timing loop misbehaves.
+
+Also folds the in-lane hardware witnesses the engine reliably knows into the
+manifest -- audio_backend (from the sticky backend enum) and the locked logical
+video mode -- so analysis stops grepping a second log for them. The SDL-probe
+card-identity witnesses (video vram_kb / LFB-vs-banked, audio is_sb16 / dsp_ver /
+dma_path) still live in <TAG>SDL.LOG and need SDL getter exports to consolidate;
+that is a follow-up, and nothing is lost meanwhile.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 173 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 173 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 0b4be3c7..762a5963 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -49,6 +49,7 @@ extern "C" {
+ #ifdef __DJGPP__
+ #include <setjmp.h>       // patch 0272: __djgpp_exception_state is a jmp_buf (include BEFORE sys/exceptn.h)
+ #include <sys/exceptn.h>  // patch 0272: __djgpp_exception_state -> fault eip/ebp for the in-LOG fault handler
++#include <bios.h>         // patch 0294: biostime() for the CPU-witness MHz calibration window
+ #endif
+ using namespace NXE::Graphics;
+ #include "ResourceManager.h"
+@@ -1250,6 +1251,152 @@ static const char *const _runmanifest_env_allowlist[] = {
+ #endif
+ #define _DOSKUTSU_BUILD_SHA12_STR _DOSKUTSU_STR(DOSKUTSU_BUILD_SHA12)
+ 
++// === CPU witness (patch 0294) ==========================================
++// Boot-time attestation of the RUNNING machine's CPU -- the campaign's biggest
++// credibility gap. Every cross-CPU conclusion previously rested on a digit the
++// operator typed into a sweep BAT, which only set the log-tag prefix; nothing
++// in any log witnessed the silicon. CPUID identity (vendor + family/model/
++// stepping) is exact and separates Pentium from 486 from Am5x86; the
++// estimate_mhz() port (mirrored from setup/profile.c, MHZ_486_LOOP_DIV=16400
++// UNCHANGED so engine numbers are directly comparable to SETUP's calibration)
++// then splits DX2-66 from DX2-50 within the 486 family. Runs ONCE at boot,
++// before the first flip, so the fps window is untouched. Default-ON; strict
++// killswitch SDL_HINT_DOSKUTSU_CPU_WITNESS=0 skips it entirely for any machine
++// on which the boot-time timing loop ever misbehaves.
++struct _cpu_witness_t {
++  int         probed;       // 0 = not yet run
++  int         have_cpuid;
++  char        vendor[16];   // CPUID leaf-0 vendor, "no-cpuid", or "disabled"
++  unsigned    family, model, stepping;
++  int         mhz_est;
++  int         have_fpu;
++  const char *cls;          // "586" / "486_mid" / "486_slow" / "disabled"
++};
++static _cpu_witness_t g_cpu_witness = { 0, 0, "unknown", 0, 0, 0, 0, 0, "unknown" };
++
++// Strict killswitch (per [[patch_authoring_discipline]] / patch 0088 inverse):
++// default ON; only exactly "0" disables. getenv (not SDL_GetHint) because the
++// probe runs at main() entry, before SDL_Init.
++static bool _cpu_witness_enabled(void)
++{
++  const char *e = std::getenv("SDL_HINT_DOSKUTSU_CPU_WITNESS");
++  return !(e && e[0] == '0' && e[1] == '\0');
++}
++
++#if defined(__DJGPP__)
++// Fixed volatile-work chunk for the 486 fallback calibration. noinline +
++// 16-byte aligned so its per-iteration cycle cost is layout-PINNED (mirrors
++// setup/profile.c busy_chunk -- the pinning is why MHZ_486_LOOP_DIV transfers).
++static void __attribute__((noinline, aligned(16))) _cpu_busy_chunk(void)
++{
++  volatile int k;
++  for (k = 0; k < 1000; ++k) { /* volatile load/add/store/cmp/branch */ }
++}
++static int _cpu_have_tsc(void)
++{
++  if (!runmanifest_cpuid_available()) return 0;
++  uint32_t a, b, c, d;
++  runmanifest_cpuid(1u, &a, &b, &c, &d);
++  return (d & (1u << 4)) != 0;   // CPUID.1:EDX bit 4 = TSC (Pentium+; false on 486)
++}
++static unsigned long long _cpu_read_tsc(void)
++{
++  unsigned long lo, hi;
++  __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
++  return ((unsigned long long)hi << 32) | lo;
++}
++static int _cpu_fpu_present(void)
++{
++  unsigned short sw = 0xffff;
++  __asm__ __volatile__("fninit\n\t" "fnstsw %0" : "=m"(sw));
++  return sw == 0;   // a real x87 leaves the status word 0 after fninit
++}
++#define _CPU_MHZ_WIN_TICKS    4
++#define _CPU_MHZ_WIN_US       219700UL   // 4 BIOS ticks at 18.2065 Hz
++#define _CPU_MHZ_486_LOOP_DIV 16400UL    // pinned against real DX2-66 silicon
++// Mirrors setup/profile.c estimate_mhz(): TSC-exact on Pentium, calibrated
++// busy-loop on 486. biostime() read once per chunk over a multi-tick window.
++static int _cpu_estimate_mhz(void)
++{
++  long t0, t1;
++  int  ticks = 0;
++  t0 = biostime(0, 0L);
++  while ((t1 = biostime(0, 0L)) == t0) { /* spin to a tick edge */ }
++  t0 = t1;
++  if (_cpu_have_tsc())
++  {
++    unsigned long long c0 = _cpu_read_tsc(), c1;
++    while (ticks < _CPU_MHZ_WIN_TICKS)
++    {
++      t1 = biostime(0, 0L);
++      if (t1 != t0) { t0 = t1; ++ticks; }
++    }
++    c1 = _cpu_read_tsc();
++    return (int)((c1 - c0) / _CPU_MHZ_WIN_US);   // cycles/us = MHz
++  }
++  unsigned long chunks = 0;
++  while (ticks < _CPU_MHZ_WIN_TICKS)
++  {
++    _cpu_busy_chunk();
++    ++chunks;
++    t1 = biostime(0, 0L);
++    if (t1 != t0) { t0 = t1; ++ticks; }
++  }
++  return (int)((chunks * 1000UL) / _CPU_MHZ_486_LOOP_DIV);
++}
++#endif  // __DJGPP__
++
++// One-shot boot probe. Idempotent; called at main() entry before any flip.
++static void _cpu_witness_probe(void)
++{
++  if (g_cpu_witness.probed) return;
++  g_cpu_witness.probed = 1;
++  if (!_cpu_witness_enabled())
++  {
++    std::snprintf(g_cpu_witness.vendor, sizeof g_cpu_witness.vendor, "disabled");
++    g_cpu_witness.cls = "disabled";
++    LOG_INFO("[cpu-witness] DISABLED (SDL_HINT_DOSKUTSU_CPU_WITNESS=0)");
++    return;
++  }
++#if defined(__DJGPP__)
++  g_cpu_witness.have_fpu = _cpu_fpu_present();
++  if (runmanifest_cpuid_available())
++  {
++    uint32_t a, b, c, d;
++    g_cpu_witness.have_cpuid = 1;
++    runmanifest_cpuid(0u, &a, &b, &c, &d);
++    std::memcpy(g_cpu_witness.vendor + 0, &b, 4);
++    std::memcpy(g_cpu_witness.vendor + 4, &d, 4);
++    std::memcpy(g_cpu_witness.vendor + 8, &c, 4);
++    g_cpu_witness.vendor[12] = '\0';
++    runmanifest_cpuid(1u, &a, &b, &c, &d);
++    g_cpu_witness.family   = (a >> 8) & 0xf;
++    g_cpu_witness.model    = (a >> 4) & 0xf;
++    g_cpu_witness.stepping = a & 0xf;
++  }
++  else
++  {
++    g_cpu_witness.have_cpuid = 0;   // early 486 stepping without CPUID
++    std::snprintf(g_cpu_witness.vendor, sizeof g_cpu_witness.vendor, "no-cpuid");
++  }
++  g_cpu_witness.mhz_est = _cpu_estimate_mhz();
++  // Class buckets mirror setup/profile.c detect_cpu().
++  if (g_cpu_witness.have_cpuid && g_cpu_witness.family >= 5)
++    g_cpu_witness.cls = "586";
++  else
++    g_cpu_witness.cls = (g_cpu_witness.mhz_est >= 60) ? "486_mid" : "486_slow";
++  LOG_INFO("[cpu-witness] vendor={} cpuid={} family={} model={} stepping={} "
++           "mhz_est={} fpu={} class={} (boot-time attestation of the running CPU; "
++           "MHZ_486_LOOP_DIV=16400 mirrors SETUP)",
++           g_cpu_witness.vendor, g_cpu_witness.have_cpuid, g_cpu_witness.family,
++           g_cpu_witness.model, g_cpu_witness.stepping, g_cpu_witness.mhz_est,
++           g_cpu_witness.have_fpu, g_cpu_witness.cls);
++#else
++  std::snprintf(g_cpu_witness.vendor, sizeof g_cpu_witness.vendor, "host");
++  g_cpu_witness.cls = "host";
++#endif
++}
++
+ static void emit_run_manifest(void)
+ {
+ #if defined(__DJGPP__)
+@@ -1429,6 +1576,26 @@ static void emit_run_manifest(void)
+   std::fprintf(fp, "per_loop_fps=%lu.%lu\n",   _perloop_x10 / 10UL, _perloop_x10 % 10UL);
+   runmanifest_emit_kv_int(fp, "overhead_s",        _overhead_s);
+   runmanifest_emit_kv_str(fp, "music_pump_active", _pump_active ? "1" : "0");
++  // CPU witness (patch 0294) -- boot-time attestation of the running silicon,
++  // replacing the operator-typed sweep digit that every cross-CPU conclusion
++  // used to rest on.
++  runmanifest_emit_kv_str(fp, "cpu_vendor",     g_cpu_witness.vendor);
++  runmanifest_emit_kv_int(fp, "cpu_have_cpuid", g_cpu_witness.have_cpuid);
++  runmanifest_emit_kv_int(fp, "cpu_family",     (int)g_cpu_witness.family);
++  runmanifest_emit_kv_int(fp, "cpu_model",      (int)g_cpu_witness.model);
++  runmanifest_emit_kv_int(fp, "cpu_stepping",   (int)g_cpu_witness.stepping);
++  runmanifest_emit_kv_int(fp, "cpu_mhz_est",    g_cpu_witness.mhz_est);
++  runmanifest_emit_kv_int(fp, "cpu_has_fpu",    g_cpu_witness.have_fpu);
++  runmanifest_emit_kv_str(fp, "cpu_class",      g_cpu_witness.cls);
++  // Hardware identity the engine reliably knows in-lane (patch 0294). The
++  // SDL-probe card-identity witnesses (video vram_kb / LFB-vs-banked; audio
++  // is_sb16 / dsp_ver / dma_path) live in <TAG>SDL.LOG and need SDL getter
++  // exports to fold in -- a follow-up coordination item; nothing is lost, they
++  // are in the SDL log per tag today.
++  runmanifest_emit_kv_str(fp, "audio_backend",
++      NXE::Diag::backend_to_string(NXE::Diag::g_p10_audio_backend_active));
++  runmanifest_emit_kv_str(fp, "video_logical_wxh", "320x240");
++  runmanifest_emit_kv_int(fp, "video_logical_bpp", 8);
+   // fps_p50/p95: percentiles need per-frame inter_flip samples -- a per-frame
+   // clock read added to the shipping flip path, which is the explicit "no
+   // per-frame instrumentation" non-goal, and that clock is pump-corrupted
+@@ -1938,6 +2105,12 @@ int main(int argc, char *argv[])
+   else
+     LOG_INFO("config: no DOSKUTSU.CFG, using built-in defaults");
+ 
++  // patch 0294: attest the running CPU now -- Logger is live (the [cpu-witness]
++  // banner needs it) and this is still before SDL_Init and any flip, so the
++  // ~220 ms calibration window is invisible to the fps measurement. Result is
++  // cached in g_cpu_witness for the RUNMANIFEST emit at exit.
++  _cpu_witness_probe();
++
+   // patch 0279: name every CFG key whose value was DISCARDED because a DOS
+   // env var already held a different one. env > file is by design, but it was
+   // SILENT -- setenv(overwrite=0) reports success even when it changes
