@@ -40,12 +40,15 @@ CPU number for `QA n`: POD-83 = 1, Am5x86 = 2, DX2-66 = 3, DX2-50 = 4.
 | 2.2 | CF to laptop | `bash /tmp/mach64kit/install-mach64.sh` |
 | 2.3 | CF to box | reboot, pick menu entry **6** |
 | 2.4 | -- | `M64VBE` then `VESATEST` |
-| 2.5 | -- | `QA 4` then `VIDM 4` |
+| 2.5 | -- | `QA 4` then `VIDM 4` (Vibra) |
 | 2.6 | -- | pull logs *laptop* |
 | 2.7 | video -> ViRGE | reboot, pick any other entry |
 
 Load it bare -- **`M64VBE`**, no arguments. There is no `I` switch; an invalid
 one just prints help and installs nothing.
+
+Sound: entry 6 sets up the **Vibra**. `VIDM 4` uses whatever SB is in the box.
+Add `PG` (`VIDM 4 PG`) only if a PicoGUS is fitted instead.
 
 `M64VBE` says:
 
