@@ -53,6 +53,29 @@ Path B -- centre/letterbox the 320x240 image inside the larger surface -- is
 the only route, and was already approved. It needs no ATI driver and helps any
 future card whose smallest mode exceeds the logical size.
 
-Scope from the round-1 photographs: the backdrop tiler already paints the full
-surface width, while sprite and text draws clip at logical size, so the work is
-blit placement plus a one-time margin clear rather than a tiler rewrite.
+### Correction: the mechanism was not clipping
+
+The scope above was read off the photographs as "the tiler paints full width,
+sprites and text clip at logical size". **That was wrong**, and implementing the
+fix disproved it.
+
+512x384 and 640x480 are both exactly 4:3, so SDL's logical presentation takes
+its **STRETCH** branch, not LETTERBOX -- the renderer path (backdrop, sprites,
+text, title) was drawing **scaled to 1.6x** and filling the surface. Meanwhile
+`drawTileFast`, the one direct-to-window writer with no dimension gate, kept
+writing **1:1 at the origin**. That mismatch between a scaled renderer and an
+unscaled direct writer is the corner tilemap -- not clipping.
+
+It also explains the two artifacts left as open riders: the shredded glyphs,
+and `IMG_4417`'s stale top-right rectangle. The partial-flush rects were
+computed in logical space while the pixels they pushed were not.
+
+The other direct writers (`_try_fast_blit`, `_try_fast_blit_alpha`,
+`_ensure_handrolled_surface`, `drawCachedBackdrop`, `drawCachedTilemap`) all
+already bail out on an oversized surface, which is why only the tilemap showed
+it.
+
+Fixed by `patches/nxengine-evo/0296`, which centres at 1:1 rather than scaling.
+Reproducible under DOSBox-X with `[video] allow low resolution vesa modes =
+false`, which forces a 640x480 stand-in -- the fault reproduces on no card the
+project owns.
