@@ -513,6 +513,7 @@ BANNER_REGEX=(
   "DOSVESA-DACWIDTH: 4F08.get ax=0x[0-9A-Fa-f]+ supported=[01] width_bits=-?[0-9]+"
   "\[music-dispatch\] tick="
   "\[cpu-witness\]"
+  "center-oversized: (ENGAGED|DISABLED \\(killswitch =0\\)|not needed \\(surface matches the logical screen\\)) surface="
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -660,6 +661,7 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "required"
+  "optional"
   "optional"
   "optional"
 )
@@ -821,6 +823,7 @@ BANNER_LABEL=(
   "SDL/0123 read-only VBE 4F08 DAC-width probe (REQUIRED -- 'DOSVESA-DACWIDTH: 4F08.get ax=.. supported=.. width_bits=..' emitted on EVERY mode set (video init, always reached before the title). Read-only diagnostic: does NOT change the palette write path (ProgramVGADAC still writes 6-bit 0-63). supported=1 width_bits=8 on a card + our 6-bit writes == washed-out palette, the candidate for the operator's 'Cirrus colours look richer than S3' report (POST-BENCHMARK-PLAN 3.3b). width_bits=-1 == BIOS lacks 4F08, 6-bit VBE default assumed. If it ever reports 8 on some card the fix is one future line (request 6-bit BL=00 BH=06, or scale writes). DOSBox-X width is whatever its VBE reports; the per-card real-HW numbers are the actual deliverable.)"
   "0292 song-change dispatch at INFO (OPTIONAL -- '[music-dispatch] tick=N song=N (prev N)' emitted by SoundManager::music() on every song change, with the logic-tick index. INFO-level, so absent on a plain untagged WARN-level run -- expected, not a failure; tagged runs and DOSKUTSU_LOG_VERBOSE=1 log at INFO. Shipped logs previously showed a song LOADING but never its DISPATCH, which is why the Shack-music question and the AUTO-vs-WaveBlaster question both needed the operator's ears; from round 2 they are answerable from the log. Embed witness = strings|grep music-dispatch.)"
   "0294 CPU witness at boot (OPTIONAL -- '[cpu-witness] vendor=.. family/model/stepping .. mhz_est=..' or the DISABLED variant, emitted once after config load. INFO-level, so absent on an untagged WARN run -- expected, not a failure. Nothing in a log previously witnessed WHICH MACHINE ran a cell: video was provable from vram/LFB evidence and sound from is_sb16/dsp_ver, while the CPU rested entirely on a digit typed into a sweep BAT, so every cross-CPU conclusion in the campaign rested on one unverifiable assertion. Reuses the silicon-pinned MHZ_486_LOOP_DIV so engine numbers stay comparable with SETUP's. Default-ON, strict killswitch SDL_HINT_DOSKUTSU_CPU_WITNESS=0, because a boot-time calibration loop on hardware we do not control needs an escape hatch. Cross-check against the BAT-written .NFO manifest: a disagreement means the wrong sweep argument was passed and every number in that run is mislabelled. Embed witness = strings|grep cpu-witness.)"
+  "0296 oversized-surface centring decision (OPTIONAL -- LOG_INFO emitted once in Renderer::initVideo, right after the renderer is created, in one of three variants: 'not needed (surface matches the logical screen)' on every card that can set 320x240 (the DEFAULT smoke case, and the state every banked benchmark cell was measured in), 'ENGAGED' when the backend could only give a larger surface, or 'DISABLED (killswitch =0)' under SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0. INFO-level, so absent on a plain untagged WARN-level boot -- expected, not a failure (same gating as [[cpu-witness]] above). The ENGAGED variant is the runtime witness that the ATI Mach64-CT path took the centring route: it reports the surface size and the offset, and is followed by a 'center-oversized: margins cleared' line and, on the first partial flush, a 'center-oversized: flush rect=WxH@X,Y bytes=N (surface would be ...)' line that proves the steady-state flush stays logical-sized rather than surface-sized. Cannot be witnessed on the reference g2k hardware (Cirrus offers 320x240); reproduce under DOSBox-X with [video] allow low resolution vesa modes = false, which forces a 640x480 stand-in for the Mach64's 512x384. Embed witness = strings|grep center-oversized. BANNER_REGEX idx 147.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then

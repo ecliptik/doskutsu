@@ -1,0 +1,465 @@
+From f735d42754e7fce260bc84b037f7106c397da7da Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Wed, 12 Aug 2026 12:13:12 -0700
+Subject: [DOSKUTSU] patch 0296 -- centre the 320x240 screen in an oversized
+ surface
+
+Some VBE implementations cannot offer a mode as small as the engine's
+logical screen. The ATI Mach64-CT is the found case: the chip has no
+double scanning, and 320x200 / 320x240 are double-scanned modes, so its
+smallest mode is 512x384 and no driver can synthesise a smaller one
+(SciTech UniVBE 6.70 says so by name when it loads, ATI's own M64VBE
+reports "320 modes enabled" and still produces none, and the card's VBE
+mode attributes clear bit 8 where the ViRGE and Cirrus both set it).
+SDL correctly picks the closest mode and hands the engine a 512x384
+surface for a 320x240 game.
+
+Two coordinate systems then fought over that surface. Everything routed
+through SDL_Renderer was scaled up by the LETTERBOX logical presentation
+-- 512x384 and 640x480 both match 4:3 exactly, so SDL takes its STRETCH
+branch and fills the surface -- while drawTileFast, the one direct-to-
+window writer with no dimension gate, kept writing 1:1 at the origin.
+That is the Mach64 photographs: a scaled backdrop and sprite layer with
+an unscaled tilemap pinned to the top-left corner, and glyphs shredded
+because the partial-flush rects were logical-space while the pixels they
+were meant to push were not.
+
+Keep one coordinate system instead. The engine goes on drawing a 1:1
+320x240 image and that image is placed at a fixed offset inside the
+larger surface:
+
+  - initVideo disables the logical presentation and installs a render
+    viewport at the offset. The software renderer applies a viewport as
+    both a translation and a surface clip rect, so a draw that hangs off
+    the logical screen is clipped rather than bleeding into the margin.
+  - drawTileFast clips to the logical box, carrying its source rect, then
+    translates by the same offset. It clamps against the destination
+    SURFACE, so translating without clipping would spill tiles that hang
+    off the logical right or bottom edge into the margin.
+  - _record_dirty_rect translates after its logical clip, so a partial
+    flush addresses the region that was actually drawn.
+  - the margin is painted once per window surface, directly on the
+    surface so the viewport does not clip the fill, and a full refresh is
+    forced so it reaches VRAM.
+
+Centring at 1:1 rather than scaling into the native mode is deliberate:
+it costs no scaling work on a machine that has none to spare, it needs
+no per-path scale awareness, and 512x384 is 196 KB/frame against
+640x480's ~300 KB plus the doubling cost.
+
+Keeping the per-frame flush the size of the live region needed three
+more changes, none of which came for free from the existing dirty-rect
+machinery:
+
+  - direct-VESA stands down. It is a full-surface present --
+    SDL_DOSVesaDirectPresentFull pushes fb_size and SDL/0034 has no rect
+    variant -- and it was taking 97 of every 100 flips, so it owned the
+    steady state and bypassed dirty-rect tracking entirely.
+  - the flush bbox is intersected with the box. The prev-frame diff
+    reports changed regions as full-surface-width bands, so the bbox
+    would have pushed 512-wide rows for a 320-wide picture.
+  - the 75% full-flush threshold is suppressed. It trades a rect flush
+    for one contiguous blast once most of the screen has changed, which
+    is right only while the surface IS the logical screen. Oversized, a
+    full present pushes the whole surface to update the box, and the
+    margin cannot have changed.
+
+Measured under DOSBox-X with low-resolution VESA modes disabled (a
+640x480 stand-in for the Mach64's 512x384): steady state is
+dirty_path_taken=100 / full_flush_taken=0 and the engine reports
+`flush rect=320x240@160,120 bytes=76800 (surface would be 640x480
+bytes=307200)`.
+
+Every touched site is guarded by _dos_center_active, which is set only
+when the surface is larger than the logical screen. On a card that does
+offer 320x240 the offset is zero, the guard is false, and each site
+keeps its pre-patch behaviour -- which matters because the banked
+benchmark matrix was measured on that path. Verified against a pre-patch
+build at native 320x240: byte-identical Options screen, identical
+drawcall totals across 127 matched flip indices, fast-blit path still
+100% engaged, logical presentation still LETTERBOX.
+
+Killswitch SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0 restores the scaled
+logical-presentation path.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 233 +++++++++++++++++++++++++++++++++++++-
+ src/graphics/Renderer.h   |  44 +++++++
+ 2 files changed, 271 insertions(+), 6 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 17d6018e..520ccd7b 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -3942,9 +3942,63 @@ bool Renderer::initVideo()
+   // 4:3 aspect and centres the game. SDL3's logical-presentation API is
+   // the documented replacement for SDL2's SDL_RenderSetLogicalSize, and
+   // is required (not optional) when render-size != window-size.
+-  if (!SDL_SetRenderLogicalPresentation(_renderer, 320, 240, SDL_LOGICAL_PRESENTATION_LETTERBOX))
++  //
++  // DOS-PORT (patch 0296, Path B): ...except when the backend could not
++  // give us a surface as small as the logical screen at all. See the
++  // _dos_center_active block in Renderer.h for the full rationale. On a
++  // card whose smallest VBE mode exceeds 320x240 (ATI Mach64-CT: no
++  // double scanning, so 512x384 is its floor) the aspect ratio matches
++  // exactly, so LETTERBOX resolves to SDL's STRETCH branch and scales
++  // the game up -- while drawTileFast keeps writing 1:1 at the origin.
++  // Centring at 1:1 is the coherent answer: it costs no scaling work,
++  // needs no per-path scale awareness, and the offset is zero on every
++  // card that does offer 320x240, which keeps that path untouched.
++  int _dos_out_w = 0;
++  int _dos_out_h = 0;
++  SDL_GetRenderOutputSize(_renderer, &_dos_out_w, &_dos_out_h);
++  const bool _dos_oversized = (_dos_out_w > 320 || _dos_out_h > 240);
++  const bool _dos_center_ks = !_strict_falsy_env("SDL_HINT_DOSKUTSU_CENTER_OVERSIZED");
++
++  if (_dos_oversized && _dos_center_ks)
++  {
++    _dos_center_active = true;
++    _dos_center_ox = (_dos_out_w - 320) / 2;
++    _dos_center_oy = (_dos_out_h - 240) / 2;
++
++    // Disable the logical presentation (no scaling) and translate with a
++    // viewport instead. Order matters: with a logical presentation live
++    // the viewport would be interpreted in logical coordinates, so the
++    // presentation must be dropped first for the viewport to mean output
++    // pixels.
++    if (!SDL_SetRenderLogicalPresentation(_renderer, 320, 240,
++                                          SDL_LOGICAL_PRESENTATION_DISABLED))
++    {
++      LOG_WARN("Renderer::initVideo: SDL_SetRenderLogicalPresentation(DISABLED) failed: {}",
++               SDL_GetError());
++    }
++    SDL_Rect _dos_vp = {_dos_center_ox, _dos_center_oy, 320, 240};
++    if (!SDL_SetRenderViewport(_renderer, &_dos_vp))
++    {
++      LOG_WARN("Renderer::initVideo: SDL_SetRenderViewport failed: {}", SDL_GetError());
++    }
++
++    LOG_INFO("center-oversized: ENGAGED surface={}x{} logical=320x240 offset={},{} "
++             "(backend offered no 320x240 mode; the game is centred 1:1 and the "
++             "margins are cleared once; set SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0 "
++             "to restore the scaled logical-presentation path)",
++             _dos_out_w, _dos_out_h, _dos_center_ox, _dos_center_oy);
++  }
++  else
+   {
+-    LOG_WARN("Renderer::initVideo: SDL_SetRenderLogicalPresentation failed: {}", SDL_GetError());
++    if (!SDL_SetRenderLogicalPresentation(_renderer, 320, 240, SDL_LOGICAL_PRESENTATION_LETTERBOX))
++    {
++      LOG_WARN("Renderer::initVideo: SDL_SetRenderLogicalPresentation failed: {}", SDL_GetError());
++    }
++
++    LOG_INFO("center-oversized: {} surface={}x{} logical=320x240 offset=0,0",
++             _dos_oversized ? "DISABLED (killswitch =0)"
++                            : "not needed (surface matches the logical screen)",
++             _dos_out_w, _dos_out_h);
+   }
+ #endif
+ 
+@@ -3982,6 +4036,12 @@ bool Renderer::initVideo()
+   // mode change or window-surface invalidation).
+   _cached_window_surface = SDL_GetWindowSurface(_window);
+ 
++  // DOS-PORT (patch 0296, Path B): paint the margin around the centred
++  // box before the first drawcall, so the area outside the game is black
++  // from the first frame rather than showing leftover VRAM. No-op unless
++  // centring engaged above.
++  _dos_center_clear_margins();
++
+   // DOS-PORT (patch 0071, Phase 9 wave 15): env-var KILL SWITCH for the
+   // dirty-rect optimization. Default flipped to ON now that wave 15
+   // re-authored the implementation atop Lever B's per-blit destination
+@@ -4467,6 +4527,10 @@ bool Renderer::flushAll()
+     // wrong colors until the next initVideo (i.e. never).
+     if (_indexed_mode && _cached_window_surface && _master_palette)
+       SDL_SetSurfacePalette(_cached_window_surface, _master_palette);
++    // DOS-PORT (patch 0296, Path B): repaint the margin if SDL handed
++    // back a different surface. No-op (one bool test) unless centring is
++    // active AND the pointer actually changed.
++    _dos_center_clear_margins();
+   }
+   // DOS-PORT (patch 0051): SDL_RenderPresent flushed the queue.
+   _renderer_queue_dirty = false;
+@@ -4696,6 +4760,44 @@ SDL_Window* Renderer::window()
+ // trivially bounded (<= DIRTY_RECTS_MAX iterations of cheap int
+ // compares) so the per-call overhead is negligible (single-digit
+ // nanoseconds). No allocation after the initial reserve in initVideo.
++// DOS-PORT (patch 0296, Path B): paint the margin around the centred
++// 320x240 box. Nothing ever draws there -- the render viewport clips the
++// renderer to the box and drawTileFast clips itself -- so without this
++// the margin shows whatever the BIOS or a previous program left in VRAM.
++//
++// Once per window surface, not per frame: the four edge rects are filled
++// directly on the surface (no renderer involvement, so the viewport does
++// not clip them) and a full refresh is forced so the whole surface
++// reaches VRAM on the next flip. No-op unless centring is active.
++void Renderer::_dos_center_clear_margins()
++{
++  if (!_dos_center_active) return;
++  SDL_Surface *win = _cached_window_surface;
++  if (!win) return;
++  if (win == _dos_center_cleared_for) return;
++
++  // Index 0 is black in the master palette (initVideo's indexed-mode
++  // smoke asserts idx0=(0,0,0)); on the RGB565 fallback 0 is black too,
++  // so a plain zero fill is correct for both formats.
++  const SDL_Rect edges[4] = {
++      {0, 0, win->w, _dos_center_oy},                                   // top
++      {0, _dos_center_oy + 240, win->w, win->h - _dos_center_oy - 240}, // bottom
++      {0, _dos_center_oy, _dos_center_ox, 240},                         // left
++      {_dos_center_ox + 320, _dos_center_oy,                            // right
++       win->w - _dos_center_ox - 320, 240},
++  };
++  for (const SDL_Rect &r : edges)
++  {
++    if (r.w > 0 && r.h > 0)
++      SDL_FillSurfaceRect(win, &r, 0);
++  }
++
++  _dos_center_cleared_for = win;
++  _force_full_refresh = true;
++  LOG_INFO("center-oversized: margins cleared for surface {}x{} around box at {},{}",
++           win->w, win->h, _dos_center_ox, _dos_center_oy);
++}
++
+ void Renderer::_record_dirty_rect(int dst_x, int dst_y, int dst_w, int dst_h)
+ {
+   if (!_dirty_rect_enabled) return;
+@@ -4709,6 +4811,19 @@ void Renderer::_record_dirty_rect(int dst_x, int dst_y, int dst_w, int dst_h)
+   if (dst_y + dst_h > screenHeight) dst_h = screenHeight - dst_y;
+   if (dst_w <= 0 || dst_h <= 0) return;
+ 
++  // DOS-PORT (patch 0296, Path B): the rects recorded above are in the
++  // engine's 320x240 logical space, but they are consumed as window-
++  // surface coordinates by the SDL_UpdateWindowSurfaceRects partial
++  // flush in flip(). Translate into the centred box so a partial flush
++  // pushes the region that was actually drawn. Zero offset (and so no
++  // change) whenever the surface is exactly 320x240. This must run AFTER
++  // the logical clip above, which is what bounds the rect to 320x240.
++  if (_dos_center_active)
++  {
++    dst_x += _dos_center_ox;
++    dst_y += _dos_center_oy;
++  }
++
+   const int new_x2 = dst_x + dst_w;
+   const int new_y2 = dst_y + dst_h;
+ 
+@@ -5352,6 +5467,31 @@ void Renderer::flip()
+     bbox_pixels = bbox.w * bbox.h;
+   }
+ 
++  // DOS-PORT (patch 0296, Path B): clamp the flush rect to the live
++  // 320x240 box. The prev-frame diff reports changed regions as FULL-
++  // SURFACE-WIDTH bands (_compute_diff_rects sets x=0, w=width), so on a
++  // 512x384 surface the bbox would push 512-wide rows even though only
++  // the centred 320 columns can ever change -- the margin is painted
++  // once and never drawn into again. Intersecting with the box takes the
++  // steady-state flush from surface-sized down to logical-sized, which
++  // is where the per-frame cost of this card lives (a 512x384 flush
++  // measured 7.44 ms on the POD-83 against 2.87 ms for a 320x240 one,
++  // and that ratio is bytes pushed). No-op when centring is inactive.
++  if (_dos_center_active && bbox.w > 0 && bbox.h > 0)
++  {
++    const int bx1 = (bbox.x > _dos_center_ox) ? bbox.x : _dos_center_ox;
++    const int by1 = (bbox.y > _dos_center_oy) ? bbox.y : _dos_center_oy;
++    const int bx2 = ((bbox.x + bbox.w) < (_dos_center_ox + 320))
++                        ? (bbox.x + bbox.w) : (_dos_center_ox + 320);
++    const int by2 = ((bbox.y + bbox.h) < (_dos_center_oy + 240))
++                        ? (bbox.y + bbox.h) : (_dos_center_oy + 240);
++    bbox.x = bx1;
++    bbox.y = by1;
++    bbox.w = (bx2 > bx1) ? (bx2 - bx1) : 0;
++    bbox.h = (by2 > by1) ? (by2 - by1) : 0;
++    bbox_pixels = bbox.w * bbox.h;
++  }
++
+   // DOS-PORT (patch 0082 + 0084): diff-engagement + bbox diagnostics.
+   if (_prev_diff_engaged)
+   {
+@@ -5384,10 +5524,24 @@ void Renderer::flip()
+   // The legacy DIRTY_THRESHOLD_PIXELS (50%) is preserved as a fallback
+   // for the non-diff path, where _dirty_rects content is the drawcall-
+   // coalesced screen-spanning rect that should still trip 50% threshold.
++  //
++  // DOS-PORT (patch 0296, Path B): the threshold exists because once
++  // most of the screen has changed, one contiguous full-surface blast
++  // beats a per-row rect flush. That trade assumes the surface IS the
++  // logical screen, so "full" and "all of the box" push the same bytes.
++  // On an oversized surface they do not: a full present pushes the whole
++  // 512x384 (196 KB) to update a 320x240 (77 KB) box, and the margin
++  // cannot have changed -- it is painted once and never drawn into. So
++  // when centring is active the partial path is never the worse choice
++  // and the threshold is suppressed. _force_full_refresh and the
++  // first-N-frames guard still route to a full present, which is what
++  // gets the freshly cleared margin into VRAM.
+   const bool threshold_exceeded =
+-      _prev_diff_engaged
+-          ? (bbox_pixels > DIRTY_BBOX_THRESHOLD_PIXELS)
+-          : (dirty_pixels > DIRTY_THRESHOLD_PIXELS);
++      _dos_center_active
++          ? false
++          : (_prev_diff_engaged
++                 ? (bbox_pixels > DIRTY_BBOX_THRESHOLD_PIXELS)
++                 : (dirty_pixels > DIRTY_THRESHOLD_PIXELS));
+   if (_prev_diff_engaged && threshold_exceeded)
+     ++_prev_frame_diff_bbox_threshold_exceeded_block;
+   const bool can_use_dirty_path =
+@@ -5424,8 +5578,18 @@ void Renderer::flip()
+   //
+   // Diagnostic counters bumped per-attempt (success / fail) so the
+   // per-100-flip phase-timing block reports attribution.
++  // DOS-PORT (patch 0296, Path B): direct-VESA is a FULL-surface present
++  // -- SDL_DOSVesaDirectPresentFull pushes fb_size bytes and SDL/0034
++  // exposes no rect variant. On an oversized surface that is the whole
++  // 512x384 (196 KB) every frame to update a 320x240 (77 KB) region that
++  // is the only thing which can change. Stand the DV path down when
++  // centring is active so the flush goes through the partial path, whose
++  // bbox is clamped to the live box above. Unchanged when centring is
++  // inactive, which is the configuration every banked benchmark cell was
++  // measured in.
+   const bool _dv_attempt =
+-      _abl_direct_vesa() && !first_n_force && !_force_full_refresh;
++      _abl_direct_vesa() && !first_n_force && !_force_full_refresh
++      && !_dos_center_active;
+   bool _direct_vesa_done = false;
+   if (_dv_attempt)
+   {
+@@ -5499,6 +5663,23 @@ void Renderer::flip()
+       const Uint64 _t = _flip_instr_on ? SDL_GetTicksNS() : 0;
+       if (bbox.w > 0 && bbox.h > 0)
+       {
++        // DOS-PORT (patch 0296, Path B): one-shot witness of what the
++        // centred path actually hands SDL. Proves from a log -- on the
++        // card itself, where none of us can attach a debugger -- that
++        // the steady-state flush is logical-sized and not surface-sized,
++        // which is the whole per-frame cost of this card. Emitted once.
++        if (_dos_center_active && !_dos_center_flush_logged)
++        {
++          _dos_center_flush_logged = true;
++          LOG_INFO("center-oversized: flush rect={}x{}@{},{} bytes={} "
++                   "(surface would be {}x{} bytes={}); partial path, "
++                   "direct-VESA stood down (it presents full-surface only)",
++                   bbox.w, bbox.h, bbox.x, bbox.y,
++                   bbox.w * bbox.h * SDL_BYTESPERPIXEL(_cached_window_surface->format),
++                   _cached_window_surface->w, _cached_window_surface->h,
++                   _cached_window_surface->w * _cached_window_surface->h
++                       * SDL_BYTESPERPIXEL(_cached_window_surface->format));
++        }
+         ok = SDL_UpdateWindowSurfaceRects(_window, &bbox, 1);
+       }
+       else
+@@ -5608,6 +5789,11 @@ void Renderer::flip()
+     // post-present (see initVideo + the flushAll() refresh site for rationale).
+     if (_indexed_mode && _cached_window_surface && _master_palette)
+       SDL_SetSurfacePalette(_cached_window_surface, _master_palette);
++    // DOS-PORT (patch 0296, Path B): repaint the margin if SDL swapped
++    // the surface out from under us. Costs one predictable-false bool
++    // test per flip when centring is inactive, which is every card that
++    // offers a 320x240 mode.
++    _dos_center_clear_margins();
+   }
+   else if (_flip_instr_on)
+   {
+@@ -7387,6 +7573,41 @@ void Renderer::drawTileFast(Surface *src, int dstx, int dsty, int srcx, int srcy
+   SDL_Rect srcrect = {srcx, srcy, TILE_W, TILE_H};
+   SDL_Rect dstrect = {dstx, dsty, TILE_W, TILE_H};
+ 
++  // DOS-PORT (patch 0296, Path B): this is the ONE direct-to-window
++  // writer with no 320x240 dimension gate -- _try_fast_blit,
++  // _try_fast_blit_alpha, _ensure_handrolled_surface, drawCachedBackdrop
++  // and drawCachedTilemap all bail out on an oversized surface and fall
++  // back to the renderer, but drawTileFast writes straight through. That
++  // is why the Mach64 photographs show a 1:1 tilemap in the corner of an
++  // otherwise scaled screen.
++  //
++  // _blit_indexed clamps against the destination SURFACE, not against
++  // the logical screen, so translating alone would let a tile that hangs
++  // off the logical right or bottom edge spill into the cleared margin.
++  // Clip to the logical box first (carrying the source rect with it),
++  // then translate. Untouched when centring is inactive.
++  if (_dos_center_active)
++  {
++    int cx = dstrect.x, cy = dstrect.y;
++    int cw = dstrect.w, ch = dstrect.h;
++    int sx = srcrect.x, sy = srcrect.y;
++
++    if (cx < 0) { cw += cx; sx -= cx; cx = 0; }
++    if (cy < 0) { ch += cy; sy -= cy; cy = 0; }
++    if (cx + cw > 320) cw = 320 - cx;
++    if (cy + ch > 240) ch = 240 - cy;
++    if (cw <= 0 || ch <= 0) return;  // wholly outside the logical screen
++
++    srcrect.x = sx;
++    srcrect.y = sy;
++    srcrect.w = cw;
++    srcrect.h = ch;
++    dstrect.x = cx + _dos_center_ox;
++    dstrect.y = cy + _dos_center_oy;
++    dstrect.w = cw;
++    dstrect.h = ch;
++  }
++
+   // Direct call to _blit_indexed (same primitive drawSurface's fast
+   // path eventually reaches via _try_fast_blit dispatch). Wave-25
+   // instrumentation continues to fire if g_mds_tfg_loop_active is
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index e09a7140..430a08c9 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -297,6 +297,50 @@ class Renderer
+     // refresh on RenderPresent. Public so the inline drawSurface()
+     // helper can read it; nullable until first flip() runs.
+     SDL_Surface *_cached_window_surface = nullptr;
++
++    // DOS-PORT (patch 0296, Path B): centre the 320x240 logical screen
++    // inside an oversized window surface.
++    //
++    // Some VBE implementations cannot offer a mode as small as the
++    // engine's logical screen. The ATI Mach64-CT is the found case: the
++    // chip has no double scanning and 320x200 / 320x240 are double-
++    // scanned modes, so its smallest mode is 512x384 and no driver can
++    // synthesise a smaller one. SDL then hands us a 512x384 surface for
++    // a 320x240 game.
++    //
++    // Before this patch two coordinate systems fought over that surface.
++    // Everything routed through SDL_Renderer was scaled up by the
++    // LETTERBOX logical presentation (aspect matches exactly at 512x384
++    // and at 640x480, so SDL took its STRETCH branch and filled the
++    // surface), while `drawTileFast` -- the one direct-to-window writer
++    // with no dimension gate -- kept writing 1:1 at the origin. The
++    // result was a scaled backdrop and sprite layer with an unscaled
++    // tilemap pinned to the top-left corner.
++    //
++    // The fix keeps ONE coordinate system: the engine keeps drawing a
++    // 1:1 320x240 image, and that image is placed at a fixed offset
++    // inside the larger surface. `initVideo` disables the logical
++    // presentation and installs a render viewport at the offset (the SW
++    // renderer applies a viewport as both a translation and a surface
++    // clip rect, so out-of-box draws are clipped rather than bleeding
++    // into the margin); `drawTileFast` clips to the logical box and
++    // translates by the same offset; `_record_dirty_rect` translates so
++    // partial flushes address the right region of the window.
++    //
++    // `_dos_center_active` is false whenever the surface is exactly
++    // 320x240, which is every other card. On that path every one of the
++    // sites above keeps its pre-patch behaviour unchanged.
++    bool _dos_center_active = false;
++    int _dos_center_ox = 0;
++    int _dos_center_oy = 0;
++    // Window surface the margins were last cleared for. The margin is
++    // painted once (it is never drawn into afterwards); re-clearing is
++    // needed only if SDL hands back a different surface.
++    SDL_Surface *_dos_center_cleared_for = nullptr;
++    // One-shot guard for the flush-rect witness line.
++    bool _dos_center_flush_logged = false;
++    void _dos_center_clear_margins();
++
+     // DOS-PORT (patch 0051, Phase 9 wave 8): tracks whether any slow-
+     // path renderer command has been queued since the last flush. Set
+     // by every SDL_RenderTexture / SDL_RenderTextureRotated /
+-- 
+2.47.3
+
