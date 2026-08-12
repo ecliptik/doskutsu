@@ -1,0 +1,116 @@
+From 30a427654ab17b1c573d223d6dae447b054385ac Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 11 Aug 2026 17:18:27 -0700
+Subject: [PATCH 4/4] [DOSKUTSU] patch 0295 -- per-stage fps at the gameloop
+ boundary
+
+The QA reel spans light and heavy scenes (11 stage visits: 72 20 11 17 11 15 11
+19 11 14 11), but only the whole-reel aggregate survived each run. That caused a
+real analysis trap -- a heavy-scene bucket cost was compared against a whole-reel
+anchor -- and left the project's historical "Mimiga BK_PARALLAX" anchors with no
+way to reconnect to reel numbers.
+
+Record each stage VISIT's start snapshot (flip count + logic tick) at the
+gameloop() boundary. gameloop() is entered exactly once per stage: the outer loop
+reloads the map, then re-enters, so this is a natural event-driven sample point
+-- roughly 11 integer snapshots per run, NOT per-frame work and NOT per-frame
+logging (the hard telemetry constraint). Each segment's span is the gap to the
+next boundary; the last segment ends at emit. per-stage fps = seg_flips*50/
+seg_ticks -- a game-time rate from integer counters, so it is valid in pump cells
+too. One run now yields both a reel average and per-scene figures, and the
+historical heavy-scene anchors become comparable for the first time.
+
+The segment array is bounded at 64 (the reel visits 11); overflow is counted and
+emitted as perstage_dropped rather than silently truncated.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 61 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 61 insertions(+)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 762a5963..9bf366da 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1397,6 +1397,41 @@ static void _cpu_witness_probe(void)
+ #endif
+ }
+ 
++// === per-stage fps (patch 0295) ========================================
++// The QA reel spans light and heavy scenes (11 stage visits: 72 20 11 17 11 15
++// 11 19 11 14 11), but only the whole-reel aggregate ever survived -- so a
++// heavy-scene bucket cost was once mis-compared against a whole-reel anchor, and
++// the historical "Mimiga BK_PARALLAX" anchors could not be reconnected to reel
++// numbers at all. Record each stage VISIT's start snapshot (flip count + logic
++// tick) at the gameloop() boundary (gameloop is entered exactly once per stage:
++// the outer loop reloads the map, then re-enters). Each segment's span is the
++// gap to the NEXT boundary; the last segment's end is emit time. per-stage fps =
++// seg_flips*50/seg_ticks. Boundary-driven, NOT per-frame: ~11 integer snapshots,
++// no per-frame work, no per-frame logging (the hard telemetry constraint).
++#define _PERSTAGE_MAX 64   // reel visits 11; bound generously and count overflow
++struct _perstage_seg_t {
++  int           stage_no;
++  int           tick;    // g_tick_count at this stage's entry
++  unsigned long flip;    // g_flip_count at this stage's entry
++};
++static _perstage_seg_t g_perstage[_PERSTAGE_MAX];
++static int g_perstage_n       = 0;   // recorded segment starts
++static int g_perstage_dropped = 0;   // visits past _PERSTAGE_MAX (never silent)
++
++// Called at gameloop() entry -- records this stage's start snapshot.
++static void _perstage_enter(int stage_no, unsigned long flip_now, int tick_now)
++{
++  if (g_perstage_n < _PERSTAGE_MAX)
++  {
++    g_perstage[g_perstage_n].stage_no = stage_no;
++    g_perstage[g_perstage_n].tick     = tick_now;
++    g_perstage[g_perstage_n].flip     = flip_now;
++    ++g_perstage_n;
++  }
++  else
++    ++g_perstage_dropped;
++}
++
+ static void emit_run_manifest(void)
+ {
+ #if defined(__DJGPP__)
+@@ -1612,6 +1647,23 @@ static void emit_run_manifest(void)
+   runmanifest_emit_kv_int(fp, "banner_optional_hit",   m.banner_optional_hit);
+   runmanifest_emit_kv_int(fp, "critical_count",        m.critical_count);
+   runmanifest_emit_kv_int(fp, "warn_count",            m.warn_count);
++  // per-stage fps (patch 0295): one line per stage VISIT. Each segment's span is
++  // the gap to the next boundary; the last segment ends at emit (now = _flips /
++  // _reel_ticks). fps = flips*50/ticks (game-time rate, pump-independent).
++  runmanifest_emit_kv_int(fp, "perstage_count", g_perstage_n);
++  if (g_perstage_dropped)
++    runmanifest_emit_kv_int(fp, "perstage_dropped", g_perstage_dropped);
++  for (int i = 0; i < g_perstage_n; ++i)
++  {
++    const unsigned long f_end = (i + 1 < g_perstage_n) ? g_perstage[i + 1].flip : _flips;
++    const int           t_end = (i + 1 < g_perstage_n) ? g_perstage[i + 1].tick : _reel_ticks;
++    const unsigned long d_flip = (f_end >= g_perstage[i].flip) ? (f_end - g_perstage[i].flip) : 0UL;
++    const int           d_tick = (t_end >= g_perstage[i].tick) ? (t_end - g_perstage[i].tick) : 0;
++    const unsigned long fps_x10 = (d_tick > 0) ? (d_flip * 500UL / (unsigned long)d_tick) : 0UL;
++    std::fprintf(fp, "perstage_%02d=stage:%d ticks:%d flips:%lu fps:%lu.%lu\n",
++                 i, g_perstage[i].stage_no, d_tick, d_flip,
++                 fps_x10 / 10UL, fps_x10 % 10UL);
++  }
+   std::fprintf(fp, "%s\n", RUNMANIFEST_END_MARKER);
+   std::fflush(fp);
+   ::fsync(::fileno(fp));
+@@ -1665,6 +1717,15 @@ void gameloop(void)
+   // beat below catches the case where SDL_GetTicks() / timeRemaining math
+   // is broken on real DOS HW and run_tick() never fires.
+   LOG_INFO("gameloop: entered (curmap={}, running={})", (int)game.curmap, (int)game.running);
++
++  // patch 0295: per-stage fps boundary. gameloop() is entered once per stage, so
++  // snapshotting (flip count, logic tick) here delimits this stage's segment.
++  // Boundary-driven -- no per-frame cost.
++  {
++    extern unsigned long g_flip_count;
++    _perstage_enter((int)game.curmap, g_flip_count, g_tick_count);
++  }
++
+   int loop_iter = 0;
+ 
+   while (game.running && game.switchstage.mapno < 0)
