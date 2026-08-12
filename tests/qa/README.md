@@ -18,6 +18,33 @@ here refuses to run without it and tells you so.
 
 ---
 
+## The reel -- use THIS one or nothing compares
+
+`QA-ROUND1.TAS` in this directory is the exact input recording that produced
+all 89 round-1 cells. **sha256 begins `4118561edf26b93a`, 1956 bytes.**
+
+Every cell in every round must replay the same reel or the columns are not
+comparable -- that is the whole basis of the campaign. Before a round, confirm
+the CF's `DOSKUTSU\QA.TAS` matches that sha.
+
+**The kit payload does NOT ship this reel.** Its `DOSKUTSU/QA.TAS` is a
+fallback (`5c661a8723e5`) that no round-1 cell ever used; the round-1 reel is
+an operator recording made with `RECORD.BAT` on the bench.
+`install-qa-v163.sh` stashes a non-fallback `QA.TAS` off the CF and restores it
+after extracting, so populating a card that already holds the take is safe.
+
+**Populating a blank or replaced card is not.** It installs the fallback, and
+the round then replays a different reel while every log looks entirely normal.
+Nothing downstream would catch it. Either populate onto the card that already
+carries the take, copy `QA-ROUND1.TAS` to `DOSKUTSU\QA.TAS` afterwards, or
+bake it into the payload as the shipped reel.
+
+**Do not re-record mid-campaign.** The superseded 2026-08-06 and v167 rounds
+used a third reel (`30dd4b7050468eeb`, 2044 bytes), which is part of why their
+numbers cannot be compared with round 1's.
+
+---
+
 ## Lane instrumentation and log retrieval
 
 Three scripts, tracked here as the source of truth. The copies under `/tmp/`
