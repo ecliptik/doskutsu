@@ -28,12 +28,29 @@ jumper values the Vibra cannot use.
 | | Swap | Run |
 |---|---|---|
 | 1.0 | CF to laptop | populate |
-| 1.1 | CF to box | `QA 4` then `GAP` |
-| 1.2 | sound -> PicoGUS | `EAR` (listen) |
-| 1.3 | -- | `PROVE` |
-| 1.4 | -- | pull logs *laptop* |
+| 1.1 | CF to box | `QA 4` then **`RB`** |
+| 1.2 | -- | pull logs *laptop* -- **stop and check** |
+| 1.3 | -- | `GAP` |
+| 1.4 | sound -> PicoGUS | `EAR` (listen) |
+| 1.5 | -- | `PROVE` |
+| 1.6 | -- | pull logs *laptop* |
 
-`GAP` not `GAP PG`. No PicoGUS in the box at 1.1.
+**`RB` runs first and 1.2 is a real stop.** It decides whether the ~90 banked
+round-1 cells still compare against this binary. Four cells:
+
+| Cell | Catches |
+|---|---|
+| `R4` OPL3 | control -- no music timer, isolates observer effect |
+| `R4B` | repeat of `R4` -- the noise floor, measured not inferred |
+| `R5` AdLib | the music-timer path, which `R4` cannot see |
+| `R3` Organya | the re-rendered PCM cache, which nothing else exercises |
+
+Send me those logs before anything else. If `R4` agrees with round-1's `5C4`
+(17.39 per-loop) within the noise floor, everything carries forward. If
+it does not, the rest of the round is measuring something new and we need to
+know that first.
+
+`GAP` not `GAP PG` -- no PicoGUS in the box until 1.4.
 
 ---
 
@@ -127,7 +144,6 @@ Labels: `r2-gap-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-vidm-dx250`,
 |---|---|
 | `X0` / `P0` silent | correct -- that is the measurement |
 | keyboard dead in a cell | correct -- the reel drives it |
-| `RB REFUSES TO RUN` | correct on this card |
 | "no PicoGUS detected" | wrong sweep for the card in the box |
 | minutes on the title screen | HQ cache missing -- abort |
 | hangs at once | wrong reel -- check the sha |
@@ -137,5 +153,31 @@ Labels: `r2-gap-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-vidm-dx250`,
 ## Do not bank
 
 - anything run before commit `28218c0`
-- `RB` output from this card
+- `RB` output from a card whose `BINARY.NFO` is not the round-2 build
 - round-1 `5112` / `6112`
+
+---
+
+## Payload -- NOT BUILT YET
+
+The populate command above still fetches the **round-1** payload. Do not run
+Part 1 until this is done; `RB` would compare round 1 against itself.
+
+| | Step | State |
+|---|---|---|
+| 1 | binary with `0296` letterbox | built, **stamp wrong** -- see below |
+| 2 | `make convert-music` | done (rebuilt at the converter fix) |
+| 3 | Organya cache, both tiers | rendered, `READY.OK` not yet written |
+| 4 | repack tarball | not started |
+| 5 | `EXP_DOSKUTSU_SHA` + `TARBALL` | not updated |
+
+**Open issue.** The binary contains the letterbox code but is stamped
+`ff96af07db07`, the fingerprint of the *pre-0296* patch set; a fresh `make`
+computes `1f79ce20e4ee`. A stale `-D` in the CMake cache. It works only because
+the Organya cache carries the same wrong stamp, so the two agree. A clean
+rebuild fixes the stamp and invalidates the cache, costing a rebuild plus both
+tier renders, about 25 minutes unattended.
+
+Shipping as-is means every round-2 log reports a build sha belonging to a
+different patch set -- in the round where `BINARY.NFO` and `ROUND2.OK` were
+added specifically to make provenance checkable.
