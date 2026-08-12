@@ -1,0 +1,296 @@
+From 619f24d98b3e597d6d0d76023f7a1ebec82f03e8 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 11 Aug 2026 17:16:29 -0700
+Subject: [PATCH 2/4] [DOSKUTSU] patch 0293 -- RUNMANIFEST schema-v2: real
+ binary hash, fps decomposition, pump-aware fields
+
+The RUNMANIFEST block every QA cell emits was a well-designed skeleton that was
+mostly unpopulated, so the whole benchmark campaign was reconstructed by hand-
+written awk over per-frame log lines. Populate it, and fix the one field that was
+actively misleading.
+
+Provenance defect: binary_sha12 carried the compile-time -DDOSKUTSU_BUILD_SHA12
+value, which is a sha256-12 over the patch DIFF lines -- and by construction of
+scripts/org-cache.sh that same value is ALSO the Organya PCM cache key. So the
+one field whose job is to prove "same binary across rounds" reported the source/
+cache fingerprint under a name that says binary. The real linked-binary sha256
+(a post-link value) cannot be known at compile time, and self-hashing a 7.75 MB
+exe at exit is too costly on a 486 and lands in the #18/#32 quit window. Fix:
+  - binary_sha12 now echoes the kit-verified 12-hex from a DOSKUTSU.SHA sidecar
+    written beside the exe by the install step; UNKNOWN when absent (honest,
+    never the source fingerprint). binary_sha12_src records provenance (kit vs
+    unknown) so an echoed value is never conflated with a self-measured one.
+  - build_sha12 and organya_cache_key emit the source-diff value under honest
+    names (separate fields so a future divergence is representable).
+
+fps decomposition emitted directly (previously hand-computed every round):
+fps_true_flips, fps_true_render_s, reel_ticks, reel_game_seconds (DERIVED from
+the reel's actual tick count / 50, not the assumed 102), per_loop_fps, overhead_s
+-- all from integer counters, valid in every cell including pump cells.
+
+Pump awareness: when the SDL/0110 PIT music pump is active (gus/adlib), uclock is
+corrupted and any percentile quantises to the 55 ms BIOS tick. music_pump_active
+is latched from the sticky backend enum (a live pump query reads false post
+SDL_Quit), and fps_p50/fps_p95 emit INVALID_PUMP on those cells, NA otherwise --
+a wrong-but-plausible number has already cost two published findings, so we emit
+no percentile rather than a fake one. per_loop_fps is the real per-run number.
+No per-frame sampler is added (the no-per-frame-instrumentation constraint).
+
+started_utc honours a DOSKUTSU_RUN_UTC override, else the RTC (the campaign's
+2026-11-19 stamp was a mis-set CMOS, not an engine bug; the interval duration_s
+is unaffected). schema_version bumps to 2: binary_sha12 changes meaning between
+corpora, so consumers must be able to tell v1 from v2.
+
+The block is open-coded via the header's exposed runmanifest_emit_kv_* helpers
+rather than extending the shared include/runmanifest.h (co-owned with HWINV,
+outside this workstream's lane); HWINV keeps emitting its own v1 block unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 206 ++++++++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 154 insertions(+), 52 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 5156e357..0b4be3c7 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1263,9 +1263,12 @@ static void emit_run_manifest(void)
+   unsigned signals = 0;
+   m.environment = runmanifest_detect_environment(&signals);
+ 
+-  // binary_sha12 from compile-time stamp (stringify-converted).
+-  std::snprintf(m.binary_sha12, sizeof m.binary_sha12, "%s",
+-                _DOSKUTSU_BUILD_SHA12_STR);
++  // patch 0293: the compile-time stamp is the SOURCE/patch-stack fingerprint
++  // (and, by construction of scripts/org-cache.sh, ALSO the Organya cache key)
++  // -- NOT the linked-binary hash. It is emitted below under its honest names
++  // build_sha12 + organya_cache_key; the binary_sha12 field now carries the real
++  // sha256-12 echoed from the kit sidecar (see the open-coded emit). m.binary_sha12
++  // is intentionally left unset -- the open-coded block does not read it.
+ 
+   // wave_tag from existing DOSKUTSU_LOG_TAG env var (preserves wave-37+
+   // multi-PLAY log-routing convention; empty if unset).
+@@ -1285,17 +1288,25 @@ static void emit_run_manifest(void)
+                                       m.env_block_sha,
+                                       sizeof m.env_block_sha);
+ 
+-  // Timestamps (ISO8601 UTC for started_utc; integer seconds for
+-  // duration_s).
++  // Timestamps. duration_s: the RTC delta -- an INTERVAL, robust even when the
++  // absolute clock is wrong. started_utc (patch 0293): the absolute RTC date is
++  // only as trustworthy as the machine's CMOS (the campaign's g2k read
++  // 2026-11-19 for an 2026-08-11 run because its clock was mis-set), so honour an
++  // operator DOSKUTSU_RUN_UTC=<ISO8601> override when set; else fall back to the
++  // RTC-derived stamp, which stays valid for intra-session ordering.
+   if (_runmanifest_boot_time != 0)
++    m.duration_s = (int)(std::time(nullptr) - _runmanifest_boot_time);
+   {
+-    std::tm *gm = std::gmtime(&_runmanifest_boot_time);
+-    if (gm)
++    const char *run_utc = std::getenv("DOSKUTSU_RUN_UTC");
++    if (run_utc && run_utc[0])
++      std::snprintf(m.started_utc, sizeof m.started_utc, "%s", run_utc);
++    else if (_runmanifest_boot_time != 0)
+     {
+-      std::strftime(m.started_utc, sizeof m.started_utc,
+-                    "%Y-%m-%dT%H:%M:%SZ", gm);
++      std::tm *gm = std::gmtime(&_runmanifest_boot_time);
++      if (gm)
++        std::strftime(m.started_utc, sizeof m.started_utc,
++                      "%Y-%m-%dT%H:%M:%SZ", gm);
+     }
+-    m.duration_s = (int)(std::time(nullptr) - _runmanifest_boot_time);
+   }
+ 
+   // exit_code: reaching this code path = clean shutdown = 0. The
+@@ -1305,57 +1316,148 @@ static void emit_run_manifest(void)
+   // on the clean path; future iters can pipe `error` into this fn.
+   m.exit_code = 0;
+ 
+-  // DOS-PORT (patch 0289): clock-independent throughput. fps_p50/p95 stay NA
+-  // on purpose -- percentiles need per-frame timings, and those ride
+-  // SDL_GetTicks == uclock, which the SDL/0110 music pump corrupts (PIT ch0
+-  // reprogrammed under libc's feet). In a gus/adlib cell they quantise to the
+-  // 55 ms BIOS tick and a median read from them says 18.5 fps against a real
+-  // ~28. flips / duration_s touches neither: the counter is an integer and
+-  // duration_s comes from time(). So it is valid in EVERY cell, pump or not,
+-  // and is the number the fps matrix should be built from.
+-  {
+-    extern unsigned long g_flip_count;
+-    extern std::time_t g_first_flip_time;
+-    // patch 0290: measure from the FIRST FLIP, not from process start.
+-    // duration_s covers boot, the Organya cache load and the 0287 banner
+-    // hold -- ~35 s of a ~135 s cell during which nothing is rendered.
+-    // Dividing by it understated every backend by roughly 8%, unevenly,
+-    // since boot cost varies per backend. The end of the window is shutdown
+-    // rather than the last flip so the flip path stays free of a per-frame
+-    // time() call; the gap between final flip and shutdown is negligible.
+-    const std::time_t now = std::time(nullptr);
+-    const int dur = (g_first_flip_time != 0 && now > g_first_flip_time)
+-                      ? (int)(now - g_first_flip_time)
+-                      : m.duration_s;
+-    const unsigned long fl = g_flip_count;
+-    // Integer tenths, no float formatting on DJGPP.
+-    const unsigned long fps10 = (dur > 0) ? (fl * 10UL / (unsigned long)dur) : 0UL;
++  // === fps decomposition (patch 0289/0290 + 0293) ========================
++  // Every value here is derived from INTEGER counters (flip count, logic-tick
++  // count, RTC interval) and NEVER reads the per-frame uclock the SDL/0110 PIT
++  // music pump corrupts -- so per_loop_fps + overhead_s are valid in EVERY cell,
++  // pump or not, which is the whole reason the matrix is built from them rather
++  // than from inter_flip medians (which are invalid in gus/adlib cells).
++  extern unsigned long g_flip_count;
++  extern std::time_t g_first_flip_time;
++  // patch 0290: wall seconds from the FIRST FLIP (not process start -- boot, the
++  // Organya cache load and the 0287 banner hold add ~35 s of a ~135 s cell in
++  // which nothing renders). End = shutdown rather than last flip so the flip
++  // path stays free of a per-frame time() call; the final-flip-to-shutdown gap
++  // is negligible.
++  const std::time_t _now_t = std::time(nullptr);
++  const int _render_s = (g_first_flip_time != 0 && _now_t > g_first_flip_time)
++                          ? (int)(_now_t - g_first_flip_time)
++                          : m.duration_s;
++  const unsigned long _flips = g_flip_count;
++  const int _reel_ticks = g_tick_count;   // 50 Hz fixed-timestep logic ticks
++  // reel game-seconds DERIVED from the reel's ACTUAL tick count (not the assumed
++  // 102): game_s = ticks/50. per_loop_fps = flips / game_s = flips*50/ticks.
++  // Integer tenths throughout (no float printf on DJGPP).
++  const int _reel_gs_x10 = (_reel_ticks > 0) ? (_reel_ticks / 5) : 0;  // (ticks/50)*10
++  const unsigned long _perloop_x10 =
++      (_reel_ticks > 0) ? (_flips * 500UL / (unsigned long)_reel_ticks) : 0UL;
++  const int _overhead_s = _render_s - (_reel_ticks / 50);
++
++  // Retain the [fps-true] wall-time mean (patch 0289/0290) verbatim for
++  // backward-compat: it is flips / wall-render-s, a DIFFERENT (dilution-
++  // inclusive) number than per_loop_fps, and existing greps depend on it.
++  {
++    const unsigned long fps10 =
++        (_render_s > 0) ? (_flips * 10UL / (unsigned long)_render_s) : 0UL;
+     LOG_INFO("[fps-true] flips={} render_s={} fps_mean={}.{} "
+              "(clock-independent: flips / seconds since the FIRST flip; use THIS "
+              "for the fps matrix, not inter_flip medians, which are invalid in "
+              "any cell running the PIT/IRQ-0 music pump)",
+-             fl, dur, fps10 / 10UL, fps10 % 10UL);
++             _flips, _render_s, fps10 / 10UL, fps10 % 10UL);
++  }
++
++  // Did this cell run the PIT/IRQ-0 music pump? Latched from the sticky backend
++  // enum, NOT SDL_DOSOplTimerPumpActive(): by emit time (post SDL_Quit) the pump
++  // is already stopped, so a live query would read false for a gus/adlib cell.
++  // adlib + gus are the only pump backends (SDL/0110 via patches 0234/0238);
++  // OPL3 / WB / Organya never pump.
++  const bool _pump_active =
++      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::adlib) ||
++      (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::gus);
++
++  // Real linked-binary sha256-12, echoed from the kit sidecar (patch 0293). The
++  // actual `sha256sum DOSKUTSU.EXE` value cannot be known at compile time, and
++  // self-hashing a 7.75 MB exe at exit is too costly on a 486 (and lands in the
++  // #18/#32 quit-to-DOS window). The kit's install step verifies the exe against
++  // a known sha and writes the 12-hex to DOSKUTSU.SHA beside it; echo that.
++  // Absent sidecar -> UNKNOWN (honest), never the source fingerprint. Provenance
++  // recorded in binary_sha12_src (kit vs unknown).
++  char        _bin_sha12[16];
++  const char *_bin_sha12_src;
++  {
++    int j = 0;
++    std::FILE *sf = std::fopen("DOSKUTSU.SHA", "rb");  // rb per DJGPP binary-mode rule
++    if (sf)
++    {
++      char line[80];
++      if (std::fgets(line, sizeof line, sf))
++        for (int i = 0; line[i] && j < 12; ++i)
++        {
++          const char ch  = line[i];
++          const bool hex = (ch >= '0' && ch <= '9') ||
++                           (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
++          if (!hex) break;
++          _bin_sha12[j++] = ch;
++        }
++      std::fclose(sf);
++    }
++    _bin_sha12[j] = '\0';
++    if (j == 12)
++      _bin_sha12_src = "kit";
++    else
++    {
++      std::snprintf(_bin_sha12, sizeof _bin_sha12, "UNKNOWN");
++      _bin_sha12_src = "unknown";
++    }
+   }
+ 
+-  // Banner counters + critical/warn counts: 0 placeholder. Smoke gate
+-  // post-processes the produced log to fill these (sec. 4.4 of the
+-  // tri-env correlation plan).
+-
+-  // Emit the [RUNMANIFEST-BEGIN] ... [RUNMANIFEST-END] block + fsync
+-  // per [[sdl3_dos_quirks]] DEBUG.LOG-fsync precedent.
+-  runmanifest_emit(fp, &m);
++  // === open-coded schema-v2 emit (patch 0293) ============================
++  // Open-coded (not runmanifest_emit()) because the extended field set lives
++  // HERE in the engine, not in the shared include/runmanifest.h (co-owned with
++  // HWINV, outside this workstream's lane). Uses the header's exposed
++  // runmanifest_emit_kv_* helpers so the line format stays identical. New keys
++  // are additive; schema_version=2 signals the richer set AND that binary_sha12
++  // now names the linked binary rather than the v1 source/cache fingerprint.
++  std::fprintf(fp, "%s\n", RUNMANIFEST_BEGIN_MARKER);
++  runmanifest_emit_kv_int(fp, "schema_version",  2);
++  runmanifest_emit_kv_str(fp, "environment",     runmanifest_env_str(m.environment));
++  runmanifest_emit_kv_str(fp, "binary_sha12",     _bin_sha12);
++  runmanifest_emit_kv_str(fp, "binary_sha12_src", _bin_sha12_src);
++  runmanifest_emit_kv_str(fp, "build_sha12",       _DOSKUTSU_BUILD_SHA12_STR);
++  runmanifest_emit_kv_str(fp, "organya_cache_key", _DOSKUTSU_BUILD_SHA12_STR);
++  runmanifest_emit_kv_str(fp, "wave_tag",      m.wave_tag);
++  runmanifest_emit_kv_str(fp, "scene",         m.scene);
++  runmanifest_emit_kv_str(fp, "env_block_sha", m.env_block_sha);
++  runmanifest_emit_kv_str(fp, "started_utc",   m.started_utc);
++  runmanifest_emit_kv_int(fp, "duration_s",    m.duration_s);
++  runmanifest_emit_kv_int(fp, "exit_code",     m.exit_code);
++  // fps decomposition -- the numbers the matrix is built from:
++  runmanifest_emit_kv_int(fp, "fps_true_flips",    (int)_flips);
++  runmanifest_emit_kv_int(fp, "fps_true_render_s", _render_s);
++  runmanifest_emit_kv_int(fp, "reel_ticks",        _reel_ticks);
++  std::fprintf(fp, "reel_game_seconds=%d.%d\n", _reel_gs_x10 / 10, _reel_gs_x10 % 10);
++  std::fprintf(fp, "per_loop_fps=%lu.%lu\n",   _perloop_x10 / 10UL, _perloop_x10 % 10UL);
++  runmanifest_emit_kv_int(fp, "overhead_s",        _overhead_s);
++  runmanifest_emit_kv_str(fp, "music_pump_active", _pump_active ? "1" : "0");
++  // fps_p50/p95: percentiles need per-frame inter_flip samples -- a per-frame
++  // clock read added to the shipping flip path, which is the explicit "no
++  // per-frame instrumentation" non-goal, and that clock is pump-corrupted
++  // anyway. INVALID_PUMP on a pump cell, NA otherwise; per_loop_fps above is the
++  // real per-run number.
++  runmanifest_emit_kv_str(fp, "fps_p50", _pump_active ? "INVALID_PUMP" : "NA");
++  runmanifest_emit_kv_str(fp, "fps_p95", _pump_active ? "INVALID_PUMP" : "NA");
++  // Original v1 trailing fields, preserved for schema continuity:
++  runmanifest_emit_kv_str_or_na(fp, "audio_vital_status", m.audio_vital_status);
++  runmanifest_emit_kv_str_or_na(fp, "regime",             m.regime);
++  runmanifest_emit_kv_int(fp, "banner_required_hit",   m.banner_required_hit);
++  runmanifest_emit_kv_int(fp, "banner_required_total", m.banner_required_total);
++  runmanifest_emit_kv_int(fp, "banner_forbidden_hit",  m.banner_forbidden_hit);
++  runmanifest_emit_kv_int(fp, "banner_optional_hit",   m.banner_optional_hit);
++  runmanifest_emit_kv_int(fp, "critical_count",        m.critical_count);
++  runmanifest_emit_kv_int(fp, "warn_count",            m.warn_count);
++  std::fprintf(fp, "%s\n", RUNMANIFEST_END_MARKER);
+   std::fflush(fp);
+   ::fsync(::fileno(fp));
+ 
+-  // Engagement banner for build-qa's two-witness gate (strings audit
+-  // proves embed; this LOG_INFO proves runtime emit at the documented
+-  // hook point). Optional severity per existing wave-41+ banner
+-  // convention.
+-  LOG_INFO("[runmanifest-emit] schema=v{} env={} sha12={} dur={}s tag='{}' "
+-           "scene='{}' env_sha={} (signals=0x{:x})",
+-           m.schema_version, runmanifest_env_str(m.environment),
+-           m.binary_sha12, m.duration_s, m.wave_tag, m.scene,
+-           m.env_block_sha, signals);
++  // Engagement banner for build-qa's two-witness gate (strings proves embed;
++  // this LOG_INFO proves runtime emit at the documented hook point).
++  LOG_INFO("[runmanifest-emit] schema=v2 env={} binary_sha12={}({}) build_sha12={} "
++           "per_loop_fps={}.{} overhead_s={} pump={} dur={}s tag='{}' scene='{}' "
++           "(signals=0x{:x})",
++           runmanifest_env_str(m.environment), _bin_sha12, _bin_sha12_src,
++           _DOSKUTSU_BUILD_SHA12_STR, _perloop_x10 / 10UL, _perloop_x10 % 10UL,
++           _overhead_s, _pump_active ? 1 : 0, m.duration_s, m.wave_tag, m.scene,
++           signals);
+ #else
+   // Host (non-DJGPP) build: no-op. The spdlog path doesn't expose a
+   // FILE* for the bracketed emit; RUNMANIFEST is production-DOS-only.

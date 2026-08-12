@@ -1,0 +1,55 @@
+From 435bbd83ab2e4e8584b4a9119f727f66f877fbfc Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 11 Aug 2026 17:26:04 -0700
+Subject: [PATCH] patch 0293 fix: key INVALID_PUMP on the timebase, not the
+ pump
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 30 +++++++++++++++++++++++-------
+ 1 file changed, 23 insertions(+), 7 deletions(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index 9bf366da..f1ee025d 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1631,13 +1631,29 @@ static void emit_run_manifest(void)
+       NXE::Diag::backend_to_string(NXE::Diag::g_p10_audio_backend_active));
+   runmanifest_emit_kv_str(fp, "video_logical_wxh", "320x240");
+   runmanifest_emit_kv_int(fp, "video_logical_bpp", 8);
+-  // fps_p50/p95: percentiles need per-frame inter_flip samples -- a per-frame
+-  // clock read added to the shipping flip path, which is the explicit "no
+-  // per-frame instrumentation" non-goal, and that clock is pump-corrupted
+-  // anyway. INVALID_PUMP on a pump cell, NA otherwise; per_loop_fps above is the
+-  // real per-run number.
+-  runmanifest_emit_kv_str(fp, "fps_p50", _pump_active ? "INVALID_PUMP" : "NA");
+-  runmanifest_emit_kv_str(fp, "fps_p95", _pump_active ? "INVALID_PUMP" : "NA");
++  // fps_p50/p95 are NOT populated: true percentiles would need per-frame
++  // inter_flip samples retained in the shipping flip path, and per-frame
++  // instrumentation is the explicit non-goal (it is how a measurement system
++  // starts changing what it measures). per_loop_fps above is the real per-run
++  // number and is what the matrix is built from.
++  //
++  // The INVALID_PUMP marker keys on the TIMEBASE, not on the pump. Before
++  // SDL/0122 any pump cell's SDL clock was a 55 ms staircase, so its
++  // inter_flip figures were meaningless. With the pump-aware timebase active
++  // (ch0 in MODE 2, SDL_DOSOplTimerTimebaseActive()) that clock is correct
++  // again -- measured: the 10-40 ms inter_flip band is EXACTLY empty with the
++  // killswitch engaged and repopulates with the fix on. So gating on
++  // _pump_active alone would stamp INVALID_PUMP on every gus/adlib cell
++  // whose clock the fix had just repaired, permanently marking good data as
++  // corrupt on precisely the backends 0122 exists to rescue.
++  const bool _clock_corrupt = _pump_active && !SDL_DOSOplTimerTimebaseActive();
++  runmanifest_emit_kv_str(fp, "fps_p50", _clock_corrupt ? "INVALID_PUMP" : "NA");
++  runmanifest_emit_kv_str(fp, "fps_p95", _clock_corrupt ? "INVALID_PUMP" : "NA");
++  // Explicit witness so a reader never has to infer which regime applied.
++  runmanifest_emit_kv_str(fp, "pump_clock_state",
++      !_pump_active            ? "no-pump"
++      : _clock_corrupt         ? "pump-uncorrected"
++                               : "pump-timebase-ok");
+   // Original v1 trailing fields, preserved for schema continuity:
+   runmanifest_emit_kv_str_or_na(fp, "audio_vital_status", m.audio_vital_status);
+   runmanifest_emit_kv_str_or_na(fp, "regime",             m.regime);
+-- 
+2.47.3
+
