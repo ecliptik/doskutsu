@@ -77,6 +77,42 @@ runs.
 
 ---
 
+## The prove-out run (do this FIRST after a new binary)
+
+`PROVE.BAT` + `prove-verdict.sh` are the automated pair that answers "is this
+binary good on real hardware" before anyone spends a full round on it.
+7 cells, ~20 min, fully unattended, one run per hardware config.
+
+    PROVE.BAT                       (on the box, after QA.BAT sets %QAM%)
+    bash /tmp/logback-qa.sh prove-G (pull, labelled)
+    tests/qa/prove-verdict.sh /tmp/qa-v163/prove-G/G/
+
+The verdict script is the point. Collecting logs proves nothing; it checks
+each CHANGE against its own witness and prints PASS / FAIL / SKIP per claim,
+exiting non-zero on any failure. **SKIP is never a pass** -- an absent
+witness is an absence.
+
+| cell | proves |
+|---|---|
+| `P4` | control: OPL3, non-pump. Re-baseline anchor against the banked `C4`. |
+| `P4B` | the noise floor, measured rather than inherited from an accidental duplicate. Every later "inside the noise" claim cites this number. |
+| **`P5`** | **the timebase fix ON** -- 10-40 ms band populated, `pump_clock_state=pump-timebase-ok`, teardown `delta=0` on MODE 2. |
+| **`P5K`** | **the same cell with the killswitch** -- that band must be EXACTLY EMPTY. |
+| `P3` | Organya: catches a silently different PCM cache re-render. |
+| `P0` | the true `AUDIO_OFF=1` floor (`SILENT.CFG` is not one). |
+| `P8` | forced 8-bit on the Vibra: identity, override and DMA path stay separable. |
+
+**`P5` vs `P5K` is the highest-information measurement in the set**, because
+it is the only test DOSBox structurally cannot perform: DOSBox does not model
+IRQ-0/PIT timing, and the MODE-2 latch read is the one part of the fix that
+could behave differently on real silicon. Everything else in this sweep
+confirms; that pair decides.
+
+Run the whole sweep **once per video card** -- the DAC-width question needs
+the Cirrus and the S3 readings as a pair, and one alone settles nothing.
+
+---
+
 ## The three BATs
 
 | BAT | Cells | Time | Needs ears | Answers |
