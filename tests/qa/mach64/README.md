@@ -36,6 +36,27 @@ never on the number.
 `C:\ATI\SUPPORT\64VBE221\VESATEST` after booting into entry 6; it lists every
 mode the card currently offers.
 
+## Loading it
+
+Run it **bare**: `M64VBE`. There is no `install` or `I` switch -- the only
+valid ones are `u s d 3 -3 vw -vw acc vga 4 -4 ?`, and an unrecognised
+argument prints the help screen without installing anything.
+
+It reports one of:
+
+| | |
+|---|---|
+| `M64VBE (V2.21) is installed` | loaded |
+| `M64VBE is already installed` | already resident |
+| `Can not load M64VBE; Mach64 adapter is not detected` | it does not recognise the card |
+
+`M64VBE U` is the resident check: `successfully removed` means it was loaded,
+`Can not remove; M64VBE is not resident` means it never was.
+
+**How to tell which VBE is active from `VESATEST` alone:** the card's own ROM
+offers 640x400 and up. UniVBE adds 512x384. M64VBE adds 320x200 and 320x240.
+A list starting at 640x400 means no TSR is resident at all.
+
 ## ATI's documented fallbacks
 
 Unload with `M64VBE U`, then reload with switches:
