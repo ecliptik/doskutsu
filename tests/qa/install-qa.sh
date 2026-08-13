@@ -29,7 +29,7 @@ EXP_CWSDPMI_SHA="2de899fecaa90632b8b9bdfc0305cb0375e59ae252c37e32d06c1ed3f98a8f4
 EXP_TAS_SHA="4118561edf26b93ab9b7a50e894e04ba7b0e7f089c6aa6418afcc8340ebf0bf1"  # QA.TAS ROUND-1 BENCHMARK reel (1956 B, ~5100 ticks/102 s)
 # The payload keeps its filename across repacks, so the staged copy is checked
 # by content. Bump this whenever the tarball is rebuilt.
-EXP_TARBALL_SHA="84f4507b85fb040ba0b35ac93ea08961cf308b08f331e7d646679f0eacc3d85f"
+EXP_TARBALL_SHA="d7d1d01dbbd9b4e14a1540eca8e65650924edec603d9be8fb8f748c7beaca206"
 
 # Overridable ONLY so the script can be exercised end to end without a card --
 # every default is unchanged, so the operator command line is identical. Two of
@@ -267,9 +267,16 @@ _ok20=0
 for _f in "${CF_GAME_DIR}"/[Pp][Rr][Oo][Ff][Ii][Ll][Ee][35].[Dd][Aa][Tt]; do
   [ -e "$_f" ] || continue
   _st=$(od -An -tu4 -j8 -N4 "$_f" 2>/dev/null | tr -d ' ')
-  if [ "${_st:-x}" = "20" ]; then
-    echo "  ${_f##*/}: map 20 'Save Point' -- benchmark state"
+  # Weapon list starts at 0x38: id, level, xp, maxammo, ammo. The reel presses
+  # fire, so a save with no weapon replays the same route drawing no bullets --
+  # less work per frame, and a frame rate that reads better than round 1 for a
+  # reason that has nothing to do with the binary.
+  _wp=$(od -An -tu4 -j56 -N4 "$_f" 2>/dev/null | tr -d ' ')
+  if [ "${_st:-x}" = "20" ] && [ "${_wp:-0}" != "0" ]; then
+    echo "  ${_f##*/}: map 20 'Save Point', weapon ${_wp} -- benchmark state"
     _ok20=1
+  elif [ "${_st:-x}" = "20" ]; then
+    echo "  ${_f##*/}: map 20 but NO WEAPON -- the reel will fire nothing"
   else
     echo "  ${_f##*/}: map ${_st:-?} -- NOT the benchmark state"
   fi
