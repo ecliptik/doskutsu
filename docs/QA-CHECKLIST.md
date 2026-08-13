@@ -23,20 +23,23 @@ jumper values the Vibra cannot use.
 
 ---
 
-## Part 1 -- DX2-50 (in the box now)
+## Part 1 -- DX2-50
 
-| | Swap | Run |
+`RB`, `EAR` and `PROVE` need the **PicoGUS**; `GAP` needs the **Vibra**. Doing
+the PicoGUS work first keeps it to one card swap.
+
+| | Swap / boot | Run |
 |---|---|---|
 | 1.0 | CF to laptop | populate |
-| 1.1 | CF to box | `QA 4` then **`RB`** |
-| 1.2 | -- | pull logs *laptop* -- **stop and check** |
-| 1.3 | -- | `GAP` |
-| 1.4 | sound -> PicoGUS | `EAR` (listen) |
-| 1.5 | -- | `PROVE` |
+| 1.1 | **PicoGUS** in, CF to box, boot menu **2** | `QA 4` then **`RB`** |
+| 1.2 | -- | pull logs *laptop* -- **stop, send them** |
+| 1.3 | -- | `EAR` (listen) |
+| 1.4 | -- | `PROVE` |
+| 1.5 | fit **Vibra**, boot menu **5** (VIBRA) | `GAP` |
 | 1.6 | -- | pull logs *laptop* |
 
-**`RB` runs first and 1.2 is a real stop.** It decides whether the ~90 banked
-round-1 cells still compare against this binary. Four cells:
+**1.2 is a real stop.** `RB` decides whether the ~90 banked round-1 cells still
+compare against this binary. Four cells:
 
 | Cell | Catches |
 |---|---|
@@ -45,12 +48,11 @@ round-1 cells still compare against this binary. Four cells:
 | `R5` AdLib | the music-timer path, which `R4` cannot see |
 | `R3` Organya | the re-rendered PCM cache, which nothing else exercises |
 
-Send me those logs before anything else. If `R4` agrees with round-1's `5C4`
-(17.39 per-loop) within the noise floor, everything carries forward. If
-it does not, the rest of the round is measuring something new and we need to
-know that first.
+If `R4` matches round-1's `5C4` (17.39 per-loop) within the noise floor,
+everything carries forward. If not, the rest of the round is measuring
+something new and that has to be understood first.
 
-`GAP` not `GAP PG` -- no PicoGUS in the box until 1.4.
+`GAP` at 1.5, not `GAP PG` -- the Vibra is in the box by then.
 
 ---
 
@@ -65,7 +67,7 @@ Two independent questions. A correct picture does **not** mean a usable card.
 
 | | Swap | Run |
 |---|---|---|
-| 2.1 | video -> Mach64, ViRGE out | -- |
+| 2.1 | Mach64 in, ViRGE out, boot menu **5** | -- |
 | 2.2 | -- | `QA 4` then `VIDM 4` |
 | 2.3 | -- | pull logs *laptop* |
 | 2.4 | only if stalls persist | `VIDMK 4` -- same cells, `VBLANK_BOUND=0` |
@@ -98,7 +100,7 @@ rather than as one contiguous blast.
 
 | | Swap | Run |
 |---|---|---|
-| 3.1 | CPU -> DX2-66, sound -> Vibra | `QA 3` then `GAP` |
+| 3.1 | CPU -> DX2-66, **Vibra**, menu **5** | `QA 3` then `GAP` |
 | 3.2 | -- | pull logs *laptop* |
 
 ---
@@ -158,26 +160,20 @@ Labels: `r2-gap-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-vidm-dx250`,
 
 ---
 
-## Payload -- NOT BUILT YET
+## Payload -- BUILT 2026-08-12
 
-The populate command above still fetches the **round-1** payload. Do not run
-Part 1 until this is done; `RB` would compare round 1 against itself.
+| | |
+|---|---|
+| Binary | `fe44805fb603` -- letterbox `0296` present |
+| Build fingerprint | `1f79ce20e4ee` |
+| Reel | `4118561edf26`, 1956 B |
+| Organya cache | both tiers, keyed `1f79ce20e4ee` |
+| MIDI sets | current `loop_reps=1` set |
+| `ROUND2.OK` | written -- `RB` is enabled |
 
-| | Step | State |
-|---|---|---|
-| 1 | binary with `0296` letterbox | built, **stamp wrong** -- see below |
-| 2 | `make convert-music` | done (rebuilt at the converter fix) |
-| 3 | Organya cache, both tiers | rendered, `READY.OK` not yet written |
-| 4 | repack tarball | not started |
-| 5 | `EXP_DOSKUTSU_SHA` + `TARBALL` | not updated |
+Verified end to end against a mock card, reading every value back out of the
+packed tarball rather than staging.
 
-**Open issue.** The binary contains the letterbox code but is stamped
-`ff96af07db07`, the fingerprint of the *pre-0296* patch set; a fresh `make`
-computes `1f79ce20e4ee`. A stale `-D` in the CMake cache. It works only because
-the Organya cache carries the same wrong stamp, so the two agree. A clean
-rebuild fixes the stamp and invalidates the cache, costing a rebuild plus both
-tier renders, about 25 minutes unattended.
-
-Shipping as-is means every round-2 log reports a build sha belonging to a
-different patch set -- in the round where `BINARY.NFO` and `ROUND2.OK` were
-added specifically to make provenance checkable.
+**Do not rebuild the engine without re-rendering the Organya cache.** The cache
+is keyed to this exact binary; a rebuild changes the fingerprint and every
+Organya cell then cold-renders on the bench, which looks like a hang.
