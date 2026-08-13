@@ -76,21 +76,29 @@ observation left in the round.
 **The Shack is the LAST map change, ~87 s into a 103 s cell** -- a small hut
 interior, roughly 15 seconds before the cell ends. It is on screen for 6-8 s.
 
-For `E4` (OPL3) and `E3` (Organya), note one of:
+**Answered on DX2-50, 2026-08-13.** The expected pattern is now:
 
-| | |
-|---|---|
-| music for the whole visit | -- |
-| music starts late, then plays | how many seconds late |
-| silence the entire visit | -- |
+| Cell | Backend | Expected |
+|---|---|---|
+| 1 `E4` | OPL3 (MIDI) | a note or two, not distinctive music |
+| 2 `E3` | Organya (PCM) | correct music, sounds right |
+| 3 `EA` | AdLib (MIDI, OPL2) | silence |
 
-Both cells load the same song and both log an identical start, so the logs
-cannot separate these. Only the answer decides what gets fixed:
+The Shack song opens with 7.68 s of channel-10 percussion before its first
+melodic note, and the visit is 6-8 s, so the MIDI backends spend the whole
+scene on drums -- which both OPL paths render as one repeated noise burst.
+Organya plays the original samples and never touches GM channel mapping.
 
-- **Organya late, OPL3 fine** -> known and accepted (a 1.58 MB cache read eats
-  the first ~2 s). Becomes a documentation line, no code.
-- **OPL3 also silent** -> a real defect. The track has 2119 notes with the
-  first at t=0.00 s, so silence there is not the music being sparse.
+On the DX2-66 and POD-83 arms this only needs **confirming**, since it is a
+property of the arrangement rather than the CPU. Report just: same pattern, or
+not. A different pattern on another CPU would mean the explanation is wrong.
+
+One extra observation worth making on `E3` (Organya), which costs nothing and
+sharpens the fix: does its Shack music sound like **drums first, melody after**,
+or **full music straight away**? Drums-then-melody means the intro really is
+percussion-only and the defect is purely how the OPL paths render drums.
+Full music immediately means Organya's percussion carries the intro musically,
+and the GM drum mapping is throwing away pitch the original had.
 
 ---
 
