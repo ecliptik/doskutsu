@@ -84,7 +84,7 @@ no card comes back out; PicoGUS is fine if it is still fitted.
 | Step | Hardware | Boot | Type after boot | Time |
 |---|---|---|---|---|
 | E1 | **Mach64** + Vibra, **UniVBE set up for it** | 1 | `QA 1` -> `VIDM 1` | 40 min |
-| E2 | -- | -- | colour probe, below -- only if E1 colours still wrong | 10 min |
+| E2 | -- | -- | colour probe, below -- **same sitting**, only if E1 colours still wrong | 10 min |
 | E3 | -- | -- | TBD -- pending the Mach64 investigation | -- |
 | E4 | CF in *laptop* | -- | **logback `r2f-mach64`** -- send | 2 min |
 
@@ -113,6 +113,12 @@ tags -- so it runs after E1, not before.
 
 Colours right at 16bpp -> fault is in the indexed/palette chain.
 Still wrong -> fault is upstream, in the renderer path.
+
+**E1's fps is NOT comparable to Round A's 2.2.** That figure is DX2-50 +
+PicoGUS; E1 is POD-83 + Vibra. Different CPU and sound card, so any difference
+must not be credited to UniVBE. The colour and geometry questions are card-side
+and unaffected. A defect-2 delta would need the same CPU, which is not worth a
+separate trip.
 
 **Budget 40 min for E1.** Round A's Mach64 cell took 38 minutes at 2.2 fps.
 UniVBE may improve that a lot or not at all; assume not.
