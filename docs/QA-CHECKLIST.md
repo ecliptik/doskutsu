@@ -44,9 +44,21 @@ Re-recording would orphan the 89 round-1 cells.
 | Part | CPU | Video | Sound | Boot | Type after boot | Time |
 |---|---|---|---|---|---|---|
 | 1 | DX2-50 | ViRGE | **PicoGUS** | menu **2** | `QA 4` -> `RB` `EAR` `PROVE` | 40 min |
-| 2 | DX2-50 | **Mach64** | PicoGUS | menu **2** | `QA 4` -> `VIDM 4 PG` `VIDMK 4 PG` | 20 min |
-| 3 | DX2-50 | ViRGE | **Vibra** | menu **5** | `QA 4` -> `GAP` | 12 min |
-| 4 | **DX2-66** | ViRGE | Vibra | menu **5** | `QA 3` -> `GAP` | 12 min |
+| 2 | DX2-50 | **Mach64** | PicoGUS | menu **5** | `QA 4` -> `VIDM 4 PG` `VIDMK 4 PG` | 20 min |
+| 3 | DX2-50 | ViRGE | **Vibra** | menu **1** | `QA 4` -> `GAP` | 12 min |
+| 4 | **DX2-66** | ViRGE | Vibra | menu **1** | `QA 3` -> `GAP` | 12 min |
+
+**Check the sound path in the log, not the menu number.** The boot menu is
+edited from time to time, so the number is the least durable thing here. What
+must be true is the BLASTER the cell actually ran on:
+
+| Part | Expect in the cell's `SDL.LOG` |
+|---|---|
+| PicoGUS in SB mode (parts 1, 2) | `irq=7` |
+| Vibra (parts 3, 4) | `irq=5 dma=5` |
+
+Round 1 measured exactly that split, so a cell showing the wrong one is not
+comparable no matter which menu entry produced it.
 
 **`QA n` after EVERY boot.** It is not sticky -- it sets `QAM`, the tag every
 log is filed under, and a hardware swap means a power cycle. Miss it and the
@@ -121,7 +133,7 @@ Two independent questions. A correct picture does not mean a usable card.
 
 | | Swap | Run |
 |---|---|---|
-| 2.1 | **Mach64** in, ViRGE out, PicoGUS stays, menu **2** | `QA 4` then `VIDM 4 PG` |
+| 2.1 | **Mach64** in, ViRGE out, PicoGUS stays, menu **5** | `QA 4` then `VIDM 4 PG` |
 | 2.2 | -- | `VIDMK 4 PG` -- same cells, `VBLANK_BOUND=0` |
 | 2.3 | -- | pull logs *laptop* |
 
@@ -148,7 +160,7 @@ cannot overwrite its own baseline.
 
 | | Swap / boot | Run |
 |---|---|---|
-| 3.1 | **ViRGE** back in, Mach64 + PicoGUS out, fit **Vibra**, menu **5** | `QA 4` then `GAP` |
+| 3.1 | **ViRGE** back in, Mach64 out, menu **1** (Vibra) | `QA 4` then `GAP` |
 | 3.2 | -- | pull logs *laptop* |
 
 `GAP`, not `GAP PG` -- the PicoGUS is out by now.
@@ -159,7 +171,7 @@ cannot overwrite its own baseline.
 
 | | Swap | Run |
 |---|---|---|
-| 4.1 | CPU -> **DX2-66**, ViRGE + Vibra, menu **5** | `QA 3` then `GAP` |
+| 4.1 | CPU -> **DX2-66**, ViRGE + Vibra, menu **1** | `QA 3` then `GAP` |
 | 4.2 | -- | pull logs *laptop* |
 
 ---
