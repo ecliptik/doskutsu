@@ -2,78 +2,60 @@
 
 `QA n` after every boot: POD-83 = 1, Am5x86 = 2, DX2-66 = 3, DX2-50 = 4.
 Every sweep waits for a **keypress** at its banner, then runs unattended.
-Pull logs after every sweep -- never reuse a label.
+One logback per CPU round, at the end. Never reuse a label.
 
 ---
 
 ## Round A -- 486DX2-50 (`QA 4`)
 
-| Step | Hardware | Boot | Type after boot | Then pull | Time |
-|---|---|---|---|---|---|
-| A0 | CF in *laptop* | -- | populate | -- | 5 min |
-| A1 | ViRGE + PicoGUS | 2 | `QA 4` -> `RB` | `r2f-rb-dx250` **-- send** | 12 min |
-| A2 | -- | -- | `EAR` | `r2f-ear-dx250` | 9 min |
-| A3 | -- | -- | `PROVE` | `r2f-prove-dx250` | 18 min |
-| A4 | **Mach64** + PicoGUS | 5 | `QA 4` -> `VIDM 4 PG` `VIDMK 4 PG` | `r2f-vidm-dx250` | 20 min |
-| A5 | ViRGE + **Vibra** | 1 | `QA 4` -> `GAP` | `r2f-gap-dx250` | 12 min |
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| A0 | CF in *laptop* | -- | populate | 5 min |
+| A1 | ViRGE + PicoGUS | 2 | `QA 4` -> `RB` `EAR` `PROVE` | 40 min |
+| A2 | **Mach64** + PicoGUS | 5 | `QA 4` -> `VIDM 4 PG` `VIDMK 4 PG` | 20 min |
+| A3 | ViRGE + **Vibra** | 1 | `QA 4` -> `GAP` | 12 min |
+| A4 | CF in *laptop* | -- | **logback `r2f-dx250`** -- send | 2 min |
 
 ## Round B -- 486DX2-66 (`QA 3`)
 
-| Step | Hardware | Boot | Type after boot | Then pull | Time |
-|---|---|---|---|---|---|
-| B1 | ViRGE + PicoGUS | 2 | `QA 3` -> `RB` | `r2f-rb-dx266` | 12 min |
-| B2 | -- | -- | `EAR` | `r2f-ear-dx266` | 9 min |
-| B3 | -- | -- | `PROVE` | `r2f-prove-dx266` | 18 min |
-| B4 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP` | `r2f-gap-dx266` | 12 min |
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| B1 | ViRGE + PicoGUS | 2 | `QA 3` -> `RB` `EAR` `PROVE` | 40 min |
+| B2 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP` | 12 min |
+| B3 | CF in *laptop* | -- | **logback `r2f-dx266`** -- send | 2 min |
 
 ## Round C -- Am5x86-133 (`QA 2`)
 
-| Step | Hardware | Boot | Type after boot | Then pull | Time |
-|---|---|---|---|---|---|
-| C1 | ViRGE + PicoGUS | 2 | `QA 2` -> `RB` | `r2f-rb-am5x86` | 12 min |
-| C2 | -- | -- | `EAR` | `r2f-ear-am5x86` | 9 min |
-| C3 | -- | -- | `PROVE` | `r2f-prove-am5x86` | 18 min |
-| C4 | ViRGE + **Vibra** | 1 | `QA 2` -> `GAP` | `r2f-gap-am5x86` | 12 min |
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| C1 | ViRGE + PicoGUS | 2 | `QA 2` -> `RB` `EAR` `PROVE` | 40 min |
+| C2 | ViRGE + **Vibra** | 1 | `QA 2` -> `GAP` | 12 min |
+| C3 | CF in *laptop* | -- | **logback `r2f-am5x86`** -- send | 2 min |
 
 ## Round D -- Pentium OverDrive 83 (`QA 1`)
 
-| Step | Hardware | Boot | Type after boot | Then pull | Time |
-|---|---|---|---|---|---|
-| D1 | ViRGE + PicoGUS | 2 | `QA 1` -> `RB` | `r2f-rb-pod83` | 12 min |
-| D2 | -- | -- | `EAR` | `r2f-ear-pod83` | 9 min |
-| D3 | -- | -- | `PROVE` | `r2f-prove-pod83` | 18 min |
-| D4 | ViRGE + **Vibra** | 1 | `QA 1` -> `GAP` | `r2f-gap-pod83` | 12 min |
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| D1 | ViRGE + PicoGUS | 2 | `QA 1` -> `RB` `EAR` `PROVE` | 40 min |
+| D2 | ViRGE + **Vibra** | 1 | `QA 1` -> `GAP` | 12 min |
+| D3 | CF in *laptop* | -- | **logback `r2f-pod83`** -- send | 2 min |
 
-`--` in Hardware/Boot means no swap and no reboot; keep going.
+Logs accumulate on the card across a round -- tags are unique per sweep and
+prefixed per CPU, so one pull collects the lot. Do not re-populate mid-round;
+that clears `LOGS\`.
 
 ---
 
 ## Log commands -- *laptop*, CF mounted
 
-Fetch the script once per session, then one line per pull:
+Fetch the script once, then one line at the end of each round:
 
     scp claude:/tmp/logback-qa.sh /tmp/
 
-    bash /tmp/logback-qa.sh r2f-rb-dx250        <- A1  (send these)
-    bash /tmp/logback-qa.sh r2f-ear-dx250       <- A2
-    bash /tmp/logback-qa.sh r2f-prove-dx250     <- A3
-    bash /tmp/logback-qa.sh r2f-vidm-dx250      <- A4
-    bash /tmp/logback-qa.sh r2f-gap-dx250       <- A5
-
-    bash /tmp/logback-qa.sh r2f-rb-dx266        <- B1
-    bash /tmp/logback-qa.sh r2f-ear-dx266       <- B2
-    bash /tmp/logback-qa.sh r2f-prove-dx266     <- B3
-    bash /tmp/logback-qa.sh r2f-gap-dx266       <- B4
-
-    bash /tmp/logback-qa.sh r2f-rb-am5x86       <- C1
-    bash /tmp/logback-qa.sh r2f-ear-am5x86      <- C2
-    bash /tmp/logback-qa.sh r2f-prove-am5x86    <- C3
-    bash /tmp/logback-qa.sh r2f-gap-am5x86      <- C4
-
-    bash /tmp/logback-qa.sh r2f-rb-pod83        <- D1
-    bash /tmp/logback-qa.sh r2f-ear-pod83       <- D2
-    bash /tmp/logback-qa.sh r2f-prove-pod83     <- D3
-    bash /tmp/logback-qa.sh r2f-gap-pod83       <- D4
+    bash /tmp/logback-qa.sh r2f-dx250      <- end of Round A
+    bash /tmp/logback-qa.sh r2f-dx266      <- end of Round B
+    bash /tmp/logback-qa.sh r2f-am5x86     <- end of Round C
+    bash /tmp/logback-qa.sh r2f-pod83      <- end of Round D
 
 Populate (once, at A0):
 
