@@ -4,34 +4,20 @@
 Every sweep waits for a **keypress** at its banner, then runs unattended.
 One logback per CPU round, at the end. Never reuse a label.
 
+**After every video card swap, re-set-up UniVBE and watch its boot line** --
+it names the chipset it took over. A card on its own BIOS is not comparable to
+round 1 and may not boot.
+
 ---
 
-## Round A -- 486DX2-50 (`QA 4`)
+## Round A -- 486DX2-50 (`QA 4`) -- DONE
 
 | Step | Hardware | Boot | Type after boot | Time |
 |---|---|---|---|---|
 | A0 | CF in *laptop* | -- | populate | 5 min |
 | A1 | ViRGE + PicoGUS | 2 | `QA 4` -> `RB` `EAR` `PROVE` | 40 min |
-| A2 | **Mach64** + PicoGUS | 5 | `QA 4` -> `VIDM 4 PG` `VIDMK 4 PG` | 20 min |
-| A3 | ViRGE + **Vibra** | 1 | `QA 4` -> `GAP` | 12 min |
-| A4 | CF in *laptop* | -- | **logback `r2f-dx250`** -- send | 2 min |
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-dx250
-
-**Mach64 colour probe -- run at A2, BEFORE the normal `VIDM`.** By eye only;
-it overwrites the same log tags, so the real cells must run after it.
-
-    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0
-    VIDM 4 PG                                 <- look at the colours, no logs kept
-    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=     <- REQUIRED, see below
-    VIDM 4 PG                                 <- the real cells
-    VIDMK 4 PG
-
-Colours right at 16bpp -> fault is in the indexed/palette chain.
-Still wrong -> fault is upstream, in the renderer path.
-The empty `SET` is not optional: `CLRENV` does not clear this var, so it leaks
-into every later sweep in the same boot and would put `GAP` at 16bpp silently.
-
+| A2 | ViRGE + **Vibra** | 1 | `QA 4` -> `GAP` | 12 min |
+| A3 | CF in *laptop* | -- | logback `r2f-dx250` | 2 min |
 
 ## Round B -- 486DX2-66 (`QA 3`)
 
@@ -43,7 +29,6 @@ into every later sweep in the same boot and would put `GAP` at 16bpp silently.
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-dx266
 
-
 ## Round C -- Am5x86-133 (`QA 2`)
 
 | Step | Hardware | Boot | Type after boot | Time |
@@ -53,7 +38,6 @@ into every later sweep in the same boot and would put `GAP` at 16bpp silently.
 | C3 | CF in *laptop* | -- | **logback `r2f-am5x86`** -- send | 2 min |
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-am5x86
-
 
 ## Round D -- Pentium OverDrive 83 (`QA 1`)
 
@@ -65,70 +49,14 @@ into every later sweep in the same boot and would put `GAP` at 16bpp silently.
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-pod83
 
-
-Logs accumulate on the card across a round -- tags are unique per sweep and
-prefixed per CPU, so one pull collects the lot. Do not re-populate mid-round;
-that clears `LOGS\`.
+Logs accumulate on the card across a round; one pull collects the lot.
+Do not re-populate mid-round -- that clears `LOGS\`.
 
 ---
 
 ## Populate -- *laptop*, once, at A0
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
-
-## Round E -- Mach64 follow-up (PROVISIONAL -- do not run yet)
-
-Runs last, on whatever the POD-83 round leaves in the box. Vibra preferred so
-no card comes back out; PicoGUS is fine if it is still fitted.
-
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| E1 | **Mach64** + Vibra, **UniVBE set up for it** | 1 | `QA 1` -> `VIDM 1` | 40 min |
-| E2 | -- | -- | colour probe, below -- **same sitting**, only if E1 colours still wrong | 10 min |
-| E3 | -- | -- | TBD -- pending the Mach64 investigation | -- |
-| E4 | CF in *laptop* | -- | **logback `r2f-mach64`** -- send | 2 min |
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-mach64
-
-**Round A's Mach64 cell ran with the card's own VBE 2.0 BIOS answering**
-(`oem_string='ATI MACH64'`, VBE 2.0, 22 modes) even though UniVBE was set up
-for it. So E1's first job is to establish which of these is true:
-
-| | Then |
-|---|---|
-| UniVBE did not engage that boot | E1 gets 512x384 and possibly correct colours, free |
-| UniVBE cannot drive the Mach64-CT | 640x480 IS the ceiling, 2.2 fps is real, Path B closes |
-
-**Check it at the boot banner before spending 40 minutes:** UniVBE prints the
-chipset it detected. If it declines the Mach64, stop -- run nothing, report
-that, and the Mach64 lane is finished as a hardware verdict rather than a bug.
-Otherwise confirm `oem_string='Universal VESA VBE 6.70'` in the E1 log.
-
-The colour probe at E2 is by eye only, and it overwrites the real cells' log
-tags -- so it runs after E1, not before.
-
-    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0
-    VIDM 1 PG                                 <- drop PG on a Vibra
-    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=     <- REQUIRED, CLRENV does not clear it
-
-Colours right at 16bpp -> fault is in the indexed/palette chain.
-Still wrong -> fault is upstream, in the renderer path.
-
-**E1's fps is NOT comparable to Round A's 2.2.** That figure is DX2-50 +
-PicoGUS; E1 is POD-83 + Vibra. Different CPU and sound card, so any difference
-must not be credited to UniVBE. The colour and geometry questions are card-side
-and unaffected. A defect-2 delta would need the same CPU, which is not worth a
-separate trip.
-
-**Budget 40 min for E1.** Round A's Mach64 cell took 38 minutes at 2.2 fps.
-UniVBE may improve that a lot or not at all; assume not.
-
-Known from Round A, provisional pending E1: mode `0x0101 640x480`, letterbox
-correct at offset 160,120, 1782 of 1782 drawcalls on the software slow path
-against 0 on the ViRGE, flush 23x the ViRGE's for the same 76800 bytes.
-`VIDMK` produced no A/B -- both cells died on SB detection, not video.
-
----
 
 ## Sweeps
 
@@ -138,16 +66,13 @@ against 0 on the ViRGE, flush 23x the ViRGE's for the same 76800 bytes.
 | `EAR` | 3 | ~9 min | ViRGE + PicoGUS + **ears** |
 | `PROVE` | 6 | ~18 min | ViRGE + PicoGUS |
 | `GAP` | 4 | ~12 min | ViRGE + Vibra |
-| `VIDM 4 PG` | 2 | ~10 min | Mach64 + PicoGUS |
-| `VIDMK 4 PG` | 2 | ~10 min | Mach64 + PicoGUS |
 
 `GAP` is slow on purpose -- 2 of its 4 cells are Organya-HQ. Only `X0` is fast.
-Mach64: UniVBE, never M64VBE.
 
 ## `EAR` -- the only sweep needing ears
 
-Shack = last map change, ~87 s in, on screen 6-8 s. Already confirmed on
-DX2-50; on the other CPUs just report same or different.
+Shack = last map change, ~87 s in, on screen 6-8 s. Confirmed on DX2-50; on the
+other CPUs just report same or different.
 
 | Cell | Backend | Expected |
 |---|---|---|
@@ -190,3 +115,31 @@ DX2-50; on the other CPUs just report same or different.
 | Reel | `4118561edf26`, 1956 B |
 | Saves | `32529e291e0f`, map 20 + Polar Star |
 | Sound witness | PicoGUS `irq=7`, Vibra `irq=5 dma=5` |
+| Video witness | `oem_string='Universal VESA VBE 6.70'` |
+
+---
+
+# Mach64 -- LAST, after every round is done
+
+Mach64 in, ViRGE out. Keep whatever sound the POD-83 round left in the box.
+
+| Step | Do | Time |
+|---|---|---|
+| M1 | Fit Mach64, set up UniVBE for it, boot | -- |
+| M2 | **Does UniVBE take the Mach64?** If it declines -- STOP, report, done | -- |
+| M3 | `QA 1` then `VIDM 1` (add `PG` only if the PicoGUS is in) | 40 min |
+| M4 | Colours still wrong by eye? run the probe below, same sitting | 10 min |
+| M5 | logback `r2f-mach64` -- send | 2 min |
+
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-mach64
+
+Colour probe -- by eye, after M3. The empty `SET` is required; `CLRENV` does
+not clear this one and it would leak into anything run afterwards.
+
+    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0
+    VIDM 1
+    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=
+
+- Budget 40 min per cell -- it ran at 2.2 fps last time.
+- Its fps is not comparable to Round A's Mach64 number (different CPU + sound).
+- UniVBE, never M64VBE.
