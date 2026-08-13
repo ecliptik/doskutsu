@@ -90,11 +90,19 @@ no card comes back out; PicoGUS is fine if it is still fitted.
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-mach64
 
-**Round A's Mach64 cells ran on the card's own VBE 2.0 BIOS, not UniVBE**
-(`oem_string='ATI MACH64'`, 22 modes). Everything measured there is provisional
-because of it -- the 640x480 mode, the 2.2 fps, and probably the colours. E1 is
-that cell re-run properly; it may fix the colours and drop the surface to
-512x384 with no code change at all.
+**Round A's Mach64 cell ran with the card's own VBE 2.0 BIOS answering**
+(`oem_string='ATI MACH64'`, VBE 2.0, 22 modes) even though UniVBE was set up
+for it. So E1's first job is to establish which of these is true:
+
+| | Then |
+|---|---|
+| UniVBE did not engage that boot | E1 gets 512x384 and possibly correct colours, free |
+| UniVBE cannot drive the Mach64-CT | 640x480 IS the ceiling, 2.2 fps is real, Path B closes |
+
+**Check it at the boot banner before spending 40 minutes:** UniVBE prints the
+chipset it detected. If it declines the Mach64, stop -- run nothing, report
+that, and the Mach64 lane is finished as a hardware verdict rather than a bug.
+Otherwise confirm `oem_string='Universal VESA VBE 6.70'` in the E1 log.
 
 The colour probe at E2 is by eye only, and it overwrites the real cells' log
 tags -- so it runs after E1, not before.
