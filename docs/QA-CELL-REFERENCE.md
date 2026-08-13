@@ -67,6 +67,14 @@ neighbouring `G17` proves the DreamBlaster is present and working. Reading it
 as an auto-detect result is a mistake; testing detection requires a
 SETUP-generated CFG.
 
+Organya-HQ (22050 stereo) costs about a quarter of the frame rate, and it does
+so on the reference machine, not only on the 486s: POD-83 measures 27.20
+per-loop on `G111` against 20.41 on `G112`, a 25% drop, with load-stall
+overhead rising 27 s to 55 s. The Am5x86 pair agrees (27.13 -> 20.13). The
+486-class HQ figures are not quotable -- `5112` scored higher than `6112`,
+which cannot be true of identical work, and both are excluded from round 1
+pending a re-measure.
+
 ---
 
 ## The CPU argument
