@@ -20,9 +20,9 @@ set -e
 # ============================================================================
 # CONFIG
 # ============================================================================
-TARBALL="doskutsu-cf-2026-08-10-qa-v170-09e449c5a81d.tar.gz"
+TARBALL="doskutsu-cf-2026-08-12-qa-r2-fe44805fb603.tar.gz"
 
-EXP_DOSKUTSU_SHA="09e449c5a81ddbdc405c7fc07c0964685db8e1c5925edf3eb9086fb97e35cc42"
+EXP_DOSKUTSU_SHA="fe44805fb60375f7c773c92fa28e1164739f0f2391fcc81e9232e40b95ac7898"
 EXP_SETUP_SHA="723d6991b30308083daadcc8b35ca972cff1bb3604e7fec3f4628b2c0acb9ba3"
 EXP_SETUPBAT_SHA="ee9140aac514abe1d6eaca9d3c08817f1599201f59916b145c904b5c3ed18741"
 EXP_CWSDPMI_SHA="2de899fecaa90632b8b9bdfc0305cb0375e59ae252c37e32d06c1ed3f98a8f44"
@@ -116,10 +116,10 @@ fi
 echo "[5/8] cache-key + kit presence sanity"
 if [ -f "${CF_GAME_DIR}/CACHE/11025_1/READY.OK" ]; then
   key=$(cat "${CF_GAME_DIR}/CACHE/11025_1/READY.OK" 2>/dev/null | tr -d '\r\n')
-  if [ "$key" = "f8d446b4b0e0" ]; then
-    echo "  PASS: Organya 11025 cache keyed f8d446b4b0e0 (hits on aef02e5c)"
+  if [ "$key" = "1f79ce20e4ee" ]; then
+    echo "  PASS: Organya 11025 cache keyed 1f79ce20e4ee (hits on aef02e5c)"
   else
-    echo "  WARN: cache key '${key}' != f8d446b4b0e0 -- Organya cells may cold-render"
+    echo "  WARN: cache key '${key}' != 1f79ce20e4ee -- Organya cells may cold-render"
   fi
 else
   echo "  WARN: no CACHE/11025_1/READY.OK on CF -- Organya cells will cold-render"
@@ -178,6 +178,25 @@ else
 fi
 printf 'HQCACHE=%s\n' "${HQ_STATE}" > "${QA_DIR}/KIT_STATUS"
 echo "  wrote ${QA_DIR}/KIT_STATUS (HQCACHE=${HQ_STATE})"
+
+echo "[5a/8] back up save files before any purge"
+# The benchmark reel opens Load Game and reads profile3.dat / profile5.dat.
+# Deleting those desyncs the whole route, and the purge below once listed them
+# by name. Copy anything save-shaped aside first, unconditionally, so a purge
+# bug can never be unrecoverable again.
+_sv=0
+for _f in "${CF_GAME_DIR}"/[Pp][Rr][Oo][Ff][Ii][Ll][Ee]*.[Dd][Aa][Tt]; do
+  [ -e "$_f" ] || continue
+  mkdir -p "${STAGING}/saves-backup"
+  cp -p "$_f" "${STAGING}/saves-backup/" && _sv=$((_sv+1))
+done
+if [ "$_sv" -gt 0 ]; then
+  echo "  backed up ${_sv} save file(s) -> ${STAGING}/saves-backup/"
+else
+  echo "  WARNING: no profile*.dat on the CF."
+  echo "           The benchmark reel loads a SAVE (profile3/profile5) and enters"
+  echo "           map 20. Without them the reel desyncs and every cell is void."
+fi
 
 echo "[5b/8] purge accumulated iter debris (superseded binaries, retired probes)"
 # ~141 entries that no current sweep references: superseded game binaries at
@@ -292,8 +311,6 @@ QA_STALE="
   PLAYG44.BAT
   PLAYGUS.BAT
   PRECACHE.BAT
-  PROFILE3.DAT
-  PROFILE5.DAT
   PSPK0.BAT
   QA281.TAS
   QA282.TAS
