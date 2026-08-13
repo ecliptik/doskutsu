@@ -1,187 +1,181 @@
-# QA checklist -- round 2
+# QA checklist -- round 2, full set
 
 Detail lives in `docs/QA-RUN-SHEET.md` and `tests/qa/README.md`.
 *laptop* = run on the laptop. Everything else is typed on the DOS box.
 
 CPU number for `QA n`: POD-83 = 1, Am5x86 = 2, DX2-66 = 3, DX2-50 = 4.
 
+**Every sweep waits for a keypress at its banner.** It prints the cell list,
+then `PAUSE`. Nothing runs until a key is pressed. Walking away at that point
+produces a `.NFO` manifest, zero cell logs, and a round that looks like it ran.
+After the keypress the sweep is unattended to the end -- except `EAR`.
+
 **S3 ViRGE in every part except the Mach64 lane.** The video card is worth
 ~1 fps, so it is part of the configuration, not a detail. Round 1's DX2-50
-OPL3 cell measured 17.39 on the ViRGE and 16.90 on the Cirrus. Run `RB` on a
-Cirrus and it reads as a binary regression that is not there.
+OPL3 cell measured 17.39 on the ViRGE and 16.90 on the Cirrus.
 
-**Sound card rule.** Sweeps use whatever SB is in the box. Add `PG` only
-when a PicoGUS is fitted -- `GAP PG`, `VIDM 4 PG`. On a Vibra use plain
-`GAP` / `VIDM 4`. Passing `PG` without a PicoGUS overwrites BLASTER with
-jumper values the Vibra cannot use.
+**Sound card rule.** Sweeps use whatever SB is in the box. Add `PG` only when a
+PicoGUS is fitted -- `GAP PG`, `VIDM 4 PG`. On a Vibra use plain `GAP` /
+`VIDM 4`. Passing `PG` without a PicoGUS overwrites BLASTER with jumper values
+the Vibra cannot use.
 
 ---
 
-## Save state -- read once before Part 1
+## Save state
 
-The reel does not start a new game. It opens Load Game and enters map 20 from
-a **save**, so `PROFILE3.DAT` and `PROFILE5.DAT` must be on the CF or every
-cell replays something else while looking completely normal.
+The reel does not start a new game. It opens Load Game, enters map 20 from a
+save, and fires the Polar Star throughout. Both slots must read
+**map 20 + weapon 2** or the round measures something else.
 
-The round-1 saves were destroyed by a populate. Rebuilt ones ship in the
-payload and are installed by the populate step; the installer no longer purges
-profiles and now backs up any it finds to `saves-backup/` first.
+An unarmed save reproduces the route perfectly and still ruins the numbers:
+bullets are drawn objects, so a run that fires nothing does ~6% less draw work
+per frame and beats the anchor for a reason that has nothing to do with the
+binary. The populate prints the state of both slots -- read those two lines
+before starting.
 
-| | |
-|---|---|
-| Reel | unchanged -- `4118561edf26`, the round-1 recording |
-| Saves | rebuilt, both slots at map 20 'Save Point' |
-| Re-record a reel? | **no** -- see below |
-
-**A new TAS is not needed.** A reel is a list of (tick, input); it replays
-against whatever state the save provides. Rebuilding the save restores the
-starting state the round-1 reel was recorded against, which is why the reel
-itself carries forward untouched. Re-recording would orphan all 89 round-1
-cells, because their route would no longer be the route being replayed.
-
-That holds **only if the rebuilt save reproduces the round-1 route.** It was
-checked before shipping by replaying the reel against it on the round-1 binary
-and diffing the stage sequence, which must be:
-
-    72 -> 20 -> 11 -> 17 -> 11 -> 15 -> 11 -> 19 -> 11 -> 14 -> 11
-
-`RB` at step 1.2 is where that gets confirmed on real hardware. If `R4` lands
-on the round-1 anchor, round 1 carries forward. If the route in the log is not
-the sequence above, stop -- the reel is replaying against the wrong state and
-no cell in the round means anything until that is settled.
+No new TAS is needed. A reel is a list of (tick, input) replayed against
+whatever the save provides, so restoring the state restores the run.
+Re-recording would orphan the 89 round-1 cells.
 
 ---
 
 ## Order
 
-| Part | Hardware | Time |
-|---|---|---|
-| 1 | DX2-50, ViRGE, PicoGUS -> Vibra | 50 min |
-| 2 | DX2-50, **Mach64**, Vibra | 20 min |
-| 3 | DX2-66, ViRGE, Vibra | 12 min |
+| Part | Hardware | Sweeps | Time |
+|---|---|---|---|
+| 1 | DX2-50, ViRGE, **PicoGUS** | `RB` `EAR` `PROVE` | 40 min |
+| 2 | DX2-50, ViRGE, **Vibra** | `GAP` | 12 min |
+| 3 | DX2-50, **Mach64**, Vibra | `VIDM` `VIDMK` | 20 min |
+| 4 | DX2-66, ViRGE, Vibra | `GAP` | 12 min |
+
+One PicoGUS fit, one Vibra fit, one Mach64 fit, one CPU swap.
 
 ---
 
-## Part 1 -- DX2-50 + S3 ViRGE
-
-`RB`, `EAR` and `PROVE` need the **PicoGUS**; `GAP` needs the **Vibra**. Doing
-the PicoGUS work first keeps it to one card swap.
+## Part 1 -- DX2-50 + ViRGE + PicoGUS
 
 | | Swap / boot | Run |
 |---|---|---|
 | 1.0 | CF to laptop | populate |
 | 1.1 | **ViRGE** + **PicoGUS**, CF to box, menu **2** | `QA 4` then **`RB`** |
 | 1.2 | -- | pull logs *laptop* -- **stop, send them** |
-| 1.3 | -- | `EAR` (listen) |
+| 1.3 | -- | **`EAR`** -- listen, see below |
 | 1.4 | -- | `PROVE` |
-| 1.5 | fit **Vibra**, boot menu **5** (VIBRA) | `GAP` |
-| 1.6 | -- | pull logs *laptop* |
+| 1.5 | -- | pull logs *laptop* |
 
-**1.2 is a real stop.** `RB` decides whether the ~90 banked round-1 cells still
-compare against this binary. Four cells:
+**1.2 is a real stop.** `RB` decides whether the ~89 banked round-1 cells still
+compare against this binary. It passed once already (`R4` 17.19, `R4B` 17.39
+against the 17.39 anchor, noise floor 0.21), so a repeat that lands in the same
+place confirms it; one that does not means something changed since.
 
-| Cell | Catches |
+### 1.3 `EAR` -- the only sweep that needs ears
+
+Three cells. The question is the Shack, and it is the single most useful
+observation left in the round.
+
+**The Shack is the LAST map change, ~87 s into a 103 s cell** -- a small hut
+interior, roughly 15 seconds before the cell ends. It is on screen for 6-8 s.
+
+For `E4` (OPL3) and `E3` (Organya), note one of:
+
+| | |
 |---|---|
-| `R4` OPL3 | control -- no music timer, isolates observer effect |
-| `R4B` | repeat of `R4` -- the noise floor, measured not inferred |
-| `R5` AdLib | the music-timer path, which `R4` cannot see |
-| `R3` Organya | the re-rendered PCM cache, which nothing else exercises |
+| music for the whole visit | -- |
+| music starts late, then plays | how many seconds late |
+| silence the entire visit | -- |
 
-If `R4` matches round-1's `5C4` (17.39 per-loop) within the noise floor,
-everything carries forward. If not, the rest of the round is measuring
-something new and that has to be understood first.
+Both cells load the same song and both log an identical start, so the logs
+cannot separate these. Only the answer decides what gets fixed:
 
-`GAP` at 1.5, not `GAP PG` -- the Vibra is in the box by then.
+- **Organya late, OPL3 fine** -> known and accepted (a 1.58 MB cache read eats
+  the first ~2 s). Becomes a documentation line, no code.
+- **OPL3 also silent** -> a real defect. The track has 2119 notes with the
+  first at t=0.00 s, so silence there is not the music being sparse.
 
 ---
 
-## Part 2 -- Mach64 verification
+## Part 2 -- DX2-50 + Vibra
+
+| | Swap / boot | Run |
+|---|---|---|
+| 2.1 | fit **Vibra**, boot menu **5** (VIBRA) | `QA 4` then `GAP` |
+| 2.2 | -- | pull logs *laptop* |
+
+`GAP`, not `GAP PG` -- the PicoGUS is out by now.
+
+---
+
+## Part 3 -- Mach64 verification
 
 **Use UniVBE, not M64VBE.** The card cannot do 320x240 -- the Mach64-CT has no
-double scanning -- so the engine now centres the 320x240 picture inside the
-512x384 surface (`patches/nxengine-evo/0296`). M64VBE additionally hangs
-SDL_Init. Boot any normal menu entry; entry 6 has no use.
+double scanning -- so the engine centres the 320x240 picture inside the 512x384
+surface (`patches/nxengine-evo/0296`). M64VBE additionally hangs SDL_Init.
 
-Two independent questions. A correct picture does **not** mean a usable card.
+Two independent questions. A correct picture does not mean a usable card.
 
 | | Swap | Run |
 |---|---|---|
-| 2.1 | Mach64 in, ViRGE out, boot menu **5** | -- |
-| 2.2 | -- | `QA 4` then `VIDM 4` |
-| 2.3 | -- | pull logs *laptop* |
-| 2.4 | only if stalls persist | `VIDMK 4` -- same cells, `VBLANK_BOUND=0` |
-| 2.5 | -- | pull logs *laptop* |
-| 2.6 | **ViRGE** back in | -- |
+| 3.1 | **Mach64** in, ViRGE out, boot menu **5** | `QA 4` then `VIDM 4` |
+| 3.2 | -- | `VIDMK 4` -- same cells, `VBLANK_BOUND=0` |
+| 3.3 | -- | pull logs *laptop* |
+| 3.4 | **ViRGE** back in | -- |
 
-**a) Does the picture land right?** Look at the screen. Expect the image
-centred with a black border, not in the corner. The log proves it engaged:
+**a) Does the picture land right?** Expect the image centred with a black
+border, not in the corner. The log proves it engaged:
 
     center-oversized: ENGAGED surface=...
     center-oversized: flush rect=320x240@96,72 bytes=76800
 
 Killswitch for an A/B: `SET SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0`.
 
-**b) Do the stalls survive?** Round 1 had **40% of frames over 300 ms** while
-the unstalled ones hit 20 ms -- 50 fps at 512x384. The letterbox does nothing
-for that; it is what decides whether the card is usable. Check the
-`inter_flip_ms` spread, then run 2.4 if they are still there.
-
-`VIDMK` tags `5C4MK` / `551MK` so the A/B cannot overwrite its own baseline.
-
-Expect the flush to be **logical-sized (76800 B), not surface-sized** -- the
-patch scopes it to the centred rect. Fewer bytes is certain; the exact
-millisecond gain is a bench question, because a sub-rect flush goes per-row
-rather than as one contiguous blast.
+**b) Do the stalls survive?** Round 1 had 40% of frames over 300 ms while the
+unstalled ones hit 20 ms. The letterbox does nothing for that; it is what
+decides whether the card is usable. `VIDMK` tags `5C4MK` / `551MK` so the A/B
+cannot overwrite its own baseline.
 
 ---
 
-## Part 3 -- DX2-66 + S3 ViRGE
+## Part 4 -- DX2-66 + ViRGE + Vibra
 
 | | Swap | Run |
 |---|---|---|
-| 3.1 | CPU -> DX2-66, **ViRGE** + **Vibra**, menu **5** | `QA 3` then `GAP` |
-| 3.2 | -- | pull logs *laptop* |
+| 4.1 | CPU -> **DX2-66**, ViRGE + Vibra, menu **5** | `QA 3` then `GAP` |
+| 4.2 | -- | pull logs *laptop* |
 
 ---
 
-## Pre-flight -- *laptop*, every time
+## Pre-flight -- *laptop*, every populate
 
-- [ ] `sha256sum /media/micheal/DOS/doskutsu/QA.TAS` starts `4118561edf26`
-- [ ] `ls /media/micheal/DOS/doskutsu/PROFILE[35].DAT` -- **both present**
-- [ ] `cat /media/micheal/DOS/doskutsu/BINARY.NFO` -- expected binary
-- [ ] `ls /media/micheal/DOS/doskutsu/CACHE/22050_2` exists
-- [ ] `LOGS/` empty
-- [ ] new logback label picked
-- [ ] right CPU and sound card; **S3 ViRGE** unless you are in Part 2
+Read these off the populate output; do not go hunting for them.
 
-Wrong reel:
-```
-scp claude:/tmp/QA-ROUND1.TAS claude:/tmp/fix-reel.sh /tmp/
-bash /tmp/fix-reel.sh
-```
+- [ ] `PROFILE3.DAT: map 20 'Save Point', weapon 2 -- benchmark state`
+- [ ] `PROFILE5.DAT:` same
+- [ ] `PASS: QA.TAS = benchmark reel (1956 B)`
+- [ ] `PASS: DOSKUTSU.EXE fe44805fb603`
+- [ ] `already staged and current (sha d7d1d01dbbd9)` or a re-fetch
+- [ ] right CPU and sound card; **S3 ViRGE** unless in Part 3
 
 ---
 
 ## Commands
 
-**The sweeps are the commands.** You type them at `C:\DOSKUTSU>` on the DOS
-box. `QA n` first, once per boot, to set which CPU the logs are filed under.
+The sweeps are the commands. `QA n` first, once per boot, sets which CPU the
+logs are filed under.
 
     C:
     CD \DOSKUTSU
     QA 4          <- 4 = DX2-50. Once per boot, before any sweep.
     RB            <- then the sweep name, on its own
+                  <- PRESS A KEY at the banner
 
 | Sweep | Cells | Time | Needs | What it is |
 |---|---|---|---|---|
 | `RB` | 4 | ~12 min | PicoGUS + ViRGE | re-baseline against round 1 |
-| `EAR` | 3 | ~9 min | PicoGUS + ViRGE + **ears** | the Shack music question |
+| `EAR` | 3 | ~9 min | PicoGUS + ViRGE + **ears** | the Shack question |
 | `PROVE` | 6 | ~18 min | PicoGUS + ViRGE | timebase fix A/B |
 | `GAP` | 4 | ~12 min | Vibra + ViRGE | four round-1 measurement gaps |
 | `VIDM 4` | 2 | ~10 min | Mach64 seated | letterbox + stalls |
 | `VIDMK 4` | 2 | ~10 min | Mach64 seated | same, `VBLANK_BOUND=0` |
-
-Each is unattended once started, except `EAR`. They end themselves.
 
 `VIDM`/`VIDMK` take the CPU number as an argument because they are video lanes;
 the others read it from `QA n`.
@@ -194,11 +188,12 @@ Populate -- *laptop*:
 Logs -- *laptop*, after each sweep:
 `scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh <label>`
 
-Labels: `r2-rb-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-gap-dx250`,
-`r2-vidm-dx250`, `r2-gap-dx266`. Never reuse one. Pull between sweeps.
+Labels -- never reuse one, the logback refuses to overwrite:
+`r2-rb-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-gap-dx250`,
+`r2-vidm-dx250`, `r2-gap-dx266`.
 
-Mach64 boot profile -- *laptop*, once, only for Part 2:
-`scp -r claude:/tmp/mach64kit /tmp/ && bash /tmp/mach64kit/install-mach64.sh`
+Pull between sweeps. Logs accumulate in `LOGS\`; the populate archives and
+clears them, so pull before re-populating.
 
 ---
 
@@ -208,10 +203,11 @@ Mach64 boot profile -- *laptop*, once, only for Part 2:
 |---|---|
 | `X0` / `P0` silent | correct -- that is the measurement |
 | keyboard dead in a cell | correct -- the reel drives it |
+| nothing happens after typing the sweep | the `PAUSE` -- press a key |
 | "no PicoGUS detected" | wrong sweep for the card in the box |
 | minutes on the title screen | HQ cache missing -- abort |
 | hangs at once | wrong reel -- check the sha |
-| reel wanders / route is not 72-20-11-... | saves missing or wrong -- abort, do not bank |
+| route is not `72 20 11 17 11 15 11 19 11 14 11` | wrong save state -- abort |
 
 ---
 
@@ -220,6 +216,7 @@ Mach64 boot profile -- *laptop*, once, only for Part 2:
 - anything run before commit `28218c0`
 - `RB` output from a card whose `BINARY.NFO` is not the round-2 build
 - round-1 `5112` / `6112`
+- the `r2-rb-dx250-noweapon` set -- unarmed save, inflated numbers
 
 ---
 
@@ -229,14 +226,13 @@ Mach64 boot profile -- *laptop*, once, only for Part 2:
 |---|---|
 | Binary | `fe44805fb603` -- letterbox `0296` present |
 | Build fingerprint | `1f79ce20e4ee` |
+| Payload tarball | `d7d1d01dbbd9` |
 | Reel | `4118561edf26`, 1956 B |
+| Saves | `32529e291e0f`, map 20 + Polar Star, both slots |
 | Organya cache | both tiers, keyed `1f79ce20e4ee` |
-| MIDI sets | current `loop_reps=1` set |
-| `ROUND2.OK` | written -- `RB` is enabled |
-
-Verified end to end against a mock card, reading every value back out of the
-packed tarball rather than staging.
+| MIDI sets | `loop_reps=1` set (`vivi.mid` 4558 events, was 11188) |
 
 **Do not rebuild the engine without re-rendering the Organya cache.** The cache
 is keyed to this exact binary; a rebuild changes the fingerprint and every
-Organya cell then cold-renders on the bench, which looks like a hang.
+Organya cell then cold-renders on the bench, which looks like a hang. It also
+voids the `RB` re-baseline, which costs another 12 minutes of bench time.
