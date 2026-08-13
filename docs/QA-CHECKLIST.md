@@ -124,19 +124,41 @@ bash /tmp/fix-reel.sh
 
 ## Commands
 
+**The sweeps are the commands.** You type them at `C:\DOSKUTSU>` on the DOS
+box. `QA n` first, once per boot, to set which CPU the logs are filed under.
+
+    C:
+    CD \DOSKUTSU
+    QA 4          <- 4 = DX2-50. Once per boot, before any sweep.
+    RB            <- then the sweep name, on its own
+
+| Sweep | Cells | Time | Needs | What it is |
+|---|---|---|---|---|
+| `RB` | 4 | ~12 min | PicoGUS | re-baseline against round 1 |
+| `EAR` | 3 | ~9 min | PicoGUS + **your ears** | the Shack music question |
+| `PROVE` | 6 | ~18 min | PicoGUS | timebase fix A/B |
+| `GAP` | 4 | ~12 min | Vibra | four round-1 measurement gaps |
+| `VIDM 4` | 2 | ~10 min | Mach64 seated | letterbox + stalls |
+| `VIDMK 4` | 2 | ~10 min | Mach64 seated | same, `VBLANK_BOUND=0` |
+
+Each is unattended once started, except `EAR`. They end themselves.
+
+`VIDM`/`VIDMK` take the CPU number as an argument because they are video lanes;
+the others read it from `QA n`.
+
+---
+
 Populate -- *laptop*:
 `scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh`
 
-Mach64 boot profile -- *laptop*, once:
-`scp -r claude:/tmp/mach64kit /tmp/ && bash /tmp/mach64kit/install-mach64.sh`
-
-Sweep -- DOS: `C:` / `CD \DOSKUTSU` / `QA n` / sweep name
-
-Logs -- *laptop*:
+Logs -- *laptop*, after each sweep:
 `scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh <label>`
 
-Labels: `r2-gap-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-vidm-dx250`,
-`r2-gap-dx266`. Never reuse one. Pull between sweeps.
+Labels: `r2-rb-dx250`, `r2-ear-dx250`, `r2-prove-dx250`, `r2-gap-dx250`,
+`r2-vidm-dx250`, `r2-gap-dx266`. Never reuse one. Pull between sweeps.
+
+Mach64 boot profile -- *laptop*, once, only for Part 2:
+`scp -r claude:/tmp/mach64kit /tmp/ && bash /tmp/mach64kit/install-mach64.sh`
 
 ---
 
