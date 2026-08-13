@@ -17,6 +17,41 @@ jumper values the Vibra cannot use.
 
 ---
 
+## Save state -- read once before Part 1
+
+The reel does not start a new game. It opens Load Game and enters map 20 from
+a **save**, so `PROFILE3.DAT` and `PROFILE5.DAT` must be on the CF or every
+cell replays something else while looking completely normal.
+
+The round-1 saves were destroyed by a populate. Rebuilt ones ship in the
+payload and are installed by the populate step; the installer no longer purges
+profiles and now backs up any it finds to `saves-backup/` first.
+
+| | |
+|---|---|
+| Reel | unchanged -- `4118561edf26`, the round-1 recording |
+| Saves | rebuilt, both slots at map 20 'Save Point' |
+| Re-record a reel? | **no** -- see below |
+
+**A new TAS is not needed.** A reel is a list of (tick, input); it replays
+against whatever state the save provides. Rebuilding the save restores the
+starting state the round-1 reel was recorded against, which is why the reel
+itself carries forward untouched. Re-recording would orphan all 89 round-1
+cells, because their route would no longer be the route being replayed.
+
+That holds **only if the rebuilt save reproduces the round-1 route.** It was
+checked before shipping by replaying the reel against it on the round-1 binary
+and diffing the stage sequence, which must be:
+
+    72 -> 20 -> 11 -> 17 -> 11 -> 15 -> 11 -> 19 -> 11 -> 14 -> 11
+
+`RB` at step 1.2 is where that gets confirmed on real hardware. If `R4` lands
+on the round-1 anchor, round 1 carries forward. If the route in the log is not
+the sequence above, stop -- the reel is replaying against the wrong state and
+no cell in the round means anything until that is settled.
+
+---
+
 ## Order
 
 | Part | Hardware | Time |
@@ -112,6 +147,7 @@ rather than as one contiguous blast.
 ## Pre-flight -- *laptop*, every time
 
 - [ ] `sha256sum /media/micheal/DOS/doskutsu/QA.TAS` starts `4118561edf26`
+- [ ] `ls /media/micheal/DOS/doskutsu/PROFILE[35].DAT` -- **both present**
 - [ ] `cat /media/micheal/DOS/doskutsu/BINARY.NFO` -- expected binary
 - [ ] `ls /media/micheal/DOS/doskutsu/CACHE/22050_2` exists
 - [ ] `LOGS/` empty
@@ -175,6 +211,7 @@ Mach64 boot profile -- *laptop*, once, only for Part 2:
 | "no PicoGUS detected" | wrong sweep for the card in the box |
 | minutes on the title screen | HQ cache missing -- abort |
 | hangs at once | wrong reel -- check the sha |
+| reel wanders / route is not 72-20-11-... | saves missing or wrong -- abort, do not bank |
 
 ---
 
