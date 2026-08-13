@@ -307,11 +307,17 @@ for _f in "${CF_GAME_DIR}"/[Pp][Rr][Oo][Ff][Ii][Ll][Ee][35].[Dd][Aa][Tt]; do
   fi
 done
 if [ "$_sv" -gt 0 ] && [ "$_ok20" -eq 0 ]; then
-  echo "  WARNING: the CF's saves are not at map 20, and the CF's saves win."
-  echo "           The reel will replay against them and the route will not be"
-  echo "           72 20 11 17 11 15 11 19 11 14 11. Delete them and re-run this"
-  echo "           script to install the shipped benchmark pair:"
-  echo "             rm -f ${CF_GAME_DIR}/PROFILE*.DAT"
+  echo "  WARNING: the saves on this CF are not benchmark state."
+  echo "           The reel will replay against them, the route will not be"
+  echo "           72 20 11 17 11 15 11 19 11 14 11, and the round is void."
+  if [ "${KEEP_SAVES:-0}" = "1" ]; then
+    echo "           KEEP_SAVES=1 kept them deliberately. Re-run without it to"
+    echo "           install the shipped benchmark pair."
+  else
+    echo "           This should not happen -- step [3/8] replaces non-benchmark"
+    echo "           saves with the shipped pair. Re-run; if it persists, the"
+    echo "           payload's saves are wrong, not the card's."
+  fi
 fi
 
 echo "[5b/8] purge accumulated iter debris (superseded binaries, retired probes)"
