@@ -18,6 +18,20 @@ One logback per CPU round, at the end. Never reuse a label.
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-dx250
 
+**Mach64 colour probe -- run at A2, BEFORE the normal `VIDM`.** By eye only;
+it overwrites the same log tags, so the real cells must run after it.
+
+    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0
+    VIDM 4 PG                                 <- look at the colours, no logs kept
+    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=     <- REQUIRED, see below
+    VIDM 4 PG                                 <- the real cells
+    VIDMK 4 PG
+
+Colours right at 16bpp -> fault is in the indexed/palette chain.
+Still wrong -> fault is upstream, in the renderer path.
+The empty `SET` is not optional: `CLRENV` does not clear this var, so it leaks
+into every later sweep in the same boot and would put `GAP` at 16bpp silently.
+
 
 ## Round B -- 486DX2-66 (`QA 3`)
 
