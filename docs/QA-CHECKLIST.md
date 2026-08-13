@@ -41,14 +41,23 @@ Re-recording would orphan the 89 round-1 cells.
 
 ## Order
 
-| Part | Hardware | Sweeps | Time |
-|---|---|---|---|
-| 1 | DX2-50, ViRGE, **PicoGUS** | `RB` `EAR` `PROVE` | 40 min |
-| 2 | DX2-50, ViRGE, **Vibra** | `GAP` | 12 min |
-| 3 | DX2-50, **Mach64**, Vibra | `VIDM` `VIDMK` | 20 min |
-| 4 | DX2-66, ViRGE, Vibra | `GAP` | 12 min |
+| Part | CPU | Video | Sound | Boot | Type after boot | Time |
+|---|---|---|---|---|---|---|
+| 1 | DX2-50 | ViRGE | **PicoGUS** | menu **2** | `QA 4` -> `RB` `EAR` `PROVE` | 40 min |
+| 2 | DX2-50 | **Mach64** | PicoGUS | menu **2** | `QA 4` -> `VIDM 4 PG` `VIDMK 4 PG` | 20 min |
+| 3 | DX2-50 | ViRGE | **Vibra** | menu **5** | `QA 4` -> `GAP` | 12 min |
+| 4 | **DX2-66** | ViRGE | Vibra | menu **5** | `QA 3` -> `GAP` | 12 min |
 
-One PicoGUS fit, one Vibra fit, one Mach64 fit, one CPU swap.
+**`QA n` after EVERY boot.** It is not sticky -- it sets `QAM`, the tag every
+log is filed under, and a hardware swap means a power cycle. Miss it and the
+sweep stops with `ERROR: machine not set`. Running several sweeps without
+rebooting in between needs it only once.
+
+The Mach64 lane keeps the PicoGUS so the sound card is not a second variable:
+round 1's video cells ran on it (`irq=7`), and Vibra-vs-PicoGUS is worth
+0.90-1.30 per-loop on its own -- more than the video difference being measured.
+
+One PicoGUS fit, one Mach64 swap, one Vibra fit, one CPU swap.
 
 ---
 
@@ -102,18 +111,7 @@ envelopes, queued as Tier 3.3c.
 
 ---
 
-## Part 2 -- DX2-50 + Vibra
-
-| | Swap / boot | Run |
-|---|---|---|
-| 2.1 | fit **Vibra**, boot menu **5** (VIBRA) | `QA 4` then `GAP` |
-| 2.2 | -- | pull logs *laptop* |
-
-`GAP`, not `GAP PG` -- the PicoGUS is out by now.
-
----
-
-## Part 3 -- Mach64 verification
+## Part 2 -- Mach64 verification (PicoGUS stays in)
 
 **Use UniVBE, not M64VBE.** The card cannot do 320x240 -- the Mach64-CT has no
 double scanning -- so the engine centres the 320x240 picture inside the 512x384
@@ -123,10 +121,13 @@ Two independent questions. A correct picture does not mean a usable card.
 
 | | Swap | Run |
 |---|---|---|
-| 3.1 | **Mach64** in, ViRGE out, boot menu **5** | `QA 4` then `VIDM 4` |
-| 3.2 | -- | `VIDMK 4` -- same cells, `VBLANK_BOUND=0` |
-| 3.3 | -- | pull logs *laptop* |
-| 3.4 | **ViRGE** back in | -- |
+| 2.1 | **Mach64** in, ViRGE out, PicoGUS stays, menu **2** | `QA 4` then `VIDM 4 PG` |
+| 2.2 | -- | `VIDMK 4 PG` -- same cells, `VBLANK_BOUND=0` |
+| 2.3 | -- | pull logs *laptop* |
+
+**`PG` is required on both.** The PicoGUS SB-mode switch is opt-in in each BAT;
+without it the lane runs on whatever BLASTER the boot menu set and the Mach64
+numbers stop comparing against round 1's video cells.
 
 **a) Does the picture land right?** Expect the image centred with a black
 border, not in the corner. The log proves it engaged:
@@ -140,6 +141,17 @@ Killswitch for an A/B: `SET SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0`.
 unstalled ones hit 20 ms. The letterbox does nothing for that; it is what
 decides whether the card is usable. `VIDMK` tags `5C4MK` / `551MK` so the A/B
 cannot overwrite its own baseline.
+
+---
+
+## Part 3 -- DX2-50 + ViRGE + Vibra
+
+| | Swap / boot | Run |
+|---|---|---|
+| 3.1 | **ViRGE** back in, Mach64 + PicoGUS out, fit **Vibra**, menu **5** | `QA 4` then `GAP` |
+| 3.2 | -- | pull logs *laptop* |
+
+`GAP`, not `GAP PG` -- the PicoGUS is out by now.
 
 ---
 
@@ -161,7 +173,7 @@ Read these off the populate output; do not go hunting for them.
 - [ ] `PASS: QA.TAS = benchmark reel (1956 B)`
 - [ ] `PASS: DOSKUTSU.EXE fe44805fb603`
 - [ ] `already staged and current (sha d7d1d01dbbd9)` or a re-fetch
-- [ ] right CPU and sound card; **S3 ViRGE** unless in Part 3
+- [ ] right CPU and sound card; **S3 ViRGE** unless in Part 2
 
 ---
 
@@ -176,14 +188,14 @@ logs are filed under.
     RB            <- then the sweep name, on its own
                   <- PRESS A KEY at the banner
 
-| Sweep | Cells | Time | Needs | What it is |
+| Sweep | Cells | Time | Hardware it needs | What it is |
 |---|---|---|---|---|
-| `RB` | 4 | ~12 min | PicoGUS + ViRGE | re-baseline against round 1 |
-| `EAR` | 3 | ~9 min | PicoGUS + ViRGE + **ears** | the Shack question |
-| `PROVE` | 6 | ~18 min | PicoGUS + ViRGE | timebase fix A/B |
-| `GAP` | 4 | ~12 min | Vibra + ViRGE | four round-1 measurement gaps |
-| `VIDM 4` | 2 | ~10 min | Mach64 seated | letterbox + stalls |
-| `VIDMK 4` | 2 | ~10 min | Mach64 seated | same, `VBLANK_BOUND=0` |
+| `RB` | 4 | ~12 min | DX2-50 + ViRGE + PicoGUS | re-baseline against round 1 |
+| `EAR` | 3 | ~9 min | DX2-50 + ViRGE + PicoGUS + **ears** | the Shack question |
+| `PROVE` | 6 | ~18 min | DX2-50 + ViRGE + PicoGUS | timebase fix A/B |
+| `GAP` | 4 | ~12 min | DX2-50 or DX2-66 + ViRGE + Vibra | four round-1 measurement gaps |
+| `VIDM 4 PG` | 2 | ~10 min | DX2-50 + **Mach64** + PicoGUS | letterbox + stalls |
+| `VIDMK 4 PG` | 2 | ~10 min | DX2-50 + **Mach64** + PicoGUS | same, `VBLANK_BOUND=0` |
 
 `VIDM`/`VIDMK` take the CPU number as an argument because they are video lanes;
 the others read it from `QA n`.
