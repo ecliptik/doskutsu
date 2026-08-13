@@ -5,6 +5,11 @@ Detail lives in `docs/QA-RUN-SHEET.md` and `tests/qa/README.md`.
 
 CPU number for `QA n`: POD-83 = 1, Am5x86 = 2, DX2-66 = 3, DX2-50 = 4.
 
+**S3 ViRGE in every part except the Mach64 lane.** The video card is worth
+~1 fps, so it is part of the configuration, not a detail. Round 1's DX2-50
+OPL3 cell measured 17.39 on the ViRGE and 16.90 on the Cirrus. Run `RB` on a
+Cirrus and it reads as a binary regression that is not there.
+
 **Sound card rule.** Sweeps use whatever SB is in the box. Add `PG` only
 when a PicoGUS is fitted -- `GAP PG`, `VIDM 4 PG`. On a Vibra use plain
 `GAP` / `VIDM 4`. Passing `PG` without a PicoGUS overwrites BLASTER with
@@ -16,14 +21,13 @@ jumper values the Vibra cannot use.
 
 | Part | Hardware | Time |
 |---|---|---|
-| 1 | DX2-50, ViRGE, Vibra -> PicoGUS | 45 min |
-| 2 | Mach64 verification | 20 min |
-| 3 | DX2-66, Vibra | 12 min |
-| 4 | blocked -- needs round-2 payload | -- |
+| 1 | DX2-50, ViRGE, PicoGUS -> Vibra | 50 min |
+| 2 | DX2-50, **Mach64**, Vibra | 20 min |
+| 3 | DX2-66, ViRGE, Vibra | 12 min |
 
 ---
 
-## Part 1 -- DX2-50
+## Part 1 -- DX2-50 + S3 ViRGE
 
 `RB`, `EAR` and `PROVE` need the **PicoGUS**; `GAP` needs the **Vibra**. Doing
 the PicoGUS work first keeps it to one card swap.
@@ -31,7 +35,7 @@ the PicoGUS work first keeps it to one card swap.
 | | Swap / boot | Run |
 |---|---|---|
 | 1.0 | CF to laptop | populate |
-| 1.1 | **PicoGUS** in, CF to box, boot menu **2** | `QA 4` then **`RB`** |
+| 1.1 | **ViRGE** + **PicoGUS**, CF to box, menu **2** | `QA 4` then **`RB`** |
 | 1.2 | -- | pull logs *laptop* -- **stop, send them** |
 | 1.3 | -- | `EAR` (listen) |
 | 1.4 | -- | `PROVE` |
@@ -72,7 +76,7 @@ Two independent questions. A correct picture does **not** mean a usable card.
 | 2.3 | -- | pull logs *laptop* |
 | 2.4 | only if stalls persist | `VIDMK 4` -- same cells, `VBLANK_BOUND=0` |
 | 2.5 | -- | pull logs *laptop* |
-| 2.6 | video -> ViRGE | -- |
+| 2.6 | **ViRGE** back in | -- |
 
 **a) Does the picture land right?** Look at the screen. Expect the image
 centred with a black border, not in the corner. The log proves it engaged:
@@ -96,11 +100,11 @@ rather than as one contiguous blast.
 
 ---
 
-## Part 3 -- DX2-66
+## Part 3 -- DX2-66 + S3 ViRGE
 
 | | Swap | Run |
 |---|---|---|
-| 3.1 | CPU -> DX2-66, **Vibra**, menu **5** | `QA 3` then `GAP` |
+| 3.1 | CPU -> DX2-66, **ViRGE** + **Vibra**, menu **5** | `QA 3` then `GAP` |
 | 3.2 | -- | pull logs *laptop* |
 
 ---
@@ -112,7 +116,7 @@ rather than as one contiguous blast.
 - [ ] `ls /media/micheal/DOS/doskutsu/CACHE/22050_2` exists
 - [ ] `LOGS/` empty
 - [ ] new logback label picked
-- [ ] right CPU, sound card, video card in the box
+- [ ] right CPU and sound card; **S3 ViRGE** unless you are in Part 2
 
 Wrong reel:
 ```
@@ -134,10 +138,10 @@ box. `QA n` first, once per boot, to set which CPU the logs are filed under.
 
 | Sweep | Cells | Time | Needs | What it is |
 |---|---|---|---|---|
-| `RB` | 4 | ~12 min | PicoGUS | re-baseline against round 1 |
-| `EAR` | 3 | ~9 min | PicoGUS + **your ears** | the Shack music question |
-| `PROVE` | 6 | ~18 min | PicoGUS | timebase fix A/B |
-| `GAP` | 4 | ~12 min | Vibra | four round-1 measurement gaps |
+| `RB` | 4 | ~12 min | PicoGUS + ViRGE | re-baseline against round 1 |
+| `EAR` | 3 | ~9 min | PicoGUS + ViRGE + **ears** | the Shack music question |
+| `PROVE` | 6 | ~18 min | PicoGUS + ViRGE | timebase fix A/B |
+| `GAP` | 4 | ~12 min | Vibra + ViRGE | four round-1 measurement gaps |
 | `VIDM 4` | 2 | ~10 min | Mach64 seated | letterbox + stalls |
 | `VIDMK 4` | 2 | ~10 min | Mach64 seated | same, `VBLANK_BOUND=0` |
 
