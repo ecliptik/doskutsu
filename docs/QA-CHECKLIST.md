@@ -76,6 +76,35 @@ that clears `LOGS\`.
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
 
+## Round E -- Mach64 follow-up (PROVISIONAL -- do not run yet)
+
+Runs last, on whatever the POD-83 round leaves in the box. Vibra preferred so
+no card comes back out; PicoGUS is fine if it is still fitted.
+
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| E1 | **Mach64** + Vibra | 1 | `QA 1` -> colour probe, below | 10 min |
+| E2 | -- | -- | TBD -- pending the Mach64 investigation | -- |
+| E3 | CF in *laptop* | -- | **logback `r2f-mach64`** -- send | 2 min |
+
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-mach64
+
+E1, the colour probe, never ran in Round A. By eye only; it overwrites the
+real cells' log tags, so run it first if E2 turns out to need them.
+
+    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0
+    VIDM 1 PG                                 <- drop PG on a Vibra
+    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=     <- REQUIRED, CLRENV does not clear it
+
+Colours right at 16bpp -> fault is in the indexed/palette chain.
+Still wrong -> fault is upstream, in the renderer path.
+
+**Known from Round A, so E2 does not need to re-establish it:** the card sets
+`0x0101 640x480` (not 512x384), the letterbox works at offset 160,120, 1782 of
+1782 drawcalls fall to the software slow path against 0 on the ViRGE, and the
+result is 2.2 fps -- 38 minutes for one cell. Budget for that if E2 runs a full
+cell. `VIDMK` produced no A/B: both cells died on SB detection, not video.
+
 ---
 
 ## Sweeps
