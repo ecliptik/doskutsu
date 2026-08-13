@@ -93,12 +93,12 @@ On the DX2-66 and POD-83 arms this only needs **confirming**, since it is a
 property of the arrangement rather than the CPU. Report just: same pattern, or
 not. A different pattern on another CPU would mean the explanation is wrong.
 
-One extra observation worth making on `E3` (Organya), which costs nothing and
-sharpens the fix: does its Shack music sound like **drums first, melody after**,
-or **full music straight away**? Drums-then-melody means the intro really is
-percussion-only and the defect is purely how the OPL paths render drums.
-Full music immediately means Organya's percussion carries the intro musically,
-and the GM drum mapping is throwing away pitch the original had.
+Root cause is settled, so nothing further is needed by ear beyond the pattern
+above. `vivi.org` opens with four percussion tracks from t=0.00 s and no
+melodic note until 7.68 s; Organya renders those four as distinct pitched
+samples (the "full music"), while both OPL paths collapse them into one shared
+noise-burst patch. The drums are the music. Fix is five or six FM drum
+envelopes, queued as Tier 3.3c.
 
 ---
 
