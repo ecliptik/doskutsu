@@ -77,6 +77,20 @@ if [ -f "${CF_GAME_DIR}/QA.TAS" ]; then
     echo "  backup also kept at ${OPTAKE}"
   fi
 fi
+# Same hazard, same shape, for the benchmark saves. The payload carries
+# PROFILE3/5.DAT so a blank card gets a working reel state, but extracting them
+# over a card that already has saves DESTROYS whatever is there -- the operator's
+# own progress, or a save the reel was recorded against. The card's copy always
+# wins; the shipped pair only fills in when the card has none.
+SAVESTASH=""
+for _f in "${CF_GAME_DIR}"/[Pp][Rr][Oo][Ff][Ii][Ll][Ee]*.[Dd][Aa][Tt]; do
+  [ -e "$_f" ] || continue
+  if [ -z "${SAVESTASH}" ]; then
+    SAVESTASH=$(mktemp -d "${TMPDIR:-/tmp}/qa-savestash.XXXXXX")
+    echo "  saves already on CF -- stashing them across the extract"
+  fi
+  cp -p "$_f" "${SAVESTASH}/"
+done
 # Extract everything EXCEPT the big Organya-HQ (22050 stereo) cache -- that is
 # gated on CF free space in step [5] so a tight card never ENOSPCs mid-extract.
 tar -xzf "${STAGING}/${TARBALL}" -C "${CF_MOUNT}/" \
@@ -85,6 +99,13 @@ echo "  PASS: extracted DOSKUTSU/ into ${CF_GAME_DIR} (HQ cache deferred)"
 if [ -n "${OPTAKE}" ]; then
   cp "${OPTAKE}" "${CF_GAME_DIR}/QA.TAS"
   echo "  restored it post-extract; step [5d] decides which reel ships"
+fi
+if [ -n "${SAVESTASH}" ]; then
+  cp -p "${SAVESTASH}"/* "${CF_GAME_DIR}/" 2>/dev/null
+  echo "  restored the CF's own saves over the shipped pair ($(ls -1 "${SAVESTASH}" | wc -l) file(s))"
+  rm -rf "${SAVESTASH}"
+else
+  echo "  no saves were on the CF -- shipped benchmark pair installed"
 fi
 
 echo "[4/8] sha-assert shipping binaries on CF"
@@ -184,18 +205,45 @@ echo "[5a/8] back up save files before any purge"
 # Deleting those desyncs the whole route, and the purge below once listed them
 # by name. Copy anything save-shaped aside first, unconditionally, so a purge
 # bug can never be unrecoverable again.
+#
+# Each run gets its OWN directory. A fixed destination is only one generation
+# deep: the second populate overwrites the backup taken by the first, so the
+# copy of the save you actually want is gone exactly when you reach for it.
 _sv=0
+_bdir="${STAGING}/saves-backup/$(date -u +%Y%m%dT%H%M%SZ)"
 for _f in "${CF_GAME_DIR}"/[Pp][Rr][Oo][Ff][Ii][Ll][Ee]*.[Dd][Aa][Tt]; do
   [ -e "$_f" ] || continue
-  mkdir -p "${STAGING}/saves-backup"
-  cp -p "$_f" "${STAGING}/saves-backup/" && _sv=$((_sv+1))
+  mkdir -p "${_bdir}"
+  cp -p "$_f" "${_bdir}/" && _sv=$((_sv+1))
 done
 if [ "$_sv" -gt 0 ]; then
-  echo "  backed up ${_sv} save file(s) -> ${STAGING}/saves-backup/"
+  echo "  backed up ${_sv} save file(s) -> ${_bdir}/"
 else
   echo "  WARNING: no profile*.dat on the CF."
   echo "           The benchmark reel loads a SAVE (profile3/profile5) and enters"
   echo "           map 20. Without them the reel desyncs and every cell is void."
+fi
+# Present is not the same as correct. A save the game wrote during ordinary play
+# is at whatever map the player stood on, and the reel replays against it just as
+# happily -- producing a full, normal-looking log of the wrong run. The stage
+# field is bytes 8..11 (LE) right after the 'Do041220' magic.
+_ok20=0
+for _f in "${CF_GAME_DIR}"/[Pp][Rr][Oo][Ff][Ii][Ll][Ee][35].[Dd][Aa][Tt]; do
+  [ -e "$_f" ] || continue
+  _st=$(od -An -tu4 -j8 -N4 "$_f" 2>/dev/null | tr -d ' ')
+  if [ "${_st:-x}" = "20" ]; then
+    echo "  ${_f##*/}: map 20 'Save Point' -- benchmark state"
+    _ok20=1
+  else
+    echo "  ${_f##*/}: map ${_st:-?} -- NOT the benchmark state"
+  fi
+done
+if [ "$_sv" -gt 0 ] && [ "$_ok20" -eq 0 ]; then
+  echo "  WARNING: the CF's saves are not at map 20, and the CF's saves win."
+  echo "           The reel will replay against them and the route will not be"
+  echo "           72 20 11 17 11 15 11 19 11 14 11. Delete them and re-run this"
+  echo "           script to install the shipped benchmark pair:"
+  echo "             rm -f ${CF_GAME_DIR}/PROFILE*.DAT"
 fi
 
 echo "[5b/8] purge accumulated iter debris (superseded binaries, retired probes)"
