@@ -14,9 +14,27 @@ and 5 identical means the selection cannot change where the run begins.
 |---|---|
 | Map | 20, 'Save Point' |
 | Position | px 64469, py 73728 |
-| HP | 3 / 3, Lv 0, no weapon |
+| HP | 3 / 3 |
+| Weapon | Polar Star (id 2), Lv 1, `maxammo=0` (infinite) |
 | Size | 1540 bytes each, format `Do041220` |
-| sha256 | both begin `ccb9610bbd77` |
+| sha256 | both begin `32529e291e0f` |
+
+## The weapon is part of the measurement
+
+The first rebuild carried no weapon, and it reproduced the route perfectly --
+the reel pressed fire and nothing happened. Bullets are drawn objects: a sprite
+blit each, per-frame physics, collision against every enemy on screen, plus the
+Pixtone SFX. A run that fires nothing does strictly less work per frame, so it
+reads as a frame-rate improvement that does not exist.
+
+`maxammo` is the same kind of trap one level down. The console's `giveweapon`
+hands out 100 rounds, but the real Polar Star is infinite (the status bar treats
+`maxammo == 0` as the infinite case). A finite pool would empty partway through
+the reel and stop the firing mid-run, so the cost would be present at the start
+of a cell and absent by the end.
+
+Neither shows up as an error. Both produce a complete log, a matching route, and
+a frame rate that is simply wrong.
 
 ## Provenance
 
