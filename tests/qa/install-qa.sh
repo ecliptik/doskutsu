@@ -27,6 +27,9 @@ EXP_SETUP_SHA="723d6991b30308083daadcc8b35ca972cff1bb3604e7fec3f4628b2c0acb9ba3"
 EXP_SETUPBAT_SHA="ee9140aac514abe1d6eaca9d3c08817f1599201f59916b145c904b5c3ed18741"
 EXP_CWSDPMI_SHA="2de899fecaa90632b8b9bdfc0305cb0375e59ae252c37e32d06c1ed3f98a8f44"
 EXP_TAS_SHA="4118561edf26b93ab9b7a50e894e04ba7b0e7f089c6aa6418afcc8340ebf0bf1"  # QA.TAS ROUND-1 BENCHMARK reel (1956 B, ~5100 ticks/102 s)
+# The payload keeps its filename across repacks, so the staged copy is checked
+# by content. Bump this whenever the tarball is rebuilt.
+EXP_TARBALL_SHA="84f4507b85fb040ba0b35ac93ea08961cf308b08f331e7d646679f0eacc3d85f"
 
 # Overridable ONLY so the script can be exercised end to end without a card --
 # every default is unchanged, so the operator command line is identical. Two of
@@ -51,14 +54,34 @@ echo "  PASS: ${CF_MOUNT} present"
 
 echo "[2/8] fetch payload tarball claude -> laptop"
 mkdir -p "${STAGING}"
+# Cache on CONTENT, not on filename. The payload gets repacked in place -- new
+# saves, a different reel -- while keeping its name, so "a file by that name is
+# already here" accepted a stale copy indefinitely. That silently installed the
+# previous payload and every downstream PASS still read green.
 if [ -f "${STAGING}/${TARBALL}" ]; then
-  echo "  already staged, not re-fetching 188 MB (delete it to force a re-fetch)"
+  _tsha=$(sha256sum "${STAGING}/${TARBALL}" | cut -d' ' -f1)
+  if [ "${_tsha}" = "${EXP_TARBALL_SHA}" ]; then
+    echo "  already staged and current (sha ${_tsha:0:12}) -- not re-fetching 188 MB"
+  else
+    echo "  STALE payload staged (sha ${_tsha:0:12}, want ${EXP_TARBALL_SHA:0:12}) -- re-fetching"
+    if [ "${DRY_RUN}" = "1" ]; then
+      echo "  FAIL: DRY_RUN=1 but the staged payload is stale"; exit 1
+    fi
+    mv -f "${STAGING}/${TARBALL}" "${STAGING}/${TARBALL}.stale" 2>/dev/null
+    scp "claude:/tmp/${TARBALL}" "${STAGING}/"
+  fi
 elif [ "${DRY_RUN}" = "1" ]; then
   echo "  FAIL: DRY_RUN=1 but ${STAGING}/${TARBALL} is not staged"; exit 1
 else
   scp "claude:/tmp/${TARBALL}" "${STAGING}/"
 fi
-echo "  PASS: ${STAGING}/${TARBALL}"
+_tsha=$(sha256sum "${STAGING}/${TARBALL}" | cut -d' ' -f1)
+if [ "${_tsha}" != "${EXP_TARBALL_SHA}" ]; then
+  echo "  FAIL: payload sha ${_tsha:0:12}, expected ${EXP_TARBALL_SHA:0:12}"
+  echo "        Everything below this point would install the wrong payload."
+  exit 1
+fi
+echo "  PASS: ${STAGING}/${TARBALL} (sha ${_tsha:0:12})"
 
 echo "[3/8] extract payload onto CF (non-destructive overlay; base DATA preserved)"
 mkdir -p "${CF_GAME_DIR}"
@@ -105,7 +128,20 @@ if [ -n "${SAVESTASH}" ]; then
   echo "  restored the CF's own saves over the shipped pair ($(ls -1 "${SAVESTASH}" | wc -l) file(s))"
   rm -rf "${SAVESTASH}"
 else
-  echo "  no saves were on the CF -- shipped benchmark pair installed"
+  # Assert it, do not announce it. This line previously claimed an install it
+  # had not checked, and read green while the payload carried no saves at all.
+  _got=0
+  for _f in "${CF_GAME_DIR}"/[Pp][Rr][Oo][Ff][Ii][Ll][Ee][35].[Dd][Aa][Tt]; do
+    [ -e "$_f" ] && _got=$((_got+1))
+  done
+  if [ "${_got}" -eq 2 ]; then
+    echo "  no saves were on the CF -- shipped benchmark pair installed (2 files)"
+  else
+    echo "  FAIL: the payload did not deliver PROFILE3/5.DAT (found ${_got}/2)."
+    echo "        The reel loads a save and enters map 20; without it every cell"
+    echo "        replays a different run and the round is void."
+    exit 1
+  fi
 fi
 
 echo "[4/8] sha-assert shipping binaries on CF"
