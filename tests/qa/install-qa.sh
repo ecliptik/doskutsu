@@ -100,20 +100,44 @@ if [ -f "${CF_GAME_DIR}/QA.TAS" ]; then
     echo "  backup also kept at ${OPTAKE}"
   fi
 fi
-# Same hazard, same shape, for the benchmark saves. The payload carries
-# PROFILE3/5.DAT so a blank card gets a working reel state, but extracting them
-# over a card that already has saves DESTROYS whatever is there -- the operator's
-# own progress, or a save the reel was recorded against. The card's copy always
-# wins; the shipped pair only fills in when the card has none.
-SAVESTASH=""
+# Same hazard, same shape, for the benchmark saves -- but "the card always wins"
+# is too blunt. It protects an operator's own progress, and it also pins a stale
+# benchmark pair forever, so a payload that ships corrected saves can never
+# deliver them. Decide by what the card's saves ARE:
+#
+#   already benchmark state (map 20 + a weapon) -> keep the card's, no churn
+#   anything else                               -> shipped pair wins
+#
+# Either way the card's copy is backed up first, timestamped, so the choice is
+# always reversible. KEEP_SAVES=1 forces the card's saves to win regardless.
+_isbench() {  # map 20 with a non-zero weapon in the first slot
+  local f="$1" st wp
+  st=$(od -An -tu4 -j8  -N4 "$f" 2>/dev/null | tr -d ' ')
+  wp=$(od -An -tu4 -j56 -N4 "$f" 2>/dev/null | tr -d ' ')
+  [ "${st:-x}" = "20" ] && [ "${wp:-0}" != "0" ]
+}
+SAVESTASH=""; SAVEKEEP=0; _cardbench=1; _cardn=0
 for _f in "${CF_GAME_DIR}"/[Pp][Rr][Oo][Ff][Ii][Ll][Ee]*.[Dd][Aa][Tt]; do
   [ -e "$_f" ] || continue
   if [ -z "${SAVESTASH}" ]; then
     SAVESTASH=$(mktemp -d "${TMPDIR:-/tmp}/qa-savestash.XXXXXX")
-    echo "  saves already on CF -- stashing them across the extract"
+    _pre="${STAGING}/saves-backup/$(date -u +%Y%m%dT%H%M%SZ)-pre-extract"
+    mkdir -p "${_pre}"
   fi
-  cp -p "$_f" "${SAVESTASH}/"
+  cp -p "$_f" "${SAVESTASH}/"; cp -p "$_f" "${_pre}/"
+  _cardn=$((_cardn+1))
+  _isbench "$_f" || _cardbench=0
 done
+if [ -n "${SAVESTASH}" ]; then
+  echo "  ${_cardn} save(s) already on CF -- backed up to ${_pre}/"
+  if [ "${KEEP_SAVES:-0}" = "1" ]; then
+    SAVEKEEP=1; echo "  KEEP_SAVES=1 -- the CF's saves will be kept"
+  elif [ "${_cardbench}" = "1" ]; then
+    SAVEKEEP=1; echo "  they are already benchmark state (map 20 + weapon) -- keeping them"
+  else
+    echo "  they are NOT benchmark state -- the shipped pair will replace them"
+  fi
+fi
 # Extract everything EXCEPT the big Organya-HQ (22050 stereo) cache -- that is
 # gated on CF free space in step [5] so a tight card never ENOSPCs mid-extract.
 tar -xzf "${STAGING}/${TARBALL}" -C "${CF_MOUNT}/" \
@@ -123,11 +147,12 @@ if [ -n "${OPTAKE}" ]; then
   cp "${OPTAKE}" "${CF_GAME_DIR}/QA.TAS"
   echo "  restored it post-extract; step [5d] decides which reel ships"
 fi
-if [ -n "${SAVESTASH}" ]; then
+if [ -n "${SAVESTASH}" ] && [ "${SAVEKEEP}" = "1" ]; then
   cp -p "${SAVESTASH}"/* "${CF_GAME_DIR}/" 2>/dev/null
   echo "  restored the CF's own saves over the shipped pair ($(ls -1 "${SAVESTASH}" | wc -l) file(s))"
   rm -rf "${SAVESTASH}"
 else
+  [ -n "${SAVESTASH}" ] && rm -rf "${SAVESTASH}"
   # Assert it, do not announce it. This line previously claimed an install it
   # had not checked, and read green while the payload carried no saves at all.
   _got=0
@@ -135,7 +160,7 @@ else
     [ -e "$_f" ] && _got=$((_got+1))
   done
   if [ "${_got}" -eq 2 ]; then
-    echo "  no saves were on the CF -- shipped benchmark pair installed (2 files)"
+    echo "  shipped benchmark pair installed (2 files)"
   else
     echo "  FAIL: the payload did not deliver PROFILE3/5.DAT (found ${_got}/2)."
     echo "        The reel loads a save and enters map 20; without it every cell"
