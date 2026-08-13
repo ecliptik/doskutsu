@@ -16,6 +16,9 @@ One logback per CPU round, at the end. Never reuse a label.
 | A3 | ViRGE + **Vibra** | 1 | `QA 4` -> `GAP` | 12 min |
 | A4 | CF in *laptop* | -- | **logback `r2f-dx250`** -- send | 2 min |
 
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-dx250
+
+
 ## Round B -- 486DX2-66 (`QA 3`)
 
 | Step | Hardware | Boot | Type after boot | Time |
@@ -23,6 +26,9 @@ One logback per CPU round, at the end. Never reuse a label.
 | B1 | ViRGE + PicoGUS | 2 | `QA 3` -> `RB` `EAR` `PROVE` | 40 min |
 | B2 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP` | 12 min |
 | B3 | CF in *laptop* | -- | **logback `r2f-dx266`** -- send | 2 min |
+
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-dx266
+
 
 ## Round C -- Am5x86-133 (`QA 2`)
 
@@ -32,6 +38,9 @@ One logback per CPU round, at the end. Never reuse a label.
 | C2 | ViRGE + **Vibra** | 1 | `QA 2` -> `GAP` | 12 min |
 | C3 | CF in *laptop* | -- | **logback `r2f-am5x86`** -- send | 2 min |
 
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-am5x86
+
+
 ## Round D -- Pentium OverDrive 83 (`QA 1`)
 
 | Step | Hardware | Boot | Type after boot | Time |
@@ -40,24 +49,16 @@ One logback per CPU round, at the end. Never reuse a label.
 | D2 | ViRGE + **Vibra** | 1 | `QA 1` -> `GAP` | 12 min |
 | D3 | CF in *laptop* | -- | **logback `r2f-pod83`** -- send | 2 min |
 
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-pod83
+
+
 Logs accumulate on the card across a round -- tags are unique per sweep and
 prefixed per CPU, so one pull collects the lot. Do not re-populate mid-round;
 that clears `LOGS\`.
 
 ---
 
-## Log commands -- *laptop*, CF mounted
-
-Fetch the script once, then one line at the end of each round:
-
-    scp claude:/tmp/logback-qa.sh /tmp/
-
-    bash /tmp/logback-qa.sh r2f-dx250      <- end of Round A
-    bash /tmp/logback-qa.sh r2f-dx266      <- end of Round B
-    bash /tmp/logback-qa.sh r2f-am5x86     <- end of Round C
-    bash /tmp/logback-qa.sh r2f-pod83      <- end of Round D
-
-Populate (once, at A0):
+## Populate -- *laptop*, once, at A0
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
 
