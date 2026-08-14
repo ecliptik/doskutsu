@@ -20,16 +20,16 @@ set -e
 # ============================================================================
 # CONFIG
 # ============================================================================
-TARBALL="doskutsu-cf-2026-08-12-qa-r2-fe44805fb603.tar.gz"
+TARBALL="doskutsu-cf-2026-08-14-qa-r3-1de88fcefd4a.tar.gz"
 
-EXP_DOSKUTSU_SHA="fe44805fb60375f7c773c92fa28e1164739f0f2391fcc81e9232e40b95ac7898"
+EXP_DOSKUTSU_SHA="1de88fcefd4a691e19e3c6ace446032cf26a7f1030b248b158216e795d29801d"
 EXP_SETUP_SHA="723d6991b30308083daadcc8b35ca972cff1bb3604e7fec3f4628b2c0acb9ba3"
 EXP_SETUPBAT_SHA="ee9140aac514abe1d6eaca9d3c08817f1599201f59916b145c904b5c3ed18741"
 EXP_CWSDPMI_SHA="2de899fecaa90632b8b9bdfc0305cb0375e59ae252c37e32d06c1ed3f98a8f44"
 EXP_TAS_SHA="4118561edf26b93ab9b7a50e894e04ba7b0e7f089c6aa6418afcc8340ebf0bf1"  # QA.TAS ROUND-1 BENCHMARK reel (1956 B, ~5100 ticks/102 s)
 # The payload keeps its filename across repacks, so the staged copy is checked
 # by content. Bump this whenever the tarball is rebuilt.
-EXP_TARBALL_SHA="d7d1d01dbbd9b4e14a1540eca8e65650924edec603d9be8fb8f748c7beaca206"
+EXP_TARBALL_SHA="4a383480189d80ea7f0b493f67e04455e80178e7907f02816cc5e7875054a84b"
 
 # Overridable ONLY so the script can be exercised end to end without a card --
 # every default is unchanged, so the operator command line is identical. Two of
@@ -198,10 +198,10 @@ fi
 echo "[5/8] cache-key + kit presence sanity"
 if [ -f "${CF_GAME_DIR}/CACHE/11025_1/READY.OK" ]; then
   key=$(cat "${CF_GAME_DIR}/CACHE/11025_1/READY.OK" 2>/dev/null | tr -d '\r\n')
-  if [ "$key" = "1f79ce20e4ee" ]; then
-    echo "  PASS: Organya 11025 cache keyed 1f79ce20e4ee (hits on aef02e5c)"
+  if [ "$key" = "eaff28facb1a" ]; then
+    echo "  PASS: Organya 11025 cache keyed eaff28facb1a (hits on aef02e5c)"
   else
-    echo "  WARN: cache key '${key}' != 1f79ce20e4ee -- Organya cells may cold-render"
+    echo "  WARN: cache key '${key}' != eaff28facb1a -- Organya cells may cold-render"
   fi
 else
   echo "  WARN: no CACHE/11025_1/READY.OK on CF -- Organya cells will cold-render"
