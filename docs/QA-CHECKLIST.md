@@ -1,4 +1,4 @@
-# QA checklist -- round 2
+# QA checklist
 
 `QA n` after every boot: POD-83 = 1, Am5x86 = 2, DX2-66 = 3, DX2-50 = 4.
 Every sweep waits for a **keypress** at its banner, then runs unattended.
@@ -19,7 +19,7 @@ round 1 and may not boot.
 | A2 | ViRGE + **Vibra** | 1 | `QA 4` -> `GAP` | 12 min |
 | A3 | CF in *laptop* | -- | logback `r2f-dx250` | 2 min |
 
-## Round B -- 486DX2-66 (`QA 3`)
+## Round B -- 486DX2-66 (`QA 3`) -- DONE
 
 | Step | Hardware | Boot | Type after boot | Time |
 |---|---|---|---|---|
@@ -29,7 +29,7 @@ round 1 and may not boot.
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-dx266
 
-## Round C -- Am5x86-133 (`QA 2`)
+## Round C -- Am5x86-133 (`QA 2`) -- DONE
 
 | Step | Hardware | Boot | Type after boot | Time |
 |---|---|---|---|---|
@@ -39,7 +39,7 @@ round 1 and may not boot.
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-am5x86
 
-## Round D -- Pentium OverDrive 83 (`QA 1`)
+## Round D -- Pentium OverDrive 83 (`QA 1`) -- DONE
 
 | Step | Hardware | Boot | Type after boot | Time |
 |---|---|---|---|---|
@@ -119,7 +119,58 @@ other CPUs just report same or different.
 
 ---
 
-# Mach64 -- LAST, after every round is done
+# Round F -- new binary (NOT READY -- binary not built yet)
+
+One CPU swap to the **DX2-66**, then it stays. Everything else is cards.
+No Cirrus needed. Populate first -- it is a new binary and a new cache.
+
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| F0 | CF in *laptop* | -- | populate (new payload) | 5 min |
+| F1 | CPU -> **DX2-66**, ViRGE + PicoGUS | 2 | `QA 3` -> `RB` | 12 min |
+| F2 | -- | -- | pull logs -- **stop, send them** | 2 min |
+| F3 | -- | -- | `EAR` -- drum patches, by ear | 9 min |
+| F4 | -- | -- | `MIDIAB` -- the AdLib MIDI A/B | 12 min |
+| F5 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP8` | 12 min |
+| F6 | CF in *laptop* | -- | **logback `r3-dx266`** -- send | 2 min |
+
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-dx266
+
+**F2 is a real stop.** `RB` decides whether the new binary still compares to
+the 157 banked cells. Do not run F3-F5 until it is confirmed.
+
+**F3 `EAR`** -- the Shack should now play as music on OPL3 and AdLib, not one
+repeated click. Same three cells, same listening point: last map change, ~87 s
+in, on screen 6-8 s.
+
+| Cell | Backend | Was | Should now be |
+|---|---|---|---|
+| 1 `E4` | OPL3 | a note or two | recognisable drums |
+| 2 `E3` | Organya | correct music | unchanged |
+| 3 `EA` | AdLib | silence | audible |
+
+**F4 `MIDIAB`** -- same binary, two MIDI sets. Tests whether the AdLib gain
+came from the shorter arrangements. No rebuild involved.
+
+**F5 `GAP8`** -- adds the Vibra `force_8bit=1` cell that round 2 left open,
+alongside the audio floor re-measured with the error spam fixed.
+
+# Round G -- Mach64 with the new binary (NOT READY)
+
+Only after Round F passes. Same Mach64 procedure as before -- UniVBE first,
+watch the banner.
+
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| G1 | **Mach64**, UniVBE set up for it | 1 | `QA 3` -> `VIDM 3` | 40 min |
+| G2 | -- | -- | logback `r3-mach64` -- send | 2 min |
+
+Looking for: map-name text in the right colour, the surface at 512x384 rather
+than 640x480, and whether the frame rate moved off 2.2 fps.
+
+---
+
+# Mach64 -- round 2 procedure (M1-M5) -- DONE except M4
 
 Mach64 in, ViRGE out. Keep whatever sound the POD-83 round left in the box.
 
