@@ -172,7 +172,14 @@ confirmation by a different route, not the only evidence.
 
 ---
 
-## Round F -- round-3 binary, 486DX2-66 (`QA 3`) -- NOT READY
+## Round F -- round-3 binary, 486DX2-66 (`QA 3`) -- HOLD
+
+**HOLD, 2026-08-14.** The payload is built and populate-verified (binary
+`1de88fcefd4a`, cache key `eaff28facb1a`, tarball `4a383480189d`) and the smoke
+gate passes -- but two verification gaps are open and the operator chose to wait
+rather than start a round that might be invalidated mid-way. See
+`docs/internal/POST-BENCHMARK-PLAN.md`, "PHASE B STATUS". Do not populate until
+those close.
 
 One CPU swap to the **DX2-66**, then it stays. Everything else is cards.
 No Cirrus needed. Populate first -- new binary, new cache, new MIDI set.
