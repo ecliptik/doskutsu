@@ -1,0 +1,91 @@
+From 4775c197d73a922e7e84d102372fb89a86af9e4f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <services.claude@accounts.ecliptik.com>
+Date: Thu, 13 Aug 2026 23:57:13 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0299 -- report an unrendered Pixtone slot
+ once, not per trigger
+
+With AUDIO_OFF=1 nothing is rendered by design, so every SFX trigger took the
+"not rendered" branch and logged at ERROR. The round-2 audio-floor cells carry
+274 of these against 3 error lines in an ordinary cell, from only 10 distinct
+slots.
+
+That is not cosmetic. DEBUG.LOG fsyncs per line (patch 0036, DOS INT 21h fn
+68h), so those are ~264 avoidable CF-card syncs inside X0 and P0 -- the two
+cells whose entire purpose is to measure what the engine costs with audio off.
+The floor was measuring its own instrumentation, which is consistent with AdLib
+appearing to match or beat it on all four CPUs in round 2.
+
+Suppress by slot rather than by configuration: the first report for a given
+slot still logs, every repeat is dropped. A genuinely missing slot therefore
+stays reportable during normal play, which a config gate would have lost.
+
+Both call sites are fixed. play() and playResampled() carry the same message
+and are a copy-paste pair; fixing one would have left half the spam behind.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/Pixtone.cpp | 34 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
+index 0f8fc0df..13054e66 100644
+--- a/src/sound/Pixtone.cpp
++++ b/src/sound/Pixtone.cpp
+@@ -1248,6 +1248,23 @@ void Pixtone::shutdown()
+   }
+ }
+ 
++// DOS-PORT: returns true the FIRST time a given slot is reported unrendered,
++// false every time after. Suppression is per slot rather than per config, so a
++// genuinely missing slot is still reported once in normal play while an
++// audio-off run stops emitting one fsync'd ERROR line per SFX trigger.
++// NUM_SOUNDS is 0x75 and slots are 1-based; anything outside that range is
++// always reported, since an out-of-range slot is a real defect.
++static bool _first_unrendered_report(int32_t slot)
++{
++  static bool seen[0x76] = {false};
++  if (slot < 0 || slot > 0x75)
++    return true;
++  if (seen[slot])
++    return false;
++  seen[slot] = true;
++  return true;
++}
++
+ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+ {
+   // patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation):
+@@ -1354,7 +1371,17 @@ int Pixtone::play(int32_t chan, int32_t slot, int32_t loop)
+   }
+   else
+   {
+-    LOG_ERROR("Pixtone::play: sound slot {} not rendered", slot);
++    // DOS-PORT: log each unrendered slot ONCE, not once per trigger.
++    // With AUDIO_OFF=1 nothing is rendered by design, so every SFX trigger
++    // took this branch: the round-2 audio-floor cells carried 274 of these
++    // against 3 error lines in a normal cell, from just 10 distinct slots.
++    // DEBUG.LOG fsyncs per line (patch 0036, DOS INT 21h fn 68h), so that is
++    // ~264 avoidable CF syncs inside the one cell whose whole purpose is to
++    // measure the cost of NOT doing audio work -- the floor was measuring its
++    // own instrumentation. Suppressing by slot rather than by config keeps a
++    // genuinely missing slot reportable in every configuration.
++    if (_first_unrendered_report(slot))
++      LOG_ERROR("Pixtone::play: sound slot {} not rendered", slot);
+     return -1;
+   }
+ }
+@@ -1654,7 +1681,10 @@ int Pixtone::playResampled(int32_t chan, int32_t slot, int32_t loop, uint32_t pe
+   }
+   else
+   {
+-    LOG_ERROR("Pixtone::playResampled: sound slot {} not rendered", slot);
++    // DOS-PORT: same once-per-slot suppression as Pixtone::play above.
++    // These two sites are a copy-paste pair and must stay in step.
++    if (_first_unrendered_report(slot))
++      LOG_ERROR("Pixtone::playResampled: sound slot {} not rendered", slot);
+     return -1;
+   }
+ }
+-- 
+2.47.3
+
