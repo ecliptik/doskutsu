@@ -169,10 +169,12 @@ Three things to report:
 | | |
 |---|---|
 | map-name text | still pink, or correct? |
-| speed by eye | the 16bpp probe ran near ViRGE speed -- does 8bpp now too? |
+| speed by eye | how fast is it -- not "did it improve" |
 | mode in the log | should be `0x01F3 512x384`, not `640x480` |
 
-Budget 20 min, not 40 -- `0297` is expected to cut it sharply, but it may not.
+Budget **40 min**. The 16bpp probe looked 3x faster but was writing a corrupt
+tilemap, so it is not a prediction. `0297` may cut this sharply or barely at
+all; report the number rather than a verdict.
 
 # Mach64 -- round 2 procedure (M1-M5) -- DONE except M4
 
