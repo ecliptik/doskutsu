@@ -4,11 +4,43 @@ Real-hardware measurements of DOSKUTSU on four vintage CPUs, taken with an
 automated input replay so every configuration renders exactly the same 102
 seconds of gameplay.
 
-**89 cells. Four CPUs. Three video cards, three sound cards, seven music
-backends. One binary (`09e449c5a81d`), one input recording, every cell running
-the complete route.**
+**157 cells over two rounds. Four CPUs. Three video cards, three sound cards,
+seven music backends. One input recording, every cell running the complete
+route.**
 
 Raw logs for every cell are committed under [`qa-results/`](../qa-results/).
+
+---
+
+## Round 2 -- current figures
+
+Round 2 (binary `fe44805fb603`, 68 cells) re-measured every CPU against the
+same recording. **These are the current numbers; the detailed sections below
+are round 1 (`09e449c5a81d`) and its charts are drawn from that data.**
+
+| CPU | AdLib | OPL3 FM | Organya | Organya-HQ |
+|---|---|---|---|---|
+| Pentium OverDrive 83 | **32.95** | 30.92 | 28.44 | 20.45 |
+| Am5x86-133 | **32.78** | 31.03 | 28.52 | 20.35 |
+| 486DX2-66 | **24.88** | 22.92 | 20.70 | 13.29 |
+| 486DX2-50 | **18.59** | 17.40 | 14.99 | 14.13 |
+
+Frames per second of game time, best cell per backend. AdLib leads on every
+CPU. Organya-HQ costs about a quarter of the frame rate on the faster parts;
+on the DX2-50 the loss moves out of the frame rate and into loading stalls
+instead, which is why its figure looks close to plain Organya and is not.
+
+**What changed since round 1**
+
+| | |
+|---|---|
+| Music timebase fix (`SDL/0122`) | +0.13 to +0.88 fps, more on faster CPUs |
+| AdLib | up 0.70 to 1.31 fps on every CPU |
+| OPL3 FM | down ~1% on every CPU, cause not yet identified |
+| Organya | unchanged |
+
+Round 1 and round 2 agree above about 2%; below that the OPL3 shift matters.
+Full comparison and method: [`qa-results/MATRIX-ROUND2.md`](../qa-results/MATRIX-ROUND2.md).
 
 ---
 
@@ -210,7 +242,7 @@ over-reading:
 
 | | |
 |---|---|
-| Raw logs, all 89 cells | [`qa-results/`](../qa-results/) |
+| Raw logs, all 157 cells | [`qa-results/`](../qa-results/) |
 | Cross-CPU analysis | [`qa-results/MATRIX-CROSS-CPU.md`](../qa-results/MATRIX-CROSS-CPU.md) |
 | Audio-backend matrix | [`qa-results/MATRIX-POD83.md`](../qa-results/MATRIX-POD83.md) |
 | Video-card matrix | [`qa-results/MATRIX-VIDEO-POD83.md`](../qa-results/MATRIX-VIDEO-POD83.md) |

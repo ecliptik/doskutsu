@@ -127,11 +127,44 @@ first true floors measured in this campaign -- round 1 had none, because
 | Am5x86-133 | 32.60 | 32.52 | 32.54 (AdLib) | none measurable |
 | POD-83 | 32.84 | 32.92 | 32.86 (AdLib) | none measurable |
 
-**AdLib matches or beats the audio-off floor on every CPU.** That is not a
-measurement error -- it reproduces across two independent cells per CPU -- but
-it does mean the floor is not a floor in the expected sense, and the AdLib
-path's cost is at or below the noise of the measurement. Worth understanding
-before quoting either number as an audio budget.
+**AdLib matches or beats the audio-off floor on every CPU** -- and the cause
+is now identified: **the floor cells are contaminated by their own error
+logging.**
+
+With audio off, every Pixtone trigger logs `Pixtone::play: sound slot N not
+rendered` at ERROR level. `X0` and `P0` carry **277 and 278 error lines**
+against 3 in a normal cell. Patch `0036` fsyncs `DEBUG.LOG` per line through
+DOS INT 21h fn 68h, so those are ~275 extra disk syncs to a CF card, inside the
+one cell whose purpose is to measure the cost of *not* doing audio work.
+
+The floor is therefore understated by an unquantified amount of its own
+instrumentation. Do not quote `X0`/`P0` as an audio budget until the logging is
+silenced or downgraded; the true floor is above what was measured, which is
+consistent with AdLib appearing to beat it.
+
+---
+
+## `NA_pump` can be retired -- the timebase fix restored the metric
+
+Round 1 discarded `inter_flip_ms` medians in every pump cell, because the
+PIT/IRQ-0 music pump corrupts the DJGPP `uclock` those medians derive from. The
+signature was a **completely empty 10-40 ms band**.
+
+`SDL/0122` fixes the timebase, and the band comes back:
+
+| Cell | Samples | In the 10-40 ms band | Median |
+|---|---|---|---|
+| Round 1 `5C5` AdLib (pump) | 183 | **0** | 55 |
+| Round 2 `5R5` AdLib (pump) | 190 | **26** | 54 |
+| Round 2 `5R4` OPL3 (no pump) | 176 | 13 | 58 |
+
+The round-2 pump cell has *more* samples in the band than the non-pump control,
+so there is no hole left to explain. The artifact is gone.
+
+`ROUND2-CELLS.csv` still marks pump cells `NA_pump`, deliberately -- it applies
+round 1's rule so both rounds are derived by the same script. But the exclusion
+is no longer justified on round-2 data, and a future round should drop it and
+recover the metric rather than inherit a workaround for a bug that is fixed.
 
 ---
 
@@ -159,6 +192,18 @@ roughly 17 fps, and no CPU in the matrix closes it -- the Am5x86-133 does not
 beat the POD-83 despite a 60% clock advantage.
 
 ---
+
+## Two defects the logs surfaced
+
+**Pixtone error spam in audio-off cells** -- see the floor section above.
+Behavioural fix is a severity downgrade or a gate; measurement fix is required
+before `X0`/`P0` can be quoted.
+
+**`SDL/0071` logs an ordinary decision at ERROR level.** Every Organya cell
+carries `pixtone IRQ-mix: REQUESTED but Organya backend active; skipping`,
+logged as `[error]`. The behaviour is correct -- IRQ-mix needs OPL3/WB -- but
+the severity is wrong, and it pollutes any error scan of a clean run. Cosmetic,
+one-line, no cache-key impact if it rides an existing patch.
 
 ## What this round does not answer
 
