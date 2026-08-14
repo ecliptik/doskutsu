@@ -1,0 +1,267 @@
+From c5cc6aacd79a3c56818159402cddddca62312c59 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 14 Aug 2026 00:17:46 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0300 -- charge the renderer drain to itself
+
+dc_ms has been read as drawcall dispatch cost and it is not one. Between
+the two round-2 Mach64 cells it scaled 2.36x while the drawcall count
+stayed flat (windim 1787 against 1782), and at 16bpp it moved 4x on a
+flat count. Queueing a command into a list is O(1) and cannot do that.
+
+Nine sites drain the renderer queue on entry, so their direct write lands
+after anything already queued -- the z-order rule patch 0051 established.
+Every one sits inside a _DrawcallTimer scope:
+
+  _try_fast_blit            _try_fast_blit_mirrored
+  _try_fast_blit_alpha      _ensure_handrolled_surface
+  drawTileFast              drawCachedBackdrop
+  drawCachedBackdropClipped prepareDirectBackdropWrite
+  drawCachedTilemap
+
+So the drain has always been charged to whichever drawcall happened to
+trigger it, rather than to the drawcalls whose work it is performing.
+When the queued work gets more expensive -- which is exactly what an
+oversized surface does, by pushing every drawcall onto SDL_Blit_Slow --
+dc_ms rises without a single extra dispatch. That is the 2.36x.
+
+_timed_flush_renderer brackets those nine and accumulates into
+dc_drain_ms, reported alongside a derived dc_net_ms (dc_total - dc_drain)
+and a dc_drain_calls count. Read dc_net_ms when asking whether dispatch
+scales. It must not scale with surface area, and if it still does after
+this split then the leak is somewhere the renderer drain does not
+explain -- which is a result, not a failure.
+
+A near-zero dc_drain_ms is equally informative: it excludes the obvious
+suspect cleanly instead of leaving it as a standing doubt over every
+number derived from these buckets, including the residual.
+
+Deliberately NOT covered: the two drains inside flip() itself. Those were
+already bracketed into _drain_ns by patch 0087 and are reported through
+the [flip-stat phase=drain] line. This patch covers only the drains that
+had no accounting at all.
+
+Related and worth knowing before anyone plans instrumentation work: that
+[flip-stat] family already breaks the flip body into drain / dirty /
+present / program / get / housekeeping / total, and it emitted zero lines
+in every Mach64 cell because SDL_HINT_DOSKUTSU_FLIP_INSTR is strict-
+truthy and defaults off. The flip-side split needs a run-sheet line, not
+a patch. This patch is the part that machinery does not cover.
+
+Gated on the same _abl_no_dc_timing() flag as _DrawcallTimer, on purpose.
+dc_drain is only ever read as a share of dc_total, so a configuration
+where one is measured and the other is not would produce a ratio with no
+meaning. One flag, both numbers, or neither. Block counters reset
+alongside their parent, or the split silently stops summing.
+
+MEASURED TOGETHER WITH 0297, NOT AGAINST A BASELINE. Before 0297 an
+oversized surface never reached these sites at all -- every drawcall went
+to the renderer and the drains did not happen. 0297 puts the hand-rolled
+paths back in play and those paths are what drain. So dc_drain_ms on the
+round-3 binary is a cost 0297 newly incurs, not a pre-existing quantity
+this patch has revealed. Both land in the same binary and Round G
+exercises them in one pass; do not read these numbers as a before.
+
+No behaviour change: two clock reads around calls that already happened,
+and one wider log line. No consumer parses that line's field order --
+checked the smoke gate and the analysis tooling.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 90 ++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 80 insertions(+), 10 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 2e4419ee..7f1655f0 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -1613,6 +1613,29 @@ Uint64 _drawcall_accum_ns_block = 0;
+ Uint64 _drawcall_accum_ns_global = 0;
+ int    _drawcall_count_block = 0;     // counts wraps that fired (for avg)
+ int    _drawcall_count_global = 0;
++// DOS-PORT (patch 0300): the slice of _drawcall_accum_ns that is not
++// dispatch at all, but queued slow-path commands EXECUTING inside a
++// drawcall's bracket.
++//
++// Nine sites drain the renderer queue on entry so their direct write
++// lands after anything already queued (the z-order rule patch 0051
++// established). Every one of them sits inside a _DrawcallTimer scope, so
++// the drain time has always been charged to the drawcall that happened to
++// trigger it rather than to the drawcalls whose work it is performing.
++//
++// That is measurable and it is why dc_ms cannot be read as dispatch cost:
++// between the round-2 Mach64 cells dc_ms scaled 2.36x while the drawcall
++// count stayed flat (windim 1787 against 1782), and at 16bpp it moved 4x
++// on a flat count. Queueing into a command list is O(1) and cannot do
++// that; draining a queue whose contents got more expensive can.
++//
++// Kept separate from flip()'s _drain_ns, which brackets the two drains
++// that happen inside flip() itself. Those were already attributed. These
++// were not, and they are the ones landing in the wrong bucket.
++Uint64 _dc_drain_accum_ns_block = 0;
++Uint64 _dc_drain_accum_ns_global = 0;
++int    _dc_drain_calls_block = 0;
++int    _dc_drain_calls_global = 0;
+ Uint64 _flip_inner_accum_ns_block = 0;
+ Uint64 _flip_inner_accum_ns_global = 0;
+ Uint64 _inter_flip_accum_ms_block = 0;  // ms sum (12.3-D inter_flip is ms)
+@@ -2058,6 +2081,36 @@ struct _DrawcallTimer
+   }
+ };
+ 
++// DOS-PORT (patch 0300): SDL_FlushRenderer with the drain time attributed
++// to itself rather than to whichever drawcall happened to trigger it.
++//
++// Gated on the SAME _abl_no_dc_timing() flag as _DrawcallTimer above, on
++// purpose: dc_drain is only ever read as a share of dc_total, so a
++// configuration where one is measured and the other is not would produce
++// a ratio with no meaning. One flag, both numbers, or neither.
++//
++// The empty-queue case is the common one on a card that takes the
++// hand-rolled paths -- SDL_FlushRenderer early-returns and this measures
++// two clock reads around a cheap call. That is the point: if dc_drain
++// comes back near zero while dc_total is still scaling with surface area,
++// the leak is somewhere other than the drain and this patch has cleanly
++// excluded the obvious suspect rather than confirmed it.
++static inline void _timed_flush_renderer(SDL_Renderer *renderer)
++{
++  if (_abl_no_dc_timing())
++  {
++    SDL_FlushRenderer(renderer);
++    return;
++  }
++  const Uint64 _t0 = SDL_GetTicksNS();
++  SDL_FlushRenderer(renderer);
++  const Uint64 dt = SDL_GetTicksNS() - _t0;
++  _dc_drain_accum_ns_block += dt;
++  _dc_drain_accum_ns_global += dt;
++  ++_dc_drain_calls_block;
++  ++_dc_drain_calls_global;
++}
++
+ // DOS-PORT (patch 0068, Phase 9 wave 13.6.1): externs into the SDL3-DOS
+ // keyboard / audio backends for the bisect-counters logged below. Defined
+ // at file scope in C TUs:
+@@ -2206,14 +2259,26 @@ void _maybe_flush_phase_timing_audit()
+       ? (long long)((_direct_vesa_present_accum_ns_block * 10ull)
+                     / ((Uint64)_direct_vesa_presents_block * 1000000ull))
+       : 0;
++  // DOS-PORT (patch 0300): dc_total split into dispatch and drain.
++  // dc_drain_ms is queued slow-path work EXECUTING inside a drawcall's
++  // bracket; dc_net_ms is what is left, which is the dispatch cost dc_ms
++  // was always read as. Read dc_net_ms, not dc_ms, when asking whether
++  // dispatch scales -- it must not scale with surface area, and if
++  // dc_net_ms still does after this split, the leak is somewhere the
++  // renderer drain does not explain.
++  const long long dc_drain_ms = (long long)(_dc_drain_accum_ns_block / 1000000ull);
++  const long long dc_net_ms   = (long long)dc_total_ms - dc_drain_ms;
+   LOG_INFO("phase timing block {}: drawcalls={} dc_total_ms={} "
++           "dc_drain_ms={} dc_net_ms={} dc_drain_calls={} "
+            "flip_inner_total_ms={} inter_flip_total_ms={} "
+            "(per-flip avg x10: dc_ms={} fi_ms={} if_ms={} derived audio+engine_ms={}; "
+            "per-drawcall avg us_x10={}) "
+            "[direct-vesa: presents={} total_ms={} avg_ms_x10={} failed={}] "
+            "[ablation: NO_DC_TIMING={} CACHE_WINSURF={} DIRECT_VESA={}]",
+            _dc_block_idx, _drawcall_count_block,
+-           (long long)dc_total_ms, (long long)flip_inner_total_ms,
++           (long long)dc_total_ms,
++           dc_drain_ms, dc_net_ms, _dc_drain_calls_block,
++           (long long)flip_inner_total_ms,
+            (long long)inter_flip_total_ms,
+            dc_avg_ms_x10, fi_avg_ms_x10, if_avg_ms_x10,
+            audio_engine_ms_x10, dc_avg_us_x10,
+@@ -2577,6 +2642,11 @@ void _maybe_flush_phase_timing_audit()
+   _flip_body_sample_idx = 0;
+   _drawcall_accum_ns_block = 0;
+   _drawcall_count_block = 0;
++  // DOS-PORT (patch 0300): reset alongside its parent, or dc_drain_ms
++  // accumulates across blocks while dc_total_ms does not, and the split
++  // silently stops summing.
++  _dc_drain_accum_ns_block = 0;
++  _dc_drain_calls_block = 0;
+   _flip_inner_accum_ns_block = 0;
+   _inter_flip_accum_ms_block = 0;
+   // patch 0086 (wave 18): reset direct-VESA per-block counters.
+@@ -6945,7 +7015,7 @@ static inline bool _try_fast_blit(SDL_Renderer *renderer,
+   // the flush only matters for pure correctness, never harm.
+   if (renderer_queue_dirty)
+   {
+-    SDL_FlushRenderer(renderer);
++    _timed_flush_renderer(renderer);
+     renderer_queue_dirty = false;
+   }
+ 
+@@ -7023,7 +7093,7 @@ static inline bool _try_fast_blit_mirrored(SDL_Renderer *renderer,
+   // same dirty-bit pattern as _try_fast_blit (patch 0051 / wave-12.1).
+   if (renderer_queue_dirty)
+   {
+-    SDL_FlushRenderer(renderer);
++    _timed_flush_renderer(renderer);
+     renderer_queue_dirty = false;
+   }
+ 
+@@ -7139,7 +7209,7 @@ static inline SDL_Surface *_ensure_handrolled_surface(SDL_Renderer *renderer,
+ 
+   if (renderer_queue_dirty)
+   {
+-    SDL_FlushRenderer(renderer);
++    _timed_flush_renderer(renderer);
+     renderer_queue_dirty = false;
+   }
+   return win_surface;
+@@ -7244,7 +7314,7 @@ static inline bool _try_fast_blit_alpha(SDL_Renderer *renderer,
+ 
+   if (renderer_queue_dirty)
+   {
+-    SDL_FlushRenderer(renderer);
++    _timed_flush_renderer(renderer);
+     renderer_queue_dirty = false;
+   }
+ 
+@@ -7745,7 +7815,7 @@ void Renderer::drawTileFast(Surface *src, int dstx, int dsty, int srcx, int srcy
+   // Same gate as _try_fast_blit; correctness is non-negotiable.
+   if (_renderer_queue_dirty)
+   {
+-    SDL_FlushRenderer(_renderer);
++    _timed_flush_renderer(_renderer);
+     _renderer_queue_dirty = false;
+   }
+ 
+@@ -8229,7 +8299,7 @@ bool Renderer::drawCachedBackdrop(SDL_Surface *src)
+   // window surface before we overwrite the bg layer beneath them.
+   if (_renderer_queue_dirty)
+   {
+-    SDL_FlushRenderer(_renderer);
++    _timed_flush_renderer(_renderer);
+     _renderer_queue_dirty = false;
+   }
+ 
+@@ -8304,7 +8374,7 @@ bool Renderer::drawCachedBackdropClipped(SDL_Surface *src, int y_start, int y_en
+   // drawCachedBackdrop above).
+   if (_renderer_queue_dirty)
+   {
+-    SDL_FlushRenderer(_renderer);
++    _timed_flush_renderer(_renderer);
+     _renderer_queue_dirty = false;
+   }
+ 
+@@ -8361,7 +8431,7 @@ void Renderer::prepareDirectBackdropWrite()
+   // Mirrors drawCachedBackdrop's drain step.
+   if (_renderer_queue_dirty)
+   {
+-    SDL_FlushRenderer(_renderer);
++    _timed_flush_renderer(_renderer);
+     _renderer_queue_dirty = false;
+   }
+ }
+@@ -8406,7 +8476,7 @@ bool Renderer::drawCachedTilemap(SDL_Surface *src, bool with_colorkey)
+   // them. (Same rationale as drawCachedBackdrop.)
+   if (_renderer_queue_dirty)
+   {
+-    SDL_FlushRenderer(_renderer);
++    _timed_flush_renderer(_renderer);
+     _renderer_queue_dirty = false;
+   }
+ 
+-- 
+2.47.3
+

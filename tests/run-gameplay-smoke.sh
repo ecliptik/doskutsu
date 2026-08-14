@@ -514,6 +514,7 @@ BANNER_REGEX=(
   "\[music-dispatch\] tick="
   "\[cpu-witness\]"
   "center-oversized: (ENGAGED|DISABLED \\(killswitch =0\\)|not needed \\(surface matches the logical screen\\)) surface="
+  "fastpath-oversized: (ENGAGED|DISABLED \\(killswitch =0\\)) -- hand-rolled blit/fill paths"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -664,8 +665,9 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "optional"
+  "optional"
 )
-# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY -- ALL THREE are 137 entries
+# BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY -- ALL THREE are 149 entries
 # each and MUST stay 1:1 (re-aligned in the v1.6.2 rc5 window: the GUS Campaign-3
 # regexes idx 111-129 had no labels, so SDL/0115..0268 labels displayed against the
 # wrong regexes and the real scores printed with an empty "[]" label -- purely cosmetic,
@@ -824,6 +826,7 @@ BANNER_LABEL=(
   "0292 song-change dispatch at INFO (OPTIONAL -- '[music-dispatch] tick=N song=N (prev N)' emitted by SoundManager::music() on every song change, with the logic-tick index. INFO-level, so absent on a plain untagged WARN-level run -- expected, not a failure; tagged runs and DOSKUTSU_LOG_VERBOSE=1 log at INFO. Shipped logs previously showed a song LOADING but never its DISPATCH, which is why the Shack-music question and the AUTO-vs-WaveBlaster question both needed the operator's ears; from round 2 they are answerable from the log. Embed witness = strings|grep music-dispatch.)"
   "0294 CPU witness at boot (OPTIONAL -- '[cpu-witness] vendor=.. family/model/stepping .. mhz_est=..' or the DISABLED variant, emitted once after config load. INFO-level, so absent on an untagged WARN run -- expected, not a failure. Nothing in a log previously witnessed WHICH MACHINE ran a cell: video was provable from vram/LFB evidence and sound from is_sb16/dsp_ver, while the CPU rested entirely on a digit typed into a sweep BAT, so every cross-CPU conclusion in the campaign rested on one unverifiable assertion. Reuses the silicon-pinned MHZ_486_LOOP_DIV so engine numbers stay comparable with SETUP's. Default-ON, strict killswitch SDL_HINT_DOSKUTSU_CPU_WITNESS=0, because a boot-time calibration loop on hardware we do not control needs an escape hatch. Cross-check against the BAT-written .NFO manifest: a disagreement means the wrong sweep argument was passed and every number in that run is mislabelled. Embed witness = strings|grep cpu-witness.)"
   "0296 oversized-surface centring decision (OPTIONAL -- LOG_INFO emitted once in Renderer::initVideo, right after the renderer is created, in one of three variants: 'not needed (surface matches the logical screen)' on every card that can set 320x240 (the DEFAULT smoke case, and the state every banked benchmark cell was measured in), 'ENGAGED' when the backend could only give a larger surface, or 'DISABLED (killswitch =0)' under SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0. INFO-level, so absent on a plain untagged WARN-level boot -- expected, not a failure (same gating as [[cpu-witness]] above). The ENGAGED variant is the runtime witness that the ATI Mach64-CT path took the centring route: it reports the surface size and the offset, and is followed by a 'center-oversized: margins cleared' line and, on the first partial flush, a 'center-oversized: flush rect=WxH@X,Y bytes=N (surface would be ...)' line that proves the steady-state flush stays logical-sized rather than surface-sized. Cannot be witnessed on the reference g2k hardware (Cirrus offers 320x240); reproduce under DOSBox-X with [video] allow low resolution vesa modes = false, which forces a 640x480 stand-in for the Mach64's 512x384. Embed witness = strings|grep center-oversized. BANNER_REGEX idx 147.)"
+  "0297 oversized-surface fast-path decision (OPTIONAL -- LOG_INFO emitted once in Renderer::initVideo, immediately after the 0296 'center-oversized: ENGAGED' line, and ONLY in that branch: on a card that offers 320x240 the centring block never runs, so this line is absent by design and its absence is not a failure. Two variants: 'ENGAGED' (default) means the hand-rolled blit and fill paths follow the centred box instead of standing down, and 'DISABLED (killswitch =0)' under SDL_HINT_DOSKUTSU_FASTPATH_OVERSIZED=0 means they stand down while the centring stays -- which is the Round G A/B arm, deliberately a SEPARATE hint from 0296's so the comparison isolates the blit route rather than swapping one picture for another. Runtime confirmation that the patch is doing anything lives in two existing counters, not in this banner: 'fastpath audit ... taken=' must go non-zero on an oversized surface (it read taken=0 skipped=1782 on the round-2 Mach64) and the matching 'slowpath reason block ... windim=' must fall to zero. Cannot be witnessed on g2k (Cirrus offers 320x240); same DOSBox-X stand-in as 0296. Embed witness = strings|grep fastpath-oversized. BANNER_REGEX idx 148.)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
@@ -839,6 +842,18 @@ GATE_FAIL=0
 GATE_FAIL_REQUIRED_ABSENT=0   # set only when a REQUIRED banner is absent (vs a FORBIDDEN one present); gates the contention retry below
 log ""
 log "=== Banner-emit gate (proves runtime invocation, not just embed) ==="
+
+# Array parity is load-bearing: severity is read WITHOUT a set-u guard, so a
+# missing BANNER_SEVERITY entry aborts the whole run with "unbound variable"
+# rather than misreporting one banner. Patch 0297 shipped with REGEX and LABEL
+# extended and SEVERITY not, which is exactly this failure. Check it cheaply
+# instead of trusting the comment above.
+if [[ "${#BANNER_REGEX[@]}" -ne "${#BANNER_SEVERITY[@]}" || \
+      "${#BANNER_REGEX[@]}" -ne "${#BANNER_LABEL[@]}" ]]; then
+  log "FAIL: banner arrays are not parallel -- REGEX=${#BANNER_REGEX[@]} SEVERITY=${#BANNER_SEVERITY[@]} LABEL=${#BANNER_LABEL[@]}"
+  log "      every entry needs a line in ALL THREE at the same index"
+  exit 1
+fi
 
 for i in "${!BANNER_REGEX[@]}"; do
   regex="${BANNER_REGEX[$i]}"

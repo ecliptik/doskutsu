@@ -1,0 +1,126 @@
+From 87a5149d1364b5f3dc9c773c8114d97f13bc01e8 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 14 Aug 2026 00:21:32 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0301 -- format guard on drawTileFast
+
+`_blit_indexed` assumes INDEX8 on both sides and moves one byte per
+pixel. `drawTileFast` called it with no format check at all.
+
+The sibling `drawTileFastToSurface` states the assumption in its own
+comment and falls back to SDL_BlitSurface when either side disagrees.
+`drawTileFast` never got that fallback, and nothing upstream supplies
+one: map.cpp gates the call on `drawtile_fast_on`, which resolves through
+`drawtile_fast_active()` to `_abl_drawtile_fast()` -- a bare
+SDL_HINT_DOSKUTSU_DRAWTILE_FAST env read, default ON, with no
+indexed-mode or format condition anywhere in the chain.
+
+So against an RGB565 window surface the entire tilemap layer wrote one
+byte per pixel into a two-byte-per-pixel destination. Half the bytes, at
+the wrong addresses. The visible result is a corrupted tilemap; the
+invisible one is that the frame also gets cheaper, because it is doing
+half the writes it should.
+
+REACHABLE WITHOUT A KILLSWITCH, which is what makes this a user-facing
+bug rather than a diagnostic curiosity. initVideo sets `_indexed_mode =
+false` and logs "FALLBACK to RGB565" whenever `master.pal` or
+`master.map` fails to load -- missing file, short read, or the 8.3-alias
+probe failing on an LFN-less filesystem. Those files are generated
+per-user by tools/build-master-palette.py against their own extracted
+Cave Story data, so a user who skips or botches that step lands in RGB565
+and gets a corrupted tilemap. And unlike the paths 0297 touched, this
+site has no dimension gate either, so it happens on EVERY card, not only
+one whose smallest VBE mode exceeds the logical screen.
+
+Found while auditing the 16bpp probe cell from round 2, where it
+contaminated the measurement: that run was reported as ~3x faster than
+its 8bpp counterpart while also showing "lots of new corruption", and one
+mechanism produced both. The performance conclusion drawn from that cell
+was withdrawn; the bug it exposed is this.
+
+The fix mirrors the sibling exactly: dispatch to `_blit_indexed` only
+when both surfaces are INDEX8, otherwise SDL_BlitSurface, which handles
+arbitrary formats and honours the source colorkey set at load time. The
+rects handed to either path are the post-clip, post-translate ones, so
+patch 0296's centring still applies on the fallback.
+
+`src_sfc` and the destination are hoisted into locals and null-checked
+first. That is not defensive padding: the fallback dereferences both
+through SDL_BlitSurface, so the guard is a precondition of introducing
+it, not an unrelated hardening.
+
+Trade accepted: on the RGB565 path this is slower than what it replaced.
+What it replaced was fast and wrong. RGB565 is a degraded fallback
+configuration whose users currently see a broken screen, so correctness
+wins without argument. The INDEX8 path -- every normally configured
+install, and every cell in the banked benchmark matrix -- is untouched
+apart from two pointer compares that fold away against the blit.
+
+No new banner: this adds a guard and an error log that fires only on
+SDL_BlitSurface failure, not a lever with a boot-time witness.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 47 +++++++++++++++++++++++++++++++++++----
+ 1 file changed, 43 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 7f1655f0..19733e26 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -7867,10 +7867,49 @@ void Renderer::drawTileFast(Surface *src, int dstx, int dsty, int srcx, int srcy
+   // path eventually reaches via _try_fast_blit dispatch). Wave-25
+   // instrumentation continues to fire if g_mds_tfg_loop_active is
+   // set by the caller.
+-  _blit_indexed(_cached_window_surface, src->surfaceCpu(),
+-                srcrect, dstrect,
+-                (Uint8)src->colorkey(), src->hasColorkey(),
+-                src->spanTable());
++  //
++  // DOS-PORT (patch 0301): format guard. `_blit_indexed` assumes
++  // INDEX8<->INDEX8 and moves ONE byte per pixel; the sibling
++  // `drawTileFastToSurface` says so in as many words and falls back to
++  // SDL_BlitSurface when either side disagrees. This function never got
++  // that fallback, and nothing upstream supplies one -- `map.cpp` gates
++  // the call on `drawtile_fast_on`, which resolves to a bare
++  // SDL_HINT_DOSKUTSU_DRAWTILE_FAST env read with no format condition at
++  // all. So against an RGB565 window surface the whole tilemap layer wrote
++  // one byte per pixel into a two-byte-per-pixel destination: half the
++  // bytes, at the wrong addresses, which is corruption that also happens
++  // to look faster.
++  //
++  // Reachable WITHOUT any killswitch. `initVideo` sets `_indexed_mode =
++  // false` and logs "FALLBACK to RGB565" whenever `master.pal` or
++  // `master.map` fails to load -- a missing file, a short read, or the 8.3
++  // alias probe failing. A user in that state gets a corrupted tilemap on
++  // EVERY card, not only oversized ones, because this site has no
++  // dimension gate either.
++  SDL_Surface *const _tf_dst = _cached_window_surface;
++  SDL_Surface *const _tf_src = src ? src->surfaceCpu() : nullptr;
++  if (!_tf_dst || !_tf_src) return;
++
++  if (_tf_src->format == SDL_PIXELFORMAT_INDEX8 &&
++      _tf_dst->format == SDL_PIXELFORMAT_INDEX8)
++  {
++    _blit_indexed(_tf_dst, _tf_src,
++                  srcrect, dstrect,
++                  (Uint8)src->colorkey(), src->hasColorkey(),
++                  src->spanTable());
++  }
++  else
++  {
++    // Same fallback as drawTileFastToSurface: SDL_BlitSurface handles
++    // arbitrary formats and honours the source colorkey set at load. The
++    // rects handed over are the post-clip, post-translate ones, so the
++    // 0296 centring still applies on this path.
++    if (!SDL_BlitSurface(_tf_src, &srcrect, _tf_dst, &dstrect))
++    {
++      LOG_ERROR("Renderer::drawTileFast: SDL_BlitSurface fallback failed: {}",
++                SDL_GetError());
++    }
++  }
+ }
+ 
+ // DOS-PORT (patch 0132, Phase 11 wave-35 mds_tilemap_bg drawTileFast
+-- 
+2.47.3
+

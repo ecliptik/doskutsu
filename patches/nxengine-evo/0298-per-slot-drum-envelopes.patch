@@ -1,0 +1,381 @@
+From 600898d20e32cbd6962ac59a5901dfab03cd90ea Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 14 Aug 2026 00:29:02 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0298 -- per-slot drum envelopes on OPL3 and
+ OPL2
+
+PATCH_DRUM was one maximally-percussive noise burst -- MULT=15, AR=15,
+DR=15, RR=15, WS=7 -- applied to every drum in the kit. The whole kit
+therefore differed only by the MIDI note's pitch, so a kick and a closed
+hat were the same sound an octave apart. The Shack is the audible case.
+
+The reachable key set is fixed and knowable, not open-ended. The MIDI set
+is our own org2mid output and its DRUM_GM_KEY[] table maps the eight
+Organya drum SLOTS to exactly eight GM keys: 35, 38, 42, 46, 45, 39, plus
+37 and 49 as forward-compat stubs for slots 6/7, which are SND_NULL
+across all 42 stock .org files. The engine agrees on the same axis --
+Organya.cpp indexes DrumSamples[idx - 8], so the drum sound is chosen by
+slot, and slot is what org2mid keys on. Eight envelopes therefore cover
+the corpus exactly, and the default case is unreachable with stock data.
+It is kept anyway so a hand-authored MIDI on channel 9 degrades to the
+old single burst rather than to silence.
+
+Character per key, and the FM parameter doing the work:
+
+  35 KICK       low MULT + sine WS -> pitched body rather than noise
+  38 SNARE      high MULT + logsaw -> noisy, decay shorter than the tom
+  42 HAT CLOSED max MULT, fastest DR/RR -> shortest event in the kit
+  46 HAT OPEN   42's timbre with DR/RR relaxed, so it reads as the SAME
+                instrument ringing on rather than a different one
+  45 TOM        low MULT + sine -> pitched like the kick, longer decay
+  39 PERC       noisy like the snare, slower attack for a softer edge
+  37 SIDESTICK  stub: short, dry, pitched
+  49 CRASH      stub: noisy, longest RR in the table
+
+Both backends or neither: OPL2 has its own drum path and AdLib is the
+configuration where the Shack was completely silent, so a fix in the OPL3
+file alone would have left the worse case untouched. The OPL2 table is a
+byte-identical copy rather than a shared symbol, matching how that file
+already carries its own copies of all eight PATCH_* constants; only one
+backend is constructed per process (adlib XOR opl3).
+
+`note` is threaded into _apply_patch on both backends. On the drum channel
+GM puts the kit on the note and the program field is ignored, so the note
+IS the instrument selector there -- without it the function cannot choose.
+The transpose lookup that reads patch[11] is switched to the same table in
+the same commit; leaving it on PATCH_DRUM would have applied one envelope's
+fine-tune to another's voice.
+
+Rhythm mode was checked before any of this was written, because per-slot
+envelopes allocated as ordinary melodic voices would interact with the
+OPL3 percussion latch if it were engaged: the failure mode is some drums
+working and others not, which reads as a bad envelope rather than a
+channel-allocation problem. Every 0xBD write in the tree is a clear to
+0x00 -- OPL3 init, OPL2 init, and both shutdowns. Bit 5 is never set
+anywhere, so rhythm mode is off, channels 6-8 stay melodic, and there is
+no interaction. Negative result, established first rather than after.
+
+NOT VERIFIED BY EAR. These envelopes are authored from the OPL3 register
+semantics documented at the head of MidiBackendOpl3.cpp, not tuned against
+the chip, and nobody has heard them. Round F's EAR cell is the gate. They
+are a first pass that should be expected to need revision -- revise the
+table, which is data, rather than reverting the mechanism, which is the
+note-threading. A wrong envelope is a wrong constant; the old behaviour
+was a wrong design.
+
+Chip note carried in the OPL2 file: bytes [4]/[10] carry WS=7, an OPL3
+waveform. A real OPL2 honours only WS 0-3 and masks the rest, so the noisy
+entries land on quarter-sine instead of logsaw. That is pre-existing on
+this path -- the PATCH_DRUM it replaces already shipped WS=7 -- and is left
+alone deliberately: changing it is a timbre decision wanting the operator's
+ear, not a silent divergence introduced under cover of an unheard patch.
+
+No banner: this is a data table plus an argument, not a lever with a boot
+witness. No killswitch either -- the old behaviour is a single envelope
+applied eight ways, which is not a configuration worth preserving.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendOpl2.cpp |  68 +++++++++++++++++--
+ src/sound/MidiBackendOpl2.h   |   4 +-
+ src/sound/MidiBackendOpl3.cpp | 124 ++++++++++++++++++++++++++++++++--
+ src/sound/MidiBackendOpl3.h   |   6 +-
+ 4 files changed, 192 insertions(+), 10 deletions(-)
+
+diff --git a/src/sound/MidiBackendOpl2.cpp b/src/sound/MidiBackendOpl2.cpp
+index 17a50764..56a46284 100644
+--- a/src/sound/MidiBackendOpl2.cpp
++++ b/src/sound/MidiBackendOpl2.cpp
+@@ -81,6 +81,62 @@ static constexpr uint8_t PATCH_DRUM[12] = {
+   0x0F, 0x00, 0xFF, 0x0F, 0x07, 0xF0, 0x0F, 0x00, 0xFF, 0x0F, 0x07, 0x00,
+ };
+ 
++// DOS-PORT (patch 0298): per-slot drum envelopes, byte-identical to the
++// OPL3 backend's table. Kept as a separate copy rather than shared,
++// matching how this file already carries its own copies of all eight
++// PATCH_* constants -- only one backend is constructed per process
++// (adlib XOR opl3), and the duplication is the established convention
++// here. See MidiBackendOpl3.cpp for the character rationale per key and
++// for why the eight GM keys below are the complete reachable set.
++//
++// Chip note: bytes [4]/[10] carry WS=7, which is an OPL3 waveform. A real
++// OPL2 honours only WS 0-3 and masks the rest, so the noisy entries land
++// on quarter-sine instead of logsaw. That is pre-existing behaviour --
++// the PATCH_DRUM above it already ships WS=7 on this path -- and it is
++// left alone deliberately: changing it is a timbre decision that wants
++// the operator's ear, not a silent divergence introduced in a patch whose
++// envelopes are themselves unheard.
++static constexpr uint8_t PATCH_DRUM_KICK[12] = {
++  0x01, 0x00, 0xF8, 0x0A, 0x00, 0xF0, 0x01, 0x00, 0xF7, 0x0B, 0x00, 0x00,
++};
++static constexpr uint8_t PATCH_DRUM_SNARE[12] = {
++  0x0E, 0x00, 0xFB, 0x0C, 0x07, 0xF0, 0x0E, 0x00, 0xFA, 0x0C, 0x07, 0x00,
++};
++static constexpr uint8_t PATCH_DRUM_HAT_CLOSED[12] = {
++  0x0F, 0x00, 0xFE, 0x0F, 0x07, 0xF0, 0x0F, 0x00, 0xFE, 0x0F, 0x07, 0x00,
++};
++static constexpr uint8_t PATCH_DRUM_HAT_OPEN[12] = {
++  0x0F, 0x00, 0xF8, 0x06, 0x07, 0xF0, 0x0F, 0x00, 0xF8, 0x06, 0x07, 0x00,
++};
++static constexpr uint8_t PATCH_DRUM_TOM[12] = {
++  0x02, 0x00, 0xF9, 0x09, 0x00, 0xF0, 0x02, 0x00, 0xF9, 0x09, 0x00, 0x00,
++};
++static constexpr uint8_t PATCH_DRUM_PERC[12] = {
++  0x0C, 0x00, 0xEA, 0x0B, 0x07, 0xF0, 0x0C, 0x00, 0xEA, 0x0B, 0x07, 0x00,
++};
++static constexpr uint8_t PATCH_DRUM_SIDESTICK[12] = {
++  0x04, 0x00, 0xFD, 0x0E, 0x00, 0xF0, 0x04, 0x00, 0xFD, 0x0E, 0x00, 0x00,
++};
++static constexpr uint8_t PATCH_DRUM_CRASH[12] = {
++  0x0F, 0x00, 0xF5, 0x04, 0x07, 0xF0, 0x0F, 0x00, 0xF5, 0x04, 0x07, 0x00,
++};
++
++static const uint8_t *_drum_patch_for_key(int note)
++{
++  switch (note)
++  {
++    case 35: return PATCH_DRUM_KICK;
++    case 38: return PATCH_DRUM_SNARE;
++    case 42: return PATCH_DRUM_HAT_CLOSED;
++    case 46: return PATCH_DRUM_HAT_OPEN;
++    case 45: return PATCH_DRUM_TOM;
++    case 39: return PATCH_DRUM_PERC;
++    case 37: return PATCH_DRUM_SIDESTICK;
++    case 49: return PATCH_DRUM_CRASH;
++    default: return PATCH_DRUM;
++  }
++}
++
+ // Runtime bank (loaded from data/opl3bank.dat). Separate static storage
+ // from the OPL3 backend's -- only one of the two backends is ever
+ // constructed in a given process (adlib XOR opl3), so no double-load.
+@@ -325,10 +381,14 @@ int MidiBackendOpl2::_find_voice(int channel, int note)
+   return -1;
+ }
+ 
+-void MidiBackendOpl2::_apply_patch(int voice_id, int channel, int program)
++void MidiBackendOpl2::_apply_patch(int voice_id, int channel, int program,
++                                   int note)
+ {
++  // patch 0298: on DRUM_CHANNEL the note is the instrument selector, not
++  // the program -- GM puts the kit on the note.
+   const uint8_t *patch =
+-      (channel == DRUM_CHANNEL) ? PATCH_DRUM : _program_to_patch(program);
++      (channel == DRUM_CHANNEL) ? _drum_patch_for_key(note)
++                                : _program_to_patch(program);
+   SDL_DOSOpl3VoiceWritePatch(voice_id, patch);
+ }
+ 
+@@ -353,7 +413,7 @@ void MidiBackendOpl2::note_on(int channel, int note, int velocity)
+   _voices[voice].midi_channel = (std::uint8_t)(channel & 0x0F);
+   _voices[voice].midi_note    = (std::uint8_t)(note    & 0x7F);
+ 
+-  _apply_patch(voice, channel, _channel_program[channel & 0x0F]);
++  _apply_patch(voice, channel, _channel_program[channel & 0x0F], note);
+ 
+   // Honor patch[11] as a SIGNED int8 semitone transpose (DMXOPL/GENMIDI
+   // convention; mirrors patch 0232 in the OPL3 backend). midi_note keeps
+@@ -361,7 +421,7 @@ void MidiBackendOpl2::note_on(int channel, int note, int velocity)
+   // transposed.
+   const std::uint8_t *_xpatch =
+       (channel == DRUM_CHANNEL)
+-          ? PATCH_DRUM
++          ? _drum_patch_for_key(note)   // patch 0298: same table as dispatch
+           : _program_to_patch(_channel_program[channel & 0x0F]);
+   const int _play_note = note + (int)(std::int8_t)_xpatch[11];
+ 
+diff --git a/src/sound/MidiBackendOpl2.h b/src/sound/MidiBackendOpl2.h
+index ff0255b8..a21879ae 100644
+--- a/src/sound/MidiBackendOpl2.h
++++ b/src/sound/MidiBackendOpl2.h
+@@ -95,7 +95,9 @@ private:
+   int  _find_voice(int channel, int note);
+ 
+   // Apply the GM patch for `program` on `channel` to voice `voice_id`.
+-  void _apply_patch(int voice_id, int channel, int program);
++  // patch 0298: `note` selects the drum envelope on DRUM_CHANNEL (GM puts
++  // the kit on the note, not the program). Unused on melodic channels.
++  void _apply_patch(int voice_id, int channel, int program, int note);
+ 
+   // Convert MIDI note (0-127) to OPL (fnum, block) tuple.
+   void _midi_note_to_fnum_block(int note, std::uint16_t *out_fnum,
+diff --git a/src/sound/MidiBackendOpl3.cpp b/src/sound/MidiBackendOpl3.cpp
+index e3cc88d7..823d410e 100644
+--- a/src/sound/MidiBackendOpl3.cpp
++++ b/src/sound/MidiBackendOpl3.cpp
+@@ -219,6 +219,118 @@ static constexpr uint8_t PATCH_DRUM[12] = {
+   0x00,
+ };
+ 
++// ============================================================================
++// DOS-PORT (patch 0298): per-slot drum envelopes.
++//
++// PATCH_DRUM above is ONE maximally-percussive noise burst -- MULT=15,
++// AR=15/DR=15, RR=15, WS=7 -- used for every drum in the kit. On the OPL3
++// that is a click: the entire kit differs only by the MIDI note's pitch,
++// so a kick and a closed hat are the same sound an octave apart. The
++// Shack is the audible case, and the AdLib cell had it silent outright.
++//
++// Which notes can actually arrive is fixed and knowable, not open-ended.
++// The MIDI set is our own org2mid output, and its DRUM_GM_KEY[] table
++// (tools/org2mid/org2mid.c) maps the eight Organya drum SLOTS to exactly
++// eight GM keys -- 35, 38, 42, 46, 45, 39, plus 37 and 49 as forward-compat
++// stubs for slots 6/7, which are SND_NULL across all 42 stock .org files.
++// The engine side agrees: Organya.cpp indexes DrumSamples[idx - 8], so the
++// drum sound is chosen by slot, and slot is what org2mid keys on. Nothing
++// else can reach channel 9, so eight envelopes cover the corpus exactly and
++// the default below is genuinely unreachable with stock data.
++//
++// Character targets, and the FM parameter doing the work in each:
++//
++//   35 KICK       low MULT + sine WS -> pitched body, not noise; medium DR
++//   38 SNARE      high MULT + logsaw WS -> noisy; DR shorter than the tom
++//   42 HAT CLOSED max MULT, fastest DR/RR -> the shortest thing in the kit
++//   46 HAT OPEN   same timbre as 42, DR/RR relaxed -> it must read as the
++//                 SAME instrument ringing on, not as a different one
++//   45 TOM        low MULT + sine -> pitched like the kick, longer decay
++//   39 PERC/CLAP  noisy like the snare, slower attack for a softer edge
++//   37 SIDESTICK  stub: short, dry, pitched
++//   49 CRASH      stub: noisy with the longest RR in the table
++//
++// NOT VERIFIED BY EAR. These are authored from the OPL3 register semantics
++// documented at the head of this file, not tuned against the chip. Round F's
++// EAR cell is the gate; treat the values as a first pass that is expected to
++// need revision, and revise the table rather than reverting the mechanism.
++// ============================================================================
++
++static constexpr uint8_t PATCH_DRUM_KICK[12] = {
++  0x01, 0x00, 0xF8, 0x0A, 0x00,  // op0: MULT=1, sine, AR=15 DR=8, RR=10
++  0xF0,                          // FB/CONN: stereo + FB=0 + AM
++  0x01, 0x00, 0xF7, 0x0B, 0x00,  // op1: matched, slightly shorter tail
++  0x00,
++};
++
++static constexpr uint8_t PATCH_DRUM_SNARE[12] = {
++  0x0E, 0x00, 0xFB, 0x0C, 0x07,  // op0: MULT=14, logsaw, DR=11 RR=12
++  0xF0,
++  0x0E, 0x00, 0xFA, 0x0C, 0x07,  // op1: matched
++  0x00,
++};
++
++static constexpr uint8_t PATCH_DRUM_HAT_CLOSED[12] = {
++  0x0F, 0x00, 0xFE, 0x0F, 0x07,  // op0: max MULT, DR=14 RR=15 -- shortest
++  0xF0,
++  0x0F, 0x00, 0xFE, 0x0F, 0x07,
++  0x00,
++};
++
++static constexpr uint8_t PATCH_DRUM_HAT_OPEN[12] = {
++  0x0F, 0x00, 0xF8, 0x06, 0x07,  // op0: same timbre as 42, DR=8 RR=6
++  0xF0,                          //      -- same instrument, ringing on
++  0x0F, 0x00, 0xF8, 0x06, 0x07,
++  0x00,
++};
++
++static constexpr uint8_t PATCH_DRUM_TOM[12] = {
++  0x02, 0x00, 0xF9, 0x09, 0x00,  // op0: MULT=2, sine -> pitched, DR=9
++  0xF0,
++  0x02, 0x00, 0xF9, 0x09, 0x00,
++  0x00,
++};
++
++static constexpr uint8_t PATCH_DRUM_PERC[12] = {
++  0x0C, 0x00, 0xEA, 0x0B, 0x07,  // op0: AR=14 (softer edge), DR=10
++  0xF0,
++  0x0C, 0x00, 0xEA, 0x0B, 0x07,
++  0x00,
++};
++
++static constexpr uint8_t PATCH_DRUM_SIDESTICK[12] = {
++  0x04, 0x00, 0xFD, 0x0E, 0x00,  // stub (slot 6 unused in stock data)
++  0xF0,
++  0x04, 0x00, 0xFD, 0x0E, 0x00,
++  0x00,
++};
++
++static constexpr uint8_t PATCH_DRUM_CRASH[12] = {
++  0x0F, 0x00, 0xF5, 0x04, 0x07,  // stub (slot 7 unused): longest RR
++  0xF0,
++  0x0F, 0x00, 0xF5, 0x04, 0x07,
++  0x00,
++};
++
++// GM percussion key -> envelope. Anything org2mid cannot emit falls back to
++// the pre-0298 single burst, so a hand-authored or third-party MIDI on the
++// drum channel degrades to exactly the old behaviour rather than silence.
++static const uint8_t *_drum_patch_for_key(int note)
++{
++  switch (note)
++  {
++    case 35: return PATCH_DRUM_KICK;
++    case 38: return PATCH_DRUM_SNARE;
++    case 42: return PATCH_DRUM_HAT_CLOSED;
++    case 46: return PATCH_DRUM_HAT_OPEN;
++    case 45: return PATCH_DRUM_TOM;
++    case 39: return PATCH_DRUM_PERC;
++    case 37: return PATCH_DRUM_SIDESTICK;
++    case 49: return PATCH_DRUM_CRASH;
++    default: return PATCH_DRUM;
++  }
++}
++
+ // ============================================================================
+ // Patch 0141 (wave 46 Phase 10.5): runtime patch-bank loader
+ // ============================================================================
+@@ -709,12 +821,16 @@ int MidiBackendOpl3::_find_voice(int channel, int note)
+   return -1;
+ }
+ 
+-void MidiBackendOpl3::_apply_patch(int voice_id, int channel, int program)
++void MidiBackendOpl3::_apply_patch(int voice_id, int channel, int program,
++                                   int note)
+ {
+   const uint8_t *patch;
+   if (channel == DRUM_CHANNEL)
+   {
+-    patch = PATCH_DRUM;
++    // DOS-PORT (patch 0298): the drum channel ignores `program` by design
++    // (GM puts the kit on the note, not the program), so the note IS the
++    // instrument selector here -- which is why it had to be threaded in.
++    patch = _drum_patch_for_key(note);
+   }
+   else
+   {
+@@ -752,7 +868,7 @@ void MidiBackendOpl3::note_on(int channel, int note, int velocity)
+ 
+   // Apply the patch for this MIDI channel's current program (or drum
+   // patch on drum channel).
+-  _apply_patch(voice, channel, _channel_program[channel & 0x0F]);
++  _apply_patch(voice, channel, _channel_program[channel & 0x0F], note);
+ 
+   // patch 0232 (DOPL3v1 transpose): honor patch[11] as a SIGNED int8
+   // semitone offset, applied to the played note before the (fnum, block)
+@@ -769,7 +885,7 @@ void MidiBackendOpl3::note_on(int channel, int note, int velocity)
+   // offset is 0 and behavior is byte-identical to pre-0232 (no killswitch).
+   const std::uint8_t *_xpatch =
+       (channel == DRUM_CHANNEL)
+-          ? PATCH_DRUM
++          ? _drum_patch_for_key(note)   // patch 0298: same table as dispatch
+           : _program_to_patch(_channel_program[channel & 0x0F]);
+   const int _play_note = note + (int)(std::int8_t)_xpatch[11];
+ 
+diff --git a/src/sound/MidiBackendOpl3.h b/src/sound/MidiBackendOpl3.h
+index cfda41cd..c1ae4695 100644
+--- a/src/sound/MidiBackendOpl3.h
++++ b/src/sound/MidiBackendOpl3.h
+@@ -94,7 +94,11 @@ private:
+   // Drum channel (channel 9) ignores program and uses a single drum
+   // patch; melody channels pick from the inline melody bank by program
+   // family (8-program groupings per GM spec).
+-  void _apply_patch(int voice_id, int channel, int program);
++  // patch 0298: `note` selects the drum envelope on DRUM_CHANNEL. GM puts
++  // the kit on the note rather than the program, so on channel 9 `program`
++  // is ignored and `note` is the instrument selector. Unused on melodic
++  // channels, where `program` still chooses the family bucket.
++  void _apply_patch(int voice_id, int channel, int program, int note);
+ 
+   // Convert MIDI note (0-127) to OPL3 (fnum, block) tuple. Uses
+   // precomputed 12-entry octave-base table; block = octave count
+-- 
+2.47.3
+
