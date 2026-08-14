@@ -119,76 +119,7 @@ other CPUs just report same or different.
 
 ---
 
-# Round F -- round-3 binary (NOT READY -- binary not built yet)
-
-One CPU swap to the **DX2-66**, then it stays. Everything else is cards.
-No Cirrus needed. Populate first -- new binary, new cache, new MIDI set.
-
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| F0 | CF in *laptop* | -- | populate (round-3 payload) | 6 min |
-| F1 | CPU -> **DX2-66**, ViRGE + PicoGUS | 2 | `QA 3` -> `RB` | 12 min |
-| F2 | CF in *laptop* | -- | **logback `r3-rb-dx266`** -- send, then STOP | 2 min |
-| F3 | -- | 2 | `EAR` -- listen at the Shack | 9 min |
-| F4 | -- | 2 | `MIDIAB` | 7 min |
-| F5 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP` | 12 min |
-| F6 | CF in *laptop* | -- | **logback `r3-dx266`** -- send | 2 min |
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-rb-dx266
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-dx266
-
-**F2 is a hard stop.** `RB` decides whether the new binary still compares to
-the 157 banked cells. Do not run F3-F5 until it is confirmed.
-
-**F3 `EAR`** -- the Shack, last map change, ~87 s in, on screen 6-8 s.
-
-| Cell | Backend | Was | Should now be |
-|---|---|---|---|
-| 1 `E4` | OPL3 | a note or two | recognisable drums |
-| 2 `E3` | Organya | correct music | unchanged |
-| 3 `EA` | AdLib | silence | audible |
-
-**F4 `MIDIAB`** -- 2 cells, same binary, two MIDI sets. Answers where the
-AdLib gain came from. Run it on this CPU specifically; the POD-83 cannot
-answer it.
-
-# Round G -- Mach64 with the round-3 binary (NOT READY)
-
-Only after Round F passes.
-
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| G1 | **Mach64**, UniVBE set up for it | 1 | check the UniVBE banner first | -- |
-| G2 | -- | 1 | `QA 3` -> `VIDM 3` | 40 min |
-| G3 | -- | 1 | `VIDMI 3` -- flip breakdown, watch then reset | ~5 min |
-| G4 | CF in *laptop* | -- | **logback `r3-mach64`** -- send | 2 min |
-
-Get `VIDMI` onto the card with the populate, or copy it directly:
-
-    scp claude:/tmp/VIDMI.BAT /media/micheal/DOS/doskutsu/
-
-**G3 `VIDMI`** switches on flip instrumentation that already exists in the
-engine but defaults off -- every Mach64 cell so far carried zero of these. It
-splits `flip_inner` into drain / dirty / present, which the analysis has been
-treating as unrecoverable. It is **not an fps row**: the extra timer reads cost
-time. Read the breakdown, do not bank the frame rate. Watch-then-reset is fine,
-same as `VIDMC`.
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-mach64
-
-Three things to report:
-
-| | |
-|---|---|
-| map-name text | still pink, or correct? |
-| speed by eye | how fast is it -- not "did it improve" |
-| mode in the log | should be `0x01F3 512x384`, not `640x480` |
-
-Budget **40 min**. The 16bpp probe looked 3x faster but was writing a corrupt
-tilemap, so it is not a prediction. `0297` may cut this sharply or barely at
-all; report the number rather than a verdict.
-
-# Mach64 -- round 2 procedure (M1-M5) -- DONE except M4
+## Round E -- Mach64, round-2 binary (`QA 1`) -- DONE except M4
 
 Mach64 in, ViRGE out. Keep whatever sound the POD-83 round left in the box.
 
@@ -238,3 +169,74 @@ confirmation by a different route, not the only evidence.
 - Budget 40 min per cell -- it ran at 2.2 fps last time.
 - Its fps is not comparable to Round A's Mach64 number (different CPU + sound).
 - UniVBE, never M64VBE.
+
+---
+
+## Round F -- round-3 binary, 486DX2-66 (`QA 3`) -- NOT READY
+
+One CPU swap to the **DX2-66**, then it stays. Everything else is cards.
+No Cirrus needed. Populate first -- new binary, new cache, new MIDI set.
+
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| F0 | CF in *laptop* | -- | populate (round-3 payload) | 6 min |
+| F1 | CPU -> **DX2-66**, ViRGE + PicoGUS | 2 | `QA 3` -> `RB` | 12 min |
+| F2 | CF in *laptop* | -- | **logback `r3-rb-dx266`** -- send, then STOP | 2 min |
+| F3 | -- | 2 | `EAR` -- listen at the Shack | 9 min |
+| F4 | -- | 2 | `MIDIAB` | 7 min |
+| F5 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP` | 12 min |
+| F6 | CF in *laptop* | -- | **logback `r3-dx266`** -- send | 2 min |
+
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-rb-dx266
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-dx266
+
+**F2 is a hard stop.** `RB` decides whether the new binary still compares to
+the 157 banked cells. Do not run F3-F5 until it is confirmed.
+
+**F3 `EAR`** -- the Shack, last map change, ~87 s in, on screen 6-8 s.
+
+| Cell | Backend | Was | Should now be |
+|---|---|---|---|
+| 1 `E4` | OPL3 | a note or two | recognisable drums |
+| 2 `E3` | Organya | correct music | unchanged |
+| 3 `EA` | AdLib | silence | audible |
+
+**F4 `MIDIAB`** -- 2 cells, same binary, two MIDI sets. Answers where the
+AdLib gain came from. Run it on this CPU specifically; the POD-83 cannot
+answer it.
+
+## Round G -- Mach64, round-3 binary (`QA 3`) -- NOT READY
+
+Only after Round F passes.
+
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| G1 | **Mach64**, UniVBE set up for it | 1 | check the UniVBE banner first | -- |
+| G2 | -- | 1 | `QA 3` -> `VIDM 3` | 40 min |
+| G3 | -- | 1 | `VIDMI 3` -- flip breakdown, watch then reset | ~5 min |
+| G4 | CF in *laptop* | -- | **logback `r3-mach64`** -- send | 2 min |
+
+Get `VIDMI` onto the card with the populate, or copy it directly:
+
+    scp claude:/tmp/VIDMI.BAT /media/micheal/DOS/doskutsu/
+
+**G3 `VIDMI`** switches on flip instrumentation that already exists in the
+engine but defaults off -- every Mach64 cell so far carried zero of these. It
+splits `flip_inner` into drain / dirty / present, which the analysis has been
+treating as unrecoverable. It is **not an fps row**: the extra timer reads cost
+time. Read the breakdown, do not bank the frame rate. Watch-then-reset is fine,
+same as `VIDMC`.
+
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-mach64
+
+Three things to report:
+
+| | |
+|---|---|
+| map-name text | still pink, or correct? |
+| speed by eye | how fast is it -- not "did it improve" |
+| mode in the log | should be `0x01F3 512x384`, not `640x480` |
+
+Budget **40 min**. The 16bpp probe looked 3x faster but was writing a corrupt
+tilemap, so it is not a prediction. `0297` may cut this sharply or barely at
+all; report the number rather than a verdict.
