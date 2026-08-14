@@ -128,17 +128,27 @@ Mach64 in, ViRGE out. Keep whatever sound the POD-83 round left in the box.
 | M1 | Fit Mach64, set up UniVBE for it, boot | -- |
 | M2 | **Does UniVBE take the Mach64?** If it declines -- STOP, report, done | -- |
 | M3 | `QA 1` then `VIDM 1` (add `PG` only if the PicoGUS is in) | 40 min |
-| M4 | Colours still wrong by eye? run the probe below, same sitting | 10 min |
+| M4 | Colours still wrong by eye? `VIDMC 1` -- same sitting | 10 min |
 | M5 | logback `r2f-mach64` -- send | 2 min |
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-mach64
 
-Colour probe -- by eye, after M3. The empty `SET` is required; `CLRENV` does
-not clear this one and it would leak into anything run afterwards.
+Colour probe (`VIDMC`) runs the VIDM cells at 16bpp -- no palette, no index
+remap, no DAC. By eye only; it writes the same log tags, so run it after M3.
+It sets and clears the hint itself.
 
-    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0
-    VIDM 1
-    SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=
+    VIDMC 1        (add PG only if the PicoGUS is in)
+
+Watch the map-name text as the stage loads:
+
+| | |
+|---|---|
+| text **white** | the indexed + colour-mod path is at fault |
+| text **pink** | fault is upstream of the palette |
+
+Get it onto the card first -- *laptop*, CF mounted:
+
+    scp claude:/tmp/VIDMC.BAT /media/micheal/DOS/doskutsu/
 
 - Budget 40 min per cell -- it ran at 2.2 fps last time.
 - Its fps is not comparable to Round A's Mach64 number (different CPU + sound).
