@@ -119,29 +119,28 @@ other CPUs just report same or different.
 
 ---
 
-# Round F -- new binary (NOT READY -- binary not built yet)
+# Round F -- round-3 binary (NOT READY -- binary not built yet)
 
 One CPU swap to the **DX2-66**, then it stays. Everything else is cards.
-No Cirrus needed. Populate first -- it is a new binary and a new cache.
+No Cirrus needed. Populate first -- new binary, new cache, new MIDI set.
 
 | Step | Hardware | Boot | Type after boot | Time |
 |---|---|---|---|---|
-| F0 | CF in *laptop* | -- | populate (new payload) | 5 min |
+| F0 | CF in *laptop* | -- | populate (round-3 payload) | 6 min |
 | F1 | CPU -> **DX2-66**, ViRGE + PicoGUS | 2 | `QA 3` -> `RB` | 12 min |
-| F2 | -- | -- | pull logs -- **stop, send them** | 2 min |
-| F3 | -- | -- | `EAR` -- drum patches, by ear | 9 min |
-| F4 | -- | -- | `MIDIAB` -- the AdLib MIDI A/B | 12 min |
-| F5 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP8` | 12 min |
+| F2 | CF in *laptop* | -- | **logback `r3-rb-dx266`** -- send, then STOP | 2 min |
+| F3 | -- | 2 | `EAR` -- listen at the Shack | 9 min |
+| F4 | -- | 2 | `MIDIAB` | 7 min |
+| F5 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP` | 12 min |
 | F6 | CF in *laptop* | -- | **logback `r3-dx266`** -- send | 2 min |
 
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-rb-dx266
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-dx266
 
-**F2 is a real stop.** `RB` decides whether the new binary still compares to
+**F2 is a hard stop.** `RB` decides whether the new binary still compares to
 the 157 banked cells. Do not run F3-F5 until it is confirmed.
 
-**F3 `EAR`** -- the Shack should now play as music on OPL3 and AdLib, not one
-repeated click. Same three cells, same listening point: last map change, ~87 s
-in, on screen 6-8 s.
+**F3 `EAR`** -- the Shack, last map change, ~87 s in, on screen 6-8 s.
 
 | Cell | Backend | Was | Should now be |
 |---|---|---|---|
@@ -149,26 +148,31 @@ in, on screen 6-8 s.
 | 2 `E3` | Organya | correct music | unchanged |
 | 3 `EA` | AdLib | silence | audible |
 
-**F4 `MIDIAB`** -- same binary, two MIDI sets. Tests whether the AdLib gain
-came from the shorter arrangements. No rebuild involved.
+**F4 `MIDIAB`** -- 2 cells, same binary, two MIDI sets. Answers where the
+AdLib gain came from. Run it on this CPU specifically; the POD-83 cannot
+answer it.
 
-**F5 `GAP8`** -- adds the Vibra `force_8bit=1` cell that round 2 left open,
-alongside the audio floor re-measured with the error spam fixed.
+# Round G -- Mach64 with the round-3 binary (NOT READY)
 
-# Round G -- Mach64 with the new binary (NOT READY)
-
-Only after Round F passes. Same Mach64 procedure as before -- UniVBE first,
-watch the banner.
+Only after Round F passes.
 
 | Step | Hardware | Boot | Type after boot | Time |
 |---|---|---|---|---|
-| G1 | **Mach64**, UniVBE set up for it | 1 | `QA 3` -> `VIDM 3` | 40 min |
-| G2 | -- | -- | logback `r3-mach64` -- send | 2 min |
+| G1 | **Mach64**, UniVBE set up for it | 1 | check the UniVBE banner first | -- |
+| G2 | -- | 1 | `QA 3` -> `VIDM 3` | 20 min |
+| G3 | CF in *laptop* | -- | **logback `r3-mach64`** -- send | 2 min |
 
-Looking for: map-name text in the right colour, the surface at 512x384 rather
-than 640x480, and whether the frame rate moved off 2.2 fps.
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-mach64
 
----
+Three things to report:
+
+| | |
+|---|---|
+| map-name text | still pink, or correct? |
+| speed by eye | the 16bpp probe ran near ViRGE speed -- does 8bpp now too? |
+| mode in the log | should be `0x01F3 512x384`, not `640x480` |
+
+Budget 20 min, not 40 -- `0297` is expected to cut it sharply, but it may not.
 
 # Mach64 -- round 2 procedure (M1-M5) -- DONE except M4
 
