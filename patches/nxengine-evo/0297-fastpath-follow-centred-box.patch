@@ -1,0 +1,751 @@
+From 37a29bbe013f2796afcdd92f4257035dfe2f9f0c Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 14 Aug 2026 00:05:08 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0297 -- let the hand-rolled paths follow the
+ centred box
+
+Patch 0296 gave the ATI Mach64 a correct picture by centring the 320x240
+logical screen inside the smallest surface its VBE will offer, but it
+relaxed no dimension gate. Six sites in Renderer.cpp demanded a window
+surface of exactly 320x240 and fell through to the SDL software renderer
+otherwise, and 0296 fixed only drawTileFast. The round-2 logs show what
+that costs on the one card in the fleet that is oversized:
+
+  Mach64 512x384  slowpath reason block: windim=1787 of 1787
+                  fastpath audit: taken=0 (idx8=0) skipped=1787
+  ViRGE  320x240  fastpath audit: taken=2828 skipped=0 pct_x10=1000
+
+Every drawSurface call on that card leaves the hand-rolled blitters, and
+the requirement was never "exactly the logical screen" -- it was "at
+least the logical screen, so a 1:1 blit fits".
+
+The correctness half is colour-modulated text. drawSurfaceColorMod takes
+its destination from _ensure_handrolled_surface, so on an oversized
+surface it reaches the fallback that hands an INDEX8 texture to
+SDL_SetTextureColorMod. SDL_CalculateBlit1 has no SDL_COPY_MODULATE_COLOR
+case in any combination, so a colourkeyed glyph lands on SDL_Blit_Slow --
+a per-pixel RGB round trip with a reverse palette lookup, in place of the
+engine's precomputed byte LUT. That is the pink map-name text the
+operator reports, and the counters make the diversion explicit: 13173
+modulated draws in the fallback bucket against the ViRGE's zero.
+
+Relaxed here: _try_fast_blit, _try_fast_blit_mirrored,
+_try_fast_blit_alpha, and _ensure_handrolled_surface for
+drawSurfaceColorMod, fillRect and clearScreen.
+
+Routed rather than relaxed: drawLine and drawRect pass center_active=false.
+That is a routing decision, not a narrowing. The dimension match in
+_dos_surface_fits happens before the flag is consulted, so a card offering
+320x240 still takes the direct write at both sites; only an oversized
+surface falls through to the renderer, and 0296's viewport already
+translates and clips renderer draws into the centred box. The draw lands
+in the right place either way. It is preferable here because both bound
+every write against the surface, so a direct-write version would need a
+per-pixel or per-edge clip to the logical box, and getting that wrong
+writes into the margin rather than failing visibly -- while the renderer
+does the clipping correctly for free on primitives too rare to measure.
+Nothing about these two sites is pending.
+
+Three things this needed that the existing machinery did not give:
+
+  - a shared clip-then-translate. Every primitive clamps against the
+    destination SURFACE, which equals the logical screen only while the
+    surface does; oversized, a sprite hanging off the logical right edge
+    would spill into the cleared margin instead of being cut. 0296
+    open-coded this for one caller. Eight hand-written copies is how the
+    margin eventually gets a stray tile in it.
+  - a mirrored variant. A column-reversed blit maps a destination-left
+    clip onto the source RIGHT edge. Getting it backwards does not crash
+    and does not touch the margin -- it silently draws the wrong slice of
+    the sheet, which survives a smoke test.
+  - clearScreen restricted to the box. Both branches wrote the whole
+    surface, which oversized would repaint the margin with the map's
+    background colour every frame, undoing 0296's one-shot clear and
+    pushing bytes that flip() then intersects away. The native path keeps
+    its single contiguous memset: 240 short memsets are measurably worse
+    than one long one, and that is the path the banked matrix was
+    measured on.
+
+Coordinate discipline, since the failure mode is invisible:
+_record_dirty_rect applies the centring offset itself AND clips to the
+logical box before translating, so it is still fed untranslated rects at
+every touched site. Feeding it translated input would truncate and
+displace in one step, leaving a rect that looks plausible in a log while
+the flush addresses the wrong region -- correct picture, wrong bytes
+flushed, presenting as tearing rather than as visibly broken output.
+
+A rect clipped wholly outside the logical screen returns true, not false.
+_blit_indexed already early-returns on a zero-pixel clamp and reports
+success, so the caller counts a taken fastpath and draws nothing.
+Returning false would push those onto the slow path and move the very
+counters this patch is measured by.
+
+Every site is gated on _dos_center_active, so a card offering 320x240
+takes the literal pre-patch path -- not an equivalent one. That matters
+because the banked benchmark matrix was measured there. The oversized
++ killswitch case is rejected too: 0296's hint leaves the surface
+oversized while centring is off, and accepting it would draw the game 1:1
+in a corner, a third picture belonging to neither A/B arm.
+
+Killswitch SDL_HINT_DOSKUTSU_FASTPATH_OVERSIZED=0 stands the fast paths
+down while keeping the centring. Deliberately separate from 0296's hint,
+so Round G compares two blit routes rather than two pictures.
+
+WHAT THIS DOES NOT FIX. The expected performance gain is unknown. The
+16bpp probe that suggested the indexed blit dominates was contaminated by
+drawTileFast writing one byte per pixel into a two-byte surface (its own
+follow-up), and the residual bucket it would have to beat is derived by
+subtraction from buckets that leak -- dc_ms scaled 2.36x on a flat
+drawcall count, which queue dispatch cannot do. This patch addresses the
+text colour and an unmeasured share of the frame. It does not touch the
+59-65% unattributed residual, the episodic present plateaus, the SDL/0116
+VBLANK cap, or the colour question if it survives.
+
+Verification, all from witnesses already in the binary: the
+`center-oversized: flush rect=WxH@X,Y` line must still report logical
+size at the centring origin; `fastpath audit ... taken=` must go non-zero
+on an oversized surface while `slowpath reason ... windim=` falls to
+zero; and the native-320x240 no-op gets 0296's own treatment rather than
+being asserted from the gate.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 380 +++++++++++++++++++++++++++++++++-----
+ src/graphics/Renderer.h   |  16 ++
+ 2 files changed, 349 insertions(+), 47 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 520ccd7b..2e4419ee 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -3987,6 +3987,20 @@ bool Renderer::initVideo()
+              "margins are cleared once; set SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0 "
+              "to restore the scaled logical-presentation path)",
+              _dos_out_w, _dos_out_h, _dos_center_ox, _dos_center_oy);
++
++    // DOS-PORT (patch 0297): the hand-rolled fast paths follow the centred
++    // box instead of standing down. Separate hint from 0296's so Round G
++    // can A/B this patch alone without also reverting the centring.
++    _dos_fastpath_oversized =
++        !_strict_falsy_env("SDL_HINT_DOSKUTSU_FASTPATH_OVERSIZED");
++    LOG_INFO("fastpath-oversized: {} -- hand-rolled blit/fill paths {} on the "
++             "oversized surface (pre-0297 they all required exactly 320x240 and "
++             "fell through to the SDL software renderer, which is what put "
++             "colour-modulated text on SDL_Blit_Slow); set "
++             "SDL_HINT_DOSKUTSU_FASTPATH_OVERSIZED=0 to stand them down again "
++             "while keeping the centring",
++             _dos_fastpath_oversized ? "ENGAGED" : "DISABLED (killswitch =0)",
++             _dos_fastpath_oversized ? "follow the centred box" : "stand down");
+   }
+   else
+   {
+@@ -6740,11 +6754,139 @@ static inline bool _blit_indexed_mirrored(SDL_Surface *dst, SDL_Surface *src,
+ //   called or SDL_RenderPresent fires. Either way the slow-path output
+ //   composites on top of fast-path output exactly as it would if both
+ //   went through the renderer.
++// DOS-PORT (patch 0297): clip a logical-space destination rect to the
++// 320x240 logical screen, carrying its source rect, then translate it
++// into a centred box at (ox,oy). Returns false when the rect lies wholly
++// outside the logical screen and nothing should be drawn.
++//
++// Every hand-rolled primitive below clamps against the destination
++// SURFACE, not against the logical screen -- correct while the surface IS
++// the logical screen, wrong once it is larger, because a sprite hanging
++// off the logical right or bottom edge would then spill into the cleared
++// margin instead of being cut. So the clip has to happen HERE, before the
++// translate, and the source rect has to travel with it or the surviving
++// pixels come from the wrong part of the sheet.
++//
++// This is patch 0296's drawTileFast logic lifted into one place. It was
++// open-coded there for a single caller; 0297 needs it at eight sites, and
++// eight hand-written copies of a clip-then-translate is how the margin
++// eventually gets a stray tile in it.
++//
++// ox/oy are zero whenever centring is inactive, which makes this an
++// identity transform plus a bounds check on every card that offers
++// 320x240 -- the configuration every banked benchmark cell was measured
++// in. `srcrect` may be null for primitives that have no source (fills,
++// lines, clears).
++static inline bool _dos_clip_xlate(SDL_Rect *srcrect, SDL_Rect &dstrect,
++                                   int ox, int oy)
++{
++  int cx = dstrect.x, cy = dstrect.y;
++  int cw = dstrect.w, ch = dstrect.h;
++  int sx = srcrect ? srcrect->x : 0;
++  int sy = srcrect ? srcrect->y : 0;
++
++  if (cx < 0) { cw += cx; sx -= cx; cx = 0; }
++  if (cy < 0) { ch += cy; sy -= cy; cy = 0; }
++  if (cx + cw > 320)  cw = 320  - cx;
++  if (cy + ch > 240) ch = 240 - cy;
++  if (cw <= 0 || ch <= 0) return false;
++
++  if (srcrect)
++  {
++    srcrect->x = sx;
++    srcrect->y = sy;
++    srcrect->w = cw;
++    srcrect->h = ch;
++  }
++  dstrect.x = cx + ox;
++  dstrect.y = cy + oy;
++  dstrect.w = cw;
++  dstrect.h = ch;
++  return true;
++}
++
++// DOS-PORT (patch 0297): mirrored sibling of _dos_clip_xlate. Under a
++// column-reversed blit destination column i reads source column
++// (w-1-i), so a clip off the destination LEFT edge must remove source
++// columns from the RIGHT (srcrect.x unchanged, width shrinks) and a clip
++// off the destination RIGHT edge must remove them from the LEFT
++// (srcrect.x advances). Getting this backwards does not crash and does
++// not corrupt the margin -- it silently draws the wrong slice of the
++// sprite sheet, which is exactly the kind of defect that survives a
++// smoke test, so it is kept separate from the unmirrored helper rather
++// than folded in behind a flag.
++//
++// Rows are not mirrored, so the vertical half matches _dos_clip_xlate.
++static inline bool _dos_clip_xlate_mirrored(SDL_Rect &srcrect, SDL_Rect &dstrect,
++                                            int ox, int oy)
++{
++  int cx = dstrect.x, cy = dstrect.y;
++  int cw = dstrect.w, ch = dstrect.h;
++  int sx = srcrect.x, sy = srcrect.y;
++
++  if (cx < 0) { cw += cx; cx = 0; }                    // left  -> src right
++  if (cy < 0) { ch += cy; sy -= cy; cy = 0; }
++  if (cx + cw > 320)
++  {
++    const int cut = (cx + cw) - 320;          // right -> src left
++    cw -= cut;
++    sx += cut;
++  }
++  if (cy + ch > 240) ch = 240 - cy;
++  if (cw <= 0 || ch <= 0) return false;
++
++  srcrect.x = sx;
++  srcrect.y = sy;
++  srcrect.w = cw;
++  srcrect.h = ch;
++  dstrect.x = cx + ox;
++  dstrect.y = cy + oy;
++  dstrect.w = cw;
++  dstrect.h = ch;
++  return true;
++}
++
++// DOS-PORT (patch 0297): shared surface gate for the hand-rolled paths.
++// Pre-0297 every one of these sites demanded a surface of exactly
++// 320x240 and bailed to the SDL software renderer otherwise, which is
++// why the ATI Mach64 -- whose smallest VBE mode exceeds the logical
++// screen -- ran 100% of its drawcalls through SDL_Blit_Slow and rendered
++// colour-modulated text through a path SDL has no indexed blitter for.
++// The requirement was never "exactly the logical screen"; it was "at
++// least the logical screen, so a 1:1 blit fits". Formats still must
++// match -- _blit_indexed assumes one byte per pixel and _blit_rgb565 two.
++//
++// THREE outcomes, and the middle one is the whole reason this is a
++// function rather than a comparison:
++//
++//   exactly 320x240        -> accept, offsets are zero. The literal
++//                             pre-patch path, which is what every banked
++//                             benchmark cell was measured on.
++//   larger + centring ON   -> accept, caller translates by the offsets.
++//                             The new behaviour, Mach64 only in this fleet.
++//   larger + centring OFF  -> REJECT, exactly as before 0297.
++//
++// That last case is not hypothetical: SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0
++// leaves the surface oversized while `_dos_center_active` stays false, and
++// the killswitch is meant to restore the scaled logical-presentation path.
++// Accepting it here would instead draw the game 1:1 in the top-left corner
++// -- a different picture from either arm, which would quietly poison the
++// A/B the killswitch exists to provide.
++static inline bool _dos_surface_fits(const SDL_Surface *win_surface,
++                                     bool center_active)
++{
++  if (!win_surface) return false;
++  if (win_surface->w == 320 && win_surface->h == 240) return true;
++  if (!center_active) return false;
++  return win_surface->w >= 320 && win_surface->h >= 240;
++}
++
+ static inline bool _try_fast_blit(SDL_Renderer *renderer,
+                                   SDL_Surface *win_surface,
+                                   bool &renderer_queue_dirty,
+                                   Surface *src, int srcx, int srcy,
+-                                  const SDL_Rect &srcrect, const SDL_Rect &dstrect)
++                                  const SDL_Rect &srcrect, const SDL_Rect &dstrect,
++                                  int ox, int oy, bool center_active)
+ {
+   // Cheap precondition gates first.
+   if (src->alpha != 255)
+@@ -6775,12 +6917,10 @@ static inline bool _try_fast_blit(SDL_Renderer *renderer,
+   if (src_surface->format != win_surface->format)
+     return false;
+ 
+-  // Logical-presentation gate: with letterboxing, dst coords need
+-  // scaling/translating from 320x240 logical to the window surface
+-  // dimensions. The simple "if window is 320x240 the math is identity"
+-  // check covers the Cirrus + PIN_WINDOW_TO_NATIVE path. Mach64 with
+-  // 640x480 window falls through here.
+-  if (win_surface->w != 320 || win_surface->h != 240)
++  // Logical-presentation gate. Pre-0297 this demanded exactly 320x240 and
++  // sent everything else to the renderer; 0297 accepts a larger surface
++  // when centring is live and places the blit inside the centred box.
++  if (!_dos_surface_fits(win_surface, center_active))
+     return false;
+ 
+   // DOS-PORT (patch 0051, Phase 9 wave 8): drain queued slow-path
+@@ -6818,13 +6958,27 @@ static inline bool _try_fast_blit(SDL_Renderer *renderer,
+   //
+   // DOS-PORT (patch 0073, Phase 9 wave 16 Lever 3): format dispatch.
+   // INDEX8<->INDEX8 takes the byte-per-pixel sibling primitive.
++  //
++  // DOS-PORT (patch 0297): clip to the logical box and translate into the
++  // centred box before handing the rects to the primitive. Identity plus
++  // a bounds check when the surface is exactly 320x240. A rect wholly
++  // outside the logical screen returns TRUE, not false: the primitives
++  // already early-return on a zero-pixel clamp and report success, so the
++  // caller counts it as a taken fastpath and draws nothing. Returning
++  // false instead would push those calls onto the slow path and silently
++  // change the fastpath/slowpath counters that this patch is measured by.
++  SDL_Rect _s = srcrect;
++  SDL_Rect _d = dstrect;
++  if (!_dos_clip_xlate(&_s, _d, ox, oy))
++    return true;
++
+   if (win_surface->format == SDL_PIXELFORMAT_INDEX8)
+   {
+-    return _blit_indexed(win_surface, src_surface, srcrect, dstrect,
++    return _blit_indexed(win_surface, src_surface, _s, _d,
+                          (Uint8)src->colorkey(), src->hasColorkey(),
+                          src->spanTable());
+   }
+-  return _blit_rgb565(win_surface, src_surface, srcrect, dstrect,
++  return _blit_rgb565(win_surface, src_surface, _s, _d,
+                       (Uint16)src->colorkey(), src->hasColorkey());
+ }
+ 
+@@ -6840,7 +6994,8 @@ static inline bool _try_fast_blit_mirrored(SDL_Renderer *renderer,
+                                            SDL_Surface *win_surface,
+                                            bool &renderer_queue_dirty,
+                                            Surface *src,
+-                                           const SDL_Rect &srcrect, const SDL_Rect &dstrect)
++                                           const SDL_Rect &srcrect, const SDL_Rect &dstrect,
++                                           int ox, int oy, bool center_active)
+ {
+   if (src->alpha != 255)
+     return false;
+@@ -6861,7 +7016,7 @@ static inline bool _try_fast_blit_mirrored(SDL_Renderer *renderer,
+   if (src_surface->format != win_surface->format)
+     return false;
+ 
+-  if (win_surface->w != 320 || win_surface->h != 240)
++  if (!_dos_surface_fits(win_surface, center_active))
+     return false;
+ 
+   // Drain queued slow-path commands so our overlay lands AFTER them --
+@@ -6872,12 +7027,23 @@ static inline bool _try_fast_blit_mirrored(SDL_Renderer *renderer,
+     renderer_queue_dirty = false;
+   }
+ 
++  // DOS-PORT (patch 0297): mirrored clip-then-translate. Uses the
++  // mirrored helper, not the plain one -- a column-reversed blit maps a
++  // destination-left clip onto the source RIGHT edge. See the helper's
++  // comment; the plain version here would draw the wrong slice of the
++  // sheet without any other visible symptom. Wholly-outside returns true
++  // for the same reason as _try_fast_blit.
++  SDL_Rect _s = srcrect;
++  SDL_Rect _d = dstrect;
++  if (!_dos_clip_xlate_mirrored(_s, _d, ox, oy))
++    return true;
++
+   if (win_surface->format == SDL_PIXELFORMAT_INDEX8)
+   {
+-    return _blit_indexed_mirrored(win_surface, src_surface, srcrect, dstrect,
++    return _blit_indexed_mirrored(win_surface, src_surface, _s, _d,
+                                   (Uint8)src->colorkey(), src->hasColorkey());
+   }
+-  return _blit_rgb565_mirrored(win_surface, src_surface, srcrect, dstrect,
++  return _blit_rgb565_mirrored(win_surface, src_surface, _s, _d,
+                                (Uint16)src->colorkey(), src->hasColorkey());
+ }
+ 
+@@ -6958,13 +7124,18 @@ static inline Uint8 _packed_index_for(uint8_t r, uint8_t g, uint8_t b)
+ // primitives don't have a source texture.
+ static inline SDL_Surface *_ensure_handrolled_surface(SDL_Renderer *renderer,
+                                                      SDL_Surface *win_surface,
+-                                                     bool &renderer_queue_dirty)
++                                                     bool &renderer_queue_dirty,
++                                                     bool center_active)
+ {
+   if (!win_surface) return nullptr;
+   // DOS-PORT (patch 0073, Phase 9 wave 16): accept INDEX8 too.
+   if (win_surface->format != SDL_PIXELFORMAT_RGB565 &&
+       win_surface->format != SDL_PIXELFORMAT_INDEX8) return nullptr;
+-  if (win_surface->w != 320 || win_surface->h != 240) return nullptr;
++  // DOS-PORT (patch 0297): accept an oversized surface when centring is
++  // live. Callers of THIS helper write into the returned surface with
++  // their own geometry, so unlike the blit wrappers they each have to
++  // clip-and-translate for themselves -- see each call site.
++  if (!_dos_surface_fits(win_surface, center_active)) return nullptr;
+ 
+   if (renderer_queue_dirty)
+   {
+@@ -7059,7 +7230,8 @@ static inline bool _try_fast_blit_alpha(SDL_Renderer *renderer,
+                                         SDL_Surface *win_surface,
+                                         bool &renderer_queue_dirty,
+                                         Surface *src,
+-                                        const SDL_Rect &srcrect, const SDL_Rect &dstrect)
++                                        const SDL_Rect &srcrect, const SDL_Rect &dstrect,
++                                        int ox, int oy, bool center_active)
+ {
+   if (src->alpha == 255) return false;  // 255 path lives in _try_fast_blit
+ 
+@@ -7068,7 +7240,7 @@ static inline bool _try_fast_blit_alpha(SDL_Renderer *renderer,
+ 
+   if (!win_surface) return false;
+   if (win_surface->format != SDL_PIXELFORMAT_RGB565) return false;
+-  if (win_surface->w != 320 || win_surface->h != 240) return false;
++  if (!_dos_surface_fits(win_surface, center_active)) return false;
+ 
+   if (renderer_queue_dirty)
+   {
+@@ -7076,7 +7248,13 @@ static inline bool _try_fast_blit_alpha(SDL_Renderer *renderer,
+     renderer_queue_dirty = false;
+   }
+ 
+-  return _blit_rgb565_alpha(win_surface, src_surface, srcrect, dstrect,
++  // DOS-PORT (patch 0297): clip-then-translate, as _try_fast_blit.
++  SDL_Rect _s = srcrect;
++  SDL_Rect _d = dstrect;
++  if (!_dos_clip_xlate(&_s, _d, ox, oy))
++    return true;
++
++  return _blit_rgb565_alpha(win_surface, src_surface, _s, _d,
+                             (Uint16)src->colorkey(), src->hasColorkey(),
+                             (Uint8)src->alpha);
+ }
+@@ -7402,7 +7580,8 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   // (font runs, dialog backgrounds, etc.) take the same path.
+   if (_try_fast_blit(_renderer, _cached_window_surface,
+                      _renderer_queue_dirty,
+-                     src, srcx, srcy, srcrect, dstrect))
++                     src, srcx, srcy, srcrect, dstrect,
++                     _dos_center_ox, _dos_center_oy, _dos_fastpath_oversized))
+   {
+     ++_fastpath_taken_block;
+     ++_fastpath_taken_global;
+@@ -7432,7 +7611,8 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+   // null src to the existing SDL_RenderTexture path.
+   if (_try_fast_blit_alpha(_renderer, _cached_window_surface,
+                            _renderer_queue_dirty,
+-                           src, srcrect, dstrect))
++                           src, srcrect, dstrect,
++                           _dos_center_ox, _dos_center_oy, _dos_fastpath_oversized))
+   {
+     ++_fastpath_alpha_taken_block;
+     ++_fastpath_alpha_taken_global;
+@@ -7477,7 +7657,12 @@ void Renderer::drawSurface(Surface *src, int dstx, int dsty, int srcx, int srcy,
+       ++_slow_reason_format_block;
+       ++_slow_reason_format_global;
+     }
+-    else if (_cached_window_surface->w != 320 || _cached_window_surface->h != 240)
++    // DOS-PORT (patch 0297): mirror the relaxed gate, or this bucket
++    // reports every oversized-surface drawcall as a windim miss while the
++    // fastpath is in fact taking them. The `windim` count against
++    // `fastpath audit taken=` is the pair this patch is measured by, so a
++    // stale predicate here would make a working patch look inert.
++    else if (!_dos_surface_fits(_cached_window_surface, _dos_fastpath_oversized))
+     {
+       ++_slow_reason_windim_block;
+       ++_slow_reason_windim_global;
+@@ -7719,7 +7904,8 @@ void Renderer::drawSurfaceMirrored(Surface *src, int dstx, int dsty, int srcx, i
+   // the comment block at line 185.
+   if (_try_fast_blit_mirrored(_renderer, _cached_window_surface,
+                               _renderer_queue_dirty,
+-                              src, srcrect, dstrect))
++                              src, srcrect, dstrect,
++                              _dos_center_ox, _dos_center_oy, _dos_fastpath_oversized))
+   {
+     // DOS-PORT (patch 0057, Phase 9 wave 12.3-D): split mirrored
+     // counters from drawSurface counters so audit lines distinguish
+@@ -7813,11 +7999,31 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
+ 
+   SDL_Surface *win = _ensure_handrolled_surface(_renderer,
+                                                 _cached_window_surface,
+-                                                _renderer_queue_dirty);
++                                                _renderer_queue_dirty,
++                                                _dos_fastpath_oversized);
+   SDL_Surface *src_surface = src->surfaceCpu();
+ 
++  // DOS-PORT (patch 0297): clip-then-translate into the centred box. This
++  // is THE site the patch exists for: pre-0297 an oversized surface sent
++  // every colour-modulated draw to the fallback below, which hands an
++  // INDEX8 texture to SDL_SetTextureColorMod -- and SDL_CalculateBlit1
++  // has no SDL_COPY_MODULATE_COLOR case in any combination, so a
++  // colourkeyed glyph lands on SDL_Blit_Slow. That is the pink map-name
++  // text on the Mach64. Every one of the 13173 modulated draws in the
++  // round-2 log took that route, against zero on the ViRGE.
++  //
++  // Note the rects are clipped/translated HERE and the _record_dirty_rect
++  // calls below deliberately keep using the untranslated `dstrect`:
++  // _record_dirty_rect applies the centring offset itself, and clips to
++  // the logical box BEFORE translating, so feeding it translated input
++  // would truncate and displace in one step.
++  SDL_Rect _cm_s = srcrect;
++  SDL_Rect _cm_d = dstrect;
++  const bool _cm_visible = _dos_clip_xlate(&_cm_s, _cm_d,
++                                           _dos_center_ox, _dos_center_oy);
++
+   if (win && src_surface && src->alpha == 255 &&
+-      win->format == src_surface->format)
++      win->format == src_surface->format && _cm_visible)
+   {
+     bool ok = false;
+     // DOS-PORT (patch 0074, Phase 9 wave 16 Lever 3): 6-way dispatch
+@@ -7828,7 +8034,7 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
+     {
+       if (mod_r == 0 && mod_g == 0 && mod_b == 0)
+       {
+-        ok = _blit_indexed_color_mod_black(win, src_surface, srcrect, dstrect,
++        ok = _blit_indexed_color_mod_black(win, src_surface, _cm_s, _cm_d,
+                                            (Uint8)src->colorkey(),
+                                            src->hasColorkey(),
+                                            /*master_black_idx=*/0);
+@@ -7840,7 +8046,7 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
+       else
+       {
+         const auto &lut = _cmod_lut_for(mod_r, mod_g, mod_b);
+-        ok = _blit_indexed_color_mod(win, src_surface, srcrect, dstrect,
++        ok = _blit_indexed_color_mod(win, src_surface, _cm_s, _cm_d,
+                                      (Uint8)src->colorkey(), src->hasColorkey(),
+                                      lut.data());
+         ++_color_mod_indexed_general_block;
+@@ -7853,14 +8059,14 @@ void Renderer::drawSurfaceColorMod(Surface *src, const SDL_Rect &srcrect,
+     {
+       if (mod_r == 0 && mod_g == 0 && mod_b == 0)
+       {
+-        ok = _blit_rgb565_color_mod_black(win, src_surface, srcrect, dstrect,
++        ok = _blit_rgb565_color_mod_black(win, src_surface, _cm_s, _cm_d,
+                                           (Uint16)src->colorkey(), src->hasColorkey());
+         ++_color_mod_black_block;
+         ++_color_mod_black_global;
+       }
+       else
+       {
+-        ok = _blit_rgb565_color_mod_general(win, src_surface, srcrect, dstrect,
++        ok = _blit_rgb565_color_mod_general(win, src_surface, _cm_s, _cm_d,
+                                             (Uint16)src->colorkey(), src->hasColorkey(),
+                                             mod_r, mod_g, mod_b);
+         ++_color_mod_general_block;
+@@ -8242,9 +8448,28 @@ void Renderer::drawLine(int x1, int y1, int x2, int y2, NXColor color)
+   // separately). drawLine is single-site (debug overlay only) so
+   // simplest correct implementation wins. Falls through on Mach64.
+   {
++    // DOS-PORT (patch 0297): routed through the renderer on an oversized
++    // surface, on purpose. This is NOT pending work -- do not "finish" it
++    // by passing _dos_fastpath_oversized here.
++    //
++    // Passing false does not disable the hand-rolled path at 320x240:
++    // _dos_surface_fits matches on the dimensions BEFORE it consults this
++    // flag, so a card offering the logical screen still takes the direct
++    // write. It refuses only when the surface is larger, and there the
++    // caller falls through to SDL_RenderDrawLine -- which patch 0296's
++    // render viewport already translates into the centred box and clips
++    // to it. The draw lands in the right place either way.
++    //
++    // That routing is preferable here: the Bresenham walk below bounds
++    // every plotted pixel against win->w/win->h, so a direct-write version
++    // would need a per-pixel clip to the logical box, and getting it wrong
++    // writes into the margin rather than failing visibly. The renderer
++    // does that clipping correctly for free, and drawLine is far too rare
++    // for the indirection to cost anything measurable.
+     SDL_Surface *win = _ensure_handrolled_surface(_renderer,
+                                                   _cached_window_surface,
+-                                                  _renderer_queue_dirty);
++                                                  _renderer_queue_dirty,
++                                                  /*center_active=*/false);
+     if (win)
+     {
+       const int wd = win->w, ht = win->h;
+@@ -8322,9 +8547,18 @@ void Renderer::drawRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+   // patch 0010 invariant) each is a 1-px-thick line; we re-use fillRect
+   // semantics (per-row memset16) for each, post-clip to surface bounds.
+   // Falls through to SDL_RenderFillRects on Mach64 / 640x480.
++  // DOS-PORT (patch 0297): routed through the renderer on an oversized
++  // surface, same as drawLine and for the same reason -- NOT pending work.
++  // The dimension match in _dos_surface_fits still takes the direct write
++  // at 320x240; oversized, the four edge fills fall through to the
++  // renderer, whose 0296 viewport translates and clips them into the box.
++  // The edge fills below clamp against the surface, so a direct-write
++  // version would need a per-edge clip to the logical box for no gain on
++  // four thin spans.
+   SDL_Surface *win = _ensure_handrolled_surface(_renderer,
+                                                 _cached_window_surface,
+-                                                _renderer_queue_dirty);
++                                                _renderer_queue_dirty,
++                                                /*center_active=*/false);
+   if (win)
+   {
+     // DOS-PORT (patch 0073, Phase 9 wave 16): format dispatch.
+@@ -8419,16 +8653,19 @@ void Renderer::fillRect(int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, ui
+   // clip to handle off-screen partial rects. Falls through on Mach64.
+   SDL_Surface *win = _ensure_handrolled_surface(_renderer,
+                                                 _cached_window_surface,
+-                                                _renderer_queue_dirty);
++                                                _renderer_queue_dirty,
++                                                _dos_fastpath_oversized);
+   if (win)
+   {
+-    int cx = dx, cy = dy, cw = dw, ch = dh;
+-    if (cx < 0) { cw += cx; cx = 0; }
+-    if (cy < 0) { ch += cy; cy = 0; }
+-    if (cx + cw > win->w) cw = win->w - cx;
+-    if (cy + ch > win->h) ch = win->h - cy;
+-    if (cw > 0 && ch > 0)
++    // DOS-PORT (patch 0297): clip to the LOGICAL box, then translate into
++    // the centred box. The pre-patch clamp below used win->w/win->h, which
++    // is the same thing only while the surface IS the logical screen; on an
++    // oversized surface it would let a partially off-screen rect run on
++    // into the margin instead of being cut at the logical edge.
++    SDL_Rect _fr = {dx, dy, dw, dh};
++    if (_dos_clip_xlate(nullptr, _fr, _dos_center_ox, _dos_center_oy))
+     {
++      int cx = _fr.x, cy = _fr.y, cw = _fr.w, ch = _fr.h;
+       // DOS-PORT (patch 0073, Phase 9 wave 16): format dispatch.
+       if (win->format == SDL_PIXELFORMAT_INDEX8)
+       {
+@@ -8537,7 +8774,19 @@ void Renderer::clearScreen(uint8_t r, uint8_t g, uint8_t b)
+   // any other surface state we don't recognize.
+   SDL_Surface *win = _ensure_handrolled_surface(_renderer,
+                                                 _cached_window_surface,
+-                                                _renderer_queue_dirty);
++                                                _renderer_queue_dirty,
++                                                _dos_fastpath_oversized);
++  // DOS-PORT (patch 0297): the clear must cover the LOGICAL box, never the
++  // whole surface. Both legacy branches below wrote the full surface --
++  // `pitch * h` in one, every row in the other -- which equals the box only
++  // while the surface IS the logical screen. Oversized, that repaints the
++  // margin with the map's background colour every frame, undoing 0296's
++  // one-shot margin clear and pushing bytes that can never reach VRAM
++  // anyway (flip() intersects the flush rect with the box). So the row walk
++  // starts at the box origin, runs 240 rows, and each memset covers the
++  // box width rather than the surface pitch.
++  const int _cl_x = _dos_center_ox;
++  const int _cl_y = _dos_center_oy;
+   if (win)
+   {
+     // DOS-PORT (patch 0073, Phase 9 wave 16): format dispatch.
+@@ -8563,34 +8812,71 @@ void Renderer::clearScreen(uint8_t r, uint8_t g, uint8_t b)
+         // load or tile-mutation invalidate triggers rebuild here.
+         map_mds_clear_lut_ensure_built();
+ 
+-        Uint8 *row = (Uint8 *)win->pixels;
+         const size_t pitch = (size_t)win->pitch;
+-        const int h = win->h;
+-        for (int sy = 0; sy < h; sy++)
++        // Row span and origin: the whole surface when the surface IS the
++        // logical screen (literally the pre-0297 walk), the box otherwise.
++        const size_t span = _dos_center_active ? (size_t)320 : pitch;
++        const int rows = _dos_center_active ? 240 : win->h;
++        Uint8 *row = (Uint8 *)win->pixels + (size_t)_cl_y * pitch + _cl_x;
++        for (int sy = 0; sy < rows; sy++)
+         {
+           if (!map_mds_clear_lut_should_skip_row(sy))
+           {
+-            SDL_memset(row, c, pitch);
++            SDL_memset(row, c, span);
+           }
+           // else: row will be fully overwritten by BG tile layer this
+           // frame; SDL_memset is wasted bandwidth. Skip.
+           row += pitch;
+         }
+       }
+-      else
++      else if (!_dos_center_active)
+       {
+         // 1 byte/pixel x pitchxh. SDL_memset is the natural fast path
+         // (faster than per-Uint16 loop because byte stores fold trivially
+-        // into rep stosb on i486+).
++        // into rep stosb on i486+). Unchanged from pre-0297: one
++        // contiguous blast, which is why this branch is kept separate
++        // rather than folded into the per-row walk below -- 240 short
++        // memsets are measurably worse than one long one, and this is the
++        // path every banked benchmark cell was measured on.
+         SDL_memset(win->pixels, c, (size_t)win->pitch * (size_t)win->h);
+       }
++      else
++      {
++        // DOS-PORT (patch 0297): oversized -- clear the box only, per row.
++        // The contiguous blast above would cover the margin too.
++        const size_t pitch = (size_t)win->pitch;
++        Uint8 *row = (Uint8 *)win->pixels + (size_t)_cl_y * pitch + _cl_x;
++        for (int sy = 0; sy < 240; sy++)
++        {
++          SDL_memset(row, c, 320);
++          row += pitch;
++        }
++      }
+     }
+     else
+     {
+       const Uint16 c565 = _pack_rgb565(r, g, b);
+-      Uint16 *dp = (Uint16 *)win->pixels;
+-      const int total = (win->pitch / 2) * win->h;
+-      for (int i = 0; i < total; ++i) dp[i] = c565;
++      if (!_dos_center_active)
++      {
++        // Unchanged from pre-0297: one flat walk of the whole surface.
++        Uint16 *dp = (Uint16 *)win->pixels;
++        const int total = (win->pitch / 2) * win->h;
++        for (int i = 0; i < total; ++i) dp[i] = c565;
++      }
++      else
++      {
++        // DOS-PORT (patch 0297): oversized -- box only, per row, so the
++        // margin keeps the black 0296 painted into it.
++        const size_t pitch = (size_t)win->pitch;
++        Uint8 *row = (Uint8 *)win->pixels + (size_t)_cl_y * pitch
++                     + (size_t)_cl_x * 2u;
++        for (int sy = 0; sy < 240; sy++)
++        {
++          Uint16 *dp = (Uint16 *)row;
++          for (int i = 0; i < 320; ++i) dp[i] = c565;
++          row += pitch;
++        }
++      }
+     }
+     _record_dirty_rect(0, 0, sw, sh);
+     ++_prim_clear_handrolled_block;
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index 430a08c9..9b52ae15 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -339,6 +339,22 @@ class Renderer
+     SDL_Surface *_dos_center_cleared_for = nullptr;
+     // One-shot guard for the flush-rect witness line.
+     bool _dos_center_flush_logged = false;
++
++    // DOS-PORT (patch 0297): separate killswitch for the hand-rolled
++    // fast paths on an oversized surface.
++    //
++    // 0296's SDL_HINT_DOSKUTSU_CENTER_OVERSIZED=0 would disable this too,
++    // since every 0297 site is gated on centring being live -- but it
++    // would also take the centring with it, leaving the scaled
++    // logical-presentation path and comparing two pictures rather than
++    // two blit routes. Round G needs to A/B 0297 ALONE inside one binary,
++    // so it gets its own hint: centring stays, the fast paths stand down,
++    // and drawcalls go back through the SDL software renderer exactly as
++    // they did before this patch.
++    //
++    // Implied by _dos_center_active -- false whenever centring is
++    // inactive, so a card offering 320x240 never consults it.
++    bool _dos_fastpath_oversized = false;
+     void _dos_center_clear_margins();
+ 
+     // DOS-PORT (patch 0051, Phase 9 wave 8): tracks whether any slow-
+-- 
+2.47.3
+
