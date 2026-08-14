@@ -128,27 +128,43 @@ Mach64 in, ViRGE out. Keep whatever sound the POD-83 round left in the box.
 | M1 | Fit Mach64, set up UniVBE for it, boot | -- |
 | M2 | **Does UniVBE take the Mach64?** If it declines -- STOP, report, done | -- |
 | M3 | `QA 1` then `VIDM 1` (add `PG` only if the PicoGUS is in) | 40 min |
-| M4 | Colours still wrong by eye? `VIDMC 1` -- same sitting | 10 min |
+| M4 | Colours still wrong by eye? `VIDMC 1` -- watch, then reset | ~5 min |
 | M5 | logback `r2f-mach64` -- send | 2 min |
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-mach64
 
 Colour probe (`VIDMC`) runs the VIDM cells at 16bpp -- no palette, no index
-remap, no DAC. By eye only; it writes the same log tags, so run it after M3.
-It sets and clears the hint itself.
-
-    VIDMC 1        (add PG only if the PicoGUS is in)
-
-Watch the map-name text as the stage loads:
-
-| | |
-|---|---|
-| text **white** | the indexed + colour-mod path is at fault |
-| text **pink** | fault is upstream of the palette |
+remap, no DAC in the path. It sets and clears the hint itself, so there is
+nothing to type by hand.
 
 Get it onto the card first -- *laptop*, CF mounted:
 
     scp claude:/tmp/VIDMC.BAT /media/micheal/DOS/doskutsu/
+
+Then:
+
+    QA 1
+    VIDMC 1        (add PG only if the PicoGUS is in)
+
+**Do not let it finish.** It runs both VIDM cells and 16bpp pushes double the
+bytes, so it is slower than the 38 min VIDM took. The answer arrives in the
+first few minutes:
+
+**Watch the map-name banner** -- route is `72` -> `20 Save Point` ->
+`11 Mimiga Village`, and the name appears as each loads.
+
+| | |
+|---|---|
+| text **white** | indexed + colour-mod path is at fault -- patch `0297` fixes it |
+| text **pink** | fault is upstream of the palette -- `0297` is not the whole story |
+
+Once seen, **reset the machine.** Its logs are disposable by design and the
+hint dies with the DOS session, so an abort leaks nothing even though the
+BAT's own cleanup line never runs.
+
+Optional: the diversion is already confirmed from the round-2 logs (13173
+fallback draws on the Mach64 against 0 on the ViRGE). This is independent
+confirmation by a different route, not the only evidence.
 
 - Budget 40 min per cell -- it ran at 2.2 fps last time.
 - Its fps is not comparable to Round A's Mach64 number (different CPU + sound).
