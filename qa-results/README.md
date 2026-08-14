@@ -20,8 +20,13 @@ until a re-baseline establishes they are.
 
 | Round | Binary | Status |
 |---|---|---|
-| **Round 1** | `09e449c5a81d` (v1.7.0) | **CANONICAL** -- every published figure |
+| **Round 2** | `fe44805fb603` | **CURRENT** -- 68 cells, four CPUs |
+| **Round 1** | `09e449c5a81d` (v1.7.0) | **CANONICAL** -- most published figures |
 | Pre-round-1 | various | superseded, kept for provenance only |
+
+The two rounds are comparable above about 2%. Below that they are not: round
+2's OPL3 control measures ~1% low against round 1 on all four CPUs. See
+[`MATRIX-ROUND2.md`](MATRIX-ROUND2.md).
 
 ### Round 1 -- 89 cells, four CPUs, 89/89 complete route
 
@@ -71,7 +76,7 @@ because they were derived by hand instead.
 | What | Why |
 |---|---|
 | `2026-08-11-mach64-corruption` | Lane F aborted. The ATI Mach64's VBE offers no mode below 512x384, so the game drew a 320x240 screen into a 512x384 surface. No usable frame rate; the photographs and the diagnosis are kept. |
-| `5112` and `6112` (Organya-HQ) | The 486DX2-50 scored *higher* than the 486DX2-66 on this cell, which cannot be true of identical work. Both figures are suspect and are quoted nowhere. Needs re-measuring. |
+| ~~`5112` and `6112` (Organya-HQ)~~ | **EXCLUSION REVERSED 2026-08-13.** Round 2 re-ran this cell twice per CPU and both figures reproduce within noise (`5112` 14.08 against 14.13/14.14; `6112` 13.56 against 13.29/13.26). The measurements were never wrong. What misled was the metric: on this cell the HQ cost lands in load-stall overhead rather than loop rate, and does so more as the CPU slows -- so per-loop comparisons across CPUs compare different things. Both figures are restored, with that caveat. |
 | `2026-08-10-POD83-picogus-v170` | Same binary, but superseded by the `-sfx` round which is a superset (13 cells against 10). Kept because it was the first fully clean round. |
 
 ### Pre-round-1 -- superseded
@@ -85,6 +90,34 @@ not mix them with round 1.
 | `2026-08-06-tas-roundtrip` | 0282 diag | Record-vs-replay trace pair that found the TAS input-hold bug (nx 0283). Not a benchmark. |
 | `2026-08-06-POD83-picogus` | v1.6.5 `b421e5a52fea` | First round, 9 cells. 4 of 9 truncated the reel. |
 | `2026-08-09-POD83-picogus-v167` | v1.6.7 `101d95c16522` | GUS/AdLib cells corrupted by the 0286 unsigned-wrap bug, fixed in 0288. |
+
+### Round 2 -- 68 cells, four CPUs, 68/68 complete route
+
+- **Binary:** `DOSKUTSU.EXE` sha256 begins `fe44805fb603`
+- **Build fingerprint / Organya cache key:** `1f79ce20e4ee`
+- **Reel:** `QA.TAS` `4118561edf26`, unchanged from round 1
+- **Saves:** `32529e291e0f` -- map 20 'Save Point', Polar Star, both slots.
+  Round 1's saves were destroyed; these are rebuilt and validated by replaying
+  the reel against the round-1 binary and diffing the stage route.
+- **Video:** S3 ViRGE + UniVBE 6.70 on every cell (`oem_string=` witnessed).
+- **Sound:** PicoGUS SB mode `irq=7` for `RB`/`EAR`/`PROVE`; Vibra16
+  `irq=5 dma=5` for `GAP`.
+
+| Dataset | CPU | Cells | What it covers |
+|---|---|---|---|
+| `2026-08-13-r2-DX250` | 486DX2-50 | 17 | `RB` `EAR` `PROVE` `GAP` |
+| `2026-08-13-r2-DX266` | 486DX2-66 | 17 | same |
+| `2026-08-13-r2-Am5x86` | Am5x86-133 | 17 | same |
+| `2026-08-13-r2-POD83` | POD-83 | 17 | same |
+| `2026-08-13-r2-mach64` | 486DX2-50 | 3 | **not comparable** -- ran on the card's own VBE 2.0 BIOS |
+
+**[`ROUND2-CELLS.csv`](ROUND2-CELLS.csv) is the canonical extraction**, produced
+by `extract-cells-r2.sh` -- same script shape as round 1, so both rounds are
+derived identically. Findings: [`MATRIX-ROUND2.md`](MATRIX-ROUND2.md).
+
+What round 2 added that round 1 lacked: a measured noise floor per CPU, a
+direct A/B of the pump-aware timebase (`PROVE`), a true audio-off floor
+(`X0`/`P0`), and the Organya-HQ re-measure that reversed the exclusion above.
 
 ---
 
@@ -136,31 +169,39 @@ because the logs cannot supply it.
 
 ---
 
-## Adding round 2
+## Round 2 -- what it did, and what it left open
 
-Round 2 is expected to carry fixes found during round 1. Because those fixes
-change the binary, they move the Organya cache key, and **every round-1 number
-is strictly from a binary that no longer exists.**
+Round 2 followed the plan below and it worked: one batched binary, re-baselined
+against the reel, four CPUs. Recording how it actually went, since the recipe
+was written blind.
 
-To keep round 1 usable rather than discarding 89 cells:
+**What held.** Landing every change in one binary was right -- the expensive
+part was never the build, it was the Organya cache re-render and the CF
+populate behind it. The three-cell re-baseline (`R4` control, `R5` pump path,
+`R3` cache) caught what it was meant to. Running the control **five times
+across three sweeps** rather than once is what made a systematic 1% deficit
+separable from a 0.20 noise floor; a single control cell per CPU would have
+read it as noise, and did, on the first CPU analysed.
 
-1. **Land all the changes in one binary.** The expensive part is not the build,
-   it is the cache re-render and CF re-populate behind it.
-2. **Re-baseline with three cells per CPU**, not one. Each is there to catch a
-   different class of change:
-   - `C4` (OPL3) -- the control, no music timer, isolates observer effect
-   - `C5` (AdLib) -- the music-timer path, which a timebase fix changes and
-     `C4` cannot see
-   - `C3` (Organya) -- exercises the re-rendered cache, which nothing else does
-3. **Two back-to-back runs of one cell** to measure the noise floor directly.
-   Round 1's ~0.2 fps figure came from configurations that happened to repeat.
-4. **Compare against `ROUND1-CELLS.csv`.** If the control cell agrees within the
-   measured noise floor, round 1 carries forward and only the new work is new.
-   If it does not, the change altered what is being measured and that has to be
-   quantified before anything else is trusted.
-5. **Movement in the AdLib cell is a finding about the fix**, not baseline
-   drift, and should be recorded as such.
+**What the recipe missed.**
 
-Store round 2 as new `<date>-<machine>-<what>/` directories and add a Round 2
-section above. Do not overwrite round-1 directories, and do not mix rounds in
-one table without saying which binary produced each column.
+1. **The reel needs a save, and the save needs auditing.** Round 1's saves were
+   destroyed by a populate. The reel opens Load Game and enters map 20; without
+   the right save it replays a different run while every log looks ordinary. A
+   rebuilt save that reproduced the route perfectly still measured wrong,
+   because it carried no weapon and the reel fires throughout -- about 6% less
+   draw work per frame. Both states pass every check in the original plan.
+
+2. **Provenance has to be witnessed per cell, not assumed per session.** One
+   lane ran on the video card's own BIOS instead of UniVBE and produced a mode
+   list, a resolution and a frame rate that compare to nothing. `oem_string=`
+   and the sound-path `irq=` are now checked on every pull.
+
+3. **Per-loop fps is not a universal metric.** On Organya-HQ the cost lands in
+   overhead rather than loop rate, increasingly so as the CPU slows -- which is
+   what got two sound cells wrongly excluded from round 1.
+
+Store further rounds as new `<date>-<machine>-<what>/` directories. Do not
+overwrite existing round directories, and do not mix rounds in one table
+without saying which binary produced each column.
+
