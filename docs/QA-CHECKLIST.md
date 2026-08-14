@@ -159,8 +159,20 @@ Only after Round F passes.
 | Step | Hardware | Boot | Type after boot | Time |
 |---|---|---|---|---|
 | G1 | **Mach64**, UniVBE set up for it | 1 | check the UniVBE banner first | -- |
-| G2 | -- | 1 | `QA 3` -> `VIDM 3` | 20 min |
-| G3 | CF in *laptop* | -- | **logback `r3-mach64`** -- send | 2 min |
+| G2 | -- | 1 | `QA 3` -> `VIDM 3` | 40 min |
+| G3 | -- | 1 | `VIDMI 3` -- flip breakdown, watch then reset | ~5 min |
+| G4 | CF in *laptop* | -- | **logback `r3-mach64`** -- send | 2 min |
+
+Get `VIDMI` onto the card with the populate, or copy it directly:
+
+    scp claude:/tmp/VIDMI.BAT /media/micheal/DOS/doskutsu/
+
+**G3 `VIDMI`** switches on flip instrumentation that already exists in the
+engine but defaults off -- every Mach64 cell so far carried zero of these. It
+splits `flip_inner` into drain / dirty / present, which the analysis has been
+treating as unrecoverable. It is **not an fps row**: the extra timer reads cost
+time. Read the breakdown, do not bank the frame rate. Watch-then-reset is fine,
+same as `VIDMC`.
 
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-mach64
 
