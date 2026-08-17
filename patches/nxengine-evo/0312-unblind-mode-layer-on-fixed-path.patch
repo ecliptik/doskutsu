@@ -1,0 +1,104 @@
+From e212240b2d4d930c7348e2337a4a07e05d0cbc5c Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 17 Aug 2026 16:46:14 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0312 -- unblind the mode layer on the
+ fixed-timestep path
+
+Patches 0304/0305 moved the ENGINE layer's timers off Game::tick(), which
+the default fixed-timestep GM_NORMAL path never calls. The MODE layer was
+left behind and is still blind.
+
+Mechanism: patch 0152 retired ModeTickTimer from the GM_NORMAL path and
+moved the parent composition to Game::tick's tail, so on the fixed path the
+two slice timers (state, render) fire but the parent they would be
+subtracted from is never assembled. The residual is therefore never pushed,
+and because the emit gates on g_mt_residual_idx > 0, the entire
+[mode-tick-stat] block stays silent.
+
+Measured consequence in round J: 2 emitted blocks in a 271 s run, both on
+the title screen. HUD, post, textbox, fade and ScreenEffects have never
+been measured during actual gameplay.
+
+This composes the parent and pushes the residual at the end of
+tick_render_submit(), mirroring Game::tick's tail exactly rather than
+inventing a second convention. It runs ONLY when Game::tick is not the
+caller: that wrapper does the same work itself, and doing it in both places
+double-counts on the 1:1 path -- the precise trap 0304 documented and
+guarded after it cost a retracted witness. Reuses that ownership flag.
+
+Verified under DOSBox-X on the fixed path before shipping: 5 blocks at
+n=75-99 samples, against the 2 title-only blocks the same reel produced
+before. First look shows mode_post and mode_sim are negligible while
+mode_draw_hud is spiky (0.08 median against a 4.49 p95).
+
+KNOWN LIMITATION: the residual is a subtraction, so a wrapped uclock parent
+yields an absurd positive that nothing catches -- one 394 ms sample against
+a 0.02 ms median in the verification run. Negatives are clamped to 0 per the
+existing convention; positives are not. Read the medians, not the means,
+until a sanity ceiling lands.
+
+Instrumentation only, default-OFF behind the existing MODE_TICK_INSTR gate.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/game.cpp | 47 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index a228a555..83a10646 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -678,6 +678,53 @@ void Game::tick_render_submit(void)
+     DrawDebug();
+     console.Draw();
+   }
++
++  // DOS-PORT (patch 0312): compose the mode_tick parent and push the
++  // mode_tick residual ON THE FIXED-TIMESTEP PATH.
++  //
++  // 0304/0305 moved the ENGINE layer off Game::tick(), which the default
++  // fixed-timestep GM_NORMAL path never calls. The MODE layer was left
++  // behind and is still blind: patch 0152 retired ModeTickTimer from the
++  // GM_NORMAL path and moved the parent composition to Game::tick's tail
++  // (see the 0152 block there), so on the fixed path the two slice timers
++  // fire but the parent they would be subtracted from is never assembled.
++  // The residual is therefore never pushed, and because the emit gates on
++  // g_mt_residual_idx > 0, the whole [mode-tick-stat] block stays silent.
++  //
++  // Consequence measured in round J: 2 emitted blocks in a 271 s run, both
++  // on the title screen. HUD, post, textbox, fade and ScreenEffects have
++  // never been measured during actual gameplay -- roughly 4.6-5.6 ms/flip
++  // that nothing can currently see.
++  //
++  // Runs ONLY when Game::tick is not the caller. Game::tick wraps both
++  // halves and does this itself at its tail; doing it in both places would
++  // double-count on the 1:1 path, which is the exact trap 0304 documented
++  // and guarded after it cost a retracted witness. Reuses that same
++  // ownership flag rather than inventing a second mechanism.
++  if (!NXE::Diag::g_engine_tick_parent_active)
++  {
++    NXE::Diag::g_eng_mode_tick_dt_this_tick =
++        NXE::Diag::g_eng_mode_tick_state_dt_this_tick
++        + NXE::Diag::g_eng_mode_tick_render_dt_this_tick;
++    if (NXE::Diag::engine_tick_fine_instr_active()
++        && NXE::Diag::g_eng_mode_tick_idx < NXE::Diag::g_eng_tick_block_size)
++      NXE::Diag::g_eng_mode_tick_samples[NXE::Diag::g_eng_mode_tick_idx++] =
++          NXE::Diag::g_eng_mode_tick_dt_this_tick;
++
++    if (NXE::Diag::mode_tick_instr_active()
++        && NXE::Diag::g_mt_residual_idx < NXE::Diag::g_eng_tick_block_size)
++    {
++      const Uint64 _mt_total = NXE::Diag::g_eng_mode_tick_dt_this_tick;
++      Sint64 _mt_res = (Sint64)_mt_total
++                     - (Sint64)NXE::Diag::g_mt_sim_dt_this_tick
++                     - (Sint64)NXE::Diag::g_mt_draw_scene_dt_this_tick
++                     - (Sint64)NXE::Diag::g_mt_draw_hud_dt_this_tick
++                     - (Sint64)NXE::Diag::g_mt_post_dt_this_tick;
++      if (_mt_res < 0) _mt_res = 0;
++      NXE::Diag::g_mt_residual_samples[NXE::Diag::g_mt_residual_idx++] =
++          (Uint64)_mt_res;
++    }
++  }
+ }
+ 
+ void Game::switchmap(int mapno, int scriptno, int px, int py)
