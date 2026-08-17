@@ -1,0 +1,203 @@
+From 0851388b1e9784f8b91beadcdd78e3c4f95a0ed3 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 15 Aug 2026 10:07:18 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0303 -- centre the cached backdrop and
+ tilemap blits
+
+The backdrop and tilemap caches are allocated at WINDOW size but filled in
+LOGICAL space, and then blitted at the surface origin. On a centred
+oversized surface that puts 320x240 of picture at (0,0) while every other
+path draws at (ox,oy), so the game box is short by exactly ox on the right
+and oy on the bottom -- 96 and 72 on the ATI Mach64 at 512x384.
+
+Both halves of the mismatch are load-bearing and neither is obvious from
+the call site:
+
+  map.cpp:2413/2687   g_backdrop_cache_sfc = SDL_CreateSurface(win->w,
+                      win->h, win->format)        -- WINDOW-sized buffer
+
+  map.cpp:743-748     do { ... SDL_BlitSurface(bg_src, &src, target, &dst);
+                      dx += sfc_w * scale; } while (dx < destwd);
+                      with destwd = screenWidth * scale  -- LOGICAL fill
+
+So the cache is a 512x384 buffer carrying a 320x240 picture in its
+top-left corner, and `SDL_BlitSurface(src, NULL, win, NULL)` faithfully
+copies the whole thing to the origin. Operator report: "background chunks
+in and is missing, always on the right side or bottom." Terrain and
+sprites still draw in the bare zone because those ARE centred; what shows
+through is the margin 0296 cleared once.
+
+The intermittency is the map.cpp dispatch, not the blit: the direct-write
+arm (prepareDirectBackdropWrite + per-tile writes through drawTileFast) is
+centred and correct, the cache-blit arm is not, and frames alternate on
+cache hit / miss / thrash.
+
+ATTRIBUTION: this dates to 0296, not 0297. Nothing in the cache fill or
+the cache blit consults SDL_HINT_DOSKUTSU_FASTPATH_OVERSIZED --
+`_render_layered_to_surface` writes its target through plain SDL calls and
+`drawCachedBackdrop`'s only gates are format equality and dimension
+equality against the window surface, both of which pass because the cache
+is allocated from the window's own dimensions. The misplacement therefore
+exists from the moment centring made ox/oy non-zero. 0297 did not cause
+it; it raised the frame rate and fixed the text, which is what made a
+misplaced backdrop legible instead of lost under pink glyphs at 2-3 fps.
+It should be checked on any future card that receives a non-320x240
+surface, not filed as Mach64-specific.
+
+Three sites, all in Renderer.cpp:
+
+  drawCachedBackdrop         full-screen cache -> window
+  drawCachedTilemap          same basis, same misplacement
+  drawCachedBackdropClipped  sub-region variant; ALSO had its widths taken
+                             from the surface (`src->w`, `win->w`) rather
+                             than the logical screen, which on an oversized
+                             surface reads past the filled region of the
+                             cache and past the right edge of the box
+
+The native path is kept literally unchanged rather than equivalently: when
+centring is inactive the first two keep their exact `NULL, NULL` call, and
+the third's offsets are zero while its widths fall back to the original
+expressions. Every banked benchmark cell was measured on that path.
+
+Does NOT contaminate the banked matrix. Only an oversized surface is
+affected: every ViRGE and Cirrus cell runs at native 320x240, so
+`_dos_center_active` is false and both full-screen blits keep their literal
+`NULL, NULL` call. In this campaign that confines it to the Mach64 lane,
+and the four-CPU matrix does not want re-auditing over it -- though it does
+mean the defect is live in `1de88fcefd4a` on the card, since it dates to
+0296.
+
+Not a killswitch candidate: a backdrop drawn 96 px left of everything else
+is not a configuration anyone would want to select, and 0297's
+SDL_HINT_DOSKUTSU_FASTPATH_OVERSIZED already exists as the escape hatch
+for the whole centred fast-path family if the card has to ship early.
+
+UNVERIFIED: why FASTPATH_OVERSIZED=0 was reported to restore the backdrop.
+Nothing here is gated on that hint, so on this model both arms should be
+equally misplaced. The candidate explanation that the cache never becomes
+valid with the fast paths down is REFUTED above -- the fill does not
+consult the hint. The surviving reading is that the killswitch arm is
+differently wrong in a way that reads as whole at 3 fps under the older
+artifacts. The geometry here is correct regardless of which arm the
+operator was looking at, but the discrepancy is real and is not explained.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 80 +++++++++++++++++++++++++++++++++------
+ 1 file changed, 68 insertions(+), 12 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 19733e26..b58da4b3 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -8350,11 +8350,39 @@ bool Renderer::drawCachedBackdrop(SDL_Surface *src)
+   // + account the full-screen backdrop write bytes. This is the single
+   // chokepoint every full cache-blit flows through.
+   const Uint64 _mdsd_bd_t0 = _abl_mds_decomp() ? SDL_GetTicksNS() : 0;
+-  if (!SDL_BlitSurface(src, NULL, _cached_window_surface, NULL))
++  // DOS-PORT (patch 0302): place the cache at the centred box, not at the
++  // surface origin. The cache surface is allocated at WINDOW size
++  // (map.cpp: SDL_CreateSurface(win->w, win->h, ...)) but filled in
++  // LOGICAL space -- `_render_layered_to_surface` tiles its parallax
++  // layers while `dx < destwd`, and destwd is `screenWidth * scale`, so
++  // the content stops at 320x240 inside a 512x384 buffer. Blitting the
++  // whole thing at (0,0) therefore lands 320x240 of picture at the
++  // surface origin while every centred path draws at (ox,oy), leaving the
++  // box short by exactly ox on the right and oy on the bottom.
++  //
++  // Pre-0297 this was invisible rather than absent: at 2-3 fps under pink
++  // text and general corruption nobody could see it. It dates to 0296,
++  // which is what first made ox/oy non-zero -- 0297 only made the frame
++  // legible enough to notice.
++  if (!_dos_center_active)
+   {
+-    LOG_ERROR("Renderer::drawCachedBackdrop: SDL_BlitSurface failed: {}",
+-              SDL_GetError());
+-    return false;
++    if (!SDL_BlitSurface(src, NULL, _cached_window_surface, NULL))
++    {
++      LOG_ERROR("Renderer::drawCachedBackdrop: SDL_BlitSurface failed: {}",
++                SDL_GetError());
++      return false;
++    }
++  }
++  else
++  {
++    SDL_Rect _s = {0, 0, screenWidth * scale, screenHeight * scale};
++    SDL_Rect _d = {_dos_center_ox, _dos_center_oy, _s.w, _s.h};
++    if (!SDL_BlitSurface(src, &_s, _cached_window_surface, &_d))
++    {
++      LOG_ERROR("Renderer::drawCachedBackdrop: centred SDL_BlitSurface failed: {}",
++                SDL_GetError());
++      return false;
++    }
+   }
+   if (_abl_mds_decomp())
+   {
+@@ -8418,15 +8446,25 @@ bool Renderer::drawCachedBackdropClipped(SDL_Surface *src, int y_start, int y_en
+   }
+ 
+   const int rows = (y_end_inclusive - y_start + 1);
++  // DOS-PORT (patch 0302): the sub-region variant needs the same centring
++  // as its full-screen sibling, and it needs the WIDTH corrected too. Both
++  // rects were sized from the surface (`src->w`, `win->w`), which equals
++  // the logical width only when the surface is the logical screen; on an
++  // oversized surface that reaches past the filled region of the cache and
++  // past the right edge of the box. Width comes from the logical screen,
++  // and the destination is offset into the box.
++  const int _cb_w = (_dos_center_active) ? (screenWidth * scale) : src->w;
++  const int _cb_dw = (_dos_center_active) ? (screenWidth * scale)
++                                          : _cached_window_surface->w;
+   SDL_Rect srect;
+   srect.x = 0;
+   srect.y = y_start * scale;
+-  srect.w = src->w;
++  srect.w = _cb_w;
+   srect.h = rows * scale;
+   SDL_Rect drect;
+-  drect.x = 0;
+-  drect.y = y_start * scale;
+-  drect.w = _cached_window_surface->w;
++  drect.x = _dos_center_ox;
++  drect.y = y_start * scale + _dos_center_oy;
++  drect.w = _cb_dw;
+   drect.h = rows * scale;
+ 
+   // patch 0147 (wave-52): time the clipped cache->window blit
+@@ -8523,11 +8561,29 @@ bool Renderer::drawCachedTilemap(SDL_Surface *src, bool with_colorkey)
+   // a per-row memcpy ~ 4.3 ms on g2k. For FG (colorkey'd) this is per-
+   // pixel branched ~ 7.7 ms. The colorkey state lives on src->flags;
+   // SDL_BlitSurface auto-dispatches to the right inner loop.
+-  if (!SDL_BlitSurface(src, NULL, _cached_window_surface, NULL))
++  // DOS-PORT (patch 0302): same centring as drawCachedBackdrop -- this
++  // cache is allocated and filled on the identical window-sized /
++  // logical-content basis, so a blit at the surface origin misplaces it
++  // by (ox,oy) in exactly the same way.
++  if (!_dos_center_active)
+   {
+-    LOG_ERROR("Renderer::drawCachedTilemap: SDL_BlitSurface failed: {}",
+-              SDL_GetError());
+-    return false;
++    if (!SDL_BlitSurface(src, NULL, _cached_window_surface, NULL))
++    {
++      LOG_ERROR("Renderer::drawCachedTilemap: SDL_BlitSurface failed: {}",
++                SDL_GetError());
++      return false;
++    }
++  }
++  else
++  {
++    SDL_Rect _s = {0, 0, screenWidth * scale, screenHeight * scale};
++    SDL_Rect _d = {_dos_center_ox, _dos_center_oy, _s.w, _s.h};
++    if (!SDL_BlitSurface(src, &_s, _cached_window_surface, &_d))
++    {
++      LOG_ERROR("Renderer::drawCachedTilemap: centred SDL_BlitSurface failed: {}",
++                SDL_GetError());
++      return false;
++    }
+   }
+ 
+   _bump_drawcall();
+-- 
+2.47.3
+

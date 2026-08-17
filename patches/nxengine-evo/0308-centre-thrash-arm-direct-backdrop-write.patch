@@ -1,0 +1,191 @@
+From 2ab30def6a78543ee7569197c47942707fa436ac Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 17 Aug 2026 09:55:18 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0308 -- centre the thrash arm's direct
+ backdrop write
+
+Patch 0303 centred the cached backdrop and tilemap BLITS. It did not fix
+the truncation, because the backdrop reaches the window by two routes and
+only one of them performs a blit.
+
+Operator report on the round-4 binary, which contains 0303: "Background
+starts centered, but then as player moves becomes black on right and
+bottom." Both halves are informative. "Starts centered" is new -- that is
+0303 working on the cache route. "As player moves" is the handover to the
+route it does not cover.
+
+When the backdrop cache thrashes, map.cpp dispatches to the direct arm,
+which calls `_render_layered_to_surface(win, r)` against the WINDOW
+surface. Nothing in that function is centring-aware:
+
+  map.cpp   SDL_FillSurfaceRect(target, NULL, clear_pixel)   whole surface
+  map.cpp   } while (dx < destwd);  destwd = screenWidth * scale   logical
+
+So it fills all 512x384 and then tiles the five parallax layers across only
+the logical 320x240 at the surface origin. Against a game box at
+(96,72)-(416,312) that leaves the backdrop short by exactly 96 on the right
+and 72 on the bottom -- the reported geometry.
+
+It also explains the COLOUR, which is what raises this from plausible to
+confirmed. `clear_pixel` initialises to 0 and is overridden only for
+backdrops 9/10/12/13/14, so on every other map the uncovered region is
+filled with zero and reads as black rather than as the backdrop's sky
+tone. The operator said black.
+
+Confirmed empirically before writing this: `backdrop cache: thrashing-
+detect engaged (streak=4, route=direct)` fires ~30 times per cell across
+all four round-3 Mach64 cells (6C4M 30, 651M 31, 6C4I 30, 651I 31). The
+direct arm is not an edge case on this card -- it engages repeatedly
+through a normal reel, and camera motion is what drives the miss streak.
+
+The fix threads a `centred` flag rather than inferring one. True only for
+the window-target call; the cache-fill call passes false and keeps writing
+at the cache's own origin, because `drawCachedBackdrop` is what centres
+that copy on its way out and offsetting in both places would translate
+twice -- the same double-apply trap 0296 documented for the dirty rects.
+
+Two details that are load-bearing rather than tidy:
+
+  - The clear is limited to the BOX. A full-surface fill would repaint the
+    margin with clear_pixel, which is invisible while that value is zero
+    and becomes a coloured frame around the picture the moment a backdrop
+    sets it. It would also undo 0296's one-shot margin clear on every
+    thrash frame for no benefit, since the margin can never be flushed.
+
+  - The tile clamp is required, not decorative. SDL_BlitSurface clips to
+    the destination SURFACE, not to the box, so without it the tile
+    straddling the logical right edge spills into the cleared margin.
+    Same for the bottom, where the last layer's height runs one row past
+    the logical screen.
+
+Checked and NOT implicated: the 0183 / SDL_HINT_DOSKUTSU_THRASH_FULLCOVER
+path, flagged as a lead because it fixed a same-shaped backdrop-black-on-
+scroll bug in v1.0.4. Its effect is to gate `bg_subregion_on` OFF, which
+routes thrash frames to the full-screen `drawCachedBackdrop` rather than
+the clipped variant -- i.e. to the path 0303 already centres. It carries no
+320x240-shaped assumption of its own.
+
+Native path unchanged, not merely equivalent: both offsets are zero
+whenever the target is the cache, or the surface is the logical screen, or
+centring is off -- and at zero the fill takes its literal pre-patch
+`SDL_FillSurfaceRect(target, NULL, ...)` call and the clamp arithmetic is
+skipped entirely.
+
+Not folded into 0303 by amendment: 0303 is in the round-4 binary that ran
+on hardware, and 0304-0307 sit on top of it. Rewriting a patch that a
+tested binary corresponds to is how a series stops describing the thing
+that was measured.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/map.cpp | 63 ++++++++++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 57 insertions(+), 6 deletions(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 110ca8c0..03f58833 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -690,7 +690,15 @@ static void _fastleft_layered_update_parscroll(Renderer *r);
+ //
+ // Returns true on success, false if the source backdrop is missing or
+ // format-mismatched (caller falls back to legacy DrawFastLeftLayered).
+-static bool _render_layered_to_surface(SDL_Surface *target, Renderer *r)
++// DOS-PORT (patch 0303 ext): `centred` is true ONLY when `target` is the
++// window surface. The thrash / direct-render arm draws straight into the
++// window, so on a centred oversized surface its output has to be placed at
++// the box like every other path. The cache-fill call passes false and keeps
++// writing at the cache's own origin, because drawCachedBackdrop is what
++// centres that copy on its way out -- offsetting here as well would apply
++// the translation twice.
++static bool _render_layered_to_surface(SDL_Surface *target, Renderer *r,
++                                       bool centred)
+ {
+   if (!target || !backdrop[map.backdrop]) return false;
+   SDL_Surface *bg_src = backdrop[map.backdrop]->surfaceCpu();
+@@ -712,7 +720,29 @@ static bool _render_layered_to_surface(SDL_Surface *target, Renderer *r)
+     clear_pixel = SDL_MapSurfaceRGB(target, 170, 101, 0);
+   else if (map.backdrop == 14)
+     clear_pixel = SDL_MapSurfaceRGB(target, 202, 97, 97);
+-  SDL_FillSurfaceRect(target, NULL, clear_pixel);
++  // DOS-PORT (patch 0303 ext): offsets are non-zero only on the window
++  // target under centring. Zero everywhere else, which keeps the cache-fill
++  // call and every native-320x240 card on the pre-patch arithmetic.
++  const int _bx = (centred && r->_dos_center_active) ? r->_dos_center_ox : 0;
++  const int _by = (centred && r->_dos_center_active) ? r->_dos_center_oy : 0;
++  const int _bw = r->screenWidth  * r->scale;
++  const int _bh = r->screenHeight * r->scale;
++
++  if (_bx == 0 && _by == 0)
++  {
++    SDL_FillSurfaceRect(target, NULL, clear_pixel);
++  }
++  else
++  {
++    // Clear the BOX, not the surface. The full-surface fill would repaint
++    // the margin with clear_pixel -- which defaults to 0 and so reads as
++    // black, indistinguishable from the margin 0296 cleared once, until a
++    // backdrop with a non-zero clear colour makes it a visible frame around
++    // the picture. It would also undo that one-shot clear on every thrash
++    // frame for no benefit, since the margin can never be flushed.
++    SDL_Rect _boxr = {_bx, _by, _bw, _bh};
++    SDL_FillSurfaceRect(target, &_boxr, clear_pixel);
++  }
+ 
+   int layer_ys[] = {87, 122, 145, 176, 240};
+   if (r->widescreen) layer_ys[4] = 272;
+@@ -739,11 +769,32 @@ static bool _render_layered_to_surface(SDL_Surface *target, Renderer *r)
+     dst.h = src.h;
+     dst.y = y1 * r->scale;
+ 
++    // DOS-PORT (patch 0303 ext): translate into the box and clamp to it.
++    // The loop bound stays in LOGICAL space -- `destwd` is the logical
++    // width, so the tile sequence is unchanged and only its placement
++    // moves. The clamp is required rather than decorative: SDL_BlitSurface
++    // clips to the destination SURFACE, not to the box, so the tile
++    // straddling the logical right edge would otherwise spill into the
++    // cleared margin. Same reasoning for the bottom, where the last
++    // layer's height can run one row past the logical screen.
+     int dx = x * r->scale;
+     do
+     {
+-      dst.x = dx;
+-      SDL_BlitSurface(bg_src, &src, target, &dst);
++      SDL_Rect _s = src;
++      SDL_Rect _d = dst;
++      _d.x = dx + _bx;
++      _d.y = dst.y + _by;
++
++      if (_bx != 0 || _by != 0)
++      {
++        const int _over_r = (_d.x + _d.w) - (_bx + _bw);
++        if (_over_r > 0) { _d.w -= _over_r; _s.w -= _over_r; }
++        const int _over_b = (_d.y + _d.h) - (_by + _bh);
++        if (_over_b > 0) { _d.h -= _over_b; _s.h -= _over_b; }
++      }
++
++      if (_d.w > 0 && _d.h > 0)
++        SDL_BlitSurface(bg_src, &_s, target, &_d);
+       dx += sfc_w * r->scale;
+     } while (dx < destwd);
+     y1 = y2 + 1;
+@@ -2385,7 +2436,7 @@ void map_draw_backdrop(void)
+               // above (bg_src->format == win->format) so the
+               // SDL_BlitSurface inner calls resolve to per-row memcpy.
+               r->prepareDirectBackdropWrite();
+-              if (_render_layered_to_surface(win, r))
++              if (_render_layered_to_surface(win, r, /*centred=*/true))
+               {
+                 r->commitDirectBackdropWrite();
+                 int mapy = map.displayed_yscroll / CSFI;
+@@ -2423,7 +2474,7 @@ void map_draw_backdrop(void)
+               }
+ 
+               if (g_backdrop_cache_sfc &&
+-                  _render_layered_to_surface(g_backdrop_cache_sfc, r))
++                  _render_layered_to_surface(g_backdrop_cache_sfc, r, /*centred=*/false))
+               {
+                 g_backdrop_cache_curmap     = game.curmap;
+                 g_backdrop_cache_id         = map.backdrop;
+-- 
+2.47.3
+

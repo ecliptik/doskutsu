@@ -1,0 +1,230 @@
+From 7fdf1529bd7f1097000f68227054c5fc7860d0c1 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 16 Aug 2026 13:54:45 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0307 -- fix the two structural faults in
+ 0298's drum envelopes
+
+0298 authored per-slot drum envelopes from the OPL3 register semantics and
+said in its own message that nobody had heard them, that EAR was the gate,
+and that the table should be revised rather than the mechanism reverted.
+Round F's EAR cell heard them on BOTH OPL3 and AdLib: clipped cymbal and
+blip sounds, with the note placement correct. Mechanism right, constants
+wrong -- the outcome 0298 predicted.
+
+Two faults, and 0298 inherited both unchanged from the single PATCH_DRUM it
+replaced, which is why it still sounds like that burst in eight lengths.
+
+SL=0 on every operator meant the decay phase's target equalled the peak, so
+decay terminated immediately and DR never ran. The six differentiated DR
+values 0298 carefully chose provably did nothing; the audible tail was RR
+alone. SL=15 makes decay traverse the full range at DR as authored. Each
+patch keeps its original RR in the low nibble, so the open/closed hat
+distinction built with RR 6 vs 15 survives and the DR distinction begins to
+work.
+
+Modulator TL=0 pinned FM depth at maximum. With modulator MULT at 14-15 on
+the noisy entries that is deep high-ratio FM, which produces dense
+inharmonic sidebands -- the clang the operator described. Now attenuated per
+drum, more for the pitched entries than the noisy ones. Carrier TL stays 0;
+that is the drum's output level and it was already correct.
+
+Only bytes 1, 3 and 9 change in each table. Bytes 0, 2, 4, 5, 6, 8, 10 and
+11 are untouched, so every MULT, AR, DR, RR, WS and FB/CONN value 0298 chose
+is preserved.
+
+The first fault is structural and provable. The second's eight replacement
+values are reasoned from the register semantics and NOT heard, which is
+exactly what 0298 did -- they are a second pass and should be expected to
+need revision. EAR remains the gate. Shipping this ahead of that audition is
+still an improvement, because the SL fix is correct independently of taste.
+
+Data-only: no code path is touched, so this cannot move dc_ms, flip_inner or
+the engine bucket. The OPL2 copy is byte-identical to the OPL3 one, matching
+how that file already carries its own copies of every PATCH_* constant. The
+pre-existing WS=7 note on the OPL2 path is left alone -- a real OPL2 masks
+waveforms above 3, which is an AdLib-only timbre question and cannot explain
+the OPL3 result.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/sound/MidiBackendOpl2.cpp | 42 ++++++++++++++++++++-----
+ src/sound/MidiBackendOpl3.cpp | 58 +++++++++++++++++++++++++----------
+ 2 files changed, 76 insertions(+), 24 deletions(-)
+
+diff --git a/src/sound/MidiBackendOpl2.cpp b/src/sound/MidiBackendOpl2.cpp
+index 56a4628..d2fca0e 100644
+--- a/src/sound/MidiBackendOpl2.cpp
++++ b/src/sound/MidiBackendOpl2.cpp
+@@ -96,29 +96,55 @@ static constexpr uint8_t PATCH_DRUM[12] = {
+ // left alone deliberately: changing it is a timbre decision that wants
+ // the operator's ear, not a silent divergence introduced in a patch whose
+ // envelopes are themselves unheard.
++// DOS-PORT (patch 0307): 0298's envelopes were authored from register
++// semantics and never heard. Round F's EAR cell heard them on BOTH backends
++// and reported clipped cymbal/blip sounds with correct note placement --
++// mechanism right, constants wrong, exactly as 0298 predicted. Two faults,
++// both of which 0298 inherited unchanged from the PATCH_DRUM it replaced:
++//
++//   1. SL=0 on every operator (high nibble of bytes 3 and 9). The decay
++//      phase's target equalled the peak, so decay terminated immediately and
++//      DR never ran -- the six differentiated DR values below provably did
++//      nothing, and the audible tail was RR alone. Now SL=15, so decay
++//      traverses the full range at DR as authored. Each patch's original RR
++//      is preserved in the low nibble, so the open/closed hat distinction
++//      built with RR 6 vs 15 survives and the DR distinction starts working.
++//
++//   2. Modulator TL=0 (byte 1; KSL is 0 throughout so byte 1 is TL directly,
++//      0 = loudest). The modulator drove the carrier at maximum depth, and
++//      with modulator MULT at 14-15 on the noisy entries that is deep
++//      high-ratio FM -- dense inharmonic sidebands. That is the clang.
++//      Now attenuated per drum: more for the pitched entries (kick, tom),
++//      less for the noisy ones (snare, hats, perc). Carrier TL (byte 7)
++//      stays 0 -- that is the drum's output level and it was correct.
++//
++// Fault 1 is structural and provable. Fault 2's eight replacement values are
++// reasoned from the register semantics, NOT heard -- which is precisely what
++// 0298 did. They are a second pass and should be expected to need revision;
++// revise the constants, not the mechanism. EAR is still the gate.
+ static constexpr uint8_t PATCH_DRUM_KICK[12] = {
+-  0x01, 0x00, 0xF8, 0x0A, 0x00, 0xF0, 0x01, 0x00, 0xF7, 0x0B, 0x00, 0x00,
++  0x01, 0x10, 0xF8, 0xFA, 0x00, 0xF0, 0x01, 0x00, 0xF7, 0xFB, 0x00, 0x00,
+ };
+ static constexpr uint8_t PATCH_DRUM_SNARE[12] = {
+-  0x0E, 0x00, 0xFB, 0x0C, 0x07, 0xF0, 0x0E, 0x00, 0xFA, 0x0C, 0x07, 0x00,
++  0x0E, 0x08, 0xFB, 0xFC, 0x07, 0xF0, 0x0E, 0x00, 0xFA, 0xFC, 0x07, 0x00,
+ };
+ static constexpr uint8_t PATCH_DRUM_HAT_CLOSED[12] = {
+-  0x0F, 0x00, 0xFE, 0x0F, 0x07, 0xF0, 0x0F, 0x00, 0xFE, 0x0F, 0x07, 0x00,
++  0x0F, 0x06, 0xFE, 0xFF, 0x07, 0xF0, 0x0F, 0x00, 0xFE, 0xFF, 0x07, 0x00,
+ };
+ static constexpr uint8_t PATCH_DRUM_HAT_OPEN[12] = {
+-  0x0F, 0x00, 0xF8, 0x06, 0x07, 0xF0, 0x0F, 0x00, 0xF8, 0x06, 0x07, 0x00,
++  0x0F, 0x06, 0xF8, 0xF6, 0x07, 0xF0, 0x0F, 0x00, 0xF8, 0xF6, 0x07, 0x00,
+ };
+ static constexpr uint8_t PATCH_DRUM_TOM[12] = {
+-  0x02, 0x00, 0xF9, 0x09, 0x00, 0xF0, 0x02, 0x00, 0xF9, 0x09, 0x00, 0x00,
++  0x02, 0x12, 0xF9, 0xF9, 0x00, 0xF0, 0x02, 0x00, 0xF9, 0xF9, 0x00, 0x00,
+ };
+ static constexpr uint8_t PATCH_DRUM_PERC[12] = {
+-  0x0C, 0x00, 0xEA, 0x0B, 0x07, 0xF0, 0x0C, 0x00, 0xEA, 0x0B, 0x07, 0x00,
++  0x0C, 0x0A, 0xEA, 0xFB, 0x07, 0xF0, 0x0C, 0x00, 0xEA, 0xFB, 0x07, 0x00,
+ };
+ static constexpr uint8_t PATCH_DRUM_SIDESTICK[12] = {
+-  0x04, 0x00, 0xFD, 0x0E, 0x00, 0xF0, 0x04, 0x00, 0xFD, 0x0E, 0x00, 0x00,
++  0x04, 0x14, 0xFD, 0xFE, 0x00, 0xF0, 0x04, 0x00, 0xFD, 0xFE, 0x00, 0x00,
+ };
+ static constexpr uint8_t PATCH_DRUM_CRASH[12] = {
+-  0x0F, 0x00, 0xF5, 0x04, 0x07, 0xF0, 0x0F, 0x00, 0xF5, 0x04, 0x07, 0x00,
++  0x0F, 0x06, 0xF5, 0xF4, 0x07, 0xF0, 0x0F, 0x00, 0xF5, 0xF4, 0x07, 0x00,
+ };
+ 
+ static const uint8_t *_drum_patch_for_key(int note)
+diff --git a/src/sound/MidiBackendOpl3.cpp b/src/sound/MidiBackendOpl3.cpp
+index 823d410..729c826 100644
+--- a/src/sound/MidiBackendOpl3.cpp
++++ b/src/sound/MidiBackendOpl3.cpp
+@@ -256,59 +256,85 @@ static constexpr uint8_t PATCH_DRUM[12] = {
+ // need revision, and revise the table rather than reverting the mechanism.
+ // ============================================================================
+ 
++// DOS-PORT (patch 0307): 0298's envelopes were authored from register
++// semantics and never heard. Round F's EAR cell heard them on BOTH backends
++// and reported clipped cymbal/blip sounds with correct note placement --
++// mechanism right, constants wrong, exactly as 0298 predicted. Two faults,
++// both of which 0298 inherited unchanged from the PATCH_DRUM it replaced:
++//
++//   1. SL=0 on every operator (high nibble of bytes 3 and 9). The decay
++//      phase's target equalled the peak, so decay terminated immediately and
++//      DR never ran -- the six differentiated DR values below provably did
++//      nothing, and the audible tail was RR alone. Now SL=15, so decay
++//      traverses the full range at DR as authored. Each patch's original RR
++//      is preserved in the low nibble, so the open/closed hat distinction
++//      built with RR 6 vs 15 survives and the DR distinction starts working.
++//
++//   2. Modulator TL=0 (byte 1; KSL is 0 throughout so byte 1 is TL directly,
++//      0 = loudest). The modulator drove the carrier at maximum depth, and
++//      with modulator MULT at 14-15 on the noisy entries that is deep
++//      high-ratio FM -- dense inharmonic sidebands. That is the clang.
++//      Now attenuated per drum: more for the pitched entries (kick, tom),
++//      less for the noisy ones (snare, hats, perc). Carrier TL (byte 7)
++//      stays 0 -- that is the drum's output level and it was correct.
++//
++// Fault 1 is structural and provable. Fault 2's eight replacement values are
++// reasoned from the register semantics, NOT heard -- which is precisely what
++// 0298 did. They are a second pass and should be expected to need revision;
++// revise the constants, not the mechanism. EAR is still the gate.
+ static constexpr uint8_t PATCH_DRUM_KICK[12] = {
+-  0x01, 0x00, 0xF8, 0x0A, 0x00,  // op0: MULT=1, sine, AR=15 DR=8, RR=10
++  0x01, 0x10, 0xF8, 0xFA, 0x00,  // op0: MULT=1, sine, AR=15 DR=8, RR=10
+   0xF0,                          // FB/CONN: stereo + FB=0 + AM
+-  0x01, 0x00, 0xF7, 0x0B, 0x00,  // op1: matched, slightly shorter tail
++  0x01, 0x00, 0xF7, 0xFB, 0x00,  // op1: matched, slightly shorter tail
+   0x00,
+ };
+ 
+ static constexpr uint8_t PATCH_DRUM_SNARE[12] = {
+-  0x0E, 0x00, 0xFB, 0x0C, 0x07,  // op0: MULT=14, logsaw, DR=11 RR=12
++  0x0E, 0x08, 0xFB, 0xFC, 0x07,  // op0: MULT=14, logsaw, DR=11 RR=12
+   0xF0,
+-  0x0E, 0x00, 0xFA, 0x0C, 0x07,  // op1: matched
++  0x0E, 0x00, 0xFA, 0xFC, 0x07,  // op1: matched
+   0x00,
+ };
+ 
+ static constexpr uint8_t PATCH_DRUM_HAT_CLOSED[12] = {
+-  0x0F, 0x00, 0xFE, 0x0F, 0x07,  // op0: max MULT, DR=14 RR=15 -- shortest
++  0x0F, 0x06, 0xFE, 0xFF, 0x07,  // op0: max MULT, DR=14 RR=15 -- shortest
+   0xF0,
+-  0x0F, 0x00, 0xFE, 0x0F, 0x07,
++  0x0F, 0x00, 0xFE, 0xFF, 0x07,
+   0x00,
+ };
+ 
+ static constexpr uint8_t PATCH_DRUM_HAT_OPEN[12] = {
+-  0x0F, 0x00, 0xF8, 0x06, 0x07,  // op0: same timbre as 42, DR=8 RR=6
++  0x0F, 0x06, 0xF8, 0xF6, 0x07,  // op0: same timbre as 42, DR=8 RR=6
+   0xF0,                          //      -- same instrument, ringing on
+-  0x0F, 0x00, 0xF8, 0x06, 0x07,
++  0x0F, 0x00, 0xF8, 0xF6, 0x07,
+   0x00,
+ };
+ 
+ static constexpr uint8_t PATCH_DRUM_TOM[12] = {
+-  0x02, 0x00, 0xF9, 0x09, 0x00,  // op0: MULT=2, sine -> pitched, DR=9
++  0x02, 0x12, 0xF9, 0xF9, 0x00,  // op0: MULT=2, sine -> pitched, DR=9
+   0xF0,
+-  0x02, 0x00, 0xF9, 0x09, 0x00,
++  0x02, 0x00, 0xF9, 0xF9, 0x00,
+   0x00,
+ };
+ 
+ static constexpr uint8_t PATCH_DRUM_PERC[12] = {
+-  0x0C, 0x00, 0xEA, 0x0B, 0x07,  // op0: AR=14 (softer edge), DR=10
++  0x0C, 0x0A, 0xEA, 0xFB, 0x07,  // op0: AR=14 (softer edge), DR=10
+   0xF0,
+-  0x0C, 0x00, 0xEA, 0x0B, 0x07,
++  0x0C, 0x00, 0xEA, 0xFB, 0x07,
+   0x00,
+ };
+ 
+ static constexpr uint8_t PATCH_DRUM_SIDESTICK[12] = {
+-  0x04, 0x00, 0xFD, 0x0E, 0x00,  // stub (slot 6 unused in stock data)
++  0x04, 0x14, 0xFD, 0xFE, 0x00,  // stub (slot 6 unused in stock data)
+   0xF0,
+-  0x04, 0x00, 0xFD, 0x0E, 0x00,
++  0x04, 0x00, 0xFD, 0xFE, 0x00,
+   0x00,
+ };
+ 
+ static constexpr uint8_t PATCH_DRUM_CRASH[12] = {
+-  0x0F, 0x00, 0xF5, 0x04, 0x07,  // stub (slot 7 unused): longest RR
++  0x0F, 0x06, 0xF5, 0xF4, 0x07,  // stub (slot 7 unused): longest RR
+   0xF0,
+-  0x0F, 0x00, 0xF5, 0x04, 0x07,
++  0x0F, 0x00, 0xF5, 0xF4, 0x07,
+   0x00,
+ };
+ 
+-- 
+2.47.3
+

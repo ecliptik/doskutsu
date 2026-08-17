@@ -1,0 +1,256 @@
+From f883635875868a505f7311c996a6e076f788747c Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 15 Aug 2026 10:16:31 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0304 -- measure the engine bucket on the
+ fixed-timestep path
+
+Every engine-side timing instrument in the tree is anchored to
+Game::tick(), and main.cpp:1823 routes GM_NORMAL to run_tick_fixed()
+whenever fixed_timestep_active() -- default-ON since 0159. So during the
+gameplay the campaign actually measures, no engine timer is bumped at
+all: the engine half of the `audio/engine split block` line reads a flat
+zero, and the audit early-returns entirely unless an Organya stream
+callback keeps the audio counter alive.
+
+Round-G logs show it directly. The three OPL3 cells emit 20-22
+phase-timing blocks and exactly 2 split blocks -- title/menu, on the 1:1
+path -- then go dark. The Organya cell emits 20 split blocks reading
+engine_tick_calls=99, 76, then 0 for every remaining block while
+audio_mixer_calls climbs to 240.
+
+FINE_INSTR was no escape hatch either. Its sub-bucket timers do run
+inside tick_state/tick_render_submit, but the emit is gated on
+g_eng_residual_idx > 0 and the only push site is inside Game::tick, so
+the block never printed on the fixed path however the flags were set.
+
+The consequence is that the audio+engine bucket -- ~68% of the frame on
+the Mach64, and the largest single bucket on both cards -- has never
+been decomposed on the path that runs. What can be read today says the
+label is misleading: the one measured audio component (Organya PCM mix)
+is ~2.0 ms/flip against a derived bucket of ~34-56 ms/flip, about 5%.
+
+Bracket both halves of the fixed tick so the existing split audit
+reports an engine bucket during gameplay, with no change to the audit
+itself and none to Renderer.cpp.
+
+Gated on FINE_INSTR, default OFF, where the 1:1 path's EngineTickTimer
+is unconditional. This bracket lands on the hot path every measured cell
+runs, and the Round-G VIDM/VIDMI arms put instrumentation cost at ~0.6
+fps of ~14 (~4%) on a 486DX2-66; leaving it always-on would tax the very
+numbers the campaign is attributing, with an unbisected ~4% round-2 ->
+round-3 regression still open. FINE_INSTR rather than a new hint because
+it already gates the sub-buckets inside these two functions, so parent
+and children now switch on together.
+
+Double-count guard, and the reason it is needed: Game::tick() is a thin
+WRAPPER that calls tick_state() then tick_render_submit(), with only
+instrumentation resets in between. Without a guard the ungated parent
+timer and both new child timers would accumulate into the same counter
+on the 1:1 path, reporting ~2x true engine time and corrupting the
+title/menu bucket -- the one place the instrument previously worked.
+Game::tick now claims ownership (RAII, so an early exit cannot leave the
+flag stuck set and silently blind the fixed path) and the child timers
+stand down while it is held. Deleting the parent instead would be
+simpler and is wrong: it is ungated, so removing it would drop the
+engine bucket from default FINE_INSTR=0 runs. Guard storage lives in
+game.cpp, not Renderer.cpp, so this patch touches no file another
+workstream is editing.
+
+Witnessed under DOSBox-X: with the guard, per-block engine_tick_calls
+equals the Game::tick residual sample count exactly (99/99, then 100/100
+across ten consecutive blocks), which is what single-counting predicts
+and is impossible under the double-count. Default gameplay banner gate
+PASSES. The fixed-path bucket itself is NOT yet witnessed -- the DOSBox
+smoke never reaches sustained unpaused GM_NORMAL, so that still needs a
+real-HW cell with FINE_INSTR=1.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h | 60 +++++++++++++++++++++++++++
+ src/game.cpp                  | 78 ++++++++++++++++++++++++++++++++++-
+ 2 files changed, 136 insertions(+), 2 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index c8cde8c3..e3aa56ee 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -115,6 +115,66 @@ struct EngineTickTimer
+ // stay decoupled from the Renderer class.
+ bool engine_tick_fine_instr_active();
+ 
++// DOS-PORT (patch 0304): FINE_INSTR-gated sibling of EngineTickTimer,
++// for the FIXED-TIMESTEP path (Game::tick_state / tick_render_submit).
++//
++// Feeds the SAME g_engine_tick_* counters as EngineTickTimer, so the
++// `audio/engine split block` line needs no change to report an engine
++// bucket during GM_NORMAL gameplay -- which it previously could not,
++// because EngineTickTimer sits only in Game::tick() and main.cpp routes
++// GM_NORMAL to run_tick_fixed() instead. See the rationale block at the
++// top of Game::tick_state().
++//
++// Gated where EngineTickTimer is not, and deliberately so: this bracket
++// lands on the hot path that every measured cell runs, and the Round-G
++// VIDM/VIDMI arms put instrumentation cost at ~0.6 fps of ~14 (~4%) on
++// a 486DX2-66. Leaving it always-on would tax the very numbers the
++// campaign is trying to attribute, with an unbisected ~4% round-2 ->
++// round-3 regression already open. Default OFF = default binary
++// unchanged. FINE_INSTR is the right existing flag rather than a new
++// hint: it already gates the engine sub-buckets that live inside these
++// two functions, so one flag now turns on the parent bucket and its
++// children together instead of leaving the parent unmeasurable.
++//
++// `on` is captured once at construction; when false both the ctor and
++// dtor skip the clock reads entirely and the cost is one cached
++// predicate per call.
++//
++// DOUBLE-COUNT GUARD. `Game::tick()` is a thin WRAPPER -- it calls
++// tick_state() then tick_render_submit(), with only instrumentation
++// resets in between (game.cpp:314-315). So on the 1:1 path the
++// pre-existing EngineTickTimer (whole body) and both of these timers
++// (each half) would accumulate into the SAME counter, reading ~2x true
++// engine time and corrupting the title/menu bucket -- the one place the
++// instrument previously worked. `g_engine_tick_parent_active` is set by
++// Game::tick around its delegation; while it is set these timers stand
++// down entirely and the parent owns the measurement.
++//
++// Deleting the parent instead would be simpler and is wrong: it is
++// ungated, so removing it would drop the engine bucket from default
++// (FINE_INSTR=0) runs. Storage is defined in game.cpp, not Renderer.cpp.
++extern bool g_engine_tick_parent_active;
++
++struct FixedPathEngineTickTimer
++{
++  const bool on;
++  std::uint64_t t0;
++  FixedPathEngineTickTimer()
++      : on(!g_engine_tick_parent_active && engine_tick_fine_instr_active()),
++        t0(on ? SDL_GetTicksNS() : 0)
++  {
++  }
++  ~FixedPathEngineTickTimer()
++  {
++    if (!on) return;
++    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    g_engine_tick_accum_ns_block += dt;
++    g_engine_tick_accum_ns_global += dt;
++    ++g_engine_tick_count_block;
++    ++g_engine_tick_count_global;
++  }
++};
++
+ // DOS-PORT (patch 0160, SFX-stall instrumentation contract -- part A):
+ // per-SFX-trigger marker. sfx_trigger_record() is the NXE::Diag-facing
+ // forwarder (defined at the end of Renderer.cpp, mirroring the
+diff --git a/src/game.cpp b/src/game.cpp
+index f5213912..0d94c956 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -221,6 +221,20 @@ bool Game::pause(int pausemode, int param)
+   return 0;
+ }
+ 
++// DOS-PORT (patch 0304): storage for the engine_tick double-count guard
++// declared in Utils/diagnostic_timers.h. Defined HERE rather than in
++// Renderer.cpp (where the sibling g_engine_tick_* counters live) so this
++// patch touches no file another workstream is editing. Single-threaded
++// by construction -- the engine spawns no threads on the DOS port, and
++// the SDL3 DOS backend's scheduler is cooperative.
++namespace NXE
++{
++namespace Diag
++{
++bool g_engine_tick_parent_active = false;
++}
++}
++
+ void Game::tick(void)
+ {
+   // patch 0062 (wave 13.1-D2): time the entire engine-tick body. Sibling
+@@ -311,8 +325,24 @@ void Game::tick(void)
+   // (was here at top-of-tick, now inside tick_render_submit after the
+   // logic; behavior-preserving because logic never reads the
+   // framebuffer). See PHASE11-WAVE-56-CONTRACT.md.
+-  tick_state();
+-  tick_render_submit();
++  // DOS-PORT (patch 0304): claim ownership of the engine_tick counters
++  // for the duration of the delegation. Game::tick is a WRAPPER around
++  // these two calls, so without this the ungated EngineTickTimer above
++  // and the FINE_INSTR-gated FixedPathEngineTickTimer inside each half
++  // would all accumulate into the same counter and report ~2x true
++  // engine time on this path. RAII so an early exit out of either half
++  // cannot leave the flag stuck set (which would silently blind the
++  // fixed path for the rest of the process).
++  {
++    struct _ParentClaim
++    {
++      _ParentClaim()  { NXE::Diag::g_engine_tick_parent_active = true;  }
++      ~_ParentClaim() { NXE::Diag::g_engine_tick_parent_active = false; }
++    } _pc;
++
++    tick_state();
++    tick_render_submit();
++  }
+ 
+   // patch 0152 (wave-56 B1 -- mode_tick split, refinement B opt iv):
+   // the W20B mode_tick parent total = the state slice + the render
+@@ -471,6 +501,40 @@ bool menu_slide_ft_active()
+ // foreclosure of the wave-36 -28 fps drawcall-coupling trap.
+ void Game::tick_state(void)
+ {
++  // DOS-PORT (patch 0304): engine-tick accounting on the FIXED-TIMESTEP
++  // path. EngineTickTimer used to sit only at the top of Game::tick(),
++  // which main.cpp's dispatch (`fixed_timestep_active() && game.mode ==
++  // GM_NORMAL` -> run_tick_fixed) never calls. FIXED_TIMESTEP has been
++  // default-ON since 0159, so throughout GM_NORMAL gameplay the engine
++  // half of the `audio/engine split block` line read a flat zero and the
++  // audit early-returned entirely unless an Organya stream callback kept
++  // the audio counter alive. Round-G evidence: the three OPL3 cells emit
++  // 20-22 phase-timing blocks and exactly 2 split blocks (title/menu, on
++  // the 1:1 path); the Organya cell emits 20 split blocks with
++  // engine_tick_calls=99, 76, then 0 for every remaining block. The
++  // ~68%-of-frame "audio+engine" bucket was therefore never decomposed
++  // on the path that actually runs.
++  //
++  // Bracketing BOTH halves keeps the bucket's meaning identical to the
++  // 1:1 path -- sibling costs in the caller (input_poll, runFade) stay
++  // outside, exactly as diagnostic_timers.h documents for Game::tick,
++  // and the drawcalls submitted by the render half are inside on both
++  // paths (Game::tick drew too), so `engine_tick_ms_x10` overlaps
++  // dc_total by design. Subtract dc_total for non-drawcall engine time;
++  // the derived `audio+engine_ms` remainder is computed from dc_total
++  // and flip_inner independently, so nothing there changes.
++  //
++  // Read `engine_tick_ms_x10` (per-flip ms, accum/flips) as the engine
++  // bucket. Do NOT read `engine_tick_calls` or the per-call us figure
++  // across paths: here the count is (catch-up tick_state runs + 1
++  // render submit) per displayed frame rather than 1, so per-call is
++  // comparable only within the fixed path.
++  //
++  // FINE_INSTR-gated, default OFF -- see FixedPathEngineTickTimer in
++  // diagnostic_timers.h for why this one is gated where the 1:1 path's
++  // EngineTickTimer is not.
++  NXE::Diag::FixedPathEngineTickTimer _ett;
++
+   debug_clear();
+ 
+   if (game.paused)
+@@ -561,6 +625,16 @@ void Game::tick_state(void)
+ // holds -- contract sec.1.3).
+ void Game::tick_render_submit(void)
+ {
++  // DOS-PORT (patch 0304): the render half of the same bracket -- see
++  // the rationale block at the top of tick_state(). Placed OUTSIDE the
++  // ClearScreenTimer scope below so the two nest cleanly (this timer is
++  // the parent bucket; ClearScreenTimer / ModeTickRenderTimer /
++  // DebugOverlayTimer are its FINE_INSTR sub-buckets, and sub-buckets
++  // are meant to sum to at most the parent). Sharing the FINE_INSTR
++  // gate with those sub-buckets means the whole engine layer -- parent
++  // and children -- switches on together.
++  NXE::Diag::FixedPathEngineTickTimer _ett;
++
+   {
+     NXE::Diag::ClearScreenTimer _cst;
+     Renderer::getInstance()->clearScreen(BLACK);
+-- 
+2.47.3
+
