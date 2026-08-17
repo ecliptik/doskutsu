@@ -1,0 +1,162 @@
+From 5da6cf9e590be0e64eda1a928d0bda03382c52be Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 17 Aug 2026 13:31:15 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0311 -- read the window surface back and
+ report where the pixels are
+
+The Mach64 renders the right ~96 columns and bottom ~72 rows of the game
+box black. FOUR proposed mechanisms have been wrong: 0297's per-drawcall
+gate, 0308's thrash arm, a dirty-rect coordinate theory, and the
+flush-shape theory that produced the retracted 0309.
+
+Reading code is exhausted. Six draw/flush paths were each verified to
+apply the centring offset correctly -- drawCachedBackdrop,
+drawCachedBackdropClipped, drawCachedTilemap, drawTileFast, the thrash
+direct arm, and _record_dirty_rect -- and the flush rect is witnessed at a
+correct 320x240@96,72 in the hardware logs themselves.
+
+Neither emulator can reproduce it. DOSBox-X with the oversized stand-in
+engages the same centring path at 640x480 and renders correctly. 86Box's
+Mach64 advertises the VESA double-scan bit that the operator's silicon
+clears, so it offers 320x240, never engages centring, and cannot express
+the defect at all -- the single hardware property this bug stands on is
+not modelled.
+
+So this patch does not test a hypothesis. It reads the window surface back
+after drawing and reports whether the missing pixels are absent from the
+SURFACE or only from the SCREEN:
+
+  right/bottom probes non-zero  -> pixels ARE in the surface; the defect is
+    downstream in the LFB write or scanout. Every test so far has been
+    structurally blind there -- notably the one 86Box cell that did engage
+    centring ran banked with has_lfb=0, while the real card uses an LFB.
+  right/bottom zero, controls non-zero -> a draw path is sizing itself
+    wrong after all, despite six of them reading correctly.
+  controls also zero -> the frame was blank; the sample says nothing.
+
+That third outcome is deliberate. Four confident-but-wrong mechanisms came
+from stories that fit the evidence; an instrument that cannot report "this
+told you nothing" invites a fifth.
+
+Samples 16 points rather than scanning. A full 512x384 readback is 196608
+byte reads per flip, and Round J measured this CPU's memory at ~17 MB/s
+flat beyond an 8 KB L1 -- about 11 ms, enough to distort the frame being
+measured. The reported defect is whole-region, not speckled, so probes
+answer the same question for free.
+
+Zero reads as clear because the margin clear uses clear_pixel, which is 0
+on every backdrop except 9/10/12/13/14, making a black content pixel
+indistinguishable from cleared. Hence the controls: they establish the
+sampling works on this frame before anything is concluded from the probes.
+
+Default OFF behind SDL_HINT_DOSKUTSU_SURFACE_EXTENT, strict-1, emitting
+once per 100 flips. No cost when unset.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 85 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 85 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 52c50f35..41e22571 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -874,6 +874,18 @@ inline bool _abl_flip_body_instr()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0311): window-surface readback probe for the Mach64
++// black right/bottom defect. Samples 16 points inside the centred box
++// once per 100 flips and reports their values, so a log can say whether
++// the missing pixels are absent from the SURFACE or only from the
++// SCREEN. Strict-1, default OFF; no cost when unset. See the emit site
++// in flip() for why this samples rather than scans.
++inline bool _abl_surface_extent()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_SURFACE_EXTENT");
++  return v;
++}
++
+ // DOS-PORT (patch 0113, Phase 11 iter H opt #2: off-screen tile
+ // bbox skip). The FG-tilemap loop pre-clips its iteration range to the
+ // map-bounds-clipped visible window, eliminating per-iteration OOB
+@@ -5756,6 +5768,79 @@ void Renderer::flip()
+     bbox_pixels = bbox.w * bbox.h;
+   }
+ 
++  // DOS-PORT (patch 0311): where did the pixels actually land?
++  //
++  // The Mach64 renders the right ~96 columns and bottom ~72 rows of the
++  // game box black, and FOUR proposed mechanisms have now been wrong:
++  // 0297's per-drawcall gate, 0308's thrash arm, a dirty-rect coordinate
++  // theory, and the flush-shape theory that produced the retracted 0309.
++  // Reading code has been exhausted -- six draw/flush paths were each
++  // verified centred, and the flush rect is witnessed at a correct
++  // 320x240@96,72 in the hardware logs. Neither emulator can reproduce
++  // it: DOSBox-X renders the centred path correctly at 640x480, and
++  // 86Box's Mach64 advertises the double-scan bit the real silicon
++  // clears, so it offers 320x240 and never engages centring at all.
++  //
++  // So this does not test a hypothesis. It reads the window surface back
++  // and reports where non-clear pixels are, which splits the remaining
++  // space in one measurement:
++  //
++  //   right/bottom probes non-zero -> the pixels ARE in the surface, and
++  //     the defect is downstream in the LFB write or scanout. Every test
++  //     to date has been structurally blind there -- notably the one
++  //     86Box cell that DID centre ran banked with has_lfb=0.
++  //   right/bottom probes zero while the controls are non-zero -> some
++  //     draw path is sizing itself wrong after all, despite reading
++  //     correctly.
++  //
++  // Sampling, not scanning. A full 512x384 sweep is 196608 byte reads per
++  // flip on a 486 at ~17 MB/s -- ~11 ms, which would distort the very
++  // frame it measures. Sixteen probes cost nothing and answer the same
++  // question, because the reported defect is whole-region, not speckled.
++  //
++  // Zero is read as "clear" because the margin clear uses clear_pixel,
++  // which defaults to 0 on every backdrop except 9/10/12/13/14. A black
++  // CONTENT pixel is therefore indistinguishable from cleared -- which is
++  // why the controls matter: they establish that the sampling works on
++  // this frame before any conclusion is drawn from the probes.
++  //
++  // Default OFF, strict-1, and emits once per 100 flips.
++  if (_abl_surface_extent() && _dos_center_active && _cached_window_surface &&
++      SDL_BYTESPERPIXEL(_cached_window_surface->format) == 1)
++  {
++    static int _se_n = 0;
++    if (++_se_n >= 100)
++    {
++      _se_n = 0;
++      const Uint8 *px = (const Uint8 *)_cached_window_surface->pixels;
++      const int pitch = _cached_window_surface->pitch;
++      const int ox = _dos_center_ox, oy = _dos_center_oy;
++      // Probe rows/cols inside the box: near-left and near-right columns,
++      // near-top and near-bottom rows. 2px inset to dodge any edge case.
++      const int cx[4] = {ox + 2, ox + 106, ox + 212, ox + 317};
++      const int cy[4] = {oy + 2, oy + 80, oy + 160, oy + 237};
++      char buf[256];
++      int n = 0;
++      for (int r = 0; r < 4 && n < 200; r++)
++      {
++        for (int c = 0; c < 4 && n < 200; c++)
++        {
++          const int v = (int)px[cy[r] * pitch + cx[c]];
++          n += SDL_snprintf(buf + n, sizeof(buf) - n, "%s%d",
++                            (r || c) ? "," : "", v);
++        }
++      }
++      LOG_INFO("surface-extent: box={}x240@{},{} pitch={} probes(4x4 "
++               "row-major, x={},{},{},{} y={},{},{},{})=[{}] "
++               "(0 = clear/black; the LAST column and LAST row are the "
++               "reported-black region, the FIRST of each are controls -- "
++               "if controls are 0 too the frame was blank and this sample "
++               "says nothing)",
++               320, ox, oy, pitch,
++               cx[0], cx[1], cx[2], cx[3], cy[0], cy[1], cy[2], cy[3], buf);
++    }
++  }
++
+   // DOS-PORT (patch 0082 + 0084): diff-engagement + bbox diagnostics.
+   if (_prev_diff_engaged)
+   {
