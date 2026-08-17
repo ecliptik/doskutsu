@@ -1,0 +1,115 @@
+From 555337c16b403ad9600daae6c549e9001dc1a292 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 17 Aug 2026 13:18:09 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0310 -- default the off-screen tile-slot
+ skip ON
+
+Patch 0113 added the FG-tilemap loop's off-screen slot skip and shipped it
+default-OFF as an opt-in A/B. The A/B was never run. It then sat unmeasured
+for eleven waves while the campaign chased levers with far worse ceilings.
+
+Round J measured it on the DX2-66, same reel, clean cells, no
+instrumentation on either arm:
+
+  control            per_loop_fps 22.5   Mimiga 20.4 21.2 21.7 21.1 23.9
+  TILE_BBOX_SKIP=1   per_loop_fps 23.1   Mimiga 21.2 22.4 22.7 21.2 24.2
+
++0.6 fps, and higher on every one of the five Mimiga samples rather than
+only in the aggregate. That per-sample consistency is what separates it
+from the +/-2 fps noise band that has swallowed most levers here.
+
+Small, but free. No new code path, no new risk surface. The tile loops run
+17x22 = 374 slots per layer (MAP_DRAW_EXTRA=1) and 38-74 of those are
+wholly outside the visible window depending on camera position; skipping
+them cannot skip anything that could have been drawn.
+
+Polarity now matches the 0088 / 0093 / 0115 / 0117 convention: only a
+literal "0" disables.
+
+Also adds the boot banner the lever never had. 0113 emitted nothing, which
+is exactly how a default-OFF lever sits unmeasured for eleven waves without
+anything noticing. The same gap bit Round J from the other side:
+TILEMAP_CACHE's engagement had to be inferred from a -6 fps delta because
+it too emits nothing, so its arm cannot be witnessed in the log the way
+every banner-carrying lever can. A strings-grep proves a lever is compiled
+in, never that it ran.
+
+The banner sits OUTSIDE the oversized-centring block deliberately -- this
+lever is card-independent, and a Mach64-only witness would be absent on the
+very cards where the fps was measured.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 50 ++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 44 insertions(+), 6 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index b98838b1..52c50f35 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -875,14 +875,33 @@ inline bool _abl_flip_body_instr()
+ }
+ 
+ // DOS-PORT (patch 0113, Phase 11 iter H opt #2: off-screen tile
+-// bbox skip). Killswitch for the FG-tilemap loop's OOB-tile skip
+-// optimization. When ENABLED, the loop pre-clips iteration range to
+-// the map-bounds-clipped visible window, eliminating per-iteration
+-// OOB bounds checks + OOB iterations entirely. Default OFF (so iter
+-// H PLAY2 is the A/B opt-in test). Strict-1 match.
++// bbox skip). The FG-tilemap loop pre-clips its iteration range to the
++// map-bounds-clipped visible window, eliminating per-iteration OOB
++// bounds checks and the OOB iterations themselves. The tile loops run
++// 17x22 = 374 slots per layer (MAP_DRAW_EXTRA=1), of which 38-74 are
++// wholly off-screen depending on camera position.
++//
++// DOS-PORT (patch 0310): DEFAULT FLIPPED ON. It shipped default-OFF in
++// 0113 as an opt-in A/B and then sat unmeasured for eleven waves. Round
++// J measured it on the DX2-66, same reel, clean cells, no
++// instrumentation:
++//
++//   control            per_loop_fps 22.5   Mimiga 20.4 21.2 21.7 21.1 23.9
++//   TILE_BBOX_SKIP=1   per_loop_fps 23.1   Mimiga 21.2 22.4 22.7 21.2 24.2
++//
++// +0.6 fps, and higher on every one of the five Mimiga samples rather
++// than only in the aggregate -- which is what separates this from the
++// +/-2 fps noise band that has swallowed most levers in this campaign.
++//
++// Small, but it is free: no new code path, no new risk surface, and the
++// skipped iterations are by construction wholly outside the visible
++// window, so nothing that could have been drawn is skipped.
++//
++// Polarity now matches the 0088 / 0093 / 0115 / 0117 killswitch
++// convention: only a literal "0" disables.
+ inline bool _abl_tile_bbox_skip()
+ {
+-  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP");
++  static const bool v = !_strict_falsy_env("SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP");
+   return v;
+ }
+ 
+@@ -4236,6 +4255,25 @@ bool Renderer::initVideo()
+   const char *_renderer_name = SDL_GetStringProperty(_renderer_props, SDL_PROP_RENDERER_NAME_STRING, NULL);
+   LOG_INFO("Renderer::initVideo: using: {} renderer", _renderer_name ? _renderer_name : "<unknown>");
+ 
++  // DOS-PORT (patch 0310): boot witness for the off-screen tile-slot skip.
++  // Emitted OUTSIDE the centring block on purpose -- the lever is
++  // card-independent, so a Mach64-only banner would be absent on the very
++  // cards where the fps was measured.
++  //
++  // 0113 shipped this lever with no runtime banner at all, which is why it
++  // could sit default-OFF and unmeasured for eleven waves without anything
++  // noticing. Round J also had to infer TILEMAP_CACHE's engagement from a
++  // 6 fps delta because that lever likewise emits nothing -- a lever with
++  // no witness cannot satisfy the two-witness rule, and `strings | grep`
++  // proves only that the code is present, not that it ran.
++  LOG_INFO("tile-bbox-skip: {} -- off-screen tile slots {} (of 374 per layer, "
++           "38-74 are wholly outside the visible window); set "
++           "SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP=0 to restore the pre-0310 "
++           "default-OFF behaviour",
++           _abl_tile_bbox_skip() ? "ENGAGED (default since 0310)"
++                                 : "DISABLED (killswitch =0)",
++           _abl_tile_bbox_skip() ? "skipped" : "iterated and bounds-checked");
++
+   std::string spotpath = ResourceManager::getInstance()->getPath("spot.png");
+ 
+   SDL_Surface *image;
