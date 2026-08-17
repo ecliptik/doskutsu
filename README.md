@@ -122,7 +122,7 @@ The same posture applies as the broader Cave Story port community ([NXEngine-evo
 **Recommended**
 
 - CPU: Pentium 75 MHz or faster
-- RAM: 32 MB
+- RAM: 16 MB
 - Video: VESA 1.2+ with 320x240 support
 - Sound: Sound Blaster 16 or compatible; AdLib/OPL2-only and Gravis UltraSound (or PicoGUS) cards also supported
 - OS: MS-DOS 6.22 or compatible
