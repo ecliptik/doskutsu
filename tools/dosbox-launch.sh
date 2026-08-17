@@ -36,6 +36,15 @@ CONF_PARITY="$SCRIPT_DIR/dosbox-x.conf"
 CONF_FAST="$SCRIPT_DIR/dosbox-x-fast.conf"
 CONF="$CONF_PARITY"
 
+# DOS-PORT: explicit conf override, e.g.
+#   DOSBOX_CONF=tools/dosbox-x-oversized.conf tools/dosbox-launch.sh --stage ...
+# Applied AFTER flag parsing below so it beats --fast / --parity. Exists
+# because the Mach64 centring path (patch 0296) only engages on a backend
+# that cannot offer 320x240, which needs its own conf -- and swapping
+# dosbox-x-fast.conf in place to get it is how a half-finished debug session
+# leaves a wrong parity config behind.
+CONF_OVERRIDE="${DOSBOX_CONF:-}"
+
 KILL_FIRST=0
 EXE=""
 STAGE=0
@@ -71,6 +80,13 @@ while [[ $# -gt 0 ]]; do
     *) echo "dosbox-launch.sh: unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+if [[ -n "$CONF_OVERRIDE" ]]; then
+  # Relative paths resolve against the repo root, not the caller's cwd.
+  [[ "$CONF_OVERRIDE" = /* ]] || CONF_OVERRIDE="$REPO_ROOT/$CONF_OVERRIDE"
+  CONF="$CONF_OVERRIDE"
+  echo "dosbox-launch.sh: conf overridden via DOSBOX_CONF -> $CONF"
+fi
 
 if [[ "$KILL_FIRST" == "1" ]] && pgrep -x dosbox-x >/dev/null 2>&1; then
   echo "Stopping running dosbox-x..."
@@ -136,6 +152,24 @@ DBX_ARGS=(-conf "$CONF" -nopromptfolder
 # gate's banner-emit check (the runtime-log half of the two-witness pattern)
 # can still witness INFO banners. Production real-HW runs do not use this
 # launcher, so the WARN-when-untagged default is unaffected there.
+
+# DOSKUTSU_EXTRA_SET -- optional caller-supplied env for the guest, as one or
+# more NAME=VALUE pairs separated by whitespace, injected as additional DOS
+# SET commands before the exe runs. Unset (the default) changes nothing, so
+# every existing invocation is byte-identical to before.
+#
+# Added for the patch-0304 witness run: proving a FINE_INSTR-gated counter
+# actually gets bumped needs the hint set inside the guest, and the SET list
+# above is fixed. Editing that list per experiment would mean a tracked-file
+# change for each one -- exactly the shared-file churn the campaign keeps
+# getting bitten by. Injected AFTER the fixed SETs so a caller can also
+# override one of them deliberately (last SET of a name wins in DOS).
+if [[ -n "${DOSKUTSU_EXTRA_SET:-}" ]]; then
+  for _kv in $DOSKUTSU_EXTRA_SET; do
+    DBX_ARGS+=(-c "SET $_kv")
+    echo "  extra guest env: SET $_kv"
+  done
+fi
 
 if [[ -n "$EXE" ]]; then
   EXE_DOS="$(echo "$EXE" | tr '/' '\\' | tr '[:lower:]' '[:upper:]')"
