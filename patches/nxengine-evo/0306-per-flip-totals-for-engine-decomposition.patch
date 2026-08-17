@@ -1,0 +1,536 @@
+From 349d8953ae0dd7ac4f0145c77465f66255ec24aa Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 16 Aug 2026 14:44:20 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0306 -- per-flip totals for the engine
+ decomposition
+
+0305 made the fine sub-buckets emit on the fixed-timestep path, but they
+still could not be compared against the bucket they decompose. The
+[engine-tick-stat] lines are per-CALL distribution statistics; the
+engine_tick figure in the sibling audio/engine split line is a per-FLIP
+average. Dividing one by the other is not a coverage fraction, and both
+this session and the benchmarking session made that mistake from
+opposite directions -- once concluding the sub-buckets covered under 10%
+of their parent, once that they exceeded it.
+
+Emit per-flip totals (accum/flips) ALONGSIDE the distributions, not
+instead of them: the distributions answer a different question and are
+what reveal a long tail. Paired per block, sum_children now matches
+engine_tick to within one quantisation unit -- 3.50/3.50, 3.00/3.00,
+4.40/4.40 -- so sub-bucket against parent is arithmetic instead of
+inference. The answer it gives: the decomposition is exhaustive, and
+mode_tick_render is ~95% of engine_tick. There is no missing residual.
+
+The totals cannot be derived by summing the existing sample arrays.
+Those hold at most g_eng_tick_block_size entries and the push is guarded
+by an index bound, so any phase firing more than 100 times per block is
+silently truncated -- understating exactly the busiest phases. Separate
+untruncated accumulators plus real call counts, and a trunc= flag so a
+reader can see when the distribution above is a subsample.
+
+Second hunk, and the reason the first one is trustworthy: every timer
+computed SDL_GetTicksNS() - t0 into an UNSIGNED value. On DOS the
+timebase is uclock, which is not reliably monotonic; when it steps
+backwards the subtraction wraps to ~1.8e19 ns. This was ALREADY
+happening and already in the logs -- the pre-0306 clear_screen
+distribution carries max=18446744073654.68 ms -- but a median over 100
+samples hid it. A sum cannot, so the new totals turned one wrapped
+sample into a nonsense bucket, which is how it was found. Clamped via
+_nxe_diag_dt(): a backwards clock means the interval is unmeasurable,
+not enormous, so dropping it biases a total slightly low while keeping
+it destroys the total outright. Applied to all 27 sites in the header,
+the direct accumulators included, since a sum is the most vulnerable
+form.
+
+Default-OFF behind the same FINE_INSTR gate as 0304/0305 -- verified:
+zero totals lines in a default run, and the gameplay banner gate passes.
+Measurement does not get to move the shipped binary's cost.
+
+NOT fixed here, reported instead: the older phase-timing accumulators in
+Renderer.cpp (dc_total / flip_inner / inter_flip) wrap the same way, ~4%
+of blocks in a DOSBox reel. 0306 does not need them and campaign
+readings have survived it by using medians, so it wants its own slot
+rather than growing this patch while a build is waiting.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h | 119 ++++++++++++++++++++++++++--------
+ src/game.cpp                  |   9 +++
+ src/graphics/Renderer.cpp     |  95 +++++++++++++++++++++++++++
+ 3 files changed, 196 insertions(+), 27 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index e3aa56ee..75255b73 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -42,6 +42,29 @@ extern std::uint64_t g_audio_service_accum_ns_global;
+ extern int g_audio_service_count_block;
+ extern int g_audio_service_count_global;
+ 
++// DOS-PORT (patch 0306): monotonic-safe elapsed-ns read.
++//
++// Every timer below computed `SDL_GetTicksNS() - t0` into an UNSIGNED value.
++// On DOS, SDL's timebase is uclock, which is not reliably monotonic -- the
++// SDL/0110 music pump reprograms PIT ch0 underneath it, and 0122 only papers
++// over part of that. When the clock steps backwards the subtraction wraps to
++// ~1.8e19 ns.
++//
++// This was already happening and already in the logs: the pre-0306
++// [engine-tick-stat] clear_screen line carries `max=18446744073654.68` ms.
++// A median over 100 samples hid it, so nobody noticed. A SUM cannot hide it,
++// so the per-flip totals this patch adds turned one wrapped sample into a
++// nonsense bucket -- which is how it was found.
++//
++// Clamping to 0 is right rather than merely convenient: a backwards clock
++// means the interval is unmeasurable, not that it was enormous. Dropping it
++// biases a total slightly low; keeping it destroys the total outright.
++static inline std::uint64_t _nxe_diag_dt(std::uint64_t t0)
++{
++  const std::uint64_t now = SDL_GetTicksNS();
++  return (now > t0) ? (now - t0) : 0;
++}
++
+ // RAII helper for the Organya stream callback (called by SDL3 audio
+ // thread when more samples are needed). Place at top of the callback.
+ struct AudioMixerTimer
+@@ -50,7 +73,7 @@ struct AudioMixerTimer
+   AudioMixerTimer() : t0(SDL_GetTicksNS()) {}
+   ~AudioMixerTimer()
+   {
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_audio_mix_accum_ns_block += dt;
+     g_audio_mix_accum_ns_global += dt;
+     ++g_audio_mix_count_block;
+@@ -68,7 +91,7 @@ struct EngineTickTimer
+   EngineTickTimer() : t0(SDL_GetTicksNS()) {}
+   ~EngineTickTimer()
+   {
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_engine_tick_accum_ns_block += dt;
+     g_engine_tick_accum_ns_global += dt;
+     ++g_engine_tick_count_block;
+@@ -167,7 +190,7 @@ struct FixedPathEngineTickTimer
+   ~FixedPathEngineTickTimer()
+   {
+     if (!on) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_engine_tick_accum_ns_block += dt;
+     g_engine_tick_accum_ns_global += dt;
+     ++g_engine_tick_count_block;
+@@ -202,7 +225,7 @@ struct SfxTriggerTimer
+   ~SfxTriggerTimer()
+   {
+     if (on)
+-      sfx_trigger_record(sfx_id, SDL_GetTicksNS() - t0);
++      sfx_trigger_record(sfx_id, _nxe_diag_dt(t0));  // patch 0306
+   }
+ };
+ 
+@@ -227,7 +250,7 @@ struct AudioServiceTimer
+   {
+     if (!on)
+       return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_audio_service_accum_ns_block += dt;
+     g_audio_service_accum_ns_global += dt;
+     ++g_audio_service_count_block;
+@@ -279,6 +302,36 @@ extern std::uint64_t g_eng_mode_tick_render_dt_this_tick;
+ // Cost when env unset: 1 SDL_GetTicksNS at construction (always) +
+ // 1 at destruction + 1 branch-on-cached-bool. Mirrors existing
+ // EngineTickTimer pattern; -O2 should fold the env-off path tightly.
++// DOS-PORT (patch 0306): untruncated per-block accumulators, one pair per
++// sub-bucket, feeding the per-flip totals the [engine-tick-stat] line now
++// emits alongside its distribution stats.
++//
++// Why these cannot be derived from the existing sample arrays: those arrays
++// hold at most g_eng_tick_block_size (100) entries and the push is guarded by
++// `idx < g_eng_tick_block_size`, so any phase firing more than 100 times in a
++// block is SILENTLY TRUNCATED. Summing them would understate exactly the
++// busiest phases -- the ones worth optimising. `_calls` here is the real call
++// count and keeps climbing past 100, so a reader can also see when the
++// distribution above it is a truncated subsample rather than the whole block.
++//
++// The accumulate is unconditional within the FINE_INSTR guard each destructor
++// already applies, so default (FINE_INSTR=0) runs pay nothing new -- the
++// destructors still return before touching any of this.
++extern std::uint64_t g_eng_clear_screen_accum_ns_block;
++extern std::uint64_t g_eng_tsc_interp_accum_ns_block;
++extern std::uint64_t g_eng_mode_tick_accum_ns_block;
++extern std::uint64_t g_eng_mode_tick_state_accum_ns_block;
++extern std::uint64_t g_eng_mode_tick_render_accum_ns_block;
++extern std::uint64_t g_eng_debug_overlay_accum_ns_block;
++extern std::uint64_t g_eng_residual_accum_ns_block;
++extern int g_eng_clear_screen_calls_block;
++extern int g_eng_tsc_interp_calls_block;
++extern int g_eng_mode_tick_calls_block;
++extern int g_eng_mode_tick_state_calls_block;
++extern int g_eng_mode_tick_render_calls_block;
++extern int g_eng_debug_overlay_calls_block;
++extern int g_eng_residual_calls_block;
++
+ struct ClearScreenTimer
+ {
+   std::uint64_t t0;
+@@ -286,8 +339,10 @@ struct ClearScreenTimer
+   ~ClearScreenTimer()
+   {
+     if (!engine_tick_fine_instr_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_eng_clear_screen_dt_this_tick = dt;
++    g_eng_clear_screen_accum_ns_block += dt;   // patch 0306
++    ++g_eng_clear_screen_calls_block;          // patch 0306
+     if (g_eng_clear_screen_idx < g_eng_tick_block_size)
+       g_eng_clear_screen_samples[g_eng_clear_screen_idx++] = dt;
+   }
+@@ -300,8 +355,10 @@ struct TscInterpTimer
+   ~TscInterpTimer()
+   {
+     if (!engine_tick_fine_instr_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_eng_tsc_interp_dt_this_tick = dt;
++    g_eng_tsc_interp_accum_ns_block += dt;   // patch 0306
++    ++g_eng_tsc_interp_calls_block;          // patch 0306
+     if (g_eng_tsc_interp_idx < g_eng_tick_block_size)
+       g_eng_tsc_interp_samples[g_eng_tsc_interp_idx++] = dt;
+   }
+@@ -314,8 +371,10 @@ struct ModeTickTimer
+   ~ModeTickTimer()
+   {
+     if (!engine_tick_fine_instr_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_eng_mode_tick_dt_this_tick = dt;
++    g_eng_mode_tick_accum_ns_block += dt;   // patch 0306
++    ++g_eng_mode_tick_calls_block;          // patch 0306
+     if (g_eng_mode_tick_idx < g_eng_tick_block_size)
+       g_eng_mode_tick_samples[g_eng_mode_tick_idx++] = dt;
+   }
+@@ -335,8 +394,10 @@ struct ModeTickStateTimer
+   ~ModeTickStateTimer()
+   {
+     if (!engine_tick_fine_instr_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_eng_mode_tick_state_dt_this_tick = dt;
++    g_eng_mode_tick_state_accum_ns_block += dt;   // patch 0306
++    ++g_eng_mode_tick_state_calls_block;          // patch 0306
+     if (g_eng_mode_tick_state_idx < g_eng_tick_block_size)
+       g_eng_mode_tick_state_samples[g_eng_mode_tick_state_idx++] = dt;
+   }
+@@ -349,8 +410,10 @@ struct ModeTickRenderTimer
+   ~ModeTickRenderTimer()
+   {
+     if (!engine_tick_fine_instr_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_eng_mode_tick_render_dt_this_tick = dt;
++    g_eng_mode_tick_render_accum_ns_block += dt;   // patch 0306
++    ++g_eng_mode_tick_render_calls_block;          // patch 0306
+     if (g_eng_mode_tick_render_idx < g_eng_tick_block_size)
+       g_eng_mode_tick_render_samples[g_eng_mode_tick_render_idx++] = dt;
+   }
+@@ -363,8 +426,10 @@ struct DebugOverlayTimer
+   ~DebugOverlayTimer()
+   {
+     if (!engine_tick_fine_instr_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_eng_debug_overlay_dt_this_tick = dt;
++    g_eng_debug_overlay_accum_ns_block += dt;   // patch 0306
++    ++g_eng_debug_overlay_calls_block;          // patch 0306
+     if (g_eng_debug_overlay_idx < g_eng_tick_block_size)
+       g_eng_debug_overlay_samples[g_eng_debug_overlay_idx++] = dt;
+   }
+@@ -496,7 +561,7 @@ struct ModeSimTimer
+   ~ModeSimTimer()
+   {
+     if (!mode_tick_instr_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mt_sim_dt_this_tick = dt;
+     if (g_mt_sim_idx < g_eng_tick_block_size)
+       g_mt_sim_samples[g_mt_sim_idx++] = dt;
+@@ -514,7 +579,7 @@ struct ModeDrawSceneTimer
+     // INSTR-only so existing output is byte-identical when off.
+     const bool _instr = mode_tick_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mt_draw_scene_dt_this_tick = dt;
+     if (_instr && g_mt_draw_scene_idx < g_eng_tick_block_size)
+       g_mt_draw_scene_samples[g_mt_draw_scene_idx++] = dt;
+@@ -528,7 +593,7 @@ struct ModeDrawHudTimer
+   ~ModeDrawHudTimer()
+   {
+     if (!mode_tick_instr_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mt_draw_hud_dt_this_tick = dt;
+     if (g_mt_draw_hud_idx < g_eng_tick_block_size)
+       g_mt_draw_hud_samples[g_mt_draw_hud_idx++] = dt;
+@@ -542,7 +607,7 @@ struct ModePostTimer
+   ~ModePostTimer()
+   {
+     if (!mode_tick_instr_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mt_post_dt_this_tick = dt;
+     if (g_mt_post_idx < g_eng_tick_block_size)
+       g_mt_post_samples[g_mt_post_idx++] = dt;
+@@ -659,7 +724,7 @@ struct MdsClearTimer
+     // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
+     const bool _instr = mode_draw_scene_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mds_clear_dt_this_tick = dt;
+     if (_instr && g_mds_clear_idx < g_eng_tick_block_size)
+       g_mds_clear_samples[g_mds_clear_idx++] = dt;
+@@ -675,7 +740,7 @@ struct MdsTilemapBgTimer
+     // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
+     const bool _instr = mode_draw_scene_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mds_tilemap_bg_dt_this_tick = dt;
+     if (_instr && g_mds_tilemap_bg_idx < g_eng_tick_block_size)
+       g_mds_tilemap_bg_samples[g_mds_tilemap_bg_idx++] = dt;
+@@ -691,7 +756,7 @@ struct MdsObjectLoopTimer
+     // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
+     const bool _instr = mode_draw_scene_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mds_object_loop_dt_this_tick = dt;
+     if (_instr && g_mds_object_loop_idx < g_eng_tick_block_size)
+       g_mds_object_loop_samples[g_mds_object_loop_idx++] = dt;
+@@ -707,7 +772,7 @@ struct MdsPlayerTimer
+     // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
+     const bool _instr = mode_draw_scene_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mds_player_dt_this_tick = dt;
+     if (_instr && g_mds_player_idx < g_eng_tick_block_size)
+       g_mds_player_samples[g_mds_player_idx++] = dt;
+@@ -723,7 +788,7 @@ struct MdsTilemapFgTimer
+     // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
+     const bool _instr = mode_draw_scene_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mds_tilemap_fg_dt_this_tick = dt;
+     if (_instr && g_mds_tilemap_fg_idx < g_eng_tick_block_size)
+       g_mds_tilemap_fg_samples[g_mds_tilemap_fg_idx++] = dt;
+@@ -739,7 +804,7 @@ struct MdsCaretsWaterFloatsTimer
+     // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
+     const bool _instr = mode_draw_scene_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mds_carets_water_floats_dt_this_tick = dt;
+     if (_instr && g_mds_carets_water_floats_idx < g_eng_tick_block_size)
+       g_mds_carets_water_floats_samples[g_mds_carets_water_floats_idx++] = dt;
+@@ -855,7 +920,7 @@ struct MdtBgBackdropTimer
+     // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
+     const bool _instr = mds_bg_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mdt_bg_backdrop_dt_this_tick = dt;
+     if (_instr && g_mdt_bg_backdrop_idx < g_eng_tick_block_size)
+       g_mdt_bg_backdrop_samples[g_mdt_bg_backdrop_idx++] = dt;
+@@ -871,7 +936,7 @@ struct MdtBgTilelayerTimer
+     // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
+     const bool _instr = mds_bg_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mdt_bg_tilelayer_dt_this_tick = dt;
+     if (_instr && g_mdt_bg_tilelayer_idx < g_eng_tick_block_size)
+       g_mdt_bg_tilelayer_samples[g_mdt_bg_tilelayer_idx++] = dt;
+@@ -887,7 +952,7 @@ struct MdtBgTintscreenTimer
+     // patch 0147 (wave-52): widened gate (see ModeDrawSceneTimer).
+     const bool _instr = mds_bg_instr_active();
+     if (!_instr && !mds_decomp_active()) return;
+-    const std::uint64_t dt = SDL_GetTicksNS() - t0;
++    const std::uint64_t dt = _nxe_diag_dt(t0);  // patch 0306: clamp on backwards clock
+     g_mdt_bg_tintscreen_dt_this_tick = dt;
+     if (_instr && g_mdt_bg_tintscreen_idx < g_eng_tick_block_size)
+       g_mdt_bg_tintscreen_samples[g_mdt_bg_tintscreen_idx++] = dt;
+@@ -1320,7 +1385,7 @@ struct P12MidiTickTimer
+   ~P12MidiTickTimer()
+   {
+     if (!p12_audio_instr_active()) return;
+-    g_p12_midi_tick_accum_ns_block += SDL_GetTicksNS() - t0;
++    g_p12_midi_tick_accum_ns_block += _nxe_diag_dt(t0);  // patch 0306
+     ++g_p12_midi_tick_count_block;
+   }
+ };
+@@ -1332,7 +1397,7 @@ struct P12PixtonePlayTimer
+   ~P12PixtonePlayTimer()
+   {
+     if (!p12_audio_instr_active()) return;
+-    g_p12_pixtone_play_accum_ns_block += SDL_GetTicksNS() - t0;
++    g_p12_pixtone_play_accum_ns_block += _nxe_diag_dt(t0);  // patch 0306
+     ++g_p12_pixtone_play_count_block;
+   }
+ };
+@@ -1344,7 +1409,7 @@ struct P12PixtoneStopTimer
+   ~P12PixtoneStopTimer()
+   {
+     if (!p12_audio_instr_active()) return;
+-    g_p12_pixtone_stop_accum_ns_block += SDL_GetTicksNS() - t0;
++    g_p12_pixtone_stop_accum_ns_block += _nxe_diag_dt(t0);  // patch 0306
+     ++g_p12_pixtone_stop_count_block;
+   }
+ };
+diff --git a/src/game.cpp b/src/game.cpp
+index 0d94c956..a228a555 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -377,6 +377,15 @@ void Game::tick(void)
+                 - (Sint64)NXE::Diag::g_eng_mode_tick_dt_this_tick
+                 - (Sint64)NXE::Diag::g_eng_debug_overlay_dt_this_tick;
+     if (_res < 0) _res = 0;
++    // DOS-PORT (patch 0306): untruncated accumulate for the per-flip total,
++    // BEFORE the bounded sample push below. Note the enclosing `if` already
++    // caps on g_eng_residual_idx, so on the 1:1 path a block with more than
++    // g_eng_tick_block_size ticks stops accumulating here too -- that bound
++    // is pre-existing and shared with the sample array rather than something
++    // this patch introduces. The fixed-timestep path pushes no residual at
++    // all (see 0305), so its residual total reads 0, which is honest.
++    NXE::Diag::g_eng_residual_accum_ns_block += (Uint64)_res;
++    ++NXE::Diag::g_eng_residual_calls_block;
+     NXE::Diag::g_eng_residual_samples[NXE::Diag::g_eng_residual_idx++] = (Uint64)_res;
+   }
+ 
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 2d10499f..b98838b1 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -189,6 +189,24 @@ int g_eng_tsc_interp_idx     = 0;
+ int g_eng_mode_tick_idx      = 0;
+ int g_eng_debug_overlay_idx  = 0;
+ int g_eng_residual_idx       = 0;
++// DOS-PORT (patch 0306): untruncated per-block totals + real call counts.
++// The sample arrays above stop at g_eng_tick_block_size, so they cannot be
++// summed into a per-flip figure without understating the busiest phases.
++// Declared in Utils/diagnostic_timers.h; bumped by the sub-bucket timers.
++std::uint64_t g_eng_clear_screen_accum_ns_block      = 0;
++std::uint64_t g_eng_tsc_interp_accum_ns_block        = 0;
++std::uint64_t g_eng_mode_tick_accum_ns_block         = 0;
++std::uint64_t g_eng_mode_tick_state_accum_ns_block   = 0;
++std::uint64_t g_eng_mode_tick_render_accum_ns_block  = 0;
++std::uint64_t g_eng_debug_overlay_accum_ns_block     = 0;
++std::uint64_t g_eng_residual_accum_ns_block          = 0;
++int g_eng_clear_screen_calls_block      = 0;
++int g_eng_tsc_interp_calls_block        = 0;
++int g_eng_mode_tick_calls_block         = 0;
++int g_eng_mode_tick_state_calls_block   = 0;
++int g_eng_mode_tick_render_calls_block  = 0;
++int g_eng_debug_overlay_calls_block     = 0;
++int g_eng_residual_calls_block          = 0;
+ std::uint64_t g_eng_clear_screen_dt_this_tick   = 0;
+ std::uint64_t g_eng_tsc_interp_dt_this_tick     = 0;
+ std::uint64_t g_eng_mode_tick_dt_this_tick      = 0;
+@@ -2812,6 +2830,66 @@ void _maybe_flush_phase_timing_audit()
+     {
+       LOG_INFO("[engine-tick-stat n=0 phase=engine_tick_residual  min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
+     }
++
++    // DOS-PORT (patch 0306): per-flip TOTALS, emitted ALONGSIDE the
++    // distributions above rather than replacing them -- the two answer
++    // different questions and the distributions are what show a long tail.
++    //
++    // This line exists because the distributions could not be compared
++    // against their own parent. They are per-CALL statistics; `engine_tick`
++    // in the sibling `audio/engine split block` line is a per-FLIP average.
++    // Dividing one by the other is not a coverage fraction, and both this
++    // session and the benchmarking session made that mistake from opposite
++    // directions. These totals are the same KIND of number as the parent, so
++    // sub-bucket vs parent is now arithmetic instead of inference.
++    //
++    // `trunc=1` means at least one phase fired more than the sample array
++    // holds, so the distribution lines above it describe a subsample of the
++    // block while these totals still describe all of it. Read it before
++    // quoting a median.
++    //
++    // Divisor is _dc_tally_every_flips, the same block size the sibling
++    // phase-timing line divides by, so the two lines are directly comparable.
++    {
++      const long long _f = (long long)_dc_tally_every_flips;
++      auto _pf = [_f](std::uint64_t ns) -> long long {
++        return _f ? (long long)((ns * 10ull) / ((std::uint64_t)_f * 1000000ull)) : 0;
++      };
++      using namespace NXE::Diag;
++      const std::uint64_t _sum_ns =
++          g_eng_clear_screen_accum_ns_block + g_eng_tsc_interp_accum_ns_block
++        + g_eng_mode_tick_state_accum_ns_block + g_eng_mode_tick_render_accum_ns_block
++        + g_eng_debug_overlay_accum_ns_block;
++      const int _trunc =
++          (g_eng_clear_screen_calls_block     > g_eng_tick_block_size
++        || g_eng_tsc_interp_calls_block       > g_eng_tick_block_size
++        || g_eng_mode_tick_calls_block        > g_eng_tick_block_size
++        || g_eng_mode_tick_state_calls_block  > g_eng_tick_block_size
++        || g_eng_mode_tick_render_calls_block > g_eng_tick_block_size
++        || g_eng_debug_overlay_calls_block    > g_eng_tick_block_size) ? 1 : 0;
++      // `sum` deliberately EXCLUDES mode_tick (the retired parent slice,
++      // which double-counts state+render where it fires at all) and
++      // residual (1:1-path only, and already un-bracketed time rather than
++      // a sibling bucket). It is the sum of the disjoint measured children.
++      LOG_INFO("[engine-tick-totals block {}: per-flip ms_x10 clear_screen={} "
++               "tsc_interp={} mode_tick={} mode_tick_state={} mode_tick_render={} "
++               "debug_overlay={} residual={} sum_children={}; calls cs={} ti={} "
++               "mt={} mts={} mtr={} do={} res={}; flips={} trunc={}]",
++               _dc_block_idx,
++               _pf(g_eng_clear_screen_accum_ns_block),
++               _pf(g_eng_tsc_interp_accum_ns_block),
++               _pf(g_eng_mode_tick_accum_ns_block),
++               _pf(g_eng_mode_tick_state_accum_ns_block),
++               _pf(g_eng_mode_tick_render_accum_ns_block),
++               _pf(g_eng_debug_overlay_accum_ns_block),
++               _pf(g_eng_residual_accum_ns_block),
++               _pf(_sum_ns),
++               g_eng_clear_screen_calls_block, g_eng_tsc_interp_calls_block,
++               g_eng_mode_tick_calls_block, g_eng_mode_tick_state_calls_block,
++               g_eng_mode_tick_render_calls_block, g_eng_debug_overlay_calls_block,
++               g_eng_residual_calls_block,
++               _f, _trunc);
++    }
+   }
+   // Reset engine-tick sample arrays + idxes regardless of FINE_INSTR
+   // state -- keeps storage cleanly zeroed for the next block.
+@@ -2822,6 +2900,23 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_eng_residual_idx      = 0;
+   NXE::Diag::g_eng_mode_tick_state_idx  = 0;  // patch 0152 (wave-56 B1)
+   NXE::Diag::g_eng_mode_tick_render_idx = 0;  // patch 0152 (wave-56 B1)
++  // patch 0306: reset the untruncated totals on the SAME cadence as the
++  // idxes above, and like them unconditionally -- a block that does not emit
++  // still clears, so a quiet block cannot carry work into the next one.
++  NXE::Diag::g_eng_clear_screen_accum_ns_block     = 0;
++  NXE::Diag::g_eng_tsc_interp_accum_ns_block       = 0;
++  NXE::Diag::g_eng_mode_tick_accum_ns_block        = 0;
++  NXE::Diag::g_eng_mode_tick_state_accum_ns_block  = 0;
++  NXE::Diag::g_eng_mode_tick_render_accum_ns_block = 0;
++  NXE::Diag::g_eng_debug_overlay_accum_ns_block    = 0;
++  NXE::Diag::g_eng_residual_accum_ns_block         = 0;
++  NXE::Diag::g_eng_clear_screen_calls_block     = 0;
++  NXE::Diag::g_eng_tsc_interp_calls_block       = 0;
++  NXE::Diag::g_eng_mode_tick_calls_block        = 0;
++  NXE::Diag::g_eng_mode_tick_state_calls_block  = 0;
++  NXE::Diag::g_eng_mode_tick_render_calls_block = 0;
++  NXE::Diag::g_eng_debug_overlay_calls_block    = 0;
++  NXE::Diag::g_eng_residual_calls_block         = 0;
+ 
+   // patch 0095 (wave 22 W22A): mode-tick decomposition emit + reset.
+   // Gated on MODE_TICK_INSTR (separate from FLIP_INSTR / FINE_INSTR
+-- 
+2.47.3
+

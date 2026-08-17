@@ -1,0 +1,129 @@
+From 8c5101a3f5ca39703dc7176b1ed01b4685bb9ecd Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 15 Aug 2026 10:46:55 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0305 -- let the engine decomposition emit on
+ the fixed path
+
+0304 restored the COARSE engine bucket during GM_NORMAL gameplay. The
+FINE decomposition stayed dark for the same reason one level down: the
+`[engine-tick-stat]` block is gated on g_eng_residual_idx > 0, and the
+residual is pushed exclusively inside Game::tick, which the
+fixed-timestep GM_NORMAL path never calls.
+
+The data was already there. The sub-bucket timers (ClearScreenTimer,
+TscInterpTimer, ModeTickStateTimer, ModeTickRenderTimer,
+DebugOverlayTimer) all run inside tick_state / tick_render_submit and
+fill their arrays correctly throughout gameplay -- only the gate was
+shut. Witnessed on the 0304 QA-reel run: 3 emits across 185 blocks.
+
+Emit when ANY sub-bucket has samples. Measured on the same reel after:
+121 emits across 121 blocks, all seven phases present, with
+mode_tick_render at ~2.7 ms/flip the dominant sub-bucket and
+clear_screen ~0.06, mode_tick_state ~0.28.
+
+The residual is deliberately NOT synthesized for the fixed path. It is
+defined as un-bracketed time inside ONE Game::tick body, and that path
+has no such body -- tick_state runs 0..N times per displayed frame
+against tick_render_submit's once. Inventing a number under the existing
+label would make engine_tick_residual mean two different things
+depending on which path produced the line; it prints n=0 instead, which
+is honest, and the line says so itself.
+
+Second hunk, a defect this widening exposes rather than introduces: the
+residual line was emitted WITHOUT the n>0 guard every sibling phase has.
+That was safe only while the old gate guaranteed a non-empty array.
+Reached with n=0 it ran _compute_flip_phase_stats over uninitialized
+storage and printed min/med 515404.69 ms with p95 4294.99 -- 2^32/1e6,
+the giveaway. Guarded to match its siblings. A stale huge number sitting
+in a log beside real per-phase timings is exactly what gets quoted at
+face value later.
+
+Why this matters before the next hardware trip: without it a real-HW
+FINE_INSTR=1 cell returns the engine bucket TOTAL but not its
+breakdown -- half the answer for a full operator trip, and the breakdown
+is the half that says where the engine time actually goes.
+
+Both hunks are inside the existing FINE_INSTR-gated block, so the
+default binary is unchanged.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 55 ++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 51 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index b58da4b3..2d10499f 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -2673,7 +2673,37 @@ void _maybe_flush_phase_timing_audit()
+   // Output prefix `engine-tick-stat` distinct from W20A's `flip-stat`
+   // and the parked W20B-flip-body's `flip-fine-stat` so grep tooling
+   // can separate the three layers without ambiguity.
+-  if (_abl_fine_instr() && NXE::Diag::g_eng_residual_idx > 0)
++  // DOS-PORT (patch 0305): emit when ANY sub-bucket has samples, not only
++  // when the residual does. The residual is pushed exclusively inside
++  // Game::tick (game.cpp), which the FIXED-TIMESTEP GM_NORMAL path never
++  // calls -- so gating the whole block on it kept the engine decomposition
++  // dark during the gameplay every measured cell runs, one level below the
++  // coarse-bucket blindness 0304 fixed. Witnessed on the 0304 QA-reel run:
++  // 3 emits across 185 blocks, while the sub-bucket timers inside
++  // tick_state / tick_render_submit were filling their arrays correctly the
++  // whole time. The data was there; only the gate was shut.
++  //
++  // The residual is deliberately NOT synthesized for the fixed path. It is
++  // defined as un-bracketed time inside ONE Game::tick body, and the fixed
++  // path has no such body -- tick_state runs 0..N times per displayed frame
++  // against tick_render_submit's once. Manufacturing a number under the
++  // existing label would make `engine_tick_residual` mean two different
++  // things depending on which path produced the line, which is exactly the
++  // mixed-provenance trap that has already cost this campaign one retracted
++  // result. It prints n=0 there instead, which is honest: on the fixed path
++  // the residual is genuinely undefined, and its own line says so.
++  //
++  // Reads the sub-bucket idxes rather than re-deriving anything. They are
++  // reset unconditionally below (outside this guard), so a block that does
++  // not emit still clears -- no stale accumulation either way.
++  if (_abl_fine_instr()
++      && (NXE::Diag::g_eng_residual_idx > 0
++          || NXE::Diag::g_eng_clear_screen_idx > 0
++          || NXE::Diag::g_eng_tsc_interp_idx > 0
++          || NXE::Diag::g_eng_mode_tick_idx > 0
++          || NXE::Diag::g_eng_mode_tick_state_idx > 0
++          || NXE::Diag::g_eng_mode_tick_render_idx > 0
++          || NXE::Diag::g_eng_debug_overlay_idx > 0))
+   {
+     using NXE::Diag::g_eng_clear_screen_samples;
+     using NXE::Diag::g_eng_tsc_interp_samples;
+@@ -2762,9 +2792,26 @@ void _maybe_flush_phase_timing_audit()
+     {
+       LOG_INFO("[engine-tick-stat n=0 phase=debug_overlay         min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
+     }
+-    _compute_flip_phase_stats(g_eng_residual_samples, n_res, st_res);
+-    LOG_INFO("[engine-tick-stat n={} phase=engine_tick_residual  min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
+-             n_res, st_res.min_ms, st_res.med_ms, st_res.mean_ms, st_res.p95_ms, st_res.max_ms);
++    // DOS-PORT (patch 0305): n>0 guard, matching every sibling phase above.
++    // This line was previously unguarded, which was safe only because the
++    // old emit condition (residual_idx > 0) meant it could never be reached
++    // with an empty array. Widening that condition breaks the assumption:
++    // on the fixed-timestep path the residual is legitimately empty, and
++    // _compute_flip_phase_stats over n=0 read uninitialized storage and
++    // printed garbage -- observed as min/med 515404.69 ms and p95 4294.99
++    // (that is 2^32/1e6, the giveaway). A stale huge number sitting in a
++    // log next to real per-phase timings is precisely what gets quoted at
++    // face value later, so it must not be emitted at all.
++    if (n_res > 0)
++    {
++      _compute_flip_phase_stats(g_eng_residual_samples, n_res, st_res);
++      LOG_INFO("[engine-tick-stat n={} phase=engine_tick_residual  min={:.2f} med={:.2f} mean={:.2f} p95={:.2f} max={:.2f} ms]",
++               n_res, st_res.min_ms, st_res.med_ms, st_res.mean_ms, st_res.p95_ms, st_res.max_ms);
++    }
++    else
++    {
++      LOG_INFO("[engine-tick-stat n=0 phase=engine_tick_residual  min=0.00 med=0.00 mean=0.00 p95=0.00 max=0.00 ms]");
++    }
+   }
+   // Reset engine-tick sample arrays + idxes regardless of FINE_INSTR
+   // state -- keeps storage cleanly zeroed for the next block.
+-- 
+2.47.3
+
