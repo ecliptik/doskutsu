@@ -68,6 +68,27 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     n_patches=$(find "$patches_path" -maxdepth 1 -name '*.patch' -type f | wc -l)
     n_applied=$(cd "$vendor_path" && git log --oneline "${sha}..HEAD" 2>/dev/null | wc -l)
 
+    # Duplicate numeric prefix. The count comparison below CANNOT see this:
+    # two files sharing a slot keep both counts equal, so the series passes
+    # the gate while applying in an order the vendor stack does not match
+    # (apply-patches.sh sorts lexically, so the tiebreak is the description
+    # text, not intent). Found 2026-08-15 when a new patch was authored into
+    # the 0302 slot that had already shipped in binary 1de88fcefd4a.
+    dupes=$(find "$patches_path" -maxdepth 1 -name '*.patch' -type f -printf '%f\n' \
+            | cut -c1-4 | sort | uniq -d)
+    if [[ -n "$dupes" ]]; then
+        log "$name: DUPLICATE PATCH SLOT(S) -- each numeric prefix must be unique"
+        while read -r p; do
+            [[ -z "$p" ]] && continue
+            log "$name:    slot $p claimed by:"
+            find "$patches_path" -maxdepth 1 -name "${p}-*.patch" -type f -printf '                     %f\n'
+        done <<<"$dupes"
+        log "$name:    fix: renumber the NEWER patch to a free slot and amend its"
+        log "$name:         commit subject to match. Never reassign a slot that has"
+        log "$name:         shipped -- the old number identifies a released binary."
+        rc=1
+    fi
+
     if [[ "$n_patches" -ne "$n_applied" ]]; then
         log "$name: MISMATCH -- $n_patches patch(es) in patches/$name/, $n_applied commit(s) since pinned SHA $sha"
         log "$name:    delta = $((n_patches - n_applied))"
