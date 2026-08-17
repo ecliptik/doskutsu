@@ -1,64 +1,95 @@
 # QA checklist
 
 `QA n` after every boot: POD-83 = 1, Am5x86 = 2, DX2-66 = 3, DX2-50 = 4.
-Every sweep waits for a **keypress** at its banner, then runs unattended.
-One logback per CPU round, at the end. Never reuse a label.
+Boot 1 = Vibra16. Boot 2 = PicoGUS.
+Every sweep waits for a keypress at its banner, then runs unattended.
+Never reuse a logback label.
+Re-run UniVBE after every video card swap and check its banner names the card.
 
-**After every video card swap, re-set-up UniVBE and watch its boot line** --
-it names the chipset it took over. A card on its own BIOS is not comparable to
-round 1 and may not boot.
+## The loop
 
----
+    populate once per binary -> run the round -> logback -> feedback -> next round
 
-## Round A -- 486DX2-50 (`QA 4`) -- DONE
-
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| A0 | CF in *laptop* | -- | populate | 5 min |
-| A1 | ViRGE + PicoGUS | 2 | `QA 4` -> `RB` `EAR` `PROVE` | 40 min |
-| A2 | ViRGE + **Vibra** | 1 | `QA 4` -> `GAP` | 12 min |
-| A3 | CF in *laptop* | -- | logback `r2f-dx250` | 2 min |
-
-## Round B -- 486DX2-66 (`QA 3`) -- DONE
-
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| B1 | ViRGE + PicoGUS | 2 | `QA 3` -> `RB` `EAR` `PROVE` | 40 min |
-| B2 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP` | 12 min |
-| B3 | CF in *laptop* | -- | **logback `r2f-dx266`** -- send | 2 min |
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-dx266
-
-## Round C -- Am5x86-133 (`QA 2`) -- DONE
-
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| C1 | ViRGE + PicoGUS | 2 | `QA 2` -> `RB` `EAR` `PROVE` | 40 min |
-| C2 | ViRGE + **Vibra** | 1 | `QA 2` -> `GAP` | 12 min |
-| C3 | CF in *laptop* | -- | **logback `r2f-am5x86`** -- send | 2 min |
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-am5x86
-
-## Round D -- Pentium OverDrive 83 (`QA 1`) -- DONE
-
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| D1 | ViRGE + PicoGUS | 2 | `QA 1` -> `RB` `EAR` `PROVE` | 40 min |
-| D2 | ViRGE + **Vibra** | 1 | `QA 1` -> `GAP` | 12 min |
-| D3 | CF in *laptop* | -- | **logback `r2f-pod83`** -- send | 2 min |
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-pod83
-
-Logs accumulate on the card across a round; one pull collects the lot.
-Do not re-populate mid-round -- that clears `LOGS\`.
+Logs accumulate across a round; one pull collects the lot.
+Do not re-populate mid-round -- it clears `LOGS\`.
 
 ---
 
-## Populate -- *laptop*, once, at A0
+## Populate -- *laptop*, CF mounted at `/media/micheal/DOS`
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
 
-## Sweeps
+Unmounts the CF when done. Logback does not -- unmount that by hand.
+
+Check in the output:
+
+- [ ] `PASS: DOSKUTSU.EXE 6971e9f73bc9`
+- [ ] `PASS: Organya 11025 cache keyed 3ba36d8dd56d`
+- [ ] `PASS: Organya-HQ 22050 cache extracted` -- not `SKIPPING` / `no HQ cache`
+- [ ] `PASS: QA.TAS = benchmark reel (1956 B)`
+- [ ] `PROFILE3.DAT: map 20 'Save Point', weapon 2` -- `PROFILE5.DAT` same
+- [ ] `already staged and current (sha 162fb8b55a4c)` or a re-fetch
+- [ ] `PASS: all N BATs CRLF + ASCII`
+
+A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
+
+---
+
+## Round K -- new binary, DX2-66 (`QA 3`)
+
+Card starts in g2k on **ViRGE + PicoGUS** from Round J.
+
+| Step | Hardware | Boot | Type after boot | Time |
+|---|---|---|---|---|
+| K0 | laptop | -- | populate | 6 min |
+| K1 | ViRGE + PicoGUS | 2 | `QA 3` then `RB` | 12 min |
+| K2 | laptop | -- | logback `r10-rb-dx266`, send, **STOP** | 3 min |
+| K3 | ViRGE + PicoGUS | 2 | `ADIAG 3 PG` | 12 min |
+| K4 | ViRGE + PicoGUS | 2 | `LEV 3 PG` | 9 min |
+| K5 | Mach64 + Vibra | 1 | re-run UniVBE, check its banner | -- |
+| K6 | Mach64 + Vibra | 1 | `QA 3` then `BDIAG 3` | 5 min |
+| K7 | laptop | -- | logback `r10-mach64`, send | 3 min |
+
+All three *laptop* commands, CF mounted:
+
+    scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r10-rb-dx266
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r10-mach64
+
+**K0 repopulates.** New binary, new cache key. Check the pre-flight lines.
+
+**K2 is a hard stop.** Wait for feedback before K3.
+
+**K1 `RB`** -- confirms `0310` (off-screen tile-slot skip, now default ON)
+on the reference card. Round J already banked its A/B at +0.6 fps, so this
+is confirmation, not discovery. Expect the `RB` cells slightly above their
+Round-I figures.
+
+**K4 `LEV 3 PG`** -- two shipped levers never A/B'd in 572 logged runs,
+both default-OFF, no rebuild needed. All three cells are fps rows; do not
+stack them. **Cell 3 (`PERF_MODE`) drops decorative foreground tiles** --
+watch the picture and say whether it looks wrong. An fps gain that costs
+fidelity is a product call, and it is yours.
+
+**K3 `ADIAG 3 PG`** -- audio ablation, all four cells ARE fps rows.
+Cells 2-4 will sound wrong; that is the point. The fps gap from cell 1 is
+what audio costs. Nothing in this campaign has ever measured that: the one
+audio counter brackets a single function, and the SDL-side audio brackets
+have never been enabled. **Cell 4 caveat** -- the audio IRQ fires at the
+buffer-refill rate whenever the device is open, so if `AUDIO_OFF` only
+silences the mixer, cell 4 is a FLOOR on audio cost, not a ceiling.
+
+**K6 `BDIAG 3`** -- Mach64 REQUIRED; meaningless on any other card. An
+instrument, not a fix: nothing in this binary tries to correct the
+backdrop, so **the defect should still be visible on screen**. Report the
+`surface-extent:` line's 16 probe values. If that line never appears,
+centring did not engage -- say so, the cell answered nothing.
+
+---
+
+## Reference
+
+### Sweeps
 
 | Sweep | Cells | Time | Needs |
 |---|---|---|---|
@@ -66,184 +97,77 @@ Do not re-populate mid-round -- that clears `LOGS\`.
 | `EAR` | 3 | ~9 min | ViRGE + PicoGUS + **ears** |
 | `PROVE` | 6 | ~18 min | ViRGE + PicoGUS |
 | `GAP` | 4 | ~12 min | ViRGE + Vibra |
+| `MIDIAB` | 2 | ~7 min | ViRGE + PicoGUS |
+| `VB` | 6 | ~35 min | ViRGE + Vibra (WB cell needs the header) |
+| `VIDM` | 2 | ~6 min | Mach64 |
+| `VIDMI` | 2 | ~6 min | Mach64, own tags `C4I`/`51I` |
+| `VIDKS` | 1 | ~5 min | Mach64, own tag `KS`, watch-then-reset |
+| `FINE` | 2 | ~6 min | any card + **PicoGUS needs `PG`**, tags `C4F`/`51F` |
+| `DEEP` | 2 | ~8 min | any card + `PG`, 7 instr layers, tags `C4D`/`51D` |
+| `TAB` | 3 | ~9 min | any card + `PG`, tags `T0`/`TB`/`TC`, all fps rows |
+| `MEMBW` | 1 | ~2 min | standalone probe, writes `MEMBW.OUT` (logback does NOT collect it -- copy it off by hand) |
+| `BDIAG` | 1 | ~5 min | **Mach64 only**, tag `BD`, diagnostic not fps |
+| `ADIAG` | 4 | ~12 min | any card + `PG`, tags `A0`/`AM`/`AS`/`AX`, all fps rows |
+| `LEV` | 3 | ~9 min | any card + `PG`, tags `L0`/`LA`/`LP`, all fps rows |
 
-`GAP` is slow on purpose -- 2 of its 4 cells are Organya-HQ. Only `X0` is fast.
+Add `PG` to a Mach64 sweep only if the PicoGUS is in.
 
-## `EAR` -- the only sweep needing ears
-
-Shack = last map change, ~87 s in, on screen 6-8 s. Confirmed on DX2-50; on the
-other CPUs just report same or different.
-
-| Cell | Backend | Expected |
-|---|---|---|
-| 1 `E4` | OPL3 | a note or two |
-| 2 `E3` | Organya | correct music |
-| 3 `EA` | AdLib | silence |
-
----
-
-## Pre-flight -- read off the populate output
-
-- [ ] `PROFILE3.DAT: map 20 'Save Point', weapon 2` -- and `PROFILE5.DAT` same
-- [ ] `PASS: QA.TAS = benchmark reel (1956 B)`
-- [ ] `PASS: DOSKUTSU.EXE fe44805fb603`
-- [ ] `already staged and current (sha d7d1d01dbbd9)` or a re-fetch
-
-## Not broken
+### Not broken
 
 | | |
 |---|---|
 | nothing happens after typing the sweep | the `PAUSE` -- press a key |
-| `X0` / `P0` silent | correct -- that is the measurement |
-| keyboard dead in a cell | correct -- the reel drives it |
-| `GAP` choppy | correct -- Organya-HQ cells |
+| `X0` / `P0` silent | correct |
+| keyboard dead in a cell | correct, the reel drives it |
+| `GAP` choppy | correct, Organya-HQ cells |
 | minutes on the title screen | HQ cache missing -- abort |
 | route is not `72 20 11 17 11 15 11 19 11 14 11` | wrong save -- abort |
 
-## Do not bank
+### Do not bank
 
-- `RB` from a card whose `BINARY.NFO` is not `fe44805fb603`
+- `RB` from a card whose `BINARY.NFO` does not match the round
 - round-1 `5112` / `6112`
-- the `r2-rb-dx250-noweapon` set (unarmed save)
+- the `r2-rb-dx250-noweapon` set
+- `VIDMI` cells as fps rows -- instrumentation costs ~0.6 fps
+- any `VB` WB cell whose log does not say `audio_backend=wb`
 
-## Payload
+### Payload
+
+| | Round 4 | Round 5 | Round 8 |
+|---|---|---|---|
+| Binary | `03e053712a6c` | `c1729d2fe065` | `6971e9f73bc9` |
+| Tarball | `97491a731ec6` | `d49dccd49558` | `162fb8b55a4c` |
+| Cache key | `1ab4e612a715` | `482d88eba8b2` | `3ba36d8dd56d` |
+
+The Round-8 binary carries `0310` (tile-slot skip, default ON) and `0311`
+(surface-extent probe, default OFF). `0309` is retracted -- out of the
+series AND out of the binary -- and the installer deletes the stale
+`VIDMR.BAT` from the CF, since tar extraction never removes files and a
+cell for a vanished lever would measure two identical arms.
 
 | | |
 |---|---|
-| Binary | `fe44805fb603` |
-| Tarball | `d7d1d01dbbd9` |
 | Reel | `4118561edf26`, 1956 B |
 | Saves | `32529e291e0f`, map 20 + Polar Star |
 | Sound witness | PicoGUS `irq=7`, Vibra `irq=5 dma=5` |
 | Video witness | `oem_string='Universal VESA VBE 6.70'` |
 
----
+### Done
 
-## Round E -- Mach64, round-2 binary (`QA 1`) -- DONE except M4
-
-Mach64 in, ViRGE out. Keep whatever sound the POD-83 round left in the box.
-
-| Step | Do | Time |
-|---|---|---|
-| M1 | Fit Mach64, set up UniVBE for it, boot | -- |
-| M2 | **Does UniVBE take the Mach64?** If it declines -- STOP, report, done | -- |
-| M3 | `QA 1` then `VIDM 1` (add `PG` only if the PicoGUS is in) | 40 min |
-| M4 | Colours still wrong by eye? `VIDMC 1` -- watch, then reset | ~5 min |
-| M5 | logback `r2f-mach64` -- send | 2 min |
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r2f-mach64
-
-Colour probe (`VIDMC`) runs the VIDM cells at 16bpp -- no palette, no index
-remap, no DAC in the path. It sets and clears the hint itself, so there is
-nothing to type by hand.
-
-Get it onto the card first -- *laptop*, CF mounted:
-
-    scp claude:/tmp/VIDMC.BAT /media/micheal/DOS/doskutsu/
-
-Then:
-
-    QA 1
-    VIDMC 1        (add PG only if the PicoGUS is in)
-
-**Do not let it finish.** It runs both VIDM cells and 16bpp pushes double the
-bytes, so it is slower than the 38 min VIDM took. The answer arrives in the
-first few minutes:
-
-**Watch the map-name banner** -- route is `72` -> `20 Save Point` ->
-`11 Mimiga Village`, and the name appears as each loads.
-
-| | |
-|---|---|
-| text **white** | indexed + colour-mod path is at fault -- patch `0297` fixes it |
-| text **pink** | fault is upstream of the palette -- `0297` is not the whole story |
-
-Once seen, **reset the machine.** Its logs are disposable by design and the
-hint dies with the DOS session, so an abort leaks nothing even though the
-BAT's own cleanup line never runs.
-
-Optional: the diversion is already confirmed from the round-2 logs (13173
-fallback draws on the Mach64 against 0 on the ViRGE). This is independent
-confirmation by a different route, not the only evidence.
-
-- Budget 40 min per cell -- it ran at 2.2 fps last time.
-- Its fps is not comparable to Round A's Mach64 number (different CPU + sound).
-- UniVBE, never M64VBE.
-
----
-
-## Round F -- round-3 binary, 486DX2-66 (`QA 3`) -- HOLD
-
-**HOLD, 2026-08-14.** The payload is built and populate-verified (binary
-`1de88fcefd4a`, cache key `eaff28facb1a`, tarball `4a383480189d`) and the smoke
-gate passes -- but two verification gaps are open and the operator chose to wait
-rather than start a round that might be invalidated mid-way. See
-`docs/internal/POST-BENCHMARK-PLAN.md`, "PHASE B STATUS". Do not populate until
-those close.
-
-One CPU swap to the **DX2-66**, then it stays. Everything else is cards.
-No Cirrus needed. Populate first -- new binary, new cache, new MIDI set.
-
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| F0 | CF in *laptop* | -- | populate (round-3 payload) | 6 min |
-| F1 | CPU -> **DX2-66**, ViRGE + PicoGUS | 2 | `QA 3` -> `RB` | 12 min |
-| F2 | CF in *laptop* | -- | **logback `r3-rb-dx266`** -- send, then STOP | 2 min |
-| F3 | -- | 2 | `EAR` -- listen at the Shack | 9 min |
-| F4 | -- | 2 | `MIDIAB` | 7 min |
-| F5 | ViRGE + **Vibra** | 1 | `QA 3` -> `GAP` | 12 min |
-| F6 | CF in *laptop* | -- | **logback `r3-dx266`** -- send | 2 min |
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-rb-dx266
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-dx266
-
-**F2 is a hard stop.** `RB` decides whether the new binary still compares to
-the 157 banked cells. Do not run F3-F5 until it is confirmed.
-
-**F3 `EAR`** -- the Shack, last map change, ~87 s in, on screen 6-8 s.
-
-| Cell | Backend | Was | Should now be |
+| Round | Machine | Sweeps | Logback |
 |---|---|---|---|
-| 1 `E4` | OPL3 | a note or two | recognisable drums |
-| 2 `E3` | Organya | correct music | unchanged |
-| 3 `EA` | AdLib | silence | audible |
+| A | DX2-50, ViRGE | `RB` `EAR` `PROVE` `GAP` | `r2f-dx250` |
+| B | DX2-66, ViRGE | `RB` `EAR` `PROVE` `GAP` | `r2f-dx266` |
+| C | Am5x86-133, ViRGE | `RB` `EAR` `PROVE` `GAP` | `r2f-am5x86` |
+| D | POD-83, ViRGE | `RB` `EAR` `PROVE` `GAP` | `r2f-pod83` |
+| E | POD-83, Mach64 | `VIDM` `VIDMC` | `r2f-mach64`, `vidmc-pod-` |
+| F | DX2-66, ViRGE | `RB` `EAR` `MIDIAB` `GAP` | `r3-rb-dx266`, `r3-rb-dx266-b`, `r3-dx266` |
+| G | DX2-66, ViRGE + Mach64 | `GAP` `MIDIAB` `VIDM` `VIDMI` | `r3-fredo-dx266`, `r3-fredo-dx266-2`, `r3-mach64`, `r3-mach64-b` |
+| H | DX2-66, ViRGE + Mach64 | `RB` `EAR` `VB` `VIDKS` `VIDM` `VIDMI` | `r4-rb-dx266`, `r4-rb-dx266-vibra`, `r4-mach64`, `r4-mach64-b` |
+| I | DX2-66, ViRGE + Mach64 | `RB` `FINE` `VIDMR` | `r5-virge-dx266`, `r5-virge-dx266-b`, `r5-mach64` |
+| J | DX2-66, ViRGE | `DEEP` `TAB` `MEMBW` | `r6-deep-dx266` |
 
-**F4 `MIDIAB`** -- 2 cells, same binary, two MIDI sets. Answers where the
-AdLib gain came from. Run it on this CPU specifically; the POD-83 cannot
-answer it.
+All labels above are spent. Nothing in Rounds A-J is to be re-run.
 
-## Round G -- Mach64, round-3 binary (`QA 3`) -- NOT READY
-
-Only after Round F passes.
-
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| G1 | **Mach64**, UniVBE set up for it | 1 | check the UniVBE banner first | -- |
-| G2 | -- | 1 | `QA 3` -> `VIDM 3` | 40 min |
-| G3 | -- | 1 | `VIDMI 3` -- flip breakdown, watch then reset | ~5 min |
-| G4 | CF in *laptop* | -- | **logback `r3-mach64`** -- send | 2 min |
-
-Get `VIDMI` onto the card with the populate, or copy it directly:
-
-    scp claude:/tmp/VIDMI.BAT /media/micheal/DOS/doskutsu/
-
-**G3 `VIDMI`** switches on flip instrumentation that already exists in the
-engine but defaults off -- every Mach64 cell so far carried zero of these. It
-splits `flip_inner` into drain / dirty / present, which the analysis has been
-treating as unrecoverable. It is **not an fps row**: the extra timer reads cost
-time. Read the breakdown, do not bank the frame rate. Watch-then-reset is fine,
-same as `VIDMC`.
-
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r3-mach64
-
-Three things to report:
-
-| | |
-|---|---|
-| map-name text | still pink, or correct? |
-| speed by eye | how fast is it -- not "did it improve" |
-| mode in the log | should be `0x01F3 512x384`, not `640x480` |
-
-Budget **40 min**. The 16bpp probe looked 3x faster but was writing a corrupt
-tilemap, so it is not a prediction. `0297` may cut this sharply or barely at
-all; report the number rather than a verdict.
+Results and analysis live in `docs/internal/POST-BENCHMARK-PLAN.md` and
+`docs/internal/HANDOFF-ENGINE-AUDIO-BUCKET.md`.
