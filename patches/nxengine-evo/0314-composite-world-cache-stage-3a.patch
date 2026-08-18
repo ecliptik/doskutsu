@@ -1,0 +1,320 @@
+From 3ee8da68d7c322c8bd6220f685261b7deb0ae9a9 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 18 Aug 2026 10:45:24 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0314 -- composite world cache, stage 3a
+ (variant B)
+
+Stage 3a of the composite world cache. THIS STAGE IS A CORRECTNESS GATE AND
+IS EXPECTED TO BE SLOWER WHEN ENABLED: it rebuilds the composite
+unconditionally every frame, so it pays both the compositing cost and the
+blit-out cost with no key and no possible hit. It exists to prove the
+composite is pixel-correct before stage 3b introduces the tile-aligned key
+that produces the saving. Do not bank an fps number from it.
+
+Why this and not more per-frame tile work: Round N measured
+mode_draw_scene at 21.05 ms, 64% of a 32.8 ms in-loop frame on the POD-83,
+and the two tile layers lay down 1.01 screenfuls in ~15.9 ms = 4.9 MB/s
+against a measured 17 MB/s memcpy floor. About 11.3 ms/frame is cost above
+the copy floor. Patch 0097's cache aimed at this and failed on a
+pixel-granular key that missed on every camera move; this composites at a
+tile-aligned origin and applies the sub-tile remainder at read-out, so a hit
+survives 15 of every 16 pixels of camera travel.
+
+VARIANT B, operator call. The cache holds the BG and FG tile layers only,
+colorkeyed; the backdrop stays on its existing path and shows through. The
+opaque variant that composites the backdrop in projects a larger saving
+(hit 6.6 ms vs 19.9, against B's 9.7 vs 18.0) but needs all ~7 return paths
+in map_draw_backdrop() redirected to an off-screen surface -- the exact code
+family that has produced a black-region defect three times (0183, 0143/0157,
+wave-54's black valley). Taking that risk in the one stage that cannot show
+a benefit is the wrong order; moving the backdrop in later is a contained
+follow-up once a hit rate exists. Excluding it also removes the BK_PARALLAX
+problem outright, since a world-origin key is wrong for a parallax backdrop
+and the backdrop is no longer cached.
+
+Declines rather than clamps on negative scroll: a clamp would silently shift
+the world by a few pixels on the MAP_BORDER paths. Every declined case falls
+through to map_draw(false), so the uncached path is byte-identical to
+pre-0314.
+
+The tile-selection logic mirrors _tilemap_render_plain_tiles_into_cache
+exactly -- same special-case skips, same TA_CURRENT and 0x43 exclusions,
+same PERF_MODE cut -- so the composite cannot disagree with the uncached
+path about which tiles exist. Only the destination origin differs.
+
+Counters are real counters, not literals. The plan's sec. 1.1 found
+tm_route_cache hard-coded to 0, which misled every reader of those logs.
+The 86 KB allocation is counted and logged rather than hand-waved.
+
+Default-OFF behind strict SDL_HINT_DOSKUTSU_WORLD_CACHE=1.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/game.cpp |  10 ++-
+ src/map.cpp  | 208 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/map.h    |   9 +++
+ 3 files changed, 226 insertions(+), 1 deletion(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index decb41b1..a97cc126 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -1227,7 +1227,15 @@ void DrawScene(void)
+       NXE::Diag::g_mds_decomp_pass = NXE::Diag::MDS_PASS_BG; // patch 0147
+       {
+         NXE::Diag::MdtBgTilelayerTimer _mtbg_tl;
+-        map_draw(false);
++        // DOS-PORT (patch 0314, stage 3a): the world cache composites the BG
++        // AND FG tile layers into an off-screen tile-aligned surface and
++        // blits the sub-tile window out. It returns false whenever it
++        // declines, so the uncached call below stays byte-identical to
++        // pre-0314 behaviour. FG is still redrawn in full after the sprite
++        // pass -- narrowing that to a sprite-intersection repair set is
++        // stage 3c, not this one.
++        if (!world_cache_draw_tiles())
++          map_draw(false);
+       }
+     }
+ 
+diff --git a/src/map.cpp b/src/map.cpp
+index 89dbc566..21ddde86 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -3564,6 +3564,214 @@ void tilemap_cache_reset()
+ // Original per-tile loop preserved in `_tilemap_render_uncached_full_-
+ // loop()` (anonymous namespace above) for the killswitch / disabled
+ // paths.
++// ---------------------------------------------------------------------------
++// DOS-PORT (patch 0314, Option 3 STAGE 3a): composite world cache.
++//
++// THIS STAGE IS A CORRECTNESS GATE AND IS EXPECTED TO BE SLOWER WHEN ENABLED.
++// It rebuilds the composite unconditionally every frame (no key, no hit), so
++// it pays the compositing cost AND the blit-out cost. It exists to prove the
++// composite is pixel-correct before stage 3b introduces the tile-aligned key
++// that actually produces the saving. Do not bank an fps number from it.
++//
++// VARIANT B (operator call): the cache holds the BG and FG TILE layers only.
++// The backdrop stays on its existing path and is drawn to the window first;
++// the cache is colorkeyed so the backdrop shows through wherever no tile is
++// laid down. Variant A -- an opaque cache with the backdrop composited in --
++// projects a larger saving (hit 6.6 ms vs 19.9, against B's 9.7 vs 18.0) but
++// requires redirecting all ~7 return paths inside map_draw_backdrop() to an
++// off-screen surface, and that is the exact code family that has produced a
++// black-region defect three separate times (0183, 0143/0157, wave-54's black
++// valley). Taking that risk in the one stage that by construction cannot show
++// a benefit is the wrong order. Moving the backdrop in later is a contained
++// follow-up once a hit rate is measured, not a rewrite.
++//
++// A second consequence of B, worth stating because the plan flagged it as an
++// open risk: excluding the backdrop removes the BK_PARALLAX problem entirely.
++// A world-origin key is wrong for a parallax backdrop, but the backdrop is no
++// longer in the cache, so parallax maps need no special-casing here.
++//
++// GEOMETRY. The surface is one tile wider and taller than the screen
++// (336x256 at 320x240) and is composited at a TILE-ALIGNED origin. The
++// sub-tile remainder is applied at read-out by offsetting the source rect, so
++// a hit survives 15 of every 16 pixels of camera travel -- the fix for patch
++// 0097's pixel-granular key, which missed on every camera move.
++//
++// The tile-selection logic below deliberately mirrors
++// _tilemap_render_plain_tiles_into_cache() (special-case skips, TA_CURRENT
++// and tilecode 0x43 exclusions, the PERF_MODE cut) so the composite cannot
++// disagree with the uncached path about WHICH tiles exist. The only
++// difference is the destination origin.
++// ---------------------------------------------------------------------------
++static SDL_Surface *g_world_cache_sfc = nullptr;
++static int      g_world_cache_w             = 0;
++static int      g_world_cache_h             = 0;
++static int      g_world_cache_decided       = -1;
++static unsigned g_world_cache_frames_block  = 0;
++static unsigned g_world_cache_composite_block = 0;
++static unsigned g_world_cache_declined_block  = 0;
++static unsigned g_world_cache_bytes         = 0;
++static bool     g_world_cache_first_logged  = false;
++
++static bool world_cache_enabled()
++{
++  if (g_world_cache_decided < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_WORLD_CACHE");
++    g_world_cache_decided = (e && e[0] == '1' && e[1] == 0) ? 1 : 0;
++    LOG_INFO("world-cache: {} -- stage 3a composite (patch 0314; "
++             "opt-in SDL_HINT_DOSKUTSU_WORLD_CACHE=1, default OFF). "
++             "Variant B: BG+FG tile layers only, colorkeyed, backdrop stays "
++             "on its own path. Unconditional-miss correctness gate -- when "
++             "enabled it is EXPECTED to be slower, the saving arrives in 3b.",
++             g_world_cache_decided ? "ENABLED (opt-in)" : "DISABLED (default)");
++  }
++  return g_world_cache_decided == 1;
++}
++
++// Composite one tile layer into the cache at a tile-aligned origin.
++static void _world_cache_render_layer(SDL_Surface *cache, uint8_t foreground)
++{
++  if (!cache) return;
++  Renderer *r = Renderer::getInstance();
++  const bool drawtile_fast_bg_on = NXE::Diag::drawtile_fast_bg_active();
++  const int scroll_x = (map.displayed_xscroll / CSFI);
++  const int scroll_y = (map.displayed_yscroll / CSFI);
++  const int mapx = scroll_x / TILE_W;
++  const int mapy = scroll_y / TILE_H;
++
++  for (int y = 0; y <= (r->screenHeight / TILE_H) + MAP_DRAW_EXTRA_Y; y++)
++  {
++    for (int x = 0; x <= (r->screenWidth / TILE_W) + MAP_DRAW_EXTRA_X; x++)
++    {
++      if (((mapx + x) >= 0) && ((mapy + y) >= 0)
++          && ((mapx + x) < map.xsize) && ((mapy + y) < map.ysize))
++      {
++        const int t = map.tiles[mapx + x][mapy + y];
++        if (((game.curmap == 71) && (tilecode[t] == 0x41)) || ((game.curmap == 31)))
++        {
++        }
++        else if ((tileattr[t] & TA_FOREGROUND) == foreground
++                 && !_perf_b2_skip_fg_tile(tileattr[t], foreground))
++        {
++          if (!(tileattr[t] & TA_CURRENT) && tilecode[t] != 0x43)
++          {
++            // Tile-aligned destination: no sub-tile offset here, it is
++            // applied at read-out instead.
++            ++NXE::Diag::g_drawtile_fast_bg_calls_count_block;
++            if (drawtile_fast_bg_on)
++            {
++              ++NXE::Diag::g_drawtile_fast_bg_engaged_count_block;
++              r->tileset.drawTileFastToSurface(cache, x * TILE_W, y * TILE_H, t);
++            }
++            else
++            {
++              ++NXE::Diag::g_drawtile_fast_bg_fallback_count_block;
++              r->tileset.drawTileToSurface(cache, x * TILE_W, y * TILE_H, t);
++            }
++          }
++        }
++      }
++    }
++  }
++}
++
++// Returns true when the cache handled the BG tile layer, in which case the
++// caller must NOT run map_draw(false). Returns false for every declined case
++// so the uncached path stays byte-identical to pre-0314 behaviour.
++bool world_cache_draw_tiles()
++{
++  if (!world_cache_enabled()) return false;
++  if (flipacceltime) return false;
++
++  Renderer *r = Renderer::getInstance();
++  if (!r) return false;
++  SDL_Surface *win = r->_cached_window_surface;
++  if (!win) return false;
++
++  ++g_world_cache_frames_block;
++
++  const int scroll_x = (map.displayed_xscroll / CSFI);
++  const int scroll_y = (map.displayed_yscroll / CSFI);
++  // Negative scroll would make the read-out source rect negative, which is
++  // not a valid blit. It happens on the MAP_BORDER paths. Decline rather
++  // than clamp -- a clamp would silently shift the world by a few pixels.
++  if (scroll_x < 0 || scroll_y < 0)
++  {
++    ++g_world_cache_declined_block;
++    return false;
++  }
++
++  const int cw = r->screenWidth + TILE_W;
++  const int ch = r->screenHeight + TILE_H;
++
++  if (g_world_cache_sfc && (g_world_cache_w != cw || g_world_cache_h != ch))
++  {
++    SDL_DestroySurface(g_world_cache_sfc);
++    g_world_cache_sfc = nullptr;
++  }
++  if (!g_world_cache_sfc)
++  {
++    g_world_cache_sfc = SDL_CreateSurface(cw, ch, win->format);
++    if (!g_world_cache_sfc)
++    {
++      ++g_world_cache_declined_block;
++      return false;
++    }
++    if (win->format == SDL_PIXELFORMAT_INDEX8 && r->masterPalette())
++      SDL_SetSurfacePalette(g_world_cache_sfc, r->masterPalette());
++    SDL_SetSurfaceColorKey(g_world_cache_sfc, true, TILEMAP_FG_COLORKEY);
++    g_world_cache_w = cw;
++    g_world_cache_h = ch;
++    // Count the allocation rather than hand-waving it: the RAM floor is a
++    // measured 16 MB and this rides on top of the existing caches.
++    g_world_cache_bytes = (unsigned)(g_world_cache_sfc->pitch * ch);
++    LOG_INFO("world-cache: allocated {}x{} INDEX8 colorkeyed, pitch={} "
++             "bytes={} (screen {}x{} + one tile margin)",
++             cw, ch, g_world_cache_sfc->pitch, g_world_cache_bytes,
++             r->screenWidth, r->screenHeight);
++  }
++
++  // STAGE 3a: unconditional miss. Rebuild every frame. No key is consulted
++  // and no hit is possible -- that is 3b's job. The counter below is a REAL
++  // counter, not a literal: sec. 1.1 of the plan found `tm_route_cache` was
++  // hard-coded to 0 and it misled every reader of those logs, including this
++  // author. Do not reintroduce that pattern.
++  ++g_world_cache_composite_block;
++  SDL_FillSurfaceRect(g_world_cache_sfc, NULL, TILEMAP_FG_COLORKEY);
++  _world_cache_render_layer(g_world_cache_sfc, 0);
++  _world_cache_render_layer(g_world_cache_sfc, 1);
++
++  SDL_Rect src;
++  src.x = scroll_x % TILE_W;
++  src.y = scroll_y % TILE_H;
++  src.w = r->screenWidth;
++  src.h = r->screenHeight;
++  SDL_Rect dst;
++  dst.x = 0;
++  dst.y = 0;
++  dst.w = r->screenWidth;
++  dst.h = r->screenHeight;
++  SDL_BlitSurface(g_world_cache_sfc, &src, win, &dst);
++
++  if (!g_world_cache_first_logged)
++  {
++    g_world_cache_first_logged = true;
++    LOG_INFO("world-cache: first composite (src={},{} {}x{} curmap={} "
++             "scrolltype={}) -- stage 3a unconditional miss",
++             src.x, src.y, src.w, src.h, game.curmap, map.scrolltype);
++  }
++  if ((g_world_cache_frames_block % 100) == 0)
++  {
++    LOG_INFO("[world-cache n={} composites={} declined={} bytes={}]",
++             g_world_cache_frames_block, g_world_cache_composite_block,
++             g_world_cache_declined_block, g_world_cache_bytes);
++    g_world_cache_frames_block    = 0;
++    g_world_cache_composite_block = 0;
++    g_world_cache_declined_block  = 0;
++  }
++  return true;
++}
++
+ void map_draw(uint8_t foreground)
+ {
+   Renderer *r = Renderer::getInstance();
+diff --git a/src/map.h b/src/map.h
+index afefaf28..35482032 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -139,6 +139,15 @@ void DrawFastLeftLayered(void);
+ // map_draw_backdrop runs). Scoped to DrawScene caller, not the
+ // backdrop function's internals.
+ bool map_backdrop_should_skip_clear_and_draw();
++
++// DOS-PORT (patch 0314, stage 3a): composite world cache, variant B (BG+FG
++// tile layers only; the backdrop stays on its own path and shows through the
++// colorkey). Returns true when it has drawn the tile layers, in which case
++// the caller must NOT also run map_draw(false). Returns false for every
++// declined case, leaving the uncached path byte-identical to pre-0314.
++// Unconditional-miss correctness gate -- EXPECTED to be slower when enabled.
++// Opt-in via SDL_HINT_DOSKUTSU_WORLD_CACHE=1, default OFF.
++bool world_cache_draw_tiles();
+ void map_backdrop_record_present_success();
+ void map_backdrop_invalidate_skip_state();
+ 
+-- 
+2.47.3
+
