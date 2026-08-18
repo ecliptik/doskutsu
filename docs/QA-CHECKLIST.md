@@ -52,57 +52,81 @@ A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
 
 ---
 
-## Round N -- POD-83 diagnostics, ViRGE + PicoGUS
+## Round O -- world cache, three arms on one binary, POD-83
 
-One machine, no card swaps, no CPU swaps. Everything runs on the POD-83.
+One machine, ViRGE + PicoGUS, no swaps. First fps read on the world cache.
 
-**The binary has not changed since Round M.** Round 12 is a BAT-only repack,
-so Round M's KPI anchor (30.2 per-loop) and its noise band still apply and
-`RB` does not need re-running. That band is what makes `LEV` judgeable: the
-POD's identical pair differed by 0.0-0.1 fps, so anything above ~0.5 fps in
-this round is a real effect.
-
-**Do not pass `PG` to anything below.** These sweeps now switch the PicoGUS
-to SB mode themselves. That was the Round M defect: `MINE` ran straight after
-`RB`, which hands back an AdLib-mode card, and both cells died at `sdl_init`
-one second in without drawing a frame.
+**All three arms are in ONE binary.** That is deliberate: this campaign has
+found cross-binary comparison unreliable, so the control and both cache arms
+run on the same reel, same boot, same silicon.
 
 | Step | Type after boot | Time | Kind |
 |---|---|---|---|
-| N0 | *laptop*, populate | 6 min | payload r12 |
-| N1 | `QA 1` then `MINE 1` | 12 min | diagnostic |
-| N2 | `LEV 1` | 9 min | **fps rows** |
-| N3 | `DEEP 1` | 8 min | diagnostic |
-| N4 | *laptop*, logback `r12-pod-diag` | 3 min | |
+| O0 | *laptop*, populate | 6 min | new payload |
+| O1 | `QA 1` then `WC 1` | 9 min | **3 arms, fps + hit rate** |
+| O2 | `RB` | 12 min | KPI re-anchor |
+| O3 | *laptop*, logback `r13-worldcache` | 3 min | |
 
 Both *laptop* commands, CF mounted:
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r12-pod-diag
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r13-worldcache
 
-**N0 repopulates.** Same binary and same cache key, so nothing cold-renders --
-but the fixed BATs only reach the CF this way. Without it N1 fails exactly as
-it did in Round M.
+**O0 repopulates** -- new binary carrying `0313`, `0314`, `0315`. All three
+ship default-OFF, so the control arm should reproduce Round M.
 
-**N1 `MINE 1`** is the Round M re-run and the point of the round: the mode
-layer and the flip body, neither ever measured on the KPI machine. NOT fps
-rows -- the instrumentation costs a few percent. Report whether
-`[mode-tick-stat]` shows `n` in the DOZENS and appears past block 1. If `n` is
-2, or every block is title-screen, patch 0312 did not take on the fixed path
-and the cell answered nothing.
+### O1 `WC 1` -- the three arms
 
-**N2 `LEV 1`** is three fps rows: control, `ASM_BLIT`, `PERF_MODE`. Both
-levers ship default-OFF and have never been A/B'd on this machine against a
-known noise band. Cell 3 drops decorative foreground tiles and keeps collision
-tiles -- **watch the screen and say whether anything looks wrong or missing**.
-An fps gain that makes the game look worse is a product call, and it is yours.
+| cell | tag | hints set | what it is |
+|---|---|---|---|
+| 1 | `GW0` | none | uncached control |
+| 2 | `GWA` | `WORLD_CACHE=1` | stage 3a, composites every frame |
+| 3 | `GWB` | `WORLD_CACHE=1` + `WORLD_CACHE_KEY=1` | stage 3b, keyed |
 
-**N3 `DEEP 1`** is the seven-layer decomposition, run on the DX2-66 in Round J
-and never on the POD. Diagnostic, not an fps row.
+**Cell 2 is EXPECTED TO BE SLOWER than cell 1.** It rebuilds the composite
+unconditionally with no key and no possible hit, so it pays the compositing
+cost twice over. That is what it is for -- it is the correctness arm. A cell
+2 that is slower than cell 1 is the expected result, not a failure. The
+comparison that matters is **cell 3 against cell 1**.
 
-Not in this round: the Mach64, which rejoins for a full matrix once the
-backdrop defect is fixed, and the ~5.9 ms inter-flip remainder, which has no
-instrumentation on any machine and needs a patch before any cell can see it.
+**The number to pull is the hit rate, and it is in the log, not the fps.**
+
+    [world-cache n=100 hits=.. composites=.. declined=.. hit_pct_x10=.. bytes=..]
+
+Break-even is a 0.33 hit rate (`hit_pct_x10=330`). Under DOSBox the smoke
+measured 990-1000, but that route barely moves the camera and is NOT a
+gameplay figure -- Round N measured 71% static frames on this reel, so
+expect something in the 700-900 band. If `hit_pct_x10` comes back near 1000
+on a reel that scrolls, be suspicious rather than pleased: it would more
+likely mean the key is not invalidating than that the cache is perfect.
+
+`declined=` should be small. A large count means the cache is standing down
+(negative scroll on MAP_BORDER paths) and cell 3 is measuring almost
+nothing.
+
+### Watch the screen on cell 3
+
+The DOSBox screenshots are byte-identical to the control, but that route is
+mostly stationary, so the **invalidation paths are barely exercised**. These
+are the cases that would expose a stale-tile bug, and the reel passes through
+all of them:
+
+- [ ] scrolling edges -- tiles must not smear, tear, or lag the camera
+- [ ] a destructible tile being shot -- the hole must appear immediately
+- [ ] a sprite walking behind foreground geometry -- must still be occluded
+- [ ] room transitions -- no leftover tiles from the previous room
+
+Any of those failing is a real defect and worth aborting the cell to report.
+Every prior cache in this codebase produced a black-region or stale artifact
+at some point (`0183`, `0143`/`0157`, wave-54's black valley), so treat a
+clean run as evidence rather than assuming it.
+
+### O2 `RB`
+
+The binary changed, so the KPI anchor is re-checked. Cells `R4`/`R4B` are the
+KPI pair. Expect `per_loop_fps` ~30.2 as in Round M; a drop means one of the
+three new patches costs something even switched off, which would matter more
+than anything the cache does.
 
 ---
 
@@ -203,9 +227,9 @@ vanished lever would measure two identical arms.
 | J | DX2-66, ViRGE | `DEEP` `TAB` `MEMBW` | `r6-deep-dx266` |
 | K | DX2-66, ViRGE + Mach64 | `RB` `ADIAG` `LEV` `BDIAG` | `r10-rb-dx266`, `r10-mach64` |
 | M | all four CPUs, ViRGE | `QA` `RB` x2 per CPU; `MINE` FAILED | `r11-crosscpu` |
+| N | POD-83, ViRGE | `MINE` `LEV` `DEEP` | `r12-pod-diag` |
 
-All labels above are spent. Nothing in Rounds A-M is to be re-run, except
-`MINE`, which never ran: both its cells aborted at `sdl_init`.
+All labels above are spent. Nothing in Rounds A-N is to be re-run.
 
 Results and analysis live in `docs/internal/POST-BENCHMARK-PLAN.md` and
 `docs/internal/HANDOFF-ENGINE-AUDIO-BUCKET.md`.
