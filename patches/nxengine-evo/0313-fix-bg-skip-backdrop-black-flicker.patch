@@ -1,0 +1,148 @@
+From 5bcf303e35f9d360801caf0f63b3f349a7aab5c7 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 18 Aug 2026 08:51:40 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0313 -- fix the bg-skip backdrop-black
+ flicker
+
+bg-skip (patch 0143) skips the backdrop redraw on frames where nothing
+that affects the backdrop has changed. It was retired in wave-61 because
+it shipped a backdrop-black flicker, and wave-60 concluded no contained
+fix existed.
+
+The flicker was never in bg-skip's own logic. DrawScene already gates both
+its clearScreen and map_draw_backdrop on the predicate correctly. What
+blacked the screen is the unconditional full-window clearScreen at the top
+of tick_render_submit(), upstream of the entire mode dispatch: on a skip
+frame the framebuffer was cleared there and the backdrop was then quite
+correctly not redrawn.
+
+The wave-60 verdict is stale. It predates patch 0152 (wave-56), which split
+Game::tick into tick_state() and tick_render_submit(). map_scroll_do() --
+the only writer of map.displayed_xscroll/yscroll -- runs inside
+game_tick_normal_state(), so every key the predicate reads is already final
+for the frame by the time the render half is entered. The predicate can be
+answered before the clear, which is precisely what wave-60 lacked.
+
+So: evaluate it once at the top of tick_render_submit(), latch it, gate the
+upstream clearScreen on it, and have DrawScene read the latch instead of
+re-asking. Asking twice would double-count the telemetry counters and, worse,
+could return two different answers -- the exact mismatch that produced the
+flicker.
+
+Gated on TD_GM_NORMAL_SPLIT, the only dispatch reaching DrawScene. Title,
+menus, pause and TD_OTHER keep the unconditional clear; they draw over the
+full window and hold no backdrop skip state. Any path reaching DrawScene
+without the latch set reads false and clears normally.
+
+The lever stays default-OFF. The +0.87 fps it was measured at was dismissed
+against a noise floor since measured at 0.2 fps, so it needs re-measuring on
+hardware, not enabling on faith.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/game.cpp | 52 ++++++++++++++++++++++++++++++++++++++++++++++++++--
+ src/map.cpp  |  9 ++++++---
+ 2 files changed, 56 insertions(+), 5 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index 83a10646..decb41b1 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -632,6 +632,13 @@ void Game::tick_state(void)
+ // paused and non-GM_NORMAL modes run their whole OnTick here, after
+ // clearScreen (so the legacy clearScreen-before-any-draw ordering
+ // holds -- contract sec.1.3).
++// DOS-PORT (patch 0313): this frame's bg-skip decision, latched by
++// tick_render_submit() before the upstream clearScreen and read back by
++// DrawScene. File-static: both the producer and the only consumer live in
++// this translation unit. Reset on every tick_render_submit() entry, so a
++// stale true cannot leak into a frame whose dispatch never evaluated it.
++static bool s_bg_skip_latched_this_frame = false;
++
+ void Game::tick_render_submit(void)
+ {
+   // DOS-PORT (patch 0304): the render half of the same bracket -- see
+@@ -644,9 +651,45 @@ void Game::tick_render_submit(void)
+   // and children -- switches on together.
+   NXE::Diag::FixedPathEngineTickTimer _ett;
+ 
++  // DOS-PORT (patch 0313): evaluate the bg-skip predicate HERE, before the
++  // clear, and latch it for DrawScene to reuse. This is the fix for the
++  // backdrop-black flicker that retired bg-skip (patch 0143) in wave-61.
++  //
++  // The flicker was never in bg-skip's own logic. DrawScene already gates
++  // both its clearScreen and map_draw_backdrop on the predicate correctly.
++  // What blacked the screen is the UNCONDITIONAL full-window clearScreen
++  // below, which runs upstream of the whole mode dispatch: on a skip frame
++  // the framebuffer was cleared here and the backdrop was then legitimately
++  // not redrawn, leaving the backdrop region black.
++  //
++  // Wave-60 concluded there was no contained fix. That verdict is now stale:
++  // it predates patch 0152 (wave-56), which split Game::tick into tick_state()
++  // and tick_render_submit(). map_scroll_do() -- the only writer of
++  // map.displayed_xscroll/yscroll -- runs inside game_tick_normal_state(), so
++  // by the time this function is entered every key the predicate reads is
++  // already final for the frame. The predicate can therefore be answered
++  // before the clear, which is exactly what wave-60 lacked.
++  //
++  // Evaluated EXACTLY ONCE per frame and latched. The predicate bumps
++  // telemetry counters (total_flips / total_skips) and calling it twice would
++  // double-count them; it is otherwise read-only -- the skip-key state commit
++  // lives in map_backdrop_record_present_success(), called from
++  // map_draw_backdrop when BG content is actually drawn, and is untouched.
++  //
++  // Gated on TD_GM_NORMAL_SPLIT because that is the only dispatch that reaches
++  // DrawScene. Title screen, menus, pause and every TD_OTHER mode keep the
++  // unconditional clear -- they draw over the full window and have no backdrop
++  // skip state, so skipping their clear would leave the previous frame behind.
++  // Any path that reaches DrawScene without this latch being set reads false
++  // and clears normally, which is the safe direction.
++  s_bg_skip_latched_this_frame =
++      (_tick_dispatch == TD_GM_NORMAL_SPLIT)
++      && map_backdrop_should_skip_clear_and_draw();
++
+   {
+     NXE::Diag::ClearScreenTimer _cst;
+-    Renderer::getInstance()->clearScreen(BLACK);
++    if (!s_bg_skip_latched_this_frame)
++      Renderer::getInstance()->clearScreen(BLACK);
+   }
+ 
+   switch (_tick_dispatch)
+@@ -1112,7 +1155,12 @@ void DrawScene(void)
+   // [[single_lever_per_binary_or_else_attribution_impossible]]):
+   // the lever is "skip-when-unchanged"; no ride-along correctness
+   // changes in this iter.
+-  const bool bg_skip_unchanged = map_backdrop_should_skip_clear_and_draw();
++  // DOS-PORT (patch 0313): read the latch set by tick_render_submit() rather
++  // than re-evaluating. The predicate must run exactly once per frame (it
++  // bumps telemetry counters) and, critically, the answer must be the SAME
++  // one the upstream clearScreen was gated on -- re-asking here could
++  // disagree and reintroduce the very mismatch that caused the flicker.
++  const bool bg_skip_unchanged = s_bg_skip_latched_this_frame;
+ 
+   // patch 0144 (wave 49 mds_clear LUT): signal that the upcoming
+   // clearScreen call is from DrawScene's MdsClearTimer scope, where
+diff --git a/src/map.cpp b/src/map.cpp
+index 03f58833..89dbc566 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -236,9 +236,12 @@ static bool _bg_skip_killswitch_engaged()
+     const char *e = std::getenv("SDL_HINT_DOSKUTSU_BG_SKIP_WHEN_UNCHANGED");
+     g_bg_skip_killswitch_decided = (e && e[0] == '1' && e[1] == 0) ? 0 : 1;
+     LOG_INFO("map: BG skip-when-unchanged {} (set SDL_HINT_DOSKUTSU_"
+-             "BG_SKIP_WHEN_UNCHANGED=1 to enable; default OFF since "
+-             "wave-61 -- abandoned, it shipped a backdrop-black flicker "
+-             "and its +0.87 fps was below the noise floor)",
++             "BG_SKIP_WHEN_UNCHANGED=1 to enable; still default OFF, now "
++             "pending re-measurement -- patch 0313 fixed the wave-61 "
++             "backdrop-black flicker by gating the upstream clearScreen on "
++             "the same latched predicate DrawScene uses, and the +0.87 fps "
++             "that was dismissed as sub-noise was judged against a floor "
++             "since measured at 0.2)",
+              g_bg_skip_killswitch_decided ? "DISABLED (default)"
+                                           : "ENABLED (opt-in)");
+   }
+-- 
+2.47.3
+
