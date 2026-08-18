@@ -6,6 +6,23 @@ Every sweep waits for a keypress at its banner, then runs unattended.
 Never reuse a logback label.
 Re-run UniVBE after every video card swap and check its banner names the card.
 
+## The KPI
+
+The ship target is **30 fps on the POD-83** and **25 fps on the DX2-66**,
+measured with **OPL3 FM music on an S3 ViRGE** -- the configuration most
+machines will run, since a Sound Blaster supplies OPL3 and a WaveBlaster is
+uncommon. The figure is **per-loop fps** (`per_loop_fps`), the same metric
+`docs/BENCHMARKS.md` publishes. Do not judge the KPI on `fps_mean`
+(wall-clock) -- it is a different number, ~5 fps lower on the POD, and the
+targets were not set against it.
+
+The KPI cells are `RB`'s `R4` and `R4B` (both OPL3). `R3` is Organya and `R5`
+is AdLib -- neither is the KPI, whatever they measure.
+
+Round M: POD-83 30.2 (met, no margin), DX2-66 22.2 (2.8 short).
+
+50 fps stays the moonshot, not the bar.
+
 ## The loop
 
     populate once per binary -> run the round -> logback -> feedback -> next round
