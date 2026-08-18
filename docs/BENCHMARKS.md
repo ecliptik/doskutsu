@@ -42,6 +42,37 @@ instead, which is why its figure looks close to plain Organya and is not.
 Round 1 and round 2 agree above about 2%; below that the OPL3 shift matters.
 Full comparison and method: [`qa-results/MATRIX-ROUND2.md`](../qa-results/MATRIX-ROUND2.md).
 
+## Round M -- newest figures, and the noise floor
+
+Round M (2026-08-17) re-measured all four CPUs against the same recording on a
+current binary, holding video and sound fixed at S3 ViRGE + PicoGUS so only the
+CPU varies. Frames per second of game time, as above.
+
+| CPU | AdLib | OPL3 FM | Organya |
+|---|---|---|---|
+| Pentium OverDrive 83 | **32.2** | 30.2 | 27.7 |
+| Am5x86-133 | **32.1** | 30.5 | 27.6 |
+| 486DX2-66 | **24.0** | 22.2 | 19.8 |
+| 486DX2-50 | **17.8** | 17.1 | 14.6 |
+
+These sit 0.5-0.9 below round 2 across the board. That is the known, accepted
+cost of two correctness fixes landed since (a drawcall-format guard and an
+audio interlock), both of which bought more than they cost.
+
+**The measurement noise floor is 0.2 fps.** Round M ran the OPL3 cell twice,
+back to back, on every machine. The identical pair differed by at most 0.2 fps
+-- 0.0 on the OverDrive. An earlier single pair had suggested 0.6, which turned
+out to be the outlier rather than the floor. This matters for reading any
+result here: a difference under about 0.5 fps between two configurations is not
+a difference, and several levers previously dismissed as "sub-noise" were judged
+against a threshold five times too conservative.
+
+**The OverDrive and the Am5x86-133 remain within 0.8 fps of each other on every
+backend**, with the Am5x86 slightly ahead on OPL3 despite a 60% higher clock.
+The reference machine is limited by something other than clock speed.
+
+---
+
 ---
 
 ## What the numbers mean
