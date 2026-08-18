@@ -45,7 +45,7 @@ Check in the output:
 - [ ] `PASS: Organya-HQ 22050 cache extracted` -- not `SKIPPING` / `no HQ cache`
 - [ ] `PASS: QA.TAS = benchmark reel (1956 B)`
 - [ ] `PROFILE3.DAT: map 20 'Save Point', weapon 2` -- `PROFILE5.DAT` same
-- [ ] `already staged and current (sha 853f13d900d9)` or a re-fetch
+- [ ] `already staged and current (sha bb7d4849bc39)` or a re-fetch
 - [ ] `PASS: all N BATs CRLF + ASCII`
 
 A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
@@ -182,10 +182,11 @@ Add `PG` to a **Mach64** sweep only if the PicoGUS is in. `ADIAG` `DEEP`
 | | Round 5 | Round 8 | Round 13 |
 |---|---|---|---|
 | Binary | `c1729d2fe065` | `6971e9f73bc9` | `e9e8ff80ae10` |
-| Tarball | `d49dccd49558` | `162fb8b55a4c` | `853f13d900d9` |
+| Tarball | `d49dccd49558` | `162fb8b55a4c` | `bb7d4849bc39` |
 | Cache key | `482d88eba8b2` | `3ba36d8dd56d` | `66ff01f7f997` |
 
-**Round 14 is a BAT-only repack of Round 13** -- same binary, same caches,
+**Round 15 is a BAT-only repack of Round 13** (r14 was superseded before
+it ever reached a card) -- same binary, same caches,
 same cache key `66ff01f7f997`, so nothing cold-renders. It adds the `DKTCAP`
 capture flag to the eight non-listening sweeps (`RB` `WC` `MINE` `LEV` `DEEP`
 `ADIAG` `TAB` `FINE`).
@@ -194,7 +195,10 @@ capture flag to the eight non-listening sweeps (`RB` `WC` `MINE` `LEV` `DEEP`
 banked round** -- the 10 s banner delay still fires and no mode switch
 happens. Only an explicit `SET DKTCAP=1` changes anything, and then the sweep
 collapses the banner delay and returns the console to mode 12h between cells
-so a VGA capture device does not black out. Console text is SLOW in mode 12h
+so a VGA capture device does not black out. The switch also fires ONCE at
+the top of the sweep, before the banner prints, so the `[DKTCAP=1]` line is
+itself capturable -- printed into text mode 03h it would be invisible to the
+only thing that needs to read it. Console text is SLOW in mode 12h
 (planar, read-modify-write per glyph), which is the cost of the flag. Turn it
 off with `SET DKTCAP=` or restore text mode with `VGACAP\MODE03`.
 
