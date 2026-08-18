@@ -45,57 +45,64 @@ Check in the output:
 - [ ] `PASS: Organya-HQ 22050 cache extracted` -- not `SKIPPING` / `no HQ cache`
 - [ ] `PASS: QA.TAS = benchmark reel (1956 B)`
 - [ ] `PROFILE3.DAT: map 20 'Save Point', weapon 2` -- `PROFILE5.DAT` same
-- [ ] `already staged and current (sha 2b1eb1289a35)` or a re-fetch
+- [ ] `already staged and current (sha 5874f9008c50)` or a re-fetch
 - [ ] `PASS: all N BATs CRLF + ASCII`
 
 A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
 
 ---
 
-## Round M -- cross-CPU baseline, ViRGE + PicoGUS throughout
+## Round N -- POD-83 diagnostics, ViRGE + PicoGUS
 
-**The KPI machine is the POD-83.** Rounds G-L were run on the DX2-66 and
-every recent lever was judged there. The README matrix shows POD-83 and
-Am5x86-133 both pinned at ~33 fps, so the POD is already not CPU-bound and
-486 gains do not automatically transfer up. This round re-anchors the
-baseline on the machine the target is written against.
+One machine, no card swaps, no CPU swaps. Everything runs on the POD-83.
 
-Video and sound stay fixed all round -- **ViRGE + PicoGUS, boot 2**. Only
-the CPU changes. One card swap at the start, then four CPU swaps.
+**The binary has not changed since Round M.** Round 12 is a BAT-only repack,
+so Round M's KPI anchor (30.2 per-loop) and its noise band still apply and
+`RB` does not need re-running. That band is what makes `LEV` judgeable: the
+POD's identical pair differed by 0.0-0.1 fps, so anything above ~0.5 fps in
+this round is a real effect.
 
-| Step | CPU | Type after boot | Time |
+**Do not pass `PG` to anything below.** These sweeps now switch the PicoGUS
+to SB mode themselves. That was the Round M defect: `MINE` ran straight after
+`RB`, which hands back an AdLib-mode card, and both cells died at `sdl_init`
+one second in without drawing a frame.
+
+| Step | Type after boot | Time | Kind |
 |---|---|---|---|
-| M0 | laptop | populate | 6 min |
-| M1 | POD-83 | `QA 1` then `RB` | 12 min |
-| M2 | POD-83 | `RB` again -- same cells, second run | 12 min |
-| M3 | POD-83 | `MINE 1 PG` | 12 min |
-| M4 | Am5x86-133 | `QA 2` then `RB` | 12 min |
-| M5 | 486DX2-66 | `QA 3` then `RB` | 12 min |
-| M6 | 486DX2-50 | `QA 4` then `RB` | 12 min |
-| M7 | laptop | logback `r11-crosscpu`, send | 3 min |
+| N0 | *laptop*, populate | 6 min | payload r12 |
+| N1 | `QA 1` then `MINE 1` | 12 min | diagnostic |
+| N2 | `LEV 1` | 9 min | **fps rows** |
+| N3 | `DEEP 1` | 8 min | diagnostic |
+| N4 | *laptop*, logback `r12-pod-diag` | 3 min | |
 
 Both *laptop* commands, CF mounted:
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r11-crosscpu
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r12-pod-diag
 
-**M0 repopulates.** New binary, new cache key. Check the pre-flight lines.
+**N0 repopulates.** Same binary and same cache key, so nothing cold-renders --
+but the fixed BATs only reach the CF this way. Without it N1 fails exactly as
+it did in Round M.
 
-**M2 is the noise band and is not optional.** Round K measured 0.6 fps
-between two configuration-identical runs -- larger than most levers this
-campaign has banked. Without a same-round repeat on the KPI machine, no
-future fps claim can be judged.
+**N1 `MINE 1`** is the Round M re-run and the point of the round: the mode
+layer and the flip body, neither ever measured on the KPI machine. NOT fps
+rows -- the instrumentation costs a few percent. Report whether
+`[mode-tick-stat]` shows `n` in the DOZENS and appears past block 1. If `n` is
+2, or every block is title-screen, patch 0312 did not take on the fixed path
+and the cell answered nothing.
 
-**M3 `MINE 1 PG`** -- the two never-measured regions, on the KPI machine.
-NOT fps rows. Report whether `[mode-tick-stat]` shows `n` in the DOZENS; if
-`n` is 2 or the lines are title-only, patch 0312 did not take.
+**N2 `LEV 1`** is three fps rows: control, `ASM_BLIT`, `PERF_MODE`. Both
+levers ship default-OFF and have never been A/B'd on this machine against a
+known noise band. Cell 3 drops decorative foreground tiles and keeps collision
+tiles -- **watch the screen and say whether anything looks wrong or missing**.
+An fps gain that makes the game look worse is a product call, and it is yours.
 
-**`QA n` must match the installed CPU every time** -- 1 POD-83, 2 Am5x86,
-3 DX2-66, 4 DX2-50. A wrong digit mislabels every row in that lane and the
-cross-CPU comparison is the entire point of the round.
+**N3 `DEEP 1`** is the seven-layer decomposition, run on the DX2-66 in Round J
+and never on the POD. Diagnostic, not an fps row.
 
-Not in this round: the Mach64. It rejoins for a full hardware matrix once
-the backdrop defect is fixed.
+Not in this round: the Mach64, which rejoins for a full matrix once the
+backdrop defect is fixed, and the ~5.9 ms inter-flip remainder, which has no
+instrumentation on any machine and needs a patch before any cell can see it.
 
 ---
 
@@ -124,7 +131,8 @@ the backdrop defect is fixed.
 | `ADIAG` | 4 | ~12 min | any card + `PG`, tags `A0`/`AM`/`AS`/`AX`, all fps rows |
 | `LEV` | 3 | ~9 min | any card + `PG`, tags `L0`/`LA`/`LP`, all fps rows |
 
-Add `PG` to a Mach64 sweep only if the PicoGUS is in.
+Add `PG` to a **Mach64** sweep only if the PicoGUS is in. `ADIAG` `DEEP`
+`FINE` `LEV` `TAB` `MINE` no longer take `PG` -- they switch it themselves.
 
 ### Not broken
 
@@ -194,8 +202,10 @@ vanished lever would measure two identical arms.
 | I | DX2-66, ViRGE + Mach64 | `RB` `FINE` `VIDMR` | `r5-virge-dx266`, `r5-virge-dx266-b`, `r5-mach64` |
 | J | DX2-66, ViRGE | `DEEP` `TAB` `MEMBW` | `r6-deep-dx266` |
 | K | DX2-66, ViRGE + Mach64 | `RB` `ADIAG` `LEV` `BDIAG` | `r10-rb-dx266`, `r10-mach64` |
+| M | all four CPUs, ViRGE | `QA` `RB` x2 per CPU; `MINE` FAILED | `r11-crosscpu` |
 
-All labels above are spent. Nothing in Rounds A-K is to be re-run.
+All labels above are spent. Nothing in Rounds A-M is to be re-run, except
+`MINE`, which never ran: both its cells aborted at `sdl_init`.
 
 Results and analysis live in `docs/internal/POST-BENCHMARK-PLAN.md` and
 `docs/internal/HANDOFF-ENGINE-AUDIO-BUCKET.md`.
