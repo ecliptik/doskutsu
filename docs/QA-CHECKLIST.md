@@ -40,12 +40,12 @@ Unmounts the CF when done. Logback does not -- unmount that by hand.
 
 Check in the output:
 
-- [ ] `PASS: DOSKUTSU.EXE 02d91d3be589`
-- [ ] `PASS: Organya 11025 cache keyed a483f4b30d24`
+- [ ] `PASS: DOSKUTSU.EXE e9e8ff80ae10`
+- [ ] `PASS: Organya 11025 cache keyed 66ff01f7f997`
 - [ ] `PASS: Organya-HQ 22050 cache extracted` -- not `SKIPPING` / `no HQ cache`
 - [ ] `PASS: QA.TAS = benchmark reel (1956 B)`
 - [ ] `PROFILE3.DAT: map 20 'Save Point', weapon 2` -- `PROFILE5.DAT` same
-- [ ] `already staged and current (sha 5874f9008c50)` or a re-fetch
+- [ ] `already staged and current (sha 16298d551a1b)` or a re-fetch
 - [ ] `PASS: all N BATs CRLF + ASCII`
 
 A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
@@ -179,11 +179,19 @@ Add `PG` to a **Mach64** sweep only if the PicoGUS is in. `ADIAG` `DEEP`
 
 ### Payload
 
-| | Round 5 | Round 8 | Round 12 |
+| | Round 5 | Round 8 | Round 13 |
 |---|---|---|---|
-| Binary | `c1729d2fe065` | `6971e9f73bc9` | `02d91d3be589` |
-| Tarball | `d49dccd49558` | `162fb8b55a4c` | `5874f9008c50` |
-| Cache key | `482d88eba8b2` | `3ba36d8dd56d` | `a483f4b30d24` |
+| Binary | `c1729d2fe065` | `6971e9f73bc9` | `e9e8ff80ae10` |
+| Tarball | `d49dccd49558` | `162fb8b55a4c` | `16298d551a1b` |
+| Cache key | `482d88eba8b2` | `3ba36d8dd56d` | `66ff01f7f997` |
+
+**Round 13 carries `0313` (bg-skip flicker fix), `0314` (world cache stage
+3a) and `0315` (stage 3b tile-aligned key), all default-OFF, plus the new
+`WC` sweep.** Adding those three patches moved the build sha from
+`a483f4b30d24` to `66ff01f7f997`, and that key is baked into every cached
+Organya PCM -- so BOTH cache tiers were re-rendered against the new binary.
+A stale key would make every Organya cell cold-render, which is an abort.
+Check the populate line says `66ff01f7f997`, not the old key.
 
 **Round 12 is a BAT-only repack of Round 11** -- same binary, same caches,
 same cache key, so nothing cold-renders. It fixes the `PG` argument defect:
