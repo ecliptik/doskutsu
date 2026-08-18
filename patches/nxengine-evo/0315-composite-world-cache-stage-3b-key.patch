@@ -1,0 +1,278 @@
+From 54426cf1e7459b0d1e9b6b62e6ddac36eab417ac Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 18 Aug 2026 11:52:47 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0315 -- composite world cache, stage 3b
+ (tile-aligned key)
+
+Stage 3b: consult a key so an unchanged frame skips the composite entirely
+and goes straight to the read-out blit. This is where the saving arrives;
+3a was pure cost by construction.
+
+The key is TILE-ALIGNED, which is the specific fix for patch 0097. 0097
+keyed on pixel scroll and therefore missed on every single pixel of camera
+motion; its break-even was a 0.92 hit rate it never approached. Keying on
+the tile-aligned origin means a hit survives 15 of every 16 pixels of camera
+travel, because the sub-tile remainder is applied at read-out rather than
+baked into the composite. Break-even here is 0.33.
+
+Gated separately from the 3a hint so ONE binary carries all three arms:
+neither hint = uncached baseline, WORLD_CACHE=1 = 3a unconditional
+composite, WORLD_CACHE=1 + WORLD_CACHE_KEY=1 = 3b keyed. Three arms on one
+reel makes attribution a within-binary comparison instead of a cross-binary
+one, which this campaign has repeatedly found unreliable.
+
+Key fields and why each is present: curmap (different content, reloads
+tilesets), tile-aligned mapx/mapy, tile_mutation, window surface pointer
+(re-fetch invalidates the blit target), and screen dimensions. Animated
+tiles (TA_CURRENT) and destroyables (0x43) are excluded from the composite
+and render live, so animation must not and does not invalidate. The backdrop
+is not cached under variant B, so no backdrop or parallax phase belongs
+here.
+
+FIXES A LATENT STALE-TILE BUG. Patch 0097 bumped g_tile_mutation_counter in
+map_ChangeTileWithSmoke ONLY. TSC <CMP and the Hell stage write map.tiles
+directly and never bumped it -- harmless while 0097's cache was default-OFF
+and never hit, a stale-tile defect the moment a cache can actually hit.
+Patch 0144 had already identified TSC <CMP as the second mutation site for
+the mds_clear LUT without connecting it to the tilemap counter. All three
+sites now route through map_note_tile_mutation(), which bumps the counter
+and drops the validity flag.
+
+Counters are real. The plan's sec. 1.1 found tm_route_cache was a literal
+carrying only killswitch state, which misled every reader of the Round N
+logs. A hit rate that cannot be read from the log is not a measurement, so
+the per-100-frame line reports hits, composites, declines and hit_pct_x10.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/ai/hell/hell.cpp |   2 +
+ src/map.cpp          | 138 +++++++++++++++++++++++++++++++++++++++----
+ src/map.h            |   8 +++
+ src/tsc.cpp          |   6 ++
+ 4 files changed, 142 insertions(+), 12 deletions(-)
+
+diff --git a/src/ai/hell/hell.cpp b/src/ai/hell/hell.cpp
+index 209cffdd..78337151 100644
+--- a/src/ai/hell/hell.cpp
++++ b/src/ai/hell/hell.cpp
+@@ -795,6 +795,8 @@ void ai_deleet(Object *o)
+ 
+             map.tiles[x][y]     = 0;
+             map.tiles[x][y + 1] = 0;
++            // DOS-PORT (patch 0315, stage 3b): third tile-mutation site.
++            map_note_tile_mutation();
+           }
+           else
+           {
+diff --git a/src/map.cpp b/src/map.cpp
+index 21ddde86..7915e60b 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -3612,6 +3612,87 @@ static unsigned g_world_cache_declined_block  = 0;
+ static unsigned g_world_cache_bytes         = 0;
+ static bool     g_world_cache_first_logged  = false;
+ 
++// DOS-PORT (patch 0315, stage 3b): the tile-aligned key.
++//
++// Stage 3a composited unconditionally every frame, which is correct but pure
++// cost. 3b consults a key so a frame whose cached content is unchanged can
++// skip the composite entirely and go straight to the read-out blit. This is
++// where the saving actually arrives.
++//
++// The key is TILE-ALIGNED, which is the whole point and the specific fix for
++// patch 0097. 0097 keyed on pixel scroll (map.cpp:3052-3053) and therefore
++// missed on every single pixel of camera motion; break-even for it was a 0.92
++// hit rate, which it never came close to. Keying on the tile-aligned origin
++// means a hit survives 15 of every 16 pixels of camera travel, because the
++// sub-tile remainder is applied at read-out instead of being baked in.
++//
++// Gated SEPARATELY from the 3a hint so one binary carries all three arms:
++// neither hint = uncached baseline, WORLD_CACHE=1 = 3a unconditional
++// composite, WORLD_CACHE=1 + WORLD_CACHE_KEY=1 = 3b keyed. Three arms on one
++// reel makes the attribution a within-binary comparison rather than a
++// cross-binary one, which this campaign has repeatedly found unreliable.
++//
++// What the key must cover, and why each field is here:
++//   curmap        -- a different map is different content, and reloads tilesets
++//   mapx/mapy     -- the tile-aligned origin; the sub-tile part is NOT keyed
++//   tile_mutation -- destroyed/scripted tiles (see map_note_tile_mutation)
++//   win_ptr       -- window surface re-fetch invalidates the blit target
++//   sw/sh         -- a mode change resizes the read-out
++// Animated tiles (TA_CURRENT) and destroyables (tilecode 0x43) are excluded
++// from the composite entirely and render live, so animation must NOT and does
++// not invalidate. The backdrop is not cached under variant B, so nothing about
++// backdrop scroll or parallax phase belongs in this key.
++struct WorldCacheKey
++{
++  int      curmap;
++  int      mapx;
++  int      mapy;
++  unsigned tile_mutation;
++  void    *win_ptr;
++  int      sw;
++  int      sh;
++};
++
++static WorldCacheKey g_world_cache_key;
++static bool     g_world_cache_key_valid   = false;
++static int      g_world_cache_key_decided = -1;
++static unsigned g_world_cache_hit_block   = 0;
++
++static bool _world_cache_keys_equal(const WorldCacheKey &a, const WorldCacheKey &b)
++{
++  return a.curmap        == b.curmap
++      && a.mapx          == b.mapx
++      && a.mapy          == b.mapy
++      && a.tile_mutation == b.tile_mutation
++      && a.win_ptr       == b.win_ptr
++      && a.sw            == b.sw
++      && a.sh            == b.sh;
++}
++
++static bool world_cache_key_enabled()
++{
++  if (g_world_cache_key_decided < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_WORLD_CACHE_KEY");
++    g_world_cache_key_decided = (e && e[0] == '1' && e[1] == 0) ? 1 : 0;
++    LOG_INFO("world-cache-key: {} -- stage 3b tile-aligned key (patch 0315; "
++             "opt-in SDL_HINT_DOSKUTSU_WORLD_CACHE_KEY=1, default OFF; "
++             "requires SDL_HINT_DOSKUTSU_WORLD_CACHE=1). OFF reproduces "
++             "stage 3a's unconditional composite, so one binary carries the "
++             "uncached, 3a and 3b arms.",
++             g_world_cache_key_decided ? "ENABLED (opt-in)" : "DISABLED (default)");
++  }
++  return g_world_cache_key_decided == 1;
++}
++
++// DOS-PORT (patch 0315, stage 3b): see map.h. Every site that writes
++// map.tiles at runtime must call this or the world cache serves stale tiles.
++void map_note_tile_mutation(void)
++{
++  ++g_tile_mutation_counter;
++  g_world_cache_key_valid = false;
++}
++
+ static bool world_cache_enabled()
+ {
+   if (g_world_cache_decided < 0)
+@@ -3722,6 +3803,8 @@ bool world_cache_draw_tiles()
+     SDL_SetSurfaceColorKey(g_world_cache_sfc, true, TILEMAP_FG_COLORKEY);
+     g_world_cache_w = cw;
+     g_world_cache_h = ch;
++    // A fresh surface holds no composite yet.
++    g_world_cache_key_valid = false;
+     // Count the allocation rather than hand-waving it: the RAM floor is a
+     // measured 16 MB and this rides on top of the existing caches.
+     g_world_cache_bytes = (unsigned)(g_world_cache_sfc->pitch * ch);
+@@ -3731,15 +3814,39 @@ bool world_cache_draw_tiles()
+              r->screenWidth, r->screenHeight);
+   }
+ 
+-  // STAGE 3a: unconditional miss. Rebuild every frame. No key is consulted
+-  // and no hit is possible -- that is 3b's job. The counter below is a REAL
+-  // counter, not a literal: sec. 1.1 of the plan found `tm_route_cache` was
+-  // hard-coded to 0 and it misled every reader of those logs, including this
+-  // author. Do not reintroduce that pattern.
+-  ++g_world_cache_composite_block;
+-  SDL_FillSurfaceRect(g_world_cache_sfc, NULL, TILEMAP_FG_COLORKEY);
+-  _world_cache_render_layer(g_world_cache_sfc, 0);
+-  _world_cache_render_layer(g_world_cache_sfc, 1);
++  // STAGE 3b: consult the tile-aligned key. With the key hint OFF this
++  // reproduces 3a exactly -- composite every frame, no hit possible.
++  //
++  // These are REAL counters. The plan's sec. 1.1 found `tm_route_cache` was a
++  // hard-coded literal that carried only the killswitch state, and it misled
++  // every reader of the Round N logs including this author. A hit rate that
++  // cannot be read from the log is not a measurement.
++  WorldCacheKey cur;
++  cur.curmap        = game.curmap;
++  cur.mapx          = scroll_x / TILE_W;
++  cur.mapy          = scroll_y / TILE_H;
++  cur.tile_mutation = g_tile_mutation_counter;
++  cur.win_ptr       = (void *)win;
++  cur.sw            = r->screenWidth;
++  cur.sh            = r->screenHeight;
++
++  const bool keyed = world_cache_key_enabled();
++  const bool hit   = keyed && g_world_cache_key_valid
++                     && _world_cache_keys_equal(g_world_cache_key, cur);
++
++  if (hit)
++  {
++    ++g_world_cache_hit_block;
++  }
++  else
++  {
++    ++g_world_cache_composite_block;
++    SDL_FillSurfaceRect(g_world_cache_sfc, NULL, TILEMAP_FG_COLORKEY);
++    _world_cache_render_layer(g_world_cache_sfc, 0);
++    _world_cache_render_layer(g_world_cache_sfc, 1);
++    g_world_cache_key       = cur;
++    g_world_cache_key_valid = true;
++  }
+ 
+   SDL_Rect src;
+   src.x = scroll_x % TILE_W;
+@@ -3762,12 +3869,19 @@ bool world_cache_draw_tiles()
+   }
+   if ((g_world_cache_frames_block % 100) == 0)
+   {
+-    LOG_INFO("[world-cache n={} composites={} declined={} bytes={}]",
+-             g_world_cache_frames_block, g_world_cache_composite_block,
+-             g_world_cache_declined_block, g_world_cache_bytes);
++    LOG_INFO("[world-cache n={} hits={} composites={} declined={} "
++             "hit_pct_x10={} bytes={}]",
++             g_world_cache_frames_block, g_world_cache_hit_block,
++             g_world_cache_composite_block, g_world_cache_declined_block,
++             g_world_cache_frames_block
++                 ? (unsigned)((g_world_cache_hit_block * 1000u)
++                              / g_world_cache_frames_block)
++                 : 0u,
++             g_world_cache_bytes);
+     g_world_cache_frames_block    = 0;
+     g_world_cache_composite_block = 0;
+     g_world_cache_declined_block  = 0;
++    g_world_cache_hit_block       = 0;
+   }
+   return true;
+ }
+diff --git a/src/map.h b/src/map.h
+index 35482032..78ee7fc0 100644
+--- a/src/map.h
++++ b/src/map.h
+@@ -148,6 +148,14 @@ bool map_backdrop_should_skip_clear_and_draw();
+ // Unconditional-miss correctness gate -- EXPECTED to be slower when enabled.
+ // Opt-in via SDL_HINT_DOSKUTSU_WORLD_CACHE=1, default OFF.
+ bool world_cache_draw_tiles();
++
++// DOS-PORT (patch 0315, stage 3b): notify the caches that a map tile changed.
++// Bumps g_tile_mutation_counter, which the world-cache key includes, so any
++// tile mutation forces a recomposite on the next frame. Patch 0097 bumped the
++// counter in map_ChangeTileWithSmoke ONLY; TSC <CMP and the Hell stage write
++// map.tiles directly and did not, which was harmless while 0097's cache was
++// default-OFF and would be a stale-tile bug now that a cache can actually hit.
++void map_note_tile_mutation(void);
+ void map_backdrop_record_present_success();
+ void map_backdrop_invalidate_skip_state();
+ 
+diff --git a/src/tsc.cpp b/src/tsc.cpp
+index b1b2341d..522a66f1 100644
+--- a/src/tsc.cpp
++++ b/src/tsc.cpp
+@@ -1121,6 +1121,12 @@ void TSC::ExecScript(ScriptInstance *s)
+         int y           = parm[1];
+         map.tiles[x][y] = parm[2];
+ 
++        // DOS-PORT (patch 0315, stage 3b): TSC <CMP is a tile-mutation site
++        // and must invalidate the world cache. Patch 0144 already treats it
++        // as one for the mds_clear LUT but never bumped the tilemap mutation
++        // counter, so a scripted tile change would have gone stale.
++        map_note_tile_mutation();
++
+         // DOS-PORT (patch 0144, Phase 11 wave 49 mds_clear LUT):
+         // invalidate the per-row skip LUT here too. TSC <CMP is the
+         // second tile-mutation site (alongside map_ChangeTileWithSmoke
+-- 
+2.47.3
+
