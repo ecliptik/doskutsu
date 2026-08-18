@@ -68,6 +68,17 @@ AdLib is the pick on every CPU measured -- it renders 1.5-2 fps faster than OPL3
 
 Above roughly a 486DX4-100, a faster CPU stops improving the frame rate -- the render loop is limited by something other than clock speed.
 
+### Performance targets
+
+| Machine | Target | Status |
+|---|---|---|
+| Pentium OverDrive 83 | 30 fps | reference machine; the figure the project is judged on |
+| 486DX2-66 | 25 fps | the low end that should still play properly |
+
+50 fps is the moonshot -- it is Cave Story's `GAME_FPS=50` design rate, and hitting it would mean the port runs at the speed the game was written for. It is not the bar for shipping, and on 486-class silicon it is not currently reachable: the frame is dominated by tilemap compositing, which is bounded by system memory bandwidth measured at ~17 MB/s flat beyond an 8 KB L1 on a DX2-66.
+
+Optimization work is measured on the Pentium OverDrive 83, because that is the reference machine. This matters more than it sounds: the OverDrive and the Am5x86-133 both sit at the same frame rate, so the reference machine is already limited by something other than clock speed, and a change that helps a slower CPU may do nothing at all on it.
+
 [docs/BENCHMARKS.md](./docs/BENCHMARKS.md) is the full report: 157 cells across two measurement rounds and four CPUs, three video cards and three sound cards, with charts, method, and the raw logs. [docs/FPS-MATRIX.md](./docs/FPS-MATRIX.md) keeps the older per-wave history.
 
 Cave Story runs at 50 fps; the reference PC's hardware limits fully-detailed rendering to about 33 fps. It still plays at the correct 50 Hz speed through [Fixed-Timestep mode](#fixed-timestep-mode), which advances game logic on a fixed 50 Hz clock independent of the render rate.
