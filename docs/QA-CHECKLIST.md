@@ -23,67 +23,49 @@ Unmounts the CF when done. Logback does not -- unmount that by hand.
 
 Check in the output:
 
-- [ ] `PASS: DOSKUTSU.EXE 6971e9f73bc9`
-- [ ] `PASS: Organya 11025 cache keyed 3ba36d8dd56d`
+- [ ] `PASS: DOSKUTSU.EXE 02d91d3be589`
+- [ ] `PASS: Organya 11025 cache keyed a483f4b30d24`
 - [ ] `PASS: Organya-HQ 22050 cache extracted` -- not `SKIPPING` / `no HQ cache`
 - [ ] `PASS: QA.TAS = benchmark reel (1956 B)`
 - [ ] `PROFILE3.DAT: map 20 'Save Point', weapon 2` -- `PROFILE5.DAT` same
-- [ ] `already staged and current (sha 162fb8b55a4c)` or a re-fetch
+- [ ] `already staged and current (sha 2b1eb1289a35)` or a re-fetch
 - [ ] `PASS: all N BATs CRLF + ASCII`
 
 A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
 
 ---
 
-## Round K -- new binary, DX2-66 (`QA 3`)
+## Round L -- new binary, DX2-66 (`QA 3`)
 
-Card starts in g2k on **ViRGE + PicoGUS** from Round J.
+Card starts in g2k on **Mach64 + Vibra** from Round K.
 
 | Step | Hardware | Boot | Type after boot | Time |
 |---|---|---|---|---|
-| K0 | laptop | -- | populate | 6 min |
-| K1 | ViRGE + PicoGUS | 2 | `QA 3` then `RB` | 12 min |
-| K2 | laptop | -- | logback `r10-rb-dx266`, send, **STOP** | 3 min |
-| K3 | ViRGE + PicoGUS | 2 | `ADIAG 3 PG` | 12 min |
-| K4 | ViRGE + PicoGUS | 2 | `LEV 3 PG` | 9 min |
-| K5 | Mach64 + Vibra | 1 | re-run UniVBE, check its banner | -- |
-| K6 | Mach64 + Vibra | 1 | `QA 3` then `BDIAG 3` | 5 min |
-| K7 | laptop | -- | logback `r10-mach64`, send | 3 min |
+| L0 | laptop | -- | populate | 6 min |
+| L1 | ViRGE + PicoGUS | 2 | `QA 3` then `MINE 3 PG` | 12 min |
+| L2 | ViRGE + PicoGUS | 2 | `QA 3` then `RB` | 12 min |
+| L3 | ViRGE + PicoGUS | 2 | `RB` again -- **same cells, second run** | 12 min |
+| L4 | laptop | -- | logback `r11-virge-dx266`, send | 3 min |
 
-All three *laptop* commands, CF mounted:
+Both *laptop* commands, CF mounted:
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r10-rb-dx266
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r10-mach64
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r11-virge-dx266
 
-**K0 repopulates.** New binary, new cache key. Check the pre-flight lines.
+**L0 repopulates.** New binary, new cache key. Check the pre-flight lines.
 
-**K2 is a hard stop.** Wait for feedback before K3.
+**L1 `MINE 3 PG`** -- the two never-measured regions. Cell 1 is the mode
+layer (HUD, post, fade, textbox) during real gameplay for the first time;
+cell 2 is the flip-body split. NOT fps rows. Report: do the
+`[mode-tick-stat]` lines show `n` in the DOZENS? If `n` is 2 or the lines
+are title-screen only, patch 0312 did not take and the cell answered
+nothing.
 
-**K1 `RB`** -- confirms `0310` (off-screen tile-slot skip, now default ON)
-on the reference card. Round J already banked its A/B at +0.6 fps, so this
-is confirmation, not discovery. Expect the `RB` cells slightly above their
-Round-I figures.
-
-**K4 `LEV 3 PG`** -- two shipped levers never A/B'd in 572 logged runs,
-both default-OFF, no rebuild needed. All three cells are fps rows; do not
-stack them. **Cell 3 (`PERF_MODE`) drops decorative foreground tiles** --
-watch the picture and say whether it looks wrong. An fps gain that costs
-fidelity is a product call, and it is yours.
-
-**K3 `ADIAG 3 PG`** -- audio ablation, all four cells ARE fps rows.
-Cells 2-4 will sound wrong; that is the point. The fps gap from cell 1 is
-what audio costs. Nothing in this campaign has ever measured that: the one
-audio counter brackets a single function, and the SDL-side audio brackets
-have never been enabled. **Cell 4 caveat** -- the audio IRQ fires at the
-buffer-refill rate whenever the device is open, so if `AUDIO_OFF` only
-silences the mixer, cell 4 is a FLOOR on audio cost, not a ceiling.
-
-**K6 `BDIAG 3`** -- Mach64 REQUIRED; meaningless on any other card. An
-instrument, not a fix: nothing in this binary tries to correct the
-backdrop, so **the defect should still be visible on screen**. Report the
-`surface-extent:` line's 16 probe values. If that line never appears,
-centring did not engage -- say so, the cell answered nothing.
+**L2 and L3 are the SAME sweep run twice, deliberately.** Round K measured
+this rig's repeatability at 0.6 fps between two configuration-identical
+runs -- which is larger than most levers this campaign has celebrated. A
+second `RB` gives a same-binary noise band for the round, so any future fps
+claim can be judged against it instead of against a single run.
 
 ---
 
@@ -107,6 +89,7 @@ centring did not engage -- say so, the cell answered nothing.
 | `TAB` | 3 | ~9 min | any card + `PG`, tags `T0`/`TB`/`TC`, all fps rows |
 | `MEMBW` | 1 | ~2 min | standalone probe, writes `MEMBW.OUT` (logback does NOT collect it -- copy it off by hand) |
 | `BDIAG` | 1 | ~5 min | **Mach64 only**, tag `BD`, diagnostic not fps |
+| `MINE` | 2 | ~12 min | any card + `PG`, tags `MN`/`MF`, diagnostic not fps |
 | `ADIAG` | 4 | ~12 min | any card + `PG`, tags `A0`/`AM`/`AS`/`AX`, all fps rows |
 | `LEV` | 3 | ~9 min | any card + `PG`, tags `L0`/`LA`/`LP`, all fps rows |
 
@@ -133,17 +116,18 @@ Add `PG` to a Mach64 sweep only if the PicoGUS is in.
 
 ### Payload
 
-| | Round 4 | Round 5 | Round 8 |
+| | Round 5 | Round 8 | Round 11 |
 |---|---|---|---|
-| Binary | `03e053712a6c` | `c1729d2fe065` | `6971e9f73bc9` |
-| Tarball | `97491a731ec6` | `d49dccd49558` | `162fb8b55a4c` |
-| Cache key | `1ab4e612a715` | `482d88eba8b2` | `3ba36d8dd56d` |
+| Binary | `c1729d2fe065` | `6971e9f73bc9` | `02d91d3be589` |
+| Tarball | `d49dccd49558` | `162fb8b55a4c` | `2b1eb1289a35` |
+| Cache key | `482d88eba8b2` | `3ba36d8dd56d` | `a483f4b30d24` |
 
-The Round-8 binary carries `0310` (tile-slot skip, default ON) and `0311`
-(surface-extent probe, default OFF). `0309` is retracted -- out of the
-series AND out of the binary -- and the installer deletes the stale
-`VIDMR.BAT` from the CF, since tar extraction never removes files and a
-cell for a vanished lever would measure two identical arms.
+The Round-11 binary carries `0310` (tile-slot skip, default ON), `0311`
+(surface-extent probe, default OFF) and `0312` (mode-layer instrumentation
+on the fixed path, default OFF). `0309` is retracted -- out of the series
+AND out of the binary -- and the installer deletes the stale `VIDMR.BAT`
+from the CF, since tar extraction never removes files and a cell for a
+vanished lever would measure two identical arms.
 
 | | |
 |---|---|
@@ -166,8 +150,9 @@ cell for a vanished lever would measure two identical arms.
 | H | DX2-66, ViRGE + Mach64 | `RB` `EAR` `VB` `VIDKS` `VIDM` `VIDMI` | `r4-rb-dx266`, `r4-rb-dx266-vibra`, `r4-mach64`, `r4-mach64-b` |
 | I | DX2-66, ViRGE + Mach64 | `RB` `FINE` `VIDMR` | `r5-virge-dx266`, `r5-virge-dx266-b`, `r5-mach64` |
 | J | DX2-66, ViRGE | `DEEP` `TAB` `MEMBW` | `r6-deep-dx266` |
+| K | DX2-66, ViRGE + Mach64 | `RB` `ADIAG` `LEV` `BDIAG` | `r10-rb-dx266`, `r10-mach64` |
 
-All labels above are spent. Nothing in Rounds A-J is to be re-run.
+All labels above are spent. Nothing in Rounds A-K is to be re-run.
 
 Results and analysis live in `docs/internal/POST-BENCHMARK-PLAN.md` and
 `docs/internal/HANDOFF-ENGINE-AUDIO-BUCKET.md`.
