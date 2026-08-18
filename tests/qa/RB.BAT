@@ -54,6 +54,14 @@ REM  byte-identical to every banked round: the 10 s banner delay stays, and
 REM  no mode switch happens. Only an explicit SET DKTCAP=1 changes anything.
 IF NOT "%DKTCAP%"=="1" SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 IF "%DKTCAP%"=="1" SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=0
+REM  Switch to mode 12h HERE, before the banner below, not only after cells.
+REM  The banner is the capture harness's positive witness that DKTCAP took --
+REM  but printed into text mode 03h (720x400 @70 Hz) no capture device can
+REM  lock it, so the witness would be invisible to the only thing that needs
+REM  to read it. Firing the switch first makes the banner, the PAUSE and any
+REM  error text capturable. Costs a slow planar redraw of the banner, which
+REM  is outside every timed bracket.
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 IF "%DKTCAP%"=="1" ECHO  [DKTCAP=1] capture session: banner delay off, console
 IF "%DKTCAP%"=="1" ECHO  returns to mode 12h between cells (text will be SLOW).
 IF "%DKTCAP%"=="1" ECHO  SET DKTCAP= to turn off; VGACAP\MODE03 restores text.
