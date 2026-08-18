@@ -35,37 +35,50 @@ A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
 
 ---
 
-## Round L -- new binary, DX2-66 (`QA 3`)
+## Round M -- cross-CPU baseline, ViRGE + PicoGUS throughout
 
-Card starts in g2k on **Mach64 + Vibra** from Round K.
+**The KPI machine is the POD-83.** Rounds G-L were run on the DX2-66 and
+every recent lever was judged there. The README matrix shows POD-83 and
+Am5x86-133 both pinned at ~33 fps, so the POD is already not CPU-bound and
+486 gains do not automatically transfer up. This round re-anchors the
+baseline on the machine the target is written against.
 
-| Step | Hardware | Boot | Type after boot | Time |
-|---|---|---|---|---|
-| L0 | laptop | -- | populate | 6 min |
-| L1 | ViRGE + PicoGUS | 2 | `QA 3` then `MINE 3 PG` | 12 min |
-| L2 | ViRGE + PicoGUS | 2 | `QA 3` then `RB` | 12 min |
-| L3 | ViRGE + PicoGUS | 2 | `RB` again -- **same cells, second run** | 12 min |
-| L4 | laptop | -- | logback `r11-virge-dx266`, send | 3 min |
+Video and sound stay fixed all round -- **ViRGE + PicoGUS, boot 2**. Only
+the CPU changes. One card swap at the start, then four CPU swaps.
+
+| Step | CPU | Type after boot | Time |
+|---|---|---|---|
+| M0 | laptop | populate | 6 min |
+| M1 | POD-83 | `QA 1` then `RB` | 12 min |
+| M2 | POD-83 | `RB` again -- same cells, second run | 12 min |
+| M3 | POD-83 | `MINE 1 PG` | 12 min |
+| M4 | Am5x86-133 | `QA 2` then `RB` | 12 min |
+| M5 | 486DX2-66 | `QA 3` then `RB` | 12 min |
+| M6 | 486DX2-50 | `QA 4` then `RB` | 12 min |
+| M7 | laptop | logback `r11-crosscpu`, send | 3 min |
 
 Both *laptop* commands, CF mounted:
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r11-virge-dx266
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r11-crosscpu
 
-**L0 repopulates.** New binary, new cache key. Check the pre-flight lines.
+**M0 repopulates.** New binary, new cache key. Check the pre-flight lines.
 
-**L1 `MINE 3 PG`** -- the two never-measured regions. Cell 1 is the mode
-layer (HUD, post, fade, textbox) during real gameplay for the first time;
-cell 2 is the flip-body split. NOT fps rows. Report: do the
-`[mode-tick-stat]` lines show `n` in the DOZENS? If `n` is 2 or the lines
-are title-screen only, patch 0312 did not take and the cell answered
-nothing.
+**M2 is the noise band and is not optional.** Round K measured 0.6 fps
+between two configuration-identical runs -- larger than most levers this
+campaign has banked. Without a same-round repeat on the KPI machine, no
+future fps claim can be judged.
 
-**L2 and L3 are the SAME sweep run twice, deliberately.** Round K measured
-this rig's repeatability at 0.6 fps between two configuration-identical
-runs -- which is larger than most levers this campaign has celebrated. A
-second `RB` gives a same-binary noise band for the round, so any future fps
-claim can be judged against it instead of against a single run.
+**M3 `MINE 1 PG`** -- the two never-measured regions, on the KPI machine.
+NOT fps rows. Report whether `[mode-tick-stat]` shows `n` in the DOZENS; if
+`n` is 2 or the lines are title-only, patch 0312 did not take.
+
+**`QA n` must match the installed CPU every time** -- 1 POD-83, 2 Am5x86,
+3 DX2-66, 4 DX2-50. A wrong digit mislabels every row in that lane and the
+cross-CPU comparison is the entire point of the round.
+
+Not in this round: the Mach64. It rejoins for a full hardware matrix once
+the backdrop defect is fixed.
 
 ---
 
@@ -90,6 +103,7 @@ claim can be judged against it instead of against a single run.
 | `MEMBW` | 1 | ~2 min | standalone probe, writes `MEMBW.OUT` (logback does NOT collect it -- copy it off by hand) |
 | `BDIAG` | 1 | ~5 min | **Mach64 only**, tag `BD`, diagnostic not fps |
 | `MINE` | 2 | ~12 min | any card + `PG`, tags `MN`/`MF`, diagnostic not fps |
+| `RB` x2 | 8 | ~24 min | same sweep twice -- gives the round its noise band |
 | `ADIAG` | 4 | ~12 min | any card + `PG`, tags `A0`/`AM`/`AS`/`AX`, all fps rows |
 | `LEV` | 3 | ~9 min | any card + `PG`, tags `L0`/`LA`/`LP`, all fps rows |
 
