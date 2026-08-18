@@ -49,7 +49,14 @@ ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%RB.NFO
 ECHO sound=PicoGUS REQUIRED -- this sweep switches it sb -> adlib >> LOGS\%QAM%RB.NFO
 ECHO video=S3 ViRGE (match the banked anchors) >> LOGS\%QAM%RB.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%RB.NFO
-SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
+REM  DKTCAP=1 marks an UNATTENDED CAPTURE session. Default (unset) is
+REM  byte-identical to every banked round: the 10 s banner delay stays, and
+REM  no mode switch happens. Only an explicit SET DKTCAP=1 changes anything.
+IF NOT "%DKTCAP%"=="1" SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
+IF "%DKTCAP%"=="1" SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=0
+IF "%DKTCAP%"=="1" ECHO  [DKTCAP=1] capture session: banner delay off, console
+IF "%DKTCAP%"=="1" ECHO  returns to mode 12h between cells (text will be SLOW).
+IF "%DKTCAP%"=="1" ECHO  SET DKTCAP= to turn off; VGACAP\MODE03 restores text.
 PAUSE
 ECHO.
 ECHO ##########################################################
@@ -72,6 +79,7 @@ ECHO  OPL3 -- the control
 ECHO  Non-pump. Must match the banked C4 anchor.
 ECHO ============================================
 DOSKUTSU.EXE
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
@@ -86,6 +94,7 @@ ECHO  OPL3 repeat -- the noise floor
 ECHO  Back-to-back with R4. The spread IS the noise floor.
 ECHO ============================================
 DOSKUTSU.EXE
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ORGANYA.CFG DOSKUTSU.CFG > NUL
@@ -100,6 +109,7 @@ ECHO  Organya -- the re-rendered PCM cache
 ECHO  Catches a silently different re-render.
 ECHO ============================================
 DOSKUTSU.EXE
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 ECHO.
 ECHO ##########################################################
 ECHO  switching PicoGUS -> ADLIB MODE (no SB, so the PIT pump can own ch0)
@@ -119,6 +129,7 @@ ECHO  AdLib -- the pump path
 ECHO  The timebase fix touches ONLY gus/adlib. Movement here is a FINDING.
 ECHO ============================================
 DOSKUTSU.EXE
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 ECHO.
 ECHO === RE-BASELINE DONE. Logs %QAM%R4 %QAM%R4B %QAM%R3 %QAM%R5 ===
 ECHO === R4 vs banked C4 = the re-baseline; R4 vs R4B = the noise floor. ===
