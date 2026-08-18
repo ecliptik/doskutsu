@@ -147,11 +147,23 @@ Add `PG` to a Mach64 sweep only if the PicoGUS is in.
 
 ### Payload
 
-| | Round 5 | Round 8 | Round 11 |
+| | Round 5 | Round 8 | Round 12 |
 |---|---|---|---|
 | Binary | `c1729d2fe065` | `6971e9f73bc9` | `02d91d3be589` |
-| Tarball | `d49dccd49558` | `162fb8b55a4c` | `2b1eb1289a35` |
+| Tarball | `d49dccd49558` | `162fb8b55a4c` | `5874f9008c50` |
 | Cache key | `482d88eba8b2` | `3ba36d8dd56d` | `a483f4b30d24` |
+
+**Round 12 is a BAT-only repack of Round 11** -- same binary, same caches,
+same cache key, so nothing cold-renders. It fixes the `PG` argument defect:
+`ADIAG` `DEEP` `FINE` `LEV` `TAB` `MINE` now switch the PicoGUS to SB mode
+unconditionally, the way `RB` always has. The old opt-in never fired -- every
+manifest this campaign has written says "SB already in the box" -- so those
+sweeps were working only by inheriting SB mode from an earlier sweep. Round M
+scheduled `MINE` directly after `RB`, whose last act is `pgusinit /mode
+adlib`, and both cells died at `sdl_init` one second in. Do NOT pass `PG` to
+those six any more; it is ignored. The Mach64 sweeps keep the opt-in, because
+a Mach64 round can legitimately run on a Vibra16, but now print a loud warning
+naming this exact failure when `PG` is absent.
 
 The Round-11 binary carries `0310` (tile-slot skip, default ON), `0311`
 (surface-extent probe, default OFF) and `0312` (mode-layer instrumentation
