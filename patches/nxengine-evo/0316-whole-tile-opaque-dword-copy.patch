@@ -1,0 +1,364 @@
+From 6d7e79d09dc041fdbabe15eca60b154f15f83c46 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 18 Aug 2026 13:25:30 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0316 -- whole-tile opaque dispatch to an
+ unrolled dword copy
+
+Round N measured the tilemap colorkey loop at 84.1% opaque pixels, and the
+two tile layers move 1.01 screenfuls in ~15.9 ms = 4.9 MB/s against a
+measured 17.0 MB/s memcpy floor. The per-pixel colorkey compare separates
+those tiers. A tile containing no colorkey pixel does not need the compare.
+
+Differs from patch 0145 (measured +0.40): 0145 walks a per-row run list and
+pays rep-setup cost per run even on a fully opaque tile. This decides once
+per tile from one bit, then runs straight-line.
+
+No stale-tile class: tile opacity is a property of tile CONTENT. Camera
+motion cannot change it and a destructible tile changes the tile INDEX, not
+the pixels behind an index. Only a tilesheet reload invalidates, which frees
+the table via Surface::cleanup().
+
+Deliberately NOT named OPAQUE_TILE_FASTPATH -- that literal is in the smoke
+gate at severity forbidden. The wave-38 lever of that name was never judged
+on merit; it went out in a batch rollback of a 3-lever stack that regressed
+14 fps on a build missing patches, with a different lever identified as the
+cause. Mechanism unmeasured, not refuted; only the name is retired.
+
+Default-OFF behind strict SDL_HINT_DOSKUTSU_TILE_DWORD_COPY=1.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/BlitSpans.h  |  24 +++++
+ src/graphics/Renderer.cpp | 180 +++++++++++++++++++++++++++++++++++++-
+ src/graphics/Surface.cpp  |  27 ++++++
+ src/graphics/Surface.h    |   8 ++
+ 4 files changed, 235 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/BlitSpans.h b/src/graphics/BlitSpans.h
+index 54d5913a..0af94aa2 100644
+--- a/src/graphics/BlitSpans.h
++++ b/src/graphics/BlitSpans.h
+@@ -61,6 +61,30 @@ bool blit_asm_span_enabled();
+ // the transparent palette index.
+ BlitSpanTable *build_blit_span_table(SDL_Surface *s, std::uint8_t colorkey);
+ 
++// DOS-PORT (patch 0316): whole-tile opaque dispatch.
++//
++// Cached-at-boot gate. True when the operator opted in with
++// SDL_HINT_DOSKUTSU_TILE_DWORD_COPY=1. Deliberately NOT named
++// OPAQUE_TILE_FASTPATH: that literal is carried in the gameplay-smoke
++// gate at severity `forbidden` and its reappearance FAILS the gate. The
++// wave-38 lever of that name was reverted as part of a batch rollback --
++// never judged on merit -- and the name is retained purely as a
++// revert-detector. See the BOOT.md entry.
++bool tile_dword_copy_enabled();
++
++// Scan an INDEX8 tilesheet and return a byte per 16x16 tile cell: 1 when
++// the cell contains NO colorkey pixel, 0 otherwise. Row-major over the
++// sheet's tile grid, (s->w / 16) entries per row. Caller owns the pointer
++// (delete[] it). Returns nullptr if the surface is unusable or its
++// dimensions are not whole tiles.
++//
++// Tile opacity is a property of tile CONTENT, so this table never needs
++// per-frame invalidation: camera motion does not change it, and a
++// destructible tile changes the tile INDEX, not the pixels behind an
++// index. It is rebuilt on surface reload via Surface::cleanup(), which
++// is the only event that can change the pixels.
++unsigned char *build_opaque_tile_table(SDL_Surface *s, std::uint8_t colorkey);
++
+ }; // namespace Graphics
+ }; // namespace NXE
+ 
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 41e22571..ff873a7b 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -441,6 +441,16 @@ std::uint32_t g_p12_pixtone_stop_count_block        = 0;
+ std::uint32_t g_drawtile_fast_bg_engaged_count_block  = 0;
+ std::uint32_t g_drawtile_fast_bg_fallback_count_block = 0;
+ std::uint32_t g_drawtile_fast_bg_calls_count_block    = 0;
++
++// DOS-PORT (patch 0316): whole-tile dword-copy engagement counters. Declared
++// here rather than beside the lever because the per-100-flip emit block lives
++// earlier in this translation unit than the blit primitives do. Emitted
++// UNGATED, unlike the FLIP_INSTR-gated [drawtile-fast-bg] line above: a plain
++// fps cell must be able to prove the lever engaged without switching on
++// instrumentation that perturbs the number it is measuring. Patch 0113 sat
++// unmeasured for eleven waves precisely because nothing could witness it.
++static std::uint32_t g_tdc_engaged_block  = 0;
++static std::uint32_t g_tdc_fallback_block = 0;
+ }  // namespace Diag
+ }  // namespace NXE
+ 
+@@ -2625,6 +2635,17 @@ void _maybe_flush_phase_timing_audit()
+              NXE::Diag::g_drawtile_fast_bg_fallback_count_block,
+              NXE::Diag::g_drawtile_fast_bg_calls_count_block);
+   }
++  // DOS-PORT (patch 0316): UNGATED engagement line -- a plain fps cell must
++  // be able to prove the lever engaged without enabling instrumentation that
++  // perturbs the number it is measuring.
++  if (NXE::Diag::g_tdc_engaged_block || NXE::Diag::g_tdc_fallback_block)
++  {
++    LOG_INFO("[tile-dword-copy n=100 engaged={} fallback={}]",
++             NXE::Diag::g_tdc_engaged_block, NXE::Diag::g_tdc_fallback_block);
++  }
++  NXE::Diag::g_tdc_engaged_block  = 0;
++  NXE::Diag::g_tdc_fallback_block = 0;
++
+   // patch 0132: reset counters unconditionally.
+   NXE::Diag::g_drawtile_fast_bg_engaged_count_block  = 0;
+   NXE::Diag::g_drawtile_fast_bg_fallback_count_block = 0;
+@@ -4404,6 +4425,14 @@ bool Renderer::initVideo()
+              "(default; set SDL_HINT_DOSKUTSU_ASM_BLIT=1 to opt in -- "
+              "wave-51 _blit_indexed colorkey-blit lever)");
+   }
++  // DOS-PORT (patch 0316): whole-tile dword-copy lever banner.
++  LOG_INFO("Renderer::initVideo: tile dword-copy lever {} -- whole-tile "
++           "opaque dispatch (SDL_HINT_DOSKUTSU_TILE_DWORD_COPY=1 opts in, "
++           "default OFF; fully-opaque 16x16 tiles skip the per-pixel colorkey "
++           "compare and move as dwords). Engagement witness is the ungated "
++           "[tile-dword-copy n=100 engaged=.. fallback=..] line.",
++           tile_dword_copy_enabled() ? "ENABLED (opt-in)" : "DISABLED (default)");
++
+   // DOS-PORT (patch 0146, Phase 11 wave-51): blit-decomp instrumentation
+   // engagement banner -- greppable witness for build-qa's BANNERS array.
+   if (_blit_decomp_enabled())
+@@ -6782,6 +6811,112 @@ BlitSpanTable *build_blit_span_table(SDL_Surface *s, Uint8 colorkey)
+ // precomputed-run copies. nullptr (the default, and always when
+ // SDL_HINT_DOSKUTSU_ASM_BLIT is off) preserves the legacy per-pixel
+ // loop byte-for-byte -- this is the lever killswitch.
++// ---------------------------------------------------------------------------
++// DOS-PORT (patch 0316): whole-tile opaque dispatch to an unrolled dword copy.
++//
++// Round N measured the tilemap colorkey loop at 84.1% opaque pixels, and the
++// two tile layers move 1.01 screenfuls in ~15.9 ms = 4.9 MB/s against a
++// measured 17.0 MB/s memcpy floor. The per-pixel colorkey compare is what
++// separates those two tiers. A tile that contains no colorkey pixel at all
++// does not need the compare: it can be moved as straight bytes.
++//
++// How this differs from patch 0145's span lever, which measured only +0.40:
++// 0145 walks a run list per row and issues rep string instructions per run,
++// paying P54C rep-setup cost even on a fully opaque tile (16 row lookups plus
++// the setups, to move 256 bytes). This decides ONCE PER TILE from a single
++// bit and then runs straight-line, with no run table and no rep setup.
++//
++// Why the stale-tile class does not apply here, unlike every cache in this
++// file: tile opacity is a property of tile CONTENT. Camera motion cannot
++// change it, and a destructible tile changes the tile INDEX rather than the
++// pixels behind an index, so the table stays correct across mutation. The
++// only event that can invalidate it is a tilesheet reload, which frees it via
++// Surface::cleanup().
++//
++// NOT named OPAQUE_TILE_FASTPATH. That literal sits in the gameplay-smoke
++// gate at severity `forbidden` and its reappearance fails the gate. The
++// wave-38 lever of that name was never judged on merit -- it went out in a
++// batch rollback of a 3-lever stack that regressed 14 fps, on a build that
++// was itself missing patches, and the identified cause was a different
++// lever's per-flip getenv. So the mechanism is unmeasured, not refuted; only
++// the name is retired.
++bool tile_dword_copy_enabled()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_TILE_DWORD_COPY");
++  return v;
++}
++
++unsigned char *build_opaque_tile_table(SDL_Surface *s, std::uint8_t colorkey)
++{
++  if (!s || !s->pixels) return nullptr;
++  if (s->format != SDL_PIXELFORMAT_INDEX8) return nullptr;
++  const int cols = s->w / TILE_W;
++  const int rows = s->h / TILE_H;
++  // Partial tiles would make the row-major index lie about where a cell
++  // starts. Decline rather than round.
++  if (cols <= 0 || rows <= 0) return nullptr;
++  if (cols * TILE_W != s->w || rows * TILE_H != s->h) return nullptr;
++
++  unsigned char *tbl = new (std::nothrow) unsigned char[(size_t)cols * rows];
++  if (!tbl) return nullptr;
++
++  const Uint8 *base = (const Uint8 *)s->pixels;
++  const int pitch = s->pitch;
++  int opaque = 0;
++  for (int ty = 0; ty < rows; ++ty)
++  {
++    for (int tx = 0; tx < cols; ++tx)
++    {
++      bool all_opaque = true;
++      for (int r = 0; r < TILE_H && all_opaque; ++r)
++      {
++        const Uint8 *row = base + (size_t)(ty * TILE_H + r) * pitch + (tx * TILE_W);
++        for (int c = 0; c < TILE_W; ++c)
++        {
++          if (row[c] == colorkey) { all_opaque = false; break; }
++        }
++      }
++      tbl[(size_t)ty * cols + tx] = all_opaque ? 1 : 0;
++      if (all_opaque) ++opaque;
++    }
++  }
++  LOG_INFO("tile-dword-copy: table built {}x{} tiles, {} of {} fully opaque "
++           "({}.{}%) colorkey={}",
++           cols, rows, opaque, cols * rows,
++           (opaque * 100) / (cols * rows),
++           ((opaque * 1000) / (cols * rows)) % 10,
++           (int)colorkey);
++  return tbl;
++}
++
++// 16x16 straight-line copy. Byte prologue to dword-align the DESTINATION,
++// then dwords, then a byte tail. The destination is dword-aligned on only one
++// scroll position in four (blit_x = -(scroll_x % 16) + 16x), so the prologue
++// is load-bearing rather than decorative. memcpy of a constant 4 compiles to a
++// single 32-bit move; x86 tolerates the source being unaligned.
++static inline void _tile_dword_copy_16(SDL_Surface *dst, SDL_Surface *src,
++                                       int sx, int sy, int dx, int dy)
++{
++  const int spitch = src->pitch;
++  const int dpitch = dst->pitch;
++  const Uint8 *srow = (const Uint8 *)src->pixels + (size_t)sy * spitch + sx;
++  Uint8       *drow = (Uint8 *)dst->pixels       + (size_t)dy * dpitch + dx;
++
++  for (int r = 0; r < TILE_H; ++r)
++  {
++    const Uint8 *sp = srow;
++    Uint8       *dp = drow;
++    int n = TILE_W;
++    while (n && (((std::uintptr_t)dp) & 3u)) { *dp++ = *sp++; --n; }
++    int dwords = n >> 2;
++    while (dwords--) { std::memcpy(dp, sp, 4); dp += 4; sp += 4; }
++    n &= 3;
++    while (n--) { *dp++ = *sp++; }
++    srow += spitch;
++    drow += dpitch;
++  }
++}
++
+ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
+                                  SDL_Rect srcrect, SDL_Rect dstrect,
+                                  Uint8 colorkey, bool has_colorkey,
+@@ -8158,10 +8293,47 @@ void Renderer::drawTileFast(Surface *src, int dstx, int dsty, int srcx, int srcy
+   if (_tf_src->format == SDL_PIXELFORMAT_INDEX8 &&
+       _tf_dst->format == SDL_PIXELFORMAT_INDEX8)
+   {
+-    _blit_indexed(_tf_dst, _tf_src,
+-                  srcrect, dstrect,
+-                  (Uint8)src->colorkey(), src->hasColorkey(),
+-                  src->spanTable());
++    // DOS-PORT (patch 0316): whole-tile opaque dispatch. Every condition
++    // below is a correctness precondition, not an optimisation:
++    //   - full 16x16 rects only. A clipped rect (0296 centring trimmed it)
++    //     is not a whole tile, and its srcrect.x/y would no longer be a
++    //     tile-grid multiple, so the table index would be wrong.
++    //   - both rects fully inside their surfaces. _blit_indexed does its own
++    //     dst clamping; this copy does not, so an off-screen tile MUST fall
++    //     through or it writes out of bounds.
++    // The INDEX8<->INDEX8 guard is inherited from the enclosing branch
++    // (patch 0301) -- one byte per pixel on both sides is what makes a raw
++    // byte copy correct at all.
++    const bool _tdc_shape_ok =
++        srcrect.w == TILE_W && srcrect.h == TILE_H &&
++        dstrect.w == TILE_W && dstrect.h == TILE_H &&
++        srcrect.x >= 0 && srcrect.y >= 0 &&
++        dstrect.x >= 0 && dstrect.y >= 0 &&
++        srcrect.x + TILE_W <= _tf_src->w && srcrect.y + TILE_H <= _tf_src->h &&
++        dstrect.x + TILE_W <= _tf_dst->w && dstrect.y + TILE_H <= _tf_dst->h;
++
++    const unsigned char *_tdc_tbl = _tdc_shape_ok ? src->opaqueTileTable() : nullptr;
++    bool _tdc_done = false;
++    if (_tdc_tbl)
++    {
++      const int _tdc_cols = _tf_src->w / TILE_W;
++      const int _tdc_idx  = (srcrect.y / TILE_H) * _tdc_cols + (srcrect.x / TILE_W);
++      if (_tdc_tbl[_tdc_idx])
++      {
++        _tile_dword_copy_16(_tf_dst, _tf_src,
++                            srcrect.x, srcrect.y, dstrect.x, dstrect.y);
++        ++NXE::Diag::g_tdc_engaged_block;
++        _tdc_done = true;
++      }
++    }
++    if (!_tdc_done)
++    {
++      ++NXE::Diag::g_tdc_fallback_block;
++      _blit_indexed(_tf_dst, _tf_src,
++                    srcrect, dstrect,
++                    (Uint8)src->colorkey(), src->hasColorkey(),
++                    src->spanTable());
++    }
+   }
+   else
+   {
+diff --git a/src/graphics/Surface.cpp b/src/graphics/Surface.cpp
+index 38b83231..23d5fc0a 100644
+--- a/src/graphics/Surface.cpp
++++ b/src/graphics/Surface.cpp
+@@ -664,6 +664,29 @@ const BlitSpanTable *Surface::spanTable()
+   return _span_table;
+ }
+ 
++// DOS-PORT (patch 0316): whole-tile opacity accessor. Mirrors spanTable()
++// exactly -- probe once, cache for the surface's lifetime, return nullptr
++// at zero cost thereafter for a non-candidate surface (lever off,
++// non-INDEX8, or no colorkey). The scan and the gate both live in
++// Renderer.cpp beside the blit primitives that consume them.
++//
++// The colorkey handed to the builder is the surface's OWN _colorkey, not
++// an assumed index. Getting that wrong would silently strip transparency
++// from tiles that have it -- a visible artifact rather than a crash.
++const unsigned char *Surface::opaqueTileTable()
++{
++  if (!_opaque_tile_table_built)
++  {
++    _opaque_tile_table_built = true;
++    if (tile_dword_copy_enabled() && _surface_cpu && _has_colorkey &&
++        _surface_cpu->format == SDL_PIXELFORMAT_INDEX8)
++    {
++      _opaque_tile_table = build_opaque_tile_table(_surface_cpu, (Uint8)_colorkey);
++    }
++  }
++  return _opaque_tile_table;
++}
++
+ void Surface::cleanup()
+ {
+   if (_texture)
+@@ -686,6 +709,10 @@ void Surface::cleanup()
+   delete _span_table;
+   _span_table = nullptr;
+   _span_table_built = false;
++  // DOS-PORT (patch 0316): same lifetime as the span table.
++  delete[] _opaque_tile_table;
++  _opaque_tile_table = nullptr;
++  _opaque_tile_table_built = false;
+   _has_colorkey = false;
+   _colorkey = 0;
+ }
+diff --git a/src/graphics/Surface.h b/src/graphics/Surface.h
+index 53512157..8c795a3d 100644
+--- a/src/graphics/Surface.h
++++ b/src/graphics/Surface.h
+@@ -88,6 +88,10 @@ public:
+   // the surface's lifetime; freed in cleanup(). Never a per-blit cost.
+   const BlitSpanTable *spanTable();
+ 
++    // DOS-PORT (patch 0316): per-tile opacity table for the whole-tile
++    // dword-copy lever. Same lazy-build/cache shape as spanTable().
++    const unsigned char *opaqueTileTable();
++
+ private:
+   void cleanup();
+ 
+@@ -105,6 +109,10 @@ private:
+   // makes the lazy build a build-ONCE -- a non-candidate surface is not
+   // re-probed on every spanTable() call.
+   BlitSpanTable *_span_table = nullptr;
++  // DOS-PORT (patch 0316): freed and reset alongside _span_table in
++  // cleanup(), so a reloaded tilesheet rebuilds against the new pixels.
++  unsigned char *_opaque_tile_table = nullptr;
++  bool _opaque_tile_table_built = false;
+   bool _span_table_built = false;
+   int _width;
+   int _height;
+-- 
+2.47.3
+
