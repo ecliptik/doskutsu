@@ -70,10 +70,14 @@ Above roughly a 486DX4-100, a faster CPU stops improving the frame rate -- the r
 
 ### Performance targets
 
-| Machine | Target | Status |
-|---|---|---|
-| Pentium OverDrive 83 | 30 fps | reference machine; the figure the project is judged on |
-| 486DX2-66 | 25 fps | the low end that should still play properly |
+Targets are measured with **OPL3 FM music on an S3 ViRGE**. That is the configuration most machines will actually run: a Sound Blaster supplies OPL3, while a WaveBlaster daughterboard is uncommon. The figure is per-loop frame rate -- frames per second of game time, the same metric the table above and `docs/BENCHMARKS.md` report -- so targets and published numbers compare directly.
+
+| Machine | Target | Measured | Status |
+|---|---|---|---|
+| Pentium OverDrive 83 | 30 fps | 30.2 fps | met, no margin |
+| 486DX2-66 | 25 fps | 22.2 fps | 2.8 fps short |
+
+The reference machine is the Pentium OverDrive 83 and the low end that should still play properly is the 486DX2-66.
 
 50 fps is the moonshot -- it is Cave Story's `GAME_FPS=50` design rate, and hitting it would mean the port runs at the speed the game was written for. It is not the bar for shipping, and on 486-class silicon it is not currently reachable: the frame is dominated by tilemap compositing, which is bounded by system memory bandwidth measured at ~17 MB/s flat beyond an 8 KB L1 on a DX2-66.
 
