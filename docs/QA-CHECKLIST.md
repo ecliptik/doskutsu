@@ -52,81 +52,74 @@ A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
 
 ---
 
-## Round O -- world cache, three arms on one binary, POD-83
+## Round P -- the last unmeasured milliseconds, POD-83
 
-One machine, ViRGE + PicoGUS, no swaps. First fps read on the world cache.
+One machine, ViRGE + PicoGUS, ~20 minutes. **No new patch and no new lever** --
+this round measures something that has never been measured, using an ablation
+already compiled into the binary.
 
-**All three arms are in ONE binary.** That is deliberate: this campaign has
-found cross-binary comparison unreliable, so the control and both cache arms
-run on the same reel, same boot, same silicon.
-
-| Step | Type after boot | Time | Kind |
-|---|---|---|---|
-| O0 | *laptop*, populate | 6 min | new payload |
-| O1 | `QA 1` then `WC 1` | 9 min | **3 arms, fps + hit rate** |
-| O2 | `RB` | 12 min | KPI re-anchor |
-| O3 | *laptop*, logback `r13-worldcache` | 3 min | |
+| Step | Type after boot | Time |
+|---|---|---|
+| P0 | *laptop*, populate | 6 min |
+| P1 | `QA 1` then `SET DOSKUTSU_NO_INPUT_POLL=1` then `RB` | 12 min |
+| P2 | `SET DOSKUTSU_NO_INPUT_POLL=` -- **clear it, see below** | - |
+| P3 | *laptop*, logback `r15-inputpoll`, send | 3 min |
 
 Both *laptop* commands, CF mounted:
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r13-worldcache
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r15-inputpoll
 
-**O0 repopulates** -- new binary carrying `0313`, `0314`, `0315`. All three
-ship default-OFF, so the control arm should reproduce Round M.
+### What this measures
 
-### O1 `WC 1` -- the three arms
+The POD's frame is 32.8 ms in-loop. Round N accounted for all but **~3.9 ms**
+of it -- tilemap 21.05, flip 4.55, sim 2.39, HUD and post 0.94. That remaining
+12% has never been instrumented on any machine. Most of it is expected to be
+`input_poll`, which runs ~1.67 times per frame and is unbracketed.
 
-| cell | tag | hints set | what it is |
-|---|---|---|---|
-| 1 | `GW0` | none | uncached control |
-| 2 | `GWA` | `WORLD_CACHE=1` | stage 3a, composites every frame |
-| 3 | `GWB` | `WORLD_CACHE=1` + `WORLD_CACHE_KEY=1` | stage 3b, keyed |
+`DOSKUTSU_NO_INPUT_POLL=1` skips the event pump entirely. The fps gap against
+the control is the total cost of that region, including the cooperative-
+scheduler yield that happens inside it.
 
-**Cell 2 is EXPECTED TO BE SLOWER than cell 1.** It rebuilds the composite
-unconditionally with no key and no possible hit, so it pays the compositing
-cost twice over. That is what it is for -- it is the correctness arm. A cell
-2 that is slower than cell 1 is the expected result, not a failure. The
-comparison that matters is **cell 3 against cell 1**.
+### The control is Round O, not a second run
 
-**The number to pull is the hit rate, and it is in the log, not the fps.**
+Round O measured `R4` **30.3** and `R4B` **30.2** per-loop on this exact binary
+(`e9e8ff80ae10`, unchanged in r15). Compare the ablated `R4`/`R4B` against
+those. **Do not run `RB` twice in one round to get a local control** -- the
+second run reuses the same log tags and overwrites the first.
 
-    [world-cache n=100 hits=.. composites=.. declined=.. hit_pct_x10=.. bytes=..]
+### CLEARING THE VARIABLE IS NOT OPTIONAL
 
-Break-even is a 0.33 hit rate (`hit_pct_x10=330`). Under DOSBox the smoke
-measured 990-1000, but that route barely moves the camera and is NOT a
-gameplay figure -- Round N measured 71% static frames on this reel, so
-expect something in the 700-900 band. If `hit_pct_x10` comes back near 1000
-on a reel that scrolls, be suspicious rather than pleased: it would more
-likely mean the key is not invalidating than that the cache is perfect.
+`DOSKUTSU_NO_INPUT_POLL` is **not** among the 204 variables `CLRENV` clears, so
+once set it survives every cell and every later sweep in that boot. Leave it set
+and everything you run afterwards is silently measuring an ablated game, with no
+banner saying so. Clear it at P2, or reboot before running anything else.
 
-`declined=` should be small. A large count means the cache is standing down
-(negative scroll on MAP_BORDER paths) and cell 3 is measuring almost
-nothing.
+### What to expect, and what is not a fault
 
-### Watch the screen on cell 3
+- **Audio may glitch, stutter or drop out.** The event pump is where the
+  SDL3-DOS cooperative scheduler yields, and skipping it starves the audio
+  thread. Expected. This is an ablation to size a cost, never a shippable
+  lever.
+- The reel still drives input under TAS, so the run should complete normally
+  despite the game being uncontrollable by hand.
+- If a cell hangs or exits early instead of completing, that is itself the
+  result -- report it rather than retrying.
 
-The DOSBox screenshots are byte-identical to the control, but that route is
-mostly stationary, so the **invalidation paths are barely exercised**. These
-are the cases that would expose a stale-tile bug, and the reel passes through
-all of them:
+**Do not bank these as fps rows.** They are an ablation arm, not a
+configuration anyone would ship.
 
-- [ ] scrolling edges -- tiles must not smear, tear, or lag the camera
-- [ ] a destructible tile being shot -- the hole must appear immediately
-- [ ] a sprite walking behind foreground geometry -- must still be occluded
-- [ ] room transitions -- no leftover tiles from the previous room
+### Optional ride-along: confirm the capture flag (1 min)
 
-Any of those failing is a real defect and worth aborting the cell to report.
-Every prior cache in this codebase produced a black-region or stale artifact
-at some point (`0183`, `0143`/`0157`, wave-54's black valley), so treat a
-clean run as evidence rather than assuming it.
+Only if you care about the harness thread. At the prompt before P1:
 
-### O2 `RB`
+    SET DKTCAP=1
 
-The binary changed, so the KPI anchor is re-checked. Cells `R4`/`R4B` are the
-KPI pair. Expect `per_loop_fps` ~30.2 as in Round M; a drop means one of the
-three new patches costs something even switched off, which would matter more
-than anything the cache does.
+then start any sweep and check the banner area prints a `[DKTCAP=1] capture
+session:` line before the `PAUSE`. That line is the witness that r15 landed.
+Then `SET DKTCAP=` and carry on -- with it set, console text goes slow and the
+console switches to mode 12h between cells, which is correct behaviour but
+unhelpful if nobody is capturing.
 
 ---
 
@@ -260,8 +253,9 @@ vanished lever would measure two identical arms.
 | K | DX2-66, ViRGE + Mach64 | `RB` `ADIAG` `LEV` `BDIAG` | `r10-rb-dx266`, `r10-mach64` |
 | M | all four CPUs, ViRGE | `QA` `RB` x2 per CPU; `MINE` FAILED | `r11-crosscpu` |
 | N | POD-83, ViRGE | `MINE` `LEV` `DEEP` | `r12-pod-diag` |
+| O | POD-83, ViRGE | `WC` (3 arms) `RB` | `r13-worldcache` |
 
-All labels above are spent. Nothing in Rounds A-N is to be re-run.
+All labels above are spent. Nothing in Rounds A-O is to be re-run.
 
 Results and analysis live in `docs/internal/POST-BENCHMARK-PLAN.md` and
 `docs/internal/HANDOFF-ENGINE-AUDIO-BUCKET.md`.
