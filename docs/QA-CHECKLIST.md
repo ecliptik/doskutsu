@@ -45,7 +45,7 @@ Check in the output:
 - [ ] `PASS: Organya-HQ 22050 cache extracted` -- not `SKIPPING` / `no HQ cache`
 - [ ] `PASS: QA.TAS = benchmark reel (1956 B)`
 - [ ] `PROFILE3.DAT: map 20 'Save Point', weapon 2` -- `PROFILE5.DAT` same
-- [ ] `already staged and current (sha bb7d4849bc39)` or a re-fetch
+- [ ] `already staged and current (sha c3daea95f466)` or a re-fetch
 - [ ] `PASS: all N BATs CRLF + ASCII`
 
 A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
@@ -54,72 +54,65 @@ A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
 
 ## Round P -- the last unmeasured milliseconds, POD-83
 
-One machine, ViRGE + PicoGUS, ~20 minutes. **No new patch and no new lever** --
-this round measures something that has never been measured, using an ablation
-already compiled into the binary.
+One machine, ViRGE + PicoGUS, ~23 min. **No new patch and no new lever** --
+the ablation has been compiled in since patch 0063.
 
 | Step | Type after boot | Time |
 |---|---|---|
 | P0 | *laptop*, populate | 6 min |
-| P1 | `QA 1` then `SET DOSKUTSU_NO_INPUT_POLL=1` then `RB` | 12 min |
-| P2 | `SET DOSKUTSU_NO_INPUT_POLL=` -- **clear it, see below** | - |
-| P3 | *laptop*, logback `r15-inputpoll`, send | 3 min |
-
-Both *laptop* commands, CF mounted:
+| P1 | `QA 1` then `PUMP 1` | 14 min |
+| P2 | *laptop*, logback `r16-pump`, send | 3 min |
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
-    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r15-inputpoll
+    scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r16-pump
 
-### What this measures
+### What it measures
 
 The POD's frame is 32.8 ms in-loop. Round N accounted for all but **~3.9 ms**
-of it -- tilemap 21.05, flip 4.55, sim 2.39, HUD and post 0.94. That remaining
-12% has never been instrumented on any machine. Most of it is expected to be
-`input_poll`, which runs ~1.67 times per frame and is unbracketed.
+-- tilemap 21.05, flip 4.55, sim 2.39, HUD and post 0.94. That 12% has never
+been instrumented on any machine. Most of it should be `input_poll`, which
+runs ~1.67 times per frame and is entirely unbracketed.
 
-`DOSKUTSU_NO_INPUT_POLL=1` skips the event pump entirely. The fps gap against
-the control is the total cost of that region, including the cooperative-
-scheduler yield that happens inside it.
+`DOSKUTSU_NO_INPUT_POLL=1` skips the event pump. The gap between arms is its
+total cost, including the cooperative-scheduler yield that happens inside it.
 
-### The control is Round O, not a second run
+### Four cells, both arms repeated
 
-Round O measured `R4` **30.3** and `R4B` **30.2** per-loop on this exact binary
-(`e9e8ff80ae10`, unchanged in r15). Compare the ablated `R4`/`R4B` against
-those. **Do not run `RB` twice in one round to get a local control** -- the
-second run reuses the same log tags and overwrites the first.
+| cell | tag | arm |
+|---|---|---|
+| 1 | `GP0` | control |
+| 2 | `GPA` | pump OFF |
+| 3 | `GP0B` | control, repeat |
+| 4 | `GPAB` | pump OFF, repeat |
 
-### CLEARING THE VARIABLE IS NOT OPTIONAL
+**The control runs in this session rather than being borrowed from round O.**
+The repeats are not padding: the measured floor is 0.2 fps, a 0.6 fps result
+once failed to reproduce, and cross-round comparison has been unreliable here.
+The control pair gives this round its own band; the ablated pair proves the
+delta is not a single-sample artifact.
 
-`DOSKUTSU_NO_INPUT_POLL` is **not** among the 204 variables `CLRENV` clears, so
-once set it survives every cell and every later sweep in that boot. Leave it set
-and everything you run afterwards is silently measuring an ablated game, with no
-banner saying so. Clear it at P2, or reboot before running anything else.
+### Expect the audio to misbehave in cells 2 and 4
 
-### What to expect, and what is not a fault
+The event pump is where the SDL3-DOS cooperative scheduler yields, so skipping
+it starves the audio thread. Expected, not a fault. The reel drives input under
+TAS so the run completes even though the game is uncontrollable by hand. **If a
+cell hangs or exits early rather than completing, that is the result** --
+report it rather than retrying.
 
-- **Audio may glitch, stutter or drop out.** The event pump is where the
-  SDL3-DOS cooperative scheduler yields, and skipping it starves the audio
-  thread. Expected. This is an ablation to size a cost, never a shippable
-  lever.
-- The reel still drives input under TAS, so the run should complete normally
-  despite the game being uncontrollable by hand.
-- If a cell hangs or exits early instead of completing, that is itself the
-  result -- report it rather than retrying.
+**Not fps rows.** This is an ablation sizing a cost, not a shippable
+configuration. `PUMP` clears `NO_INPUT_POLL` itself at the end; if the variable
+is ever set by hand instead, clear it -- it is not in `CLRENV` and would
+silently ablate every later cell in that boot.
 
-**Do not bank these as fps rows.** They are an ablation arm, not a
-configuration anyone would ship.
+### Harness note
 
-### Optional ride-along: confirm the capture flag (1 min)
+`PUMP` carries the `DKTCAP` gate, so vcctrl can drive it. Control sequence:
 
-Only if you care about the harness thread. At the prompt before P1:
+    boot -> prompt -> QA 1 -> SET DKTCAP=1 -> PUMP 1 -> one keypress at PAUSE -> wait
 
-    SET DKTCAP=1
-
-then start any sweep and check the banner area prints a `[DKTCAP=1] capture
-session:` line before the `PAUSE`. That line is the witness that r15 landed.
-Then `SET DKTCAP=` and carry on -- with it set, console text goes slow and the
-console switches to mode 12h between cells, which is correct behaviour but
-unhelpful if nobody is capturing.
+There is no console prompt between cells, so nothing may be typed mid-sweep.
+Expected span ~14 min on the POD; a timeout at ~2x is safe. Read
+`config=` in `LOGS\GPUMP.NFO` to confirm which boot profile produced the run.
 
 ---
 
@@ -175,11 +168,13 @@ Add `PG` to a **Mach64** sweep only if the PicoGUS is in. `ADIAG` `DEEP`
 | | Round 5 | Round 8 | Round 13 |
 |---|---|---|---|
 | Binary | `c1729d2fe065` | `6971e9f73bc9` | `e9e8ff80ae10` |
-| Tarball | `d49dccd49558` | `162fb8b55a4c` | `bb7d4849bc39` |
+| Tarball | `d49dccd49558` | `162fb8b55a4c` | `c3daea95f466` |
 | Cache key | `482d88eba8b2` | `3ba36d8dd56d` | `66ff01f7f997` |
 
-**Round 15 is a BAT-only repack of Round 13** (r14 was superseded before
-it ever reached a card) -- same binary, same caches,
+**Round 16 is a BAT-only repack of Round 13** (r14 and r15 were superseded
+before reaching a card). It adds the `PUMP` sweep and records the CONFIG.SYS
+boot profile (`config=%config%`) in every sweep manifest, so a log proves
+which profile produced it rather than asserting it -- same binary, same caches,
 same cache key `66ff01f7f997`, so nothing cold-renders. It adds the `DKTCAP`
 capture flag to the eight non-listening sweeps (`RB` `WC` `MINE` `LEV` `DEEP`
 `ADIAG` `TAB` `FINE`).
