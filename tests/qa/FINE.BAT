@@ -91,8 +91,18 @@ PAUSE
 ECHO.
 IF NOT "%3"=="PG" GOTO SNDOK
 ECHO  switching PicoGUS to SB MODE
-pgusinit /mode sb
-pgusinit /sbenv
+pgusinit /mode sb > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%FINE.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%FINE.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%FINE.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
+pgusinit /sbenv > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%FINE.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%FINE.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%FINE.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
 SET BLASTER=A220 I7 D3 P330 T3
 GOTO SNDOK2
 :SNDOK
