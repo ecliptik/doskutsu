@@ -34,7 +34,7 @@ ECHO ============================================================
 ECHO  SWEEP : RE-BASELINE anchor set (run after ANY new binary)
 ECHO  CELLS : 4 cells, ~10 min
 ECHO  CPU   : %QACPU%
-ECHO  SOUND : PicoGUS REQUIRED -- this sweep switches it sb -> adlib
+ECHO  SOUND : PicoGUS REQUIRED -- this sweep switches it sb -^> adlib
 ECHO  VIDEO : S3 ViRGE (match the banked anchors)
 ECHO  LOGS  : tagged %QAM%..  in LOGS\
 ECHO ============================================================
@@ -54,8 +54,8 @@ REM  the wrong profile -- e.g. VIBRAUSB with no Vibra fitted, which
 REM  yields no DAC at all and would otherwise look like silent audio
 REM  with no record of why.
 ECHO config=%config% >> LOGS\%QAM%RB.NFO
-ECHO sound=PicoGUS REQUIRED -- this sweep switches it sb -> adlib >> LOGS\%QAM%RB.NFO
-ECHO video=S3 ViRGE (match the banked anchors) >> LOGS\%QAM%RB.NFO
+ECHO sound=PicoGUS REQUIRED -- this sweep switches it sb -^> adlib >> LOGS\%QAM%RB.NFO
+ECHO video_declared=S3 ViRGE (DECLARED not detected -- UniVBE masks chipset; see SDL log) >> LOGS\%QAM%RB.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%RB.NFO
 REM  DKTCAP=1 marks an UNATTENDED CAPTURE session. Default (unset) is
 REM  byte-identical to every banked round: the 10 s banner delay stays, and
@@ -76,7 +76,7 @@ IF "%DKTCAP%"=="1" ECHO  SET DKTCAP= to turn off; VGACAP\MODE03 restores text.
 PAUSE
 ECHO.
 ECHO ##########################################################
-ECHO  switching PicoGUS -> SB MODE (cells needing a live SB DAC)
+ECHO  switching PicoGUS -^> SB MODE (cells needing a live SB DAC)
 ECHO ##########################################################
 pgusinit /mode sb
 pgusinit /sbenv
@@ -128,7 +128,7 @@ DOSKUTSU.EXE
 IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 ECHO.
 ECHO ##########################################################
-ECHO  switching PicoGUS -> ADLIB MODE (no SB, so the PIT pump can own ch0)
+ECHO  switching PicoGUS -^> ADLIB MODE (no SB, so the PIT pump can own ch0)
 ECHO ##########################################################
 pgusinit /mode adlib
 CALL CLRENV
