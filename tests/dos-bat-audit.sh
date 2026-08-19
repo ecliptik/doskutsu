@@ -37,7 +37,9 @@ INTERNALS="ECHO IF REM SET GOTO CALL COPY DEL REN RENAME CD CHDIR MD MKDIR RD RM
 # Known-present g2k prereqs (documented, not bundled). Empty by default --
 # the campaign convention is "bundle it or full-path it"; add here only with
 # an explicit operator-confirmed-present justification.
-KNOWN_PRESENT=""
+# pgusinit: PicoGUS mode-switch utility, resident on the g2k CF and used by
+# every sweep that changes card mode. Operator-confirmed present.
+KNOWN_PRESENT="PGUSINIT"
 
 stage="$(mktemp -d /tmp/dos-audit.XXXXXX)"
 trap 'rm -rf "$stage"' EXIT
@@ -78,7 +80,7 @@ for b in "${BATS[@]}"; do
       # strip an IF [NOT] EXIST <path> prefix to reach the real command
       while :; do
         u="$(printf '%s' "$seg" | tr '[:lower:]' '[:upper:]')"
-        if [[ "$u" == IF\ * ]]; then seg="$(printf '%s' "$seg" | sed -E 's/^[Ii][Ff][[:space:]]+([Nn][Oo][Tt][[:space:]]+)?([Ee][Xx][Ii][Ss][Tt][[:space:]]+[^[:space:]]+[[:space:]]+)?//')"; continue; fi
+        if [[ "$u" == IF\ * ]]; then seg="$(printf '%s' "$seg" | sed -E 's/^[Ii][Ff][[:space:]]+([Nn][Oo][Tt][[:space:]]+)?([Ee][Xx][Ii][Ss][Tt][[:space:]]+[^[:space:]]+[[:space:]]+|[^[:space:]]+==[^[:space:]]+[[:space:]]+|[Ee][Rr][Rr][Oo][Rr][Ll][Ee][Vv][Ee][Ll][[:space:]]+[0-9]+[[:space:]]+)?//')"; continue; fi
         break
       done
       cmd="$(printf '%s' "$seg" | awk '{print $1}')"
@@ -128,7 +130,7 @@ for b in "${BATS[@]}"; do
   LC_ALL=C grep -qP '[^\x00-\x7F\r]' "$b" && { failr "$bn: non-ASCII byte"; g5=1; }
   base="${bn%.*}"; [[ ${#base} -le 8 ]] || { failr "$bn: base >8 chars (8.3)"; g5=1; }
   grep -qE '^[[:space:]]*(REM|ECHO)\b.*[<>]' "$b" && { failr "$bn: < or > in REM/ECHO (stray-file/redirect footgun)"; g5=1; }
-  while IFS= read -r t; do t="${t%$'\r'}"; t="${t##*=}"; [[ ${#t} -le 5 ]] || { failr "$bn: LOG_TAG '$t' >5 chars"; g5=1; }; done < <(grep -hE 'SET[[:space:]]+DOSKUTSU_LOG_TAG=' "$b" 2>/dev/null)
+  while IFS= read -r t; do t="${t%$'\r'}"; t="${t##*=}"; t="${t//%QAM%/Q}"; [[ ${#t} -le 5 ]] || { failr "$bn: LOG_TAG '$t' >5 chars"; g5=1; }; done < <(grep -hE 'SET[[:space:]]+DOSKUTSU_LOG_TAG=' "$b" 2>/dev/null)
 done
 [[ $g5 -eq 0 ]] && pass "CRLF + ASCII + 8.3 + no REM/ECHO redirect + LOG_TAG<=5"
 
