@@ -17,7 +17,7 @@ ECHO ============================================================
 ECHO  SWEEP : BY-EAR pairs -- THESE NEED YOUR EARS
 ECHO  CELLS : 3 cells, ~8 min
 ECHO  CPU   : %QACPU%
-ECHO  SOUND : PicoGUS REQUIRED -- switches sb -> adlib for the AdLib cell
+ECHO  SOUND : PicoGUS REQUIRED -- switches sb to adlib for the AdLib cell
 ECHO  VIDEO : S3 ViRGE
 ECHO  LOGS  : tagged %QAM%..  in LOGS\
 ECHO ============================================================
@@ -30,14 +30,14 @@ ECHO sweep=EAR >> LOGS\%QAM%EAR.NFO
 ECHO cells=3 >> LOGS\%QAM%EAR.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%EAR.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%EAR.NFO
-ECHO sound=PicoGUS REQUIRED -- switches sb -> adlib for the AdLib cell >> LOGS\%QAM%EAR.NFO
+ECHO sound=PicoGUS REQUIRED -- switches sb to adlib for the AdLib cell >> LOGS\%QAM%EAR.NFO
 ECHO video=S3 ViRGE >> LOGS\%QAM%EAR.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%EAR.NFO
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 PAUSE
 ECHO.
 ECHO ##########################################################
-ECHO  switching PicoGUS -> SB MODE (cells needing a live SB DAC)
+ECHO  switching PicoGUS to SB MODE (cells needing a live SB DAC)
 ECHO ##########################################################
 pgusinit /mode sb
 pgusinit /sbenv
@@ -72,7 +72,7 @@ ECHO ============================================
 DOSKUTSU.EXE
 ECHO.
 ECHO ##########################################################
-ECHO  switching PicoGUS -> ADLIB MODE (no SB, so the PIT pump can own ch0)
+ECHO  switching PicoGUS to ADLIB MODE (no SB, so the PIT pump can own ch0)
 ECHO ##########################################################
 pgusinit /mode adlib
 CALL CLRENV

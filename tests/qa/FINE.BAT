@@ -33,7 +33,7 @@ REM
 REM  Card-independent -- the engine bucket is not a video question.
 REM  Run it on the ViRGE, where there is no oversized-surface confound.
 REM
-REM  Usage:  QA <n>   then   FINE <n> [PG]
+REM  Usage:  QA [n]   then   FINE [n] [PG]
 REM ===================================================================
 IF "%1"=="GO" GOTO GO
 COMMAND /E:2048 /C %0 GO %1 %2
@@ -85,7 +85,7 @@ ECHO ============================================================
 PAUSE
 ECHO.
 IF NOT "%3"=="PG" GOTO SNDOK
-ECHO  switching PicoGUS -^> SB MODE
+ECHO  switching PicoGUS to SB MODE
 pgusinit /mode sb
 pgusinit /sbenv
 SET BLASTER=A220 I7 D3 P330 T3

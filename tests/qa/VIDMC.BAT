@@ -7,7 +7,7 @@ REM
 REM  BY EYE ONLY.  It writes the same log tags as VIDM, so its logs
 REM  are disposable -- run the real VIDM after this, not before.
 REM
-REM  Usage:  QA <n>   then   VIDMC <n> [PG]
+REM  Usage:  QA [n]   then   VIDMC [n] [PG]
 REM ===================================================================
 IF "%QAM%"=="" GOTO NOMACH
 SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0

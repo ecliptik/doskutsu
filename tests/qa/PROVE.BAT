@@ -17,7 +17,7 @@ ECHO ============================================================
 ECHO  SWEEP : PROVE-OUT -- validates the round-2 binary on real silicon
 ECHO  CELLS : 6 cells, ~15 min, fully unattended
 ECHO  CPU   : %QACPU%
-ECHO  SOUND : PicoGUS REQUIRED -- this sweep switches it sb -> adlib
+ECHO  SOUND : PicoGUS REQUIRED -- this sweep switches it sb to adlib
 ECHO  VIDEO : whichever card is installed -- run once per card
 ECHO  LOGS  : tagged %QAM%P..  in LOGS\
 ECHO ============================================================
@@ -38,7 +38,7 @@ SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 PAUSE
 ECHO.
 ECHO ##########################################################
-ECHO  switching PicoGUS -> SB MODE  (P4 P4B P3 P0 need a live SB DAC)
+ECHO  switching PicoGUS to SB MODE  (P4 P4B P3 P0 need a live SB DAC)
 ECHO ##########################################################
 pgusinit /mode sb
 pgusinit /sbenv
@@ -106,7 +106,7 @@ ECHO ============================================
 DOSKUTSU.EXE
 ECHO.
 ECHO ##########################################################
-ECHO  switching PicoGUS -> ADLIB MODE  (no SB, so the PIT pump can own ch0)
+ECHO  switching PicoGUS to ADLIB MODE  (no SB, so the PIT pump can own ch0)
 ECHO ##########################################################
 pgusinit /mode adlib
 CALL CLRENV
