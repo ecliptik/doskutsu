@@ -46,6 +46,14 @@ ECHO sweep=RB >> LOGS\%QAM%RB.NFO
 ECHO cells=4 >> LOGS\%QAM%RB.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%RB.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%RB.NFO
+REM  Record the CONFIG.SYS boot profile. Unlike a SET, %config% is
+REM  chosen at the boot menu and cannot be retrofitted onto a run that
+REM  did not boot that way, so a log PROVES its own provenance rather
+REM  than attesting to the absence of something. Catches a cell run on
+REM  the wrong profile -- e.g. VIBRAUSB with no Vibra fitted, which
+REM  yields no DAC at all and would otherwise look like silent audio
+REM  with no record of why.
+ECHO config=%config% >> LOGS\%QAM%RB.NFO
 ECHO sound=PicoGUS REQUIRED -- this sweep switches it sb -> adlib >> LOGS\%QAM%RB.NFO
 ECHO video=S3 ViRGE (match the banked anchors) >> LOGS\%QAM%RB.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%RB.NFO
