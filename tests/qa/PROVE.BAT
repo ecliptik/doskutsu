@@ -31,8 +31,19 @@ ECHO sweep=PROVE >> LOGS\%QAM%PR.NFO
 ECHO cells=6 >> LOGS\%QAM%PR.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%PR.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%PR.NFO
-ECHO sound=PicoGUS (sb for P4/P4B/P3/P0, adlib for P5/P5K) >> LOGS\%QAM%PR.NFO
-ECHO video=run once per card >> LOGS\%QAM%PR.NFO
+ECHO config=%config% >> LOGS\%QAM%PR.NFO
+ECHO video_declared=%QAVID% >> LOGS\%QAM%PR.NFO
+ECHO sound_declared=%QASND% >> LOGS\%QAM%PR.NFO
+ECHO irq_source=%QAIRQ% >> LOGS\%QAM%PR.NFO
+ECHO dktcap=%DKTCAP% >> LOGS\%QAM%PR.NFO
+ECHO cell=%QAM%P4 class=perf >> LOGS\%QAM%PR.NFO
+ECHO cell=%QAM%P4B class=perf repeat_of=%QAM%P4 >> LOGS\%QAM%PR.NFO
+ECHO cell=%QAM%P3 class=probe >> LOGS\%QAM%PR.NFO
+ECHO cell=%QAM%P0 class=probe >> LOGS\%QAM%PR.NFO
+ECHO cell=%QAM%P5 class=perf >> LOGS\%QAM%PR.NFO
+ECHO cell=%QAM%P5K class=perf >> LOGS\%QAM%PR.NFO
+ECHO sound_note=PicoGUS (sb for P4/P4B/P3/P0, adlib for P5/P5K) >> LOGS\%QAM%PR.NFO
+ECHO video_note=run once per card >> LOGS\%QAM%PR.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%PR.NFO
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 PAUSE
@@ -40,8 +51,18 @@ ECHO.
 ECHO ##########################################################
 ECHO  switching PicoGUS to SB MODE  (P4 P4B P3 P0 need a live SB DAC)
 ECHO ##########################################################
-pgusinit /mode sb
-pgusinit /sbenv
+pgusinit /mode sb > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%PR.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%PR.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%PR.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
+pgusinit /sbenv > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%PR.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%PR.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%PR.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
 SET BLASTER=A220 I7 D3 P330 T3
 CALL CLRENV
 SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
@@ -58,6 +79,7 @@ ECHO  OPL3 -- the control
 ECHO  Non-pump. Must match the banked C4 anchor for this CPU.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%P4
 CALL CLRENV
 SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -73,6 +95,7 @@ ECHO  OPL3 repeat -- the noise floor
 ECHO  P4 vs P4B spread IS the noise floor.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%P4B
 CALL CLRENV
 SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -88,6 +111,7 @@ ECHO  Organya -- the re-rendered PCM cache
 ECHO  Catches a silently different re-render. Match banked C3.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%P3
 CALL CLRENV
 SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -104,11 +128,17 @@ ECHO  TRUE audio floor (AUDIO_OFF=1)
 ECHO  Device-level off. SILENT.CFG is NOT a floor.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%P0
 ECHO.
 ECHO ##########################################################
 ECHO  switching PicoGUS to ADLIB MODE  (no SB, so the PIT pump can own ch0)
 ECHO ##########################################################
-pgusinit /mode adlib
+pgusinit /mode adlib > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%PR.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%PR.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%PR.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
 CALL CLRENV
 SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -124,6 +154,7 @@ ECHO  AdLib, timebase fix ON -- THE KEY CELL
 ECHO  Expect 10-40ms band POPULATED, pump_clock_state=pump-timebase-ok.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%P5
 CALL CLRENV
 SET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -140,6 +171,7 @@ ECHO  AdLib, timebase fix OFF -- the A/B arm
 ECHO  Expect that band EXACTLY EMPTY. Proves the lever on real silicon.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%P5K
 ECHO.
 ECHO ============================================================
 ECHO  PROVE-OUT DONE. Logs %QAM%P4 %QAM%P4B %QAM%P3 %QAM%P0 %QAM%P5 %QAM%P5K

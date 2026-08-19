@@ -47,9 +47,14 @@ ECHO cells=2 >> LOGS\%QAM%VIDMI.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%VIDMI.NFO
 ECHO cpu_arg=%2 >> LOGS\%QAM%VIDMI.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%VIDMI.NFO
-IF "%3"=="PG" ECHO sound=PicoGUS in SB mode >> LOGS\%QAM%VIDMI.NFO
+ECHO config=%config% >> LOGS\%QAM%VIDMI.NFO
+ECHO video_declared=%QAVID% >> LOGS\%QAM%VIDMI.NFO
+ECHO sound_declared=%QASND% >> LOGS\%QAM%VIDMI.NFO
+ECHO cell=%QAM%C4I class=diag >> LOGS\%QAM%VIDMI.NFO
+ECHO cell=%QAM%51I class=diag >> LOGS\%QAM%VIDMI.NFO
+IF "%3"=="PG" ECHO sound_note=PicoGUS in SB mode >> LOGS\%QAM%VIDMI.NFO
 IF NOT "%3"=="PG" ECHO sound=SB already in the box >> LOGS\%QAM%VIDMI.NFO
-ECHO video=ATI Mach64 >> LOGS\%QAM%VIDMI.NFO
+ECHO video_note=ATI Mach64 >> LOGS\%QAM%VIDMI.NFO
 ECHO note=FLIP_INSTR=1 -- breakdown cell, NOT an fps row >> LOGS\%QAM%VIDMI.NFO
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 ECHO ============================================================
@@ -90,6 +95,7 @@ ECHO  [1/2]  CELL C4 instrumented   log %QAM%C4I
 ECHO  same OPL3 config as VIDM's C4M anchor
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%C4I
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\AUTO.CFG DOSKUTSU.CFG > NUL
@@ -104,6 +110,7 @@ ECHO  [2/2]  CELL G51 instrumented   log %QAM%51I
 ECHO  render witness: boot, title, backdrop scroll
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%51I
 SET SDL_HINT_DOSKUTSU_FLIP_INSTR=
 SET DOSKUTSU_TAS_REPLAY=
 ECHO.

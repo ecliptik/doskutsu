@@ -41,11 +41,16 @@ ECHO cells=2 >> LOGS\%QAM%VIDMK.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%VIDMK.NFO
 ECHO cpu_arg=%2 >> LOGS\%QAM%VIDMK.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%VIDMK.NFO
+ECHO config=%config% >> LOGS\%QAM%VIDMK.NFO
+ECHO video_declared=%QAVID% >> LOGS\%QAM%VIDMK.NFO
+ECHO sound_declared=%QASND% >> LOGS\%QAM%VIDMK.NFO
+ECHO cell=%QAM%C4MK class=matrix >> LOGS\%QAM%VIDMK.NFO
+ECHO cell=%QAM%51MK class=matrix >> LOGS\%QAM%VIDMK.NFO
 REM --- SOUND-BANNER v1 ---
-IF "%3"=="PG" ECHO sound=PicoGUS in SB mode >> LOGS\%QAM%VIDMK.NFO
+IF "%3"=="PG" ECHO sound_note=PicoGUS in SB mode >> LOGS\%QAM%VIDMK.NFO
 IF NOT "%3"=="PG" ECHO sound=SB already in the box >> LOGS\%QAM%VIDMK.NFO
 REM --- SOUND-BANNER v1 ---
-ECHO video=ATI Mach64 >> LOGS\%QAM%VIDMK.NFO
+ECHO video_note=ATI Mach64 >> LOGS\%QAM%VIDMK.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%VIDMK.NFO
 REM --- QA-INSTRUMENT v1 ---
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
@@ -86,6 +91,7 @@ ECHO  [1/2]  CELL C4 on ATI Mach64
 ECHO  log %QAM%C4MK   fps ANCHOR -- same OPL3 config as every other lane
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%C4MK
 CALL CLRENV
 SET SDL_HINT_DOSKUTSU_VBLANK_BOUND=0
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -100,6 +106,7 @@ ECHO  [2/2]  CELL G51 on ATI Mach64
 ECHO  log %QAM%51MK   render witness: boot, title, backdrop scroll
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%51MK
 SET DOSKUTSU_TAS_REPLAY=
 ECHO.
 ECHO ============================================================

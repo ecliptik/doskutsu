@@ -49,6 +49,13 @@ ECHO sweep=MIDIAB >> LOGS\%QAM%MIDIAB.NFO
 ECHO cells=2 >> LOGS\%QAM%MIDIAB.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%MIDIAB.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%MIDIAB.NFO
+ECHO config=%config% >> LOGS\%QAM%MIDIAB.NFO
+ECHO video_declared=%QAVID% >> LOGS\%QAM%MIDIAB.NFO
+ECHO sound_declared=%QASND% >> LOGS\%QAM%MIDIAB.NFO
+ECHO irq_source=%QAIRQ% >> LOGS\%QAM%MIDIAB.NFO
+ECHO dktcap=%DKTCAP% >> LOGS\%QAM%MIDIAB.NFO
+ECHO cell=%QAM%MA1 class=perf >> LOGS\%QAM%MIDIAB.NFO
+ECHO cell=%QAM%MA4 class=perf >> LOGS\%QAM%MIDIAB.NFO
 ECHO note=MA1 = shipped orgmid2 (loop_reps=1); MA4 = ORGMID4 (loop_reps=4) >> LOGS\%QAM%MIDIAB.NFO
 PAUSE
 CALL CLRENV
@@ -64,6 +71,7 @@ ECHO  [1/2] CELL MA1   tag %QAM%MA1
 ECHO  AdLib, SHIPPED MIDI set (loop_reps=1)
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%MA1
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ADLIB.CFG DOSKUTSU.CFG > NUL
@@ -78,6 +86,7 @@ ECHO  [2/2] CELL MA4   tag %QAM%MA4
 ECHO  AdLib, OLD MIDI set (loop_reps=4, more events)
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%MA4
 SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=
 ECHO.
 ECHO ============================================================

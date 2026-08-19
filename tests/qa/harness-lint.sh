@@ -95,21 +95,23 @@ lint_contract() {
       || note "L3-PRECOND" "$b" "no resident-interrupt-source precondition field"
     printf '%s\n' "$body" | grep -q 'dktcap=' \
       || note "L3-PRECOND" "$b" "capture state (dktcap=) not recorded"
-    printf '%s\n' "$body" | grep -qE 'pgus[a-z_]*readback=' \
-      || note "L3-PRECOND" "$b" "PicoGUS mode not recorded as a readback"
+    if printf '%s\n' "$body" | grep -qE '^pgusinit'; then
+      printf '%s\n' "$body" | grep -qE 'pgus[a-z_]*readback=' \
+        || note "L3-PRECOND" "$b" "switches the PicoGUS but records no readback"
+    fi
   fi
 
-  # -- 10 (L3) arms paired. ONLY class=perf cells: a matrix survey or a diag
-  # cell has nothing to be paired against, and demanding it was a linter bug.
+  # -- 10 (L3) arms paired. Pairing comes from the explicit repeat_of= field,
+  # never from a name convention: TAB's TB is an ARM (TILE_BBOX_SKIP), and a
+  # `${t}B` heuristic read it as a repeat of a tag that does not exist.
   if [ "$LEVEL" = "L3" ] && [ "$has_perf" = 1 ]; then
     local perftags unpaired=""
     perftags=$(printf '%s\n' "$body" | grep -oE 'cell=[^ ]+ class=perf' | sed 's/cell=//;s/ class=perf//')
     while read -r t; do
       [ -z "$t" ] && continue
-      case "$t" in *B) continue;; esac
-      printf '%s\n' "$perftags" | grep -qx "${t}B" \
-        || printf '%s\n' "$body" | grep -q "repeat_of=$t" \
-        || unpaired="$unpaired $t"
+      printf '%s\n' "$body" | grep -q "repeat_of=$t" && continue     # something repeats it
+      printf '%s\n' "$body" | grep -qE "cell=$t .*repeat_of=" && continue        # it repeats something
+      unpaired="$unpaired $t"
     done <<< "$perftags"
     [ -n "$unpaired" ] && note "L3-PAIR" "$b" "perf arm(s) with no repeat:$unpaired"
   fi
