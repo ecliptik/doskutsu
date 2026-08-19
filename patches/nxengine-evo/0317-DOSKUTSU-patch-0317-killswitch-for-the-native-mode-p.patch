@@ -1,0 +1,94 @@
+From 19971f4433f6f12b91f9a20725b3bd34bfeb028f Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 19 Aug 2026 12:56:10 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0317 -- killswitch for the native-mode pin
+
+The pin (patches/SDL/0012) suppresses any VBE mode-set that would change
+VRAM dimensions after the first, so the mode chosen for the CreateWindow
+request stays active for the process. Its rationale asserts that hardware
+without a native 320x240 mode lands on the 640x480 fallback at mode-set
+#1, so suppression never fires and the pin is harmless there.
+
+That assertion is measured false. On the Mach64 215CT under UniVBE 6.70
+the closest match to 320x240 is 512x384 (id=0x01F3), not 640x480, so
+mode-set #3's 640x480 request is suppressed and the card holds 512x384.
+
+DOS needs this because the consequence is not cosmetic. 512x384 in that
+VESA mode runs near 75-77 Hz, outside the 60 Hz lock range of the VGA
+capture hardware the QA harness uses as its eyes, so every measured cell
+on this card is unobservable -- a wedge can be detected but not
+diagnosed. The same card enumerates 640x480 at 8bpp with LFB, which
+locks. Standing the pin down is the only way to reach it: the hint is set
+with SDL_HINT_OVERRIDE, so no environment variable can beat it and there
+was no runtime path to the mode at all.
+
+Default behaviour is unchanged -- the pin stays engaged unless
+DOSKUTSU_PIN_NATIVE_MODE is exactly "0", and both branches announce
+themselves so the smoke gate can witness which one ran.
+
+The upper-left-rendering bug the pin defends against predates patch 0296's
+centre-in-oversized path, which handles surface != logical directly and is
+correct on this card at 512x384. Whether it is also correct at 640x480 is
+what this exists to measure, not something it assumes.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/main.cpp | 45 ++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/src/main.cpp b/src/main.cpp
+index c0aae16f..86651bee 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -2433,7 +2433,50 @@ int main(int argc, char *argv[])
+   // See docs/PHASE9-15FPS-PLAN.md sec.3 Lever 0b for the full discovery
+   // context (UNIVBE/Cirrus path) and the Mach64-side stretch fix
+   // (deferred to a future wave).
+-  SDL_SetHintWithPriority(SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE, "1", SDL_HINT_OVERRIDE);
++  //
++  // DOS-PORT (patch 0317): killswitch for the pin.
++  //
++  // The rationale above states that hardware with no native 320x240 lands on
++  // the 640x480 fallback at mode-set #1, so suppression never fires and the
++  // pin is "harmless on that target". MEASURED FALSE on the Mach64 215CT
++  // under UniVBE 6.70 (2026-08-19): closest-match to 320x240 picks 512x384
++  // (id=0x01F3), so mode-set #3's 640x480 request IS suppressed and the card
++  // stays at 512x384 for the life of the process.
++  //
++  // That costs more than a mode choice. 512x384 in this VESA mode runs near
++  // 75-77 Hz, outside the 60 Hz lock range of the capture hardware the QA
++  // harness uses as its eyes, so every measured cell on this card is
++  // unobservable -- measurable but not observable. The same card enumerates
++  // 640x480 (id=0x0101, 8bpp, lfb=1, pitch=640), which does lock.
++  //
++  // Default is UNCHANGED: the pin stays ENGAGED unless DOSKUTSU_PIN_NATIVE_MODE
++  // is exactly "0". The upper-left-rendering bug the pin was written against
++  // predates patch 0296's centre-in-oversized path, which handles
++  // surface != logical directly and is demonstrably correct on this card at
++  // 512x384 (center-oversized ENGAGED, offset 96,72, flush 76800 bytes).
++  // Whether it is also correct at 640x480 is what this killswitch exists to
++  // MEASURE. It is not assumed, and the test verifies itself: if the mode is
++  // reached, capture locks and the resulting image shows whether rendering is
++  // correct or the old bug is back.
++  const char *_pin_env = std::getenv("DOSKUTSU_PIN_NATIVE_MODE");
++  const bool _pin_off = (_pin_env && _pin_env[0] == '0' && _pin_env[1] == '\0');
++  if (_pin_off)
++  {
++    LOG_INFO("pin-native-mode: STOOD DOWN (DOSKUTSU_PIN_NATIVE_MODE=0) -- subsequent "
++             "VBE mode-sets are NOT suppressed, so SDL3's desktop-mode request "
++             "(640x480) is honoured. On a card whose closest match to 320x240 is "
++             "neither 320x240 nor 640x480 this trades a mode the capture path cannot "
++             "lock for one it can. centre-oversized is expected to engage at the "
++             "larger surface; VERIFY the image rather than assuming it. Unset, or set "
++             "to 1, to restore the pin.");
++  }
++  else
++  {
++    SDL_SetHintWithPriority(SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE, "1", SDL_HINT_OVERRIDE);
++    LOG_INFO("pin-native-mode: ENGAGED (default) -- VBE mode-sets that would change VRAM "
++             "dimensions after the first are suppressed (patches/SDL/0012); set "
++             "DOSKUTSU_PIN_NATIVE_MODE=0 to stand it down.");
++  }
+ #endif
+ 
+   // SDL3: SDL_Init returns bool (true on success); old `< 0` check would always be false.
