@@ -30,8 +30,14 @@ ECHO sweep=EAR >> LOGS\%QAM%EAR.NFO
 ECHO cells=3 >> LOGS\%QAM%EAR.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%EAR.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%EAR.NFO
-ECHO sound=PicoGUS REQUIRED -- switches sb to adlib for the AdLib cell >> LOGS\%QAM%EAR.NFO
-ECHO video=S3 ViRGE >> LOGS\%QAM%EAR.NFO
+ECHO config=%config% >> LOGS\%QAM%EAR.NFO
+ECHO video_declared=%QAVID% >> LOGS\%QAM%EAR.NFO
+ECHO sound_declared=%QASND% >> LOGS\%QAM%EAR.NFO
+ECHO cell=%QAM%E4 class=probe >> LOGS\%QAM%EAR.NFO
+ECHO cell=%QAM%E3 class=probe >> LOGS\%QAM%EAR.NFO
+ECHO cell=%QAM%EA class=probe >> LOGS\%QAM%EAR.NFO
+ECHO sound_note=PicoGUS REQUIRED -- switches sb to adlib for the AdLib cell >> LOGS\%QAM%EAR.NFO
+ECHO video_note=S3 ViRGE >> LOGS\%QAM%EAR.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%EAR.NFO
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 PAUSE
@@ -56,6 +62,7 @@ ECHO  OPL3 -- Shack reference
 ECHO  LISTEN at the Shack. Music present the whole visit?
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%E4
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ORGANYA.CFG DOSKUTSU.CFG > NUL
@@ -70,6 +77,7 @@ ECHO  Organya -- Shack suspect
 ECHO  LISTEN at the Shack. Silent? Late? Whole visit?
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%E3
 ECHO.
 ECHO ##########################################################
 ECHO  switching PicoGUS to ADLIB MODE (no SB, so the PIT pump can own ch0)
@@ -89,6 +97,7 @@ ECHO  AdLib -- 486 default candidate
 ECHO  Compare against E4 by ear. Good enough to recommend?
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%EA
 ECHO.
 ECHO === Write the answers down NOW, while fresh: ===
 ECHO ===  E4 Shack music:  whole visit / late / never ===

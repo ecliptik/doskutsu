@@ -29,8 +29,17 @@ ECHO sweep=GAP >> LOGS\%QAM%GAP.NFO
 ECHO cells=4 >> LOGS\%QAM%GAP.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%GAP.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%GAP.NFO
-ECHO sound=MIXED -- X8 needs the VIBRA; the rest run on any card >> LOGS\%QAM%GAP.NFO
-ECHO video=S3 ViRGE >> LOGS\%QAM%GAP.NFO
+ECHO config=%config% >> LOGS\%QAM%GAP.NFO
+ECHO video_declared=%QAVID% >> LOGS\%QAM%GAP.NFO
+ECHO sound_declared=%QASND% >> LOGS\%QAM%GAP.NFO
+ECHO irq_source=%QAIRQ% >> LOGS\%QAM%GAP.NFO
+ECHO dktcap=%DKTCAP% >> LOGS\%QAM%GAP.NFO
+ECHO cell=%QAM%X8 class=probe >> LOGS\%QAM%GAP.NFO
+ECHO cell=%QAM%XH1 class=perf >> LOGS\%QAM%GAP.NFO
+ECHO cell=%QAM%XH2 class=perf repeat_of=%QAM%XH1 >> LOGS\%QAM%GAP.NFO
+ECHO cell=%QAM%X0 class=perf >> LOGS\%QAM%GAP.NFO
+ECHO sound_note=MIXED -- X8 needs the VIBRA; the rest run on any card >> LOGS\%QAM%GAP.NFO
+ECHO video_note=S3 ViRGE >> LOGS\%QAM%GAP.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%GAP.NFO
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 PAUSE
@@ -39,8 +48,18 @@ IF NOT "%2"=="PG" GOTO NOPGUS
 ECHO ##########################################################
 ECHO  PicoGUS box: switching to SB MODE (X8/XH need a live SB DAC)
 ECHO ##########################################################
-pgusinit /mode sb
-pgusinit /sbenv
+pgusinit /mode sb > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%GAP.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%GAP.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%GAP.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
+pgusinit /sbenv > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%GAP.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%GAP.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%GAP.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
 SET BLASTER=A220 I7 D3 P330 T3
 GOTO CARDOK
 :NOPGUS
@@ -66,6 +85,7 @@ ECHO  tag %QAM%X8
 ECHO  VIBRA ONLY. Separates card from DMA path.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%X8
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ORGHQ.CFG DOSKUTSU.CFG > NUL
@@ -80,6 +100,7 @@ ECHO  tag %QAM%XH1
 ECHO  5112 gave an impossible ratio. Two runs test reproducibility.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%XH1
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ORGHQ.CFG DOSKUTSU.CFG > NUL
@@ -94,6 +115,7 @@ ECHO  tag %QAM%XH2
 ECHO  If XH1 and XH2 disagree, ORGHQ is non-reproducible.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%XH2
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
@@ -109,6 +131,7 @@ ECHO  tag %QAM%X0
 ECHO  Device-level off. NOT the same as SILENT.CFG.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%X0
 ECHO.
 ECHO === GAP CELLS DONE. Logs %QAM%X0 %QAM%X8 %QAM%XH1 %QAM%XH2 ===
 ECHO.

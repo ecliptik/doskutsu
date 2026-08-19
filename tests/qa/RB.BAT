@@ -46,6 +46,14 @@ ECHO sweep=RB >> LOGS\%QAM%RB.NFO
 ECHO cells=4 >> LOGS\%QAM%RB.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%RB.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%RB.NFO
+ECHO video_declared=%QAVID% >> LOGS\%QAM%RB.NFO
+ECHO sound_declared=%QASND% >> LOGS\%QAM%RB.NFO
+ECHO irq_source=%QAIRQ% >> LOGS\%QAM%RB.NFO
+ECHO dktcap=%DKTCAP% >> LOGS\%QAM%RB.NFO
+ECHO cell=%QAM%R4 class=perf >> LOGS\%QAM%RB.NFO
+ECHO cell=%QAM%R4B class=perf repeat_of=%QAM%R4 >> LOGS\%QAM%RB.NFO
+ECHO cell=%QAM%R3 class=probe >> LOGS\%QAM%RB.NFO
+ECHO cell=%QAM%R5 class=perf >> LOGS\%QAM%RB.NFO
 REM  Record the CONFIG.SYS boot profile. Unlike a SET, %config% is
 REM  chosen at the boot menu and cannot be retrofitted onto a run that
 REM  did not boot that way, so a log PROVES its own provenance rather
@@ -54,7 +62,7 @@ REM  the wrong profile -- e.g. VIBRAUSB with no Vibra fitted, which
 REM  yields no DAC at all and would otherwise look like silent audio
 REM  with no record of why.
 ECHO config=%config% >> LOGS\%QAM%RB.NFO
-ECHO sound=PicoGUS REQUIRED -- this sweep switches it sb to adlib >> LOGS\%QAM%RB.NFO
+ECHO sound_note=PicoGUS REQUIRED -- this sweep switches it sb to adlib >> LOGS\%QAM%RB.NFO
 ECHO video_declared=S3 ViRGE (DECLARED not detected -- UniVBE masks chipset; see SDL log) >> LOGS\%QAM%RB.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%RB.NFO
 REM  DKTCAP=1 marks an UNATTENDED CAPTURE session. Default (unset) is
@@ -78,8 +86,18 @@ ECHO.
 ECHO ##########################################################
 ECHO  switching PicoGUS to SB MODE (cells needing a live SB DAC)
 ECHO ##########################################################
-pgusinit /mode sb
-pgusinit /sbenv
+pgusinit /mode sb > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%RB.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%RB.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%RB.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
+pgusinit /sbenv > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%RB.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%RB.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%RB.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
 SET BLASTER=A220 I7 D3 P330 T3
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -95,6 +113,7 @@ ECHO  OPL3 -- the control
 ECHO  Non-pump. Must match the banked C4 anchor.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%R4
 IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -110,6 +129,7 @@ ECHO  OPL3 repeat -- the noise floor
 ECHO  Back-to-back with R4. The spread IS the noise floor.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%R4B
 IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -125,12 +145,18 @@ ECHO  Organya -- the re-rendered PCM cache
 ECHO  Catches a silently different re-render.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%R3
 IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 ECHO.
 ECHO ##########################################################
 ECHO  switching PicoGUS to ADLIB MODE (no SB, so the PIT pump can own ch0)
 ECHO ##########################################################
-pgusinit /mode adlib
+pgusinit /mode adlib > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%RB.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%RB.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%RB.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ADLIB.CFG DOSKUTSU.CFG > NUL
@@ -145,6 +171,7 @@ ECHO  AdLib -- the pump path
 ECHO  The timebase fix touches ONLY gus/adlib. Movement here is a FINDING.
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%R5
 IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 ECHO.
 ECHO === RE-BASELINE DONE. Logs %QAM%R4 %QAM%R4B %QAM%R3 %QAM%R5 ===

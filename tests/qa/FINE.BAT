@@ -62,9 +62,14 @@ ECHO cells=2 >> LOGS\%QAM%FINE.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%FINE.NFO
 ECHO cpu_arg=%2 >> LOGS\%QAM%FINE.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%FINE.NFO
-IF "%3"=="PG" ECHO sound=PicoGUS in SB mode >> LOGS\%QAM%FINE.NFO
+ECHO config=%config% >> LOGS\%QAM%FINE.NFO
+ECHO video_declared=%QAVID% >> LOGS\%QAM%FINE.NFO
+ECHO sound_declared=%QASND% >> LOGS\%QAM%FINE.NFO
+ECHO cell=%QAM%C4F class=diag >> LOGS\%QAM%FINE.NFO
+ECHO cell=%QAM%51F class=diag >> LOGS\%QAM%FINE.NFO
+IF "%3"=="PG" ECHO sound_note=PicoGUS in SB mode >> LOGS\%QAM%FINE.NFO
 IF NOT "%3"=="PG" ECHO sound=SB already in the box >> LOGS\%QAM%FINE.NFO
-ECHO video=whatever is in the box -- card-independent cell >> LOGS\%QAM%FINE.NFO
+ECHO video_note=whatever is in the box -- card-independent cell >> LOGS\%QAM%FINE.NFO
 ECHO note=FINE_INSTR=1 -- decomposition cell, NOT an fps row >> LOGS\%QAM%FINE.NFO
 SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
 ECHO ============================================================
@@ -109,6 +114,7 @@ ECHO  [1/2]  CELL C4 decomposed   log %QAM%C4F
 ECHO  same OPL3 config as the C4M anchor
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%C4F
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\AUTO.CFG DOSKUTSU.CFG > NUL
@@ -125,6 +131,7 @@ ECHO  [2/2]  CELL G51 decomposed   log %QAM%51F
 ECHO  auto-detect audio, same reel
 ECHO ============================================
 DOSKUTSU.EXE
+ECHO  CELL DONE %QAM%51F
 SET SDL_HINT_DOSKUTSU_FINE_INSTR=
 SET SDL_HINT_DOSKUTSU_MODE_TICK_INSTR=
 SET SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR=
