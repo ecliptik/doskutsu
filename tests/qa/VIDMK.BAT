@@ -63,7 +63,7 @@ REM PicoGUS setup is OPT-IN. Without it the lane uses whatever SB is
 REM already in the box -- a Vibra16 needs its own BLASTER (I5 D1 H5),
 REM and the PicoGUS jumper values below would break it.
 IF NOT "%3"=="PG" GOTO SNDOK
-ECHO  switching PicoGUS -> SB MODE
+ECHO  switching PicoGUS to SB MODE
 pgusinit /mode sb
 pgusinit /sbenv
 SET BLASTER=A220 I7 D3 P330 T3

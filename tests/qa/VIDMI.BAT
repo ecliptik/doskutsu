@@ -7,8 +7,8 @@ REM  `CALL VIDM`, which meant it inherited VIDM's log tags and
 REM  OVERWROTE the clean fps rows with instrumented ones -- you could
 REM  never hold both from one sitting. This writes its own tags:
 REM
-REM      VIDM   ->  <m>C4M  <m>51M   (clean, fps rows)
-REM      VIDMI  ->  <m>C4I  <m>51I   (instrumented, NOT fps rows)
+REM      VIDM   gives  [m]C4M  [m]51M   (clean, fps rows)
+REM      VIDMI  gives  [m]C4I  [m]51I   (instrumented, NOT fps rows)
 REM
 REM  FLIP_INSTR is set AFTER each CLRENV on purpose. CLRENV is
 REM  generated from the hint list and does not clear FLIP_INSTR today,
@@ -18,7 +18,7 @@ REM
 REM  NOT AN FPS ROW. The extra timer reads per flip cost time. Read the
 REM  breakdown, do not bank the frame rate.
 REM
-REM  Usage:  QA <n>   then   VIDMI <n> [PG]
+REM  Usage:  QA [n]   then   VIDMI [n] [PG]
 REM ===================================================================
 IF "%1"=="GO" GOTO GO
 COMMAND /E:2048 /C %0 GO %1 %2
@@ -68,7 +68,7 @@ ECHO ============================================================
 PAUSE
 ECHO.
 IF NOT "%3"=="PG" GOTO SNDOK
-ECHO  switching PicoGUS -> SB MODE
+ECHO  switching PicoGUS to SB MODE
 pgusinit /mode sb
 pgusinit /sbenv
 SET BLASTER=A220 I7 D3 P330 T3
