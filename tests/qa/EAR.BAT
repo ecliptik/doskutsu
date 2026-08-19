@@ -45,8 +45,18 @@ ECHO.
 ECHO ##########################################################
 ECHO  switching PicoGUS to SB MODE (cells needing a live SB DAC)
 ECHO ##########################################################
-pgusinit /mode sb
-pgusinit /sbenv
+pgusinit /mode sb > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%EAR.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%EAR.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%EAR.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
+pgusinit /sbenv > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%EAR.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%EAR.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%EAR.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
 SET BLASTER=A220 I7 D3 P330 T3
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
@@ -82,7 +92,12 @@ ECHO.
 ECHO ##########################################################
 ECHO  switching PicoGUS to ADLIB MODE (no SB, so the PIT pump can own ch0)
 ECHO ##########################################################
-pgusinit /mode adlib
+pgusinit /mode adlib > PGOUT.TMP
+TYPE PGOUT.TMP
+ECHO pgusmode_readback=begin >> LOGS\%QAM%EAR.NFO
+TYPE PGOUT.TMP >> LOGS\%QAM%EAR.NFO
+ECHO pgusmode_readback=end >> LOGS\%QAM%EAR.NFO
+IF EXIST PGOUT.TMP DEL PGOUT.TMP
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\ADLIB.CFG DOSKUTSU.CFG > NUL

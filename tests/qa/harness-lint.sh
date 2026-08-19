@@ -78,6 +78,15 @@ lint_contract() {
   [ "$nclr" -lt "$nrun" ] \
     && note "L1-CLEAR" "$b" "$nrun cell(s) but only $nclr env clear(s)"
 
+  # -- 6.4 (L2) a sweep that switches the sound card MUST record a readback,
+  # regardless of cell class. config= cannot distinguish the sound lanes once
+  # the boot profiles merge, and a diag run needs to know what the card was
+  # doing as much as a perf run does.
+  if [ "$LEVEL" != "L1" ] && printf '%s\n' "$body" | grep -qE '^pgusinit'; then
+    printf '%s\n' "$body" | grep -qE 'pgus[a-z_]*readback=' \
+      || note "L2-READBK" "$b" "switches the PicoGUS but records no readback"
+  fi
+
   # -- 4.1 result class. Levels attach to CLASSES, not files: a sweep may mix
   # a paired perf comparison with diag cells comparable to nothing. Absent a
   # machine-readable class, L3 rules below cannot be applied honestly.
@@ -95,10 +104,6 @@ lint_contract() {
       || note "L3-PRECOND" "$b" "no resident-interrupt-source precondition field"
     printf '%s\n' "$body" | grep -q 'dktcap=' \
       || note "L3-PRECOND" "$b" "capture state (dktcap=) not recorded"
-    if printf '%s\n' "$body" | grep -qE '^pgusinit'; then
-      printf '%s\n' "$body" | grep -qE 'pgus[a-z_]*readback=' \
-        || note "L3-PRECOND" "$b" "switches the PicoGUS but records no readback"
-    fi
   fi
 
   # -- 10 (L3) arms paired. Pairing comes from the explicit repeat_of= field,
