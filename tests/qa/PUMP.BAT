@@ -95,6 +95,12 @@ ECHO cell=%QAM%PUA class=perf arm=no_input_poll >> %QANFO%
 ECHO cell=%QAM%PU0B class=perf arm=control repeat_of=%QAM%PU0 >> %QANFO%
 ECHO cell=%QAM%PUAB class=perf arm=no_input_poll repeat_of=%QAM%PUA >> %QANFO%
 ECHO note=event-pump ablation -- paired arms, NOT fps rows >> %QANFO%
+IF NOT "%DKTCAP%"=="1" SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
+IF "%DKTCAP%"=="1" SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=0
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
+IF "%DKTCAP%"=="1" ECHO  [DKTCAP=1] capture session: banner delay off, console
+IF "%DKTCAP%"=="1" ECHO  returns to mode 12h between cells (text will be SLOW).
+IF "%DKTCAP%"=="1" ECHO  SET DKTCAP= to turn off; VGACAP\MODE03 restores text.
 ECHO.
 ECHO ============================================================
 ECHO  PUMP -- event-pump ablation, 4 cells, both arms repeated

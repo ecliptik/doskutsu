@@ -117,6 +117,8 @@ for r in $refs; do
   case "$r" in PROFILE.DAT) note "PROFILE.DAT = created at runtime from PROFILE.GLD (COPY) -- OK";; \
                COMMAND.COM) note "COMMAND.COM = DOS shell (always present) -- OK";; \
                PLAY.TAS) is_bundled "PLAY.TAS" && continue; note "PLAY.TAS = TAS/ dir or prereq -- confirm";; \
+               FIND.EXE) note "FIND.EXE = MS-DOS 6.22 external command in C:\\DOS, on PATH -- OK";; \
+               MODE12.COM) note "MODE12.COM = VGACAP capture tool; every call is guarded by IF EXIST C:\\VGACAP\\ -- OK";; \
                *) failr "referenced file '$r' not bundled (prereq? document or bundle)"; fe=1;; esac
 done
 [[ $fe -eq 0 ]] && pass "all referenced files bundled or runtime-created/prereq"
@@ -129,7 +131,23 @@ for b in "${BATS[@]}"; do
   file "$b" | grep -q "UTF-8" && { failr "$bn: UTF-8 (non-ASCII)"; g5=1; }
   LC_ALL=C grep -qP '[^\x00-\x7F\r]' "$b" && { failr "$bn: non-ASCII byte"; g5=1; }
   base="${bn%.*}"; [[ ${#base} -le 8 ]] || { failr "$bn: base >8 chars (8.3)"; g5=1; }
-  grep -qE '^[[:space:]]*(REM|ECHO)\b.*[<>]' "$b" && { failr "$bn: < or > in REM/ECHO (stray-file/redirect footgun)"; g5=1; }
+  # REM and ECHO both hand their line to COMMAND.COM's redirect parser, so a
+  # stray > in either creates a file. But `ECHO field=value >> manifest` is the
+  # harness manifest mechanism the standard mandates, and flagging every one of
+  # those made this gate fire on 19 of 22 conforming BATs -- noise that got the
+  # whole audit ignored. Discriminate on the redirect TARGET: a log/manifest
+  # sink is intended, anything else (`ECHO a -> b` writes a file called b) is
+  # the footgun. A redirect in a REM is never intended.
+  while IFS=: read -r ln txt; do
+    [[ -z "$ln" ]] && continue
+    if [[ "$txt" =~ ^[[:space:]]*[Rr][Ee][Mm] ]]; then
+      failr "$bn:$ln: redirect inside REM -- COMMAND.COM executes it"; g5=1; continue
+    fi
+    rest="$(sed -E 's/[[:space:]]*>>?[[:space:]]*(NUL|%[A-Za-z_][A-Za-z0-9_]*%|[A-Za-z0-9_\\:.%]*\.(NFO|LOG|TMP|OUT|CHK|DAT))[[:space:]]*$//I' <<<"$txt")"
+    if [[ "$rest" == *"<"* || "$rest" == *">"* ]]; then
+      failr "$bn:$ln: stray < or > outside a log redirect -- creates a file"; g5=1
+    fi
+  done < <(grep -nE '^[[:space:]]*([Rr][Ee][Mm]|[Ee][Cc][Hh][Oo])\b.*[<>]' "$b" | tr -d '\r')
   while IFS= read -r t; do t="${t%$'\r'}"; t="${t##*=}"; t="${t//%QAM%/Q}"; [[ ${#t} -le 5 ]] || { failr "$bn: LOG_TAG '$t' >5 chars"; g5=1; }; done < <(grep -hE 'SET[[:space:]]+DOSKUTSU_LOG_TAG=' "$b" 2>/dev/null)
 done
 [[ $g5 -eq 0 ]] && pass "CRLF + ASCII + 8.3 + no REM/ECHO redirect + LOG_TAG<=5"

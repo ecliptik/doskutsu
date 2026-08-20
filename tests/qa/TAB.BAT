@@ -19,7 +19,7 @@ REM  I read bg_state=D fg_state=D with zero hits AND zero misses. If
 REM  cell 3 comes back level with cell 1, that is the predicted result
 REM  and it CONFIRMS the cache is not the answer -- not a failed run.
 REM
-REM  Usage:  QA [n]   then   TAB [n] [PG]
+REM  Usage:  QA [n]   then   TAB [n]      (switches the PicoGUS itself)
 REM ===================================================================
 IF "%1"=="GO" GOTO GO
 COMMAND /E:2048 /C %0 GO %1 %2
@@ -46,11 +46,19 @@ IF "%QAVID%"=="" SET QAVID=UNDECLARED
 IF "%QASND%"=="" SET QASND=UNDECLARED
 IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%TAB.NFO
+ECHO schema=harness-1 >> LOGS\%QAM%TAB.NFO
 ECHO sweep=TAB >> LOGS\%QAM%TAB.NFO
 ECHO cells=3 >> LOGS\%QAM%TAB.NFO
 ECHO cpu=%QACPU% >> LOGS\%QAM%TAB.NFO
 ECHO cpu_arg=%2 >> LOGS\%QAM%TAB.NFO
 ECHO log_tag_prefix=%QAM% >> LOGS\%QAM%TAB.NFO
+REM  Record the CONFIG.SYS boot profile. Unlike a SET, %config% is
+REM  chosen at the boot menu and cannot be retrofitted onto a run that
+REM  did not boot that way, so a log PROVES its own provenance rather
+REM  than attesting to the absence of something. Catches a cell run on
+REM  the wrong profile -- e.g. VIBRAUSB with no Vibra fitted, which
+REM  yields no DAC at all and would otherwise look like silent audio
+REM  with no record of why.
 ECHO config=%config% >> LOGS\%QAM%TAB.NFO
 ECHO video_declared=%QAVID% >> LOGS\%QAM%TAB.NFO
 ECHO sound_declared=%QASND% >> LOGS\%QAM%TAB.NFO
@@ -59,11 +67,25 @@ ECHO dktcap=%DKTCAP% >> LOGS\%QAM%TAB.NFO
 ECHO cell=%QAM%T0 class=perf >> LOGS\%QAM%TAB.NFO
 ECHO cell=%QAM%TB class=perf >> LOGS\%QAM%TAB.NFO
 ECHO cell=%QAM%TC class=perf >> LOGS\%QAM%TAB.NFO
-IF "%3"=="PG" ECHO sound_note=PicoGUS in SB mode >> LOGS\%QAM%TAB.NFO
-IF NOT "%3"=="PG" ECHO sound=SB already in the box >> LOGS\%QAM%TAB.NFO
-ECHO video_note=whatever is in the box >> LOGS\%QAM%TAB.NFO
+ECHO sound_note=PicoGUS switched to SB mode by this sweep >> LOGS\%QAM%TAB.NFO
+ECHO video=whatever is in the box >> LOGS\%QAM%TAB.NFO
 ECHO note=tile A/B -- ALL THREE cells are fps rows >> LOGS\%QAM%TAB.NFO
-SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
+REM  DKTCAP=1 marks an UNATTENDED CAPTURE session. Default (unset) is
+REM  byte-identical to every banked round: the 10 s banner delay stays, and
+REM  no mode switch happens. Only an explicit SET DKTCAP=1 changes anything.
+IF NOT "%DKTCAP%"=="1" SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=10000
+IF "%DKTCAP%"=="1" SET SDL_HINT_DOSKUTSU_BANNER_DELAY_MS=0
+REM  Switch to mode 12h HERE, before the banner below, not only after cells.
+REM  The banner is the capture harness's positive witness that DKTCAP took --
+REM  but printed into text mode 03h (720x400 @70 Hz) no capture device can
+REM  lock it, so the witness would be invisible to the only thing that needs
+REM  to read it. Firing the switch first makes the banner, the PAUSE and any
+REM  error text capturable. Costs a slow planar redraw of the banner, which
+REM  is outside every timed bracket.
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
+IF "%DKTCAP%"=="1" ECHO  [DKTCAP=1] capture session: banner delay off, console
+IF "%DKTCAP%"=="1" ECHO  returns to mode 12h between cells (text will be SLOW).
+IF "%DKTCAP%"=="1" ECHO  SET DKTCAP= to turn off; VGACAP\MODE03 restores text.
 ECHO ============================================================
 ECHO  TILE A/B -- all three cells ARE fps rows
 ECHO  machine %QAM%   3 cells   tags %QAM%T0 %QAM%TB %QAM%TC
@@ -74,7 +96,13 @@ ECHO  Cell 3 coming back level with cell 1 is the EXPECTED result.
 ECHO ============================================================
 PAUSE
 ECHO.
-IF NOT "%3"=="PG" GOTO SNDOK
+REM  UNCONDITIONAL, deliberately. This was gated on a `PG` argument that in
+REM  practice never fired -- every manifest this campaign has written says
+REM  "SB already in the box". The cells worked anyway by INHERITING SB mode
+REM  from an earlier sweep, which made them hostage to run order. Round M
+REM  scheduled MINE straight after RB, whose last act is `pgusinit /mode
+REM  adlib`, so no SB DSP answered at 0x220 and both cells died at sdl_init
+REM  one second in. RB switches unconditionally at its top; so does this.
 ECHO  switching PicoGUS to SB MODE
 pgusinit /mode sb > PGOUT.TMP
 TYPE PGOUT.TMP
@@ -84,15 +112,11 @@ ECHO pgusmode_readback=end >> LOGS\%QAM%TAB.NFO
 IF EXIST PGOUT.TMP DEL PGOUT.TMP
 pgusinit /sbenv > PGOUT.TMP
 TYPE PGOUT.TMP
-ECHO pgusmode_readback=begin >> LOGS\%QAM%TAB.NFO
+ECHO sbenv_readback=begin >> LOGS\%QAM%TAB.NFO
 TYPE PGOUT.TMP >> LOGS\%QAM%TAB.NFO
-ECHO pgusmode_readback=end >> LOGS\%QAM%TAB.NFO
+ECHO sbenv_readback=end >> LOGS\%QAM%TAB.NFO
 IF EXIST PGOUT.TMP DEL PGOUT.TMP
 SET BLASTER=A220 I7 D3 P330 T3
-GOTO SNDOK2
-:SNDOK
-ECHO  using the SB already in the box (BLASTER left as the boot set it)
-:SNDOK2
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
@@ -105,7 +129,7 @@ ECHO ============================================
 ECHO  [1/3]  CONTROL   log %QAM%T0
 ECHO ============================================
 DOSKUTSU.EXE
-ECHO  CELL DONE %QAM%T0
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
@@ -119,7 +143,7 @@ ECHO ============================================
 ECHO  [2/3]  TILE_BBOX_SKIP=1   log %QAM%TB
 ECHO ============================================
 DOSKUTSU.EXE
-ECHO  CELL DONE %QAM%TB
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 CALL CLRENV
 IF EXIST PROFILE.DAT DEL PROFILE.DAT
 COPY CFGS\OPL3.CFG DOSKUTSU.CFG > NUL
@@ -134,7 +158,7 @@ ECHO  [3/3]  TILEMAP_CACHE=1   log %QAM%TC
 ECHO  expect level with cell 1 -- that is the answer, not a failure
 ECHO ============================================
 DOSKUTSU.EXE
-ECHO  CELL DONE %QAM%TC
+IF "%DKTCAP%"=="1" IF EXIST C:\VGACAP\MODE12.COM C:\VGACAP\MODE12.COM
 SET SDL_HINT_DOSKUTSU_TILE_BBOX_SKIP=
 SET SDL_HINT_DOSKUTSU_TILEMAP_CACHE=
 SET DOSKUTSU_TAS_REPLAY=
