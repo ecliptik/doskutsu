@@ -52,68 +52,55 @@ A cache-key `WARN` means every Organya cell cold-renders. Stop, re-populate.
 
 ---
 
-## Round P -- the last unmeasured milliseconds, POD-83
+## Round P -- event-pump ablation, POD-83
 
-One machine, ViRGE + PicoGUS, ~23 min. **No new patch and no new lever** --
-the ablation has been compiled in since patch 0063.
+ViRGE + PicoGUS. No new patch. ~23 min.
+Rationale and expected reading: `docs/internal/ROUND-P-PUMP.md`.
 
-| Step | Type after boot | Time |
-|---|---|---|
-| P0 | *laptop*, populate | 6 min |
-| P1 | `QA 1` then `PUMP 1` | 14 min |
-| P2 | *laptop*, logback `r16-pump`, send | 3 min |
+| Step | Hardware | Type after boot | Time |
+|---|---|---|---|
+| P0 | laptop | populate | 6 min |
+| P1 | ViRGE + PicoGUS | `QA 1 VIRGE PICOGUS` then `PUMP 1` | 14 min |
+| P2 | laptop | logback `r16-pump`, send | 3 min |
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r16-pump
 
-### What it measures
-
-The POD's frame is 32.8 ms in-loop. Round N accounted for all but **~3.9 ms**
--- tilemap 21.05, flip 4.55, sim 2.39, HUD and post 0.94. That 12% has never
-been instrumented on any machine. Most of it should be `input_poll`, which
-runs ~1.67 times per frame and is entirely unbracketed.
-
-`DOSKUTSU_NO_INPUT_POLL=1` skips the event pump. The gap between arms is its
-total cost, including the cooperative-scheduler yield that happens inside it.
-
-### Four cells, both arms repeated
+### Cells
 
 | cell | tag | arm |
 |---|---|---|
-| 1 | `GP0` | control |
-| 2 | `GPA` | pump OFF |
-| 3 | `GP0B` | control, repeat |
-| 4 | `GPAB` | pump OFF, repeat |
+| 1 | `GPU0` | control |
+| 2 | `GPUA` | pump OFF |
+| 3 | `GPU0B` | control, repeat |
+| 4 | `GPUAB` | pump OFF, repeat |
 
-**The control runs in this session rather than being borrowed from round O.**
-The repeats are not padding: the measured floor is 0.2 fps, a 0.6 fps result
-once failed to reproduce, and cross-round comparison has been unreliable here.
-The control pair gives this round its own band; the ablated pair proves the
-delta is not a single-sample artifact.
+### Scoreable only if
 
-### Expect the audio to misbehave in cells 2 and 4
+- [ ] `LOGS\GPUMP.NFO` carries `schema=harness-1`, `cells=4`, four `cell=` lines
+- [ ] `video_declared=VIRGE` and `sound_declared=PICOGUS`, neither `UNDECLARED`
+- [ ] `config=` names the booted profile
+- [ ] `pgusmode_readback=begin` block present
+- [ ] eight logs back: `<tag>.LOG` + `<tag>SDL.LOG` for all four tags
+- [ ] every SDL log: `oem_string='Universal VESA VBE 6.70'`
+- [ ] every SDL log: `has_lfb=1 use_lfb=1 banked=0`
+- [ ] `PUMP DONE` banner captured
 
-The event pump is where the SDL3-DOS cooperative scheduler yields, so skipping
-it starves the audio thread. Expected, not a fault. The reel drives input under
-TAS so the run completes even though the game is uncontrollable by hand. **If a
-cell hangs or exits early rather than completing, that is the result** --
-report it rather than retrying.
+Any box unticked -- provisional, does not enter the matrix.
 
-**Not fps rows.** This is an ablation sizing a cost, not a shippable
-configuration. `PUMP` clears `NO_INPUT_POLL` itself at the end; if the variable
-is ever set by hand instead, clear it -- it is not in `CLRENV` and would
-silently ablate every later cell in that boot.
+### Not broken
 
-### Harness note
+| | |
+|---|---|
+| audio wrong in cells 2 and 4 | correct -- the ablation starves the audio yield |
+| a cell hangs or exits early | that IS the result -- report it, never retry |
+| `NO_INPUT_POLL` still set after | `PUMP` clears it; if it was set by hand, clear it |
 
-`PUMP` carries the `DKTCAP` gate, so vcctrl can drive it. Control sequence:
+### vcctrl
 
-    boot -> prompt -> QA 1 -> SET DKTCAP=1 -> PUMP 1 -> one keypress at PAUSE -> wait
+    QA 1 VIRGE PICOGUS -> SET DKTCAP=1 -> PUMP 1 -> one key at the PAUSE
 
-There is no console prompt between cells, so nothing may be typed mid-sweep.
-Expected span ~14 min on the POD; a timeout at ~2x is safe. Read
-`config=` in `LOGS\GPUMP.NFO` to confirm which boot profile produced the run.
-
+No prompt between cells; nothing may be typed mid-sweep. ~14 min, timeout 2x.
 ---
 
 ## Reference
@@ -127,6 +114,7 @@ Expected span ~14 min on the POD; a timeout at ~2x is safe. Read
 | `PROVE` | 6 | ~18 min | ViRGE + PicoGUS |
 | `GAP` | 4 | ~12 min | ViRGE + Vibra |
 | `MIDIAB` | 2 | ~7 min | ViRGE + PicoGUS |
+| `PUMP` | 4 | ~14 min | any card + PicoGUS, tags `PU0`/`PUA`/`PU0B`/`PUAB` |
 | `VB` | 6 | ~35 min | ViRGE + Vibra (WB cell needs the header) |
 | `VIDM` | 2 | ~6 min | Mach64 |
 | `VIDMI` | 2 | ~6 min | Mach64, own tags `C4I`/`51I` |
@@ -165,11 +153,20 @@ Add `PG` to a **Mach64** sweep only if the PicoGUS is in. `ADIAG` `DEEP`
 
 ### Payload
 
-| | Round 5 | Round 8 | Round 13 |
-|---|---|---|---|
-| Binary | `c1729d2fe065` | `6971e9f73bc9` | `e9e8ff80ae10` |
-| Tarball | `d49dccd49558` | `162fb8b55a4c` | `c3daea95f466` |
-| Cache key | `482d88eba8b2` | `3ba36d8dd56d` | `66ff01f7f997` |
+| | Round 5 | Round 8 | Round 13 | Round 17 |
+|---|---|---|---|---|
+| Binary | `c1729d2fe065` | `6971e9f73bc9` | `e9e8ff80ae10` | `e9e8ff80ae10` |
+| Tarball | `d49dccd49558` | `162fb8b55a4c` | `c3daea95f466` | `03885e45e662` |
+| Cache key | `482d88eba8b2` | `3ba36d8dd56d` | `66ff01f7f997` | `66ff01f7f997` |
+
+**Round 17 is a BAT-only repack of Round 16.** Same binary, same caches, same
+cache key, so nothing cold-renders. It brings 22 BATs up to the harness
+standard -- `schema=harness-1`, declared hardware, per-cell `class=`, PicoGUS
+readback instead of the requested mode -- and repairs two defects still live
+in the r16 kit: `REM  Usage: QA <n>` redirected inside a comment, and
+`ECHO ... -^> SB MODE` used a caret that COMMAND.COM does not have, so it
+printed half the line and created a file called `SB`. Both were in
+`DEEP` `FINE` `TAB`. `QA` now takes the declared hardware: `QA 1 VIRGE PICOGUS`.
 
 **Round 16 is a BAT-only repack of Round 13** (r14 and r15 were superseded
 before reaching a card). It adds the `PUMP` sweep and records the CONFIG.SYS
