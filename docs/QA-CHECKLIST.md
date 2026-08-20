@@ -66,6 +66,16 @@ Rationale and expected reading: `docs/internal/ROUND-P-PUMP.md`.
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
     scp claude:/tmp/logback-qa.sh /tmp/ && bash /tmp/logback-qa.sh r16-pump
 
+### Before P1 -- check UniVBE is actually resident
+
+    MEM /C | FIND "UNIVBE"
+
+No line means it is not loaded, and the round is already dead: the ViRGE
+ROM offers no 320x240 and no LFB, so the engine falls to 640x480 banked and
+crawls. `UNIVBE.EXE` prints NOTHING when it declines -- silence is the
+failure, not the success. Re-run `UVCONFIG.EXE` at the machine after any
+card swap, then reboot.
+
 ### Cells
 
 | cell | tag | arm |
