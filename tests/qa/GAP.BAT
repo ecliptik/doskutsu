@@ -13,20 +13,20 @@ IF "%QAM%"=="A" SET QACPU=Am5x86-133
 IF "%QAM%"=="6" SET QACPU=486DX2-66
 IF "%QAM%"=="5" SET QACPU=486DX2-50
 IF NOT EXIST LOGS\NUL MKDIR LOGS
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO ============================================================
 ECHO  SWEEP : GAP cells -- closes four measurement gaps
 ECHO  CELLS : 4 cells, ~10 min
 ECHO  CPU   : %QACPU%
 ECHO  SOUND : MIXED -- X8 needs the VIBRA; the rest run on any card
-ECHO  VIDEO : S3 ViRGE
+ECHO  VIDEO : %QAVID% (declared; verify with vcctrl-cardid on the SDL log)
 ECHO  LOGS  : tagged %QAM%..  in LOGS\
 ECHO ============================================================
 ECHO  Check the CPU and cards above match the box before starting.
 ECHO  X8 is MEANINGLESS off the Vibra -- skip or ignore it there.
 ECHO ============================================================
-IF "%QAVID%"=="" SET QAVID=UNDECLARED
-IF "%QASND%"=="" SET QASND=UNDECLARED
-IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%GAP.NFO
 ECHO sweep=GAP >> LOGS\%QAM%GAP.NFO
 ECHO cells=4 >> LOGS\%QAM%GAP.NFO

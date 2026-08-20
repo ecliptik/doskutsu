@@ -30,14 +30,14 @@ REM --- SOUND-BANNER v1 ---
 IF "%3"=="PG" ECHO  SOUND : PicoGUS -- will switch it to SB mode
 IF NOT "%3"=="PG" ECHO  SOUND : the SB already in the box (add PG for a PicoGUS)
 REM --- SOUND-BANNER v1 ---
-ECHO  VIDEO : ATI Mach64
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
+ECHO  VIDEO : %QAVID% (declared; this sweep REQUIRES a Mach64 -- verify with vcctrl-cardid on the SDL log)
 ECHO  LOGS  : tagged %QAM%..  in LOGS\
 ECHO ============================================================
 ECHO  Check the CPU and cards above match the box before starting.
 ECHO ============================================================
-IF "%QAVID%"=="" SET QAVID=UNDECLARED
-IF "%QASND%"=="" SET QASND=UNDECLARED
-IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%VIDMK.NFO
 ECHO sweep=VIDMK >> LOGS\%QAM%VIDMK.NFO
 ECHO cells=2 >> LOGS\%QAM%VIDMK.NFO

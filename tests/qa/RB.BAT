@@ -30,20 +30,20 @@ IF "%QAM%"=="A" SET QACPU=Am5x86-133
 IF "%QAM%"=="6" SET QACPU=486DX2-66
 IF "%QAM%"=="5" SET QACPU=486DX2-50
 IF NOT EXIST LOGS\NUL MKDIR LOGS
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO ============================================================
 ECHO  SWEEP : RE-BASELINE anchor set (run after ANY new binary)
 ECHO  CELLS : 4 cells, ~10 min
 ECHO  CPU   : %QACPU%
 ECHO  SOUND : PicoGUS REQUIRED -- this sweep switches it sb to adlib
-ECHO  VIDEO : S3 ViRGE (match the banked anchors)
+ECHO  VIDEO : %QAVID% (declared; verify with vcctrl-cardid on the SDL log)
 ECHO  LOGS  : tagged %QAM%..  in LOGS\
 ECHO ============================================================
 ECHO  Each cell covers a DIFFERENT thing the new binary changed.
 ECHO  R4/R4B are ADJACENT on purpose: that spread IS the noise floor.
 ECHO ============================================================
-IF "%QAVID%"=="" SET QAVID=UNDECLARED
-IF "%QASND%"=="" SET QASND=UNDECLARED
-IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%RB.NFO
 ECHO sweep=RB >> LOGS\%QAM%RB.NFO
 ECHO cells=4 >> LOGS\%QAM%RB.NFO

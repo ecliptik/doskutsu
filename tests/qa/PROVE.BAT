@@ -13,12 +13,15 @@ IF "%QAM%"=="A" SET QACPU=Am5x86-133
 IF "%QAM%"=="6" SET QACPU=486DX2-66
 IF "%QAM%"=="5" SET QACPU=486DX2-50
 IF NOT EXIST LOGS\NUL MKDIR LOGS
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO ============================================================
 ECHO  SWEEP : PROVE-OUT -- validates the round-2 binary on real silicon
 ECHO  CELLS : 6 cells, ~15 min, fully unattended
 ECHO  CPU   : %QACPU%
 ECHO  SOUND : PicoGUS REQUIRED -- this sweep switches it sb to adlib
-ECHO  VIDEO : whichever card is installed -- run once per card
+ECHO  VIDEO : %QAVID% (declared; run once per card -- verify with vcctrl-cardid on the SDL log)
 ECHO  LOGS  : tagged %QAM%P..  in LOGS\
 ECHO ============================================================
 ECHO  P5 vs P5K is the KEY pair: it A/Bs the timebase fix on real
@@ -26,9 +29,6 @@ ECHO  hardware, the one thing DOSBox structurally cannot test.
 ECHO  The AdLib cells NEED /mode adlib -- with an SB hot the music
 ECHO  pump refuses to start and the A/B would measure nothing.
 ECHO ============================================================
-IF "%QAVID%"=="" SET QAVID=UNDECLARED
-IF "%QASND%"=="" SET QASND=UNDECLARED
-IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%PR.NFO
 ECHO sweep=PROVE >> LOGS\%QAM%PR.NFO
 ECHO cells=6 >> LOGS\%QAM%PR.NFO
