@@ -33,20 +33,20 @@ IF "%QAM%"=="6" SET QACPU=486DX2-66
 IF "%QAM%"=="5" SET QACPU=486DX2-50
 IF NOT EXIST DATA\ORGMID4\NUL GOTO NOSET
 IF NOT EXIST LOGS\NUL MKDIR LOGS
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO ============================================================
 ECHO  SWEEP : MIDIAB -- AdLib gain attribution (item 3.6)
 ECHO  CELLS : 2 cells, ~7 min
 ECHO  CPU   : %QACPU%
 ECHO  SOUND : PicoGUS or Vibra -- AdLib backend either way
-ECHO  VIDEO : S3 ViRGE
+ECHO  VIDEO : %QAVID% (declared; verify with vcctrl-cardid on the SDL log)
 ECHO  LOGS  : %QAM%MA1 (shipped set) and %QAM%MA4 (loop_reps=4 set)
 ECHO ============================================================
 ECHO  Same binary both cells. Only the MIDI arrangement changes.
 ECHO  MA1 - MA4 is the arrangement's contribution to the AdLib gain.
 ECHO ============================================================
-IF "%QAVID%"=="" SET QAVID=UNDECLARED
-IF "%QASND%"=="" SET QASND=UNDECLARED
-IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%MIDIAB.NFO
 ECHO sweep=MIDIAB >> LOGS\%QAM%MIDIAB.NFO
 ECHO cells=2 >> LOGS\%QAM%MIDIAB.NFO

@@ -13,21 +13,21 @@ IF "%QAM%"=="A" SET QACPU=Am5x86-133
 IF "%QAM%"=="6" SET QACPU=486DX2-66
 IF "%QAM%"=="5" SET QACPU=486DX2-50
 IF NOT EXIST LOGS\NUL MKDIR LOGS
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO ============================================================
 ECHO  SWEEP : BY-EAR pairs -- THESE NEED YOUR EARS
 ECHO  CELLS : 3 cells, ~8 min
 ECHO  CPU   : %QACPU%
 ECHO  SOUND : PicoGUS REQUIRED -- switches sb to adlib for the AdLib cell
-ECHO  VIDEO : S3 ViRGE
+ECHO  VIDEO : %QAVID% (declared; verify with vcctrl-cardid on the SDL log)
 ECHO  LOGS  : tagged %QAM%..  in LOGS\
 ECHO ============================================================
 ECHO  Q1 THE SHACK: music for the WHOLE visit, late, or never? (E4 vs E3)
 ECHO  Q2 ADLIB vs OPL3: acceptable as the 486 default? (EA vs E4)
 ECHO  AdLib is MUSIC-ONLY -- PC-speaker SFX, no DAC SFX.
 ECHO ============================================================
-IF "%QAVID%"=="" SET QAVID=UNDECLARED
-IF "%QASND%"=="" SET QASND=UNDECLARED
-IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%EAR.NFO
 ECHO sweep=EAR >> LOGS\%QAM%EAR.NFO
 ECHO cells=3 >> LOGS\%QAM%EAR.NFO
