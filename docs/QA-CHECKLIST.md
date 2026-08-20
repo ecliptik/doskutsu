@@ -70,11 +70,29 @@ Rationale and expected reading: `docs/internal/ROUND-P-PUMP.md`.
 
     MEM /C | FIND "UNIVBE"
 
-No line means it is not loaded, and the round is already dead: the ViRGE
-ROM offers no 320x240 and no LFB, so the engine falls to 640x480 banked and
-crawls. `UNIVBE.EXE` prints NOTHING when it declines -- silence is the
-failure, not the success. Re-run `UVCONFIG.EXE` at the machine after any
-card swap, then reboot.
+Three-state, and the third state matters:
+
+| result | meaning | do |
+|---|---|---|
+| a `UNIVBE` line | resident | go |
+| no line | **inconclusive, NOT absent** | check the first cell's log before trusting it |
+| command errors | inconclusive | as above |
+
+A `UNIVBE` line is a true positive. **No line is not evidence of absence**
+-- the name has failed to appear on this rig with UniVBE loaded, and it
+was read as "not resident" once already. It was seen loaded LOW on
+2026-08-20 (`19,024` conventional, `0` upper) despite `LH`; a high load is
+untested. So no line means look harder, never abort.
+
+The check that cannot be absent-but-true costs one cell -- assert on the
+first cell's `<tag>SDL.LOG`, which is what `score-round.sh` already does:
+
+    oem_string='Universal VESA VBE 6.70'      not the card's own name
+    has_lfb=1 use_lfb=1 banked=0
+
+If UniVBE is missing: `UNIVBE.EXE` prints NOTHING when it declines, so a
+clean-looking boot is the fault. Re-run `UVCONFIG.EXE` at the machine
+after any card swap, then reboot.
 
 ### Cells
 
