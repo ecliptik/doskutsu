@@ -41,6 +41,9 @@ ECHO ============================================================
 ECHO  Each cell covers a DIFFERENT thing the new binary changed.
 ECHO  R4/R4B are ADJACENT on purpose: that spread IS the noise floor.
 ECHO ============================================================
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%RB.NFO
 ECHO sweep=RB >> LOGS\%QAM%RB.NFO
 ECHO cells=4 >> LOGS\%QAM%RB.NFO
@@ -63,7 +66,6 @@ REM  yields no DAC at all and would otherwise look like silent audio
 REM  with no record of why.
 ECHO config=%config% >> LOGS\%QAM%RB.NFO
 ECHO sound_note=PicoGUS REQUIRED -- this sweep switches it sb to adlib >> LOGS\%QAM%RB.NFO
-ECHO video_declared=S3 ViRGE (DECLARED not detected -- UniVBE masks chipset; see SDL log) >> LOGS\%QAM%RB.NFO
 ECHO note=run order is recoverable from the [HH:MM:SS] prefixes in the cell logs >> LOGS\%QAM%RB.NFO
 REM  DKTCAP=1 marks an UNATTENDED CAPTURE session. Default (unset) is
 REM  byte-identical to every banked round: the 10 s banner delay stays, and

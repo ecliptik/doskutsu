@@ -26,6 +26,9 @@ ECHO  hardware, the one thing DOSBox structurally cannot test.
 ECHO  The AdLib cells NEED /mode adlib -- with an SB hot the music
 ECHO  pump refuses to start and the A/B would measure nothing.
 ECHO ============================================================
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%PR.NFO
 ECHO sweep=PROVE >> LOGS\%QAM%PR.NFO
 ECHO cells=6 >> LOGS\%QAM%PR.NFO
