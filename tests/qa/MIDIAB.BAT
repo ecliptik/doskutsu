@@ -44,6 +44,9 @@ ECHO ============================================================
 ECHO  Same binary both cells. Only the MIDI arrangement changes.
 ECHO  MA1 - MA4 is the arrangement's contribution to the AdLib gain.
 ECHO ============================================================
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%MIDIAB.NFO
 ECHO sweep=MIDIAB >> LOGS\%QAM%MIDIAB.NFO
 ECHO cells=2 >> LOGS\%QAM%MIDIAB.NFO

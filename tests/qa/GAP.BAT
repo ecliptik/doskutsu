@@ -24,6 +24,9 @@ ECHO ============================================================
 ECHO  Check the CPU and cards above match the box before starting.
 ECHO  X8 is MEANINGLESS off the Vibra -- skip or ignore it there.
 ECHO ============================================================
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%GAP.NFO
 ECHO sweep=GAP >> LOGS\%QAM%GAP.NFO
 ECHO cells=4 >> LOGS\%QAM%GAP.NFO

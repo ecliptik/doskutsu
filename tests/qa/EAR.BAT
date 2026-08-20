@@ -25,6 +25,9 @@ ECHO  Q1 THE SHACK: music for the WHOLE visit, late, or never? (E4 vs E3)
 ECHO  Q2 ADLIB vs OPL3: acceptable as the 486 default? (EA vs E4)
 ECHO  AdLib is MUSIC-ONLY -- PC-speaker SFX, no DAC SFX.
 ECHO ============================================================
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%EAR.NFO
 ECHO sweep=EAR >> LOGS\%QAM%EAR.NFO
 ECHO cells=3 >> LOGS\%QAM%EAR.NFO

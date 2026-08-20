@@ -35,6 +35,9 @@ ECHO  LOGS  : tagged %QAM%..  in LOGS\
 ECHO ============================================================
 ECHO  Check the CPU and cards above match the box before starting.
 ECHO ============================================================
+IF "%QAVID%"=="" SET QAVID=UNDECLARED
+IF "%QASND%"=="" SET QASND=UNDECLARED
+IF "%QAIRQ%"=="" SET QAIRQ=UNDECLARED
 ECHO DOSKUTSU QA lane manifest > LOGS\%QAM%VIDMK.NFO
 ECHO sweep=VIDMK >> LOGS\%QAM%VIDMK.NFO
 ECHO cells=2 >> LOGS\%QAM%VIDMK.NFO
