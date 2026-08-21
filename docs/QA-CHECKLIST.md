@@ -68,7 +68,22 @@ Rationale and expected reading: `docs/internal/ROUND-P-PUMP.md`.
 
 ### Before P1 -- check UniVBE is actually resident
 
-    MEM /C | FIND "UNIVBE"
+    MEM /C | FIND /I "DOS"
+    MEM /C | FIND /I "UNIVBE"
+
+Run BOTH lines, in that order. The first is a pipeline witness: `DOS` is
+always present in `MEM /C` output, so a `count`/line from it proves the
+pipe, the redirect and the search all work right now. **Only believe the
+second line's absence if the first line produced output.**
+
+`/I` is not optional. `FIND`'s search string is case-sensitive, and on this
+harness the case of every typed character is decided by Caps Lock -- which
+`at_prompt()` toggles several times a second as its own liveness probe. The
+same command a second apart types `FIND "UNIVBE"` or `find "univbe"`, and
+the lowercase form matches nothing. Without `/I` this check reports
+"no UniVBE" whenever Caps Lock happens to be on, which is **false
+confidence in the direction that matters** -- it attests a card-ROM
+provider on a machine running UniVBE.
 
 Three-state, and the third state matters:
 
