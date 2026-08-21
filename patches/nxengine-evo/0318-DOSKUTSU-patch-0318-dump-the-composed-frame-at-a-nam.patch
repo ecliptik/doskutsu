@@ -1,0 +1,276 @@
+From 1b55328a8ee50ca73b64253be7333cd67664f517 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 20 Aug 2026 19:00:13 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0318 -- dump the composed frame at a named
+ tick
+
+The port has had no way to emit a frame at a moment anyone can name, and
+that gap is why the Mach64 backdrop defect has survived five rounds of
+investigation without a reference to compare against.
+
+Without it, a DOSBox-X "reference frame" is a screenshot taken at some
+wall-clock instant, matched by eye against a hardware capture taken at a
+different instant, on a reel that runs at ~30 fps on the Gateway and far
+faster under emulation. Nothing about that comparison is anchored, so
+every regional judgement has come down to whether two pictures look
+alike -- which is how "roughly 90-100 px on the right" ended up being the
+most precise figure the campaign produced.
+
+A TAS reel plus a tick identifies exactly one frame. Dump at the same
+tick under DOSBox-X and on hardware and the two frames are the same frame
+by construction, so a difference between them is the engine behaving
+differently rather than two observers sampling at different times.
+
+It also splits the stack at the surface, which is the discrimination
+patch 0311 tried to make and could not. 0311 scored a probe as "content
+present" when a byte read non-zero; terrain draws normally over the void,
+so that test answers yes whether the backdrop is drawn or not. Dumping
+the composed surface while the glass is captured on the same run gives
+"surface whole, glass not" as a real signal, separating a compositing
+defect from a scanout one.
+
+Hooked at the top of Renderer::flip() rather than in the main-loop
+bodies. flip() is the single point both run_tick() and run_tick_fixed()
+pass through, and instrumenting the loop bodies instead is precisely how
+every engine timer went blind on the default fixed-timestep path.
+
+Binary PPM rather than a raw indexed dump plus a palette sidecar: a
+sidecar is a second file that can go missing or go stale, and a dump
+whose colours quietly come from the wrong palette is the class of
+plausible-but-wrong artifact this work exists to stop.
+
+Every failure path is loud and writes nothing -- absent surface, wrong
+depth, short palette, a surface too small to hold the box, a failed
+fopen, a short write. A truncated or absent PPM that an adjudicator
+scores as "no difference" would report that the defect does not exist.
+
+fopen("wb") per the DJGPP rule; text mode would CRLF-translate every
+0x0A in the pixel data.
+
+Default-OFF. Unset or empty DOSKUTSU_SHOT_TICKS costs one int compare
+per flip and the binary behaves as before.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 161 ++++++++++++++++++++++++++++++++++++++
+ src/graphics/Renderer.h   |  25 ++++++
+ 2 files changed, 186 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index ff873a7b..f4fb039a 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -5074,6 +5074,160 @@ SDL_Window* Renderer::window()
+ // directly on the surface (no renderer involvement, so the viewport does
+ // not clip them) and a full refresh is forced so the whole surface
+ // reaches VRAM on the next flip. No-op unless centring is active.
++// DOS-PORT (patch 0318, Round Q): tick-anchored frame dump. Contract and
++// rationale in Renderer.h next to the _shot_dump_if_due() declaration.
++//
++// Format is binary PPM (P6). Chosen over a raw indexed dump plus a palette
++// sidecar because a sidecar is a second file that can go missing or go
++// stale, and a dump whose colours silently come from the wrong palette is
++// exactly the class of quiet-wrong-answer this round exists to stop. P6 is
++// self-contained, needs no reader we have to write, and 320x240x3 = 230400
++// bytes is affordable for the handful of ticks anyone names.
++#define _SHOT_TICKS_MAX 8
++static int           _shot_decided = -1;   // -1 undecided, 0 off, 1 armed
++static int           _shot_n       = 0;
++static unsigned long _shot_ticks[_SHOT_TICKS_MAX] = {};
++static bool          _shot_taken[_SHOT_TICKS_MAX] = {};
++
++// Provided by main.cpp (patch 0153): the shared logic-tick counter, exported
++// so instrumentation does not have to be threaded through both loop bodies.
++extern "C" int doskutsu_logic_tick(void);
++
++static void _shot_init()
++{
++  if (_shot_decided >= 0) return;
++  _shot_decided = 0;
++
++  const char *e = std::getenv("DOSKUTSU_SHOT_TICKS");
++  if (!e || e[0] == '\0') return;
++
++  // Comma-separated decimal ticks. A malformed list is a LOUD refusal, not
++  // a best-effort parse: silently dumping at a tick the operator did not ask
++  // for produces a frame that gets compared against the wrong reference.
++  const char *p = e;
++  while (*p != '\0' && _shot_n < _SHOT_TICKS_MAX)
++  {
++    char *end = nullptr;
++    unsigned long v = std::strtoul(p, &end, 10);
++    if (end == p)
++    {
++      LOG_ERROR("[shot-dump] DOSKUTSU_SHOT_TICKS='{}' is not a comma-separated "
++                "decimal list; DISARMED (no frames will be dumped)", e);
++      _shot_n = 0;
++      return;
++    }
++    _shot_ticks[_shot_n++] = v;
++    p = end;
++    while (*p == ',' || *p == ' ') p++;
++  }
++  if (*p != '\0')
++  {
++    LOG_ERROR("[shot-dump] DOSKUTSU_SHOT_TICKS='{}' names more than {} ticks; "
++              "DISARMED rather than silently truncating", e, _SHOT_TICKS_MAX);
++    _shot_n = 0;
++    return;
++  }
++
++  _shot_decided = 1;
++  LOG_INFO("[shot-dump] ARMED n={} first={} last={} (DOSKUTSU_SHOT_TICKS='{}')",
++           _shot_n, _shot_ticks[0], _shot_ticks[_shot_n - 1], e);
++}
++
++void Renderer::_shot_dump_if_due()
++{
++  _shot_init();
++  if (_shot_decided != 1) return;
++
++  const unsigned long t = (unsigned long)doskutsu_logic_tick();
++  int idx = -1;
++  for (int i = 0; i < _shot_n; i++)
++  {
++    if (!_shot_taken[i] && _shot_ticks[i] == t) { idx = i; break; }
++  }
++  if (idx < 0) return;
++  _shot_taken[idx] = true;   // one attempt per tick, success or not
++
++  // Every failure below is LOUD and writes nothing. A short or absent PPM
++  // that an adjudicator scores as "no difference" would report that the
++  // defect does not exist -- the exact shape this round is built to avoid.
++  SDL_Surface *win = _cached_window_surface;
++  if (!win || !win->pixels)
++  {
++    LOG_ERROR("[shot-dump] tick={} SKIPPED: no window surface", t);
++    return;
++  }
++  if (SDL_BITSPERPIXEL(win->format) != 8)
++  {
++    LOG_ERROR("[shot-dump] tick={} SKIPPED: surface is {} not 8bpp indexed; "
++              "this dump resolves an indexed palette and would be wrong",
++              t, SDL_GetPixelFormatName(win->format));
++    return;
++  }
++  if (!_master_palette || _master_palette->ncolors < 256)
++  {
++    LOG_ERROR("[shot-dump] tick={} SKIPPED: master palette absent or short "
++              "(ncolors={})", t, _master_palette ? _master_palette->ncolors : -1);
++    return;
++  }
++
++  // The logical box, wherever centring put it. On a 320x240 surface the
++  // offsets are zero and this reads the whole thing.
++  const int ox = _dos_center_active ? _dos_center_ox : 0;
++  const int oy = _dos_center_active ? _dos_center_oy : 0;
++  if (win->w < ox + 320 || win->h < oy + 240)
++  {
++    LOG_ERROR("[shot-dump] tick={} SKIPPED: surface {}x{} cannot hold a "
++              "320x240 box at offset {},{}", t, win->w, win->h, ox, oy);
++    return;
++  }
++
++  char path[64];
++  std::snprintf(path, sizeof(path), "LOGS\\S%05lu.PPM", t);
++
++  // CLAUDE.md DJGPP rule: always "wb". Text mode would CRLF-translate the
++  // pixel bytes and corrupt every 0x0A in the image.
++  FILE *f = fopen(path, "wb");
++  if (!f)
++  {
++    LOG_ERROR("[shot-dump] tick={} SKIPPED: fopen('{}','wb') failed", t, path);
++    return;
++  }
++
++  std::fprintf(f, "P6\n320 240\n255\n");
++
++  const SDL_Color *pal = _master_palette->colors;
++  const Uint8 *base    = (const Uint8 *)win->pixels;
++  unsigned char row[320 * 3];
++  size_t written = 0;
++  for (int y = 0; y < 240; y++)
++  {
++    const Uint8 *src = base + (size_t)(oy + y) * (size_t)win->pitch + (size_t)ox;
++    for (int x = 0; x < 320; x++)
++    {
++      const SDL_Color &c = pal[src[x]];
++      row[x * 3 + 0] = c.r;
++      row[x * 3 + 1] = c.g;
++      row[x * 3 + 2] = c.b;
++    }
++    written += std::fwrite(row, 1, sizeof(row), f);
++  }
++  const bool ok = (written == (size_t)320 * 240 * 3);
++  std::fclose(f);
++
++  // Byte count is in the log so a truncated dump is visible without opening
++  // the file -- the operator reads logs, not PPMs.
++  if (ok)
++  {
++    LOG_INFO("[shot-dump] tick={} WROTE {} bytes={} box=320x240@{},{} surface={}x{}",
++             t, path, (unsigned long)written + 15UL, ox, oy, win->w, win->h);
++  }
++  else
++  {
++    LOG_ERROR("[shot-dump] tick={} TRUNCATED {}: wrote {} of {} pixel bytes",
++              t, path, (unsigned long)written, (unsigned long)320 * 240 * 3);
++  }
++}
++
+ void Renderer::_dos_center_clear_margins()
+ {
+   if (!_dos_center_active) return;
+@@ -5547,6 +5701,13 @@ bool Renderer::_direct_vesa_present()
+ void Renderer::flip()
+ {
+ //  LOG_INFO("===FLIPPING===\n");
++  // DOS-PORT (patch 0318, Round Q): tick-anchored frame dump. First thing
++  // in flip(), so the surface holds the fully-composed frame and nothing
++  // downstream has touched it yet. This is the single point BOTH main-loop
++  // paths reach; hooking the loop bodies instead is how the engine timers
++  // went blind on the default fixed-timestep path.
++  _shot_dump_if_due();
++
+   // Diagnostic instrumentation (patch 0031 + 0039). Patch 0039 added
+   // SDL_RenderPresent timing in ms and dropped the every-100th throttle to
+   // every 10th -- at the ~0.3 fps real-HW pace observed on g2k 2026-04-26
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index 9b52ae15..b8a45a11 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -340,6 +340,31 @@ class Renderer
+     // One-shot guard for the flush-rect witness line.
+     bool _dos_center_flush_logged = false;
+ 
++    // DOS-PORT (patch 0318, Round Q): tick-anchored frame dump.
++    //
++    // Writes the composed logical 320x240 box to LOGS\Snnnnn.PPM at each
++    // tick named by DOSKUTSU_SHOT_TICKS. Called from the top of flip(),
++    // which is the one point BOTH main-loop paths (run_tick and
++    // run_tick_fixed) pass through -- instrumenting the loop bodies
++    // instead is how every engine timer went blind on the default path
++    // (see [[engine_timers_blind_on_fixed_timestep_path]]).
++    //
++    // Why this exists: the port had no way to emit a frame at a NAMED
++    // moment, so a DOSBox-X "reference" was a screenshot matched by eye
++    // against a hardware frame taken at a different wall-clock instant,
++    // on a reel that runs at different speeds on the two. A TAS reel plus
++    // a tick identifies exactly one frame, so the same tick on both is
++    // the same frame by construction and the comparison becomes exact.
++    //
++    // It also splits the stack at the surface: dump on hardware while
++    // capturing the glass on the same run, and "surface whole, glass not"
++    // separates a compositing defect from a scanout one. That is the
++    // discrimination patch 0311 attempted with a non-zero test, which
++    // terrain answers yes to whether the backdrop is drawn or not.
++    //
++    // Default-OFF: unset or empty env var costs one int compare per flip.
++    void _shot_dump_if_due();
++
+     // DOS-PORT (patch 0297): separate killswitch for the hand-rolled
+     // fast paths on an oversized surface.
+     //
+-- 
+2.47.3
+
