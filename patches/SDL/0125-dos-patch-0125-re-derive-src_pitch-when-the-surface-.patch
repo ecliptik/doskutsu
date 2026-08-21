@@ -1,0 +1,90 @@
+From e0f6aed637ddc21cc89473a63fc7f573590b68ec Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 20 Aug 2026 22:35:03 -0700
+Subject: [PATCH] dos: patch 0125 -- re-derive src_pitch when the surface
+ changes in place
+
+fb_state is populated once, in CreateWindowFramebuffer, and every flush
+in DOSVESA_UpdateWindowFramebuffer then trusts src_pitch, pixels and
+pitches_match for the life of that framebuffer.
+
+A mode-set that changes the surface geometry in place therefore leaves
+each flush copying rows at the old stride. Every scanline lands short or
+long by the pitch delta, so the picture shears progressively down the
+frame rather than failing outright.
+
+Observed rather than hypothesised: a Mach64 running UniVBE + LFB at
+640x480 logs pitches_match=0 while fb_state still carries the pitch from
+the mode it was created in. It is not live on the card-ROM banked path,
+which is why it has survived this long -- the configuration that exposes
+it is not the one most cells run, so every recent measurement has been
+taken somewhere the defect is dormant.
+
+A wholly-new surface with a different pointer is already handled: SDL
+calls CreateWindowFramebuffer again and repopulates fb_state. This
+covers the in-place case, which nothing else does.
+
+Cost on the common path is one pointer dereference and one integer
+compare per flush; the body runs only when the pitch has actually moved,
+and it logs when it does, because a stride changing under a live
+framebuffer is worth knowing about even once it is handled.
+
+The anchor for this insertion is deliberately positional. The
+instrumentation entry block it follows appears five times in this file,
+so matching on that text alone would have placed the re-derivation into
+four unrelated functions.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c | 35 ++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index dde73e0ed..5efba3c60 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -1344,6 +1344,41 @@ bool DOSVESA_UpdateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+     const Uint64 _instr_t_entry =
+         _instr_enabled_cached ? SDL_GetTicksNS() : 0;
+ 
++    // DOSKUTSU patch 0125: re-derive the source pitch when the app surface
++    // changes under a live framebuffer.
++    //
++    // fb_state is populated once, in CreateWindowFramebuffer, and every
++    // flush below then trusts src_pitch / pixels / pitches_match for the
++    // life of that framebuffer. A mode-set that changes the surface
++    // geometry IN PLACE therefore leaves each flush copying rows at the old
++    // stride: every scanline lands short or long by the pitch delta and the
++    // picture shears progressively down the frame.
++    //
++    // Observed, not hypothesised: a Mach64 on UniVBE + LFB at 640x480 logs
++    // pitches_match=0 while fb_state still carries the pitch from the mode
++    // it was created in. It is NOT live on the card-ROM banked path, which
++    // is why it has survived -- the configuration that exposes it is not the
++    // one most cells run.
++    //
++    // A wholly-new surface (different pointer) is already covered: SDL calls
++    // CreateWindowFramebuffer again and repopulates fb_state. This handles
++    // the in-place case, which nothing else does.
++    //
++    // Cost on the common path is one dereference and one int compare; the
++    // body runs only when the pitch has actually moved.
++    if (fb_state.direct_fb && fb_state.surface &&
++        fb_state.surface->pitch != fb_state.src_pitch) {
++        const int _old_pitch   = fb_state.src_pitch;
++        fb_state.src_pitch     = fb_state.surface->pitch;
++        fb_state.pixels        = (Uint8 *)fb_state.surface->pixels;
++        fb_state.pitches_match = (fb_state.src_pitch == fb_state.vram_pitch);
++        DOSKUTSU_LC_LOG("src-pitch re-derived: %d -> %d (vram_pitch=%d "
++                        "pitches_match=%d) -- surface changed under a live "
++                        "framebuffer",
++                        _old_pitch, fb_state.src_pitch, fb_state.vram_pitch,
++                        (int)fb_state.pitches_match);
++    }
++
+     // DOSKUTSU patch 0015 (Phase 9 wave 3, Fix B): fast-path timing
+     // brackets. Wave-2 measurements showed real-Cirrus title flips at
+     // 333-367 ms / 2.94 fps even with LFB engaged, ~325 ms unaccounted
+-- 
+2.47.3
+

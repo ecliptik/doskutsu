@@ -1,0 +1,94 @@
+From aebebda560f93bd82b2af863eaae62399bbe3760 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 20 Aug 2026 22:35:42 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0321 -- sample the margins the frame dump
+ cannot save
+
+Patch 0320 added a clip rect so the thrash direct-to-window tile loop
+cannot over-blit past the logical box into the margins that
+_dos_center_clear_margins painted black. That clip shipped untested.
+
+It could not be tested. The dump writes the 320x240 box at (ox,oy), so
+anything outside the box is invisible to it by construction -- and
+outside the box is exactly where an over-blit puts its damage. The other
+witness, glass capture, had no lock on the game's video mode for the
+cells that would have answered it.
+
+So the dump now counts non-zero pixels in the four rects the centring
+code clears and never draws into again, and logs them. Zero means
+nothing wrote past the logical box.
+
+It reports counts rather than a verdict. Which path did the writing is
+not answerable from here, and a bare PASS would invite the reading that
+a clean margin proves the 0320 clip specifically -- when all it proves
+is that on this run, in these scenes, nothing landed there. A number
+that a reader has to interpret is better than a verdict that interprets
+itself wrongly.
+
+Costs nothing unless a dump is due -- it runs inside the per-tick body,
+which is already gated on DOSKUTSU_SHOT_TICKS naming that tick.
+
+Emits only when centring is active. On a 320x240 surface there are no
+margins to sample and the rects would be degenerate.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 42 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 42 insertions(+)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index aa40ceef..1996c6c4 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -5228,6 +5228,48 @@ void Renderer::_shot_dump_if_due()
+ 
+   // Byte count is in the log so a truncated dump is visible without opening
+   // the file -- the operator reads logs, not PPMs.
++  // DOS-PORT (patch 0321): sample the margins the dump cannot save.
++  //
++  // The dump writes the logical 320x240 box at (ox,oy), so anything OUTSIDE
++  // the box is invisible to it by construction -- which is exactly where a
++  // draw path that over-blits would put its damage, and exactly why patch
++  // 0320's clip rect could not be verified from surfaces. Round Q had to
++  // leave that as "untested" because the glass capture was unavailable.
++  //
++  // These four rects are the ones _dos_center_clear_margins paints black
++  // and never draws into again. A non-zero count means something wrote past
++  // the logical box -- report the counts rather than a verdict, because
++  // "which path" is not answerable from here and a bare PASS/FAIL would
++  // invite the reading that a clean margin proves the clip specifically.
++  //
++  // Costs nothing unless a dump is due: this runs inside the per-tick body.
++  if (_dos_center_active)
++  {
++    const int mw = win->w, mh = win->h;
++    struct { const char *n; int x, y, w, h; } mr[4] = {
++      {"top",    0,        0,        mw,              oy},
++      {"bottom", 0,        oy + 240, mw,              mh - oy - 240},
++      {"left",   0,        oy,       ox,              240},
++      {"right",  ox + 320, oy,       mw - ox - 320,   240},
++    };
++    unsigned long cnt[4] = {0, 0, 0, 0}, tot = 0;
++    for (int i = 0; i < 4; i++)
++    {
++      if (mr[i].w <= 0 || mr[i].h <= 0) continue;
++      for (int yy = mr[i].y; yy < mr[i].y + mr[i].h; yy++)
++      {
++        const Uint8 *row = base + (size_t)yy * (size_t)win->pitch;
++        for (int xx = mr[i].x; xx < mr[i].x + mr[i].w; xx++)
++          if (row[xx]) cnt[i]++;
++      }
++      tot += cnt[i];
++    }
++    LOG_INFO("[shot-dump] margins tick={} top={} bottom={} left={} right={} "
++             "total={} (non-zero px outside the logical box; 0 = nothing "
++             "drew past it)",
++             t, cnt[0], cnt[1], cnt[2], cnt[3], tot);
++  }
++
+   if (ok)
+   {
+     LOG_INFO("[shot-dump] want={} got={} skew={} WROTE {} bytes={} "
+-- 
+2.47.3
+
