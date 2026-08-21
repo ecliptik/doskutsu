@@ -1,0 +1,174 @@
+From 2c55e3684930591644d814466aa2a0e218415184 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 20 Aug 2026 22:09:31 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0320 -- centre the thrash direct-to-window
+ backdrop write
+
+The backdrop-black defect on oversized surfaces is the thrash route
+writing at the window origin instead of the centred box.
+
+After N consecutive cache misses, patch 0126 routes the backdrop tile
+loop DIRECTLY into the window surface, skipping the cache fill and the
+cache->window blit. That loop is arithmetically identical to the
+cache-fill loop below it -- and correct there, because the cache is
+filled at logical origin and drawCachedBackdrop adds the centring offset
+afterwards (patch 0302). The direct route inherited the convention and
+skipped the step that made it right.
+
+So on any surface larger than 320x240 the backdrop lands at window (0,0)
+while the visible box sits at (ox,oy). The box shows backdrop only where
+the two overlap and cleared framebuffer everywhere else, which is why the
+missing region reads as exactly 0 rather than dark.
+
+Its own comment is what kept this invisible: "the tile loop covers the
+full screen, so the per-pixel result is identical". True when the window
+IS the logical screen, which was every card until 0296 made ox/oy
+non-zero. 0297 then made the frame legible enough for anyone to notice.
+
+Confirmed on hardware rather than argued. Round Q bisected seven levers
+across five cells on a Mach64 at 640x480: BACKDROP_CACHE=0 alone takes
+the void from 78,006 pixels to zero, and with it off the Mach64 surface
+is BYTE-IDENTICAL to a ViRGE reference at the same TAS tick. The
+geometric prediction was then tested against surfaces captured before
+this mechanism existed -- 77,970 of 78,006 void pixels lie outside the
+160x120 quadrant the offset predicts, 99.95%.
+
+The clip rect is not optional. Without it the tile loop over-blits past
+the logical box into the margins _dos_center_clear_margins deliberately
+painted black, trading a missing backdrop for a bleeding one.
+
+Killswitch SDL_HINT_DOSKUTSU_THRASH_CENTRE=0 restores pre-0320
+behaviour. Default ON: this is a correctness fix, not a perf lever.
+
+No effect on any surface that is exactly 320x240 -- dosCenterActive() is
+false there and both offsets are zero, so every non-oversized card keeps
+its pre-patch behaviour byte-for-byte.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.h | 10 ++++++
+ src/map.cpp             | 70 +++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 78 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/Renderer.h b/src/graphics/Renderer.h
+index b8a45a11..d531e1d2 100644
+--- a/src/graphics/Renderer.h
++++ b/src/graphics/Renderer.h
+@@ -275,6 +275,16 @@ class Renderer
+     // baseline path runs unchanged (kill-switch fallback).
+     bool indexedMode() const { return _indexed_mode; }
+     SDL_Palette *masterPalette() const { return _master_palette; }
++
++    // DOS-PORT (patch 0320): expose the centring state so draw paths that
++    // write DIRECTLY to the window surface can place themselves in the
++    // centred box. Paths that render into an intermediate surface must NOT
++    // use these -- they draw at logical origin and the cache->window blit
++    // applies the offset for them (patch 0302). Mixing the two conventions
++    // is the defect 0320 fixes.
++    bool dosCenterActive() const { return _dos_center_active; }
++    int  dosCenterOx() const { return _dos_center_ox; }
++    int  dosCenterOy() const { return _dos_center_oy; }
+     // Per-asset remap LUT lookup. Returns nullptr if the asset is not
+     // in the master.palmap cache (mod / unknown asset). Callers fall
+     // through to the per-pixel nearest-color path in that case.
+diff --git a/src/map.cpp b/src/map.cpp
+index 7915e60b..00020aa6 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -552,6 +552,29 @@ static bool _thrash_fullcover()
+   return v == 1;
+ }
+ 
++// DOS-PORT (patch 0320): killswitch for placing the THRASH direct-to-window
++// backdrop write inside the centred box. Default ON -- this is a correctness
++// fix for a defect confirmed on hardware (Round Q, cells MQ0-MQ4), not a
++// perf lever. The killswitch exists per iter discipline so a regression has
++// a recovery path that does not need a rebuild.
++//
++// SDL_HINT_DOSKUTSU_THRASH_CENTRE=0 restores the pre-0320 behaviour, which
++// on any oversized surface draws the backdrop at the window origin instead
++// of the centred box.
++static bool _thrash_centre()
++{
++  static int v = -1;
++  if (v < 0)
++  {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_THRASH_CENTRE");
++    v = (e && e[0] == '0' && e[1] == 0) ? 0 : 1;
++    LOG_INFO("backdrop thrash centring {} (set SDL_HINT_DOSKUTSU_"
++             "THRASH_CENTRE=0 to disable)",
++             v ? "ENABLED (default)" : "DISABLED (killswitch)");
++  }
++  return v == 1;
++}
++
+ // DOS-PORT (patch 0182, v1.0.4 P1-DIAG2): opt-in backdrop render-path
+ // diagnostic for the backdrop-black-on-motion bug (water caves esp.).
+ // env SDL_HINT_DOSKUTSU_BACKDROP_DIAG=1 (strict "1"; default OFF). This
+@@ -2687,6 +2710,47 @@ void map_draw_backdrop(void)
+         // the tile loop covers the full screen, so the per-pixel
+         // result is identical.
+         r->prepareDirectBackdropWrite();
++
++        // DOS-PORT (patch 0320): place this write in the centred box.
++        //
++        // This loop is the ONLY backdrop path that writes to the window
++        // surface using the cache path's coordinate convention. The
++        // cache-fill loop forty lines below is arithmetically identical,
++        // but its target is the cache surface, where logical origin is
++        // CORRECT precisely because drawCachedBackdrop adds the centring
++        // offset afterwards (patch 0302). The thrash route inherited the
++        // convention and skipped the step that made it right, so on an
++        // oversized surface the backdrop landed at window (0,0) while the
++        // visible box sits at (ox,oy) -- the box then shows backdrop only
++        // where the two overlap, and cleared framebuffer everywhere else.
++        //
++        // The comment above ("the tile loop covers the full screen, so the
++        // per-pixel result is identical") is what made this invisible: it
++        // is true when the window IS the logical screen, which was every
++        // card until 0296 made ox/oy non-zero.
++        //
++        // Confirmed on hardware, Round Q: the void is exactly the
++        // complement of a 160x120 quadrant on a 640x480 Mach64, 77,970 of
++        // 78,006 void pixels obeying that boundary across four frames.
++        //
++        // The clip rect is not optional. Without it the tile loop over-
++        // blits past the logical box into the margins that
++        // _dos_center_clear_margins deliberately painted black, which
++        // would trade a missing backdrop for a bleeding one.
++        const bool _c320 = r->dosCenterActive() && _thrash_centre();
++        const int  _cox  = _c320 ? r->dosCenterOx() : 0;
++        const int  _coy  = _c320 ? r->dosCenterOy() : 0;
++        SDL_Rect _oldclip;
++        bool _hadclip = false;
++        if (_c320)
++        {
++          _hadclip = SDL_GetSurfaceClipRect(win, &_oldclip);
++          SDL_Rect _box = {_cox, _coy,
++                           r->screenWidth * r->scale,
++                           r->screenHeight * r->scale};
++          SDL_SetSurfaceClipRect(win, &_box);
++        }
++
+         SDL_Rect dst;
+         dst.w = w * r->scale;
+         dst.h = h * r->scale;
+@@ -2716,11 +2780,13 @@ void map_draw_backdrop(void)
+           }
+           for (x = 0; x < r->screenWidth + map.parscroll_x; x += w)
+           {
+-            dst.x = (x - map.parscroll_x) * r->scale;
+-            dst.y = (y - map.parscroll_y) * r->scale;
++            dst.x = (x - map.parscroll_x) * r->scale + _cox;
++            dst.y = (y - map.parscroll_y) * r->scale + _coy;
+             SDL_BlitSurface(bg_src, NULL, win, &dst);
+           }
+         }
++        if (_c320)
++          SDL_SetSurfaceClipRect(win, _hadclip ? &_oldclip : NULL);
+         r->commitDirectBackdropWrite();
+         _backdrop_diag_emit(BD_DIAG_PATH_THRASH, w, h,
+                             bg_subregion_engaged, bg_top, bg_bot);  // patch 0182
+-- 
+2.47.3
+
