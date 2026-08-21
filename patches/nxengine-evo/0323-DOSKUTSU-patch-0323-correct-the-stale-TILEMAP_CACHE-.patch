@@ -1,0 +1,94 @@
+From 698314e47a50c89c5467b7e89571abc1c12b7dc5 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 21 Aug 2026 10:20:36 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0323 -- correct the stale TILEMAP_CACHE gate
+ comment
+
+The comment above the tilemap cache read:
+
+    Killswitch: SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0 (strict-0; default ON)
+
+Both halves are wrong. The gate is double-negated:
+
+    _abl_tilemap_cache_killswitch() -> !_strict_truthy_env(HINT)
+    unset -> killswitch ACTIVE   -> uncached per-tile loop
+    ="1"  -> killswitch INACTIVE -> cache path
+
+So =1 OPTS IN and the default is OFF. The comment was presumably true
+before a default-flip and was never updated.
+
+This is not cosmetic. A round was specified to measure the cache by
+setting =1, and had that spec trusted the comment instead of the
+consumer, the arm would have measured the exact inverse of its label --
+and produced an internally consistent result while doing it. Two sources
+agreed on the wrong answer: this comment, and a lever scan that matched
+_strict_truthy_env without noticing the leading negation. Agreement
+between two wrong readings is not corroboration.
+
+What settled it was the consumer, which is now named in the comment as
+the authority: `killswitch_active() || !cache_enabled || !win` selects
+the uncached loop, so the branch the uncached loop sits on determines the
+polarity, not the helper's name.
+
+Also records two things found while chasing it:
+
+`cache_enabled` is a separate adaptive-alpha condition, so the cache can
+be opted in and still decline. A cell that sets the hint and sees no hits
+should check that before concluding the hint did nothing.
+
+The [mds-tilemap-cache counter is gated on MODE_DRAW_SCENE_INSTR, not on
+MDS_DECOMP. The shared `mds-` prefix does not imply a shared hint, and
+assuming it did cost a cell.
+
+Comment-only. No behaviour change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/map.cpp | 31 +++++++++++++++++++++++++++----
+ 1 file changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/src/map.cpp b/src/map.cpp
+index 00020aa6..6d626ab0 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -3028,10 +3028,33 @@ void map_drawwaterlevel(void)
+ // drawn beneath the FG layer (Quote, NPCs) show through correctly.
+ // BG cache is opaque (full-screen coverage of plain tiles).
+ //
+-// Killswitch: SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0 (strict-0; default
+-// ON) short-circuits the cache check entirely -- falls through to the
+-// original per-tile-loop render. Counter emission still fires per
+-// W22.5 hint per contract sec. 3.2.
++// Gate: SDL_HINT_DOSKUTSU_TILEMAP_CACHE=1 OPTS IN to the cache. Unset
++// (the default) runs the original per-tile-loop render.
++//
++// CORRECTED 2026-08-21. This comment previously read "Killswitch:
++// TILEMAP_CACHE=0 (strict-0; default ON)". Both halves were wrong, and
++// it had presumably been true before a default-flip. Read the chain
++// rather than the name before trusting either:
++//
++//   _abl_tilemap_cache_killswitch()  ->  !_strict_truthy_env(HINT)
++//   unset  -> !false = true  -> killswitch ACTIVE  -> uncached loop
++//   ="1"   -> !true  = false -> killswitch INACTIVE -> cache path
++//
++// So the helper is named for the killswitch but is really "cache not
++// enabled", and the sense is DOUBLE-NEGATED. A round that set =1
++// expecting to disable a default-ON cache would have measured the exact
++// inverse of its label and been internally consistent while doing it.
++// The consumer below (`killswitch_active() || !cache_enabled || !win`)
++// is the authority; the helper name is not.
++//
++// `cache_enabled` is a SEPARATE condition -- the adaptive-alpha state
++// `g_tilemap_*_cache_enabled` above -- so the cache can be opted in and
++// still decline for its own reasons. A cell that sets the hint and sees
++// no hits should check that before concluding the hint did nothing.
++//
++// Counter emission ([mds-tilemap-cache ...]) is gated on
++// SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR, NOT on MDS_DECOMP -- the
++// shared `mds-` prefix does not imply a shared hint.
+ 
+ // flipacceltime is defined at global scope (in nx.cpp); declare here at
+ // global scope so the anonymous-namespace `_tilemap_cache_compute_key()`
+-- 
+2.47.3
+
