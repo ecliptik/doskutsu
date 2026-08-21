@@ -1,0 +1,134 @@
+From ba61983384a5ed7dd287dddd9746882c6eea7714 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 21 Aug 2026 08:08:58 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0322 -- dump frames into a per-tag directory
+
+Patch 0318 named its frame dumps `S<tick>.PPM` with no tag, so two cells
+requesting the same tick write the same filename and the second silently
+destroys the first.
+
+Not hypothetical. On 2026-08-20 cell GMQ0 overwrote GVS2's S02400.PPM and
+S04851.PPM on the card, confirmed from a DIR listing showing both files
+carrying GMQ0's timestamps. Nothing was lost only because the operator
+collected between cells -- discipline covering a design fault, and had it
+not been there the loss would have been silent: no error, no log line, and
+a directory with the expected number of files in it.
+
+Dumps now go to LOGS\<TAG>\S<tick>.PPM, keyed on the cell's own LOG_TAG so
+the directory carries the same provenance as the logs beside it. A round's
+frames become a directory rather than a filename pattern, which also makes
+the round-scoped cleanup being designed on the harness side structurally
+simpler -- it can remove a directory instead of matching names carefully.
+
+The tag is sanitised to 8 alphanumerics, uppercased. DOS is 8.3, and a tag
+with a stray character would produce a directory that cannot be created,
+which would fail every dump in the cell for a reason nobody would think to
+look for in a naming change.
+
+No tag means flat LOGS\, which is exactly 0318's behaviour. Untagged runs
+are the local DOSBox case, where a collision costs nothing because the
+files are read immediately and never collected.
+
+A failed mkdir warns and falls back to flat LOGS\ rather than failing the
+dump. The warning says what the fallback costs -- dumps from different
+cells at the same tick will overwrite each other -- because a fallback
+whose consequence is unstated is how the original defect survived.
+
+The ARMED banner now carries dir= so the destination is in the log before
+any file is written, rather than inferred from where files turned up.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 54 ++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 51 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 1996c6c4..e68a2273 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -55,6 +55,8 @@ int            g_timebase_was_active = 0;
+ #include <climits>
+ #include <cstdint>
+ #include <cstdio>
++#include <sys/stat.h>   // patch 0322: mkdir for the per-tag dump directory
++#include <cerrno>       // patch 0322: EEXIST on the mkdir
+ #include <cstdlib>
+ #include <sstream>
+ #include <iomanip>
+@@ -5089,6 +5091,7 @@ static int           _shot_n       = 0;
+ static unsigned long _shot_ticks[_SHOT_TICKS_MAX] = {};
+ static bool          _shot_taken[_SHOT_TICKS_MAX] = {};
+ static unsigned long _shot_fired_at[_SHOT_TICKS_MAX] = {};
++static char          _shot_dir[32] = "LOGS";   // patch 0322
+ 
+ // Provided by main.cpp (patch 0153): the shared logic-tick counter, exported
+ // so instrumentation does not have to be threaded through both loop bodies.
+@@ -5129,9 +5132,54 @@ static void _shot_init()
+     return;
+   }
+ 
++  // DOS-PORT (patch 0322): dump into a PER-TAG subdirectory.
++  //
++  // 0318 named files `S<tick>.PPM` with no tag, so two cells that request
++  // the same tick write the same filename and the second silently destroys
++  // the first. That is not hypothetical: on 2026-08-20 cell GMQ0 overwrote
++  // GVS2's S02400.PPM and S04851.PPM on the card, confirmed from a DIR
++  // listing. Nothing was lost only because the operator collected between
++  // cells -- discipline covering a design fault, with no error and no log
++  // line if it had not been.
++  //
++  // The tag is the cell's own LOG_TAG, so the directory carries the same
++  // provenance as the logs beside it. Sanitised to 8 alphanumerics: DOS is
++  // 8.3 and a tag with a stray character would produce a directory that
++  // cannot be created, which would fail every dump for a reason nobody
++  // would look for here.
++  //
++  // No tag -> flat LOGS\, i.e. exactly 0318's behaviour. Untagged runs are
++  // the local DOSBox case where a collision costs nothing.
++  {
++    const char *tag = std::getenv("DOSKUTSU_LOG_TAG");
++    char clean[9];
++    int n = 0;
++    for (const char *q = tag ? tag : ""; *q && n < 8; q++)
++    {
++      const char c = *q;
++      if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) clean[n++] = c;
++      else if (c >= 'a' && c <= 'z') clean[n++] = (char)(c - 'a' + 'A');
++    }
++    clean[n] = '\0';
++
++    if (n > 0)
++    {
++      std::snprintf(_shot_dir, sizeof(_shot_dir), "LOGS\\%s", clean);
++      // EEXIST is the expected case on the second and later dumps.
++      if (mkdir(_shot_dir, 0755) != 0 && errno != EEXIST)
++      {
++        LOG_WARN("[shot-dump] mkdir('{}') failed (errno={}); falling back to "
++                 "flat LOGS\\ -- dumps from different cells at the same tick "
++                 "WILL overwrite each other", _shot_dir, errno);
++        std::snprintf(_shot_dir, sizeof(_shot_dir), "LOGS");
++      }
++    }
++  }
++
+   _shot_decided = 1;
+-  LOG_INFO("[shot-dump] ARMED n={} first={} last={} (DOSKUTSU_SHOT_TICKS='{}')",
+-           _shot_n, _shot_ticks[0], _shot_ticks[_shot_n - 1], e);
++  LOG_INFO("[shot-dump] ARMED n={} first={} last={} dir='{}' "
++           "(DOSKUTSU_SHOT_TICKS='{}')",
++           _shot_n, _shot_ticks[0], _shot_ticks[_shot_n - 1], _shot_dir, e);
+ }
+ 
+ void Renderer::_shot_dump_if_due()
+@@ -5194,7 +5242,7 @@ void Renderer::_shot_dump_if_due()
+   }
+ 
+   char path[64];
+-  std::snprintf(path, sizeof(path), "LOGS\\S%05lu.PPM", t);
++  std::snprintf(path, sizeof(path), "%s\\S%05lu.PPM", _shot_dir, t);
+ 
+   // CLAUDE.md DJGPP rule: always "wb". Text mode would CRLF-translate the
+   // pixel bytes and corrupt every 0x0A in the image.
+-- 
+2.47.3
+

@@ -520,7 +520,7 @@ BANNER_REGEX=(
   "world-cache: (ENABLED \\(opt-in\\)|DISABLED \\(default\\)) -- stage 3a composite"
   "world-cache-key: (ENABLED \\(opt-in\\)|DISABLED \\(default\\)) -- stage 3b tile-aligned key"
   "Renderer::initVideo: tile dword-copy lever (ENABLED \\(opt-in\\)|DISABLED \\(default\\)) -- whole-tile"  "pin-native-mode: (ENGAGED \\(default\\)|STOOD DOWN \\(DOSKUTSU_PIN_NATIVE_MODE=0\\)) --"
-  "\\[shot-dump\\] ARMED n=[0-9]+ first=[0-9]+ last=[0-9]+ \\(DOSKUTSU_SHOT_TICKS="
+  "\\[shot-dump\\] ARMED n=[0-9]+ first=[0-9]+ last=[0-9]+ dir='[^']*' \\(DOSKUTSU_SHOT_TICKS="
   "\\[shot-dump\\] summary want=[0-9]+ (fired_at=[0-9]+|NEVER FIRED)"
   "backdrop thrash centring (ENABLED \\(default\\)|DISABLED \\(killswitch\\))"
 )
