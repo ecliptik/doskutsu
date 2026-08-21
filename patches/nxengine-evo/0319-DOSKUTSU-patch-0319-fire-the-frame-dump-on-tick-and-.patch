@@ -1,0 +1,165 @@
+From d6e54ffb9a8b8fcbb354624bd2dbca55a2394086 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Thu, 20 Aug 2026 20:00:11 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0319 -- fire the frame dump on >= tick, and
+ say when it never fires
+
+Patch 0318 tested `tick == target` once per flip. Logic ticks advance at a
+true 50 Hz under the fixed-timestep guard while flips happen at whatever
+the hardware manages, so on the ViRGE cell that found this -- 29.5 fps --
+there were 0.59 flips per tick and roughly 41% of tick values were never
+tested at all. Two of four requested dumps did not happen.
+
+Firing on the first flip at or after the target cannot miss. The dump
+lands up to one tick late, which is 20 ms on a 50 Hz reel, so the log now
+carries want=, got= and skew= and the pairing knows exactly what it has
+rather than assuming exactness it does not have.
+
+The more useful half of this is the reporter.
+
+0318 made every FAILURE path loud -- absent surface, wrong depth, short
+palette, undersized surface, failed fopen, short write. It could not make
+this one loud, because nothing failed: the tick was never tested, so there
+was no error to report and the absence was perfectly silent. No file, no
+log line, nothing to notice except counting files afterwards and finding
+two instead of four.
+
+That is worse than a failure. A missing reading prompts a second look; a
+silent absence closes the question, because nothing downstream can
+distinguish "not requested" from "requested and quietly skipped". An
+adjudicator handed three PPMs where four were expected has no way to know
+the fourth was ever wanted.
+
+So the shutdown path now reports every armed tick either way, fired or
+not. With the >= rule the only remaining way to miss is a reel that ends
+first, which is a real thing to be told rather than to infer from a
+directory listing.
+
+Found by the vcctrl-94 session from timing evidence alone -- both misses
+fell inside windows where the surface existed and the reel was still
+running, which located the fault in the firing condition rather than in
+the chosen ticks, without reading this code.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 51 ++++++++++++++++++++++++++++++++++++---
+ src/main.cpp              |  7 ++++++
+ 2 files changed, 55 insertions(+), 3 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index f4fb039a..aa40ceef 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -5088,6 +5088,7 @@ static int           _shot_decided = -1;   // -1 undecided, 0 off, 1 armed
+ static int           _shot_n       = 0;
+ static unsigned long _shot_ticks[_SHOT_TICKS_MAX] = {};
+ static bool          _shot_taken[_SHOT_TICKS_MAX] = {};
++static unsigned long _shot_fired_at[_SHOT_TICKS_MAX] = {};
+ 
+ // Provided by main.cpp (patch 0153): the shared logic-tick counter, exported
+ // so instrumentation does not have to be threaded through both loop bodies.
+@@ -5139,13 +5140,24 @@ void Renderer::_shot_dump_if_due()
+   if (_shot_decided != 1) return;
+ 
+   const unsigned long t = (unsigned long)doskutsu_logic_tick();
++
++  // Fire on the FIRST flip at or after the target, never on exact equality.
++  // Logic ticks advance at a true 50 Hz under the fixed-timestep guard while
++  // the flip rate is whatever the hardware manages -- 29.5 fps on the ViRGE
++  // cell that found this. At 0.59 flips per tick an `== target` test
++  // evaluated once per flip can only ever SEE about 59% of tick values; the
++  // rest are stepped over between flips and the dump silently never happens.
++  // Measured on GVSD: two of four requested ticks produced no file and no log
++  // line, both inside windows where the surface existed and the reel was
++  // still running.
+   int idx = -1;
+   for (int i = 0; i < _shot_n; i++)
+   {
+-    if (!_shot_taken[i] && _shot_ticks[i] == t) { idx = i; break; }
++    if (!_shot_taken[i] && t >= _shot_ticks[i]) { idx = i; break; }
+   }
+   if (idx < 0) return;
+   _shot_taken[idx] = true;   // one attempt per tick, success or not
++  _shot_fired_at[idx] = t;   // the tick we ACTUALLY landed on
+ 
+   // Every failure below is LOUD and writes nothing. A short or absent PPM
+   // that an adjudicator scores as "no difference" would report that the
+@@ -5218,8 +5230,10 @@ void Renderer::_shot_dump_if_due()
+   // the file -- the operator reads logs, not PPMs.
+   if (ok)
+   {
+-    LOG_INFO("[shot-dump] tick={} WROTE {} bytes={} box=320x240@{},{} surface={}x{}",
+-             t, path, (unsigned long)written + 15UL, ox, oy, win->w, win->h);
++    LOG_INFO("[shot-dump] want={} got={} skew={} WROTE {} bytes={} "
++             "box=320x240@{},{} surface={}x{}",
++             _shot_ticks[idx], t, t - _shot_ticks[idx], path,
++             (unsigned long)written + 15UL, ox, oy, win->w, win->h);
+   }
+   else
+   {
+@@ -5228,6 +5242,37 @@ void Renderer::_shot_dump_if_due()
+   }
+ }
+ 
++// DOS-PORT (patch 0319): report any armed tick that never fired.
++//
++// The 0318 bug was not that a dump failed -- every FAILURE path was already
++// loud. It was that two ticks were never TESTED, so there was no failure to
++// report and the absence was perfectly silent: no file, no log line, nothing
++// to notice. A check that can produce a false ABSENCE has to say so itself,
++// because nothing downstream can distinguish "not requested" from "requested
++// and quietly skipped".
++//
++// With the >= firing rule the only remaining way to miss is a reel that ends
++// before the tick, which is a real thing to get told about rather than to
++// discover by counting files.
++extern "C" void doskutsu_shot_report_unfired(void)
++{
++  if (_shot_decided != 1) return;
++  for (int i = 0; i < _shot_n; i++)
++  {
++    if (_shot_taken[i])
++    {
++      LOG_INFO("[shot-dump] summary want={} fired_at={}",
++               _shot_ticks[i], _shot_fired_at[i]);
++    }
++    else
++    {
++      LOG_ERROR("[shot-dump] summary want={} NEVER FIRED -- the reel ended "
++                "before this tick was reached; no file was written",
++                _shot_ticks[i]);
++    }
++  }
++}
++
+ void Renderer::_dos_center_clear_margins()
+ {
+   if (!_dos_center_active) return;
+diff --git a/src/main.cpp b/src/main.cpp
+index 86651bee..60328b15 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -194,6 +194,9 @@ static int g_tick_count = 0;
+ // per-stage fps use, so a dispatch can be pinned to a stage.
+ extern "C" int doskutsu_logic_tick(void) { return g_tick_count; }
+ 
++// patch 0319: implemented in graphics/Renderer.cpp alongside the dump itself.
++extern "C" void doskutsu_shot_report_unfired(void);
++
+ // patch 0281: killswitch for the TAS accumulator-delta clamp above. Shares
+ // SDL_HINT_DOSKUTSU_TAS_FT_GUARD with patch 0280's load_stage guard -- both
+ // exist for the same reason (keep wall-clock out of the TAS tick stream), so
+@@ -3024,6 +3027,10 @@ shutdown:;
+   // (per W22-WB-D evidence that the shutdown path itself has
+   // historically hung on real DOS hardware). No-op when no TAS env
+   // vars set.
++  // patch 0319: say which requested frame dumps never fired. A silent
++  // absence is indistinguishable from never having been asked for.
++  doskutsu_shot_report_unfired();
++
+   TAS::shutdown();
+ 
+   doskutsu_dbg_log("engine-shutdown[8/8]: pre-SDL_Quit");
+-- 
+2.47.3
+
