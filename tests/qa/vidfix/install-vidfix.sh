@@ -1,7 +1,7 @@
 #!/bin/bash
 # Refresh just the three video-lane BATs on the CF. No re-populate needed.
 set -u
-CF="${1:-/media/micheal/DOS}"
+CF="${1:-/media/$(id -un)/DOS}"
 D="$CF/doskutsu"; [ -d "$D" ] || D="$CF/DOSKUTSU"
 [ -d "$D" ] || { echo "FIX_FAILED_REASON: no doskutsu dir under $CF"; exit 1; }
 SRC="$(cd "$(dirname "$0")" && pwd)"

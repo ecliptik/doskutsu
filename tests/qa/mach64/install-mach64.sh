@@ -2,7 +2,7 @@
 # Add a MACH64 boot profile to the CF and install ATI's VESA TSR.
 # Keeps all five existing profiles untouched. Idempotent. Backs up.
 set -u
-CF="${1:-/media/micheal/DOS}"
+CF="${1:-/media/$(id -un)/DOS}"
 [ -d "$CF" ] || { echo "FAIL: $CF not mounted"; exit 1; }
 SRC="$(cd "$(dirname "$0")" && pwd)"
 

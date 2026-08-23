@@ -90,9 +90,9 @@ PROBE_BATS=( BLTPAT AUDRQ )    # adjust per wave
 # Canonical CF mount path + staging dir on operator's laptop.
 # These are stable across waves; do not edit unless the operator's setup
 # changed.
-CF_MOUNT="/media/micheal/DOS"
+CF_MOUNT="${CF_MOUNT:-/media/$(id -un)/DOS}"
 CF_GAME_DIR="${CF_MOUNT}/doskutsu"
-STAGING="/home/micheal/Projects/gateway2000/doskutsu"
+STAGING="${STAGING:-$HOME/Projects/gateway2000/doskutsu}"
 
 # ============================================================================
 # IMPLEMENTATION -- typically untouched per wave

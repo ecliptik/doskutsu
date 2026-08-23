@@ -3,7 +3,7 @@
 # BAT-only: no engine source, no Organya cache key, no re-populate needed.
 # Idempotent, CRLF-preserving, backs up to .BAK, syncs and unmounts.
 set -u
-CF="${1:-/media/micheal/DOS}"
+CF="${1:-/media/$(id -un)/DOS}"
 D="$CF/doskutsu"; [ -d "$D" ] || D="$CF/DOSKUTSU"
 [ -d "$D" ] || { echo "FIX_FAILED_REASON: no doskutsu dir under $CF"; exit 1; }
 command -v python3 >/dev/null || { echo "FIX_FAILED_REASON: python3 not found on this laptop"; exit 1; }

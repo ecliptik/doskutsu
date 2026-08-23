@@ -32,7 +32,7 @@ Do not re-populate mid-round -- it clears `LOGS\`.
 
 ---
 
-## Populate -- *laptop*, CF mounted at `/media/micheal/DOS`
+## Populate -- *laptop*, CF mounted at `/media/$USER/DOS`
 
     scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh
 

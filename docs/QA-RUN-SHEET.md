@@ -54,11 +54,11 @@ of these, and each takes seconds.
 | | Check | How | Stop if |
 |---|---|---|---|
 | 0.1 | Card populated with current BATs | *laptop:* `scp claude:/tmp/install-qa-v163.sh /tmp/ && bash /tmp/install-qa-v163.sh` | it errors |
-| 0.2 | **Reel is the benchmark reel** | *laptop:* `sha256sum /media/micheal/DOS/doskutsu/QA.TAS` | not `4118561edf26...` |
+| 0.2 | **Reel is the benchmark reel** | *laptop:* `sha256sum /media/$USER/DOS/doskutsu/QA.TAS` | not `4118561edf26...` |
 | 0.3 | Binary is the one you mean to test | round 1 = `09e449c5a81d` | testing round-2 changes on it |
 | 0.4 | Sound card seated for the PART below | Vibra for Part 1, PicoGUS for Part 2 | mismatch |
 | 0.5 | Video is the S3 ViRGE | | anything else |
-| 0.6 | **Organya HQ cache present** | *laptop:* `ls /media/micheal/DOS/doskutsu/CACHE/22050_2/READY.OK` | absent -- the `XH` cells would cold-render for many minutes and look hung |
+| 0.6 | **Organya HQ cache present** | *laptop:* `ls /media/$USER/DOS/doskutsu/CACHE/22050_2/READY.OK` | absent -- the `XH` cells would cold-render for many minutes and look hung |
 | 0.7 | Logback label chosen | e.g. `round2-gaps` | -- |
 
 ---
@@ -239,7 +239,7 @@ a later part depends on an earlier one beyond the reel staying untouched.
 
 or
 
-    tar czf /tmp/qa-final.tar.gz -C /media/micheal/DOS/doskutsu LOGS QA.TAS \
+    tar czf /tmp/qa-final.tar.gz -C /media/$USER/DOS/doskutsu LOGS QA.TAS \
       && scp /tmp/qa-final.tar.gz claude:/tmp/
 
 - [ ] Logs sent

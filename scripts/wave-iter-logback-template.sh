@@ -65,7 +65,7 @@ declare -A PROBE_LOGS_OPTIONAL=(
 )
 
 # Canonical CF mount path. Stable across waves.
-CF_MOUNT="/media/micheal/DOS"
+CF_MOUNT="${CF_MOUNT:-/media/$(id -un)/DOS}"
 CF_GAME_DIR="${CF_MOUNT}/doskutsu"
 
 # ============================================================================

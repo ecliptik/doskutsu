@@ -12,7 +12,7 @@
 # Not set -e: continue on individual missing files (partial rounds are legit).
 set -u
 
-CF_MOUNT="/media/micheal/DOS"
+CF_MOUNT="${CF_MOUNT:-/media/$(id -un)/DOS}"
 CF_LOGS="${CF_MOUNT}/doskutsu/LOGS"
 LOCAL="/tmp/qa-v163-pull"
 REMOTE_BASE="/tmp/qa-v163"

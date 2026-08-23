@@ -22,7 +22,7 @@
 # no kit file. Re-run after any populate; it is idempotent.
 
 set -u
-CF_GAME_DIR="${CF_GAME_DIR:-/media/micheal/DOS/doskutsu}"
+CF_GAME_DIR="${CF_GAME_DIR:-/media/$(id -un)/DOS/doskutsu}"
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
 

@@ -36,10 +36,10 @@ EXP_TARBALL_SHA="4a383480189d80ea7f0b493f67e04455e80178e7907f02816cc5e7875054a84
 # three field failures were in the gap between "the source is right" and "the
 # artifact the operator fetches is right", and that gap existed because this
 # script could not be run at all without the hardware.
-CF_MOUNT="${CF_MOUNT:-/media/micheal/DOS}"
+CF_MOUNT="${CF_MOUNT:-/media/$(id -un)/DOS}"
 CF_GAME_DIR="${CF_MOUNT}/doskutsu"
 CF_LOGS="${CF_GAME_DIR}/LOGS"
-STAGING="${STAGING:-/home/micheal/Projects/gateway2000/doskutsu}"
+STAGING="${STAGING:-$HOME/Projects/gateway2000/doskutsu}"
 DRY_RUN="${DRY_RUN:-0}"   # 1 = skip the payload fetch and the final unmount
 
 # ============================================================================
