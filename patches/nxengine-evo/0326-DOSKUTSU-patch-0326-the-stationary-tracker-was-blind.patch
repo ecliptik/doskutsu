@@ -1,0 +1,136 @@
+From b077390c6e8efb4afeea534ede0cd2f46614cdc4 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 23 Aug 2026 01:03:36 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0326 -- the stationary tracker was blind on
+ the default path
+
+Game::tick() is the 1:1 path. The DEFAULT path is run_tick_fixed(), which
+calls tick_state() and tick_render_submit() directly and never calls
+Game::tick() at all. The stationary-fraction tracker sat at end-of-
+Game::tick, so on the configuration every measurement actually runs in,
+it barely incremented.
+
+The damage was not a missing number. It was a wrong one that looked
+right. Most blocks reported total=0, and the ratio clamps that to
+stationary_frac=0.00 -- indistinguishable from a genuine "the camera
+moved on every tick". So the field read as a confident measurement of
+constant motion while measuring almost nothing.
+
+The same reel then produced 0.11 on the Gateway and 0.004 under
+DOSBox-X, and neither was a property of the reel: both were sampling
+whatever residue of ticks reached the 1:1 path, which is biased toward
+states like the pause screen where the camera is still.
+
+That matters because the figure is load-bearing. The tilemap cache
+breaks even near a 63% hit rate, hit rate tracks camera stillness, and
+the cache reaches 30.15 fps at a perfect hit rate -- so this number sits
+between recording that lever as catastrophic and recording it as the
+largest win available.
+
+Placement is safe for both paths. Game::tick() calls tick_state(), and
+the only thing between there and the old site was tick_render_submit(),
+which does not write map.displayed_[xy]scroll -- scroll is finalised in
+the state half, as the comment inside render-submit says. So the 1:1
+path sees identical values and the fixed path now sees them at all.
+
+This is the same failure as the engine timers anchored to Game::tick()
+that went blind on the fixed-timestep path. It recurred because a
+counter added afterwards was placed by copying where the existing ones
+sat, and nothing re-checked that the site was still on the live path.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/game.cpp | 70 +++++++++++++++++++++++++++++++++++-----------------
+ 1 file changed, 47 insertions(+), 23 deletions(-)
+
+diff --git a/src/game.cpp b/src/game.cpp
+index a97cc126..22bebd19 100644
+--- a/src/game.cpp
++++ b/src/game.cpp
+@@ -418,29 +418,6 @@ void Game::tick(void)
+     NXE::Diag::g_mt_residual_samples[NXE::Diag::g_mt_residual_idx++] = (Uint64)_mt_res;
+   }
+ 
+-  // patch 0099 (wave 23.7 W237A): stationary-fraction tracker per
+-  // docs/PHASE11-WAVE-23-7-CONTRACT.md sec. 1.3. Compares post-tick
+-  // scroll values to prior-tick. Placement at end-of-Game::tick AFTER
+-  // all mode_sim/mode_draw work (ModeTickTimer scope closes upstream;
+-  // mode_tick residual block above just ran). map.displayed_xscroll
+-  // and map.displayed_yscroll have their final values for this tick.
+-  //
+-  // First-frame sentinel: g_w237_prev_scroll_x = INT_MIN (init + map
+-  // change). Skip the equality check until prev is set.
+-  //
+-  // Update sites NOT gated on MODE_DRAW_SCENE_INSTR -- counters update
+-  // unconditionally so the value is ready when emit fires (gating
+-  // happens at emit-time in Renderer.cpp, not at counter update).
+-  // ~3 int comparisons + 2 increments per tick; sub-us cost.
+-  if (NXE::Diag::g_w237_prev_scroll_x != INT_MIN
+-      && map.displayed_xscroll == NXE::Diag::g_w237_prev_scroll_x
+-      && map.displayed_yscroll == NXE::Diag::g_w237_prev_scroll_y)
+-  {
+-    ++NXE::Diag::g_w237_stationary_frames_block;
+-  }
+-  NXE::Diag::g_w237_prev_scroll_x = map.displayed_xscroll;
+-  NXE::Diag::g_w237_prev_scroll_y = map.displayed_yscroll;
+-  ++NXE::Diag::g_w237_total_frames_block;
+ }
+ 
+ // DOS-PORT (patch 0153 wave-57 -- Track B B2; default flipped ON by
+@@ -622,6 +599,53 @@ void Game::tick_state(void)
+     if (flashscreen.enabled)
+       flashscreen.Tick();
+   }
++
++  // patch 0326: the stationary tracker lives HERE, not at end-of-Game::tick.
++  //
++  // Game::tick() is the 1:1 path. The DEFAULT path is run_tick_fixed(),
++  // which calls tick_state() and tick_render_submit() directly and never
++  // calls Game::tick() at all -- so anchored there, this counter was blind
++  // on the configuration every measurement actually runs in.
++  //
++  // The damage was not a missing number, it was a WRONG one. Most blocks
++  // reported total=0, which the ratio clamps to stationary_frac=0.00 --
++  // indistinguishable from a genuine "camera moved every tick". The same
++  // reel then read 0.11 on hardware and 0.004 under DOSBox-X, and both were
++  // sampling a residue of ticks that happened to reach the 1:1 path.
++  //
++  // Placement is safe for both paths: Game::tick() calls tick_state() and
++  // the only thing between there and the old site was tick_render_submit(),
++  // which does not write map.displayed_[xy]scroll -- scroll is finalised in
++  // the state half. So the 1:1 path sees identical values and the fixed
++  // path now sees them at all.
++  //
++  // This is the same failure as the engine timers that were anchored to
++  // Game::tick() and went blind on the fixed-timestep path. It recurred
++  // because a counter added later was placed by copying where the existing
++  // ones sat.
++  // patch 0099 (wave 23.7 W237A): stationary-fraction tracker per
++  // docs/PHASE11-WAVE-23-7-CONTRACT.md sec. 1.3. Compares post-tick
++  // scroll values to prior-tick. Placement at end-of-Game::tick AFTER
++  // all mode_sim/mode_draw work (ModeTickTimer scope closes upstream;
++  // mode_tick residual block above just ran). map.displayed_xscroll
++  // and map.displayed_yscroll have their final values for this tick.
++  //
++  // First-frame sentinel: g_w237_prev_scroll_x = INT_MIN (init + map
++  // change). Skip the equality check until prev is set.
++  //
++  // Update sites NOT gated on MODE_DRAW_SCENE_INSTR -- counters update
++  // unconditionally so the value is ready when emit fires (gating
++  // happens at emit-time in Renderer.cpp, not at counter update).
++  // ~3 int comparisons + 2 increments per tick; sub-us cost.
++  if (NXE::Diag::g_w237_prev_scroll_x != INT_MIN
++      && map.displayed_xscroll == NXE::Diag::g_w237_prev_scroll_x
++      && map.displayed_yscroll == NXE::Diag::g_w237_prev_scroll_y)
++  {
++    ++NXE::Diag::g_w237_stationary_frames_block;
++  }
++  NXE::Diag::g_w237_prev_scroll_x = map.displayed_xscroll;
++  NXE::Diag::g_w237_prev_scroll_y = map.displayed_yscroll;
++  ++NXE::Diag::g_w237_total_frames_block;
+ }
+ 
+ // DOS-PORT (patch 0152, Phase 11 wave-56 -- Track B B1): the drawcall
+-- 
+2.47.3
+

@@ -1,0 +1,87 @@
+From bb8afdd6fdd522e8a0ccc4811997624fbbfca003 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 23 Aug 2026 00:56:11 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0325 -- emit raw stationary counts beside
+ the ratio
+
+stationary_frac is a within-block ratio. Both its counters increment in
+Game::tick, so the quantity is game logic and reproducible from a TAS
+reel. But the BLOCK BOUNDARY is per-100-flips, and the flip:tick ratio is
+hardware-dependent -- so the number of ticks a block spans is too.
+
+The same reel, same counters, same build:
+
+    Gateway    ~18 blocks over ~5140 ticks   ~285 ticks/block   mean 0.11
+    DOSBox-X  ~505 blocks over ~5140 ticks    ~10 ticks/block   mean 0.004
+
+Neither is wrong. They are different statistics wearing one name. The
+distribution is bimodal -- almost every block exactly 0.00, rare blocks
+at 1.00 -- so a single fully-stationary block contributes 1/18 to one
+mean and 1/505 to the other. A mean of block ratios is not comparable
+across machines and should not have been quoted as though it were.
+
+Emitting the raw counts lets them be summed across blocks into a pooled
+stationary fraction, which is comparable. The ratio stays, because it is
+still the right per-block view for spotting where stillness occurs.
+
+This is load-bearing rather than tidy. The tilemap cache breaks even near
+a 63% hit rate, hit rate tracks camera stillness, and the cache reaches
+30.15 fps at a perfect hit rate -- so whether the measured reel resembles
+real play is the difference between recording that lever as catastrophic
+and recording it as the largest win available. That question cannot be
+asked with a statistic that changes with the machine it was measured on.
+
+Emit-only. No counter semantics change and no behaviour change.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 2cee0637..01f53b0f 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -3408,7 +3408,7 @@ void _maybe_flush_phase_timing_audit()
+     const double _stationary_frac = (NXE::Diag::g_w237_total_frames_block > 0)
+         ? (double)NXE::Diag::g_w237_stationary_frames_block / (double)NXE::Diag::g_w237_total_frames_block
+         : 0.0;
+-    LOG_INFO("[mds-tilemap-cache n={} bg_h={} bg_m={} bg_state={} bg_t={} fg_h={} fg_m={} fg_state={} fg_t={} bg_ms_h={:.2f} bg_ms_m={:.2f} fg_ms_h={:.2f} fg_ms_m={:.2f} stationary_frac={:.2f}]",
++    LOG_INFO("[mds-tilemap-cache n={} bg_h={} bg_m={} bg_state={} bg_t={} fg_h={} fg_m={} fg_state={} fg_t={} bg_ms_h={:.2f} bg_ms_m={:.2f} fg_ms_h={:.2f} fg_ms_m={:.2f} stationary_frac={:.2f} stat_ticks={} tick_frames={}]",
+              g_tilemap_cache_n_block,
+              g_tilemap_bg_cache_hits_block,
+              g_tilemap_bg_cache_misses_block,
+@@ -3430,7 +3430,29 @@ void _maybe_flush_phase_timing_audit()
+              g_tilemap_fg_cache_misses_block > 0
+                  ? (double)g_tilemap_fg_miss_total_ns_block / 1e6 / (double)g_tilemap_fg_cache_misses_block
+                  : 0.0,
+-             _stationary_frac);
++             _stationary_frac,
++             // DOS-PORT (patch 0325): emit the RAW COUNTS beside the ratio.
++             //
++             // stationary_frac is a within-block ratio, and the block
++             // boundary is per-100-FLIPS while both counters are per-TICK.
++             // The flip:tick ratio is hardware-dependent, so the number of
++             // ticks a block spans is too -- ~285 on the Gateway, ~10 under
++             // DOSBox-X on the same reel.
++             //
++             // That makes a MEAN OF BLOCK RATIOS incomparable across
++             // machines. The distribution is bimodal (almost every block
++             // exactly 0.00, rare blocks at 1.00), so one fully-stationary
++             // block contributes 1/18 to an 18-block mean and 1/505 to a
++             // 505-block one. The same reel read 0.11 on hardware and 0.004
++             // locally, and neither is wrong -- they are different
++             // statistics wearing the same name.
++             //
++             // Summing these two counts across blocks gives the pooled
++             // stationary fraction, which IS comparable, and which the
++             // tilemap-cache question depends on: the cache breaks even
++             // near a 63% hit rate and hit rate tracks camera stillness.
++             NXE::Diag::g_w237_stationary_frames_block,
++             NXE::Diag::g_w237_total_frames_block);
+   }
+   // Reset 12 per-block counters regardless of MODE_DRAW_SCENE_INSTR
+   // state. The 2 sticky `*_enabled` flags NOT reset here (per contract
+-- 
+2.47.3
+
