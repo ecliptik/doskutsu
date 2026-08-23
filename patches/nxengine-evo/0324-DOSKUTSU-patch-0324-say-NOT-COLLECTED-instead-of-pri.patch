@@ -1,0 +1,95 @@
+From 63a3cba1b0c1451d2245b7ce898dd38b04b00efd Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sun, 23 Aug 2026 00:51:53 -0700
+Subject: [PATCH] [DOSKUTSU] patch 0324 -- say NOT COLLECTED instead of
+ printing zeros
+
+The [p12-audio] instrument has two gates and they are not the same one.
+The PRINT gate is FLIP_INSTR; the COLLECT gate is P12_AUDIO_INSTR,
+checked inside the RAII timers' destructors. Open only the print gate
+and every field emits zero, counts included.
+
+That is the most dangerous output in this codebase. Every other failure
+here announces itself by ABSENCE -- a missing line, a refused cell, a
+silent skip. This one emits a perfectly formed statistic, with the right
+field names, the right block count and a number in every slot, whose
+actual meaning is "nothing was sampled". An absence invites a second
+look. A zero closes the question.
+
+It cost a real reading on 2026-08-21. [p12-audio] was quoted as evidence
+that audio was free; audio later measured at 2.35 ms of a 35.5 ms frame,
+the largest unbucketed cost anyone had found. What gave it away was the
+COUNTS being zero rather than merely the microseconds, and only because
+someone checked rather than reading the times and moving on.
+
+So the emit now checks its own collect gate and says what it means. The
+message names the other hint, and states explicitly that zeros would have
+meant "not sampled" rather than "measured as zero" -- because the next
+person to see this line will be reading it in a log, without the source
+in front of them.
+
+Also braces the else. The prior form was a braceless else before a
+multi-line macro: correct today, and silently wrong the moment anyone
+adds a second statement.
+
+No behaviour change when P12_AUDIO_INSTR is set. The zeros case was
+never a measurement, so nothing that was previously true stops being so.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/graphics/Renderer.cpp | 34 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index e68a2273..2cee0637 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -2601,13 +2601,43 @@ void _maybe_flush_phase_timing_audit()
+   // SDL/0054 [p12-sdl ...] emit line (sdl-engine's lane).
+   if (_abl_flip_instr())
+   {
+-    LOG_INFO("[p12-audio n=100 midi_tick_us={} midi_tick_count={} pixtone_play_us={} pixtone_play_count={} pixtone_stop_us={} pixtone_stop_count={}]",
++    // DOS-PORT (patch 0324): this instrument has TWO gates and they are not
++    // the same one. The PRINT gate is FLIP_INSTR (immediately above); the
++    // COLLECT gate is P12_AUDIO_INSTR, checked inside the RAII timers'
++    // destructors in diagnostic_timers.h. Open only the print gate and every
++    // field below emits zero -- counts included.
++    //
++    // That is the most dangerous output this codebase produces. Every other
++    // failure here announces itself by ABSENCE: a missing line, a refused
++    // cell, a silent skip. This one emits a perfectly formed statistic --
++    // right field names, right block count, a number in every slot -- whose
++    // meaning is "nothing was sampled". An absence invites a second look; a
++    // zero closes the question.
++    //
++    // It cost a real reading on 2026-08-21: [p12-audio] was quoted as
++    // evidence that audio was free, and audio later measured at 2.35 ms of a
++    // 35.5 ms frame. The counts being zero rather than merely the
++    // microseconds is what gave it away, and only because someone checked.
++    //
++    // So say so instead of printing zeros.
++    if (!_abl_p12_audio_instr())
++    {
++      LOG_INFO("[p12-audio n=100 NOT COLLECTED -- set "
++               "SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 to accumulate. "
++               "FLIP_INSTR opens the print gate only; the timers sample "
++               "under their own gate. Zeros here would mean 'not sampled', "
++               "NOT 'measured as zero'.]");
++    }
++    else
++    {
++      LOG_INFO("[p12-audio n=100 midi_tick_us={} midi_tick_count={} pixtone_play_us={} pixtone_play_count={} pixtone_stop_us={} pixtone_stop_count={}]",
+              (unsigned long)(NXE::Diag::g_p12_midi_tick_accum_ns_block / 1000ULL),
+              NXE::Diag::g_p12_midi_tick_count_block,
+              (unsigned long)(NXE::Diag::g_p12_pixtone_play_accum_ns_block / 1000ULL),
+              NXE::Diag::g_p12_pixtone_play_count_block,
+              (unsigned long)(NXE::Diag::g_p12_pixtone_stop_accum_ns_block / 1000ULL),
+-             NXE::Diag::g_p12_pixtone_stop_count_block);
++               NXE::Diag::g_p12_pixtone_stop_count_block);
++    }
+   }
+   // patch 0131: reset all 6 P12 counters unconditionally -- sample
+   // contents accumulated since prior reset; idx-style reset zeroes
+-- 
+2.47.3
+
