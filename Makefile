@@ -11,78 +11,47 @@
 # See PLAN.md for the phased rationale behind each stage; see docs/BUILDING.md
 # for prerequisites and troubleshooting.
 
-# --- Toolchain ----------------------------------------------------------------
+# --- Shared SDL3-DOS build stages (via .sdl-dos-ports submodule) --------------
 #
-# Two dirs are needed from the DJGPP install:
-#   bin/                              cross-gcc, g++, ld, ar
-#   i586-pc-msdosdjgpp/bin/           target-side utilities (stubedit, stubify, exe2coff)
+# The DJGPP toolchain wiring (DJGPP_ROOT/BIN/TBIN, CC/CXX/STUBEDIT, PATH
+# export, TOOLCHAIN_FILE), BUILD_DIR/SYSROOT, the SDL vendor paths,
+# NOSIMD_FLAGS, CMAKE_COMMON, NPROC, the djgpp-check /
+# sources / patches / verify-patches-applied targets, and the SDL3 /
+# SDL3_mixer / SDL3_image cross-build stages all live in the shared fragment
+# now consumed via the submodule (migration step 4 -- single source of truth).
+# PORT_NAME is set before the include so the SDL_REVISION string embedded in
+# libSDL3.a reads "doskutsu". Set DJGPP_PREFIX=/path to use a system DJGPP
+# install instead of the tools/djgpp symlink (the fragment honours it).
 #
-# tools/djgpp is a symlink to ~/emulators/tools/djgpp, created by
-# scripts/setup-symlinks.sh. If that symlink isn't there the djgpp-check
-# target fails loud. Set DJGPP_PREFIX=/path to use a system DJGPP install
-# instead of the symlink (matches scripts/bootstrap.sh's documented path).
+# doskutsu-specific pieces the fragment intentionally does NOT own are defined
+# below and further down: the legacy sdl2-compat/mixer/image stages, the
+# nxengine (game) stage, the RUNMANIFEST build-fingerprint flags (composed
+# directly into the nxengine stage's CMAKE_CXX_FLAGS per migration mismatch
+# #4, NOT into the shared CMAKE_COMMON, which would double-apply them to the
+# other three stages), the CWSDPMI paths, and ~150 probe/QA/dist targets.
 
 REPO_ROOT    := $(abspath .)
-DJGPP_ROOT   := $(if $(DJGPP_PREFIX),$(DJGPP_PREFIX),$(REPO_ROOT)/tools/djgpp)
-DJGPP_BIN    := $(DJGPP_ROOT)/bin
-DJGPP_TBIN   := $(DJGPP_ROOT)/i586-pc-msdosdjgpp/bin
+PORT_NAME    := doskutsu
+include .sdl-dos-ports/shared/build/sdl3-dos.mk
 
-export PATH := $(DJGPP_BIN):$(DJGPP_TBIN):$(PATH)
+# --- doskutsu-specific dirs / vendor trees ------------------------------------
+#
+# The fragment owns BUILD_DIR, SYSROOT, VENDOR_DIR, SDL3_BUILD/MIXER/IMAGE and
+# the SDL / SDL_mixer / SDL_image vendor paths. These are the ones it does not.
 
-CC       := i586-pc-msdosdjgpp-gcc
-CXX      := i586-pc-msdosdjgpp-g++
-STUBEDIT := stubedit
-
-# CMake toolchain file lives inside the SDL3 tree (PR #15377 ships it).
-# It's the canonical DJGPP CMake toolchain; sdl3-mixer / sdl3-image / nxengine
-# all use the same one.
-TOOLCHAIN_FILE := $(REPO_ROOT)/vendor/SDL/build-scripts/i586-pc-msdosdjgpp.cmake
-
-# --- Directories --------------------------------------------------------------
-
-BUILD_DIR    := $(REPO_ROOT)/build
-SYSROOT      := $(BUILD_DIR)/sysroot
-
-# Per-stage build directories
-SDL3_BUILD      := $(BUILD_DIR)/sdl3
+# Per-stage build directories (legacy sdl2 path + nxengine game stage)
 COMPAT_BUILD    := $(BUILD_DIR)/sdl2-compat
 MIXER_BUILD     := $(BUILD_DIR)/sdl2-mixer
 IMAGE_BUILD     := $(BUILD_DIR)/sdl2-image
 NXENGINE_BUILD  := $(BUILD_DIR)/nxengine
 
-# Vendor trees (populated by scripts/fetch-sources.sh)
-VENDOR_DIR      := $(REPO_ROOT)/vendor
-SDL3_SRC        := $(VENDOR_DIR)/SDL
+# Vendor trees not owned by the shared fragment
 COMPAT_SRC      := $(VENDOR_DIR)/sdl2-compat
-MIXER_SRC       := $(VENDOR_DIR)/SDL_mixer
-IMAGE_SRC       := $(VENDOR_DIR)/SDL_image
 NXENGINE_SRC    := $(VENDOR_DIR)/nxengine-evo
 
 # Vendored DPMI host (tracked in git, used by dist target)
 CWSDPMI_EXE     := $(VENDOR_DIR)/cwsdpmi/cwsdpmi.exe
 CWSDPMI_DOC     := $(VENDOR_DIR)/cwsdpmi/cwsdpmi.doc
-
-# --- Common CMake args --------------------------------------------------------
-#
-# Every stage uses the DJGPP toolchain file and installs into SYSROOT.
-# CMAKE_PREFIX_PATH makes each stage's output visible to later stages.
-
-# SDL3-NOSIMD compile defines for any SDL3 consumer on DJGPP. SDL3's PUBLIC
-# `SDL_intrin.h` (vendor/SDL/include/SDL3/SDL_intrin.h:291-292, 367) enables
-# `SDL_SSE_INTRINSICS=1` for any gcc>=4.9 because the compiler *supports*
-# `__attribute__((target("sse")))` -- even though our P54C / 486 target has
-# no SSE. SDL3 itself sets `SDL_DISABLE_SSE=1` in its INTERNAL build_config.h
-# so its own code is fine, but downstream consumers (SDL3_mixer, SDL3_image,
-# NXEngine) compile without that internal config and pick up the SSE intrinsic
-# paths -- which then emit a runtime check that fails on Pentium-class hardware
-# (e.g. SDL_mixer.c:685 `MIX_Init: Need SSE instructions but this CPU doesn't
-# offer it`). Forwarding these defines through CMAKE_C_FLAGS suppresses the
-# intrinsic gate at every consumer's preprocessor level. Includes the AVX
-# family for completeness -- same upstream issue applies. Found via #26 spike;
-# upstream issue draft at .tmp/upstream-sdl-issue-sdl-intrin-propagation.md.
-NOSIMD_FLAGS := -DSDL_DISABLE_MMX=1 -DSDL_DISABLE_SSE=1 -DSDL_DISABLE_SSE2=1 \
-                -DSDL_DISABLE_SSE3=1 -DSDL_DISABLE_SSE4_1=1 -DSDL_DISABLE_SSE4_2=1 \
-                -DSDL_DISABLE_AVX=1 -DSDL_DISABLE_AVX2=1 -DSDL_DISABLE_AVX512F=1
 
 # --- Wave-43 RUNMANIFEST flags ------------------------------------------------
 #
@@ -127,26 +96,12 @@ DOSKUTSU_BUILD_SHA12 := $(shell find $(REPO_ROOT)/patches -maxdepth 2 -name '*.p
 # valid identifier characters.
 RUNMANIFEST_FLAGS := $(RUNMANIFEST_INC) -DDOSKUTSU_BUILD_SHA12=$(DOSKUTSU_BUILD_SHA12)
 
-CMAKE_COMMON := \
-    -DCMAKE_TOOLCHAIN_FILE=$(TOOLCHAIN_FILE) \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX=$(SYSROOT) \
-    -DCMAKE_PREFIX_PATH=$(SYSROOT) \
-    -DCMAKE_FIND_ROOT_PATH=$(SYSROOT) \
-    -DCMAKE_C_FLAGS="$(NOSIMD_FLAGS) $(RUNMANIFEST_FLAGS)" \
-    -DCMAKE_CXX_FLAGS="$(NOSIMD_FLAGS) $(RUNMANIFEST_FLAGS)" \
-    -DBUILD_SHARED_LIBS=OFF
-# CMAKE_FIND_ROOT_PATH=$(SYSROOT) is pre-populated so the DJGPP toolchain file's
-# `list(APPEND CMAKE_FIND_ROOT_PATH ${CC_ROOTS})` keeps both -- needed because
-# the toolchain sets CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY, which restricts
-# find_package() to those paths. Without our sysroot prepended, downstream
-# stages (sdl3-mixer, sdl3-image, nxengine) couldn't find_package(SDL3).
-#
-# CMAKE_C_FLAGS / CMAKE_CXX_FLAGS carry the NOSIMD train (see above). SDL3's
-# own build is unaffected (it sets these internally already); SDL3_mixer,
-# SDL3_image, and NXEngine itself need them for the public-header gate.
-
-NPROC := $(shell nproc 2>/dev/null || echo 4)
+# CMAKE_COMMON and NPROC are provided by the shared fragment (included above).
+# The fragment's CMAKE_COMMON carries NOSIMD_FLAGS only; the doskutsu-specific
+# RUNMANIFEST_FLAGS are composed directly into the nxengine stage's
+# CMAKE_CXX_FLAGS (see migration mismatch #4), never appended to CMAKE_COMMON
+# (which would double-apply the -I include / build-sha define to the other
+# three stages).
 
 # --- Top-level targets --------------------------------------------------------
 
@@ -204,20 +159,7 @@ help:
 
 # --- Diagnostics --------------------------------------------------------------
 
-.PHONY: djgpp-check
-djgpp-check:
-	@if [ ! -L "$(DJGPP_ROOT)" ] && [ ! -d "$(DJGPP_ROOT)" ]; then \
-	    echo "error: $(DJGPP_ROOT) does not exist. Run ./scripts/setup-symlinks.sh." >&2; \
-	    exit 1; \
-	fi
-	@if ! command -v $(CC) >/dev/null 2>&1; then \
-	    echo "error: $(CC) not found on PATH." >&2; \
-	    echo "       Tried $(DJGPP_BIN)" >&2; \
-	    echo "       Run ~/emulators/scripts/update-djgpp.sh to install." >&2; \
-	    exit 1; \
-	fi
-	@$(CC) --version | head -n1
-	@echo "DJGPP ready."
+# djgpp-check is provided by the shared fragment (included above).
 
 .PHONY: vendor-check
 vendor-check:
@@ -294,19 +236,9 @@ fetch-binaries-lfn:
 # convenience target below so the build fails before producing a binary
 # that silently lacks a patch's effects.
 
-.PHONY: sources patches verify-patches-applied
-# `make sources` clones the vendored upstreams per vendor/sources.manifest --
-# a convenience alias for ./scripts/fetch-sources.sh so the documented
-# `make sources` command (CLAUDE.md build-chain summary) resolves. Symmetric
-# with `make patches` below.
-sources:
-	@$(REPO_ROOT)/scripts/fetch-sources.sh
-
-patches:
-	@$(REPO_ROOT)/scripts/apply-patches.sh
-
-verify-patches-applied:
-	@$(REPO_ROOT)/scripts/verify-patches-applied.sh
+# sources / patches / verify-patches-applied are provided by the shared
+# fragment (included above); they drive this port's own vendor/sources.manifest
+# and patches/ via the hub's shared/scripts/.
 
 # Content-based staleness inputs for the build-stage artifacts. The .a / .exe
 # file targets below historically had ONLY an order-only `| djgpp-check`
@@ -319,136 +251,19 @@ verify-patches-applied:
 # patches`; verify-patches-applied gates that the series is actually applied,
 # so a patch edit forces `make patches` then a rebuild here.) The wildcards are
 # expanded at parse time; a newly-added patch file is a newer prereq -> rebuild.
-MANIFEST_FILE      := $(VENDOR_DIR)/sources.manifest
-SDL3_PATCHES       := $(wildcard $(REPO_ROOT)/patches/SDL/*.patch)
-SDL3_MIXER_PATCHES := $(wildcard $(REPO_ROOT)/patches/SDL_mixer/*.patch)
-SDL3_IMAGE_PATCHES := $(wildcard $(REPO_ROOT)/patches/SDL_image/*.patch)
+# MANIFEST_FILE and SDL3_PATCHES / SDL3_MIXER_PATCHES / SDL3_IMAGE_PATCHES are
+# provided by the shared fragment (included above). NXENGINE_PATCHES +
+# ENGINE_HEADERS are doskutsu-specific staleness prereqs for the nxengine stage.
 NXENGINE_PATCHES   := $(wildcard $(REPO_ROOT)/patches/nxengine-evo/*.patch)
 ENGINE_HEADERS     := $(wildcard $(REPO_ROOT)/include/*.h)
 
-# --- Stage 1: SDL3 ------------------------------------------------------------
-
-.PHONY: sdl3
-sdl3: verify-patches-applied $(SYSROOT)/lib/libSDL3.a
-
-# DOSKUTSU: pin SDL_REVISION to a deterministic string to keep build sha
-# reproducible across agent rebuilds. By default SDL3's CMakeLists.txt does
-# `git describe` on vendor/SDL/, which embeds the current HEAD commit hash
-# into the binary as `SDL-<version>-<sha>`. apply-patches.sh re-applies our
-# patch series via `git am`, and `git am` uses wall-clock time for the
-# COMMITTER timestamp -- so HEAD commit hashes change every time apply runs,
-# making the embedded revision string non-deterministic. Pin it explicitly
-# to the base manifest SHA + a doskutsu marker so the binary's embedded
-# revision is determined purely by the source content, not by when
-# apply-patches happened to run.
-SDL_REVISION_PIN := SDL-3.5.0-74a746281+doskutsu
-
-$(SYSROOT)/lib/libSDL3.a: $(SDL3_PATCHES) $(MANIFEST_FILE) | djgpp-check
-	@test -d "$(SDL3_SRC)" || (echo "error: $(SDL3_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
-	@test -f "$(TOOLCHAIN_FILE)" || (echo "error: $(TOOLCHAIN_FILE) not found -- PR #15377 not in this SDL checkout?" >&2; exit 1)
-	# SDL_TESTS=OFF -- skip SDL3's upstream test executables (loopwave /
-	# surround / resample / chkkeys / etc.) which link libSDL3.a alone.
-	# We rely on patches that have SDL <-> engine cross-link-unit symbols
-	# (e.g. SDL/0070's extern reference to g_pixtone_active_count, which
-	# is engine-side-owned in Pixtone.cpp). Those test exes don't link the
-	# engine, so they fail to resolve such externs and the build halts at
-	# the sdl3 stage before doskutsu.exe ever gets built. We never ship
-	# or run those test exes -- our smoke gate runs doskutsu.exe + the
-	# gameplay TAS. Skip them so the build proceeds. (Added 2026-05-21
-	# per build-qa #118 link-chain catch on SDL/0070.)
-	cmake -S $(SDL3_SRC) -B $(SDL3_BUILD) $(CMAKE_COMMON) \
-	    -DSDL_SHARED=OFF -DSDL_STATIC=ON \
-	    -DSDL_TESTS=OFF \
-	    -DSDL_REVISION="$(SDL_REVISION_PIN)"
-	cmake --build $(SDL3_BUILD) -j$(NPROC)
-	cmake --install $(SDL3_BUILD)
-
-# --- Path B spike: SDL3_mixer for DOS ----------------------------------------
+# --- Stages 1-3: SDL3 / SDL3_mixer / SDL3_image -------------------------------
 #
-# task #26 spike. Builds SDL_mixer (release-3.2.x) against libSDL3.a with
-# WAV (native) + OGG-via-stb_vorbis only. All other codecs OFF; SDLMIXER_DEPS_SHARED=OFF
-# disables dynamic codec loading (DJGPP has no real dlopen). PLATFORM_SUPPORTS_SHARED
-# is forced OFF via BUILD_SHARED_LIBS=OFF override.
-#
-# This is the path-B-go/no-go preflight per software-architect's condition 2.
-
-SDL3_MIXER_BUILD := $(BUILD_DIR)/sdl3-mixer
-
-.PHONY: sdl3-mixer
-sdl3-mixer: verify-patches-applied $(SYSROOT)/lib/libSDL3_mixer.a
-
-# NOSIMD flag train moved to CMAKE_COMMON (project-wide) per team-lead -- every
-# SDL3 consumer on DJGPP needs the same defines. See the NOSIMD_FLAGS block
-# at the top of this file for the full rationale. Per-stage CMAKE_C_FLAGS
-# overrides removed; they'd shadow the CMAKE_COMMON value.
-
-$(SYSROOT)/lib/libSDL3_mixer.a: $(SYSROOT)/lib/libSDL3.a $(SDL3_MIXER_PATCHES)
-	@test -d "$(MIXER_SRC)" || (echo "error: $(MIXER_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
-	cmake -S $(MIXER_SRC) -B $(SDL3_MIXER_BUILD) $(CMAKE_COMMON) \
-	    -DSDLMIXER_VENDORED=ON \
-	    -DSDLMIXER_DEPS_SHARED=OFF \
-	    -DSDLMIXER_TESTS=OFF \
-	    -DSDLMIXER_EXAMPLES=OFF \
-	    -DSDLMIXER_AIFF=OFF \
-	    -DSDLMIXER_VOC=OFF \
-	    -DSDLMIXER_AU=OFF \
-	    -DSDLMIXER_FLAC=OFF \
-	    -DSDLMIXER_GME=OFF \
-	    -DSDLMIXER_MOD=OFF \
-	    -DSDLMIXER_MP3=OFF \
-	    -DSDLMIXER_MIDI=OFF \
-	    -DSDLMIXER_OPUS=OFF \
-	    -DSDLMIXER_WAVE=ON \
-	    -DSDLMIXER_VORBIS_STB=ON \
-	    -DSDLMIXER_VORBIS_VORBISFILE=OFF \
-	    -DSDLMIXER_WAVPACK=OFF
-	cmake --build $(SDL3_MIXER_BUILD) -j$(NPROC)
-	cmake --install $(SDL3_MIXER_BUILD)
-
-# --- Path B: SDL3_image for DOS (#28) ----------------------------------------
-#
-# Builds SDL_image release-3.2.x against libSDL3.a with PNG-via-stb_image
-# only. All other codecs OFF; SDLIMAGE_DEPS_SHARED=OFF disables the
-# SDL_LoadObject codec loader path. Same SDL_DISABLE_SSE/MMX flag train as
-# sdl3-mixer -- the SDL3 PUBLIC SDL_intrin.h enables SDL_SSE_INTRINSICS for
-# any gcc>=4.9 regardless of target CPU, which would otherwise enable code
-# paths that fail on P54C-class hardware. SDL3_image kept the IMG_* prefix
-# from SDL2_image (signature drift, not the architectural redesign that
-# SDL3_mixer underwent) -- see software-architect's note on #28.
-
-SDL3_IMAGE_BUILD := $(BUILD_DIR)/sdl3-image
-# NOSIMD flag train inherited from CMAKE_COMMON. See top-of-file NOSIMD_FLAGS.
-
-.PHONY: sdl3-image
-sdl3-image: verify-patches-applied $(SYSROOT)/lib/libSDL3_image.a
-
-$(SYSROOT)/lib/libSDL3_image.a: $(SYSROOT)/lib/libSDL3.a $(SDL3_IMAGE_PATCHES)
-	@test -d "$(IMAGE_SRC)" || (echo "error: $(IMAGE_SRC) not present -- run scripts/fetch-sources.sh" >&2; exit 1)
-	cmake -S $(IMAGE_SRC) -B $(SDL3_IMAGE_BUILD) $(CMAKE_COMMON) \
-	    -DSDLIMAGE_VENDORED=ON \
-	    -DSDLIMAGE_DEPS_SHARED=OFF \
-	    -DSDLIMAGE_TESTS=OFF \
-	    -DSDLIMAGE_SAMPLES=OFF \
-	    -DSDLIMAGE_BACKEND_STB=ON \
-	    -DSDLIMAGE_PNG=ON \
-	    -DSDLIMAGE_AVIF=OFF \
-	    -DSDLIMAGE_BMP=OFF \
-	    -DSDLIMAGE_GIF=OFF \
-	    -DSDLIMAGE_JPG=OFF \
-	    -DSDLIMAGE_JXL=OFF \
-	    -DSDLIMAGE_LBM=OFF \
-	    -DSDLIMAGE_PCX=OFF \
-	    -DSDLIMAGE_PNM=OFF \
-	    -DSDLIMAGE_QOI=OFF \
-	    -DSDLIMAGE_SVG=OFF \
-	    -DSDLIMAGE_TGA=OFF \
-	    -DSDLIMAGE_TIF=OFF \
-	    -DSDLIMAGE_WEBP=OFF \
-	    -DSDLIMAGE_XCF=OFF \
-	    -DSDLIMAGE_XPM=OFF \
-	    -DSDLIMAGE_XV=OFF
-	cmake --build $(SDL3_IMAGE_BUILD) -j$(NPROC)
-	cmake --install $(SDL3_IMAGE_BUILD)
+# Provided by the shared fragment (.sdl-dos-ports/shared/build/sdl3-dos.mk,
+# included near the top of this file): the sdl3 / sdl3-mixer / sdl3-image
+# targets, their $(SYSROOT)/lib/libSDL3*.a file recipes, and the deterministic
+# SDL_REVISION pin (SDL3-DOS+$(PORT_NAME)). doskutsu's own final stage
+# (nxengine, below) links its engine against the sysroot these stages populate.
 
 # --- Stage 2: sdl2-compat -----------------------------------------------------
 
@@ -514,7 +329,16 @@ nxengine: verify-patches-applied $(BUILD_DIR)/doskutsu.exe
 
 $(BUILD_DIR)/doskutsu.exe: $(SYSROOT)/lib/libSDL3_mixer.a $(SYSROOT)/lib/libSDL3_image.a $(NXENGINE_PATCHES) $(ENGINE_HEADERS) $(MANIFEST_FILE)
 	@test -d "$(NXENGINE_SRC)" || (echo "error: $(NXENGINE_SRC) not present" >&2; exit 1)
-	cmake -S $(NXENGINE_SRC) -B $(NXENGINE_BUILD) $(CMAKE_COMMON)
+	# CMAKE_COMMON (from the shared fragment) carries NOSIMD_FLAGS only. The
+	# doskutsu-specific RUNMANIFEST flags (-I include/ + -DDOSKUTSU_BUILD_SHA12)
+	# are composed HERE, into this stage's CMAKE_CXX_FLAGS, rather than in the
+	# shared CMAKE_COMMON -- only the nxengine engine TU (main.cpp) #includes
+	# runmanifest.h, so baking them into CMAKE_COMMON would double-apply them to
+	# the SDL3/mixer/image stages too (migration mismatch #4). The later
+	# -DCMAKE_CXX_FLAGS= wins over CMAKE_COMMON's NOSIMD-only one on the cmake
+	# command line.
+	cmake -S $(NXENGINE_SRC) -B $(NXENGINE_BUILD) $(CMAKE_COMMON) \
+	    -DCMAKE_CXX_FLAGS="$(NOSIMD_FLAGS) $(RUNMANIFEST_FLAGS)"
 	cmake --build $(NXENGINE_BUILD) -j$(NPROC)
 	@# Find the produced exe -- upstream may put it at the build root or under bin/.
 	@src_exe=""; \
