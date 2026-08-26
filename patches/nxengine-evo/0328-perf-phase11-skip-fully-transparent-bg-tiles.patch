@@ -1,0 +1,443 @@
+From b060b060e9fc3304214a79b449e3f9526e2740e0 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 25 Aug 2026 21:32:18 -0700
+Subject: [PATCH] perf phase 11 patch 0328 -- skip fully-transparent BG tiles
+ (byte-identical)
+
+The real-hardware TBG1 census (patch 0327's MDS_TBG_INSTR) found that
+93.4-93.6% of every BG tile actually drawn is tile-0 (empty), the pass is
+cleanly count-bound (~41.5 us/tile flat), and skipping those blits
+projects a 2.8-9.2 ms/tick saving -- enough to clear the Mach64 KPI gap.
+
+Why this is a correctness-preserving speedup, not a gamble. Tilesets load
+with the colorkey set to master palette index 0 (black) in wave-16
+indexed mode, and _blit_indexed writes only pixels where px != colorkey.
+So a tile whose every pixel is index 0 writes ZERO pixels today -- the
+backdrop (drawn earlier in DrawScene) already shows through it. Skipping
+such a blit is byte-identical to performing it, the same property patch
+0130's occlusion table already relies on.
+
+The skip is NOT a literal t==0 compare (that would assume tile index 0 is
+blank in every tileset -- data-dependent, breakable by a mod). Instead
+Tileset::_computeBlankTiles scans the loaded tilesheet once per map load
+and marks every tile whose pixels are ALL the colorkey; the BG loop skips
+exactly those. Safe-by-construction on any tileset -- it can only ever
+skip blits that provably write nothing, and it correctly skips nothing
+when a tileset has a non-blank tile-0 or no colorkey (or a non-INDEX8
+surface). Mirrors drawTile's src-rect math so detection matches the blit.
+
+Scope: BG pass only (foreground == 0, the measured win); the FG pass and
+the default-OFF tilemap-cache fill path (patch 0132) are untouched. Only
+the plain drawTile branch is gated -- TA_CURRENT / 0x43 special sprites
+still draw.
+
+Killswitch SDL_HINT_DOSKUTSU_BG_BLANK_SKIP (default ON, strict-0
+disables). No killswitch is needed for correctness; it exists for A/B
+ablation, a clean revert on the hottest render loop, and because the
+non-default DRAWTILE_FAST=0 path records dirty rects (the default
+drawTileFast does not) so the skip has a subtle dirty-rect interaction
+there (argued benign -- pixels identical, region covered by the
+backdrop's own draw -- but worth being able to revert).
+
+Instrumentation: adds g_mds_tbg_tiles_skipped_blank to patch 0327's
+census so visited == drawn_normal + drawn_special + skipped_attr +
+skipped_oob + skipped_blank stays balanced, which also measures the
+lever's engagement on hardware. Diag-gated (counts only under
+MDS_TBG_INSTR=1). Per-load 'blank-tile precompute -- N of M ...' line +
+an always-on initVideo banner are the two-witness hooks; the FG (tfg,
+patch 0111) census is untouched.
+
+docs/BOOT.md, CLRENV.BAT and the smoke BANNERS entry ride in the outer
+repo.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h | 14 ++++++++
+ src/graphics/Renderer.cpp     | 59 +++++++++++++++++++++++++++----
+ src/graphics/Tileset.cpp      | 66 +++++++++++++++++++++++++++++++++++
+ src/graphics/Tileset.h        | 23 ++++++++++++
+ src/map.cpp                   | 38 ++++++++++++++++++--
+ 5 files changed, 191 insertions(+), 9 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 2fde8f80..70cf284f 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -1164,12 +1164,26 @@ extern std::uint32_t g_mds_tbg_tiles_skipped_oob;
+ extern std::uint32_t g_mds_tbg_tiles_drawn_tile0;
+ extern std::uint32_t g_mds_tbg_tiles_player_occluded;
+ 
++// patch 0328 (blank-tile skip): count of BG tiles skipped this block
++// because they were fully-transparent (all-colorkey). Visited-but-not-
++// drawn, so it joins the census self-check sum: visited == drawn_normal
++// + drawn_special + skipped_attr + skipped_oob + skipped_blank. Also the
++// on-HW engagement witness for the 0328 skip lever. Only ever bumped on
++// the BG pass (the skip is BG-only); the FG (tfg) census is untouched.
++extern std::uint32_t g_mds_tbg_tiles_skipped_blank;
++
+ // Forward-decl env helper. Definition in Renderer.cpp's anonymous-
+ // namespace ablation cluster; forwarded via file-scope wrapper at
+ // end-of-Renderer.cpp per the W20B build-fix amendment pattern.
+ // Strict-1 match for SDL_HINT_DOSKUTSU_MDS_TBG_INSTR.
+ bool mds_tbg_instr_active();
+ 
++// patch 0328 (blank-tile skip): killswitch accessor for the BG blank-
++// tile skip lever. Default ON; strict-"0" disables (inverse-killswitch
++// convention). Consumed by map.cpp's BG tile loop. Definition +
++// forwarding follow the drawtile_fast_active() pattern.
++bool bg_blank_skip_active();
++
+ // patch 0113 (Phase 11 iter H opt #2: off-screen tile bbox skip).
+ // Forward-decl env helper for the killswitch. When ENABLED, the
+ // FG-tilemap loop pre-computes a clipped (mapx, mapy)-rectangle
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index a95c8e9c..b8eaa629 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -375,6 +375,7 @@ std::uint32_t g_mds_tbg_tiles_skipped_attr        = 0;
+ std::uint32_t g_mds_tbg_tiles_skipped_oob         = 0;
+ std::uint32_t g_mds_tbg_tiles_drawn_tile0         = 0;
+ std::uint32_t g_mds_tbg_tiles_player_occluded     = 0;
++std::uint32_t g_mds_tbg_tiles_skipped_blank       = 0;  // patch 0328
+ 
+ // patch 0118 (Phase 11 iter K, slot 0111 ordering bug fix). Snapshot
+ // of the W22.5 mds_tilemap_fg sample-sum (in ms). Written by
+@@ -552,6 +553,9 @@ bool tile_bbox_skip_active();
+ // patch 0117 (Phase 11 iter K Cand #1: drawTileFast inline):
+ // drawtile_fast_active() forward-decl. Same pattern.
+ bool drawtile_fast_active();
++// patch 0328 (blank-tile skip): bg_blank_skip_active() forward-decl.
++// Same pattern; consumed by map.cpp's BG tile loop.
++bool bg_blank_skip_active();
+ // patch 0128 (Phase 11 wave-33 H3 visit-loop simplification --
+ // slot 0113 extension): tile_bounds_skip_active() forward-decl.
+ // Same file-scope-after-both-namespace-closes definition pattern.
+@@ -991,6 +995,24 @@ inline bool _abl_drawtile_fast()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0328: blank-tile skip). Killswitch for the BG blank-
++// tile skip lever. Default ON; strict-"0" disables (inverse-killswitch
++// convention, same shape as _abl_drawtile_fast). When ON, map.cpp's BG
++// tile loop skips drawing tiles the tileset precompute marked fully-
++// transparent (all-colorkey) -- a byte-identical no-op skip, since
++// _blit_indexed writes zero pixels for such a tile. Correctness-
++// preserving speedup; the killswitch exists for A/B ablation + a clean
++// revert path on the hottest render loop, not because OFF is ever more
++// correct.
++inline bool _abl_bg_blank_skip()
++{
++  static const bool v = []() {
++    const char *e = std::getenv("SDL_HINT_DOSKUTSU_BG_BLANK_SKIP");
++    return !(e && e[0] == '0' && e[1] == 0);
++  }();
++  return v;
++}
++
+ // DOS-PORT (patch 0128, Phase 11 wave-33 H3 visit-loop simplification --
+ // slot 0113 extension). Killswitch for the FG/BG tilemap-loop bounds-
+ // check elimination optimization. When ENABLED (default), the inner-
+@@ -3853,6 +3875,7 @@ void _maybe_flush_phase_timing_audit()
+     using NXE::Diag::g_mds_tbg_tiles_skipped_oob;
+     using NXE::Diag::g_mds_tbg_tiles_drawn_tile0;
+     using NXE::Diag::g_mds_tbg_tiles_player_occluded;
++    using NXE::Diag::g_mds_tbg_tiles_skipped_blank;  // patch 0328
+ 
+     const double bg_drawtile_per_us =
+         (g_mds_tbg_drawtile_count > 0)
+@@ -3892,7 +3915,7 @@ void _maybe_flush_phase_timing_audit()
+ 
+     LOG_INFO("[mds-tbg-tiles n={} visited={} drawn_normal={} "
+              "drawn_special={} skipped_attr={} skipped_oob={} "
+-             "drawn_tile0={} player_occluded={} "
++             "skipped_blank={} drawn_tile0={} player_occluded={} "
+              "tile0_pct_x10={:.0f} player_occ_pct_x10={:.0f}]",
+              _dc_tally_every_flips,
+              g_mds_tbg_tiles_visited,
+@@ -3900,23 +3923,28 @@ void _maybe_flush_phase_timing_audit()
+              g_mds_tbg_tiles_drawn_special,
+              g_mds_tbg_tiles_skipped_attr,
+              g_mds_tbg_tiles_skipped_oob,
++             g_mds_tbg_tiles_skipped_blank,
+              g_mds_tbg_tiles_drawn_tile0,
+              g_mds_tbg_tiles_player_occluded,
+              tile0_pct_x10,
+              player_occ_pct_x10);
+ 
+-    // Self-check (mirror of the tfg block): visited == sum of the four
+-    // disposition buckets. drawn_tile0 / player_occluded are SUBSETS of
++    // Self-check (mirror of the tfg block): visited == sum of the
++    // disposition buckets. patch 0328 adds skipped_blank (tiles skipped
++    // because fully-transparent) to the sum -- they are visited-but-not-
++    // drawn, so without it the equality would break whenever the blank-
++    // skip lever fires. drawn_tile0 / player_occluded are SUBSETS of
+     // drawn_normal, so they are deliberately NOT part of this equality.
+     const std::uint32_t bg_tiles_sum = g_mds_tbg_tiles_drawn_normal +
+                                        g_mds_tbg_tiles_drawn_special +
+                                        g_mds_tbg_tiles_skipped_attr +
+-                                       g_mds_tbg_tiles_skipped_oob;
++                                       g_mds_tbg_tiles_skipped_oob +
++                                       g_mds_tbg_tiles_skipped_blank;
+     if (bg_tiles_sum != g_mds_tbg_tiles_visited)
+     {
+       LOG_INFO("[mds-tbg-selfcheck WARN] tiles_visited={} != sum={} "
+-               "(drawn_normal+drawn_special+skipped_attr+skipped_oob); "
+-               "instrumentation drift.",
++               "(drawn_normal+drawn_special+skipped_attr+skipped_oob+"
++               "skipped_blank); instrumentation drift.",
+                g_mds_tbg_tiles_visited, bg_tiles_sum);
+     }
+     if (g_mds_tbg_tiles_drawn_tile0 > g_mds_tbg_tiles_drawn_normal ||
+@@ -3943,6 +3971,7 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_mds_tbg_tiles_skipped_oob        = 0;
+   NXE::Diag::g_mds_tbg_tiles_drawn_tile0        = 0;
+   NXE::Diag::g_mds_tbg_tiles_player_occluded    = 0;
++  NXE::Diag::g_mds_tbg_tiles_skipped_blank      = 0;  // patch 0328
+ }
+ 
+ // DOS-PORT (patch 0160, SFX-stall instrumentation contract -- part A):
+@@ -4646,6 +4675,18 @@ bool Renderer::initVideo()
+            "rendering.",
+            _abl_mds_tbg_instr() ? "ENABLED (opt-in)" : "DISABLED (default)");
+ 
++  // DOS-PORT (patch 0328: blank-tile skip). Always-on banner narrating
++  // the BG blank-tile skip lever's state, for the smoke two-witness gate.
++  LOG_INFO("Renderer::initVideo: BG blank-tile skip lever {} -- "
++           "SDL_HINT_DOSKUTSU_BG_BLANK_SKIP=0 disables (default ON); "
++           "the BG tile loop skips drawing tiles the tileset precompute "
++           "marked fully-transparent (all-colorkey) -- a byte-identical "
++           "no-op skip (_blit_indexed writes zero pixels for such a tile). "
++           "Engagement witness is the [mds-tbg-tiles ... skipped_blank=..] "
++           "count under MDS_TBG_INSTR=1, and the per-load "
++           "'blank-tile precompute -- N of M ...' line.",
++           _abl_bg_blank_skip() ? "ENABLED (default)" : "DISABLED (killswitch)");
++
+   // DOS-PORT (patch 0146, Phase 11 wave-51): blit-decomp instrumentation
+   // engagement banner -- greppable witness for build-qa's BANNERS array.
+   if (_blit_decomp_enabled())
+@@ -10300,6 +10341,12 @@ namespace NXE { namespace Diag {
+ bool mds_tbg_instr_active() { return ::NXE::Graphics::_abl_mds_tbg_instr(); }
+ }}
+ 
++// DOS-PORT (patch 0328: blank-tile skip): bg_blank_skip_active()
++// env-helper accessor. Same file-scope wrapper pattern.
++namespace NXE { namespace Diag {
++bool bg_blank_skip_active() { return ::NXE::Graphics::_abl_bg_blank_skip(); }
++}}
++
+ // DOS-PORT (patch 0113, Phase 11 iter H opt #2: off-screen tile bbox
+ // skip): tile_bbox_skip_active() env-helper accessor. Same pattern.
+ namespace NXE { namespace Diag {
+diff --git a/src/graphics/Tileset.cpp b/src/graphics/Tileset.cpp
+index d30ae064..3e26c366 100644
+--- a/src/graphics/Tileset.cpp
++++ b/src/graphics/Tileset.cpp
+@@ -47,11 +47,77 @@ bool Tileset::load(int new_tileset)
+     }
+ 
+     _current_tileset = new_tileset;
++    // patch 0328: (re)build the blank-tile table for the new tilesheet.
++    _computeBlankTiles();
+   }
+ 
+   return true;
+ }
+ 
++// DOS-PORT (patch 0328: blank-tile skip). Scan the loaded tilesheet and
++// mark every tile whose pixels are ALL the colorkey (master index 0 /
++// black in indexed mode). Such a tile's blit is a proven no-op --
++// _blit_indexed writes only pixels where `px != colorkey` (Renderer.cpp),
++// so an all-colorkey tile writes nothing and the backdrop already shows
++// through it. map.cpp's BG loop skips those blits, which is byte-
++// identical to performing them.
++//
++// Safe-by-construction fallbacks (all -> "nothing skippable"): no
++// tileset, no CPU surface, no colorkey, or a non-INDEX8 surface. The
++// DOS build is always INDEX8 (wave-16 indexed mode) with colorkey 0, so
++// the scan runs in production; anything else leaves the table all-zero
++// and the loop skips nothing. Mirrors drawTile's exact src-rect math
++// (16 tiles per row, TILE_W x TILE_H) so the detection matches the
++// actual blit region.
++void Tileset::_computeBlankTiles()
++{
++  for (int i = 0; i < 256; ++i)
++    _tile_blank[i] = 0;
++
++  if (!_tileset)
++    return;
++  SDL_Surface *s = _tileset->surfaceCpu();
++  if (!s || !_tileset->hasColorkey())
++    return;
++  if (s->format != SDL_PIXELFORMAT_INDEX8)
++    return;
++
++  const Uint8 ck = (Uint8)(_tileset->colorkey() & 0xFFu);
++  const Uint8 *px = (const Uint8 *)s->pixels;
++  const int pitch = s->pitch;
++  const int tiles_per_row = 16;
++  const int ntiles_y = s->h / TILE_H;
++  const int ntiles = tiles_per_row * ntiles_y;
++
++  int nblank = 0;
++  for (int t = 0; t < ntiles && t < 256; ++t)
++  {
++    const int srcx = (t % 16) * TILE_W;
++    const int srcy = (t / 16) * TILE_H;
++    // Defensive: never read outside the surface (a short/odd sheet).
++    if (srcx + TILE_W > s->w || srcy + TILE_H > s->h)
++      continue;
++    bool blank = true;
++    for (int yy = 0; yy < TILE_H && blank; ++yy)
++    {
++      const Uint8 *row = px + (srcy + yy) * pitch + srcx;
++      for (int xx = 0; xx < TILE_W; ++xx)
++      {
++        if (row[xx] != ck) { blank = false; break; }
++      }
++    }
++    if (blank)
++    {
++      _tile_blank[t] = 1;
++      ++nblank;
++    }
++  }
++
++  LOG_INFO("Tileset::load: blank-tile precompute -- {} of {} tiles fully "
++           "transparent (tileset {})",
++           nblank, ntiles, _current_tileset);
++}
++
+ // draw the given tile from the current tileset to the screen
+ void Tileset::drawTile(int x, int y, int t)
+ {
+diff --git a/src/graphics/Tileset.h b/src/graphics/Tileset.h
+index 81a3324d..df193ef5 100644
+--- a/src/graphics/Tileset.h
++++ b/src/graphics/Tileset.h
+@@ -3,6 +3,8 @@
+ 
+ #include "Surface.h"
+ 
++#include <cstdint>
++
+ #define TILE_W 16
+ #define TILE_H 16
+ 
+@@ -61,9 +63,30 @@ class Tileset
+     // Caller responsible for dst surface allocation + format match
+     // (INDEX8<->INDEX8 expected); errors logged but not propagated.
+     void drawTileToSurface(SDL_Surface *dst, int dst_x, int dst_y, int t);
++
++    // DOS-PORT (patch 0328: blank-tile skip). Per-tile "fully
++    // transparent" table, rebuilt at every tileset load by
++    // _computeBlankTiles(). _tile_blank[t] == 1 iff every pixel of
++    // tile index t equals the tileset's colorkey (master index 0 /
++    // black) -- i.e. drawing it via _blit_indexed writes ZERO pixels,
++    // so the blit is a no-op the backdrop already shows through.
++    // map.cpp's BG tile loop skips those blits (byte-identical output).
++    // Indexed by the unsigned-char map tile value (0..255), so the hot
++    // loop needs no bounds check. Returns a stable pointer to the
++    // 256-entry table (all-zero -> "nothing skippable", the safe
++    // fallback when the surface has no colorkey or is not INDEX8).
++    const uint8_t *blankTable() const { return _tile_blank; }
+   private:
++    // patch 0328: scan the loaded tilesheet and mark fully-transparent
++    // tiles. Safe-by-construction: only tiles whose every pixel is the
++    // colorkey are marked (their blit already writes nothing). Called
++    // from load() after _tileset is (re)populated.
++    void _computeBlankTiles();
++
+     Surface *_tileset = nullptr;
+     int _current_tileset = -1;
++    // patch 0328: 1 = tile is fully colorkey (skippable no-op blit).
++    uint8_t _tile_blank[256] = {0};
+ };
+ 
+ }; // namespace Graphics
+diff --git a/src/map.cpp b/src/map.cpp
+index 1468ef23..27ea8744 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -3327,7 +3327,9 @@ inline void _tilemap_inner_render_dispatch(
+     bool instr_on,
+     bool instr_is_bg,
+     int player_scr_x, int player_scr_y,
+-    int player_scr_w, int player_scr_h)
++    int player_scr_w, int player_scr_h,
++    bool bg_blank_skip_on,
++    const uint8_t *blank_table)
+ {
+   // patch 0327 (BG-tilemap tile census + occlusion headroom probe):
+   // route the per-tile census counters to the BG set (g_mds_tbg_*)
+@@ -3428,6 +3430,21 @@ inline void _tilemap_inner_render_dispatch(
+           }
+           else
+           {
++            // patch 0328 (blank-tile skip): skip drawing tiles the
++            // tileset precompute marked fully-transparent (all-colorkey)
++            // -- their _blit_indexed writes zero pixels, so the backdrop
++            // already shows through and skipping is byte-identical. Only
++            // the BG pass sets bg_blank_skip_on; blank_table is indexed
++            // by the tile value (0..255) so no bounds check is needed.
++            // blit_x still advances at the loop bottom, so the skip does
++            // not disturb tile positioning.
++            if (bg_blank_skip_on && blank_table[t])
++            {
++              if (instr_on)
++                ++NXE::Diag::g_mds_tbg_tiles_skipped_blank;
++            }
++            else
++            {
+             // patch 0111: drawTile bracket -- DOMINANT path (~150/flip
+             // First Cave). Wraps tileset.drawTile + Renderer::draw-
+             // Surface + _try_fast_blit chain. _blit_indexed body
+@@ -3481,6 +3498,7 @@ inline void _tilemap_inner_render_dispatch(
+                 }
+               }
+             }
++            }  // patch 0328: close blank-skip inner else (drawTile branch)
+           }
+         }
+         else
+@@ -3574,6 +3592,18 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+   // they're outside this lever's scope.
+   const bool drawtile_fast_on = NXE::Diag::drawtile_fast_active();
+ 
++  // patch 0328 (blank-tile skip): apply the fully-transparent-tile skip
++  // to the BG pass only (foreground == 0), gated on the default-ON
++  // killswitch. blank_table[t] == 1 means tile t is all-colorkey, i.e.
++  // its blit is a proven no-op; skipping it is byte-identical. The table
++  // is 256 entries, all-zero until the tileset precompute fills it, so
++  // this is safe before the first map load / when the surface has no
++  // colorkey (nothing skipped).
++  const bool bg_blank_skip_on =
++      (foreground == 0) && NXE::Diag::bg_blank_skip_active();
++  const uint8_t *blank_table =
++      Renderer::getInstance()->tileset.blankTable();
++
+   int scroll_x = (map.displayed_xscroll / CSFI);
+   int scroll_y = (map.displayed_yscroll / CSFI);
+   int mapx = scroll_x / TILE_W;
+@@ -3648,7 +3678,8 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+         mapx, mapy,
+         blit_x_start, blit_y,
+         foreground, drawtile_fast_on, instr_on,
+-        instr_bg, player_scr_x, player_scr_y, player_scr_w, player_scr_h);
++        instr_bg, player_scr_x, player_scr_y, player_scr_w, player_scr_h,
++        bg_blank_skip_on, blank_table);
+   }
+   else
+   {
+@@ -3658,7 +3689,8 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+         mapx, mapy,
+         blit_x_start, blit_y,
+         foreground, drawtile_fast_on, instr_on,
+-        instr_bg, player_scr_x, player_scr_y, player_scr_w, player_scr_h);
++        instr_bg, player_scr_x, player_scr_y, player_scr_w, player_scr_h,
++        bg_blank_skip_on, blank_table);
+   }
+ 
+   if (instr_fg)
+-- 
+2.47.3
+

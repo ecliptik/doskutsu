@@ -525,6 +525,7 @@ BANNER_REGEX=(
   "\\[shot-dump\\] summary want=[0-9]+ (fired_at=[0-9]+|NEVER FIRED)"
   "backdrop thrash centring (ENABLED \\(default\\)|DISABLED \\(killswitch\\))"
   "DOSVESA-FORCEMODE: (hint unset -> filter inactive|requested id=0x[0-9A-Fa-f]+ (FOUND|NOT enumerated))"
+  "Renderer::initVideo: BG blank-tile skip lever (ENABLED \(default\)|DISABLED \(killswitch\))"
 )
 BANNER_SEVERITY=(
   "forbidden"
@@ -686,6 +687,7 @@ BANNER_SEVERITY=(
   "optional"
   "optional"
   "optional"
+  "required"
   "required"
 )
 # BANNER_LABEL is parallel to BANNER_REGEX/BANNER_SEVERITY -- ALL THREE are 149 entries
@@ -859,6 +861,7 @@ BANNER_LABEL=(
   "0319 Round-Q frame-dump coverage summary (rides DOSKUTSU_SHOT_TICKS, DEFAULT-OFF; optional -- one LOG line per armed tick at shutdown, before TAS::shutdown, reporting fired_at=N or NEVER FIRED. This is the FIX for the 0318 defect found on cell GVSD: 0318 tested tick==target once per flip, and with logic ticks at a true 50 Hz against a 29.5 fps flip rate only ~59% of tick values were ever tested, so 2 of 4 requested dumps silently did not happen -- no file, no log line, no failure to report. 0319 fires on the first flip at or AFTER the target (cannot miss) and makes the check state its own coverage, because a silent absence is indistinguishable from never having been asked. Per-dump lines also gain want=/got=/skew=. Default smoke leaves SHOT_TICKS unset so this is ABSENT, expected not a failure. Embed witness = strings|grep 'shot-dump. summary'. OPTIONAL: diagnostic, absent on release binaries which lack 0318/0319. BANNER_REGEX idx 156.)"
   "0320 Round-Q backdrop thrash centring fix (DEFAULT-ON correctness fix, killswitch SDL_HINT_DOSKUTSU_THRASH_CENTRE=0; optional -- LOG_INFO on the first thrash-branch entry ON AN OVERSIZED SURFACE. Requires BOTH a cache-miss streak AND dosCenterActive(); the && short-circuits, so a 320x240 card never evaluates the lever and never emits, which is CORRECT and expected. Verified under DOSBox-X: thrash engages (streak 184) and this banner is absent because centring is inactive -- which is also the regression witness that the fix is inert at 320x240. Fixes the backdrop-black defect on oversized surfaces: patch 0126 routes the tile loop direct-to-window on miss streaks, using the cache path coordinate convention but skipping the cache->window blit that applies the centring offset (0302), so the backdrop landed at window origin instead of the centred box. Confirmed on hardware Round Q -- BACKDROP_CACHE=0 alone took the void 78006 px -> 0, and 99.95 pct of void pixels obey the predicted 160x120 quadrant boundary. Adds a clip rect so the tile loop cannot over-blit into the cleared margins. NO effect when the surface is exactly 320x240 (dosCenterActive false, offsets zero). Embed witness = strings|grep thrash centring. BANNER_REGEX idx 157.)"
   "patch SDL/0126 force-mode-id filter (SDL_HINT_DOSKUTSU_FORCE_MODE_ID; REQUIRED -- one banner per process emitted UNCONDITIONALLY at DOSVESA_GetDisplayModes (video init, always reached before the title, same SDL-log channel as the SDL/0123 DACWIDTH required banner), so it fires on every run incl. the default smoke where the hint is UNSET -> the 'hint unset -> filter inactive' variant. Three variants: hint-unset (filter inactive, default smoke), requested-id FOUND (enumeration filtered to that one id, names the resulting WxH pick), or requested-id NOT-enumerated (loud fallback to the unfiltered list -- never an empty mode list). Forces the mode pick past SDL_GetClosestFullscreenDisplayMode's closest-aspect tie-break which excludes 640x400 on the Mach64 card ROM and hands UniVBE runs to 512x384; shared dependency of MACH64-30FPS-PLAN Phase 1 (force 0x0101 under UniVBE) and Phase 2 (force 0x0100). Filters the enumeration list only -- leaves closest-match/pin/LFB-decision/surface-lifecycle untouched. Embed witness = strings|grep DOSVESA-FORCEMODE. BANNER_REGEX idx 158.)"
+  "0328 BG blank-tile skip lever (patch 0328; required -- one banner per process in Renderer::initVideo, narrating ENABLED (default) when SDL_HINT_DOSKUTSU_BG_BLANK_SKIP is unset vs DISABLED (killswitch) when =0; the BG tile loop skips drawing fully-transparent (all-colorkey) tiles, a byte-identical no-op; fires deterministically at video init every boot so present in smoke; default is ON so ENABLED is the expected smoke verdict)"
 )
 
 if [[ "$SKIP_GATE" == "1" ]]; then
