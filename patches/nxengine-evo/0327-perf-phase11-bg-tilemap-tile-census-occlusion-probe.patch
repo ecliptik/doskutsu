@@ -1,0 +1,551 @@
+From d7357a94699f571146e489fed347c2a89b98ecde Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 25 Aug 2026 19:48:29 -0700
+Subject: [PATCH] perf phase 11 patch 0327 -- BG-tilemap tile census +
+ occlusion headroom probe
+
+Diagnostic-only instrument (default OFF) that decomposes the BG tile
+pass -- the ~9 ms "mdt_bg_tilelayer" bucket the Mach64/POD-83 frame
+decomposition flagged as the largest sub-bucket of mds_tilemap_bg
+(bigger than the backdrop-thrash route). MDS_BG_INSTR (patch 0125)
+already TIMES that bucket but does not decompose it by tile;
+MDS_TFG_INSTR (patch 0111) has the per-tile census but only for the FG
+pass. This adds the BG sibling so we can answer, before designing any
+skip mechanism, whether occlusion headroom exists at all.
+
+Why it is diag-only and not a perf lever: the question it settles is
+whether the 9 ms is count-bound and whether any BG tiles are skippable.
+The two occluder counters are the only ones that can exist for the BG
+layer -- one tile per cell routed to one pass by (tileattr[t] &
+TA_FOREGROUND) == foreground, so FG tiles never occlude BG tiles. That
+leaves (1) empty-tile-0 blits over a backdrop and (2) player-sprite
+overdraw as the only real occluders. player_occluded is a conservative
+UPPER bound (bbox superset of opaque pixels) and player-only by design;
+full per-object occlusion is deliberately not measured (O(tiles x
+objects), and found headroom would not be cheaply exploitable -- a
+runtime skip needs a per-frame coverage map whose maintenance cost
+risks the same cost-eats-the-win trap that disabled patch 0127).
+
+Mechanism. Extends the shared _tilemap_inner_render_dispatch template so
+its existing wave-25 category/timing counters route to a parallel
+g_mds_tbg_* set when instrumenting the BG pass (foreground == 0);
+reference bindings are touched only inside the existing if(instr_on)
+guards, so the FG pass stays bit-identical and production (instr_on
+false) is unaffected. Two new subset counters (drawn_tile0,
+player_occluded) bump at the drawTile site. The BG census does NOT set
+g_mds_tfg_loop_active, so BG blit time is never conflated into the tfg
+_blit_indexed accumulator; it reads per-tile time from the template's
+own drawtile bracket instead. Player on-screen rect uses the same
+formula as the DrawScene object loop (world-pixel minus scroll minus
+sprite drawpoint), computed once per BG-pass call.
+
+Gate: SDL_HINT_DOSKUTSU_MDS_TBG_INSTR=1 (strict-1; default OFF). Emits
+[mds-tbg-stat] + [mds-tbg-tiles] per 100-tick block, with a self-check
+mirroring the tfg block. Always-on initVideo banner ("BG-tile census
+instrumentation ENABLED/DISABLED") for the smoke two-witness gate.
+docs/BOOT.md, CLRENV.BAT and the smoke BANNERS entry ride in the outer
+repo. Distinct [mds-tbg] prefix vs patch 0125's [mds-bg] timing.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ src/Utils/diagnostic_timers.h |  66 ++++++++++++++
+ src/graphics/Renderer.cpp     | 166 ++++++++++++++++++++++++++++++++++
+ src/map.cpp                   | 113 +++++++++++++++++++----
+ 3 files changed, 325 insertions(+), 20 deletions(-)
+
+diff --git a/src/Utils/diagnostic_timers.h b/src/Utils/diagnostic_timers.h
+index 75255b73..2fde8f80 100644
+--- a/src/Utils/diagnostic_timers.h
++++ b/src/Utils/diagnostic_timers.h
+@@ -1104,6 +1104,72 @@ extern double g_slot_0118_mds_fg_total_ms_snapshot;
+ // SDL_HINT_DOSKUTSU_MDS_TFG_INSTR.
+ bool mds_tfg_instr_active();
+ 
++// patch 0327 (Phase 11 backdrop-thrash follow-up: BG-tilemap tile
++// census + occlusion headroom probe). The wave-25 patch 0111 counters
++// above instrument ONLY the FG pass (foreground == TA_FOREGROUND); the
++// BG tile pass (map_draw(false), the ~9 ms "mdt_bg_tilelayer" bucket
++// that MDS_BG_INSTR times but does not decompose by tile) had no
++// per-tile census. This block mirrors the tfg counter set for the BG
++// pass and adds two occlusion-headroom counters.
++//
++// Distinct from patch 0125's SDL_HINT_DOSKUTSU_MDS_BG_INSTR, which
++// emits [mds-bg-stat] TIMING only (backdrop / tilelayer / tintscreen /
++// residual ms). This instrument emits [mds-tbg-tiles] / [mds-tbg-stat]
++// COUNTS: how many tiles the 9 ms represents, and how much of it is
++// potentially skippable. It is the BG sibling of MDS_TFG_INSTR
++// ([mds-tfg-tiles]); the one-letter prefix gap (mds-bg vs mds-tbg) is
++// intentional and greppable-distinct.
++//
++// Occlusion semantics (why only these two occluders exist). Each map
++// cell holds exactly one tile, routed to exactly one pass by
++// `(tileattr[t] & TA_FOREGROUND) == foreground`, so FG tiles and BG
++// tiles are never at the same cell -- an FG tile can never occlude a
++// BG tile. The BG tile layer's only real occluders are therefore:
++//   drawn_tile0        -- BG tiles drawn with tile index 0 (the empty
++//                         tile). Over a backdrop map these blits may
++//                         produce no visible pixels -> a cheap,
++//                         free-to-exploit skip candidate (a t==0 test
++//                         is already available in the hot loop).
++//   tiles_player_occluded
++//                      -- BG tiles whose 16x16 screen rect sits FULLY
++//                         inside the player sprite's on-screen rect.
++//                         A CONSERVATIVE UPPER bound on player-sprite
++//                         occlusion (the bbox is a superset of opaque
++//                         pixels). Player-only by design (approved
++//                         scope): the player is the single most
++//                         consistent on-screen sprite. Quote's sprite
++//                         is ~16x16, so this is expected SMALL (0-2);
++//                         a large value would be surprising and worth
++//                         a note. Full per-object occlusion is
++//                         deliberately NOT measured here -- O(tiles x
++//                         objects) coupling, and even a found headroom
++//                         is not cheaply exploitable (a runtime skip
++//                         would need a per-frame coverage map, whose
++//                         maintenance cost risks the same
++//                         cost-eats-the-win trap as patch 0127).
++//
++// Gated on SDL_HINT_DOSKUTSU_MDS_TBG_INSTR=1 (strict-1; default OFF,
++// so production is byte-unchanged -- the BG-pass instr_on stays false
++// and no counter/timer site runs). Single writer (engine main loop),
++// not IRQ-context; same torn-read reasoning as the tfg block.
++extern std::uint64_t g_mds_tbg_drawtile_total_ns;
++extern std::uint32_t g_mds_tbg_drawtile_count;
++extern std::uint64_t g_mds_tbg_drawsprite_total_ns;
++extern std::uint32_t g_mds_tbg_drawsprite_count;
++extern std::uint32_t g_mds_tbg_tiles_visited;
++extern std::uint32_t g_mds_tbg_tiles_drawn_normal;
++extern std::uint32_t g_mds_tbg_tiles_drawn_special;
++extern std::uint32_t g_mds_tbg_tiles_skipped_attr;
++extern std::uint32_t g_mds_tbg_tiles_skipped_oob;
++extern std::uint32_t g_mds_tbg_tiles_drawn_tile0;
++extern std::uint32_t g_mds_tbg_tiles_player_occluded;
++
++// Forward-decl env helper. Definition in Renderer.cpp's anonymous-
++// namespace ablation cluster; forwarded via file-scope wrapper at
++// end-of-Renderer.cpp per the W20B build-fix amendment pattern.
++// Strict-1 match for SDL_HINT_DOSKUTSU_MDS_TBG_INSTR.
++bool mds_tbg_instr_active();
++
+ // patch 0113 (Phase 11 iter H opt #2: off-screen tile bbox skip).
+ // Forward-decl env helper for the killswitch. When ENABLED, the
+ // FG-tilemap loop pre-computes a clipped (mapx, mapy)-rectangle
+diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
+index 01f53b0f..a95c8e9c 100644
+--- a/src/graphics/Renderer.cpp
++++ b/src/graphics/Renderer.cpp
+@@ -356,6 +356,26 @@ std::uint32_t g_mds_tfg_tiles_skipped_attr        = 0;
+ std::uint32_t g_mds_tfg_tiles_skipped_oob         = 0;
+ bool          g_mds_tfg_loop_active               = false;
+ 
++// patch 0327 (Phase 11 backdrop-thrash follow-up: BG-tilemap tile
++// census + occlusion headroom probe). BG-pass sibling of the wave-25
++// tfg counters. Decls in Utils/diagnostic_timers.h; per-block reset in
++// _maybe_flush_phase_timing_audit alongside the tfg cluster. No
++// loop_active flag -- the BG census relies on the template's own
++// drawtile bracket (g_mds_tbg_drawtile_total_ns), not the Renderer-
++// side _blit_indexed bracket, so it does NOT set g_mds_tfg_loop_active
++// (which would conflate BG blit time into the tfg accumulator).
++std::uint64_t g_mds_tbg_drawtile_total_ns         = 0;
++std::uint32_t g_mds_tbg_drawtile_count            = 0;
++std::uint64_t g_mds_tbg_drawsprite_total_ns       = 0;
++std::uint32_t g_mds_tbg_drawsprite_count          = 0;
++std::uint32_t g_mds_tbg_tiles_visited             = 0;
++std::uint32_t g_mds_tbg_tiles_drawn_normal        = 0;
++std::uint32_t g_mds_tbg_tiles_drawn_special       = 0;
++std::uint32_t g_mds_tbg_tiles_skipped_attr        = 0;
++std::uint32_t g_mds_tbg_tiles_skipped_oob         = 0;
++std::uint32_t g_mds_tbg_tiles_drawn_tile0         = 0;
++std::uint32_t g_mds_tbg_tiles_player_occluded     = 0;
++
+ // patch 0118 (Phase 11 iter K, slot 0111 ordering bug fix). Snapshot
+ // of the W22.5 mds_tilemap_fg sample-sum (in ms). Written by
+ // _maybe_flush_phase_timing_audit BEFORE the W22.5 reset cluster
+@@ -522,6 +542,10 @@ bool p10_audio_instr_active();
+ // mds_tfg_instr_active() forward-decl joins the family. Same file-
+ // scope-after-both-namespace-closes definition pattern.
+ bool mds_tfg_instr_active();
++// patch 0327 (BG-tilemap tile census + occlusion headroom probe):
++// mds_tbg_instr_active() forward-decl joins the family. Same file-
++// scope-after-both-namespace-closes definition pattern.
++bool mds_tbg_instr_active();
+ // patch 0113 (Phase 11 iter H opt #2: off-screen tile bbox skip):
+ // tile_bbox_skip_active() forward-decl. Same pattern.
+ bool tile_bbox_skip_active();
+@@ -846,6 +870,19 @@ inline bool _abl_mds_tfg_instr()
+   return v;
+ }
+ 
++// DOS-PORT (patch 0327: BG-tilemap tile census + occlusion headroom
++// probe). BG-pass sibling of _abl_mds_tfg_instr. Default OFF; strict-1
++// match. When set, map.cpp's _tilemap_render_uncached_full_loop counts
++// the BG pass (foreground == 0) into the g_mds_tbg_* counters and this
++// file's audit-flush emits [mds-tbg-tiles] / [mds-tbg-stat]. Cached
++// static-const-bool; -O2 hoists the per-call guard. Zero cost when
++// unset (BG-pass instr_on stays false).
++inline bool _abl_mds_tbg_instr()
++{
++  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_MDS_TBG_INSTR");
++  return v;
++}
++
+ // DOS-PORT (patch 0125, Phase 11 wave-29 mds_tilemap_bg sub-decomposition
+ // per docs/PHASE11-WAVE-29-CONTRACT.md): env-var gate for the 3 sub-
+ // bucket RAII timers + 1 derived residual sub-decomposing W22.5's
+@@ -3795,6 +3832,117 @@ void _maybe_flush_phase_timing_audit()
+   NXE::Diag::g_mds_tfg_tiles_drawn_special      = 0;
+   NXE::Diag::g_mds_tfg_tiles_skipped_attr       = 0;
+   NXE::Diag::g_mds_tfg_tiles_skipped_oob        = 0;
++
++  // patch 0327 (BG-tilemap tile census + occlusion headroom probe):
++  // two-line emit for the BG pass -- [mds-tbg-stat] (timing) +
++  // [mds-tbg-tiles] (counts + occlusion) -- mirroring the wave-25 tfg
++  // block above, plus drawn_tile0 and player_occluded. Distinct prefix
++  // mds-tbg (vs patch 0125's mds-bg timing) so grep stays clean.
++  // Self-check identical in shape to tfg's: observational, not an
++  // assertion.
++  if (_abl_mds_tbg_instr())
++  {
++    using NXE::Diag::g_mds_tbg_drawtile_total_ns;
++    using NXE::Diag::g_mds_tbg_drawtile_count;
++    using NXE::Diag::g_mds_tbg_drawsprite_total_ns;
++    using NXE::Diag::g_mds_tbg_drawsprite_count;
++    using NXE::Diag::g_mds_tbg_tiles_visited;
++    using NXE::Diag::g_mds_tbg_tiles_drawn_normal;
++    using NXE::Diag::g_mds_tbg_tiles_drawn_special;
++    using NXE::Diag::g_mds_tbg_tiles_skipped_attr;
++    using NXE::Diag::g_mds_tbg_tiles_skipped_oob;
++    using NXE::Diag::g_mds_tbg_tiles_drawn_tile0;
++    using NXE::Diag::g_mds_tbg_tiles_player_occluded;
++
++    const double bg_drawtile_per_us =
++        (g_mds_tbg_drawtile_count > 0)
++            ? (double)g_mds_tbg_drawtile_total_ns / 1000.0 / (double)g_mds_tbg_drawtile_count
++            : 0.0;
++    const double bg_drawsprite_per_us =
++        (g_mds_tbg_drawsprite_count > 0)
++            ? (double)g_mds_tbg_drawsprite_total_ns / 1000.0 / (double)g_mds_tbg_drawsprite_count
++            : 0.0;
++    const double bg_drawtile_total_ms =
++        (double)g_mds_tbg_drawtile_total_ns / 1.0e6;
++    const double bg_drawsprite_total_ms =
++        (double)g_mds_tbg_drawsprite_total_ns / 1.0e6;
++    const double bg_dt_ms = bg_drawtile_total_ms + bg_drawsprite_total_ms;
++
++    // Fraction of blitted BG tiles that are candidates to skip. The
++    // two occlusion buckets can overlap (a tile-0 cell can also sit
++    // under the player), so they are NOT summed -- reported separately.
++    const double tile0_pct_x10 =
++        (g_mds_tbg_tiles_drawn_normal > 0)
++            ? (double)(g_mds_tbg_tiles_drawn_tile0 * 1000u) / (double)g_mds_tbg_tiles_drawn_normal
++            : 0.0;
++    const double player_occ_pct_x10 =
++        (g_mds_tbg_tiles_drawn_normal > 0)
++            ? (double)(g_mds_tbg_tiles_player_occluded * 1000u) / (double)g_mds_tbg_tiles_drawn_normal
++            : 0.0;
++
++    LOG_INFO("[mds-tbg-stat n={} phase=tilemap_bg dt_ms={:.2f} "
++             "drawtile_calls={} drawsprite_calls={} "
++             "drawtile_per_us={:.2f} drawsprite_per_us={:.2f}]",
++             _dc_tally_every_flips,
++             bg_dt_ms,
++             g_mds_tbg_drawtile_count,
++             g_mds_tbg_drawsprite_count,
++             bg_drawtile_per_us,
++             bg_drawsprite_per_us);
++
++    LOG_INFO("[mds-tbg-tiles n={} visited={} drawn_normal={} "
++             "drawn_special={} skipped_attr={} skipped_oob={} "
++             "drawn_tile0={} player_occluded={} "
++             "tile0_pct_x10={:.0f} player_occ_pct_x10={:.0f}]",
++             _dc_tally_every_flips,
++             g_mds_tbg_tiles_visited,
++             g_mds_tbg_tiles_drawn_normal,
++             g_mds_tbg_tiles_drawn_special,
++             g_mds_tbg_tiles_skipped_attr,
++             g_mds_tbg_tiles_skipped_oob,
++             g_mds_tbg_tiles_drawn_tile0,
++             g_mds_tbg_tiles_player_occluded,
++             tile0_pct_x10,
++             player_occ_pct_x10);
++
++    // Self-check (mirror of the tfg block): visited == sum of the four
++    // disposition buckets. drawn_tile0 / player_occluded are SUBSETS of
++    // drawn_normal, so they are deliberately NOT part of this equality.
++    const std::uint32_t bg_tiles_sum = g_mds_tbg_tiles_drawn_normal +
++                                       g_mds_tbg_tiles_drawn_special +
++                                       g_mds_tbg_tiles_skipped_attr +
++                                       g_mds_tbg_tiles_skipped_oob;
++    if (bg_tiles_sum != g_mds_tbg_tiles_visited)
++    {
++      LOG_INFO("[mds-tbg-selfcheck WARN] tiles_visited={} != sum={} "
++               "(drawn_normal+drawn_special+skipped_attr+skipped_oob); "
++               "instrumentation drift.",
++               g_mds_tbg_tiles_visited, bg_tiles_sum);
++    }
++    if (g_mds_tbg_tiles_drawn_tile0 > g_mds_tbg_tiles_drawn_normal ||
++        g_mds_tbg_tiles_player_occluded > g_mds_tbg_tiles_drawn_normal)
++    {
++      LOG_INFO("[mds-tbg-selfcheck WARN] subset counter exceeds "
++               "drawn_normal={} (tile0={} player_occluded={}); a subset "
++               "bucket must be <= its parent.",
++               g_mds_tbg_tiles_drawn_normal,
++               g_mds_tbg_tiles_drawn_tile0,
++               g_mds_tbg_tiles_player_occluded);
++    }
++  }
++  // patch 0327: per-block reset of all 11 BG-census counters regardless
++  // of env-var state (matches the tfg cluster pattern).
++  NXE::Diag::g_mds_tbg_drawtile_total_ns        = 0;
++  NXE::Diag::g_mds_tbg_drawtile_count           = 0;
++  NXE::Diag::g_mds_tbg_drawsprite_total_ns      = 0;
++  NXE::Diag::g_mds_tbg_drawsprite_count         = 0;
++  NXE::Diag::g_mds_tbg_tiles_visited            = 0;
++  NXE::Diag::g_mds_tbg_tiles_drawn_normal       = 0;
++  NXE::Diag::g_mds_tbg_tiles_drawn_special      = 0;
++  NXE::Diag::g_mds_tbg_tiles_skipped_attr       = 0;
++  NXE::Diag::g_mds_tbg_tiles_skipped_oob        = 0;
++  NXE::Diag::g_mds_tbg_tiles_drawn_tile0        = 0;
++  NXE::Diag::g_mds_tbg_tiles_player_occluded    = 0;
+ }
+ 
+ // DOS-PORT (patch 0160, SFX-stall instrumentation contract -- part A):
+@@ -4487,6 +4635,17 @@ bool Renderer::initVideo()
+            "[tile-dword-copy n=100 engaged=.. fallback=..] line.",
+            tile_dword_copy_enabled() ? "ENABLED (opt-in)" : "DISABLED (default)");
+ 
++  // DOS-PORT (patch 0327): BG-tilemap tile-census instrumentation
++  // engagement banner -- always emitted (both states) so the smoke gate
++  // has a greppable two-witness even in the default-OFF smoke config.
++  LOG_INFO("Renderer::initVideo: BG-tile census instrumentation {} -- "
++           "SDL_HINT_DOSKUTSU_MDS_TBG_INSTR=1 opts in (default OFF); "
++           "per-100-flip [mds-tbg-stat] + [mds-tbg-tiles] decompose the "
++           "BG tile pass by count + occlusion headroom (drawn_tile0, "
++           "player_occluded). Diag-class; measures, does not change "
++           "rendering.",
++           _abl_mds_tbg_instr() ? "ENABLED (opt-in)" : "DISABLED (default)");
++
+   // DOS-PORT (patch 0146, Phase 11 wave-51): blit-decomp instrumentation
+   // engagement banner -- greppable witness for build-qa's BANNERS array.
+   if (_blit_decomp_enabled())
+@@ -10134,6 +10293,13 @@ namespace NXE { namespace Diag {
+ bool mds_tfg_instr_active() { return ::NXE::Graphics::_abl_mds_tfg_instr(); }
+ }}
+ 
++// DOS-PORT (patch 0327: BG-tilemap tile census + occlusion headroom
++// probe): mds_tbg_instr_active() env-helper accessor. Same file-scope
++// wrapper pattern as mds_tfg_instr_active above.
++namespace NXE { namespace Diag {
++bool mds_tbg_instr_active() { return ::NXE::Graphics::_abl_mds_tbg_instr(); }
++}}
++
+ // DOS-PORT (patch 0113, Phase 11 iter H opt #2: off-screen tile bbox
+ // skip): tile_bbox_skip_active() env-helper accessor. Same pattern.
+ namespace NXE { namespace Diag {
+diff --git a/src/map.cpp b/src/map.cpp
+index 6d626ab0..1468ef23 100644
+--- a/src/map.cpp
++++ b/src/map.cpp
+@@ -3324,8 +3324,27 @@ inline void _tilemap_inner_render_dispatch(
+     int blit_x_start, int blit_y_init,
+     uint8_t foreground,
+     bool drawtile_fast_on,
+-    bool instr_on)
++    bool instr_on,
++    bool instr_is_bg,
++    int player_scr_x, int player_scr_y,
++    int player_scr_w, int player_scr_h)
+ {
++  // patch 0327 (BG-tilemap tile census + occlusion headroom probe):
++  // route the per-tile census counters to the BG set (g_mds_tbg_*)
++  // when instrumenting the BG pass, else the wave-25 FG set
++  // (g_mds_tfg_*). The reference bindings are cheap and are touched
++  // ONLY inside the existing `if (instr_on)` guards, so the FG pass is
++  // bit-identical (instr_is_bg is false there and every ref aliases its
++  // tfg original) and production (instr_on false) is unaffected.
++  std::uint32_t &c_visited       = instr_is_bg ? NXE::Diag::g_mds_tbg_tiles_visited       : NXE::Diag::g_mds_tfg_tiles_visited;
++  std::uint32_t &c_drawn_normal  = instr_is_bg ? NXE::Diag::g_mds_tbg_tiles_drawn_normal  : NXE::Diag::g_mds_tfg_tiles_drawn_normal;
++  std::uint32_t &c_drawn_special = instr_is_bg ? NXE::Diag::g_mds_tbg_tiles_drawn_special : NXE::Diag::g_mds_tfg_tiles_drawn_special;
++  std::uint32_t &c_skipped_attr  = instr_is_bg ? NXE::Diag::g_mds_tbg_tiles_skipped_attr  : NXE::Diag::g_mds_tfg_tiles_skipped_attr;
++  std::uint32_t &c_skipped_oob   = instr_is_bg ? NXE::Diag::g_mds_tbg_tiles_skipped_oob   : NXE::Diag::g_mds_tfg_tiles_skipped_oob;
++  std::uint64_t &c_dt_total_ns   = instr_is_bg ? NXE::Diag::g_mds_tbg_drawtile_total_ns   : NXE::Diag::g_mds_tfg_drawtile_total_ns;
++  std::uint32_t &c_dt_count      = instr_is_bg ? NXE::Diag::g_mds_tbg_drawtile_count      : NXE::Diag::g_mds_tfg_drawtile_count;
++  std::uint64_t &c_ds_total_ns   = instr_is_bg ? NXE::Diag::g_mds_tbg_drawsprite_total_ns : NXE::Diag::g_mds_tfg_drawsprite_total_ns;
++  std::uint32_t &c_ds_count      = instr_is_bg ? NXE::Diag::g_mds_tbg_drawsprite_count    : NXE::Diag::g_mds_tfg_drawsprite_count;
+   int blit_y = blit_y_init;
+   for (int y = y_loop_start; y <= y_loop_end_inclusive; y++)
+   {
+@@ -3338,7 +3357,7 @@ inline void _tilemap_inner_render_dispatch(
+       // skipped_oob (only reachable when bounds_known == false).
+       if (instr_on)
+       {
+-        ++NXE::Diag::g_mds_tfg_tiles_visited;
++        ++c_visited;
+       }
+       // patch 0128: under bounds_known=true the OOB check is
+       // tautologically true; -O3 DCE's both the compares and the
+@@ -3359,7 +3378,7 @@ inline void _tilemap_inner_render_dispatch(
+           // in-bounds-but-not-drawn cases).
+           if (instr_on)
+           {
+-            ++NXE::Diag::g_mds_tfg_tiles_skipped_attr;
++            ++c_skipped_attr;
+           }
+         }
+         // patch 0151 (wave-55 cut B2): drop purely-decorative FG tiles
+@@ -3390,9 +3409,9 @@ inline void _tilemap_inner_render_dispatch(
+             }
+             if (instr_on)
+             {
+-              NXE::Diag::g_mds_tfg_drawsprite_total_ns += SDL_GetTicksNS() - _t0;
+-              ++NXE::Diag::g_mds_tfg_drawsprite_count;
+-              ++NXE::Diag::g_mds_tfg_tiles_drawn_special;
++              c_ds_total_ns += SDL_GetTicksNS() - _t0;
++              ++c_ds_count;
++              ++c_drawn_special;
+             }
+           }
+           else if (tilecode[t] == 0x43)
+@@ -3402,9 +3421,9 @@ inline void _tilemap_inner_render_dispatch(
+             Renderer::getInstance()->sprites.drawSprite(blit_x, blit_y, SPR_DESTROYABLE, 0, 0);
+             if (instr_on)
+             {
+-              NXE::Diag::g_mds_tfg_drawsprite_total_ns += SDL_GetTicksNS() - _t0;
+-              ++NXE::Diag::g_mds_tfg_drawsprite_count;
+-              ++NXE::Diag::g_mds_tfg_tiles_drawn_special;
++              c_ds_total_ns += SDL_GetTicksNS() - _t0;
++              ++c_ds_count;
++              ++c_drawn_special;
+             }
+           }
+           else
+@@ -3435,9 +3454,32 @@ inline void _tilemap_inner_render_dispatch(
+             }
+             if (instr_on)
+             {
+-              NXE::Diag::g_mds_tfg_drawtile_total_ns += SDL_GetTicksNS() - _t0;
+-              ++NXE::Diag::g_mds_tfg_drawtile_count;
+-              ++NXE::Diag::g_mds_tfg_tiles_drawn_normal;
++              c_dt_total_ns += SDL_GetTicksNS() - _t0;
++              ++c_dt_count;
++              ++c_drawn_normal;
++              // patch 0327: occlusion-headroom census, BG pass only.
++              // These are SUBSETS of drawn_normal (this blitted tile).
++              if (instr_is_bg)
++              {
++                // (1) empty-tile blits: index 0 is the "empty" tile;
++                // over a backdrop map these may produce no visible
++                // pixels -> cheap free-to-skip candidate.
++                if (t == 0)
++                  ++NXE::Diag::g_mds_tbg_tiles_drawn_tile0;
++                // (2) player-sprite occlusion, conservative UPPER
++                // bound: this 16x16 tile's screen rect sits FULLY
++                // inside the player sprite's on-screen rect. player_-
++                // scr_w == 0 means "no player rect this frame" (player
++                // NULL / not instrumenting), so the test never matches.
++                if (player_scr_w > 0 &&
++                    blit_x >= player_scr_x &&
++                    blit_y >= player_scr_y &&
++                    (blit_x + TILE_W) <= (player_scr_x + player_scr_w) &&
++                    (blit_y + TILE_H) <= (player_scr_y + player_scr_h))
++                {
++                  ++NXE::Diag::g_mds_tbg_tiles_player_occluded;
++                }
++              }
+             }
+           }
+         }
+@@ -3447,7 +3489,7 @@ inline void _tilemap_inner_render_dispatch(
+           // (e.g., FG-attr tile when called for BG, or vice versa).
+           if (instr_on)
+           {
+-            ++NXE::Diag::g_mds_tfg_tiles_skipped_attr;
++            ++c_skipped_attr;
+           }
+         }
+       }
+@@ -3458,7 +3500,7 @@ inline void _tilemap_inner_render_dispatch(
+         // unreachable (DCE'd because in_bounds folds to literal true).
+         if (instr_on)
+         {
+-          ++NXE::Diag::g_mds_tfg_tiles_skipped_oob;
++          ++c_skipped_oob;
+         }
+       }
+       blit_x += TILE_W;
+@@ -3482,9 +3524,19 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+   // reads. Effectively free.
+   // Cost when env set + foreground == TA_FOREGROUND: ~0.23 ms / flip
+   // total (~600 RDTSC reads at 30 cycles each on PODP83). sec. 6 budget.
+-  const bool instr_on =
+-      (foreground == TA_FOREGROUND) && NXE::Diag::mds_tfg_instr_active();
+-  if (instr_on)
++  // patch 0327: the FG pass is instrumented by the wave-25 tfg
++  // instrument (MDS_TFG_INSTR); the BG pass (foreground == 0) by the
++  // new BG-tile census (MDS_TBG_INSTR). instr_on drives the shared
++  // template's counting; instr_is_bg picks which counter set it writes.
++  // ONLY the FG instrument sets g_mds_tfg_loop_active (which gates the
++  // Renderer-side _blit_indexed RDTSC bracket) -- the BG census uses the
++  // template's own drawtile bracket, so it stays out of that flag to
++  // avoid conflating BG blit time into the tfg accumulator.
++  const bool is_fg_layer = (foreground == TA_FOREGROUND);
++  const bool instr_fg = is_fg_layer && NXE::Diag::mds_tfg_instr_active();
++  const bool instr_bg = !is_fg_layer && NXE::Diag::mds_tbg_instr_active();
++  const bool instr_on = instr_fg || instr_bg;
++  if (instr_fg)
+   {
+     NXE::Diag::g_mds_tfg_loop_active = true;
+   }
+@@ -3529,6 +3581,25 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+   int blit_y = -(scroll_y % TILE_H);
+   int blit_x_start = -(scroll_x % TILE_W);
+ 
++  // patch 0327: player on-screen sprite rect for the BG occlusion
++  // census (upper bound). Computed once per BG-pass call, only when
++  // instrumenting BG. Same on-screen formula the DrawScene object loop
++  // uses (game.cpp): world-pixel minus scroll, minus the sprite's
++  // drawpoint offset; rect size is the sprite's w/h. player_scr_w == 0
++  // signals "no rect" (not instrumenting BG, or player NULL) so the
++  // per-tile containment test never matches. Screen space matches
++  // blit_x/blit_y (both are world-pixel minus scroll).
++  int player_scr_x = 0, player_scr_y = 0, player_scr_w = 0, player_scr_h = 0;
++  if (instr_bg && player)
++  {
++    auto &_psp = Renderer::getInstance()->sprites.sprites[player->sprite];
++    const auto &_dp = _psp.frame[player->frame].dir[player->dir].drawpoint;
++    player_scr_x = (player->x / CSFI) - scroll_x - _dp.x;
++    player_scr_y = (player->y / CSFI) - scroll_y - _dp.y;
++    player_scr_w = _psp.w;
++    player_scr_h = _psp.h;
++  }
++
+   const int x_max_inclusive = (Renderer::getInstance()->screenWidth  / TILE_W) + MAP_DRAW_EXTRA_X;
+   const int y_max_inclusive = (Renderer::getInstance()->screenHeight / TILE_H) + MAP_DRAW_EXTRA_Y;
+ 
+@@ -3576,7 +3647,8 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+         y_loop_start, y_loop_end_inclusive,
+         mapx, mapy,
+         blit_x_start, blit_y,
+-        foreground, drawtile_fast_on, instr_on);
++        foreground, drawtile_fast_on, instr_on,
++        instr_bg, player_scr_x, player_scr_y, player_scr_w, player_scr_h);
+   }
+   else
+   {
+@@ -3585,10 +3657,11 @@ void _tilemap_render_uncached_full_loop(uint8_t foreground)
+         y_loop_start, y_loop_end_inclusive,
+         mapx, mapy,
+         blit_x_start, blit_y,
+-        foreground, drawtile_fast_on, instr_on);
++        foreground, drawtile_fast_on, instr_on,
++        instr_bg, player_scr_x, player_scr_y, player_scr_w, player_scr_h);
+   }
+ 
+-  if (instr_on)
++  if (instr_fg)
+   {
+     NXE::Diag::g_mds_tfg_loop_active = false;
+   }
+-- 
+2.47.3
+
