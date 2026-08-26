@@ -114,7 +114,7 @@ The MIDI backends play a choice of music sets: an `org2mid` conversion of the or
 See **[Releases](https://github.com/ecliptik/doskutsu/releases)** for pre-built binaries or build from source (see [Building](#building)).
 
 <!-- LATEST-RELEASE:START -->
-**Latest release:** [`doskutsu-1.6.3.zip`](https://github.com/ecliptik/doskutsu/releases/download/v1.6.3/doskutsu-1.6.3.zip) (v1.6.3)
+**Latest release:** [`doskutsu-1.7.0.zip`](https://github.com/ecliptik/doskutsu/releases/download/v1.7.0/doskutsu-1.7.0.zip) (v1.7.0)
 <!-- LATEST-RELEASE:END -->
 
 Each bundle is a single `doskutsu-<version>.zip` containing `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, the license texts, and NXEngine-evo's GPLv3 engine support data. The engine is the program; the game data is user-supplied, exactly the way a Doom source port ships without an IWAD.
