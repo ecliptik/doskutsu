@@ -5,6 +5,27 @@ All notable changes to DOSKUTSU are documented here. Format follows [Keep a Chan
 Per-wave performance detail, measurement logs, and analysis live in the project's
 internal docs and git history; this file keeps the user-facing summary.
 
+## [1.7.0] - 2026-08-26
+
+Mach64 compatibility-card performance. The game binary changes from 1.6.5;
+nothing outside rendering behaves differently, and every new lever is
+inert or default-behavior-preserving unless noted.
+
+### Fixed
+
+- **The ATI Mach64 card missed the ~30 fps performance target by 2.4 fps.**
+  A real-hardware occlusion census found that 78-93% of the background
+  tile layer's drawn tiles are fully transparent during ordinary gameplay
+  -- the game was blitting them anyway. The background tile loop now
+  skips any tile whose pixels are entirely the transparent colorkey,
+  computed once per map load; this is a byte-identical no-op (proven via
+  tick-locked frame comparison, on both the title screen and live
+  gameplay) rather than a visual change. Measured on real Mach64
+  hardware: 27.3 -> 30.4 fps, clearing the target. This lever is not
+  specific to the Mach64 -- it applies to every supported video card.
+  (Patch 0328, on by default; `SDL_HINT_DOSKUTSU_BG_BLANK_SKIP=0`
+  disables it if ever needed.)
+
 ## [1.6.5] - 2026-08-06
 
 TAS record/replay correctness. The game binary changes from 1.6.4; nothing
