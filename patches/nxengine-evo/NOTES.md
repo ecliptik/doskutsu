@@ -114,7 +114,7 @@ same hour-bucket of the COFF timestamp.
 
 1. **Byte count match** (`stat -c %s build/doskutsu.exe`) -- proves
    structural identity of patches + source + toolchain.
-2. **`strings` audit counts** (e.g., `grep -c "DOSKUTSU_TAS_"`,
+2. **`strings` audit counts** (e.g., `grep -c "DOS_PORT_TAS_"`,
    `grep -c "tas: "`) -- proves the expected code paths are embedded
    in `.rodata`.
 3. **Source-tree state** -- `git -C vendor/<name> log --oneline | head -N`

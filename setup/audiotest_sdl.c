@@ -102,7 +102,7 @@
  * provide a stub definition (C linkage, matches the backend's volatile
  * uint32_t). SETUP plays no Pixtone SFX, so it stays 0.
  */
-volatile uint32_t g_pixtone_active_count = 0;
+volatile uint32_t g_dos_sfx_synth_active_count = 0;
 
 /*
  * Real-chip primitives exported by libSDL3.a (SDL DOS core, SDL/0037+). The
@@ -122,14 +122,14 @@ extern void     SDL_DOSMpu401WriteByte(uint8_t byte);
 extern void     SDL_DOSMpu401Shutdown(void);
 extern uint16_t SDL_DOSMpu401GetBLASTERPort(void);
 /* T48 iter-8: SDL/0097 cold-init DRR-poll cap-hit witness (cap-during-reset). */
-extern volatile uint32_t doskutsu_mpu_drr_cap_hits;
+extern volatile uint32_t dos_port_mpu_drr_cap_hits;
 
 /* T48 iter-8: GS/GM/XG reset SysEx, VERBATIM mirror of the engine
  * (vendor/nxengine-evo/src/sound/MidiBackendWB.cpp patch 0219 WB_SYSEX_*). SETUP
  * is the deliverable, so WBS3 must exercise the COMPLETE fix (cold-init + poll +
  * voice-reset) in parity with the game's WPG cell -- otherwise SETUP's WB test
  * plays audibly but on the wrong (non-GM) Dream power-up voice map. Gated by the
- * SAME hint the engine uses (SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET = gm|gs|xg),
+ * SAME hint the engine uses (SDL_HINT_DOS_AUDIO_WB_VOICE_RESET = gm|gs|xg),
  * default OFF. Emitted FIRST (before the program-change) via SDL_DOSMpu401WriteByte
  * so it rides the cold-init pacing (poll/delay). */
 static const uint8_t WB_SYSEX_GM[] = { 0xF0, 0x7E, 0x7F, 0x09, 0x01, 0xF7 };
@@ -377,7 +377,7 @@ static void apply_hints(const scfg_t *c)
        * NORMAL priority, which SDL_SetHintWithPriority REJECTS when a matching
        * environment variable exists (SDL_hints.c: "An environment variable is
        * taking priority"). The game's launcher/AUTOEXEC does SET
-       * SDL_HINT_DOSKUTSU_GUS_VOICES=<cfg> (main.cpp bridges it via getenv), so
+       * SDL_HINT_DOS_GUS_VOICES=<cfg> (main.cpp bridges it via getenv), so
        * if SETUP runs in that environment a NORMAL SetHint would be dropped and
        * the SETUP audio test would IGNORE the operator's menu selection -- i.e.
        * the GUS voice count (and every other SDL_HINT_ config key) would read
@@ -409,10 +409,10 @@ static void apply_blaster(const scfg_t *c)
 
 /* A2: bridge the operator's real ULTRASND / ULTRADIR env vars into the SDL GUS
  * hints, EXACTLY as the engine does (main.cpp patch 0238): SDL_DOSGusInit reads
- * SDL_HINT_DOSKUTSU_GUS_ULTRASND (via SDL_GetHint, whose env fallback is the
+ * SDL_HINT_DOS_GUS_ULTRASND (via SDL_GetHint, whose env fallback is the
  * SAME hint NAME, not "ULTRASND"), so without this bridge the GF1 detect fails
  * with "no ULTRASND hint" even on a correctly-configured Gravis box. GUS_VOICES
- * already rides apply_hints() (its cfg env_name IS SDL_HINT_DOSKUTSU_GUS_VOICES).
+ * already rides apply_hints() (its cfg env_name IS SDL_HINT_DOS_GUS_VOICES).
  * Must run before SDL_DOSGusInit; safe before SDL_Init (the hint store is
  * independent). No-op on a non-GUS box (the vars are absent). */
 static void apply_ultrasnd(void)
@@ -420,9 +420,9 @@ static void apply_ultrasnd(void)
   const char *us = SDL_getenv("ULTRASND");
   const char *ud = SDL_getenv("ULTRADIR");
   if (us && us[0])
-    SDL_SetHintWithPriority("SDL_HINT_DOSKUTSU_GUS_ULTRASND", us, SDL_HINT_OVERRIDE);
+    SDL_SetHintWithPriority("SDL_HINT_DOS_GUS_ULTRASND", us, SDL_HINT_OVERRIDE);
   if (ud && ud[0])
-    SDL_SetHintWithPriority("SDL_HINT_DOSKUTSU_GUS_ULTRADIR", ud, SDL_HINT_OVERRIDE);
+    SDL_SetHintWithPriority("SDL_HINT_DOS_GUS_ULTRADIR", ud, SDL_HINT_OVERRIDE);
 }
 
 /* ---- T14 freeze trace -----------------------------------------------------
@@ -435,7 +435,7 @@ static void apply_ultrasnd(void)
  * so a hard freeze can lose the tail without the fsync). When the machine
  * wedges, the LAST flushed line is the exact wedge point.
  *
- * Filename honors DOSKUTSU_LOG_TAG exactly like the engine (main.cpp) + SDL
+ * Filename honors DOS_PORT_LOG_TAG exactly like the engine (main.cpp) + SDL
  * (SDL/0024/0062): "<TAG>SETUP.LOG" with TAG, "SETUPDBG.LOG" without. The
  * next iter sets a distinct tag per backend per power-cycle (OPL/WB/ORG ->
  * OPLSETUP.LOG / WBSETUP.LOG / ORGSETUP.LOG, all 8.3-clean), so all three
@@ -460,7 +460,7 @@ static void trace_open(void)
    * mkdir is defensive -- harmless if it already exists. */
   mkdir("LOGS", 0777);
 
-  tag = SDL_getenv("DOSKUTSU_LOG_TAG");
+  tag = SDL_getenv("DOS_PORT_LOG_TAG");
   if (tag && tag[0])
   {
     char t3[4];
@@ -608,23 +608,23 @@ int audiotest_init(const scfg_t *c)
    * (identical to SoundManager.cpp:243-246). The old code read it opt-in
    * (strict-"1"), so an empty/absent cfg value opened 44100 stereo -- a
    * device config the game never runs on g2k. Default-ON => 11025 mono. */
-  t2 = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_TIER2");
+  t2 = SDL_GetHint("SDL_HINT_DOS_AUDIO_TIER2");
   g_tier2 = !(t2 && t2[0] == '0' && t2[1] == 0);
 
   /* T28: real-SFX killswitch. Default-ON; strict "0" forces the tone blip.
    * SDL_GetHint falls back to the same-named environment variable, so the
    * operator can disable the real Polar Star with
-   * SET SDL_HINT_DOSKUTSU_SETUP_REAL_SFX=0 at the SETUP launch if a bad/odd
+   * SET SDL_HINT_DOS_SETUP_REAL_SFX=0 at the SETUP launch if a bad/odd
    * .pxt ever misbehaves on a given machine. */
   {
-    const char *rs = SDL_GetHint("SDL_HINT_DOSKUTSU_SETUP_REAL_SFX");
+    const char *rs = SDL_GetHint("SDL_HINT_DOS_SETUP_REAL_SFX");
     g_real_sfx = !(rs && rs[0] == '0' && rs[1] == 0);
   }
 
   /* T28: real-music killswitch (the title theme). Default-ON; strict "0"
    * forces the test arpeggio. SDL_GetHint falls back to the env var. */
   {
-    const char *rm = SDL_GetHint("SDL_HINT_DOSKUTSU_SETUP_REAL_MUSIC");
+    const char *rm = SDL_GetHint("SDL_HINT_DOS_SETUP_REAL_MUSIC");
     g_real_music = !(rm && rm[0] == '0' && rm[1] == 0);
   }
 
@@ -634,7 +634,7 @@ int audiotest_init(const scfg_t *c)
    * hardware, this cell plays at the correct tempo (the witness then shows
    * d_ev/d_real full vs the default cell's half). Default OFF. */
   {
-    const char *bc = SDL_GetHint("SDL_HINT_DOSKUTSU_SETUP_MIDI_BIOSCLK");
+    const char *bc = SDL_GetHint("SDL_HINT_DOS_SETUP_MIDI_BIOSCLK");
     g_midi_biosclk = (bc && bc[0] == '1' && bc[1] == 0);
   }
 
@@ -810,7 +810,7 @@ static int device_open(void)
    * env) ran the WB test on a HOT bus = the iter-6 freeze risk -- the deliverable
    * wasn't actually fixed for a real operator (iter-8 WBS3 only played because
    * the BAT set COLD_INIT=1). Default-ON + SDL/0099's bus-hot guard = the WB test
-   * cold-inits + arms by default = wedge-proof. SDL_HINT_DOSKUTSU_AUDIO_WB_COLD
+   * cold-inits + arms by default = wedge-proof. SDL_HINT_DOS_AUDIO_WB_COLD
    * _INIT=0 reverts to the old hot-order path. */
   if (g_music_mode == MUS_WB)
   {
@@ -821,15 +821,15 @@ static int device_open(void)
      * default) -- but pinning it explicitly here makes the pace banner honest and
      * survives any future SDL-default drift. Operator =0 still wins (strict-"0"
      * killswitch -> the SDL path falls to the bit-6 DRR poll). */
-    if (!SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_TX_DELAY"))
-      SDL_SetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_TX_DELAY", "320");
-    const char *cold = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT");
+    if (!SDL_GetHint("SDL_HINT_DOS_AUDIO_WB_TX_DELAY"))
+      SDL_SetHint("SDL_HINT_DOS_AUDIO_WB_TX_DELAY", "320");
+    const char *cold = SDL_GetHint("SDL_HINT_DOS_AUDIO_WB_COLD_INIT");
     const bool cold_on = !(cold && cold[0] == '0' && cold[1] == 0);
     if (cold_on)
     {
       g_wb_port = SDL_DOSMpu401GetBLASTERPort();
       trace("device_open: wb COLD-INIT port=0x%03X BEFORE SB16 open "
-            "(T73 DEFAULT-ON; killswitch SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=0; "
+            "(T73 DEFAULT-ON; killswitch SDL_HINT_DOS_AUDIO_WB_COLD_INIT=0; "
             "DOOM-faithful reorder -- MPU UART entered on the cold bus, hot writes "
             "stay blind)",
             (unsigned)g_wb_port);
@@ -842,8 +842,8 @@ static int device_open(void)
        * which per-byte flow-control mode ran). Re-read the same hints the SDL
        * cold-init path resolved. */
       {
-        const char *txd = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_TX_DELAY");
-        const char *drr = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_DRR_POLL");
+        const char *txd = SDL_GetHint("SDL_HINT_DOS_AUDIO_WB_TX_DELAY");
+        const char *drr = SDL_GetHint("SDL_HINT_DOS_AUDIO_WB_DRR_POLL");
         /* T74: TX_DELAY is defaulted to "320" at the top of this MUS_WB block (if
          * unset), so this banner now reports the true pace (TIMED-DELAY). It
          * formerly misread DRR-POLL on an unset hint while the SDL cold-init path
@@ -869,20 +869,20 @@ static int device_open(void)
    * MidiScheduler) instead of the ~2-3 Hz cooperative TUI loop -- the cadence
    * root cause of the operator's "draggy/slower" report. Resolved at the SB16
    * OpenDevice below, so it MUST be set first. Normal priority + the unset
-   * guard preserve an explicit operator killswitch: SDL_HINT_DOSKUTSU_MIDI_ISR
+   * guard preserve an explicit operator killswitch: SDL_HINT_DOS_MIDI_ISR
    * _TICK=0 (env or scfg) still wins -> falls back to the main-line tick. */
-  if (!SDL_GetHint("SDL_HINT_DOSKUTSU_MIDI_ISR_TICK"))
+  if (!SDL_GetHint("SDL_HINT_DOS_MIDI_ISR_TICK"))
   {
-    SDL_SetHint("SDL_HINT_DOSKUTSU_MIDI_ISR_TICK", "1");
-    trace("device_open: SDL_HINT_DOSKUTSU_MIDI_ISR_TICK defaulted ON (route A; "
+    SDL_SetHint("SDL_HINT_DOS_MIDI_ISR_TICK", "1");
+    trace("device_open: SDL_HINT_DOS_MIDI_ISR_TICK defaulted ON (route A; "
           "operator =0 still overrides)");
   }
   else
   {
     /* T74 witness: operator set the hint explicitly -- log the resolved route so
      * the iter-10 TPB control cell (MIDI_ISR_TICK=0) shows the killswitch at init. */
-    const char *it = SDL_GetHint("SDL_HINT_DOSKUTSU_MIDI_ISR_TICK");
-    trace("device_open: SDL_HINT_DOSKUTSU_MIDI_ISR_TICK=%s (operator-set; %s)",
+    const char *it = SDL_GetHint("SDL_HINT_DOS_MIDI_ISR_TICK");
+    trace("device_open: SDL_HINT_DOS_MIDI_ISR_TICK=%s (operator-set; %s)",
           it ? it : "(null)",
           (it && it[0] == '0' && it[1] == 0) ? "route B -- ISR tick DISABLED" : "route A");
   }
@@ -979,8 +979,8 @@ static int device_open(void)
     }
     else
     {
-      const char *drr = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_DRR_POLL");
-      const char *dp  = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT");
+      const char *drr = SDL_GetHint("SDL_HINT_DOS_AUDIO_WB_DRR_POLL");
+      const char *dp  = SDL_GetHint("SDL_HINT_DOS_AUDIO_WB_DIRECT_PORT");
       g_wb_port = SDL_DOSMpu401GetBLASTERPort();
       /* T58: log the resolved transport hints BEFORE the (potentially wedging)
        * init, so the iter log shows whether the poll/direct-port env actually
@@ -1347,7 +1347,7 @@ static int play_wb_arpeggio(void)
 
   /* T48 iter-8: opt-in voice-reset SysEx FIRST (before the program-change),
    * mirroring the engine MidiBackendWB on_song_start. Gated by the SAME hint
-   * (SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET = gm|gs|xg), default OFF. Witness to
+   * (SDL_HINT_DOS_AUDIO_WB_VOICE_RESET = gm|gs|xg), default OFF. Witness to
    * the SETUP trace (NOT SDL_Log -- SETUP freopens stdio to NUL, so the SDL-side
    * banner never reaches the log; the WBS3 config + landed witnesses must come
    * through trace()). Records the bytes + the cap-hits delta ACROSS the reset
@@ -1355,7 +1355,7 @@ static int play_wb_arpeggio(void)
    * cap-during-reset cost is the strongest log proxy that the bytes were paced
    * through, not dropped). */
   {
-    const char *vr = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET");
+    const char *vr = SDL_GetHint("SDL_HINT_DOS_AUDIO_WB_VOICE_RESET");
     const uint8_t *sx = NULL;
     int sxn = 0;
     const char *name = "none";
@@ -1364,17 +1364,17 @@ static int play_wb_arpeggio(void)
     else if (vr && SDL_strcmp(vr, "xg") == 0) { sx = WB_SYSEX_XG; sxn = (int)sizeof(WB_SYSEX_XG); name = "XG"; }
     if (sx)
     {
-      uint32_t cap0 = doskutsu_mpu_drr_cap_hits;
+      uint32_t cap0 = dos_port_mpu_drr_cap_hits;
       int b;
       for (b = 0; b < sxn; ++b)
         SDL_DOSMpu401WriteByte(sx[b]);   /* raw SysEx -- no 7-bit mask on framing bytes */
       trace("wb voice-reset: %s SysEx sent (%d bytes) cap_hits_during_reset=%lu "
             "(0=bytes paced clean; >0=poll capped mid-SysEx -> overrun risk)",
-            name, sxn, (unsigned long)(doskutsu_mpu_drr_cap_hits - cap0));
+            name, sxn, (unsigned long)(dos_port_mpu_drr_cap_hits - cap0));
     }
     else
     {
-      trace("wb voice-reset: OFF (SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET unset; "
+      trace("wb voice-reset: OFF (SDL_HINT_DOS_AUDIO_WB_VOICE_RESET unset; "
             "WB test plays on the chip's power-up voice map)");
     }
   }

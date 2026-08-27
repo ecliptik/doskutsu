@@ -91,7 +91,7 @@ The operator can feel it -- replay looks like "playing through water".
 Since these replays exist to benchmark hardware, playback must behave exactly
 as normal play does. Exclude load time; never throttle gameplay ticks.
 
-`SDL_HINT_DOSKUTSU_TAS_FT_GUARD=1` re-enables the clamp if some future reel
+`SDL_HINT_DOS_TAS_FT_GUARD=1` re-enables the clamp if some future reel
 genuinely needs it. It should stay off for anything you intend to measure.
 
 ## Recording a campaign reel
@@ -117,8 +117,8 @@ binary with different tick behaviour will not replay faithfully on another.
 
 ## Running a benchmark
 
-Cells set `DOSKUTSU_TAS_REPLAY`, a fixed `DOSKUTSU_TAS_PRNG_SEED`, and
-`DOSKUTSU_TAS_AUTO_EXIT_TICK` as a backstop; replay auto-exits at EOF anyway.
+Cells set `DOS_PORT_TAS_REPLAY`, a fixed `DOS_PORT_TAS_PRNG_SEED`, and
+`DOS_PORT_TAS_AUTO_EXIT_TICK` as a backstop; replay auto-exits at EOF anyway.
 Each cell copies its own `CFGS/*.CFG` over `DOSKUTSU.CFG`, clears inherited
 hints, deletes the save, and tags its log.
 
@@ -204,7 +204,7 @@ beside them -- routes and durations are uninterpretable without it.
 **Do this first.** Two rounds of patching from log inference got the
 2026-08-06 bug partly right and partly wrong; one trace diff found it.
 
-    SET SDL_HINT_DOSKUTSU_TAS_TRACE=1
+    SET SDL_HINT_DOS_TAS_TRACE=1
 
 Emits `[tas-trace] t= mode= map= px= py= mask=` every 25 ticks and on every
 map change, from both tick paths. Record with it on, replay with it on, and

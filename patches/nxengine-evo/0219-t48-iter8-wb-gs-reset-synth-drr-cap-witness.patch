@@ -13,7 +13,7 @@ LEVER B -- GS-reset synth (opt-in, default OFF): the Dream SAM2695's
 power-up voice map is not GM-grand-piano ("cowbell/wrong voice", the H11
 boot map). A GM/GS/XG reset SysEx switches it, but MidiScheduler discards
 stream SysEx (MidiScheduler.cpp:976-991) so none from the .mid ever
-reaches the daughterboard. New hint SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET
+reaches the daughterboard. New hint SDL_HINT_DOS_AUDIO_WB_VOICE_RESET
 = gs|xg|gm|none (default none): at on_song_start the WB backend
 synthesizes the chosen reset SysEx (GS lead = F0 41 10 42 12 40 00 7F 00
 41 F7) FIRST, before the all-notes-off and the song's program-changes, so
@@ -36,7 +36,7 @@ WITNESSES (flush-instr iter-8 CONTRACT):
   dispatch line -- "...; drr_cap_hits=C (pct% of bytes capped, cap=B)".
   ~0% = the restored poll paces cleanly; ~100% = chip persistently busy =
   latency-drag (looks like a hang without being a true wedge). Reads
-  sdl-engine SDL/0097's doskutsu_mpu_drr_cap_hits + doskutsu_mpu_drr_cap.
+  sdl-engine SDL/0097's dos_port_mpu_drr_cap_hits + dos_port_mpu_drr_cap.
 
 LEVER C cosmetic (sdl-engine's diagnosis): silence_for_shutdown's
 "via DSP cmd 0x38" banner was a stale patch-0136 hardcoded string -- the
@@ -45,7 +45,7 @@ false through teardown), the SAME as play. The wave-41 hanging note was
 the H20 blind-write overrun, fixed for free by the poll, NOT a transport
 mismatch. Corrected the banner text; no behavior change.
 
-Combined-build symbols: doskutsu_mpu_drr_cap_hits + doskutsu_mpu_drr_cap
+Combined-build symbols: dos_port_mpu_drr_cap_hits + dos_port_mpu_drr_cap
 from SDL/0097 (links clean against the rebuilt sysroot).
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
@@ -62,15 +62,15 @@ index a3249309..d8a858d1 100644
 @@ -2044,6 +2044,14 @@ extern "C" {
    // symbol: a standalone nxengine link fails until sdl-engine's SDL patch
    // exporting it lands alongside (W22A combined-review pattern).
-   extern volatile std::uint32_t doskutsu_mpu_write_count;
+   extern volatile std::uint32_t dos_port_mpu_write_count;
 +  // patch 0219 (T48 iter-8): bounded bit-6 DRR-poll cap-hit counter + the cap
 +  // value itself (sdl-engine SDL/0097). Appended to the periodic dispatch line
 +  // as the Lever-A pacing-health signal (CONTRACT 2.1): ~0% of bytes capped =
 +  // the restored poll is pacing cleanly; ~100% = chip persistently busy =
 +  // latency-drag (music drags / audio starves; looks like a hang without being
 +  // a true wedge). Combined-build symbols (resolve when SDL/0097 lands).
-+  extern volatile std::uint32_t doskutsu_mpu_drr_cap_hits;
-+  extern volatile std::uint32_t doskutsu_mpu_drr_cap;
++  extern volatile std::uint32_t dos_port_mpu_drr_cap_hits;
++  extern volatile std::uint32_t dos_port_mpu_drr_cap;
  }
  
  // patch 0218 (T48): main-line WB MPU-dispatch-count witness. flush-instr's
@@ -79,7 +79,7 @@ index a3249309..d8a858d1 100644
    }
    if ((_flip_total % _wb_dispatch_every_flips) != 0) return;
 +  // patch 0219: append the Lever-A pacing-health tail (drr_cap_hits + pct + cap).
-+  const std::uint32_t caps = doskutsu_mpu_drr_cap_hits;
++  const std::uint32_t caps = dos_port_mpu_drr_cap_hits;
 +  const unsigned pct = (n > 0)
 +      ? (unsigned)(((std::uint64_t)caps * 100ull) / n) : 0u;
    LOG_INFO("WB MPU dispatch: {} bytes written to 0x330 (cumulative, main-line, "
@@ -90,7 +90,7 @@ index a3249309..d8a858d1 100644
 +           "at first hot note; drr_cap_hits={} ({}% of bytes capped, cap={})",
 +           (unsigned long)n, _wb_dispatch_every_flips,
 +           (unsigned long long)SDL_GetTicks(), _flip_total,
-+           (unsigned long)caps, pct, (unsigned long)doskutsu_mpu_drr_cap);
++           (unsigned long)caps, pct, (unsigned long)dos_port_mpu_drr_cap);
  }
  
  void _maybe_flush_phase_timing_audit()
@@ -112,13 +112,13 @@ index d6f34d09..07d776be 100644
 @@ -24,6 +27,12 @@ extern "C" {
    // reaches the dtor, so on a wedge the surviving witnesses are the flip()-side
    // first-nonzero + periodic emits (Renderer.cpp), not this total.
-   extern volatile uint32_t doskutsu_mpu_write_count;
+   extern volatile uint32_t dos_port_mpu_write_count;
 +  // patch 0219 (T48 iter-8): bounded-DRR-poll cap-hit counter (sdl-engine
 +  // SDL/0097), bumped when the per-byte bit-6 poll reaches its cap without DRR
 +  // going ready. The GS-reset witness reads its DELTA across the reset SysEx
 +  // emit (R) -- R~0 = the multi-byte reset landed cleanly (Lever B creditable);
 +  // R high = the reset itself overran (INVALID-for-B). Combined-build symbol.
-+  extern volatile uint32_t doskutsu_mpu_drr_cap_hits;
++  extern volatile uint32_t dos_port_mpu_drr_cap_hits;
  }
  
  namespace NXE
@@ -143,7 +143,7 @@ index d6f34d09..07d776be 100644
 +// default OFF). 0=none 1=gm 2=gs 3=xg.
 +static int _resolve_wb_reset_mode()
 +{
-+  const char *v = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET");
++  const char *v = SDL_GetHint("SDL_HINT_DOS_AUDIO_WB_VOICE_RESET");
 +  if (v == nullptr) return 0;
 +  if (std::strcmp(v, "gm") == 0) return 1;
 +  if (std::strcmp(v, "gs") == 0) return 2;
@@ -164,7 +164,7 @@ index d6f34d09..07d776be 100644
 +  if (_reset_mode != 0)
 +  {
 +    static const char *const names[] = { "none", "GM", "GS", "XG" };
-+    LOG_INFO("wb backend: song-start reset = {} (SDL_HINT_DOSKUTSU_AUDIO_WB_"
++    LOG_INFO("wb backend: song-start reset = {} (SDL_HINT_DOS_AUDIO_WB_"
 +             "VOICE_RESET; synthesizes a reset SysEx at each song-start to switch "
 +             "the Dream SAM2695 voice map, since the scheduler discards stream "
 +             "SysEx). Opt-in A/B lever; SDL/0097's DRR poll paces the bytes.",
@@ -199,9 +199,9 @@ index d6f34d09..07d776be 100644
 +      // witness (CONTRACT 2.2). P=0: the lever sends only the reset SysEx; the
 +      // song's own program-changes follow via normal dispatch and select voices
 +      // on the now-reset voice map (no source for "correct" PCs at song-start).
-+      const uint32_t cap0 = doskutsu_mpu_drr_cap_hits;
++      const uint32_t cap0 = dos_port_mpu_drr_cap_hits;
 +      _send_sysex(sx, k);
-+      const uint32_t r = doskutsu_mpu_drr_cap_hits - cap0;
++      const uint32_t r = dos_port_mpu_drr_cap_hits - cap0;
 +      LOG_INFO("WB GS-reset: {} bytes SysEx + {} program-changes sent to 0x330, "
 +               "drr_cap_hits_during_reset={} (R~0 = reset landed cleanly, Lever B "
 +               "creditable; R high = reset overran -> INVALID-for-B)",
@@ -269,7 +269,7 @@ index a42ffa55..3220e047 100644
 +
    bool _ready = false;
    uint16_t _port_base = 0;
-+  // patch 0219: resolved once in the ctor from SDL_HINT_DOSKUTSU_AUDIO_WB_VOICE_RESET
++  // patch 0219: resolved once in the ctor from SDL_HINT_DOS_AUDIO_WB_VOICE_RESET
 +  // (gs|xg|gm|none; default none = OFF, opt-in A/B lever). 0=none 1=gm 2=gs 3=xg.
 +  int _reset_mode = 0;
  };

@@ -20,7 +20,7 @@
  * Why header-only:
  *   - tests/probes/ is gitignored; including a header from include/ is
  *     the cleanest cross-tree share without a vendored snapshot edit.
- *   - DJGPP cross-build doesn't have a separate libdoskutsu_runmanifest.a;
+ *   - DJGPP cross-build doesn't have a separate libdos_port_runmanifest.a;
  *     header-only sidesteps the static-link archive management.
  *   - All helpers are small (~50 LOC each); per-TU duplication cost is
  *     under 1 KB per binary.

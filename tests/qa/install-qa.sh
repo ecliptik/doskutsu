@@ -22,7 +22,7 @@ set -e
 # ============================================================================
 TARBALL="doskutsu-cf-2026-08-14-qa-r3-1de88fcefd4a.tar.gz"
 
-EXP_DOSKUTSU_SHA="1de88fcefd4a691e19e3c6ace446032cf26a7f1030b248b158216e795d29801d"
+EXP_DOS_PORT_SHA="1de88fcefd4a691e19e3c6ace446032cf26a7f1030b248b158216e795d29801d"
 EXP_SETUP_SHA="723d6991b30308083daadcc8b35ca972cff1bb3604e7fec3f4628b2c0acb9ba3"
 EXP_SETUPBAT_SHA="ee9140aac514abe1d6eaca9d3c08817f1599201f59916b145c904b5c3ed18741"
 EXP_CWSDPMI_SHA="2de899fecaa90632b8b9bdfc0305cb0375e59ae252c37e32d06c1ed3f98a8f44"
@@ -179,7 +179,7 @@ assert_sha() {
   fi
   echo "  PASS: ${name} ${got:0:12}"
 }
-assert_sha DOSKUTSU.EXE "${EXP_DOSKUTSU_SHA}"
+assert_sha DOSKUTSU.EXE "${EXP_DOS_PORT_SHA}"
 assert_sha SETUP.EXE    "${EXP_SETUP_SHA}"      # 723d6991 = AUDIOTEST=1 release (never the stub)
 assert_sha SETUP.BAT    "${EXP_SETUPBAT_SHA}"   # ee9140aa = 14 audio clears + SETUP.EXE
 assert_sha CWSDPMI.EXE  "${EXP_CWSDPMI_SHA}"
@@ -994,8 +994,8 @@ fi
 # CLRENV is the choke point every cell CALLs but predates PUMP_TIMEBASE, so a
 # killswitch set by one cell survived into the next. Per-BAT clears fix today's
 # BATs; this fixes the mechanism.
-if ! grep -q "SDL_HINT_DOSKUTSU_PUMP_TIMEBASE" "${CF_GAME_DIR}/CLRENV.BAT" 2>/dev/null; then
-  printf 'SET DOSKUTSU_PUMP_TIMEBASE=\r\nSET SDL_HINT_DOSKUTSU_PUMP_TIMEBASE=\r\n' >> "${CF_GAME_DIR}/CLRENV.BAT"
+if ! grep -q "SDL_HINT_DOS_PUMP_TIMEBASE" "${CF_GAME_DIR}/CLRENV.BAT" 2>/dev/null; then
+  printf 'SET DOS_PORT_PUMP_TIMEBASE=\r\nSET SDL_HINT_DOS_PUMP_TIMEBASE=\r\n' >> "${CF_GAME_DIR}/CLRENV.BAT"
   echo "  appended PUMP_TIMEBASE clears to CLRENV.BAT"
 else
   echo "  CLRENV.BAT already clears PUMP_TIMEBASE"
@@ -1019,10 +1019,10 @@ for cand in "${CF_MOUNT}/AUTOEXEC.BAT" "${CF_MOUNT}/autoexec.bat"; do
   [ -f "$cand" ] && AE="$cand" && break
 done
 if [ -n "$AE" ]; then
-  hits=$(grep -inE '^[[:space:]]*SET[[:space:]]+(SDL_HINT_DOSKUTSU_|DOSKUTSU_)' "$AE" 2>/dev/null || true)
+  hits=$(grep -inE '^[[:space:]]*SET[[:space:]]+(SDL_HINT_DOS_|DOSKUTSU_|DOS_PORT_)' "$AE" 2>/dev/null || true)
   if [ -n "$hits" ]; then
     echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    echo "  !! STALE DOSKUTSU_* SET(s) in ${AE}:"
+    echo "  !! STALE DOSKUTSU_*/DOS_PORT_* SET(s) in ${AE}:"
     echo "$hits" | sed 's/^/  !!   /'
     echo "  !! These beat CFG values (env > file) and can MASK a cell's witness"
     echo "  !! (e.g. a v1.4.x 'SET ...MIDI_SOURCE=wiimidi' line silently pins the"
@@ -1030,7 +1030,7 @@ if [ -n "$AE" ]; then
     echo "  !! reads wrong, REM these out + reboot before that cell."
     echo "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
   else
-    echo "  PASS: no DOSKUTSU_* / SDL_HINT_DOSKUTSU_* SET in ${AE}"
+    echo "  PASS: no DOSKUTSU_* / DOS_PORT_* / SDL_HINT_DOS_* SET in ${AE}"
   fi
   bl=$(grep -inE '^[[:space:]]*SET[[:space:]]+BLASTER' "$AE" 2>/dev/null || true)
   [ -n "$bl" ] && echo "  note: BLASTER line (expected -- hardware default): ${bl}"

@@ -5,7 +5,7 @@ deterministic input from a pre-recorded file, so a play session can be reproduce
 exactly -- used for perf-iteration (removing operator-timing variance across runs) and
 for the per-stage end-to-end (E2E) determinism regression suite.
 
-It is OFF by default: with neither `DOSKUTSU_TAS_RECORD` nor `DOSKUTSU_TAS_REPLAY` set,
+It is OFF by default: with neither `DOS_PORT_TAS_RECORD` nor `DOS_PORT_TAS_REPLAY` set,
 every hook is a no-op and the binary behaves identically to a normal run.
 
 This document covers the feature. The research/feasibility analysis (why a foreign
@@ -37,18 +37,18 @@ for every tick at or after the event's tick.
 Both are selected by environment variable (mutually exclusive; replay wins if both are
 set):
 
-    DOSKUTSU_TAS_RECORD=PLAY.TAS    capture live input -> PLAY.TAS
-    DOSKUTSU_TAS_REPLAY=PLAY.TAS    feed recorded input from PLAY.TAS
+    DOS_PORT_TAS_RECORD=PLAY.TAS    capture live input -> PLAY.TAS
+    DOS_PORT_TAS_REPLAY=PLAY.TAS    feed recorded input from PLAY.TAS
 
 Supporting variables:
 
-    DOSKUTSU_TAS_PRNG_SEED=<n>      force the base RNG seed (default 0)
-    DOSKUTSU_TAS_AUTO_EXIT_TICK=<n> end the run cleanly at tick n (safety bound)
-    DOSKUTSU_TAS_REPLAY_HOLD=1      after the replay file is exhausted, hold the last
+    DOS_PORT_TAS_PRNG_SEED=<n>      force the base RNG seed (default 0)
+    DOS_PORT_TAS_AUTO_EXIT_TICK=<n> end the run cleanly at tick n (safety bound)
+    DOS_PORT_TAS_REPLAY_HOLD=1      after the replay file is exhausted, hold the last
                                     input instead of auto-exiting (default: auto-exit
                                     at end of replay)
 
-The log (in `<CWD>\DOSKUTSU\LOGS\`, or `<TAG>.LOG` when `DOSKUTSU_LOG_TAG` is set)
+The log (in `<CWD>\DOSKUTSU\LOGS\`, or `<TAG>.LOG` when `DOS_PORT_LOG_TAG` is set)
 records the open + the end: `tas: record opened ...` / `tas: replay opened ...` and
 `tas: end-of-replay auto-exit at tick N`.
 
@@ -64,7 +64,7 @@ Replay reproduces a run exactly because three things are pinned:
 
 2. SEEDED RNG. `getrand()` is the classic MSVC linear-congruential generator
    (`seed = seed*214013 + 2531011; return (seed >> 16) & 0x7fff`). On replay the base
-   seed is taken from the file header (or `DOSKUTSU_TAS_PRNG_SEED` if set), so the RNG
+   seed is taken from the file header (or `DOS_PORT_TAS_PRNG_SEED` if set), so the RNG
    stream is reproducible.
 
 3. PER-STAGE RE-SEED. When TAS record or replay is active, the engine re-seeds the RNG
@@ -100,7 +100,7 @@ intentional logic change.
 
 ### Record a run or a segment
 
-    SET DOSKUTSU_TAS_RECORD=PLAY.TAS
+    SET DOS_PORT_TAS_RECORD=PLAY.TAS
     DOSKUTSU.EXE
     ... play ...  (quit normally to flush + close the file)
 
@@ -112,8 +112,8 @@ door tile (37,11) and walks through it to Start Point (stage 13):
     SET DOSKUTSU_WARP_X=37
     SET DOSKUTSU_WARP_Y=11
     SET DOSKUTSU_WARP_LOADOUT=1
-    SET DOSKUTSU_TAS_PRNG_SEED=0
-    SET DOSKUTSU_TAS_RECORD=SEG12.TAS
+    SET DOS_PORT_TAS_PRNG_SEED=0
+    SET DOS_PORT_TAS_RECORD=SEG12.TAS
     DOSKUTSU.EXE
     ... play the stage to its exit, then quit ...
 
@@ -137,11 +137,11 @@ Two things make a segment replay robustly (learned during suite bring-up):
 
 ### Replay a recording
 
-    SET DOSKUTSU_TAS_REPLAY=PLAY.TAS
+    SET DOS_PORT_TAS_REPLAY=PLAY.TAS
     DOSKUTSU.EXE
 
 For a segment, set the same warp variables that were used to record it, plus
-`DOSKUTSU_TAS_REPLAY=SEG12.TAS`. The replay auto-exits at end of file.
+`DOS_PORT_TAS_REPLAY=SEG12.TAS`. The replay auto-exits at end of file.
 
 ### The per-stage E2E determinism suite
 

@@ -7,7 +7,7 @@
 # flush ever comes back (the Bug 1 regression -> fire-frame pause on every cave
 # entry), a sheet gets decoded a SECOND time and this gate FAILs.
 #
-# Mechanism: runs DOSKUTSU.EXE under SDL_HINT_DOSKUTSU_IO_AUDIT=1 (patch 0180)
+# Mechanism: runs DOSKUTSU.EXE under SDL_HINT_DOS_IO_AUDIT=1 (patch 0180)
 # in DOSBox-X, drives several cave transitions via xdotool, and counts
 # [io-audit] phase=gameplay op=loadImage occurrences per file:
 #   sprite file seen >= 2 times  -> FAIL (re-decode == flush regression)
@@ -57,11 +57,11 @@ esac
 [[ -f "$STAGE/DOSKUTSU.EXE" ]] || { echo "[io-gate] FAIL: stage not built -- run 'make stage' first"; exit 2; }
 
 # Keep env block SMALL (DOSBox-X COMMAND.COM env ~720 bytes; 3+ long
-# SDL_HINT_DOSKUTSU_* SETs overflow it and silently break autorun).
+# SDL_HINT_DOS_* SETs overflow it and silently break autorun).
 # Shipping config has SKIP_SHEET_FLUSH default-ON, so the gate sets nothing
 # extra in default mode; --regress sets the =0 killswitch to restore flush.
-ENV_ARGS=( -c 'SET SDL_HINT_DOSKUTSU_IO_AUDIT=1' )
-(( REGRESS )) && ENV_ARGS+=( -c 'SET SDL_HINT_DOSKUTSU_SKIP_SHEET_FLUSH=0' )
+ENV_ARGS=( -c 'SET SDL_HINT_DOS_IO_AUDIT=1' )
+(( REGRESS )) && ENV_ARGS+=( -c 'SET SDL_HINT_DOS_SKIP_SHEET_FLUSH=0' )
 
 pkill -x dosbox-x 2>/dev/null; sleep 2
 rm -f "$STAGE/LOGS/DEBUG.LOG" "$STAGE/DEBUG.LOG" "$STAGE/debug.log" 2>/dev/null
@@ -72,7 +72,7 @@ dosbox-x -conf "$CONF" -nopromptfolder \
   -c 'SET BLASTER=A220 I5 D1 H5 T6' \
   -c 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1' \
   -c 'SET SDL_INVALID_PARAM_CHECKS=0' \
-  -c 'SET DOSKUTSU_LOG_VERBOSE=1' \
+  -c 'SET DOS_PORT_LOG_VERBOSE=1' \
   "${ENV_ARGS[@]}" \
   -c "C:" -c "DOSKUTSU.EXE" >/tmp/io-audit-gate-launcher.log 2>&1 &
 

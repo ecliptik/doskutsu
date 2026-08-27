@@ -148,7 +148,7 @@ for b in "${BATS[@]}"; do
       failr "$bn:$ln: stray < or > outside a log redirect -- creates a file"; g5=1
     fi
   done < <(grep -nE '^[[:space:]]*([Rr][Ee][Mm]|[Ee][Cc][Hh][Oo])\b.*[<>]' "$b" | tr -d '\r')
-  while IFS= read -r t; do t="${t%$'\r'}"; t="${t##*=}"; t="${t//%QAM%/Q}"; [[ ${#t} -le 5 ]] || { failr "$bn: LOG_TAG '$t' >5 chars"; g5=1; }; done < <(grep -hE 'SET[[:space:]]+DOSKUTSU_LOG_TAG=' "$b" 2>/dev/null)
+  while IFS= read -r t; do t="${t%$'\r'}"; t="${t##*=}"; t="${t//%QAM%/Q}"; [[ ${#t} -le 5 ]] || { failr "$bn: LOG_TAG '$t' >5 chars"; g5=1; }; done < <(grep -hE 'SET[[:space:]]+DOS_PORT_LOG_TAG=' "$b" 2>/dev/null)
 done
 [[ $g5 -eq 0 ]] && pass "CRLF + ASCII + 8.3 + no REM/ECHO redirect + LOG_TAG<=5"
 

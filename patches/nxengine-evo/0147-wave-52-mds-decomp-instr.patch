@@ -7,7 +7,7 @@ Subject: [PATCH] perf phase 11 patch 0147 -- wave-52 mode_draw_scene decomp
 Per flush-instr's docs/internal/WAVE-52-DECOMP-DESIGN.md sec.3 contract.
 Instrumentation-ONLY cycle-0 iter (no lever, no single-lever conflict)
 that decomposes the ~9 ms un-instrumented scrolling-frame slice on the
-canonical KPI scene. Env gate SDL_HINT_DOSKUTSU_MDS_DECOMP (strict "1",
+canonical KPI scene. Env gate SDL_HINT_DOS_MDS_DECOMP (strict "1",
 cached-at-boot; default OFF). Design doc draft-named the patch
 "-mds-scroll-decomp"; team-lead's task name "-mds-decomp-instr" is
 canonical.
@@ -125,7 +125,7 @@ index 3f90ac9..33d2a80 100644
  bool mode_tick_instr_active();
  
 +// DOS-PORT (patch 0147, Phase 11 wave-52): mds-decomp instrumentation
-+// gate. Strict "1" SDL_HINT_DOSKUTSU_MDS_DECOMP, cached-at-boot;
++// gate. Strict "1" SDL_HINT_DOS_MDS_DECOMP, cached-at-boot;
 +// definition lives in Renderer.cpp's ablation-flag cluster. When true,
 +// the W22A/W22.5/W29 mode_draw_scene timer destructors below ALSO
 +// populate their `g_*_dt_this_tick` per-tick values, so patch 0147 can
@@ -325,7 +325,7 @@ index 55f1a33..6b53ab8 100644
 +  // every g_*_dt_this_tick value this scene-draw produced has been
 +  // written by its timer destructor (which fired at the DrawScene()
 +  // sub-bracket scope exits) and not yet reset for the next tick.
-+  // No-op unless SDL_HINT_DOSKUTSU_MDS_DECOMP=1. Emits a self-contained
++  // No-op unless SDL_HINT_DOS_MDS_DECOMP=1. Emits a self-contained
 +  // decomposition block every 100 scene-draws.
 +  if (NXE::Diag::mds_decomp_active())
 +    NXE::Diag::mds_decomp_on_scene_draw();
@@ -392,7 +392,7 @@ index bac36b4..c1f4071 100644
  }
  
 +// DOS-PORT (patch 0147, Phase 11 wave-52): mds-decomp instrumentation
-+// gate. Strict "1" SDL_HINT_DOSKUTSU_MDS_DECOMP; default OFF. When ON,
++// gate. Strict "1" SDL_HINT_DOS_MDS_DECOMP; default OFF. When ON,
 +// the wave-52 scrolling-block decomposition emits a self-contained
 +// per-100-SCENE-DRAWS block (full mode_draw_scene sub-bucket re-report
 +// + backdrop-cache route/timing + per-layer framebuffer-write bytes +
@@ -401,7 +401,7 @@ index bac36b4..c1f4071 100644
 +// gate widening in diagnostic_timers.h (patch 0147).
 +inline bool _abl_mds_decomp()
 +{
-+  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_MDS_DECOMP");
++  static const bool v = _strict_truthy_env("SDL_HINT_DOS_MDS_DECOMP");
 +  return v;
 +}
 +
@@ -415,7 +415,7 @@ index bac36b4..c1f4071 100644
 +// ===================================================================
 +// DOS-PORT (patch 0147, Phase 11 wave-52): mode_draw_scene scrolling-
 +// block decomposition instrumentation. Gated on _abl_mds_decomp()
-+// (SDL_HINT_DOSKUTSU_MDS_DECOMP). Self-contained: one block emitted per
++// (SDL_HINT_DOS_MDS_DECOMP). Self-contained: one block emitted per
 +// 100 SCENE-DRAWS (not per 100 flips -- the wave-52 sec.2 coverage fix;
 +// the n=70/100 gap is cause (a), non-GM_NORMAL ticks running no
 +// DrawScene, so a scene-draw denominator is the consistent one).
@@ -621,7 +621,7 @@ index bac36b4..c1f4071 100644
  // elapsed ns to the file-scope counters at destruction. Place at top of
  // each drawcall method to cover all return paths cleanly.
 @@ -3383,6 +3608,22 @@ bool Renderer::initVideo()
-              "(default; set SDL_HINT_DOSKUTSU_BLIT_DECOMP=1 to opt in -- "
+              "(default; set SDL_HINT_DOS_BLIT_DECOMP=1 to opt in -- "
               "wave-51 _blit_indexed sub-decomp sizing)");
    }
 +  // DOS-PORT (patch 0147, Phase 11 wave-52): mds-decomp instrumentation
@@ -629,7 +629,7 @@ index bac36b4..c1f4071 100644
 +  if (_abl_mds_decomp())
 +  {
 +    LOG_INFO("Renderer::initVideo: mds-scroll-decomp instrumentation "
-+             "ENABLED via SDL_HINT_DOSKUTSU_MDS_DECOMP=1 -- per-100-"
++             "ENABLED via SDL_HINT_DOS_MDS_DECOMP=1 -- per-100-"
 +             "scene-draws [mds-decomp-stat]/[mds-decomp-route]/"
 +             "[mds-decomp-pass]/[mds-decomp-frames] emitted (wave-52 "
 +             "scrolling-block decomposition; per-layer/per-call cost)");
@@ -637,12 +637,12 @@ index bac36b4..c1f4071 100644
 +  else
 +  {
 +    LOG_INFO("Renderer::initVideo: mds-scroll-decomp instrumentation "
-+             "DISABLED (default; set SDL_HINT_DOSKUTSU_MDS_DECOMP=1 to "
++             "DISABLED (default; set SDL_HINT_DOS_MDS_DECOMP=1 to "
 +             "opt in -- wave-52 mode_draw_scene scrolling-block decomp)");
 +  }
    // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
    // PumpEvents yield-skip is active. Default ON (skip); env-var override
-   // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
+   // SDL_HINT_DOS_FORCE_PUMP_YIELD=1 restores the original yield.
 @@ -5408,6 +5649,15 @@ static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
    const Uint8 *sp = (const Uint8 *)src->pixels + sy * src_pitch + sx;
    Uint8 *dp = (Uint8 *)dst->pixels + dst_y * dst_pitch + dst_x;

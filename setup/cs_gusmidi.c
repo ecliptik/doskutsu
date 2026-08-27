@@ -230,7 +230,7 @@ static int upload_pat(const char *base_name, int is_drum, gus_pat *out)
   out->resident = 0;
   if (!base_name || !out) return 0;
 
-  ultradir = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_ULTRADIR");
+  ultradir = SDL_GetHint("SDL_HINT_DOS_GUS_ULTRADIR");
   if (!ultradir || ultradir[0] == '\0') ultradir = "C:\\ULTRASND";
 
   /* <ULTRADIR>\<name>.pat then <ULTRADIR>\MIDI\<name>.pat. "rb" -- DJGPP text

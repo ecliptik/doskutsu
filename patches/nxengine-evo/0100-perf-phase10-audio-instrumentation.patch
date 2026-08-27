@@ -44,11 +44,11 @@ Output format per contract sec. 3.1 -- distinct prefix from the existing
 
 Two new env vars per contract sec. 2 (both documented in docs/BOOT.md):
 
-  SDL_HINT_DOSKUTSU_AUDIO_INSTR=1 (dev-only, strict-1) -- gates [audio-block]
+  SDL_HINT_DOS_AUDIO_INSTR=1 (dev-only, strict-1) -- gates [audio-block]
     emit. Counter UPDATES are unconditional per anti-pattern #2 so values
     are ready when emit fires. Per-flush cost when env unset: <500 ns.
 
-  SDL_HINT_DOSKUTSU_AUDIO_BACKEND={auto,organya,opl3,wb,tracker} (user-
+  SDL_HINT_DOS_AUDIO_BACKEND={auto,organya,opl3,wb,tracker} (user-
     facing, string-enum) -- backend selection. Default `auto` resolves
     to organya in slot 0100 (only backend currently implemented).
     Forced selections (wb / opl3 / tracker) requested-but-unavailable
@@ -62,16 +62,16 @@ Cross-vendor lane-split per flush-instr's locked alpha-API 2026-05-06:
     - [audio-block ...] emit + per-block reset in
       _maybe_flush_phase_timing_audit() (after wave-23.7 speedup-probe)
     - Engine-side delta-compute pattern: read SDL-side cumulative
-      externs (doskutsu_audio_irq_count / _wall_us / _sfx_active_count),
+      externs (dos_port_audio_irq_count / _wall_us / _sfx_active_count),
       subtract last-read snapshot, write deltas to per-block storage
     - p10_audio_idle_pause_callback() -- registered at SoundManager::
       init() via SDL_DOSAudioRegisterIdlePauseCallback; invoked by SDL
       DSP-pause primitive on each pause->resume transition with
       paused_ns; increments idle_pause_count + accumulates paused_us
     - AudioBackend.{h,cpp} (NEW): selectBackendFromEnv() translates
-      SDL_HINT_DOSKUTSU_AUDIO_BACKEND env to AudioBackend enum at
+      SDL_HINT_DOS_AUDIO_BACKEND env to AudioBackend enum at
       game-init. NO backend dispatch logic; that's Stage 2/3/4.
-    - Pixtone.{h,cpp}: g_pixtone_active_count volatile uint32 written
+    - Pixtone.{h,cpp}: g_dos_sfx_synth_active_count volatile uint32 written
       by Pixtone state machine (++ on play/playResampled success after
       MIX_PlayTrack; -- in pxtSoundDone, balanced via MIX_StopTrack's
       inline callback dispatch on cooperative SDL3-DOS scheduler).
@@ -82,17 +82,17 @@ Cross-vendor lane-split per flush-instr's locked alpha-API 2026-05-06:
 
   SDL LANE (sdl-engine's slots 0037+, NOT in this patch):
     - 3 cross-vendor C-linkage extern variable definitions
-      (doskutsu_audio_irq_count / _wall_us / _sfx_active_count)
+      (dos_port_audio_irq_count / _wall_us / _sfx_active_count)
     - IRQ-5 ISR entry/exit timestamps + cumulative writes
     - DSP idle-pause primitive (pause / resume cycle on idle detect)
     - SDL_DOSAudioRegisterIdlePauseCallback API + force-pause/resume
       diagnostic helpers
-    - IRQ handler increments doskutsu_audio_sfx_active_count when
-      g_pixtone_active_count > 0 at entry (engine-state framing)
+    - IRQ handler increments dos_port_audio_sfx_active_count when
+      g_dos_sfx_synth_active_count > 0 at entry (engine-state framing)
 
 Standalone build of this patch fails at link with 4 expected unresolved
-references -- `doskutsu_audio_irq_count`, `doskutsu_audio_irq_wall_us`,
-`doskutsu_audio_sfx_active_count`, `SDL_DOSAudioRegisterIdlePauseCallback`.
+references -- `dos_port_audio_irq_count`, `dos_port_audio_irq_wall_us`,
+`dos_port_audio_sfx_active_count`, `SDL_DOSAudioRegisterIdlePauseCallback`.
 This is the W22A combined-review precedent: both lanes' diffs land
 together, build-qa runs the combined smoke. Compile is clean (no
 warnings); linker errors resolve when sdl-engine's slots 0037+ land
@@ -107,7 +107,7 @@ Files touched (5 modified + 2 new):
                                      compute block in _maybe_flush_phase_
                                      timing_audit(), idle-pause callback
                                      definition, file-scope wrapper
-  src/sound/Pixtone.h              -- g_pixtone_active_count extern decl
+  src/sound/Pixtone.h              -- g_dos_sfx_synth_active_count extern decl
   src/sound/Pixtone.cpp            -- definition + 3 mutation sites
                                      (play, playResampled, pxtSoundDone)
   src/sound/SoundManager.cpp       -- selectBackendFromEnv() call +
@@ -128,7 +128,7 @@ gets DM'd to flush-instr / sdl-engine before drafting; this patch's
 boundary precisely matches the locked lane-split.
 
 Per env_vars_document_in_user_docs.md: both new env vars documented
-in docs/BOOT.md alongside the existing `SDL_HINT_DOSKUTSU_*` entries
+in docs/BOOT.md alongside the existing `SDL_HINT_DOS_*` entries
 (AUDIO_INSTR as dev-only category; AUDIO_BACKEND as user-facing
 category).
 ---
@@ -176,13 +176,13 @@ index a244341..809e107 100644
 +// audio/engine split-block emission.
 +//
 +// Sticky `g_p10_audio_backend_active` enum is set once at game-init by
-+// AudioBackend::selectBackendFromEnv() per the SDL_HINT_DOSKUTSU_AUDIO_-
++// AudioBackend::selectBackendFromEnv() per the SDL_HINT_DOS_AUDIO_-
 +// BACKEND env-var; only flips on backend swap (rare; auto-detect chain
 +// succession in Stage 5 -- not currently triggered).
 +//
 +// Cross-vendor sourcing: 3 of 5 numerics (`audio_irq_count`,
 +// `audio_irq_wall_us`, `sfx_active_count`) are populated by the SDL-
-+// side IRQ-5 ISR via `doskutsu_audio_*` C-linkage externs declared in
++// side IRQ-5 ISR via `dos_port_audio_*` C-linkage externs declared in
 +// SDL's `SDL_dos_audio_synth.h` (sdl-engine's slots 0037+). The
 +// engine-side reads cumulative values at `_maybe_flush_phase_timing_-
 +// audit()` entry, computes deltas vs the prior block-flush snapshot,
@@ -195,7 +195,7 @@ index a244341..809e107 100644
 +// -- that the SDL-side DSP-pause primitive invokes on each pause->resume
 +// transition with the paused-duration in ns.
 +
-+// Sticky enum -- currently-active audio backend per SDL_HINT_DOSKUTSU_
++// Sticky enum -- currently-active audio backend per SDL_HINT_DOS_
 +// AUDIO_BACKEND. Default `none` until AudioBackend::selectBackendFromEnv()
 +// runs at SoundManager::init(); after init, one of organya / wb / opl3
 +// / tracker.
@@ -215,7 +215,7 @@ index a244341..809e107 100644
 +const char *backend_to_string(AudioBackend b);
 +
 +// 5 per-block reset counters -- engine-side delta-derived from
-+// `doskutsu_audio_*` SDL-side cumulative externs (3) + populated by
++// `dos_port_audio_*` SDL-side cumulative externs (3) + populated by
 +// idle-pause callback (2). All written from the audit-flush path in
 +// Renderer.cpp; reset to 0 after [audio-block ...] emit on each flush.
 +extern std::uint32_t g_p10_audio_irq_count_block;
@@ -264,9 +264,9 @@ index 27a34e2..158308d 100644
 +// the kbd-counter precedent from patches 0023 + 0025); modular wrap-
 +// safe under uint32_t arithmetic per C99.
 +extern "C" {
-+  extern volatile std::uint32_t doskutsu_audio_irq_count;
-+  extern volatile std::uint32_t doskutsu_audio_irq_wall_us;
-+  extern volatile std::uint32_t doskutsu_audio_sfx_active_count;
++  extern volatile std::uint32_t dos_port_audio_irq_count;
++  extern volatile std::uint32_t dos_port_audio_irq_wall_us;
++  extern volatile std::uint32_t dos_port_audio_sfx_active_count;
 +}
 +
  // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): storage for the audio-
@@ -365,7 +365,7 @@ index 27a34e2..158308d 100644
 +// (instrumentation has its own per-flush cost -- 3 SDL-side cumulative
 +// reads + delta-compute + 1 LOG_INFO emission per 100-flip block).
 +// Cached static-const-bool -- -O2 hoists per-flush guards. Pairs with
-+// SDL_HINT_DOSKUTSU_AUDIO_BACKEND (user-facing backend selector) per
++// SDL_HINT_DOS_AUDIO_BACKEND (user-facing backend selector) per
 +// the design's two-hint pattern: AUDIO_INSTR is dev-only diagnostic
 +// emission; AUDIO_BACKEND is the runtime backend choice (independent
 +// from instrumentation).
@@ -378,7 +378,7 @@ index 27a34e2..158308d 100644
 +// unset: ~3 atomic reads + 5 subtractions + 5 stores; <500 ns.
 +inline bool _abl_p10_audio_instr()
 +{
-+  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_AUDIO_INSTR");
++  static const bool v = _strict_truthy_env("SDL_HINT_DOS_AUDIO_INSTR");
 +  return v;
 +}
 +
@@ -402,8 +402,8 @@ index 27a34e2..158308d 100644
 +  //
 +  // Delta-compute pattern (per flush-instr's locked spec 2026-05-06):
 +  // SDL-side IRQ-5 ISR maintains cumulative counters
-+  // (`doskutsu_audio_irq_count`, `doskutsu_audio_irq_wall_us`,
-+  // `doskutsu_audio_sfx_active_count`); engine-side reads cumulative
++  // (`dos_port_audio_irq_count`, `dos_port_audio_irq_wall_us`,
++  // `dos_port_audio_sfx_active_count`); engine-side reads cumulative
 +  // values at each audit-flush, computes deltas vs the prior-snapshot
 +  // last-read values (file-scope statics), writes deltas into the
 +  // per-block storage. Modular uint32_t arithmetic is wrap-safe per
@@ -416,13 +416,13 @@ index 27a34e2..158308d 100644
 +  // ready at emit time on whichever block the operator first sets
 +  // AUDIO_INSTR=1.
 +  {
-+    static std::uint32_t _last_doskutsu_audio_irq_count = 0;
-+    static std::uint32_t _last_doskutsu_audio_irq_wall_us = 0;
-+    static std::uint32_t _last_doskutsu_audio_sfx_active_count = 0;
++    static std::uint32_t _last_dos_port_audio_irq_count = 0;
++    static std::uint32_t _last_dos_port_audio_irq_wall_us = 0;
++    static std::uint32_t _last_dos_port_audio_sfx_active_count = 0;
 +
-+    const std::uint32_t now_irq_count   = doskutsu_audio_irq_count;
-+    const std::uint32_t now_irq_wall_us = doskutsu_audio_irq_wall_us;
-+    const std::uint32_t now_sfx_active  = doskutsu_audio_sfx_active_count;
++    const std::uint32_t now_irq_count   = dos_port_audio_irq_count;
++    const std::uint32_t now_irq_wall_us = dos_port_audio_irq_wall_us;
++    const std::uint32_t now_sfx_active  = dos_port_audio_sfx_active_count;
 +
 +    // Modular wrap-safe per C99: unsigned subtraction is well-defined
 +    // even when current < last (e.g., SDL-side counters reset on
@@ -430,13 +430,13 @@ index 27a34e2..158308d 100644
 +    // realistic IRQ rate). The delta represents "change since prior
 +    // block-flush"; wrap produces a small positive delta which is
 +    // correct for the rolling-sum semantic.
-+    NXE::Diag::g_p10_audio_irq_count_block   = now_irq_count   - _last_doskutsu_audio_irq_count;
-+    NXE::Diag::g_p10_audio_irq_wall_us_block = now_irq_wall_us - _last_doskutsu_audio_irq_wall_us;
-+    NXE::Diag::g_p10_sfx_active_count_block  = now_sfx_active  - _last_doskutsu_audio_sfx_active_count;
++    NXE::Diag::g_p10_audio_irq_count_block   = now_irq_count   - _last_dos_port_audio_irq_count;
++    NXE::Diag::g_p10_audio_irq_wall_us_block = now_irq_wall_us - _last_dos_port_audio_irq_wall_us;
++    NXE::Diag::g_p10_sfx_active_count_block  = now_sfx_active  - _last_dos_port_audio_sfx_active_count;
 +
-+    _last_doskutsu_audio_irq_count          = now_irq_count;
-+    _last_doskutsu_audio_irq_wall_us        = now_irq_wall_us;
-+    _last_doskutsu_audio_sfx_active_count   = now_sfx_active;
++    _last_dos_port_audio_irq_count          = now_irq_count;
++    _last_dos_port_audio_irq_wall_us        = now_irq_wall_us;
++    _last_dos_port_audio_sfx_active_count   = now_sfx_active;
 +
 +    // Emit gated on AUDIO_INSTR=1. Counter values are set above
 +    // unconditionally; gate prevents log noise when env unset.
@@ -524,7 +524,7 @@ index 0000000..ef53acf
 +{
 +  // SDL_GetHint reads via SDL3's env-var lookup chain (SDL_SetHint
 +  // overrides -> process env -> default). Returns NULL if unset.
-+  const char *value = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
++  const char *value = SDL_GetHint("SDL_HINT_DOS_AUDIO_BACKEND");
 +
 +  // Default (env unset OR `auto`) -> for slot 0100 resolves to
 +  // `organya` (Phase 10 baseline; only backend currently implemented).
@@ -575,7 +575,7 @@ index 0000000..ef53acf
 +  {
 +    selected = NXE::Diag::AudioBackend::organya;
 +    LOG_INFO("audio backend: unrecognized value '{}' for "
-+             "SDL_HINT_DOSKUTSU_AUDIO_BACKEND; falling back to organya. "
++             "SDL_HINT_DOS_AUDIO_BACKEND; falling back to organya. "
 +             "Recognized values: auto | organya | wb | opl3 | tracker.",
 +             value);
 +  }
@@ -601,7 +601,7 @@ index 0000000..5a1ed61
 + * `Utils/diagnostic_timers.h` (because it is also an instrumentation
 + * field via `g_p10_audio_backend_active`). This header declares the
 + * one Stage-1 entry point -- `selectBackendFromEnv()` -- that translates
-+ * the user-facing `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` env var into the
++ * the user-facing `SDL_HINT_DOS_AUDIO_BACKEND` env var into the
 + * sticky `g_p10_audio_backend_active` value. NO backend dispatch
 + * logic: the actual MIDI scheduler / WaveBlaster / OPL3 implementations
 + * land in patches 0101+ (Stage 2 / 3 / 4 deliverables per
@@ -624,7 +624,7 @@ index 0000000..5a1ed61
 +namespace Sound
 +{
 +
-+// Translate the `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` env var value (auto |
++// Translate the `SDL_HINT_DOS_AUDIO_BACKEND` env var value (auto |
 +// organya | wb | opl3 | tracker) to the corresponding
 +// NXE::Diag::AudioBackend enum and write it to
 +// `g_p10_audio_backend_active`. Default (env unset) = `auto`, which
@@ -676,7 +676,7 @@ index 64dca02..bac9883 100644
 +// fires when `extern` keyword and initializer co-occur on a single
 +// declaration.
 +extern "C" {
-+  volatile std::uint32_t g_pixtone_active_count = 0;
++  volatile std::uint32_t g_dos_sfx_synth_active_count = 0;
 +}
 +
  namespace NXE
@@ -690,9 +690,9 @@ index 64dca02..bac9883 100644
 +      // MIX_StopTrack below dispatches pxtSoundDone INLINE on the
 +      // cooperative SDL3-DOS scheduler if the track was already
 +      // playing (per the synchronous-callback comment above).
-+      // pxtSoundDone decrements g_pixtone_active_count, balancing
++      // pxtSoundDone decrements g_dos_sfx_synth_active_count, balancing
 +      // the prior play()'s increment. The new MIX_PlayTrack below
-+      // then increments g_pixtone_active_count for the new sound.
++      // then increments g_dos_sfx_synth_active_count for the new sound.
 +      // Net for "play() over an active track": 0. Net for
 +      // "play() over an idle channel": +1. Both correct -- the
 +      // counter reflects "how many tracks are sounding now."
@@ -700,7 +700,7 @@ index 64dca02..bac9883 100644
        MIX_SetTrackAudio(track, _sound_fx[slot].chunk);
        MIX_SetTrackLoops(track, loop);
        MIX_PlayTrack(track, 0);
-+      ++g_pixtone_active_count;
++      ++g_dos_sfx_synth_active_count;
        _sound_fx[slot].channel = chan;
        _slots[chan]            = slot;
      }
@@ -715,7 +715,7 @@ index 64dca02..bac9883 100644
        MIX_SetTrackAudio(track, _sound_fx[slot].resampled[idx]);
        MIX_SetTrackLoops(track, loop);
        MIX_PlayTrack(track, 0);
-+      ++g_pixtone_active_count;
++      ++g_dos_sfx_synth_active_count;
        _sound_fx[slot].channel = chan;
        _slots[chan]            = slot;
      }
@@ -731,9 +731,9 @@ index 64dca02..bac9883 100644
 +    // through this single callback path, but a stray callback (e.g.
 +    // SDL3_mixer firing pxtSoundDone for an already-ended track during
 +    // shutdown) must not underflow the unsigned counter.
-+    if (g_pixtone_active_count > 0)
++    if (g_dos_sfx_synth_active_count > 0)
 +    {
-+      --g_pixtone_active_count;
++      --g_dos_sfx_synth_active_count;
 +    }
    }
  }
@@ -754,7 +754,7 @@ index cde52bb..d593229 100644
 +// PHASE10-CONTRACT.md sec. 1.4 SFX-active discriminator (resolved 2026-05-06
 +// nx-engine <-> flush-instr <-> sdl-engine cycle): the SDL-side IRQ-5 ISR
 +// reads this volatile counter at handler entry; if `> 0`, increments
-+// `doskutsu_audio_sfx_active_count` so the W22-WB-A iter can distinguish
++// `dos_port_audio_sfx_active_count` so the W22-WB-A iter can distinguish
 +// SFX-active IRQ overhead from music-only IRQ overhead.
 +//
 +// Engine-side semantics: incremented when MIX_PlayTrack succeeds in
@@ -769,7 +769,7 @@ index cde52bb..d593229 100644
 +// pattern; no atomics or memory barriers required because SDL3-DOS does
 +// not have preemptive thread context switches that could split a
 +// 32-bit aligned word write. C-linkage symbol; no namespace.
-+extern "C" volatile std::uint32_t g_pixtone_active_count;
++extern "C" volatile std::uint32_t g_dos_sfx_synth_active_count;
 +
  #define PXT_NO_CHANNELS 4
  #define PXENV_NUM_VERTICES 3
@@ -818,7 +818,7 @@ index f3544ba..7ecc3b2 100644
    // documented in docs/SDL3-MIGRATION.md sec. 3.
  
 +  // DOS-PORT (patch 0100, Phase 10 audio offload -- instrumentation
-+  // scaffolding): translate SDL_HINT_DOSKUTSU_AUDIO_BACKEND env var to
++  // scaffolding): translate SDL_HINT_DOS_AUDIO_BACKEND env var to
 +  // the sticky g_p10_audio_backend_active enum. Slot 0100 has only
 +  // organya implementation; wb/opl3/tracker selections log as
 +  // "requested but not available" and fall back to organya. Stage

@@ -9,7 +9,7 @@
 # PIN_NATIVE_MODE and every TAS_*.
 #
 # That is not cosmetic. Round R ran eight back-to-back cells and every one
-# inherited SDL_HINT_DOSKUTSU_THRASH_CENTRE=0 from an earlier cell, so the
+# inherited SDL_HINT_DOS_THRASH_CENTRE=0 from an earlier cell, so the
 # control arm and the treatment arm were the same configuration and the round
 # measured nothing. Cells only escape this when a reboot separates them.
 #
@@ -27,14 +27,14 @@ OUT=tests/qa/CLRENV.BAT
 # From source: both spellings appear, and names ending in "_" are
 # concatenation fragments rather than real variables.
 from_src() {
-  grep -rhoE 'SDL_HINT_DOSKUTSU_[A-Z0-9_]+|"DOSKUTSU_[A-Z0-9_]+"' \
+  grep -rhoE 'SDL_HINT_DOS_[A-Z0-9_]+|"(DOSKUTSU|DOS_PORT)_[A-Z0-9_]+"' \
     vendor/nxengine-evo/src vendor/SDL/src/video/dos 2>/dev/null \
     | tr -d '"' | sed 's/^SDL_HINT_//' | grep -vE '_$' | sort -u
 }
 # From the existing file, so nothing already cleared is ever lost.
 from_bat() {
   [ -f "$OUT" ] || return 0
-  tr -d '\r' < "$OUT" | sed -nE 's/^SET (SDL_HINT_)?(DOSKUTSU_[A-Z0-9_]+)=$/\2/p' | sort -u
+  tr -d '\r' < "$OUT" | sed -nE 's/^SET (SDL_HINT_)?((DOSKUTSU|DOS_PORT)_[A-Z0-9_]+)=$/\2/p' | sort -u
 }
 
 NAMES=$( { from_src; from_bat; } | sort -u )

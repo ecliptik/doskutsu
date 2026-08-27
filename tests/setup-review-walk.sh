@@ -225,7 +225,7 @@ launch_setup() {
     -c 'SET BLASTER=A220 I5 D1 H5 T6'
     -c 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1'
     -c 'SET SDL_INVALID_PARAM_CHECKS=0'
-    -c 'SET DOSKUTSU_LOG_VERBOSE=1'
+    -c 'SET DOS_PORT_LOG_VERBOSE=1'
     -c 'C:'
     -c 'SETUP.EXE')
   log "launching SETUP.EXE on DISPLAY=$XDISPLAY (conf=$(basename "$CONF"))..."

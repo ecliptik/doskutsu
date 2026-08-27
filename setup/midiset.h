@@ -6,7 +6,7 @@
  *
  * The engine's music backend (WaveBlaster / OPL3 GM) plays Standard MIDI
  * Files from a set directory under data/. Which set it uses is resolved once
- * at init from the SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE hint (the MIDI_SET
+ * at init from the SDL_HINT_DOS_AUDIO_MIDI_SOURCE hint (the MIDI_SET
  * config key). SETUP lets the user pick the set from the Music screen.
  *
  * IMPORTANT (verified vendor/nxengine-evo/src/sound/SoundManager.cpp:545-640):

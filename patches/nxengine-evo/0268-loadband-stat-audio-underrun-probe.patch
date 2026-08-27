@@ -4,7 +4,7 @@ Date: Wed, 8 Jul 2026 15:48:08 -0700
 Subject: [PATCH] patch 0268 -- #17 diag: load-band audio-underrun probe
  (LOADBAND_STAT) for the rc5 screech A/B
 
-Opt-in diagnostic (default-OFF, SDL_HINT_DOSKUTSU_LOADBAND_STAT=1) that witnesses
+Opt-in diagnostic (default-OFF, SDL_HINT_DOS_LOADBAND_STAT=1) that witnesses
 the PicoGUS-SB cave-transition screech fix. The rc5 fix is SDL-side: sdl-engine
 SDL/0119 folds a Pixtone-channel quiesce UNCONDITIONALLY into
 SDL_DOSAudioFlushRingSilence() (the export 0267 already calls). This probe just
@@ -27,10 +27,10 @@ guardrail). Zero-cost when off (cached bool -> ctor/dtor no-op); ships in v1.6.2
 dormant, not stripped post-validation (stripping would change the binary + force
 a re-validate).
 
-Counters via SDL/0119: doskutsu_audio_irq_count (bare extern, core header not on
+Counters via SDL/0119: dos_port_audio_irq_count (bare extern, core header not on
 the nx include path -> declared here), SDL_DOSAudioIsrRingWrite() getter
-(SDL_dosaudio_pump.h, already included), g_dos_pixtone_active_count (public
-SDL_dospixtone.h, now included). Types verified against the SDL headers.
+(SDL_dosaudio_pump.h, already included), g_dos_sfx_synth_pool_active_count (public
+SDL_dossfx_synth.h, now included). Types verified against the SDL headers.
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>
 ---
@@ -47,7 +47,7 @@ index 1687d6d8..e399ddea 100644
  #include <cstdlib>  // getenv
 -#include <SDL3/SDL_dosaudio_pump.h>  // patch 0162: SDL_DOSAudioPump for the audio mid-gap pump
 +#include <SDL3/SDL_dosaudio_pump.h>  // patch 0162: SDL_DOSAudioPump for the audio mid-gap pump; patch 0267: SDL_DOSAudioFlushRingSilence; patch 0268: SDL_DOSAudioIsrRingWrite
-+#include <SDL3/SDL_dospixtone.h>     // patch 0268 (#17 diag): g_dos_pixtone_active_count for the load-band probe
++#include <SDL3/SDL_dossfx_synth.h>     // patch 0268 (#17 diag): g_dos_sfx_synth_pool_active_count for the load-band probe
  
  stMap map;
  
@@ -56,7 +56,7 @@ index 1687d6d8..e399ddea 100644
  }
  
 +// DOS-PORT (patch 0268, #17 diag): load-band audio-underrun probe. OPT-IN
-+// diagnostic, DEFAULT-OFF (SDL_HINT_DOSKUTSU_LOADBAND_STAT=1). Snapshots the SB
++// diagnostic, DEFAULT-OFF (SDL_HINT_DOS_LOADBAND_STAT=1). Snapshots the SB
 +// ISR fire count + producer/enqueue cursor + the POST-flush Pixtone-active count
 +// across the load_stage band and emits ONE [loadband-stat] line per cave, so the
 +// rc5 PicoGUS-SB screech A/B has a log witness. sdl-engine's SDL/0119 folds the
@@ -69,19 +69,19 @@ index 1687d6d8..e399ddea 100644
 +// off (cached bool; guard ctor/dtor no-op). Counters via SDL/0119: the irq
 +// counter is a bare core-header extern (not on the nx include path -> declared
 +// here); the ring-write cursor is the SDL_DOSAudioIsrRingWrite() getter
-+// (SDL_dosaudio_pump.h); g_dos_pixtone_active_count is a public global
-+// (SDL_dospixtone.h).
-+extern "C" { extern volatile uint32_t doskutsu_audio_irq_count; }
++// (SDL_dosaudio_pump.h); g_dos_sfx_synth_pool_active_count is a public global
++// (SDL_dossfx_synth.h).
++extern "C" { extern volatile uint32_t dos_port_audio_irq_count; }
 +
 +static int g_loadband_stat_decided = -1;
 +static bool loadband_stat_active()
 +{
 +  if (g_loadband_stat_decided < 0)
 +  {
-+    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_LOADBAND_STAT");
++    const char *e = SDL_GetHint("SDL_HINT_DOS_LOADBAND_STAT");
 +    g_loadband_stat_decided = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
 +    LOG_INFO("load-band audio-underrun probe: {} (opt-in "
-+             "SDL_HINT_DOSKUTSU_LOADBAND_STAT=1)",
++             "SDL_HINT_DOS_LOADBAND_STAT=1)",
 +             g_loadband_stat_decided ? "ENABLED" : "DISABLED (default)");
 +  }
 +  return g_loadband_stat_decided == 1;
@@ -102,15 +102,15 @@ index 1687d6d8..e399ddea 100644
 +  {
 +    if (!on) return;
 +    t0   = SDL_GetTicks();
-+    irq0 = doskutsu_audio_irq_count;
++    irq0 = dos_port_audio_irq_count;
 +    rw0  = SDL_DOSAudioIsrRingWrite();
-+    pix0 = g_dos_pixtone_active_count; // POST-flush (ctor runs after the flush call)
++    pix0 = g_dos_sfx_synth_pool_active_count; // POST-flush (ctor runs after the flush call)
 +  }
 +  ~LoadBandStatGuard()
 +  {
 +    if (!on) return;
 +    const uint32_t dur  = (uint32_t)(SDL_GetTicks() - t0);
-+    const uint32_t irqd = doskutsu_audio_irq_count - irq0;
++    const uint32_t irqd = dos_port_audio_irq_count - irq0;
 +    const int      rwd  = SDL_DOSAudioIsrRingWrite() - rw0;
 +    LOG_INFO("[loadband-stat cave={} dur_ms={} pix_active_entry={} irq_delta={} "
 +             "ring_write_delta={} irq_expected={}]",

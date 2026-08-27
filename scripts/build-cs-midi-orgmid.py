@@ -8,7 +8,7 @@ output +12 semitones to compensate for ORGMID's known octave-down quirk.
 
 Output sits parallel to data/midi/ (the WiiWare arrangements from
 fetch-cs-midi.py). The engine selects between them at runtime via
-SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE -- `wiimidi` (default; data/midi/) vs
+SDL_HINT_DOS_AUDIO_MIDI_SOURCE -- `wiimidi` (default; data/midi/) vs
 `orgmid` (data/orgmid/) -- for A/B operator listening on real HW.
 
 Background

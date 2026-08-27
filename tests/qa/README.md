@@ -11,7 +11,7 @@ three BATs are fully unattended -- only `EAR.BAT` needs a person listening.
 Copy these three BATs and this README into the kit alongside the existing
 `PG.BAT` / `VB.BAT` / `C*.BAT` cells. They follow the same conventions:
 CRLF line endings, `COMMAND /E:2048` self-relaunch, `CALL CLRENV` before
-every cell, a `CFGS\*.CFG` copy per cell, and an 8.3-safe `DOSKUTSU_LOG_TAG`.
+every cell, a `CFGS\*.CFG` copy per cell, and an 8.3-safe `DOS_PORT_LOG_TAG`.
 
 **Run `QA.BAT` first** to set `%QAM%` (which CPU is in the box). Every BAT
 here refuses to run without it and tells you so.
@@ -240,7 +240,7 @@ of UNIVBE and check `DOSVESA-CTRL` in the SDL log for a mode list containing
 That configuration would be the first real-hardware exercise of SDL/0115's
 `gran < size` bank walk, which shipped validated only as a no-op on hardware
 where `gran == size`. If corruption appears there, A/B
-`SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0` before blaming the VBE driver.
+`SDL_HINT_DOS_BANK_GRAN_FIX=0` before blaming the VBE driver.
 
 ---
 

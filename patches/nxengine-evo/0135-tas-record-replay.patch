@@ -25,15 +25,15 @@ TSR (INT 16h hook) was considered + rejected: wall-clock keying
 would diverge within seconds when fps differs between record and
 replay. See WAVE-41-TAS-DESIGN.md sec. A for the full trade-off.
 
-Four DOSKUTSU_TAS_* env vars (bare prefix, not SDL_HINT_; precedent:
-DOSKUTSU_LOG_TAG at main.cpp:371):
+Four DOS_PORT_TAS_* env vars (bare prefix, not SDL_HINT_; precedent:
+DOS_PORT_LOG_TAG at main.cpp:371):
 
-  DOSKUTSU_TAS_RECORD=<path>          record mode; .TAS output
-  DOSKUTSU_TAS_REPLAY=<path>          replay mode; .TAS input
-  DOSKUTSU_TAS_PRNG_SEED=<u32>        seedrand() at boot (insurance)
-  DOSKUTSU_TAS_AUTO_EXIT_TICK=<u32>   game.running=false at tick N
+  DOS_PORT_TAS_RECORD=<path>          record mode; .TAS output
+  DOS_PORT_TAS_REPLAY=<path>          replay mode; .TAS input
+  DOS_PORT_TAS_PRNG_SEED=<u32>        seedrand() at boot (insurance)
+  DOS_PORT_TAS_AUTO_EXIT_TICK=<u32>   game.running=false at tick N
 
-Default-OFF: when no DOSKUTSU_TAS_* env var is set, init() bails
+Default-OFF: when no DOS_PORT_TAS_* env var is set, init() bails
 early and apply_input() returns at its first guard (two pointer
 checks). The binary's per-tick path is unchanged except for one
 cheap predicate; behavior is bit-identical to wave-37 production.
@@ -42,7 +42,7 @@ PRNG note: NXEngine has its own deterministic LCG at misc.cpp:271
 (seed * 214013L + 2531011L), not libc rand(). seedrand() is never
 called in the existing tree -- seed starts at 0 and increments
 deterministically. So engine randomness is ALREADY deterministic
-from process-start. DOSKUTSU_TAS_PRNG_SEED is therefore a
+from process-start. DOS_PORT_TAS_PRNG_SEED is therefore a
 belt-and-braces insurance, not a essential fix.
 
 .TAS file format (binary, little-endian):
@@ -65,7 +65,7 @@ tolerates the tick-skipping case per
 event with LOG_DEBUG narration rather than abort.
 
 Auto-exit: TAS::should_exit(tick_id) returns true once tick_count
-reaches DOSKUTSU_TAS_AUTO_EXIT_TICK; caller (run_tick) sets
+reaches DOS_PORT_TAS_AUTO_EXIT_TICK; caller (run_tick) sets
 game.running=false. The existing gameloop() while-predicate
 (main.cpp:241) exits naturally; engine-shutdown[1..8] sequence at
 main.cpp:723+ runs unchanged. No new shutdown path.
@@ -132,7 +132,7 @@ index 502e943..67478f1 100644
 +  // global inputs[] array and BEFORE any game logic reads it, give
 +  // TAS subsystem a chance to record (snapshot inputs[] -> .TAS file
 +  // on mask change) or replay (overwrite inputs[] from .TAS file).
-+  // No-op when neither DOSKUTSU_TAS_RECORD nor _REPLAY env var is set;
++  // No-op when neither DOS_PORT_TAS_RECORD nor _REPLAY env var is set;
 +  // returns at first guard in tas.cpp. Default-OFF preserves wave-37
 +  // binary behavior bit-for-bit when env vars unset (the binary's
 +  // engine_tick path is unchanged except for one cheap branch).
@@ -146,7 +146,7 @@ index 502e943..67478f1 100644
    SoundManager::getInstance()->runFade();
    if (log_beat) LOG_INFO("run_tick #{}: heartbeat (loop alive)", tick_count);
 +
-+  // TAS auto-exit (patch 0135). When DOSKUTSU_TAS_AUTO_EXIT_TICK is set
++  // TAS auto-exit (patch 0135). When DOS_PORT_TAS_AUTO_EXIT_TICK is set
 +  // and tick_count has reached it, terminate the main loop cleanly via
 +  // the existing game.running mechanism. gameloop()'s while-predicate
 +  // (main.cpp:241) natively exits when !game.running, falling through
@@ -167,11 +167,11 @@ index 502e943..67478f1 100644
 +  // so LOG_INFO / LOG_WARN / LOG_ERROR are usable for engagement
 +  // banners + error narration. Runs BEFORE SDL_Init + game state
 +  // machinery so:
-+  //   (a) seedrand() (called from TAS::init when DOSKUTSU_TAS_PRNG_SEED
++  //   (a) seedrand() (called from TAS::init when DOS_PORT_TAS_PRNG_SEED
 +  //       is set) happens before any random() consumer
 +  //   (b) the engagement banner emit happens early enough to be
 +  //       visible in DEBUG.LOG even if a later init step crashes
-+  // No-op when no DOSKUTSU_TAS_* env vars set; default-OFF preserves
++  // No-op when no DOS_PORT_TAS_* env vars set; default-OFF preserves
 +  // wave-37 binary behavior bit-for-bit.
 +  TAS::init();
 +
@@ -189,9 +189,9 @@ index 502e943..67478f1 100644
 +  // vars set.
 +  TAS::shutdown();
 +
-   doskutsu_dbg_log("engine-shutdown[8/8]: pre-SDL_Quit");
+   dos_port_dbg_log("engine-shutdown[8/8]: pre-SDL_Quit");
    SDL_Quit();
-   doskutsu_dbg_log("engine-shutdown[final]: post-SDL_Quit; engine "
+   dos_port_dbg_log("engine-shutdown[final]: post-SDL_Quit; engine "
 diff --git a/src/tas.cpp b/src/tas.cpp
 new file mode 100644
 index 0000000..5676b5e
@@ -286,7 +286,7 @@ index 0000000..5676b5e
 +// every PLAY's replay exits exactly when recording ends. AUTO_EXIT_TICK
 +// stays as a safety override that wins if it fires earlier.
 +//
-+// Opt-out: DOSKUTSU_TAS_REPLAY_HOLD=1 disables EOF-auto-exit, restores
++// Opt-out: DOS_PORT_TAS_REPLAY_HOLD=1 disables EOF-auto-exit, restores
 +// the original MVP behavior (replay holds last applied mask after EOF
 +// until AUTO_EXIT_TICK or operator ESC). Use case: long steady-state
 +// observation past the recorded scenario without re-recording.
@@ -460,21 +460,21 @@ index 0000000..5676b5e
 +    //    This env var only matters if a future code path calls
 +    //    seedrand() before/after our init (currently nothing does).
 +    uint32_t prng_seed_env = 0;
-+    bool prng_seed_set = _parse_u32_env("DOSKUTSU_TAS_PRNG_SEED",
++    bool prng_seed_set = _parse_u32_env("DOS_PORT_TAS_PRNG_SEED",
 +                                        &prng_seed_env);
 +    if (prng_seed_set) {
 +        seedrand(prng_seed_env);
-+        LOG_INFO("tas: PRNG seed forced to {} via DOSKUTSU_TAS_PRNG_SEED",
++        LOG_INFO("tas: PRNG seed forced to {} via DOS_PORT_TAS_PRNG_SEED",
 +                 (unsigned long)prng_seed_env);
 +    }
 +
 +    // 2. Auto-exit tick.
 +    uint32_t exit_tick = 0;
-+    if (_parse_u32_env("DOSKUTSU_TAS_AUTO_EXIT_TICK", &exit_tick) &&
++    if (_parse_u32_env("DOS_PORT_TAS_AUTO_EXIT_TICK", &exit_tick) &&
 +        exit_tick > 0) {
 +        _auto_exit_tick = exit_tick;
 +        LOG_INFO("tas: auto-exit armed at tick {} via "
-+                 "DOSKUTSU_TAS_AUTO_EXIT_TICK", (unsigned long)exit_tick);
++                 "DOS_PORT_TAS_AUTO_EXIT_TICK", (unsigned long)exit_tick);
 +    }
 +
 +    // 2b. Replay hold-after-EOF opt-out. Strict-"1" match. Default OFF
@@ -483,11 +483,11 @@ index 0000000..5676b5e
 +    // window; AUTO_EXIT_TICK becomes a safety upper bound rather than
 +    // the primary termination mechanism.
 +    {
-+        const char *hold_env = std::getenv("DOSKUTSU_TAS_REPLAY_HOLD");
++        const char *hold_env = std::getenv("DOS_PORT_TAS_REPLAY_HOLD");
 +        _replay_hold = (hold_env && hold_env[0] == '1' && hold_env[1] == '\0');
 +        if (_replay_hold) {
 +            LOG_INFO("tas: replay hold-after-EOF armed via "
-+                     "DOSKUTSU_TAS_REPLAY_HOLD=1 (engine holds last input "
++                     "DOS_PORT_TAS_REPLAY_HOLD=1 (engine holds last input "
 +                     "mask after replay file exhausts; AUTO_EXIT_TICK or "
 +                     "operator ESC needed for clean termination)");
 +        }
@@ -495,14 +495,14 @@ index 0000000..5676b5e
 +
 +    // 3. RECORD / REPLAY paths. Mutually exclusive at runtime; REPLAY
 +    //    wins if both set (caller probably left a stale RECORD var).
-+    const char *rec_path = std::getenv("DOSKUTSU_TAS_RECORD");
-+    const char *rep_path = std::getenv("DOSKUTSU_TAS_REPLAY");
++    const char *rec_path = std::getenv("DOS_PORT_TAS_RECORD");
++    const char *rep_path = std::getenv("DOS_PORT_TAS_REPLAY");
 +    const bool rec_set = rec_path && rec_path[0] != '\0';
 +    const bool rep_set = rep_path && rep_path[0] != '\0';
 +
 +    if (rec_set && rep_set) {
-+        LOG_WARN("tas: both DOSKUTSU_TAS_RECORD='{}' and "
-+                 "DOSKUTSU_TAS_REPLAY='{}' set; preferring REPLAY "
++        LOG_WARN("tas: both DOS_PORT_TAS_RECORD='{}' and "
++                 "DOS_PORT_TAS_REPLAY='{}' set; preferring REPLAY "
 +                 "(unset RECORD to suppress this warning)",
 +                 rec_path, rep_path);
 +    }
@@ -606,7 +606,7 @@ index 0000000..5676b5e
 +        static bool logged_once = false;
 +        if (!logged_once) {
 +            LOG_INFO("tas: end-of-replay auto-exit at tick {} (recording "
-+                     "exhausted; set DOSKUTSU_TAS_REPLAY_HOLD=1 to "
++                     "exhausted; set DOS_PORT_TAS_REPLAY_HOLD=1 to "
 +                     "disable + observe steady-state past recording end)",
 +                     (unsigned long)tick_id);
 +            logged_once = true;
@@ -618,7 +618,7 @@ index 0000000..5676b5e
 +    //    case (record mode + manual play with tick-precise termination).
 +    if (_auto_exit_tick == 0) return false;
 +    if (tick_id >= _auto_exit_tick) {
-+        LOG_INFO("tas: auto-exit at tick {} (DOSKUTSU_TAS_AUTO_EXIT_TICK={})",
++        LOG_INFO("tas: auto-exit at tick {} (DOS_PORT_TAS_AUTO_EXIT_TICK={})",
 +                 (unsigned long)tick_id, (unsigned long)_auto_exit_tick);
 +        return true;
 +    }
@@ -663,7 +663,7 @@ index 0000000..c24a7af
 + * threads. File I/O is blocking; per-event fsync on record to survive
 + * mid-run crashes (precedent: patch 0036 DEBUG.LOG fsync).
 + *
-+ * Default-OFF gate: when neither DOSKUTSU_TAS_RECORD nor _REPLAY is set, all
++ * Default-OFF gate: when neither DOS_PORT_TAS_RECORD nor _REPLAY is set, all
 + * hooks are no-ops at their first guard. Binary behaves byte-identical to
 + * wave-37 production. Verified by build-qa task #5 re-gate + the two-witness
 + * pattern (strings + runtime banner).
@@ -679,7 +679,7 @@ index 0000000..c24a7af
 +namespace TAS
 +{
 +
-+// Boot-time init. Reads the four DOSKUTSU_TAS_* env vars, parses, opens
++// Boot-time init. Reads the four DOS_PORT_TAS_* env vars, parses, opens
 +// the record/replay file if applicable, calls seedrand() if PRNG_SEED is
 +// set. Safe to call with no env vars set (no-op).
 +//
@@ -710,7 +710,7 @@ index 0000000..c24a7af
 +//           consume the event, prefetch next.
 +void apply_input(uint32_t tick_id, bool *inputs, int n_inputs);
 +
-+// Auto-exit predicate. Returns true if DOSKUTSU_TAS_AUTO_EXIT_TICK is
++// Auto-exit predicate. Returns true if DOS_PORT_TAS_AUTO_EXIT_TICK is
 +// non-zero AND tick_id has reached it. Caller (run_tick) sets
 +// game.running = false to terminate the main loop cleanly; the
 +// existing engine-shutdown[1..8] sequence in main.cpp runs unchanged.

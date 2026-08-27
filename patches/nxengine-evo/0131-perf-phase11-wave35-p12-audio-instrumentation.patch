@@ -50,13 +50,13 @@ NOT bracketed (already covered elsewhere):
 
 - organyaStreamCallback body -- patch 0062 AudioMixerTimer covers it
   via g_audio_mix_accum_ns_block (audio thread; same TU reads).
-- IRQ-5 ISR work -- patch 0100 doskutsu_audio_irq_count +
-  doskutsu_audio_irq_wall_us already export this; flush-instr's
+- IRQ-5 ISR work -- patch 0100 dos_port_audio_irq_count +
+  dos_port_audio_irq_wall_us already export this; flush-instr's
   decomp reads them directly.
 - SDL_mixer MIX_Mixer mix-down -- sdl-engine's SDL/0054 lane.
 - SDL3-DOS audio thread main loop -- sdl-engine's SDL/0054 lane.
 
-Gating. SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 (strict-"1"; default OFF).
+Gating. SDL_HINT_DOS_P12_AUDIO_INSTR=1 (strict-"1"; default OFF).
 Cost when off: ~zero (cached static-const-bool; -O3 hoists destructor
 guard). Cost when on: 2 SDL_GetTicksNS reads per bracketed function
 + 1 accumulator add + 1 counter increment on the on-path.
@@ -97,7 +97,7 @@ SDL/0054 handles audio-thread brackets and uses the patch 0062 / 0100
 volatile-uint pattern for cross-thread reads at audit-flush.
 
 Coordination with SDL/0054 (sdl-engine's lane). Same env-var
-SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 gates both bracket sets so single
+SDL_HINT_DOS_P12_AUDIO_INSTR=1 gates both bracket sets so single
 SET in the BAT enables both engine-side + SDL-side measurement. SDL/-
 0054 emit line will be `[p12-sdl ...]` (different prefix; same FLIP_-
 INSTR gate; sdl-engine designs the field set).
@@ -124,14 +124,14 @@ P12PixtoneStopTimer RAII at stop() entry. docs/BOOT.md entry. ~200
 LOC including comments.
 
 Smoke. Builds clean at i486 -O3 -funroll-loops -fno-rtti. New strings
-in binary: SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR env-var symbol,
+in binary: SDL_HINT_DOS_P12_AUDIO_INSTR env-var symbol,
 [p12-audio n=100 ...] emit template. All prior slot markers (slot
 0128 TILE_BOUNDS_SKIP, slot 0129 snd-shutdown[3.5/6], slot 0130
 BG_SUBREGION_BLIT, slot 0126 thrashing-detect engaged) retained.
 Slot 0127 Lever B markers still absent (wave-32 revert intact).
 Real-HW gate: wave-35 production PLAY1 (env unset; instrumentation
 silent; pure fps measurement of ride-along fps lever) vs PLAY2
-(SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 + FLIP_INSTR=1; counters emit).
+(SDL_HINT_DOS_P12_AUDIO_INSTR=1 + FLIP_INSTR=1; counters emit).
 
 Predicted measurement outcome (per flush-instr's contract sec. 5.4 +
 audio_cost_attribution_unknown.md):
@@ -199,7 +199,7 @@ index e3b014d..220fe38 100644
 +//   pixtone_stop: Pixtone::stop body bracket (per-SFX-event). Captures
 +//                 the MIX_StopTrack call cost.
 +//
-+// All gated on SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 (strict-"1"; default
++// All gated on SDL_HINT_DOS_P12_AUDIO_INSTR=1 (strict-"1"; default
 +// OFF). Cost when env off: ~zero (cached static-const-bool; -O3 hoists
 +// the per-call guard). Cost when env on: ~6 SDL_GetTicksNS reads per
 +// flip (MidiScheduler::tick) + ~2 reads per SFX trigger (rare).
@@ -316,7 +316,7 @@ index 0d0baaa..1514ade 100644
 +// per docs/PHASE11-WAVE-35-CONTRACT.md sec. 8). Strict-"1" match, default
 +// OFF (instrumentation has per-call cost -- 2 SDL_GetTicksNS reads per
 +// bracketed function + per-block accumulator updates). Opt-in via
-+// SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 for the wave-35 measurement iter.
++// SDL_HINT_DOS_P12_AUDIO_INSTR=1 for the wave-35 measurement iter.
 +//
 +// Single env-var gates 3 bracket families:
 +//   - MidiScheduler::tick body (main thread, per-frame)
@@ -337,7 +337,7 @@ index 0d0baaa..1514ade 100644
 +// touch).
 +inline bool _abl_p12_audio_instr()
 +{
-+  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR");
++  static const bool v = _strict_truthy_env("SDL_HINT_DOS_P12_AUDIO_INSTR");
 +  return v;
 +}
 +
@@ -402,7 +402,7 @@ index 41512f8..0a5360b 100644
  #include "../Utils/Logger.h"
 +// patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation): RAII
 +// timer for the per-frame MidiScheduler::tick bracket. Default OFF;
-+// strict-"1" via SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 enables. Per
++// strict-"1" via SDL_HINT_DOS_P12_AUDIO_INSTR=1 enables. Per
 +// `docs/PHASE11-WAVE-35-CONTRACT.md` sec. 8.
 +#include "../Utils/diagnostic_timers.h"
  
@@ -418,7 +418,7 @@ index 41512f8..0a5360b 100644
 +  // 401 writes, MidiBackendStub LOG_DEBUG silence). All return paths
 +  // (early-return on !_playing / empty events / no backend, normal
 +  // dispatch fall-through, end-of-song loop branch) trigger the
-+  // destructor identically. Gated on SDL_HINT_DOSKUTSU_P12_AUDIO_-
++  // destructor identically. Gated on SDL_HINT_DOS_P12_AUDIO_-
 +  // INSTR=1; off-path cost: 2 SDL_GetTicksNS + 1 cached-bool branch.
 +  NXE::Diag::P12MidiTickTimer _p12_mtt;
    if (!_playing || _events.empty() || !_backend)
@@ -434,7 +434,7 @@ index bac9883..ead8f2a 100644
  #include "../ResourceManager.h"
 +// patch 0131 (Phase 11 wave-35 Phase 12 audio instrumentation): RAII
 +// timers for Pixtone::play / playResampled / stop brackets. Default
-+// OFF; strict-"1" via SDL_HINT_DOSKUTSU_P12_AUDIO_INSTR=1 enables.
++// OFF; strict-"1" via SDL_HINT_DOS_P12_AUDIO_INSTR=1 enables.
 +// Per `docs/PHASE11-WAVE-35-CONTRACT.md` sec. 8.
 +#include "../Utils/diagnostic_timers.h"
  #include "../common/misc.h"

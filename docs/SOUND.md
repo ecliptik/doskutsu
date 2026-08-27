@@ -405,15 +405,15 @@ over the file. See [docs/CONFIG.md](./CONFIG.md) for the authoritative table.
 
 | CFG key | Env / SDL hint | Values | Default | Meaning |
 |---|---|---|---|---|
-| `AUDIO_BACKEND` | `SDL_HINT_DOSKUTSU_AUDIO_BACKEND` | auto / wb / opl3 / organya / adlib / gus / none | auto | Music backend (the **Music Type** row, + **Select Music Card** when the type is MIDI). |
-| `GUS_VOICES` | `SDL_HINT_DOSKUTSU_GUS_VOICES` | 14 / 16 / 20 / 24 / 28 / 32 | 20 | GUS voice count; rate = 617400/voices. 28 may be silent. |
-| `GUS_HIFI` | `SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE` | 0 / 1 | 1 | GUS multi-sample high fidelity (on by default). |
-| `SFX_DEVICE` | `SDL_HINT_DOSKUTSU_SFX_DEVICE` | sb / none (omitted = native DAC) | (native DAC) | Sound FX device (Select Sound FX Device). `none` = effects off. |
-| `MIDI_SET` | `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` | orgmid2 / wiimidi / `<dir>` | orgmid2 | MIDI arrangement for the OPL3 / WaveBlaster / GM / GUS backends. `orgmid2` = OrgMIDI v2 (default); `wiimidi` = WiiWare. |
-| `SB16_VOICE_VOL` | `SDL_HINT_DOSKUTSU_SB16_VOICE_VOL` | 0-31 | 28 | SB16 mixer voice (PCM/SFX) level. |
-| `SB16_FM_VOL` | `SDL_HINT_DOSKUTSU_SB16_FM_VOL` | 0-31 | 28 | SB16 mixer FM (OPL3 music) level. |
-| `ORG_PRERENDER` | `SDL_HINT_DOSKUTSU_ORG_PRERENDER` | 0 / 1 | 1 | Pre-render Organya songs to a disk PCM cache (Organya only). `0` = live per-tick synthesis. |
-| `AUDIO_TIER2` | `SDL_HINT_DOSKUTSU_AUDIO_TIER2` | 0 / 1 | 1 | Audio quality: 1 = 11025 Hz mono (lighter), 0 = 22050 Hz HQ (~11 fps in music-heavy scenes). |
+| `AUDIO_BACKEND` | `SDL_HINT_DOS_AUDIO_BACKEND` | auto / wb / opl3 / organya / adlib / gus / none | auto | Music backend (the **Music Type** row, + **Select Music Card** when the type is MIDI). |
+| `GUS_VOICES` | `SDL_HINT_DOS_GUS_VOICES` | 14 / 16 / 20 / 24 / 28 / 32 | 20 | GUS voice count; rate = 617400/voices. 28 may be silent. |
+| `GUS_HIFI` | `SDL_HINT_DOS_GUS_MULTISAMPLE` | 0 / 1 | 1 | GUS multi-sample high fidelity (on by default). |
+| `SFX_DEVICE` | `SDL_HINT_DOS_SFX_DEVICE` | sb / none (omitted = native DAC) | (native DAC) | Sound FX device (Select Sound FX Device). `none` = effects off. |
+| `MIDI_SET` | `SDL_HINT_DOS_AUDIO_MIDI_SOURCE` | orgmid2 / wiimidi / `<dir>` | orgmid2 | MIDI arrangement for the OPL3 / WaveBlaster / GM / GUS backends. `orgmid2` = OrgMIDI v2 (default); `wiimidi` = WiiWare. |
+| `SB16_VOICE_VOL` | `SDL_HINT_DOS_SB16_VOICE_VOL` | 0-31 | 28 | SB16 mixer voice (PCM/SFX) level. |
+| `SB16_FM_VOL` | `SDL_HINT_DOS_SB16_FM_VOL` | 0-31 | 28 | SB16 mixer FM (OPL3 music) level. |
+| `ORG_PRERENDER` | `SDL_HINT_DOS_ORG_PRERENDER` | 0 / 1 | 1 | Pre-render Organya songs to a disk PCM cache (Organya only). `0` = live per-tick synthesis. |
+| `AUDIO_TIER2` | `SDL_HINT_DOS_AUDIO_TIER2` | 0 / 1 | 1 | Audio quality: 1 = 11025 Hz mono (lighter), 0 = 22050 Hz HQ (~11 fps in music-heavy scenes). |
 | `AUDIO_OFF` | `DOSKUTSU_NO_AUDIO` | 1 | unset | Disable all audio (music + effects). |
 | `MUSIC_OFF` / `SFX_OFF` | `..._MUSIC_OFF` / `..._SFX_OFF` | 1 | unset | Independently disable music / effects (same as No Music / No Sound FX). |
 

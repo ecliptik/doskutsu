@@ -86,10 +86,10 @@ CWSDPMI_DOC     := $(VENDOR_DIR)/cwsdpmi/cwsdpmi.doc
 # latter needs a post-link self-hash injection -- deliberate, non-rework-safe;
 # tracked as a follow-up). Evaluated immediately (`:=`). Fallback "UNKNOWN_____"
 # if patches unavailable. 12 hex chars -> valid bare -D token (stringified by
-# main.cpp's _DOSKUTSU_STR; see below).
+# main.cpp's _DOS_PORT_STR; see below).
 RUNMANIFEST_INC := -I$(REPO_ROOT)/include
 DOSKUTSU_BUILD_SHA12 := $(shell find $(REPO_ROOT)/patches -maxdepth 2 -name '*.patch' -not -path '*_disabled*' 2>/dev/null | LC_ALL=C sort | xargs cat 2>/dev/null | grep -E '^(diff --git |@@ |[-+])' | sha256sum 2>/dev/null | cut -c1-12 | grep . || echo UNKNOWN_____)
-# Pass SHA as BARE TOKEN (no quotes); main.cpp's _DOSKUTSU_STR macro
+# Pass SHA as BARE TOKEN (no quotes); main.cpp's _DOS_PORT_STR macro
 # stringifies via C preprocessor. Avoids multi-layer quote escaping
 # through bash + make + cmake -> compiler. SHA is always 12 hex chars
 # (a..f, 0..9), valid as a C identifier; fallback "UNKNOWN_____" also
@@ -453,7 +453,7 @@ changelog-gate:
 # --- SFXPAUSE-012 sprite-sheet re-decode regression gate (v1.0.3) -----------
 #
 # Guards the shipped SKIP_SHEET_FLUSH default-ON fix (patch 0178): runs
-# DOSKUTSU.EXE under SDL_HINT_DOSKUTSU_IO_AUDIT=1 in DOSBox-X, drives several
+# DOSKUTSU.EXE under SDL_HINT_DOS_IO_AUDIT=1 in DOSBox-X, drives several
 # cave transitions, and FAILs if any sprite sheet is decoded more than once at
 # phase=gameplay (a re-decode == the per-cave flush regressed == the Bug 1
 # fire-frame pause is back). First-visit single decodes + music + bk* backdrops
@@ -848,7 +848,7 @@ PROBE_PIX_EXE     := $(PROBES_DIR)/pixprob.exe
 #
 # AUDBUF.EXE -- SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES sweep (slot 0116 verify).
 #   Sweeps buffer sizes {default,512,1024,2048,4096}, opens audio device at
-#   each, samples doskutsu_audio_irq_count over 1 sec wall, computes IRQ-rate
+#   each, samples dos_port_audio_irq_count over 1 sec wall, computes IRQ-rate
 #   ratio. SDL3-linked (PROBES_SDL_* recipe).
 PROBE_AUDBUF_SRC  := tests/probes/audbuf.c
 PROBE_AUDBUF_EXE  := $(PROBES_DIR)/audbuf.exe
@@ -1185,7 +1185,7 @@ PROBE_QHEXITP_EXE := $(PROBES_DIR)/qhexitp.exe
 #   cells via argv[1]: A1 (game cfg 11025/mono/256, no service -> expect g2k
 #   wedge), B1 (game cfg, serviced = the fix -> clean), A2 (broken cfg
 #   44100/stereo/default, no service). Writes LOGS\<TAG>PROBE.LOG (honors
-#   DOSKUTSU_LOG_TAG, per-line fsync so the wedge cell's last line survives).
+#   DOS_PORT_LOG_TAG, per-line fsync so the wedge cell's last line survives).
 #   REAL-HW-only confirmation: mode A runs clean under DOSBox-X (structural
 #   smoke only). Bundles in the T19 iter alongside the fixed SETUP.EXE. sha12
 #   stamped into the log header for provenance (source content sha, gitignored
@@ -1201,7 +1201,7 @@ PROBE_SBPUMP_SHA12 := $(shell sha256sum $(PROBE_SBPUMP_SRC) 2>/dev/null | cut -c
 #   (per-byte MARK pre/post), then known-wedge positive controls (hot 0x331
 #   read + 0xFF write) LAST. Cell D = production DSP-mediated MIDI transport
 #   (SDL_DOSAudioSB_DSPMidi* exports, cmd 0x34/0x38) hot. Writes
-#   LOGS\<TAG>PROBE.LOG (DOSKUTSU_LOG_TAG, per-line fsync -- the last MARK
+#   LOGS\<TAG>PROBE.LOG (DOS_PORT_LOG_TAG, per-line fsync -- the last MARK
 #   line IS the verdict on a hard freeze). REAL-HW-only verdict: DOSBox-X
 #   does not reproduce the ISA IOCHRDY stall (structural smoke only).
 PROBE_WBHOT_SRC   := tests/probes/wbhot.c
@@ -1256,7 +1256,7 @@ $(PROBES_DIR)/%.exe: tests/probes/%.c | djgpp-check
 # because Make picks the more-specific dep + recipe when both match.
 PROBES_SDL_CFLAGS := $(PROBES_CFLAGS) -I$(SYSROOT)/include
 # Shared engine-symbol stub TU (task #34): the SDL3 DOS audio backend references
-# engine-owned externs (g_pixtone_active_count, patch SDL/0071); standalone
+# engine-owned externs (g_dos_sfx_synth_active_count, patch SDL/0071); standalone
 # probes link libSDL3.a with NO engine objects, so any audio-opening probe
 # (audbuf/idleprob/mpusdl/sdlprob1/qhexit) fails to resolve them. This TU is on
 # the link line of EVERY SDL-linked probe (via PROBES_SDL_LDLIBS below), one
@@ -1795,7 +1795,7 @@ probes-sbpump probes-p38: $(PROBE_SBPUMP_EXE)
 	@echo "  Cells: SBPUMP A1 (game cfg, no service -> expect g2k WEDGE)"
 	@echo "         SBPUMP B1 (game cfg, serviced = fix -> CLEAN)"
 	@echo "         SBPUMP A2 (broken 44100/stereo cfg, no service)"
-	@echo "  Log: LOGS\\<TAG>PROBE.LOG (set DOSKUTSU_LOG_TAG distinct per cell: PA1/PB1/PA2)"
+	@echo "  Log: LOGS\\<TAG>PROBE.LOG (set DOS_PORT_LOG_TAG distinct per cell: PA1/PB1/PA2)"
 	@echo "  REAL-HW only: mode A runs CLEAN under DOSBox-X (structural smoke). Bundle in T19 + CWSDPMI.EXE."
 
 # DOSBox-X correctness-only smoke for SBPUMP (all 3 cells). The real-SB16 wedge
@@ -1811,7 +1811,7 @@ probes-wbhot probes-p39: $(PROBE_WBHOT_EXE)
 	@echo "         WBHOT P (POLLED direct-port differential, v1.0.3/0080 pattern)"
 	@echo "         WBHOT 9 (v3 P9: hot-0x3F ACK undrained-vs-drained mechanism +"
 	@echo "                  fix-shape differential; FREEZE RISK in phase p9b)"
-	@echo "  Log: LOGS\\<TAG>PROBE.LOG (DOSKUTSU_LOG_TAG per cell: WM1/WD1/WP1/WP9);"
+	@echo "  Log: LOGS\\<TAG>PROBE.LOG (DOS_PORT_LOG_TAG per cell: WM1/WD1/WP1/WP9);"
 	@echo "  per-line fsync -- on a hard freeze the last MARK line IS the verdict."
 	@echo "  REAL-HW only: every cell runs CLEAN under DOSBox-X (structural smoke)."
 	@echo "  Own boot per cell; power-cycle after a wedge. Bundle + CWSDPMI.EXE."
@@ -2062,7 +2062,7 @@ CRLF := awk 'BEGIN{ORS="\r\n"} {sub(/\r$$/, ""); print}'
 # ENV HYGIENE (realhw root-cause, v1.6.3-rc g2k logs). doskutsu_cfg_load()
 # publishes CFG keys with setenv(..., overwrite=0), so a PRE-EXISTING DOS env
 # var WINS over the CFG. The operator's g2k session had a stale
-# SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=wiimidi in AUTOEXEC: the CFG said
+# SDL_HINT_DOS_AUDIO_MIDI_SOURCE=wiimidi in AUTOEXEC: the CFG said
 # orgmid2, the engine played wiimidi, and nothing in the log said so. Clear the
 # audio keys SETUP writes before handing over. realhw verified empirically under
 # DOSBox-X that DOS `SET VAR=` truly DELETES the variable (it does not leave an
@@ -2092,20 +2092,20 @@ CRLF := awk 'BEGIN{ORS="\r\n"} {sub(/\r$$/, ""); print}'
 # no BAT can reach -- that is what nx 0279's WARN + an AUTOEXEC cleanup are for.
 define SETUP_BAT_BODY
 @ECHO OFF
-SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=
-SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=
-SET SDL_HINT_DOSKUTSU_MUSIC_OFF=
-SET SDL_HINT_DOSKUTSU_SFX_OFF=
+SET SDL_HINT_DOS_AUDIO_BACKEND=
+SET SDL_HINT_DOS_AUDIO_MIDI_SOURCE=
+SET SDL_HINT_DOS_MUSIC_OFF=
+SET SDL_HINT_DOS_SFX_OFF=
 SET DOSKUTSU_NO_AUDIO=
-SET SDL_HINT_DOSKUTSU_SFX_DEVICE=
-SET SDL_HINT_DOSKUTSU_AUDIO_TIER2=
-SET SDL_HINT_DOSKUTSU_GUS_VOICES=
-SET SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE=
-SET SDL_HINT_DOSKUTSU_ORG_PRERENDER=
-SET SDL_HINT_DOSKUTSU_SB16_VOICE_VOL=
-SET SDL_HINT_DOSKUTSU_SB16_FM_VOL=
-SET SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT=
-SET SDL_HINT_DOSKUTSU_MIDI_DEV=
+SET SDL_HINT_DOS_SFX_DEVICE=
+SET SDL_HINT_DOS_AUDIO_TIER2=
+SET SDL_HINT_DOS_GUS_VOICES=
+SET SDL_HINT_DOS_GUS_MULTISAMPLE=
+SET SDL_HINT_DOS_ORG_PRERENDER=
+SET SDL_HINT_DOS_SB16_VOICE_VOL=
+SET SDL_HINT_DOS_SB16_FM_VOL=
+SET SDL_HINT_DOS_AUDIO_WB_DIRECT_PORT=
+SET SDL_HINT_DOS_MIDI_DEV=
 SETUP.EXE
 endef
 export SETUP_BAT_BODY
@@ -2126,9 +2126,9 @@ export SETUP_BAT_BODY
 # Build the CR at runtime with printf instead, which dash expands correctly.
 define ASSERT_SETUP_BAT
 	@bat="$(1)"; \
-	 sets=$$(grep -c '^SET SDL_HINT_DOSKUTSU_\|^SET DOSKUTSU_NO_AUDIO=' "$$bat" || true); \
+	 sets=$$(grep -c '^SET SDL_HINT_DOS_\|^SET DOSKUTSU_NO_AUDIO=' "$$bat" || true); \
 	 test "$$sets" -eq 14 || { echo "error: $$bat has $$sets/14 env clears" >&2; exit 1; }; \
-	 test "$$(grep -n '^SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=' "$$bat" | cut -d: -f1)" \
+	 test "$$(grep -n '^SET SDL_HINT_DOS_AUDIO_BACKEND=' "$$bat" | cut -d: -f1)" \
 	    -lt "$$(grep -n '^SETUP.EXE' "$$bat" | cut -d: -f1)" \
 	   || { echo "error: $$bat clears do not precede SETUP.EXE" >&2; exit 1; }; \
 	 grep -q '^SET BLASTER=' "$$bat" \
@@ -2350,7 +2350,7 @@ stage: $(BUILD_DIR)/doskutsu.exe setup | fetch-binaries
 	@test -f "$(SETUP_EXE)"   || (echo "error: $(SETUP_EXE) missing -- 'make setup' failed?" >&2; exit 1)
 	@mkdir -p "$(STAGE_DIR)"
 	@# SDL/0024 routes SDL_Log to /DOSKUTSU/sdldbg.log (or /DOSKUTSU/<TAG>SDL.LOG
-	@# when DOSKUTSU_LOG_TAG is set). Under the staged layout DOSBox-X mounts
+	@# when DOS_PORT_LOG_TAG is set). Under the staged layout DOSBox-X mounts
 	@# STAGE_DIR as C:, so the engine fopens "/DOSKUTSU/sdldbg.log" -> host path
 	@# $(STAGE_DIR)/DOSKUTSU/sdldbg.log. DJGPP fopen silently returns NULL when
 	@# the target dir is missing; SDL_Log messages get lost without any error.
@@ -2406,7 +2406,7 @@ stage-release: stage setup-release
 # --- org-cache: pre-render the build-sha-keyed Organya PCM cache ------------
 #
 # Runs the built DOSKUTSU.EXE headless under DOSBox-X (max cycles) with
-# DOSKUTSU_ORG_PRECACHE_ALL=1 over data/org -> build/orgcache/CACHE/<rate>_<ch>/
+# DOS_PORT_ORG_PRECACHE_ALL=1 over data/org -> build/orgcache/CACHE/<rate>_<ch>/
 # *.PCM. The cache is keyed (in each PCM header) to the rendering binary's
 # DOSKUTSU_BUILD_SHA12, so it only cache-HITs on that exact binary -- deploy it
 # to a target's game dir and the target never cold-renders a song in-game.
@@ -2421,7 +2421,7 @@ stage-release: stage setup-release
 # LICENSING: the produced CACHE/ is Cave-Story-DERIVED (rendered from the user's
 # extracted .org files). It is a LOCAL / OPERATOR-DEPLOY artifact ONLY and is
 # DELIBERATELY NOT part of `make dist` (the public zip never ships game-derived
-# data). See docs/BUILDING.md + the DOSKUTSU_ORG_PRECACHE_ALL entry in
+# data). See docs/BUILDING.md + the DOS_PORT_ORG_PRECACHE_ALL entry in
 # docs/internal/BOOT.md.
 .PHONY: org-cache
 org-cache: | $(BUILD_DIR)/doskutsu.exe fetch-binaries
@@ -2473,7 +2473,7 @@ tas-smoke: stage
 # it's an offline pre-build artifact for wave-41's task #4 listening session.
 #
 # Output directory note: `make convert-music` writes to data/mid/. This dir is
-# OFFLINE-ONLY for now -- the engine recognizes SDL_HINT_DOSKUTSU_AUDIO_MIDI_
+# OFFLINE-ONLY for now -- the engine recognizes SDL_HINT_DOS_AUDIO_MIDI_
 # SOURCE=wiimidi (-> data/midi/) and =orgmid (-> data/orgmid/) only. There is
 # NO engine path to data/mid/ today. A future cycle ("WB-with-org2mid" iter)
 # will either add a new value =org2mid -> data/mid/ or replace data/midi/
@@ -2522,7 +2522,7 @@ $(ORG2MID_BIN): $(ORG2MID_DIR)/org2mid.c $(ORG2MID_DIR)/Makefile
 # data/org/*.org using our org2mid converter. v1 = original task #2
 # design-doc GM mapping; v2 = wave-42 retune addressing operator
 # wave-41 "thumps and cowbell" feedback. Both dirs ship in the wave-42
-# tarball; operator A/B's between them via the SDL_HINT_DOSKUTSU_AUDIO_
+# tarball; operator A/B's between them via the SDL_HINT_DOS_AUDIO_
 # MIDI_GM_VARIANT engine env var in TAS-deterministic PLAY cells.
 #
 # Does NOT generate data/midi-v1/ or data/midi-v2/: wiimidi source is

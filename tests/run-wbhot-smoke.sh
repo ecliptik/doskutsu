@@ -134,7 +134,7 @@ run_cell() {
     local stage; stage="$(mktemp -d -t wbhot-smoke-"$cell".XXXXXX)"
     cp "$EXE" "$stage/WBHOT.EXE"
     cp "$CWSDPMI" "$stage/CWSDPMI.EXE"
-    printf "@ECHO OFF\r\nSET BLASTER=%s\r\nSET DOSKUTSU_LOG_TAG=%s\r\nWBHOT.EXE %s\r\n" \
+    printf "@ECHO OFF\r\nSET BLASTER=%s\r\nSET DOS_PORT_LOG_TAG=%s\r\nWBHOT.EXE %s\r\n" \
         "$BLASTER" "$tag" "$cell" > "$stage/RUN.BAT"
 
     echo "[wbhot-smoke] cell $cell (tag $tag): running under DOSBox-X..."

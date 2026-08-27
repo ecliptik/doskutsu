@@ -31,9 +31,9 @@ API surface consumed (from SDL/0034 sdl-engine deliverable):
   SDL_DOSVesaDirectProgramPalette -- VGA DAC sync on master-palette change
 
 Integration in Renderer.cpp::flip():
-  1. Gate on SDL_HINT_DOSKUTSU_DIRECT_VESA=1 (strict-1 match per
+  1. Gate on SDL_HINT_DOS_DIRECT_VESA=1 (strict-1 match per
      wave-16+ default-OFF / strict-1-to-enable convention; matches
-     SDL_HINT_DOSKUTSU_FORCE_LFB / DISPLAY_START_FIX / LFB_SENTINEL /
+     SDL_HINT_DOS_FORCE_LFB / DISPLAY_START_FIX / LFB_SENTINEL /
      PREVFRAME_DIFF).
   2. Skip first DIRTY_FIRST_N_FRAMES (init backbuffer undefined) and
      any flip with _force_full_refresh set (flushAll, scene reset).
@@ -70,7 +70,7 @@ Test plan (subsequent tasks #4-#6):
   - DOSBox-X visual A/B with both polarities (off=zero-change baseline,
     on=engaged path)
   - Real-HW iter: three runs in one boot via DOS REN -- OFF baseline,
-    ON banked, ON+SDL_HINT_DOSKUTSU_FORCE_LFB=1
+    ON banked, ON+SDL_HINT_DOS_FORCE_LFB=1
   - Logback analysis reports measured fps vs wave-17.6 baseline (25.6),
     vs prediction (+2-5), vs 50 fps KPI
 
@@ -99,14 +99,14 @@ index 57fa3d3..64754b2 100644
  
 +// DOS-PORT (patch 0086, Phase 9 wave 18): direct-VESA hot path opt-in.
 +// Strict "1" match per the wave-16+ default-OFF / strict-"1" convention
-+// (matches SDL_HINT_DOSKUTSU_FORCE_LFB / DISPLAY_START_FIX / LFB_SENTINEL /
++// (matches SDL_HINT_DOS_FORCE_LFB / DISPLAY_START_FIX / LFB_SENTINEL /
 +// PREVFRAME_DIFF). Default OFF; experimental opt-in for the wave 18
 +// real-HW measurement iter. Predicted +2-5 fps title (per
 +// PHASE9-WAVE-17-18-PLAN sec. 4) -- framed as a hypothesis to measure, not
 +// a goal to defend (per perf_predictions_unreliable.md).
 +inline bool _abl_direct_vesa()
 +{
-+  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_DIRECT_VESA");
++  static const bool v = _strict_truthy_env("SDL_HINT_DOS_DIRECT_VESA");
 +  return v;
 +}
 +
@@ -118,7 +118,7 @@ index 57fa3d3..64754b2 100644
  Uint64 _inter_flip_accum_ms_global = 0;
  
 +// DOS-PORT (patch 0086, Phase 9 wave 18): direct-VESA hot path counters.
-+// Bumped only when SDL_HINT_DOSKUTSU_DIRECT_VESA=1 routes flip() through
++// Bumped only when SDL_HINT_DOS_DIRECT_VESA=1 routes flip() through
 +// Renderer::_direct_vesa_present() (skipping SDL_RenderPresent +
 +// SDL_UpdateWindowSurface). All zero in the default-OFF configuration.
 +//
@@ -200,7 +200,7 @@ index 57fa3d3..64754b2 100644
 +  if (_abl_direct_vesa())
 +  {
 +    LOG_INFO("Renderer::initVideo: direct-VESA hot path ENABLED via "
-+             "SDL_HINT_DOSKUTSU_DIRECT_VESA=1 (experimental opt-in; "
++             "SDL_HINT_DOS_DIRECT_VESA=1 (experimental opt-in; "
 +             "default OFF since wave 18; bypasses SDL_RenderPresent / "
 +             "SDL_UpdateWindowSurface and writes via SDL/0034's "
 +             "PresentFull helper; R2 mitigation handled by SDL/0034 "
@@ -209,12 +209,12 @@ index 57fa3d3..64754b2 100644
 +  else
 +  {
 +    LOG_INFO("Renderer::initVideo: direct-VESA hot path DISABLED "
-+             "(default; set SDL_HINT_DOSKUTSU_DIRECT_VESA=1 to opt in)");
++             "(default; set SDL_HINT_DOS_DIRECT_VESA=1 to opt in)");
 +  }
    // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
    // PumpEvents yield-skip is active. Default ON (skip); env-var override
-   // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
-@@ -1881,6 +1948,159 @@ static int _doskutsu_diff_against_prev(SDL_Surface *prev,
+   // SDL_HINT_DOS_FORCE_PUMP_YIELD=1 restores the original yield.
+@@ -1881,6 +1948,159 @@ static int _dos_port_diff_against_prev(SDL_Surface *prev,
    return n_out;
  }
  
@@ -225,10 +225,10 @@ index 57fa3d3..64754b2 100644
 +// dosmemput / multi-bank flush automatically based on the snapshot
 +// flags. Today's path is single-bank banked on g2k (Cirrus + UNIVBE
 +// 6.70, banked-mode default since SDL/0019 auto-disables LFB on Cirrus)
-+// or LFB-memcpy when SDL_HINT_DOSKUTSU_FORCE_LFB=1 is also set.
++// or LFB-memcpy when SDL_HINT_DOS_FORCE_LFB=1 is also set.
 +//
 +// Engaged from flip() under two preconditions:
-+//   1. SDL_HINT_DOSKUTSU_DIRECT_VESA=1 (strict-1 match; default OFF)
++//   1. SDL_HINT_DOS_DIRECT_VESA=1 (strict-1 match; default OFF)
 +//   2. _force_full_refresh and _dirty_first_n_frames_remaining clear
 +//      (init / scene-reset cases route through SDL_RenderPresent)
 +//
@@ -449,7 +449,7 @@ index d8f742b..d0b7a12 100644
 +// Header is a workspace-local SDL/0034 export that lets the engine call
 +// dosmemput / memcpy directly into VRAM, bypassing SDL_RenderPresent +
 +// SDL_UpdateWindowSurface. Default OFF (gated on
-+// SDL_HINT_DOSKUTSU_DIRECT_VESA=1); see Renderer.cpp _direct_vesa_present.
++// SDL_HINT_DOS_DIRECT_VESA=1); see Renderer.cpp _direct_vesa_present.
 +#  include <SDL3/SDL_dosvesa_directaccess.h>
 +#endif
  #include <array>
@@ -474,7 +474,7 @@ index d8f742b..d0b7a12 100644
 +    // the same populate path that bumps the generation. The snapshot
 +    // lets us call SDL_DOSVesaDirectPresentFull on each flip without
 +    // re-querying the VBE state machine. Default OFF; opt-in via
-+    // SDL_HINT_DOSKUTSU_DIRECT_VESA=1 per `wave_17_4_partial_flush_-
++    // SDL_HINT_DOS_DIRECT_VESA=1 per `wave_17_4_partial_flush_-
 +    // regression.md` precedent (measure before flipping default).
 +    //
 +    // Forward-declared in NXE_DOS-only blocks to keep non-DOS builds

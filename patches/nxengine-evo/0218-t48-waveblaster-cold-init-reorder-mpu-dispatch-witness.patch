@@ -19,7 +19,7 @@ operator's DOOM/PicoGUS left in UART needs a reset first.)
 FIX (engine half): resolve the music backend (selectBackendFromEnv, a
 pure env->enum->log call with no mixer dependency) BEFORE
 MIX_CreateMixerDevice opens the SB16, and -- when backend==wb AND the
-opt-in hint SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT is strict-"1" -- arm the
+opt-in hint SDL_HINT_DOS_AUDIO_WB_COLD_INIT is strict-"1" -- arm the
 WaveBlaster backend THERE, on the cold bus. The full cold sequence (reset
 + ACK drain + UART entry + entry-ACK drain, hot writes kept blind) lives
 in sdl-engine's SDL_DOSMpu401Init under the same hint; the engine only
@@ -33,7 +33,7 @@ faithful control. Blast radius is wb-only: auto no longer resolves to wb
 WITNESS (flush-instr's locked PASS gate): a cleared init banner cannot
 tell "WB truly played" from "cold-init clean, then silently wedged at the
 first hot note". Renderer::flip() logs a MAIN-LINE MPU-dispatch witness
-reading sdl-engine's ISR-bumped doskutsu_mpu_write_count:
+reading sdl-engine's ISR-bumped dos_port_mpu_write_count:
   - a FIRST-NONZERO one-shot (t/flip stamped) -- the discrete "at least
     one hot note dispatched" alive signal;
   - a cumulative line every 8 flips (=~0.5 s at the DX2-66's 12-19 fps,
@@ -46,7 +46,7 @@ Climbing count = sustained wavetable; frozen after first byte = a
 1-2 s-in re-wedge; no first-byte line = silent. The counter is bumped
 ISR-side but only ever read/logged main-line.
 
-Combined-build symbol: doskutsu_mpu_write_count is exported by
+Combined-build symbol: dos_port_mpu_write_count is exported by
 sdl-engine's SDL cold-path patch; a standalone nxengine link fails until
 it lands alongside (W22A combined-review pattern).
 
@@ -62,9 +62,9 @@ index 587ab923..a3249309 100644
 --- a/src/graphics/Renderer.cpp
 +++ b/src/graphics/Renderer.cpp
 @@ -2035,6 +2035,56 @@ extern "C" {
-   extern volatile std::uint32_t doskutsu_kbd_irq_install_ticks;
-   extern volatile std::uint32_t doskutsu_kbd_irq_vector_at_install;
-   extern volatile std::uint32_t doskutsu_kbd_pic1_mask_at_install;
+   extern volatile std::uint32_t dos_port_kbd_irq_install_ticks;
+   extern volatile std::uint32_t dos_port_kbd_irq_vector_at_install;
+   extern volatile std::uint32_t dos_port_kbd_pic1_mask_at_install;
 +  // patch 0218 (T48): cumulative count of bytes written to the MPU-401 data
 +  // port (0x330), bumped per byte in SDL_DOSMpu401WriteByte (sdl-engine's
 +  // cold-init series). Atomic 32-bit, same linkage class as the audio-IRQ
@@ -73,7 +73,7 @@ index 587ab923..a3249309 100644
 +  // line (here, from flip()); never log/fsync from the ISR. Combined-build
 +  // symbol: a standalone nxengine link fails until sdl-engine's SDL patch
 +  // exporting it lands alongside (W22A combined-review pattern).
-+  extern volatile std::uint32_t doskutsu_mpu_write_count;
++  extern volatile std::uint32_t dos_port_mpu_write_count;
 +}
 +
 +// patch 0218 (T48): main-line WB MPU-dispatch-count witness. flush-instr's
@@ -97,7 +97,7 @@ index 587ab923..a3249309 100644
 +constexpr int _wb_dispatch_every_flips = 8;
 +void _maybe_flush_wb_dispatch_witness()
 +{
-+  const std::uint32_t n = doskutsu_mpu_write_count;
++  const std::uint32_t n = dos_port_mpu_write_count;
 +  if (n == 0) return; // no MPU traffic -> not a WaveBlaster run; stay silent
 +  static bool _wb_first_dispatch_logged = false;
 +  if (!_wb_first_dispatch_logged)
@@ -143,7 +143,7 @@ index 0309ce50..d6f34d09 100644
 +  // teardown-total in the dtor below. flush-instr note: a hard freeze never
 +  // reaches the dtor, so on a wedge the surviving witnesses are the flip()-side
 +  // first-nonzero + periodic emits (Renderer.cpp), not this total.
-+  extern volatile uint32_t doskutsu_mpu_write_count;
++  extern volatile uint32_t dos_port_mpu_write_count;
  }
  
  namespace NXE
@@ -158,7 +158,7 @@ index 0309ce50..d6f34d09 100644
 +    // the flip()-side first-nonzero + periodic(N=8) emits instead.
 +    LOG_INFO("wb backend shutdown (MPU-401 reset issued); session MPU dispatch "
 +             "total = {} bytes to 0x330 (teardown-total, clean-exit only)",
-+             (unsigned long)doskutsu_mpu_write_count);
++             (unsigned long)dos_port_mpu_write_count);
    }
  }
  
@@ -189,7 +189,7 @@ index 77e82cf2..40b0b69f 100644
 +  //
 +  // OPT-IN, default-OFF (team-lead, per the author-flagged-caveat rule -- an
 +  // iter-4 cold-touch wedge confound is weakened but not zero, so opt-in until
-+  // the g2k play-through gate passes): the hint SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_
++  // the g2k play-through gate passes): the hint SDL_HINT_DOS_AUDIO_WB_COLD_
 +  // INIT is strict-"1" to ENGAGE. WCI1 sets it =1 (cold path); WCI0 leaves it
 +  // UNSET = today's late-install order = the faithful wedge control (no killswitch
 +  // gymnastics). Blast radius is wb-only: auto_select no longer resolves to wb
@@ -198,7 +198,7 @@ index 77e82cf2..40b0b69f 100644
 +  selectBackendFromEnv();
 +  bool wb_cold_installed = false;
 +  {
-+    const char *ci = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT");
++    const char *ci = SDL_GetHint("SDL_HINT_DOS_AUDIO_WB_COLD_INIT");
 +    const bool cold_on = ci && ci[0] == '1' && ci[1] == '\0'; // strict-"1" opt-in
 +    if (NXE::Diag::g_p10_audio_backend_active == NXE::Diag::AudioBackend::wb &&
 +        cold_on)
@@ -207,7 +207,7 @@ index 77e82cf2..40b0b69f 100644
 +               "SB16 opens (the g2k wedge is the hot UART-entry MPU access while "
 +               "the SB16 block is live; cold-bus access is probe-safe). The full "
 +               "cold reset/entry/drain sequence runs in SDL_DOSMpu401Init under "
-+               "SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT; opt-in (=1), unset = today's "
++               "SDL_HINT_DOS_AUDIO_WB_COLD_INIT; opt-in (=1), unset = today's "
 +               "late-install control. Entry-ACK result follows in the SDL WB "
 +               "banner (SDL/0095).");
 +      if (_try_install_wb_backend())

@@ -11,16 +11,16 @@ Three runtime env-var ablation flags to test the two prime MISC suspects
 identified by the 2026-04-27 3-reviewer pass plus a control. See
 docs/PHASE9-NEXT-WAVES-PLAN.md sec.6 for the decision tree.
 
-  DOSKUTSU_NO_DC_TIMING=1   skip per-drawcall SDL_GetTicks{,NS} reads
+  DOS_PORT_NO_DC_TIMING=1   skip per-drawcall SDL_GetTicks{,NS} reads
                             (R1 hypothesis: 1200-2200 PIT-port reads
                             per frame -- diagnostic measuring itself)
 
-  DOSKUTSU_CACHE_WINSURF=1  skip per-flip SDL_GetWindowSurface refresh
+  DOS_PORT_CACHE_WINSURF=1  skip per-flip SDL_GetWindowSurface refresh
                             after RenderPresent in flip() and flushAll()
                             (R3 hypothesis: re-query runs fb_state
                             populate inside SDL3-DOS)
 
-  DOSKUTSU_NO_INPUT_POLL=1  stub input_poll() body -- game uncontrollable;
+  DOS_PORT_NO_INPUT_POLL=1  stub input_poll() body -- game uncontrollable;
                             control variable for SDL_PollEvent /
                             DOS_Yield ping-pong cost (R3 secondary)
 
@@ -50,11 +50,11 @@ index 0e90c88..02e171e 100644
 +// DOS-PORT (patch 0063, Phase 9 wave 13.2): surgical instrumentation
 +// ablation flags. Tests two prime MISC suspects from the 2026-04-27
 +// 3-reviewer pass -- see docs/PHASE9-NEXT-WAVES-PLAN.md sec.6.
-+//   DOSKUTSU_NO_DC_TIMING=1 -- skip per-drawcall SDL_GetTicks{,NS} reads
++//   DOS_PORT_NO_DC_TIMING=1 -- skip per-drawcall SDL_GetTicks{,NS} reads
 +//                             (R1 hypothesis: PIT-port reads dominate)
-+//   DOSKUTSU_CACHE_WINSURF=1 -- skip per-flip SDL_GetWindowSurface refresh
++//   DOS_PORT_CACHE_WINSURF=1 -- skip per-flip SDL_GetWindowSurface refresh
 +//                              (R3 hypothesis: fb_state populate is misc)
-+//   DOSKUTSU_NO_INPUT_POLL=1 -- stub input_poll() body
++//   DOS_PORT_NO_INPUT_POLL=1 -- stub input_poll() body
 +//                              (R3 secondary hypothesis; defined in input.cpp;
 +//                               this accessor is for the init-log emission)
 +// Lazy-initialized via getenv on first call; constant for the run. Strict
@@ -67,17 +67,17 @@ index 0e90c88..02e171e 100644
 +}
 +inline bool _abl_no_dc_timing()
 +{
-+  static const bool v = _strict_truthy_env("DOSKUTSU_NO_DC_TIMING");
++  static const bool v = _strict_truthy_env("DOS_PORT_NO_DC_TIMING");
 +  return v;
 +}
 +inline bool _abl_cache_winsurf()
 +{
-+  static const bool v = _strict_truthy_env("DOSKUTSU_CACHE_WINSURF");
++  static const bool v = _strict_truthy_env("DOS_PORT_CACHE_WINSURF");
 +  return v;
 +}
 +inline bool _abl_no_input_poll_env()
 +{
-+  static const bool v = _strict_truthy_env("DOSKUTSU_NO_INPUT_POLL");
++  static const bool v = _strict_truthy_env("DOS_PORT_NO_INPUT_POLL");
 +  return v;
 +}
 +
@@ -115,7 +115,7 @@ index 0e90c88..02e171e 100644
  {
    Uint64 _t0;
 -  _DrawcallTimer() : _t0(SDL_GetTicksNS()) {}
-+  // patch 0063 ablation: skip ns-resolution timing when DOSKUTSU_NO_DC_TIMING
++  // patch 0063 ablation: skip ns-resolution timing when DOS_PORT_NO_DC_TIMING
 +  // is set. Constructor reads zero, destructor early-returns -- accumulators
 +  // freeze at whatever value they had pre-flag (typically 0 if set at boot).
 +  _DrawcallTimer() : _t0(_abl_no_dc_timing() ? 0 : SDL_GetTicksNS()) {}
@@ -150,7 +150,7 @@ index 0e90c88..02e171e 100644
    _drawcall_count_block = 0;
    _flip_inner_accum_ns_block = 0;
 @@ -975,6 +1021,13 @@ bool Renderer::initVideo()
-                "(set SDL_HINT_DOSKUTSU_DIRTY_RECTS=1 to enable, experimental)");
+                "(set SDL_HINT_DOS_DIRTY_RECTS=1 to enable, experimental)");
      }
    }
 +  // DOS-PORT (patch 0063, Phase 9 wave 13.2): log ablation-flag state
@@ -168,7 +168,7 @@ index 0e90c88..02e171e 100644
    // queue and may have invalidated the SW-renderer's window-surface
    // pointer. Refresh, mirroring flip().
 -  _cached_window_surface = SDL_GetWindowSurface(_window);
-+  // patch 0063 ablation: gate the refresh on DOSKUTSU_CACHE_WINSURF.
++  // patch 0063 ablation: gate the refresh on DOS_PORT_CACHE_WINSURF.
 +  // Risk if pointer goes stale: _try_fast_blit segfaults. Acceptable
 +  // for a one-iter ablation; not for shipping.
 +  if (!_abl_cache_winsurf())
@@ -181,7 +181,7 @@ index 0e90c88..02e171e 100644
    // invalidate the underlying window surface -- re-querying once per
    // flip is the safe invalidation hook.
 -  _cached_window_surface = SDL_GetWindowSurface(_window);
-+  // patch 0063 ablation: gate on DOSKUTSU_CACHE_WINSURF (R3 hypothesis
++  // patch 0063 ablation: gate on DOS_PORT_CACHE_WINSURF (R3 hypothesis
 +  // -- re-query may be running fb_state populate inside SDL3-DOS).
 +  if (!_abl_cache_winsurf())
 +    _cached_window_surface = SDL_GetWindowSurface(_window);
@@ -209,10 +209,10 @@ index e6e352a..228ec5c 100644
 +  // ping-pong with the audio cooperative thread is a misc cost. Game
 +  // becomes uncontrollable when set; control variable for sec.6 decision
 +  // tree. Strict "1"-only match (matches Renderer.cpp helpers) so
-+  // `SET DOSKUTSU_NO_INPUT_POLL=0` does NOT enable. See
++  // `SET DOS_PORT_NO_INPUT_POLL=0` does NOT enable. See
 +  // docs/PHASE9-NEXT-WAVES-PLAN.md.
 +  static const bool _abl_no_input_poll = []() {
-+    const char *e = std::getenv("DOSKUTSU_NO_INPUT_POLL");
++    const char *e = std::getenv("DOS_PORT_NO_INPUT_POLL");
 +    return e && e[0] == '1' && e[1] == 0;
 +  }();
 +  if (_abl_no_input_poll) return;

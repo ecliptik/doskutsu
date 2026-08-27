@@ -19,7 +19,7 @@ the slow-path / fast-path internals; nxengine/0087 names the
 engine-visible bucket each flip falls into. Cross-side correlation
 in the W20A iter readout identifies misc-slice attribution.
 
-Env gate: SDL_HINT_DOSKUTSU_FLIP_INSTR (strict "1" match per CLAUDE.md
+Env gate: SDL_HINT_DOS_FLIP_INSTR (strict "1" match per CLAUDE.md
 convention; default OFF). Cached once at init via static-const-bool
 so the optimizer can hoist the per-flip guard at -O2. When unset the
 patch adds:
@@ -44,7 +44,7 @@ Phase brackets (inside flip()):
                       SDL_RenderPresent             (full)
                     Each branch bumps its path-mix counter.
   housekeeping_ns -- post-present SDL_GetWindowSurface + palette
-                    rebind. Sub-ms when DOSKUTSU_CACHE_WINSURF=1
+                    rebind. Sub-ms when DOS_PORT_CACHE_WINSURF=1
                     short-circuits.
   total_ns        -- reuses the existing _flip_inner_dt_ns measurement
                     (SDL_GetTicksNS at flip entry -> flip exit).
@@ -79,13 +79,13 @@ init); steady-state should read 0/100. A non-zero value correlates
 with sdl-engine's `direct_vesa_lazy_reinit_calls` and signals a mode
 change / window re-create / similar event during the block.
 
-housekeeping_skipped counts DOSKUTSU_CACHE_WINSURF=1 ablation hits
+housekeeping_skipped counts DOS_PORT_CACHE_WINSURF=1 ablation hits
 per flip. Helps interpret housekeeping_ns distribution: 100/100 means
 the cheap path; 0/100 means the expensive SDL_GetWindowSurface +
 palette rebind every flip.
 
 Output routes through nxengine LOG_INFO macro -> patch 0036
-fsync-per-line -> DEBUG.LOG (or W20A.LOG when DOSKUTSU_LOG_TAG=W20A
+fsync-per-line -> DEBUG.LOG (or W20A.LOG when DOS_PORT_LOG_TAG=W20A
 per nxengine/0069). Mid-run grep works on both DOSBox-X and real HW
 per memory/sdl3_dos_quirks.md.
 
@@ -138,7 +138,7 @@ index 64754b2..ff7ebb4 100644
 +// (per docs/PHASE9-WAVE-20-COLD-PICKUP.md sec. 1).
 +inline bool _abl_flip_instr()
 +{
-+  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_FLIP_INSTR");
++  static const bool v = _strict_truthy_env("SDL_HINT_DOS_FLIP_INSTR");
 +  return v;
 +}
 +
@@ -151,7 +151,7 @@ index 64754b2..ff7ebb4 100644
  
 +// DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): per-phase flip()
 +// timing samples + path-mix counters. Engaged only under
-+// SDL_HINT_DOSKUTSU_FLIP_INSTR=1; default-OFF emits zero bytes / does
++// SDL_HINT_DOS_FLIP_INSTR=1; default-OFF emits zero bytes / does
 +// no work beyond the cached static-bool check.
 +//
 +// 100 raw uint64-ns samples per phase (~4 KB total static state). Each
@@ -174,7 +174,7 @@ index 64754b2..ff7ebb4 100644
 +//                                 (excludes first-call init; only
 +//                                 mid-run re-inits -- see
 +//                                 Renderer::_direct_vesa_present)
-+//   _housekeeping_skipped_block -- DOSKUTSU_CACHE_WINSURF=1 ablation hits
++//   _housekeeping_skipped_block -- DOS_PORT_CACHE_WINSURF=1 ablation hits
 +constexpr int _flip_phase_block_size = 100;
 +Uint64 _flip_phase_samples_drain[_flip_phase_block_size]        = {};
 +Uint64 _flip_phase_samples_dirty[_flip_phase_block_size]        = {};
@@ -260,11 +260,11 @@ index 64754b2..ff7ebb4 100644
  // elapsed ns to the file-scope counters at destruction. Place at top of
  // each drawcall method to cover all return paths cleanly.
 @@ -851,6 +972,73 @@ void _maybe_flush_phase_timing_audit()
-            (unsigned long)doskutsu_kbd_first_irq_ticks,
-            (unsigned long)doskutsu_kbd_irq_install_ticks,
-            (unsigned long)doskutsu_kbd_irq_vector_at_install);
+            (unsigned long)dos_port_kbd_first_irq_ticks,
+            (unsigned long)dos_port_kbd_irq_install_ticks,
+            (unsigned long)dos_port_kbd_irq_vector_at_install);
 +  // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): emit per-phase flip
-+  // statistics + path-mix counters when SDL_HINT_DOSKUTSU_FLIP_INSTR=1.
++  // statistics + path-mix counters when SDL_HINT_DOS_FLIP_INSTR=1.
 +  // Default OFF: skip the std::sort + 5 LOG_INFO emissions entirely.
 +  // Sample arrays were filled by flip() at the cadence; here we
 +  // summarize, emit, and reset. Format mirrors flush-instr's contract:
@@ -356,7 +356,7 @@ index 64754b2..ff7ebb4 100644
  // DOS-PORT (patch 0062, Phase 9 wave 13.1-D2): audio-mixer / engine-tick
 @@ -1187,6 +1389,22 @@ bool Renderer::initVideo()
      LOG_INFO("Renderer::initVideo: direct-VESA hot path DISABLED "
-              "(default; set SDL_HINT_DOSKUTSU_DIRECT_VESA=1 to opt in)");
+              "(default; set SDL_HINT_DOS_DIRECT_VESA=1 to opt in)");
    }
 +  // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): record FLIP_INSTR
 +  // state in DEBUG.LOG so each iter's configuration is greppable
@@ -364,19 +364,19 @@ index 64754b2..ff7ebb4 100644
 +  if (_abl_flip_instr())
 +  {
 +    LOG_INFO("Renderer::initVideo: flip-phase instrumentation ENABLED via "
-+             "SDL_HINT_DOSKUTSU_FLIP_INSTR=1 -- per-100-flip [flip-stat] + "
++             "SDL_HINT_DOS_FLIP_INSTR=1 -- per-100-flip [flip-stat] + "
 +             "[flip-counters] blocks emitted; pairs with SDL/0035 for "
 +             "wave-20 Lever A misc-slice decomposition");
 +  }
 +  else
 +  {
 +    LOG_INFO("Renderer::initVideo: flip-phase instrumentation DISABLED "
-+             "(default; set SDL_HINT_DOSKUTSU_FLIP_INSTR=1 to opt in for "
++             "(default; set SDL_HINT_DOS_FLIP_INSTR=1 to opt in for "
 +             "wave-20 Lever A diagnostic)");
 +  }
    // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
    // PumpEvents yield-skip is active. Default ON (skip); env-var override
-   // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
+   // SDL_HINT_DOS_FORCE_PUMP_YIELD=1 restores the original yield.
 @@ -2002,9 +2220,29 @@ bool Renderer::_direct_vesa_present()
    // SDL/0034 generation counter detects mode-set / lazy-reinit. Re-
    // snapshot when bumped (or on the very first direct-vesa call --
@@ -462,7 +462,7 @@ index 64754b2..ff7ebb4 100644
 +  //   _hk_ns             -- duration of the post-present housekeeping
 +  //                        block (SDL_GetWindowSurface + palette
 +  //                        rebind, OR a near-zero short-circuit when
-+  //                        DOSKUTSU_CACHE_WINSURF=1 is active).
++  //                        DOS_PORT_CACHE_WINSURF=1 is active).
 +  //
 +  // _flip_instr_on is captured once here so the body of flip() can use
 +  // it as a constexpr-equivalent guard. `static const bool` makes the
@@ -490,7 +490,7 @@ index 64754b2..ff7ebb4 100644
 +  const Uint64 _dirty_t0_ns = _flip_instr_on ? SDL_GetTicksNS() : 0;
 +
    bool _prev_diff_engaged = false;
-   if (!_doskutsu_prev_frame_diff_is_disabled(_prev_frame_diff_disabled) &&
+   if (!_dos_port_prev_frame_diff_is_disabled(_prev_frame_diff_disabled) &&
        _prev_frame_surface && _cached_window_surface &&
 @@ -2156,7 +2447,17 @@ void Renderer::flip()
    {
@@ -608,7 +608,7 @@ index 64754b2..ff7ebb4 100644
      _force_full_refresh = false;
 @@ -2378,6 +2723,12 @@ void Renderer::flip()
    // flip is the safe invalidation hook.
-   // patch 0063 ablation: gate on DOSKUTSU_CACHE_WINSURF (R3 hypothesis
+   // patch 0063 ablation: gate on DOS_PORT_CACHE_WINSURF (R3 hypothesis
    // -- re-query may be running fb_state populate inside SDL3-DOS).
 +  // patch 0087 (wave 20 Lever A): bracket the housekeeping phase.
 +  // _hk_ns is sub-ms when CACHE_WINSURF is on (just the if-check); else

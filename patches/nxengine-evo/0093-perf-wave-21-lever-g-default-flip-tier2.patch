@@ -25,7 +25,7 @@ Wave 21 outcomes leading to this patch:
   +11 fps accepted).
 
 Wave 21 patch 0093 promotes Tier-2 to DEFAULT-ON. The
-SDL_HINT_DOSKUTSU_AUDIO_TIER2 env var keeps its name but inverts its
+SDL_HINT_DOS_AUDIO_TIER2 env var keeps its name but inverts its
 semantics:
   - default (unset / empty / "1" / any non-"0"): Tier-2 ENGAGED
     (11025 Hz mono, 256-frame buffer, ~43 Hz IRQ rate)
@@ -80,7 +80,7 @@ What stays unchanged from 0094:
 
 Risk: low. The path itself is identical to 0092+0094's; only the
 gate's default flips. If a regression surfaces on a fingerprint we
-haven't tested, the user can `SET SDL_HINT_DOSKUTSU_AUDIO_TIER2=0`
+haven't tested, the user can `SET SDL_HINT_DOS_AUDIO_TIER2=0`
 and reboot to recover Tier-1.
 
 Test plan:
@@ -130,7 +130,7 @@ index 155de1e..f3544ba 100644
    LOG_INFO("Sound system init");
  
 -  // DOS-PORT (patch 0092, Phase 9 wave 21 Lever G): Tier-2 audio
--  // config selection. Read SDL_HINT_DOSKUTSU_AUDIO_TIER2 (strict-1
+-  // config selection. Read SDL_HINT_DOS_AUDIO_TIER2 (strict-1
 -  // match per CLAUDE.md convention); when set, flip global SAMPLE_RATE
 -  // + AUDIO_CHANNELS to 11025 mono AND pin the SDL3 audio buffer size
 -  // to 256 sample frames via SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES.
@@ -139,7 +139,7 @@ index 155de1e..f3544ba 100644
 +  // working as designed; W21B confirmed audio quality "acceptable" per
 +  // user verdict 2026-05-05 (mono-11025 trade for +11 fps in heavy-
 +  // music scenes accepted). Wave 21 patch 0093 promotes Tier-2 to
-+  // DEFAULT-ON with `SDL_HINT_DOSKUTSU_AUDIO_TIER2=0` as the killswitch.
++  // DEFAULT-ON with `SDL_HINT_DOS_AUDIO_TIER2=0` as the killswitch.
 +  // Mirror of wave-18 patch 0086->0088 (DIRECT_VESA polarity flip) and
 +  // wave-17.6 patch 0085 (PREVFRAME_DIFF polarity flip) -- the same
 +  // killswitch convention lets a user revert to Tier-1 (full Cave Story
@@ -171,7 +171,7 @@ index 155de1e..f3544ba 100644
 @@ -90,7 +101,9 @@ bool SoundManager::init()
    // chain).
    {
-     const char *tier2 = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_TIER2");
+     const char *tier2 = SDL_GetHint("SDL_HINT_DOS_AUDIO_TIER2");
 -    const bool tier2_on = tier2 && tier2[0] == '1' && tier2[1] == 0;
 +    // patch 0093 (wave 21 default-flip): killswitch logic -- only literal
 +    // "0" disables. Default ON; set =0 to revert to Tier-1.
@@ -183,14 +183,14 @@ index 155de1e..f3544ba 100644
        // un-pin and collapse the lever's mechanism.
        SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES,
                                "256", SDL_HINT_OVERRIDE);
--      LOG_INFO("Sound system: SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 -- Tier-2 "
+-      LOG_INFO("Sound system: SDL_HINT_DOS_AUDIO_TIER2=1 -- Tier-2 "
 -               "audio config engaged ({} Hz, {} channel{}, buffer pinned "
 -               "to 256 frames). Predicted savings: -6.5 ms/flip opening "
 -               "(IRQ-rate halving, hardware-deterministic) + audio-mix "
 -               "CPU reduction (range -3 to -22 ms/flip; mixer-impl "
 -               "dependent, measured in W21A iter). Subjective audio A/B "
 -               "expected post-W21A; killswitch reverts via "
--               "SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 (or any non-'1' value).",
+-               "SDL_HINT_DOS_AUDIO_TIER2=0 (or any non-'1' value).",
 +      LOG_INFO("Sound system: Tier-2 audio config (default since wave 21 "
 +               "patch 0093; {} Hz, {} channel{}, buffer pinned to 256 "
 +               "frames). Measured savings on g2k Pentium OverDrive 83 MHz "
@@ -200,7 +200,7 @@ index 155de1e..f3544ba 100644
 +               "playback bug, see patch 0094). Audio quality is reduced "
 +               "vs Tier-1 (mono, 11025 Hz, simple-average L+R downmix) "
 +               "but recognizable; user accepted the trade per direction "
-+               "2026-05-05. Set SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 to "
++               "2026-05-05. Set SDL_HINT_DOS_AUDIO_TIER2=0 to "
 +               "revert to Tier-1 22050 stereo (full Cave Story 2004 "
 +               "audio quality; trades fps for fidelity).",
                 (unsigned long)::SAMPLE_RATE, (unsigned long)::AUDIO_CHANNELS,
@@ -209,12 +209,12 @@ index 155de1e..f3544ba 100644
      else
      {
 -      LOG_INFO("Sound system: Tier-1 audio config (default; {} Hz, {} "
--               "channels). Set SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 to opt "
+-               "channels). Set SDL_HINT_DOS_AUDIO_TIER2=1 to opt "
 -               "into Tier-2 (11025 Hz mono, 256-frame buffer) for fps "
 -               "gain on Tier 2/3 hardware (per docs/HARDWARE.md hardware "
 -               "tiers + docs/PHASE9-LEVER-G-PLAN.md mechanism).",
 +      LOG_INFO("Sound system: Tier-1 audio config ({} Hz, {} channels) "
-+               "via SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 killswitch -- reverts "
++               "via SDL_HINT_DOS_AUDIO_TIER2=0 killswitch -- reverts "
 +               "to wave-17.6-baseline 22050 stereo, the original Cave "
 +               "Story 2004 spec. Trades the wave-21 Tier-2 fps gain "
 +               "(~+11 fps in heavy-music scenes on Pentium OverDrive "

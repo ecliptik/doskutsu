@@ -233,7 +233,7 @@ launch_dosbox() {
     -c 'SET BLASTER=A220 I5 D1 H5 T6'
     -c 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1'
     -c 'SET SDL_INVALID_PARAM_CHECKS=0'
-    -c 'SET DOSKUTSU_LOG_VERBOSE=1'
+    -c 'SET DOS_PORT_LOG_VERBOSE=1'
     -c 'C:')
   args+=("$@")
   # When capturing audio (option b), route DOSBox-X's SDL2 audio output to the
@@ -502,9 +502,9 @@ run_setup_phase() {
   assert_profile_video_speed || note_fail   # DF-UX Phase 2 startup bench witness
 }
 
-# run_doskutsu_phase <name> [capture] -- launch DOSKUTSU.EXE with the written
+# run_dos_port_phase <name> [capture] -- launch DOSKUTSU.EXE with the written
 # CFG; collect logs. If "capture" passed, start wave capture for the audio test.
-run_doskutsu_phase() {
+run_dos_port_phase() {
   local name="$1" capture="${2:-}"
   clear_logs
   WAV_OUT=""
@@ -763,7 +763,7 @@ scenario_A() {
   assert_cfg_line FIXED_TIMESTEP 1   || note_fail   # untouched -> baseline
   assert_cfg_line SB16_FM_VOL 28     || note_fail   # untouched -> baseline
   if [[ "$DOSKUTSU_PRESENT" == "1" ]]; then
-    run_doskutsu_phase "$name"
+    run_dos_port_phase "$name"
     assert_banner "config-load"   'config: loaded DOSKUTSU\.CFG \([0-9]+ keys\)' || note_fail
     assert_banner "perf-mode"     'perf-mode: level=1' || note_fail
     # Explicit opl3 (set via the CFG-driven hint) emits the "Phase 10 Stage 4"
@@ -798,7 +798,7 @@ scenario_B() {
   assert_cfg_line USE_JOYSTICK 1        || note_fail
   assert_cfg_line PERF_MODE 0           || note_fail   # untouched -> baseline
   if [[ "$DOSKUTSU_PRESENT" == "1" ]]; then
-    run_doskutsu_phase "$name"
+    run_dos_port_phase "$name"
     assert_banner "config-load"  'config: loaded DOSKUTSU\.CFG \([0-9]+ keys\)' || note_fail
     assert_banner "organya-backend" 'audio backend: organya \(forced' || note_fail
     # USE_JOYSTICK=1 flips input.cpp's value-check so the default-path
@@ -839,7 +839,7 @@ scenario_C() {
   assert_cfg_line FIXED_TIMESTEP 0          || note_fail
   assert_cfg_absent_uncommented AUDIO_BACKEND || note_fail  # auto -> comment only
   if [[ "$DOSKUTSU_PRESENT" == "1" ]]; then
-    run_doskutsu_phase "$name"
+    run_dos_port_phase "$name"
     assert_banner "config-load"     'config: loaded DOSKUTSU\.CFG \([0-9]+ keys\)' || note_fail
     assert_banner "sb16-fm-vol"     'SB16 mixer balance:.*fm=20' || note_fail
     assert_banner "fixed-timestep"  'fixed-timestep: DISABLED' || note_fail
@@ -865,7 +865,7 @@ scenario_AUDIO() {
   run_setup_phase "$name"
   assert_cfg_line AUDIO_BACKEND organya || note_fail
   if [[ "$DOSKUTSU_PRESENT" == "1" ]]; then
-    run_doskutsu_phase "$name" capture
+    run_dos_port_phase "$name" capture
     assert_banner "config-load"     'config: loaded DOSKUTSU\.CFG \([0-9]+ keys\)' || note_fail
     assert_banner "organya-backend" 'audio backend: organya \(forced' || note_fail
     # Deterministic audio gate: the SB16 device actually opened (at the engine
@@ -882,7 +882,7 @@ scenario_AUDIO() {
 # Drives the AUDIOTEST=1 SETUP.EXE into its "Test SFX / Music" screen and
 # triggers Play SFX + Play music. The screen's audiotest_init opens the REAL
 # SB16 device through the same SDL3-DOS backend the game uses and programs the
-# CT1745 mixer from the configured SDL_HINT_DOSKUTSU_SB16_* levels -- emitting
+# CT1745 mixer from the configured SDL_HINT_DOS_SB16_* levels -- emitting
 # the SDL/0074 mixer-balance banner to SETUP's OWN SDLDBG.LOG. We pre-seed a
 # distinctive SB16_FM_VOL so that banner is a discriminator: it proves SETUP's
 # built-in audio test brought the SB16 path up with the user's configured

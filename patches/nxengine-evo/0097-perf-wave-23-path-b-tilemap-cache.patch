@@ -112,13 +112,13 @@ Implementation:
    in map.cpp anonymous namespace) bumped by `map_ChangeTileWithSmoke`
    at the existing `map.tiles[x][y] = newtile;` mutation site.
 
-7. **Killswitch SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0** (strict-0,
+7. **Killswitch SDL_HINT_DOS_TILEMAP_CACHE=0** (strict-0,
    default ON) per contract sec. 3.2:
    - NEW `_strict_falsy_env()` helper in Renderer.cpp anonymous
      namespace (sibling to `_strict_truthy_env`); returns true ONLY
      on env value "0".
    - NEW `_abl_tilemap_cache_killswitch()` env helper wraps
-     `_strict_falsy_env("SDL_HINT_DOSKUTSU_TILEMAP_CACHE")` with
+     `_strict_falsy_env("SDL_HINT_DOS_TILEMAP_CACHE")` with
      cached static-const-bool -- -O2 hoists per-frame guards.
    - NEW NXE::Diag::tilemap_cache_killswitch_active() forward-decl
      accessor (file-top wrapper) + definition at file-scope-after-
@@ -138,7 +138,7 @@ Implementation:
      string. No p50/p95 per flush-instr's contract decision --
      running-sum + count sufficient for v1 cache-effectiveness
      analysis.
-   - Counter emission gates on EXISTING SDL_HINT_DOSKUTSU_MODE_DRAW_-
+   - Counter emission gates on EXISTING SDL_HINT_DOS_MODE_DRAW_-
      SCENE_INSTR=1 (W22.5 hint) per contract sec. 3.1; killswitch only
      affects cache architecture, NOT counter emit.
    - `n` counter increments at start of DrawScene() in game.cpp
@@ -197,9 +197,9 @@ Memory overhead: ~154 KB heap (76,800 x 2 cache surfaces + ~80
 bytes static state). Trivial on g2k Tier-1 (0.3% of 48 MB).
 
 Documentation: docs/BOOT.md gets:
-- Extension to existing SDL_HINT_DOSKUTSU_MODE_DRAW_SCENE_INSTR
+- Extension to existing SDL_HINT_DOS_MODE_DRAW_SCENE_INSTR
   entry mentioning the new [mds-tilemap-cache] emit line.
-- NEW SDL_HINT_DOSKUTSU_TILEMAP_CACHE killswitch entry covering
+- NEW SDL_HINT_DOS_TILEMAP_CACHE killswitch entry covering
   cache architecture, default-ON semantics, strict-0 match,
   adaptive-alpha state machine, motion-tile architectural note.
 - BOOT.md is gitignored per pre-existing convention (.gitignore:
@@ -274,7 +274,7 @@ index 6adce1b..238f102 100644
 +//   - on disable transition, increment `*_disable_transitions_block`
 +//   - re-enables on map_flush_graphics() (map change)
 +//
-+// Killswitch: SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0 (strict-0; default
++// Killswitch: SDL_HINT_DOS_TILEMAP_CACHE=0 (strict-0; default
 +// ON) short-circuits the cache check entirely -- both layers report
 +// `*_enabled=false` from block 1 with all counters at 0 (per contract
 +// sec. 3.2). Counter emission still gates on MODE_DRAW_SCENE_INSTR
@@ -296,7 +296,7 @@ index 6adce1b..238f102 100644
 +// Killswitch accessor -- definition in Renderer.cpp's anonymous-
 +// namespace `_abl_tilemap_cache_killswitch()` forwarded via the file-
 +// scope wrapper at end-of-file. map.cpp reads this to short-circuit
-+// the cache check when SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0.
++// the cache check when SDL_HINT_DOS_TILEMAP_CACHE=0.
 +bool tilemap_cache_killswitch_active();
 +
 +// Per-layer cache reset hook -- called by map_flush_graphics() on map
@@ -395,7 +395,7 @@ index 9e19e0f..e88364d 100644
 +// patch 0097 (wave 23 W23A): tilemap_cache_killswitch_active() forward-
 +// decl joins the family here. Definition at file-scope at end-of-file
 +// (heeds W20B build-fix amendment). map.cpp uses this to short-circuit
-+// the cache check when SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0.
++// the cache check when SDL_HINT_DOS_TILEMAP_CACHE=0.
  namespace NXE { namespace Diag {
  bool engine_tick_fine_instr_active();
  bool mode_tick_instr_active();
@@ -424,14 +424,14 @@ index 9e19e0f..e88364d 100644
 +}
  inline bool _abl_no_dc_timing()
  {
-   static const bool v = _strict_truthy_env("DOSKUTSU_NO_DC_TIMING");
+   static const bool v = _strict_truthy_env("DOS_PORT_NO_DC_TIMING");
 @@ -281,6 +343,21 @@ inline bool _abl_mode_draw_scene_instr()
    return v;
  }
  
 +// DOS-PORT (patch 0097, Phase 9 wave 23 W23A Path B): tilemap-cache
 +// killswitch. Strict-"0" match per contract sec. 3.2 -- default-ON cache
-+// requires opt-OUT semantics. Setting SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0
++// requires opt-OUT semantics. Setting SDL_HINT_DOS_TILEMAP_CACHE=0
 +// disables the cache (reverts to per-tile rendering for both BG and
 +// FG layers); any other value (unset, "1", empty) keeps cache ENABLED.
 +// Cache architecture in map.cpp short-circuits on this -- when true,
@@ -440,7 +440,7 @@ index 9e19e0f..e88364d 100644
 +// Cached static-const-bool -- -O2 hoists per-frame guards.
 +inline bool _abl_tilemap_cache_killswitch()
 +{
-+  static const bool v = _strict_falsy_env("SDL_HINT_DOSKUTSU_TILEMAP_CACHE");
++  static const bool v = _strict_falsy_env("SDL_HINT_DOS_TILEMAP_CACHE");
 +  return v;
 +}
 +
@@ -507,18 +507,18 @@ index 9e19e0f..e88364d 100644
 +           "bios_kbd_head=0x{:04x} bios_kbd_tail=0x{:04x} "
 +           "bios_kbd_buf0=0x{:04x}",
             _dc_block_idx,
-            (unsigned long)doskutsu_kbd_irq_count,
-            (unsigned long)doskutsu_kbd_drain_count,
+            (unsigned long)dos_port_kbd_irq_count,
+            (unsigned long)dos_port_kbd_drain_count,
 @@ -1136,7 +1264,9 @@ void _maybe_flush_phase_timing_audit()
-            (unsigned)(doskutsu_kbd_pic1_mask_at_install & 0xff),
-            (unsigned long)doskutsu_kbd_first_irq_ticks,
-            (unsigned long)doskutsu_kbd_irq_install_ticks,
--           (unsigned long)doskutsu_kbd_irq_vector_at_install);
-+           (unsigned long)doskutsu_kbd_irq_vector_at_install,
+            (unsigned)(dos_port_kbd_pic1_mask_at_install & 0xff),
+            (unsigned long)dos_port_kbd_first_irq_ticks,
+            (unsigned long)dos_port_kbd_irq_install_ticks,
+-           (unsigned long)dos_port_kbd_irq_vector_at_install);
++           (unsigned long)dos_port_kbd_irq_vector_at_install,
 +           pic1_mask_live, kbd_8042_stat,
 +           bios_kbd_head, bios_kbd_tail, bios_kbd_buf0);
    // DOS-PORT (patch 0087, Phase 9 wave 20 Lever A): emit per-phase flip
-   // statistics + path-mix counters when SDL_HINT_DOSKUTSU_FLIP_INSTR=1.
+   // statistics + path-mix counters when SDL_HINT_DOS_FLIP_INSTR=1.
    // Default OFF: skip the std::sort + 5 LOG_INFO emissions entirely.
 @@ -1510,6 +1640,104 @@ void _maybe_flush_phase_timing_audit()
    NXE::Diag::g_mds_tilemap_fg_idx           = 0;
@@ -873,7 +873,7 @@ index d5a786c..a50db37 100644
 +// drawn beneath the FG layer (Quote, NPCs) show through correctly.
 +// BG cache is opaque (full-screen coverage of plain tiles).
 +//
-+// Killswitch: SDL_HINT_DOSKUTSU_TILEMAP_CACHE=0 (strict-0; default
++// Killswitch: SDL_HINT_DOS_TILEMAP_CACHE=0 (strict-0; default
 +// ON) short-circuits the cache check entirely -- falls through to the
 +// original per-tile-loop render. Counter emission still fires per
 +// W22.5 hint per contract sec. 3.2.

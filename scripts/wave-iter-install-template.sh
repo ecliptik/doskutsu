@@ -60,7 +60,7 @@ TARBALL="doskutsu-cf-YYYY-MM-DD-wave-N-bin-XXXXXXXXXXXX.tar.gz"
 # Expected full sha256 of every binary on CF after extraction.
 # Add / remove EXPECTED_*_SHA constants + `verify_sha` calls to match the
 # binaries this wave actually ships.
-EXPECTED_DOSKUTSU_SHA="<full 64-char sha256 of DOSKUTSU.EXE>"
+EXPECTED_DOS_PORT_SHA="<full 64-char sha256 of DOSKUTSU.EXE>"
 EXPECTED_BLTPAT_SHA="<full 64-char sha256 of BLTPAT.EXE; remove if probe not bundled>"
 EXPECTED_AUDRQ_SHA="<full 64-char sha256 of AUDRQ.EXE; remove if probe not bundled>"
 # EXPECTED_MIXBENCH_SHA="..."   # add if MIXBENCH bundled
@@ -132,7 +132,7 @@ verify_sha() {
   fi
   echo "  PASS: ${name} ${actual:0:12}"
 }
-verify_sha DOSKUTSU.EXE "${EXPECTED_DOSKUTSU_SHA}"
+verify_sha DOSKUTSU.EXE "${EXPECTED_DOS_PORT_SHA}"
 [ -n "${EXPECTED_BLTPAT_SHA:-}"   ] && verify_sha BLTPAT.EXE   "${EXPECTED_BLTPAT_SHA}"
 [ -n "${EXPECTED_AUDRQ_SHA:-}"    ] && verify_sha AUDRQ.EXE    "${EXPECTED_AUDRQ_SHA}"
 [ -n "${EXPECTED_MIXBENCH_SHA:-}" ] && verify_sha MIXBENCH.EXE "${EXPECTED_MIXBENCH_SHA}"

@@ -8,7 +8,7 @@ The organya backend cold-renders each .org -> PCM at song-start via a blocking
 single-CPU synth pass (~57 s for the title song on a 486 DX2-66). On the target
 that shows as a black screen / pegged CPU before the title menu -- the apparent
 "hang". The fix machinery (per-song disk cache 0208, render-window quiesce 0214,
-the host-side DOSKUTSU_ORG_PRECACHE_ALL batch + tier-scoped cache 0215) existed
+the host-side DOS_PORT_ORG_PRECACHE_ALL batch + tier-scoped cache 0215) existed
 but the cache was never populated ON the target, so every song still cold-rendered
 once. The host/dist cannot pre-populate it: the PCM is Cave-Story-derived (not
 redistributable) and build-sha + tier keyed.
@@ -33,7 +33,7 @@ B. IN-GAME COLD-RENDER OVERLAY -- the SAME progress bar on ANY individual
 Both share one mechanism: a per-beat callback (int return; nonzero = abort)
 threaded into _org_render_song's synth loop, NULL by default. main.cpp registers
 it ONLY after the headless host-batch block (which return 0s/exits first), so
-DOSKUTSU_ORG_PRECACHE_ALL renders with cb==NULL -> byte-identical to 0215. Organya
+DOS_PORT_ORG_PRECACHE_ALL renders with cb==NULL -> byte-identical to 0215. Organya
 stays decoupled from the Renderer (it only knows the function pointer); the
 progress UI (clearScreen + headline + coarse "song N/M" bar + intra-song bar,
 pixel-throttled flips, ESC poll) lives in main.cpp via the showLoadingScreen idiom.
@@ -51,7 +51,7 @@ Organya-only (g_p10_audio_backend_active == AudioBackend::organya): OPL3/WB
 dispatch to their chip in real-time and never cold-render, so a default install
 never engages. Mono-only batch (mirrors precacheAllOrgs' stereo guard -- the
 pre-render path is mono; a stereo tier is skipped, no sentinel). Default-ON
-killswitch SDL_HINT_DOSKUTSU_ORG_AUTOCACHE=0 disables both A and B (reverts to the
+killswitch SDL_HINT_DOS_ORG_AUTOCACHE=0 disables both A and B (reverts to the
 v1.1.0 black-screen cold-render). Single lever / own binary. Documented in
 docs/internal/BOOT.md.
 
@@ -199,7 +199,7 @@ index 435d8d2e..1d260925 100644
 +  // ORGCACHE-AUTO (slot TBD): auto-precache-on-first-launch + in-game cold-render
 +  // progress overlay. Organya backend ONLY (OPL3/WB dispatch to their chip in
 +  // real-time and never cold-render). Default-ON killswitch
-+  // SDL_HINT_DOSKUTSU_ORG_AUTOCACHE. Placed AFTER the headless host-batch block
++  // SDL_HINT_DOS_ORG_AUTOCACHE. Placed AFTER the headless host-batch block
 +  // above so that batch renders with no beat cb registered = byte-identical. The
 +  // Renderer is already up (init ~L1475, showLoadingScreen ~L1487) and the backend
 +  // enum + tier are resolved (SoundManager::init above), so the progress screen
@@ -297,14 +297,14 @@ index f238b504..8ad46e28 100644
 +// ~57 s on the DX2-66) can drive a moving progress bar instead of a black
 +// screen. The callback is a file-scope function pointer (NULL default), set by
 +// the engine-side progress UI (main.cpp) AFTER the headless host batch
-+// (DOSKUTSU_ORG_PRECACHE_ALL) has already run + exited -- so the host batch
++// (DOS_PORT_ORG_PRECACHE_ALL) has already run + exited -- so the host batch
 +// renders with cb==NULL = BYTE-IDENTICAL headless path. Organya stays decoupled
 +// from the Renderer: it only knows an int(*)(uint32_t cur_beat, uint32_t total).
 +// RETURN: nonzero == ABORT this render (R2 ESC-skip during the first-launch
 +// batch; in-game renders never abort -- the UI returns 0 there). On abort
 +// _org_render_song discards the PARTIAL buffer so the caller never caches a
 +// truncated song. Whether main.cpp registers a cb at all is gated by the
-+// default-ON killswitch SDL_HINT_DOSKUTSU_ORG_AUTOCACHE (org_autocache_active,
++// default-ON killswitch SDL_HINT_DOS_ORG_AUTOCACHE (org_autocache_active,
 +// below); this layer is only the mechanism.
 +typedef int (*org_render_beat_cb_t)(uint32_t cur_beat, uint32_t total_beats);
 +static org_render_beat_cb_t g_org_render_beat_cb = nullptr;
@@ -360,7 +360,7 @@ index f238b504..8ad46e28 100644
 +  FILE *fp = fopen(_org_cache_sentinel_path().c_str(), "rb");
 +  if (!fp)
 +    return false;
-+  const char  *sha  = _DOSKUTSU_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12);
++  const char  *sha  = _DOS_PORT_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12);
 +  const size_t slen = strlen(sha);
 +  char         buf[24];
 +  const size_t n = fread(buf, 1, sizeof buf - 1, fp);
@@ -379,7 +379,7 @@ index f238b504..8ad46e28 100644
 +  FILE *fp = fopen(_org_cache_sentinel_path().c_str(), "wb");
 +  if (!fp)
 +    return false;
-+  const char *sha = _DOSKUTSU_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12);
++  const char *sha = _DOS_PORT_ORGCACHE_STR(DOSKUTSU_BUILD_SHA12);
 +  const bool  ok  = (fwrite(sha, 1, strlen(sha), fp) == strlen(sha));
 +  fclose(fp);
 +  return ok;
@@ -403,10 +403,10 @@ index f238b504..8ad46e28 100644
 +{
 +  if (g_org_autocache_decided < 0)
 +  {
-+    const char *e = SDL_GetHint("SDL_HINT_DOSKUTSU_ORG_AUTOCACHE");
++    const char *e = SDL_GetHint("SDL_HINT_DOS_ORG_AUTOCACHE");
 +    g_org_autocache_decided = (e && e[0] == '0' && e[1] == '\0') ? 0 : 1;
 +    LOG_INFO("organya auto-precache: {} (first-launch precache + in-game cold-"
-+             "render progress overlay; set SDL_HINT_DOSKUTSU_ORG_AUTOCACHE=0 to "
++             "render progress overlay; set SDL_HINT_DOS_ORG_AUTOCACHE=0 to "
 +             "disable -> v1.1.0 black-screen cold-render)",
 +             g_org_autocache_decided ? "ENABLED (default)"
 +                                      : "DISABLED (killswitch =0)");
@@ -450,7 +450,7 @@ index 7e29c358..f02aa847 100644
 --- a/src/sound/SoundManager.h
 +++ b/src/sound/SoundManager.h
 @@ -177,6 +177,15 @@ public:
-   // main()'s DOSKUTSU_ORG_PRECACHE_ALL one-shot (headless; exits after).
+   // main()'s DOS_PORT_ORG_PRECACHE_ALL one-shot (headless; exits after).
    long precacheAllOrgs();
  
 +  // ORGCACHE-AUTO (slot TBD): read-only accessors so the engine-side progress UI

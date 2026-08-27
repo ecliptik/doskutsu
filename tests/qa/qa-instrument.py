@@ -33,8 +33,8 @@ def patch(path, cfg):
     for l in lines:
         # unique WaveBlaster tag so PG and VB stop colliding on <M>17
         if cfg['wb']:
-            l = re.sub(r'^SET DOSKUTSU_LOG_TAG=%QAM%17$',
-                       'SET DOSKUTSU_LOG_TAG=%QAM%' + cfg['wb'], l)
+            l = re.sub(r'^SET DOS_PORT_LOG_TAG=%QAM%17$',
+                       'SET DOS_PORT_LOG_TAG=%QAM%' + cfg['wb'], l)
             l = re.sub(r'log %QAM%17$', 'log %QAM%' + cfg['wb'], l)
         out.append(l)
         if not done_cpu and re.match(r'^IF "%2"=="4" SET QAM=5$', l):

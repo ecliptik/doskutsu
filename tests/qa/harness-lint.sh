@@ -33,7 +33,7 @@ lint_platform() { :; }
 lint_contract() {
   local f="$1" b; b=$(basename "$f")
   local body; body=$(tr -d '\r' < "$f")
-  local tags; tags=$(printf '%s\n' "$body" | grep -oE 'SET DOSKUTSU_LOG_TAG=[^ ]+' | sed 's/.*=//')
+  local tags; tags=$(printf '%s\n' "$body" | grep -oE 'SET DOS_PORT_LOG_TAG=[^ ]+' | sed 's/.*=//')
   local ncells; ncells=$(printf '%s\n' "$tags" | grep -c . || true)
   [ "$ncells" -eq 0 ] && return 0   # not a sweep
 
@@ -133,7 +133,7 @@ done
 # ------------------------------------------- 6.5 tag uniqueness ACROSS sweeps
 echo "------------------------------------------------------------------------"
 allsweeps=$(for f in "$DIR"/*.BAT; do
-  tr -d '\r' < "$f" | grep -oE 'SET DOSKUTSU_LOG_TAG=[^ ]+' \
+  tr -d '\r' < "$f" | grep -oE 'SET DOS_PORT_LOG_TAG=[^ ]+' \
     | sed "s|.*=|$(basename "$f")\t|"
 done)
 cross=$(printf '%s\n' "$allsweeps" | awk -F'\t' 'NF==2{print $2}' | sort | uniq -d)

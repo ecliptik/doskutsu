@@ -95,10 +95,10 @@ LOG="$WORK/LOGS/COEX.LOG"
   printf 'goto end\r\n'
   printf ':run\r\n'
   printf 'SET DOSKUTSU_USE_JOYSTICK=1\r\n'
-  printf 'SET SDL_HINT_DOSKUTSU_JOY_DIAG=1\r\n'
-  printf 'SET SDL_HINT_DOSKUTSU_AUDIO_BACKEND=opl3\r\n'
-  printf 'SET DOSKUTSU_TAS_AUTO_EXIT_TICK=%s\r\n' "$EXIT_TICK"
-  printf 'SET DOSKUTSU_LOG_TAG=COEX\r\n'
+  printf 'SET SDL_HINT_DOS_JOY_DIAG=1\r\n'
+  printf 'SET SDL_HINT_DOS_AUDIO_BACKEND=opl3\r\n'
+  printf 'SET DOS_PORT_TAS_AUTO_EXIT_TICK=%s\r\n' "$EXIT_TICK"
+  printf 'SET DOS_PORT_LOG_TAG=COEX\r\n'
   printf 'DOSKUTSU.EXE\r\n'
   printf ':end\r\n'
 } > "$WORK/COEX.BAT"
@@ -109,7 +109,7 @@ dbx_args=(-conf "$CONF" -nopromptfolder
   -c 'SET BLASTER=A220 I5 D1 H5 T6'
   -c 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1'
   -c 'SET SDL_INVALID_PARAM_CHECKS=0'
-  -c 'SET DOSKUTSU_LOG_VERBOSE=1'
+  -c 'SET DOS_PORT_LOG_VERBOSE=1'
   -c "C:" -c "COEX.BAT")
 
 cleanup() { pkill -x dosbox-x 2>/dev/null || true; }

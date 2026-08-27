@@ -10,7 +10,7 @@ REM
 REM  Usage:  QA [n]   then   VIDMC [n] [PG]
 REM ===================================================================
 IF "%QAM%"=="" GOTO NOMACH
-SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=0
+SET SDL_HINT_DOS_PIXEL_FORMAT_8=0
 ECHO.
 ECHO ============================================================
 ECHO  COLOUR PROBE -- 16bpp, no palette / no DAC in the path
@@ -23,7 +23,7 @@ ECHO.
 ECHO  Logs are DISPOSABLE. Re-run VIDM afterwards for the real cells.
 ECHO ============================================================
 CALL VIDM %1 %2
-SET SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8=
+SET SDL_HINT_DOS_PIXEL_FORMAT_8=
 ECHO.
 ECHO ============================================================
 ECHO  PROBE DONE.  PIXEL_FORMAT_8 cleared -- safe to run other sweeps.

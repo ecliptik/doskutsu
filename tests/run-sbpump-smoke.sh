@@ -78,7 +78,7 @@ run_cell() {
     local stage; stage="$(mktemp -d -t sbpump-smoke-"$cell".XXXXXX)"
     cp "$EXE" "$stage/SBPUMP.EXE"
     cp "$CWSDPMI" "$stage/CWSDPMI.EXE"
-    printf "@ECHO OFF\r\nSET BLASTER=%s\r\nSET DOSKUTSU_LOG_TAG=%s\r\nSBPUMP.EXE %s\r\n" \
+    printf "@ECHO OFF\r\nSET BLASTER=%s\r\nSET DOS_PORT_LOG_TAG=%s\r\nSBPUMP.EXE %s\r\n" \
         "$BLASTER" "$tag" "$cell" > "$stage/RUN.BAT"
 
     echo "[sbpump-smoke] cell $cell (tag $tag): running under DOSBox-X..."

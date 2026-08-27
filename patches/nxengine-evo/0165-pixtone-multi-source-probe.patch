@@ -18,7 +18,7 @@ them before we commit to another wrong-variable fix.
 
 Probe-first iter (2-cell, DX2-66-only per [[486_iteration_workflow]]):
 - PLAY0 baseline -- no SET, probe DISABLED, normal cell.
-- PLAY1 SET SDL_HINT_DOSKUTSU_PIXTONE_PROBE=1 -- probe ENABLED;
+- PLAY1 SET SDL_HINT_DOS_SFX_SYNTH_PROBE=1 -- probe ENABLED;
   one [pixtone-multi] LOG_INFO line per 100-flip block lands in
   DEBUG.LOG with the hypothesis-discrimination signals.
 
@@ -34,13 +34,13 @@ Fields:
 - block, samples -- block index + total samples collected this
   block (~140 expected at 30 fps Tier-2 over a 100-flip block, the
   audio-buffer-fill rate ~43 Hz drives sample rate).
-- active min/med/p90/max -- g_pixtone_active_count distribution
+- active min/med/p90/max -- g_dos_sfx_synth_active_count distribution
   via 6 fixed buckets [0]/[1]/[2]/[3-5]/[6-10]/[11+] sampled in
   organyaStreamCallback at audio-buffer-fill cadence. Percentile
   values are bucket midpoints (0/1/2/4/8/12) via cumulative-count
   lookup -- coarse but sufficient at probe resolution. Captures
   SFX-storm bursts that collapse within one render frame.
-- live -- instantaneous read of g_pixtone_active_count at the
+- live -- instantaneous read of g_dos_sfx_synth_active_count at the
   audit-flush boundary; ground-truth cross-check vs the histogram
   max bucket when SFX channels are mid-play at emit time.
 - stoptrack delta -- block-over-block diff of
@@ -58,14 +58,14 @@ Fields:
   the SFX enum is in hand; Pixtone.cpp has only the slot-index
   abstraction). SFX-storm-rate indicator.
 - silent_irq delta -- block-over-block diff of
-  doskutsu_audio_silent_irq_count (SDL-side monotonic sibling of
+  dos_port_audio_silent_irq_count (SDL-side monotonic sibling of
   isr_consecutive_silent_irqs which resets on every non-silent
   IRQ; the monotonic version never resets). Read via extern from
   patches/SDL/0069. Scheduler-starvation + IRQ-jitter indicator.
 
 Counter increments unconditional (volatile uint32_t, no atomics,
-no fences; matches existing g_pixtone_active_count pattern). The
-probe killswitch SDL_HINT_DOSKUTSU_PIXTONE_PROBE gates only the
+no fences; matches existing g_dos_sfx_synth_active_count pattern). The
+probe killswitch SDL_HINT_DOS_SFX_SYNTH_PROBE gates only the
 LOG_INFO emit + the histogram bucket-inc -- both PLAY0 (probe off)
 and PLAY1 (probe on) cells have valid counter snapshots
 regardless of state.
@@ -83,7 +83,7 @@ Default-OFF byte-identical-at-rendered-frame to pre-0165:
   first call regardless of state (banner-only-no-state-change
   pattern, matches 0162-v2 / 0163 / 0164).
 
-Killswitch: SDL_HINT_DOSKUTSU_PIXTONE_PROBE, strict-"1" opt-in,
+Killswitch: SDL_HINT_DOS_SFX_SYNTH_PROBE, strict-"1" opt-in,
 default OFF. Same hygiene as nxengine/0162-v2 + 0163 + 0164.
 Sentinel-cached on first pixtone_probe_active() call -- single
 _strict_truthy_env (std::getenv-backed) then cached int; banner
@@ -93,7 +93,7 @@ emit "pixtone multi-source probe: ENABLED (opt-in)" /
 Cross-TU layout (mirrors the existing [audio-block] reader pattern):
 - Pixtone.h: +2 extern decls (g_pixtone_stoptrack_count +
   g_pixtone_polar_star_count) next to existing
-  g_pixtone_active_count.
+  g_dos_sfx_synth_active_count.
 - Pixtone.cpp: +2 file-scope counter defs in the existing
   extern "C" {} block; +2 inc sites (one at the preempt path in
   play() at :454, one at the resampled preempt path in
@@ -102,17 +102,17 @@ Cross-TU layout (mirrors the existing [audio-block] reader pattern):
   dispatch); +1 cmp+inc in playSfxResampled (defensive mirror for
   any future mod / patch routing polar-star resampled). Both
   count toward g_pixtone_polar_star_count.
-- Organya.cpp: +1 NXE::Diag::SamplePixtoneActiveBucket call at the
+- Organya.cpp: +1 NXE::Diag::SampleSfxSynthActiveBucket call at the
   top of organyaStreamCallback (after AudioMixerTimer, before the
   additional_amount<=0 fast-skip -- the sampler runs even on
   zero-work callback wakeups since those still represent audio-
   thread cadence ticks worth measuring).
 - diagnostic_timers.h: +1 forward-decl for
-  NXE::Diag::SamplePixtoneActiveBucket (decl in NXE::Diag
+  NXE::Diag::SampleSfxSynthActiveBucket (decl in NXE::Diag
   namespace; defn at file-scope-after-both-namespace-closes in
   Renderer.cpp per the W20B/W22A wrapper pattern).
 - Renderer.cpp: +5 extern decls in the existing extern "C" {}
-  block (doskutsu_audio_silent_irq_count from SDL/0069 + 3 Pixtone
+  block (dos_port_audio_silent_irq_count from SDL/0069 + 3 Pixtone
   counters); +1 6-bucket histogram array (volatile uint32_t at
   NXE::Diag scope, line ~129); +1 pixtone_probe_active() helper
   next to the existing _abl_p10_audio_instr ablation flag
@@ -120,15 +120,15 @@ Cross-TU layout (mirrors the existing [audio-block] reader pattern):
   +1 _maybe_flush_pixtone_multi_audit() ~110 LOC sibling of
   _maybe_flush_sfx_stat_audit (block-snapshot pattern matching the
   existing [audio-block] reader); +1 audit call in flip() right
-  after _maybe_flush_sfx_stat_audit; +1 SamplePixtoneActiveBucket
+  after _maybe_flush_sfx_stat_audit; +1 SampleSfxSynthActiveBucket
   defn at file-scope-after-both-namespace-closes (forwards into
   NXE::Graphics::pixtone_probe_active + NXE::Diag's bucket array).
 
 Working-tree edits (not in the .patch -- per HARD BUILD-
 SERIALIZATION, working-tree-only):
-- docs/internal/BOOT.md: new SDL_HINT_DOSKUTSU_PIXTONE_PROBE entry
-  inserted between SDL_HINT_DOSKUTSU_AUDIO_TICKPUMP and
-  SDL_HINT_DOSKUTSU_DATA_CACHE. Covers: opt-in semantics, line-
+- docs/internal/BOOT.md: new SDL_HINT_DOS_SFX_SYNTH_PROBE entry
+  inserted between SDL_HINT_DOS_AUDIO_TICKPUMP and
+  SDL_HINT_DOS_DATA_CACHE. Covers: opt-in semantics, line-
   shape with field meanings, hypothesis-discrimination targets,
   counter-unconditional + emit-gated invariant, cache-OFF byte-
   identity property.
@@ -175,7 +175,7 @@ index 73487e4..b8fac59 100644
 +// patch 0165 (Pixtone multi-source probe). Audio-thread-callback
 +// histogram sampler -- called from Organya.cpp's organyaStreamCallback
 +// at audio-buffer-fill cadence (~43 Hz Tier-2). Reads
-+// g_pixtone_active_count (extern "C" volatile uint32_t from
++// g_dos_sfx_synth_active_count (extern "C" volatile uint32_t from
 +// Pixtone.h) and increments the appropriate fixed bucket
 +// (0/1/2/3-5/6-10/11+). Single volatile read + bucket inc per call;
 +// race-tolerant (single-writer audio thread, single-reader render
@@ -185,7 +185,7 @@ index 73487e4..b8fac59 100644
 +// 6 bucket counters are file-scope volatile uint32_t in Renderer.cpp;
 +// they're read + reset at each per-100-flip audit-flush boundary.
 +// See PIXTONE-MULTISOURCE-DESIGN.md sec.3.
-+void SamplePixtoneActiveBucket();
++void SampleSfxSynthActiveBucket();
 +
  }  // namespace Diag
 diff --git a/src/graphics/Renderer.cpp b/src/graphics/Renderer.cpp
@@ -193,7 +193,7 @@ index 8ccf548..558d8f6 100644
 --- a/src/graphics/Renderer.cpp
 +++ b/src/graphics/Renderer.cpp
 @@ -75,2 +75,18 @@ extern "C" {
-   extern volatile std::uint32_t doskutsu_audio_sfx_active_count;
+   extern volatile std::uint32_t dos_port_audio_sfx_active_count;
 +
 +  // patch 0165 (Pixtone multi-source probe). SDL-side monotonic silent-
 +  // IRQ counter from patches/SDL/0069 (sibling of isr_consecutive_silent_irqs
@@ -201,23 +201,23 @@ index 8ccf548..558d8f6 100644
 +  // monotonic version never resets so the audit can compute block-over-
 +  // block delta). Read by _maybe_flush_pixtone_multi_audit via the
 +  // delta-snapshot pattern.
-+  extern volatile std::uint32_t doskutsu_audio_silent_irq_count;
++  extern volatile std::uint32_t dos_port_audio_silent_irq_count;
 +
 +  // patch 0165 (Pixtone multi-source probe). Engine-side counters from
 +  // Pixtone.cpp + SoundManager.cpp -- channel-pressure indicator
 +  // (preempt-and-replay events) + polar-star fire counter (storm-rate
 +  // indicator). Decls in vendor/nxengine-evo/src/sound/Pixtone.h.
-+  extern volatile std::uint32_t g_pixtone_active_count;
++  extern volatile std::uint32_t g_dos_sfx_synth_active_count;
 +  extern volatile std::uint32_t g_pixtone_stoptrack_count;
 +  extern volatile std::uint32_t g_pixtone_polar_star_count;
  }
 @@ -103,2 +119,13 @@ int g_audio_service_count_global = 0;
  
 +// patch 0165 (Pixtone multi-source probe). 6-bucket histogram for
-+// g_pixtone_active_count sampled at audio-buffer-fill cadence (~43 Hz
++// g_dos_sfx_synth_active_count sampled at audio-buffer-fill cadence (~43 Hz
 +// Tier-2). Bucket boundaries: [0], [1], [2], [3-5], [6-10], [11+].
 +// Single-writer audio thread (organyaStreamCallback via
-+// SamplePixtoneActiveBucket), single-reader render thread (audit-flush
++// SampleSfxSynthActiveBucket), single-reader render thread (audit-flush
 +// in _maybe_flush_pixtone_multi_audit). Race-tolerant -- worst case is
 +// one stale sample at percentile-compute time, acceptable for a per-
 +// 100-flip block snapshot. Volatile std::uint32_t per bucket; reset to
@@ -227,28 +227,28 @@ index 8ccf548..558d8f6 100644
  // DOS-PORT (patch 0090, Phase 9 wave 20 W20B): engine-tick decomposition
 @@ -447,2 +474,12 @@ bool drawtile_fast_bg_active();
  bool mds_bg_instr_active();
-+// patch 0165 (Pixtone multi-source probe): SamplePixtoneActiveBucket
++// patch 0165 (Pixtone multi-source probe): SampleSfxSynthActiveBucket
 +// forward-decl. Definition lives at file-scope-after-both-namespace-
 +// closes alongside the engine_tick_fine_instr_active wrapper (heeds
 +// the W20B build-fix amendment about avoiding the nested
 +// NXE::Graphics::NXE::Diag trap). Called from Organya.cpp's
 +// organyaStreamCallback at audio-buffer-fill cadence; reads the
-+// extern "C" g_pixtone_active_count from Pixtone.cpp, gates on
++// extern "C" g_dos_sfx_synth_active_count from Pixtone.cpp, gates on
 +// ::NXE::Graphics::pixtone_probe_active(), buckets into
 +// ::NXE::Diag::g_pix_hist_bucket[0..5].
-+void SamplePixtoneActiveBucket();
++void SampleSfxSynthActiveBucket();
  }}
 @@ -672,2 +709,29 @@ inline bool _abl_p10_audio_instr()
  
 +// DOS-PORT (patch 0165, Pixtone multi-source probe). Cached-int 3-state
 +// helper -- mirrors the Leg A / Leg B / DATA_CACHE sentinel-cache idiom
-+// from nxengine/0162-v2 / 0164 / 0163. First call reads SDL_HINT_DOSKUTSU_-
++// from nxengine/0162-v2 / 0164 / 0163. First call reads SDL_HINT_DOS_-
 +// PIXTONE_PROBE via _strict_truthy_env (std::getenv-backed; same path
 +// SDL3-DOS hint reads use for env var fallback) and emits the LOG_INFO
 +// banner naming the active state. Subsequent calls return the cached
 +// int without an env read. Gates only:
 +//   - _maybe_flush_pixtone_multi_audit's LOG_INFO emit
-+//   - SamplePixtoneActiveBucket's histogram bucket-inc (no-op when off)
++//   - SampleSfxSynthActiveBucket's histogram bucket-inc (no-op when off)
 +// Does NOT gate the counter increments themselves (g_pixtone_stoptrack_-
 +// count + g_pixtone_polar_star_count) -- those run unconditionally so
 +// both PLAY0 + PLAY1 cells have valid counter snapshots regardless of
@@ -260,7 +260,7 @@ index 8ccf548..558d8f6 100644
 +  static int decided = -1;
 +  if (decided < 0)
 +  {
-+    decided = _strict_truthy_env("SDL_HINT_DOSKUTSU_PIXTONE_PROBE") ? 1 : 0;
++    decided = _strict_truthy_env("SDL_HINT_DOS_SFX_SYNTH_PROBE") ? 1 : 0;
 +    LOG_INFO("pixtone multi-source probe: {}",
 +             decided ? "ENABLED (opt-in)" : "DISABLED (default)");
 +  }
@@ -272,11 +272,11 @@ index 8ccf548..558d8f6 100644
  
 +// DOS-PORT (patch 0165, Pixtone multi-source probe). Per-100-flip
 +// [pixtone-multi] emit. Sibling of _maybe_flush_sfx_stat_audit above.
-+// Reads the 6-bucket g_pixtone_active_count histogram (single-writer
-+// audio thread via SamplePixtoneActiveBucket; single-reader render
++// Reads the 6-bucket g_dos_sfx_synth_active_count histogram (single-writer
++// audio thread via SampleSfxSynthActiveBucket; single-reader render
 +// thread here) + the block-over-block deltas for g_pixtone_stoptrack_-
 +// count + g_pixtone_polar_star_count (engine-thread counters) +
-+// doskutsu_audio_silent_irq_count (SDL-side IRQ-thread counter from
++// dos_port_audio_silent_irq_count (SDL-side IRQ-thread counter from
 +// patches/SDL/0069). Emit gated on pixtone_probe_active(). One
 +// LOG_INFO line per block; counters / histogram reset after emit.
 +//
@@ -346,7 +346,7 @@ index 8ccf548..558d8f6 100644
 +
 +  const std::uint32_t now_stoptrack  = g_pixtone_stoptrack_count;
 +  const std::uint32_t now_polar_star = g_pixtone_polar_star_count;
-+  const std::uint32_t now_silent_irq = doskutsu_audio_silent_irq_count;
++  const std::uint32_t now_silent_irq = dos_port_audio_silent_irq_count;
 +
 +  const std::uint32_t d_stoptrack  = now_stoptrack  - _last_stoptrack;
 +  const std::uint32_t d_polar_star = now_polar_star - _last_polar_star;
@@ -356,10 +356,10 @@ index 8ccf548..558d8f6 100644
 +  _last_polar_star = now_polar_star;
 +  _last_silent_irq = now_silent_irq;
 +
-+  // Snapshot of the live g_pixtone_active_count (instantaneous, not
++  // Snapshot of the live g_dos_sfx_synth_active_count (instantaneous, not
 +  // delta) -- useful for ground-truth cross-check against the
 +  // histogram's max bucket when SFX channels are mid-play at emit time.
-+  const std::uint32_t live_active = g_pixtone_active_count;
++  const std::uint32_t live_active = g_dos_sfx_synth_active_count;
 +
 +  LOG_INFO("[pixtone-multi block={} samples={} active min={} med={} p90={} "
 +           "max={} live={} stoptrack={} polarstar={} silent_irq={}]",
@@ -385,10 +385,10 @@ index 8ccf548..558d8f6 100644
 @@ -8192 +8364,36 @@ bool drawtile_fast_bg_active() { return ::NXE::Graphics::_abl_drawtile_fast_bg()
  }}
 +
-+// DOS-PORT (patch 0165, Pixtone multi-source probe): SamplePixtoneActiveBucket
++// DOS-PORT (patch 0165, Pixtone multi-source probe): SampleSfxSynthActiveBucket
 +// definition. Same file-scope-after-both-namespace-closes placement as the
 +// other NXE::Diag accessors. Forwards into NXE::Graphics for the probe
-+// killswitch + bucket array. Reads g_pixtone_active_count via the extern
++// killswitch + bucket array. Reads g_dos_sfx_synth_active_count via the extern
 +// "C" decl in NXE::Graphics's extern block.
 +//
 +// Bucket boundaries: [0], [1], [2], [3-5], [6-10], [11+]. The five
@@ -404,11 +404,11 @@ index 8ccf548..558d8f6 100644
 +// + 32-bit aligned single-word writes are race-tolerant per CLAUDE.md
 +// threading-zero invariant.
 +namespace NXE { namespace Diag {
-+void SamplePixtoneActiveBucket()
++void SampleSfxSynthActiveBucket()
 +{
 +  if (!::NXE::Graphics::pixtone_probe_active())
 +    return;
-+  const std::uint32_t n = g_pixtone_active_count;
++  const std::uint32_t n = g_dos_sfx_synth_active_count;
 +  int b;
 +  if      (n == 0)  b = 0;
 +  else if (n == 1)  b = 1;
@@ -426,7 +426,7 @@ index bca66f9..8be96e7 100644
 @@ -391,2 +391,13 @@ void SDLCALL organyaStreamCallback(void *userdata, SDL_AudioStream *stream,
    NXE::Diag::AudioMixerTimer _amt;
 +
-+  // patch 0165 (Pixtone multi-source probe): sample g_pixtone_active_count
++  // patch 0165 (Pixtone multi-source probe): sample g_dos_sfx_synth_active_count
 +  // into a 6-bucket histogram at audio-buffer-fill cadence (~43 Hz Tier-2).
 +  // Single volatile read + bucket inc; race-tolerant (single-writer audio
 +  // thread, single-reader render thread at audit-flush boundary). Probe-
@@ -434,7 +434,7 @@ index bca66f9..8be96e7 100644
 +  // cache-OFF byte-identical to pre-0165. Captures SFX-storm bursts that
 +  // collapse within one render frame, which a coarser (every-10-flips)
 +  // cadence would miss by definition.
-+  NXE::Diag::SamplePixtoneActiveBucket();
++  NXE::Diag::SampleSfxSynthActiveBucket();
 +
    if (additional_amount <= 0) return;
 diff --git a/src/sound/Pixtone.cpp b/src/sound/Pixtone.cpp
@@ -442,11 +442,11 @@ index ead8f2a..5407538 100644
 --- a/src/sound/Pixtone.cpp
 +++ b/src/sound/Pixtone.cpp
 @@ -46,2 +46,11 @@ extern "C" {
-   volatile std::uint32_t g_pixtone_active_count = 0;
+   volatile std::uint32_t g_dos_sfx_synth_active_count = 0;
 +
 +  // patch 0165 (Phase 11 -- Pixtone multi-source probe). Counter defs;
 +  // extern decls in Pixtone.h. Same C-linkage + extern "C" {} block
-+  // pattern as g_pixtone_active_count (avoids the GCC extern-with-init
++  // pattern as g_dos_sfx_synth_active_count (avoids the GCC extern-with-init
 +  // warning). Unconditional volatile inc at the call sites; the probe
 +  // killswitch gates only the [pixtone-multi] block-emit + histogram
 +  // sample reads, not the counter increments.
@@ -472,7 +472,7 @@ diff --git a/src/sound/Pixtone.h b/src/sound/Pixtone.h
 index d593229..d70e4ea 100644
 --- a/src/sound/Pixtone.h
 +++ b/src/sound/Pixtone.h
-@@ -38,2 +38,30 @@ extern "C" volatile std::uint32_t g_pixtone_active_count;
+@@ -38,2 +38,30 @@ extern "C" volatile std::uint32_t g_dos_sfx_synth_active_count;
  
 +// patch 0165 (Phase 11 -- Pixtone multi-source probe). Two new counters
 +// for the [pixtone-multi] block audit + hypothesis A/B discrimination:
@@ -492,9 +492,9 @@ index d593229..d70e4ea 100644
 +// only the slot-index abstraction, enum identity is lost there).
 +//
 +// Same single-volatile-uint write-by-engine + read-by-audit pattern
-+// as g_pixtone_active_count; no atomics; no memory barriers; cache-
++// as g_dos_sfx_synth_active_count; no atomics; no memory barriers; cache-
 +// OFF byte-identical at game state (volatile inc is not a game-state
-+// mutation). The probe killswitch SDL_HINT_DOSKUTSU_PIXTONE_PROBE
++// mutation). The probe killswitch SDL_HINT_DOS_SFX_SYNTH_PROBE
 +// gates only the [pixtone-multi] block-emit + the histogram-sample
 +// bucket reads; the counters themselves increment unconditionally so
 +// both PLAY0 (probe off) and PLAY1 (probe on) cells have valid

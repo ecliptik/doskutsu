@@ -23,7 +23,7 @@ inert or default-behavior-preserving unless noted.
   gameplay) rather than a visual change. Measured on real Mach64
   hardware: 27.3 -> 30.4 fps, clearing the target. This lever is not
   specific to the Mach64 -- it applies to every supported video card.
-  (Patch 0328, on by default; `SDL_HINT_DOSKUTSU_BG_BLANK_SKIP=0`
+  (Patch 0328, on by default; `SDL_HINT_DOS_BG_BLANK_SKIP=0`
   disables it if ever needed.)
 
 ## [1.6.5] - 2026-08-06
@@ -58,7 +58,7 @@ outside TAS behaves differently.
 
 ### Added
 
-- `SDL_HINT_DOSKUTSU_TAS_TRACE=1` emits a `[tas-trace]` tick-stream trace
+- `SDL_HINT_DOS_TAS_TRACE=1` emits a `[tas-trace]` tick-stream trace
   (tick, mode, map, player position, input mask) from both tick paths.
   Diffing a record trace against a replay trace localises any future
   divergence to an exact tick. Default off. (Patch 0282.)
@@ -71,7 +71,7 @@ outside TAS behaves differently.
   made replays do less logic work per frame than real gameplay, which
   inflated measured framerates. Since these replays exist to benchmark
   hardware, playback must behave exactly as normal play does. Opt in with
-  `SDL_HINT_DOSKUTSU_TAS_FT_GUARD=1`. (Patches 0281, 0284.)
+  `SDL_HINT_DOS_TAS_FT_GUARD=1`. (Patches 0281, 0284.)
 
   Recordings made before this release replay correctly; the file format is
   unchanged. A reel captured while the interim clamp was active recorded a
@@ -100,7 +100,7 @@ outside TAS behaves differently.
   killswitch that is off by default, so TAS runs never received it. The gate
   now also fires whenever a TAS record or replay stream is open. Ordinary play
   is untouched: with no TAS stream the gate is unchanged, making this a no-op
-  outside TAS. Killswitch `SDL_HINT_DOSKUTSU_TAS_FT_GUARD=0` restores the
+  outside TAS. Killswitch `SDL_HINT_DOS_TAS_FT_GUARD=0` restores the
   previous behaviour. (nxengine-evo patch 0280.)
 
   Existing `.TAS` recordings remain valid -- the file format is unchanged and
@@ -119,7 +119,7 @@ QA pass following this release.
   the configured voice count) instead of the v1.6.2 reference tone.
 - **Sound-effects cache.** Pixtone effects are rendered once and cached to
   `CACHE\PXT\`, so later launches skip the render. Default-on;
-  `SDL_HINT_DOSKUTSU_PXT_AUTOCACHE=0` disables.
+  `SDL_HINT_DOS_PXT_AUTOCACHE=0` disables.
 - **Redesigned Sound menu.** "Music Type" is a three-state row (Organya /
   MIDI / No Music) with a separate "Select Music Card" hardware picker
   (Auto-detect / Sound Blaster (OPL3 FM) / AdLib / WaveBlaster / General MIDI /
@@ -176,7 +176,7 @@ changes from 1.6.1. g2k-validated on the reference machine.
   (OPL2 music, no DAC), the game now emits minimal PC-speaker beeps for jumping,
   picking up items, and menu confirmation, so an OPL-only machine has audible
   effect feedback. Hardware square-wave tones on PIT channel 2; default-on,
-  `SDL_HINT_DOSKUTSU_PCSPK_SFX=0` disables.
+  `SDL_HINT_DOS_PCSPK_SFX=0` disables.
 - **SETUP audio test for the Gravis UltraSound.** SETUP now drives the GF1
   directly (no Sound Blaster device), so a GUS / PicoGUS machine can verify its
   wavetable card from the "Test music" and "Test sound effects" buttons.
@@ -208,7 +208,7 @@ changes from 1.6.1. g2k-validated on the reference machine.
   entering a new area could emit a brief screech while the level loaded. The
   load-time audio-silence flush now also quiesces the effect mixer, so no stale
   effect is re-injected into the DMA buffer during the blocking load. Default-on;
-  `SDL_HINT_DOSKUTSU_LOADSTAGE_SILENCE=0` disables it.
+  `SDL_HINT_DOS_LOADSTAGE_SILENCE=0` disables it.
 - **SETUP GUS "Test music" was silent on a PicoGUS.** It now plays an audible
   reference tone through the card's confirmed wavetable path.
 - **SETUP showed "DMA 0" for a PicoGUS.** The DMA field is now seeded from the
@@ -243,10 +243,10 @@ public-release code review. No behavior change on the reference target.
 - **Banked VESA blit corrupted frames on cards whose bank granularity is
   smaller than the window size** (a legal, not-rare VBE configuration). The
   multi-bank walk now recomputes the bank from the VRAM offset each step.
-  Default-on; `SDL_HINT_DOSKUTSU_BANK_GRAN_FIX=0` restores the old walk.
+  Default-on; `SDL_HINT_DOS_BANK_GRAN_FIX=0` restores the old walk.
 - **Unbounded vertical-blank wait could hang the machine** on a display mode
   whose retrace bit never toggles. The wait is now time-bounded.
-  Default-on; `SDL_HINT_DOSKUTSU_VBLANK_BOUND=0` restores the old spin.
+  Default-on; `SDL_HINT_DOS_VBLANK_BOUND=0` restores the old spin.
 - **`GUS_VOICES=28` (the PicoGUS silent voice count) is now nudged to 27**
   instead of being accepted verbatim, with a log line explaining why.
 - **Two log format strings that crashed to DOS at runtime** (an unimplemented
@@ -270,7 +270,7 @@ real GUS or a PicoGUS in `/mode gus`. The complete GUS campaign, g2k-validated.
 
 ### Added
 
-- **Native GUS audio backend** (`SDL_HINT_DOSKUTSU_AUDIO_BACKEND=gus`). Music is
+- **Native GUS audio backend** (`SDL_HINT_DOS_AUDIO_BACKEND=gus`). Music is
   General MIDI rendered on the GF1 wavetable using GM `.pat` instruments loaded
   from the card's `ULTRASND`/`ULTRADIR` patch directory, and Pixtone sound
   effects play on the GF1 alongside the music -- no Sound Blaster required.
@@ -322,7 +322,7 @@ chip and no Sound Blaster.
 
 ### Added
 
-- **AdLib / OPL-FM music backend** (`SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib`).
+- **AdLib / OPL-FM music backend** (`SDL_HINT_DOS_AUDIO_BACKEND=adlib`).
   DOSKUTSU now plays music on an OPL/AdLib-only system with **no Sound Blaster**
   -- e.g. a real AdLib card, or a PicoGUS in `/mode adlib`. A PIT/IRQ-0 timer
   drives the music clock (no SB interrupt needed) and a 9-voice OPL2 backend
@@ -332,7 +332,7 @@ chip and no Sound Blaster.
   at the divided rate; the timer is restored on exit). g2k-validated on a PicoGUS
   in AdLib mode. (If both this and `..._AUDIO_OFF=1` are set, the explicit AdLib
   request wins.)
-- `SDL_HINT_DOSKUTSU_OPL_TIMER_HZ` -- AdLib music-pump tick rate (default 120).
+- `SDL_HINT_DOS_OPL_TIMER_HZ` -- AdLib music-pump tick rate (default 120).
 
 ## [1.4.1] - 2026-06-22
 
@@ -378,11 +378,11 @@ PicoGUS jumpered IRQ 5 / DMA 1, DreamBlaster on its WaveBlaster header).
   16-bit DMA and uses the 8-bit playback path automatically -- SFX, Organya,
   OPL3 FM, and WaveBlaster MIDI all work. Real SB16 cards (e.g. Sound Blaster
   Vibra16) are unaffected: their 16-bit path is byte-identical to before.
-- **`SDL_HINT_DOSKUTSU_AUDIO_SB_FORCE_8BIT`** -- force the 8-bit playback path
+- **`SDL_HINT_DOS_AUDIO_SB_FORCE_8BIT`** -- force the 8-bit playback path
   regardless of the card's reported DSP version (for an 8-bit card that still
   reports DSP 4.x with an `H` token present in `BLASTER`). Default off. See
   `docs/CONFIG.md`.
-- **`SDL_HINT_DOSKUTSU_AUDIO_SB_8BIT_STEREO`** -- restore the legacy SB Pro 8-bit
+- **`SDL_HINT_DOS_AUDIO_SB_8BIT_STEREO`** -- restore the legacy SB Pro 8-bit
   stereo output on the 8-bit path (the default is mono, which is correct for
   SB-2.0-class cards). Default off.
 
@@ -403,7 +403,7 @@ items validated on the reference 486 DX2-66 (S3 ViRGE / Cirrus / ATI Mach64).
 
 ### Added
 
-- **Optional high-quality Organya tier.** `SDL_HINT_DOSKUTSU_AUDIO_TIER2=0`
+- **Optional high-quality Organya tier.** `SDL_HINT_DOS_AUDIO_TIER2=0`
   switches Organya music to a 22050 Hz true-stereo pre-render (the default
   stays the lighter 11025 Hz mono tier). The HQ tier costs noticeably more CPU
   on a 486, so it is opt-in; build its cache with `make org-cache TIER=1`. See
@@ -449,12 +449,12 @@ gameport flightstick); keyboard + joystick coexistence validated under DOSBox-X.
 - **Gameport joystick / flightstick support.** `DOSKUTSU_USE_JOYSTICK=1` enables
   the 2-axis / 4-button gameport. A bounded direct-port (0x201) read keeps the
   per-frame cost low (the legacy BIOS read cost ~80 ms/frame); killswitch
-  `SDL_HINT_DOSKUTSU_JOY_DIRECTREAD=0`. The stick drives movement (axes) and
+  `SDL_HINT_DOS_JOY_DIRECTREAD=0`. The stick drives movement (axes) and
   actions (buttons) alongside the keyboard.
-- **Invert Y axis** (`DOSKUTSU_JOY_INVERT_Y=1`) for flightsticks whose pitch
+- **Invert Y axis** (`DOS_PORT_JOY_INVERT_Y=1`) for flightsticks whose pitch
   reads opposite the platformer convention, plus a stored calibration
-  (`SDL_HINT_DOSKUTSU_JOY_CAL`) and a troubleshooting read cap
-  (`SDL_HINT_DOSKUTSU_JOY_CAP`).
+  (`SDL_HINT_DOS_JOY_CAL`) and a troubleshooting read cap
+  (`SDL_HINT_DOS_JOY_CAP`).
 
 ### Fixed
 
@@ -475,9 +475,9 @@ unchanged (the two fixes live in menus). Validated on the reference 486 DX2-66
 
 - **Custom MIDI drop-in directories (#39b).** A user can drop their own General
   MIDI set into `data/<name>/` (>=1 `.mid`) and select it -- via SETUP.EXE or
-  `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=<name>` -- instead of the bundled
+  `SDL_HINT_DOS_AUDIO_MIDI_SOURCE=<name>` -- instead of the bundled
   `wiimidi` / `orgmid` sets. An unknown or empty name falls back to `wiimidi`
-  with no behavior change; killswitch `SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS=0`
+  with no behavior change; killswitch `SDL_HINT_DOS_AUDIO_MIDI_CUSTOM_DIRS=0`
   disables the feature. SETUP's music-set picker scan now widens to list
   drop-in dirs. See `docs/ASSETS.md` and `docs/CONFIG.md`.
 
@@ -487,17 +487,17 @@ unchanged (the two fixes live in menus). Validated on the reference 486 DX2-66
   stale `640x480` while the DOS render mode is hard-locked to `320x240`; it now
   reports the locked `320x240` and the Resolution scroll is acknowledged without
   a spurious "Resolution change failed" popup. Killswitch
-  `SDL_HINT_DOSKUTSU_RES_LABEL_LOCK=0` restores the prior behavior.
+  `SDL_HINT_DOS_RES_LABEL_LOCK=0` restores the prior behavior.
 - **Menu slide-in animation speed (item 3).** The teleporter StageSelect "WARP"
   banner and the save/load SaveSelect character pic slid in at the ~30 fps render
   rate instead of the authored 50 Hz logic rate under fixed-timestep; the slide
   step now advances in the 50 Hz logic half. Killswitch
-  `SDL_HINT_DOSKUTSU_MENU_SLIDE_FT=0` restores the prior behavior.
+  `SDL_HINT_DOS_MENU_SLIDE_FT=0` restores the prior behavior.
 
 ### Internal
 
 - **Exit-stage diagnostic markers (item 2).** Opt-in shutdown-path diagnostic
-  (`SDL_HINT_DOSKUTSU_EXIT_MARKERS=1`, default-OFF) that brackets the
+  (`SDL_HINT_DOS_EXIT_MARKERS=1`, default-OFF) that brackets the
   post-`SDL_Quit` teardown; no production behavior change. Diagnostic only.
 
 ## [1.1.1] - 2026-06-16
@@ -546,7 +546,7 @@ on the reference 486 DX2-66 (SB16 + DreamBlaster S2).
 - **WaveBlaster (hardware-MIDI / MPU-401) music in-game.** Selecting the WaveBlaster
   backend plays the music through a wavetable daughterboard (e.g. DreamBlaster S2 on
   the SB16 header), default-on (cold-init + paced) when chosen. Killswitch
-  `SDL_HINT_DOSKUTSU_AUDIO_WB_COLD_INIT=0`.
+  `SDL_HINT_DOS_AUDIO_WB_COLD_INIT=0`.
 
 ### Fixed
 
@@ -583,13 +583,13 @@ is still OPL3/WaveBlaster (auto-detect), unchanged.
   sheets were lazy-decoded from the CF card on the first shot/impact of a session -- a
   one-time hitch on the 486. They are now eager-loaded into the stage-load band so the
   first fire does not decode mid-gameplay. Default-ON; killswitch
-  `SDL_HINT_DOSKUTSU_EAGER_ACTION_SHEETS=0`. (`patches/nxengine-evo/0213`.)
+  `SDL_HINT_DOS_EAGER_ACTION_SHEETS=0`. (`patches/nxengine-evo/0213`.)
 - **Organya cold-render stale-music blip.** When an Organya song is cold-rendered (the
   first play of an uncached song), the blocking synth pass briefly starves the audio
   pull; the SB16 ring previously looped stale music for that window. The ring and the
   DMA double-buffer are now zero-flushed before the render, so the gap is clean silence
   instead of a stutter or click. Default-ON; killswitch
-  `SDL_HINT_DOSKUTSU_ORG_RENDER_QUIESCE=0`.
+  `SDL_HINT_DOS_ORG_RENDER_QUIESCE=0`.
   (`patches/nxengine-evo/0214`, `patches/SDL/0092`.)
 
 ### Added
@@ -597,7 +597,7 @@ is still OPL3/WaveBlaster (auto-detect), unchanged.
 - **Organya pre-render-to-cache batch mode.** A one-shot mode renders every Organya
   song to its PCM cache up front, eliminating the ~13-30 s per-song cold-render that
   otherwise occurs on first play on the 486. Run the game once with
-  `DOSKUTSU_ORG_PRECACHE_ALL=1` to generate the cache (tier-scoped, e.g.
+  `DOS_PORT_ORG_PRECACHE_ALL=1` to generate the cache (tier-scoped, e.g.
   `CACHE\11025_1\` for the 11025 Hz mono Tier-2 set -- ~46 MB across 41 songs), then
   copy that cache directory onto the CF card alongside the game; subsequent plays
   fast-load every song with no render stall. The cache is version-keyed to the build,
@@ -633,7 +633,7 @@ song to a cached PCM buffer so the playback pull is a near-free memory copy.
 - **Organya device-rate fix (SDL3-DOS).** The SB16 PCM device now opens at the engine
   content rate (11025 Hz in Tier-2) instead of the SDL 44100 floor, removing a 4x ring
   drain and a 4x logical-to-physical resampler. Default-ON; killswitch
-  `SDL_HINT_DOSKUTSU_DOS_AUDIO_DEVICE_RATE_DEFAULT=0` restores the 44100 floor.
+  `SDL_HINT_DOS_DOS_AUDIO_DEVICE_RATE_DEFAULT=0` restores the 44100 floor.
   (`patches/SDL/0087`, `0088`, `0090`; `patches/nxengine-evo/0205`.)
 - **Organya pre-render with on-disk PCM cache.** Each Organya song loop is synthesized
   once to a static PCM buffer (the per-frame producer is then a memory copy, with no
@@ -641,7 +641,7 @@ song to a cached PCM buffer so the playback pull is a near-free memory copy.
   cost is paid one time per song ever; subsequent plays fast-load from the CF card. A
   song that changes mid-gameplay before it has been cached falls back to live synthesis
   (slower, never a freeze) and is cached at the next stage load so the re-encounter is
-  real-time. Default-ON; killswitch `SDL_HINT_DOSKUTSU_ORG_PRERENDER=0` reverts to the
+  real-time. Default-ON; killswitch `SDL_HINT_DOS_ORG_PRERENDER=0` reverts to the
   v1.0.7 live-synth path. The cache is version-keyed on the build fingerprint and
   auto-invalidates on any binary change. (`patches/nxengine-evo/0206`, `0207`, `0208`,
   `0209`.) Confirmed on the reference 486 (DX2-66): real-time Organya tempo at playable
@@ -650,7 +650,7 @@ song to a cached PCM buffer so the playback pull is a near-free memory copy.
 ### Notes
 
 - **`opl3` / MIDI remains the recommended default backend** for 486 gameplay
-  (`SDL_HINT_DOSKUTSU_AUDIO_BACKEND=opl3`); it is unchanged from v1.0.7 and has the best
+  (`SDL_HINT_DOS_AUDIO_BACKEND=opl3`); it is unchanged from v1.0.7 and has the best
   performance. Organya is an opt-in alternative. The OPL3 and WaveBlaster paths are
   byte-identical to v1.0.7 -- the pre-render pump engages only when Organya is the
   active backend.
@@ -674,7 +674,7 @@ path or to the OPL3 / WaveBlaster audio paths.
   Organya ring stopped being serviced. Fixed by an in-band cooperative yield on the
   SDL3-DOS audio WaitDevice room-path -- the audio thread now yields to the main
   thread per chunk so the ring stays fed. **Default-ON**; killswitch
-  `SDL_HINT_DOSKUTSU_DOS_AUDIO_COOP_YIELD=0` restores the pre-fix blocking behavior.
+  `SDL_HINT_DOS_DOS_AUDIO_COOP_YIELD=0` restores the pre-fix blocking behavior.
   Confirmed on the reference 486 (DX2-66): a deterministic 110-second Mimiga Village
   heavy-Organya replay runs to completion with a clean exit.
 
@@ -682,7 +682,7 @@ path or to the OPL3 / WaveBlaster audio paths.
 
 - Organya gameplay on 486-class hardware remains tempo-limited by synthesizer
   throughput (a future cheaper-synth effort is planned); **`opl3` is recommended
-  for 486 gameplay** (`SDL_HINT_DOSKUTSU_AUDIO_BACKEND=opl3`). The Bug-5 hang fix
+  for 486 gameplay** (`SDL_HINT_DOS_AUDIO_BACKEND=opl3`). The Bug-5 hang fix
   above applies regardless of the selected backend.
 
 ## [1.0.6] - 2026-05-29
@@ -693,9 +693,9 @@ and audio behavior is identical to v1.0.5 plus one default flip on a debug-path 
 ### Changed
 
 - The backdrop-cache-disabled title-clamp added in v1.0.5
-  (`SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP`) is now **on by default** (set `=0` to
+  (`SDL_HINT_DOS_BLITPATTERN_CLAMP`) is now **on by default** (set `=0` to
   disable). The default render path (backdrop cache on) is unaffected either way; this
-  activates the clamp for the `SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` debug/fallback
+  activates the clamp for the `SDL_HINT_DOS_BACKDROP_CACHE=0` debug/fallback
   config as well, where it was confirmed clean on the reference machine.
 - The bundled third-party-licenses file is renamed `THIRD-PARTY.TXT` -> `3RDPARTY.TXT`
   so every file in the distribution archive is a strict DOS 8.3 name (no `THIRD-~1.TXT`
@@ -713,11 +713,11 @@ backdrop-cache-disabled title render path (a debug/fallback config, not the defa
 ### Fixed
 
 - **Title-screen clouds clipped with the backdrop cache disabled** -- with
-  `SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` (a debug/fallback config), the title
+  `SDL_HINT_DOS_BACKDROP_CACHE=0` (a debug/fallback config), the title
   backdrop dropped its lower clouds on real hardware, from a one-row out-of-bounds
   read in the layered pattern blit. The default render path (backdrop cache on) was
   never affected -- it clips the read harmlessly. New opt-in
-  `SDL_HINT_DOSKUTSU_BLITPATTERN_CLAMP=1` clamps the blit's source height to the
+  `SDL_HINT_DOS_BLITPATTERN_CLAMP=1` clamps the blit's source height to the
   texture bounds; confirmed on the reference machine. Ships off by default (the
   default path has no out-of-bounds read), so v1.0.5 is production-identical to
   v1.0.4.
@@ -750,7 +750,7 @@ are default-ON with killswitches and were validated on the reference machine
   emulator's fast render, but exposed on the reference machine's slower
   per-rendered-frame camera delta, where the uncovered rows showed through as
   black. Fixed by `patches/nxengine-evo/0183`
-  (`SDL_HINT_DOSKUTSU_THRASH_FULLCOVER`, default-ON): the cached backdrop now
+  (`SDL_HINT_DOS_THRASH_FULLCOVER`, default-ON): the cached backdrop now
   full-covers on every render path. Operator-confirmed on g2k -- black gone in
   water caves, Mimiga Village, and the Farm-cave entry. Killswitch `=0` restores
   the previous clip behavior.
@@ -758,10 +758,10 @@ are default-ON with killswitches and were validated on the reference machine
 - **First-frame disk stalls on title and stage entry** -- two reads the IO-audit
   gate flagged as deferred to gameplay phase. The title screen loaded its music and
   backdrop inside the game loop (now reclassified as a scene-load via
-  `patches/nxengine-evo/0184`, `SDL_HINT_DOSKUTSU_EAGER_TITLE_IO`), and each
+  `patches/nxengine-evo/0184`, `SDL_HINT_DOS_EAGER_TITLE_IO`), and each
   stage's entry music decoded on the first gameplay frame from its `<CMU>` script
   command (now preloaded during stage load via `patches/nxengine-evo/0185`,
-  `SDL_HINT_DOSKUTSU_PRELOAD_STAGE_MUSIC`, which peeks the stage's entry event for
+  `SDL_HINT_DOS_PRELOAD_STAGE_MUSIC`, which peeks the stage's entry event for
   its first song and starts it before play begins). The IO-audit gate now passes
   with zero non-allowlisted gameplay-phase disk reads; its allowlist was trimmed so
   a regression of either load re-trips the gate. Both default-ON; killswitches `=0`.
@@ -782,13 +782,13 @@ Cirrus CL-GD5430 / SB16 PnP + DreamBlaster S2).
   g2k). Root cause of the prior non-function: an over-broad "do not poll MPU-401
   status" generalization. Fixed in `patches/SDL/0080` by polling the bit-6 DRR
   (Data-Read-Ready) flag before every MPU-401 write (UART entry + per byte) and
-  flipping `SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT` default to ON; the
+  flipping `SDL_HINT_DOS_AUDIO_WB_DIRECT_PORT` default to ON; the
   auto-detect chain (WB -> OPL3 -> Organya) now selects WB without an env
   override. Operator-validated: distinct, correct wavetable timbre across songs
   in Mimiga Village + First Cave; PicoGUS (USB mode) coexistence confirmed.
 
 - **Permanent gameplay-IO-audit dev gate** -- `make io-gate` (also run by
-  `make smoke`) drives DOSBox-X with `SDL_HINT_DOSKUTSU_IO_AUDIT=1` and FAILs
+  `make smoke`) drives DOSBox-X with `SDL_HINT_DOS_IO_AUDIT=1` and FAILs
   the build if any disk IO is deferred to gameplay phase (the bug class behind
   the SFX pause). The gate is a sprite-sheet re-decode detector: a sheet decoded
   more than once at `phase=gameplay` means the per-cave flush regressed. Backed
@@ -808,13 +808,13 @@ Cirrus CL-GD5430 / SB16 PnP + DreamBlaster S2).
   (bullets, carets) only blit when the player fires/bonks, so their sheets
   cold-load mid-gameplay -- the operator-perceived "loads from disk" pause, which
   was the right instinct (it is disk IO, for the sprite, not the sound). Fixed by
-  `patches/nxengine-evo/0178` (`SDL_HINT_DOSKUTSU_SKIP_SHEET_FLUSH`, default-ON):
+  `patches/nxengine-evo/0178` (`SDL_HINT_DOS_SKIP_SHEET_FLUSH`, default-ON):
   sprite sheets stay resident across cave transitions instead of being flushed +
   re-decoded. Operator-confirmed on g2k: pause gone, stage-load times unchanged.
   Killswitch `=0` restores the old flush behavior. (An eager-reload alternative
   -- re-decode all sheets up front at load time -- was also built and confirmed
   to fix the pause but added ~10 s to each cave load; it is kept default-OFF as a
-  low-RAM option via `SDL_HINT_DOSKUTSU_EAGER_SHEET_RELOAD=1`. The shipped
+  low-RAM option via `SDL_HINT_DOS_EAGER_SHEET_RELOAD=1`. The shipped
   resident-sheet approach costs ~5-25 MB RAM, comfortable on the 48 MB target.)
 
 ### Changed
@@ -831,11 +831,11 @@ refuted fix-candidates and one-off probes from the narrowing campaign were
 dropped, leaving a clean stack):
 
 - `patches/nxengine-evo/0175` -- `load_stage` per-phase wall-clock trace
-  (`SDL_HINT_DOSKUTSU_LOADSTAGE_TRACE`); owns the shared per-cave counter.
+  (`SDL_HINT_DOS_LOADSTAGE_TRACE`); owns the shared per-cave counter.
 - `patches/nxengine-evo/0176` -- sprite sheet-load trace
-  (`SDL_HINT_DOSKUTSU_SHEETLOAD_TRACE`).
+  (`SDL_HINT_DOS_SHEETLOAD_TRACE`).
 - `patches/nxengine-evo/0179` -- frame-spike detector + fire-dispatch path
-  bracket (`SDL_HINT_DOSKUTSU_FRAME_SPIKE_DETECT` / `..._FIREPATH_TRACE`); the
+  bracket (`SDL_HINT_DOS_FRAME_SPIKE_DETECT` / `..._FIREPATH_TRACE`); the
   no-fixed-window frame-spike detector is what finally localized Bug 1.
 
 ### Known issues
@@ -843,7 +843,7 @@ dropped, leaving a clean stack):
 - **Backdrop-cache vertical-scroll black-on-jump** -- in caves with a low
   backdrop area (most visibly water rooms), part of the parallax backdrop
   renders black during a jump (camera-Y pan) and fills in on landing. Traced to
-  the DOS-PORT backdrop cache (`SDL_HINT_DOSKUTSU_BACKDROP_CACHE=0` disables it
+  the DOS-PORT backdrop cache (`SDL_HINT_DOS_BACKDROP_CACHE=0` disables it
   and confirms the cause, but costs perf + an incomplete title backdrop, so the
   killswitch is not a ship default). Real fix (cache to cover the vertical
   scroll range) is queued for a later release. Long-standing; not introduced
@@ -883,7 +883,7 @@ operator-validated on real hardware (486DX2-66) and cross-CPU benchmarked
 - **Stage-load freezes mechanically closed (Bug 3)** -- ~1-second freezes
   on stage transitions traced to CPU-bound MIDI parse work (`curly.mid`'s
   5684-event parse at ~480 PPQ tempo resolution). The existing
-  `SDL_HINT_DOSKUTSU_PRELOAD_MIDI=1` killswitch (`patches/nxengine-evo/0112`
+  `SDL_HINT_DOS_PRELOAD_MIDI=1` killswitch (`patches/nxengine-evo/0112`
   + `0114` from the wave 18-63 arc) eliminates the spike class on real HW
   (count > 500 ms went 4 -> 0; max went 1095 -> 414 ms). Available via the
   killswitch (`=1`); the default-ON flip is deferred to a later release.
@@ -920,17 +920,17 @@ operator-validated on real hardware (486DX2-66) and cross-CPU benchmarked
   (MIDI tick from ISR), and the auto-RATEDIV + SB16 mixer balance are all
   default-ON as of `patches/SDL/0075` + `patches/nxengine-evo/0170`, so the
   fixes apply out of the box. Each is independently disablable as a
-  killswitch (`SDL_HINT_DOSKUTSU_PIXTONE_IRQ_MIX=0`,
-  `SDL_HINT_DOSKUTSU_MIDI_ISR_TICK=0`, `SDL_HINT_DOSKUTSU_SB16_MIXER_PROGRAM=0`);
-  the SFX/music balance is tunable via `SDL_HINT_DOSKUTSU_SB16_FM_VOL` /
-  `SDL_HINT_DOSKUTSU_SB16_VOICE_VOL` (0..31). The operator-validated default
+  killswitch (`SDL_HINT_DOS_SFX_SYNTH_IRQ_MIX=0`,
+  `SDL_HINT_DOS_MIDI_ISR_TICK=0`, `SDL_HINT_DOS_SB16_MIXER_PROGRAM=0`);
+  the SFX/music balance is tunable via `SDL_HINT_DOS_SB16_FM_VOL` /
+  `SDL_HINT_DOS_SB16_VOICE_VOL` (0..31). The operator-validated default
   balance is FM 28 / voice 31.
 
 - **Build infrastructure** -- the Makefile's sdl3 cmake configure step
   adds `-DSDL_TESTS=OFF` to skip SDL3 test executables (loopwave, surround,
   resample, chkkeys). These are not shipped or used in the doskutsu.exe
   link path, and they fail to link against engine-side externs
-  (`g_pixtone_active_count`) introduced for the Pixtone probe. Build-config-
+  (`g_dos_sfx_synth_active_count`) introduced for the Pixtone probe. Build-config-
   only change; doskutsu.exe behavior unaffected.
 
 - **Smoke gate banner-emit array** -- `tests/run-gameplay-smoke.sh`
@@ -955,7 +955,7 @@ operator-validated on real hardware (486DX2-66) and cross-CPU benchmarked
 
 - **Lever 3 + Organya hard-freeze (Bug 5)** -- deferred to v1.0.2. Only
   reachable if a user opts into the legacy Organya synth
-  (`SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya`) AND Lever 3; the default OPL3
+  (`SDL_HINT_DOS_AUDIO_BACKEND=organya`) AND Lever 3; the default OPL3
   backend is unaffected, and a defensive interlock forces Lever 3 off under
   Organya. The underlying Organya-path freeze itself is a separate v1.0.2
   investigation.
@@ -971,7 +971,7 @@ killswitch env-vars for future investigation:
 - `patches/SDL/0066-0068` -- Bug 1 fix series (audio-thread hard-park +
   pump export + TryLock + timeout backstop).
 - `patches/SDL/0069` -- cumulative silent-IRQ counter export
-  (`doskutsu_audio_silent_irq_count`); part of the Pixtone probe wiring.
+  (`dos_port_audio_silent_irq_count`); part of the Pixtone probe wiring.
 - `patches/SDL/0070` -- v2 Pixtone probe `pix_active` histogram +
   `irq_count` delta fold-in to `[sdl-audiocb]` emit; closes the
   Organya-callback-vs-OPL3-backend wiring gap from v1.
@@ -1009,12 +1009,12 @@ foundation across the wave 18-63 arc.
 
 ### Added
 
-- **Three selectable music backends**, chosen with the `SDL_HINT_DOSKUTSU_AUDIO_BACKEND`
+- **Three selectable music backends**, chosen with the `SDL_HINT_DOS_AUDIO_BACKEND`
   environment variable: `opl3` (default -- SB16 / Sound Blaster Pro 2 OPL3 FM synth;
   moving music off the CPU's software mixer is worth ~+8.77 fps at the canonical
   scene), `organya` (the original 2004 `.org` software synthesizer -- faithful
   timbre), and `wb` (WaveBlaster header daughterboard). MIDI source files select
-  independently via `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` (`wiimidi` / `orgmid`).
+  independently via `SDL_HINT_DOS_AUDIO_MIDI_SOURCE` (`wiimidi` / `orgmid`).
 - **Render + audio optimization (waves 18-55).** Real-HW median climbed from the
   0.1.0 ~25 fps title to a ~30 fps production floor at the canonical Mimiga Village
   heavy-music scene. Headline wins: OPL3 audio offload, the backdrop render cache +
@@ -1027,9 +1027,9 @@ foundation across the wave 18-63 arc.
   render lever has been measured to conclusion; the remaining gap to Cave Story's
   50 fps design rate is bounded by the reference PC's memory bandwidth and is not
   recoverable in software on the faithful render path. An opt-in **Performance
-  Mode** (`SDL_HINT_DOSKUTSU_PERF_MODE`, graduated fidelity reduction) trades
+  Mode** (`SDL_HINT_DOS_PERF_MODE`, graduated fidelity reduction) trades
   visual detail for fps; its faithful-tier cuts measured flat on real hardware.
-- **Fixed-Timestep mode -- now the default** (`SDL_HINT_DOSKUTSU_FIXED_TIMESTEP`).
+- **Fixed-Timestep mode -- now the default** (`SDL_HINT_DOS_FIXED_TIMESTEP`).
   NXEngine couples game logic 1:1 to render, so at a ~30 fps render the game played
   at ~60% of its authored 50 Hz speed ("sluggish"). Fixed-Timestep advances logic
   on a fixed 50 Hz accumulator decoupled from render, so the game plays at correct
@@ -1037,7 +1037,7 @@ foundation across the wave 18-63 arc.
   real-HW instrumentation confirms steady-state gameplay logic at ~50 Hz. Reaching
   default-ON took fixing a use-after-free crash on the `FIXED_TIMESTEP=1` path, a
   backdrop-rendering flicker, and a textbox/screen-effect timing desync, each found
-  and resolved during the wave 56-63 arc. `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0`
+  and resolved during the wave 56-63 arc. `SDL_HINT_DOS_FIXED_TIMESTEP=0`
   reverts to the legacy 1:1-coupled loop, which stays byte-identical to prior
   production.
 - **Diagnostic probes + emulation harnesses.** `make probes` builds standalone
@@ -1057,10 +1057,10 @@ foundation across the wave 18-63 arc.
   reference PC is render-bound near 30 fps; Fixed-Timestep mode (now the default)
   closes the *speed* gap so the game plays correctly regardless of the render rate.
 - **Default music backend is now OPL3** (was organya). The FM-synth offload is the
-  single largest fps win; `SDL_HINT_DOSKUTSU_AUDIO_BACKEND=organya` restores the
+  single largest fps win; `SDL_HINT_DOS_AUDIO_BACKEND=organya` restores the
   original 2004 synthesizer.
 - **Direct-VESA framebuffer path default-ON** -- writes the framebuffer straight to
-  VRAM, bypassing the SDL present path; `SDL_HINT_DOSKUTSU_DIRECT_VESA=0` reverts.
+  VRAM, bypassing the SDL present path; `SDL_HINT_DOS_DIRECT_VESA=0` reverts.
 - Build and contributor documentation consolidated under `docs/`.
 
 ### Removed
@@ -1079,7 +1079,7 @@ foundation across the wave 18-63 arc.
 
 - With Fixed-Timestep mode (the default), the save-select and stage-select menu
   slide-in animations play at about half speed. Cosmetic;
-  `SDL_HINT_DOSKUTSU_FIXED_TIMESTEP=0` restores their original pace.
+  `SDL_HINT_DOS_FIXED_TIMESTEP=0` restores their original pace.
 - A faint background noise is audible on the OPL3 music backend.
 - Small patches of a cave's parallax backdrop briefly flicker to black in some
   "valley" terrain. Intermittent and cosmetic.

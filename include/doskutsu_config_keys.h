@@ -122,7 +122,7 @@ static const char *dkt_speed_vals[] =
 static const dkt_key_t DKT_KEYS[] =
 {
   /* ---- Sound -------------------------------------------------------- */
-  { "AUDIO_BACKEND", "SDL_HINT_DOSKUTSU_AUDIO_BACKEND",
+  { "AUDIO_BACKEND", "SDL_HINT_DOS_AUDIO_BACKEND",
     DKT_ENUM, DKC_SOUND, "auto", 0, 0, dkt_backend_vals,
     "Music backend",
     "auto=detect, wb=WaveBlaster, opl3=FM synth, organya=Organya, adlib=OPL2 FM, gus=Gravis Ultrasound, none=no music", 0 },
@@ -134,22 +134,22 @@ static const dkt_key_t DKT_KEYS[] =
       reads getenv("DOSKUTSU_NO_AUDIO") for mere presence, so AUDIO_OFF=0
       must NOT setenv it (would disable audio) */ },
 
-  { "AUDIO_TIER2", "SDL_HINT_DOSKUTSU_AUDIO_TIER2",
+  { "AUDIO_TIER2", "SDL_HINT_DOS_AUDIO_TIER2",
     DKT_BOOL, DKC_SOUND, "1", 0, 0, NULL,
     "Audio quality",
     "1=11025 Hz mono master rate (default); 0=legacy higher rate", 0 },
 
-  { "SB16_VOICE_VOL", "SDL_HINT_DOSKUTSU_SB16_VOICE_VOL",
+  { "SB16_VOICE_VOL", "SDL_HINT_DOS_SB16_VOICE_VOL",
     DKT_INT, DKC_SOUND, "28", 0, 31, NULL,
     "SB16 voice volume",
     "SB16 mixer voice (PCM/SFX) level, 0-31", 0 },
 
-  { "SB16_FM_VOL", "SDL_HINT_DOSKUTSU_SB16_FM_VOL",
+  { "SB16_FM_VOL", "SDL_HINT_DOS_SB16_FM_VOL",
     DKT_INT, DKC_SOUND, "28", 0, 31, NULL,
     "SB16 FM volume",
     "SB16 mixer FM (OPL3 music) level, 0-31", 0 },
 
-  { "ORG_PRERENDER", "SDL_HINT_DOSKUTSU_ORG_PRERENDER",
+  { "ORG_PRERENDER", "SDL_HINT_DOS_ORG_PRERENDER",
     DKT_BOOL, DKC_SOUND, "1", 0, 0, NULL,
     "Organya pre-render",
     "1 pre-renders Organya music to a disk PCM cache (less demanding on CPU at playback)", 0 },
@@ -161,38 +161,38 @@ static const dkt_key_t DKT_KEYS[] =
     "1 enables the gameport (costs ~80 ms/frame BIOS poll if no stick attached)", 0 },
 
   /* ---- Performance / display --------------------------------------- */
-  { "PERF_MODE", "SDL_HINT_DOSKUTSU_PERF_MODE",
+  { "PERF_MODE", "SDL_HINT_DOS_PERF_MODE",
     DKT_INT, DKC_PERF, "0", 0, 2, NULL,
     "Performance mode",
     "0=faithful, 1=smooth (drop decorative detail), 2=fast", 0 },
 
-  { "FIXED_TIMESTEP", "SDL_HINT_DOSKUTSU_FIXED_TIMESTEP",
+  { "FIXED_TIMESTEP", "SDL_HINT_DOS_FIXED_TIMESTEP",
     DKT_BOOL, DKC_PERF, "1", 0, 0, NULL,
     "Fixed 50 Hz timestep",
     "1=game runs at authored 50 Hz regardless of render fps (default)", 0 },
 
   /* ---- Compatibility / troubleshooting (Advanced submenu) ---------- */
-  { "AUDIO_WB_DIRECT_PORT", "SDL_HINT_DOSKUTSU_AUDIO_WB_DIRECT_PORT",
+  { "AUDIO_WB_DIRECT_PORT", "SDL_HINT_DOS_AUDIO_WB_DIRECT_PORT",
     DKT_BOOL, DKC_COMPAT, "1", 0, 0, NULL,
     "WaveBlaster direct port",
     "1=direct MPU-401 port writes (default); 0=DSP-mediated fallback", 0 },
 
-  { "DIRTY_RECTS", "SDL_HINT_DOSKUTSU_DIRTY_RECTS",
+  { "DIRTY_RECTS", "SDL_HINT_DOS_DIRTY_RECTS",
     DKT_BOOL, DKC_COMPAT, "1", 0, 0, NULL,
     "Dirty-rect rendering",
     "0 force-disables dirty-rect rendering (only if you see artifacts)", 0 },
 
-  { "PIXEL_FORMAT_8", "SDL_HINT_DOSKUTSU_PIXEL_FORMAT_8",
+  { "PIXEL_FORMAT_8", "SDL_HINT_DOS_PIXEL_FORMAT_8",
     DKT_BOOL, DKC_COMPAT, "1", 0, 0, NULL,
     "8bpp indexed mode",
     "0 force-disables indexed 8bpp mode (only if you see color regressions)", 0 },
 
-  { "FORCE_PUMP_YIELD", "SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD",
+  { "FORCE_PUMP_YIELD", "SDL_HINT_DOS_FORCE_PUMP_YIELD",
     DKT_BOOL, DKC_COMPAT, "0", 0, 0, NULL,
     "Force per-pump yield",
     "1 restores the original per-pump cooperative yield (only if audio stutters)", 0 },
 
-  { "THRASH_FULLCOVER", "SDL_HINT_DOSKUTSU_THRASH_FULLCOVER",
+  { "THRASH_FULLCOVER", "SDL_HINT_DOS_THRASH_FULLCOVER",
     DKT_BOOL, DKC_COMPAT, "1", 0, 0, NULL,
     "Backdrop full-cover",
     "1=fixed backdrop coverage on motion (default); 0=legacy clip", 0 },
@@ -260,7 +260,7 @@ static const dkt_key_t DKT_KEYS[] =
    * SETUP's Music screen offers only the sets actually present on disk
    * (setup/midiset.c). Only meaningful for a MIDI backend (wb / opl3 / gus);
    * Organya ignores it. */
-  { "MIDI_SET", "SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE",
+  { "MIDI_SET", "SDL_HINT_DOS_AUDIO_MIDI_SOURCE",
     DKT_STR, DKC_SOUND, "orgmid2", 0, 0, NULL,
     "MIDI music set",
     "Which MIDI music set the MIDI backend plays: orgmid2 (OrgMIDI, the default), "
@@ -268,7 +268,7 @@ static const dkt_key_t DKT_KEYS[] =
 
   /* ---- Input bindings (Phase 3 / #40 -- patch nxengine-evo/0227) ----------
    * Per-action keyboard / gameport-button remap. The engine's BIND_* loader
-   * (input.cpp input_apply_cfg_bindings) reads each DOSKUTSU_BIND_<ACTION> env
+   * (input.cpp input_apply_cfg_bindings) reads each DOS_PORT_BIND_<ACTION> env
    * var AFTER settings_load and overlays it onto the live mappings, so a
    * SETUP-written binding WINS over settings.dat. Value grammar:
    * "k:<sdlkeycode>[,b:<jbut>]" (k = SDL3 keycode, b = optional gameport button
@@ -279,43 +279,43 @@ static const dkt_key_t DKT_KEYS[] =
    * controls). The 11 remappable player actions match input.h INPUTS
    * LEFTKEY..MAPSYSTEMKEY, in that order. APPEND-ONLY: these sit at the end of
    * the table so existing positional indices are unchanged. */
-  { "BIND_LEFT", "DOSKUTSU_BIND_LEFT",
+  { "BIND_LEFT", "DOS_PORT_BIND_LEFT",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Move Left", "Key/button bound to Move Left (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_RIGHT", "DOSKUTSU_BIND_RIGHT",
+  { "BIND_RIGHT", "DOS_PORT_BIND_RIGHT",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Move Right", "Key/button bound to Move Right (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_UP", "DOSKUTSU_BIND_UP",
+  { "BIND_UP", "DOS_PORT_BIND_UP",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Look Up", "Key/button bound to Up (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_DOWN", "DOSKUTSU_BIND_DOWN",
+  { "BIND_DOWN", "DOS_PORT_BIND_DOWN",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Crouch / Down", "Key/button bound to Down (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_JUMP", "DOSKUTSU_BIND_JUMP",
+  { "BIND_JUMP", "DOS_PORT_BIND_JUMP",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Jump", "Key/button bound to Jump (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_FIRE", "DOSKUTSU_BIND_FIRE",
+  { "BIND_FIRE", "DOS_PORT_BIND_FIRE",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Fire", "Key/button bound to Fire (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_STRAFE", "DOSKUTSU_BIND_STRAFE",
+  { "BIND_STRAFE", "DOS_PORT_BIND_STRAFE",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Strafe", "Key/button bound to Strafe (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_PREVWPN", "DOSKUTSU_BIND_PREVWPN",
+  { "BIND_PREVWPN", "DOS_PORT_BIND_PREVWPN",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Prev Weapon", "Key/button bound to Previous Weapon (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_NEXTWPN", "DOSKUTSU_BIND_NEXTWPN",
+  { "BIND_NEXTWPN", "DOS_PORT_BIND_NEXTWPN",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Next Weapon", "Key/button bound to Next Weapon (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_INVENTORY", "DOSKUTSU_BIND_INVENTORY",
+  { "BIND_INVENTORY", "DOS_PORT_BIND_INVENTORY",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Inventory", "Key/button bound to Inventory (k:<sdlkeycode>[,b:<jbut>])", 0 },
-  { "BIND_MAP", "DOSKUTSU_BIND_MAP",
+  { "BIND_MAP", "DOS_PORT_BIND_MAP",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Map", "Key/button bound to Map System (k:<sdlkeycode>[,b:<jbut>])", 0 },
 
   /* Stored gameport joystick calibration (Phase 3 / #40). Consumed by the
    * SDL3-DOS backend, NOT the engine: input-sdl's SDL patch reads
-   * SDL_HINT_DOSKUTSU_JOY_CAL via SDL_GetHint (which falls back to the env var
+   * SDL_HINT_DOS_JOY_CAL via SDL_GetHint (which falls back to the env var
    * the shim sets) at joystick init, so the player needn't re-swirl the stick
    * each run. Value grammar (team-lead decision -- 6-value explicit per-axis
    * centre, because a spring-return flightstick's electrical centre is often
@@ -326,7 +326,7 @@ static const dkt_key_t DKT_KEYS[] =
    * calibration (behavior-neutral). RESERVED here so the SDL patch has a
    * registered key without editing this table (engine-side owns the registry;
    * see feat/input-remap contract). */
-  { "JOY_CAL", "SDL_HINT_DOSKUTSU_JOY_CAL",
+  { "JOY_CAL", "SDL_HINT_DOS_JOY_CAL",
     DKT_STR, DKC_INPUT, "", 0, 0, NULL,
     "Joystick calibration",
     "Stored gameport calibration xmin,xcenter,xmax,ymin,ycenter,ymax (set by SETUP Calibrate)", 0 },
@@ -341,7 +341,7 @@ static const dkt_key_t DKT_KEYS[] =
    * value-checked bool (loader setenv's "0"/"1"; engine tests == "1") -- NOT a
    * presence key, so "0" correctly means off. Only meaningful with a joystick;
    * the X axis is intentionally not invertible (left/right rarely needs it). */
-  { "JOY_INVERT_Y", "DOSKUTSU_JOY_INVERT_Y",
+  { "JOY_INVERT_Y", "DOS_PORT_JOY_INVERT_Y",
     DKT_BOOL, DKC_INPUT, "0", 0, 0, NULL,
     "Invert joystick Y",
     "1 swaps the gameport stick up/down (for flightsticks with inverted pitch)", 0 },
@@ -360,7 +360,7 @@ static const dkt_key_t DKT_KEYS[] =
    * Only meaningful for AUDIO_BACKEND=gus; other backends ignore the hint (the
    * driver only reads it when the GF1 device opens). APPEND-ONLY: sits at the
    * end so existing positional indices are unchanged. */
-  { "GUS_VOICES", "SDL_HINT_DOSKUTSU_GUS_VOICES",
+  { "GUS_VOICES", "SDL_HINT_DOS_GUS_VOICES",
     DKT_ENUM, DKC_SOUND, "20", 0, 0, dkt_gus_voice_vals,
     "GUS voices",
     "Gravis Ultrasound active voices; rate=617400/voices (20=30870Hz default, 14=44100Hz best, 28=22050Hz may be silent)", 0 },
@@ -375,7 +375,7 @@ static const dkt_key_t DKT_KEYS[] =
    * native DAC (engine derives it -- SB DAC for an SB-family card, GF1 for the
    * Gravis card); only an explicit "No Sound FX" writes SFX_DEVICE=none. The
    * engine strict-matches the literal "none" (SoundManager dispatch gate). */
-  { "SFX_DEVICE", "SDL_HINT_DOSKUTSU_SFX_DEVICE",
+  { "SFX_DEVICE", "SDL_HINT_DOS_SFX_DEVICE",
     DKT_STR, DKC_SOUND, "", 0, 0, NULL,
     "Sound FX device",
     "none = no sound effects; unset = effects ride the music card's native DAC", 0 },
@@ -389,12 +389,12 @@ static const dkt_key_t DKT_KEYS[] =
    * nxengine-evo 0240) strict-matches "1" via SDL_GetHint (_mo[0]=='1' &&
    * _mo[1]=='\0'), so a setenv'd "0" correctly reads as OFF (music/SFX stay on).
    * Default "0". APPEND-ONLY: at the end so positional indices are unchanged. */
-  { "MUSIC_OFF", "SDL_HINT_DOSKUTSU_MUSIC_OFF",
+  { "MUSIC_OFF", "SDL_HINT_DOS_MUSIC_OFF",
     DKT_BOOL, DKC_SOUND, "0", 0, 0, NULL,
     "Music disabled",
     "1 disables music only (sound effects keep playing); alt to AUDIO_BACKEND=none", 0 },
 
-  { "SFX_OFF", "SDL_HINT_DOSKUTSU_SFX_OFF",
+  { "SFX_OFF", "SDL_HINT_DOS_SFX_OFF",
     DKT_BOOL, DKC_SOUND, "0", 0, 0, NULL,
     "Sound FX disabled",
     "1 disables sound effects only (music keeps playing); alt to SFX_DEVICE=none", 0 },
@@ -404,14 +404,14 @@ static const dkt_key_t DKT_KEYS[] =
    * uploads the full multi-sample .pat set per instrument for best fidelity +
    * polyphony; OFF falls back to a single nearest-middle-C sample (the low-DRAM
    * state). Only meaningful for AUDIO_BACKEND=gus. Confirmed with pat-bank:
-   * cfg_key GUS_HIFI -> SDL hint SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE, read once by
+   * cfg_key GUS_HIFI -> SDL hint SDL_HINT_DOS_GUS_MULTISAMPLE, read once by
    * MidiBackendGus's ctor via SDL_GetHint. POLARITY: the engine DEFAULTS ON --
    * it strict-matches "0" as the killswitch; unset OR any non-"0" value = ON.
    * So this registry default is "1" (matching the engine default): SETUP writes
    * GUS_HIFI=1 (hint "1" -> on), and only an explicit Off writes GUS_HIFI=0
    * (hint "0" -> the single-sample fallback). The loader passthru SETs the full
    * hint name from this key (same shim as GUS_VOICES). */
-  { "GUS_HIFI", "SDL_HINT_DOSKUTSU_GUS_MULTISAMPLE",
+  { "GUS_HIFI", "SDL_HINT_DOS_GUS_MULTISAMPLE",
     DKT_BOOL, DKC_SOUND, "1", 0, 0, NULL,
     "GUS high fidelity",
     "1 = full multi-sample fidelity (default); 0 = single-sample low-memory fallback", 0 },
@@ -426,7 +426,7 @@ static const dkt_key_t DKT_KEYS[] =
    * waveblaster = daughterboard on the SB header (default MPU port 0x330).
    * Default "waveblaster" preserves the historical meaning of a bare wb config.
    * APPEND-ONLY: at the end so positional indices are unchanged. */
-  { "MIDI_DEV", "SDL_HINT_DOSKUTSU_MIDI_DEV",
+  { "MIDI_DEV", "SDL_HINT_DOS_MIDI_DEV",
     DKT_ENUM, DKC_SOUND, "waveblaster", 0, 0, dkt_midi_dev_vals,
     "MIDI device",
     "SETUP-only (AUDIO_BACKEND=wb): genmidi=external GM module via MPU-401, waveblaster=daughterboard on the SB header", 0 },

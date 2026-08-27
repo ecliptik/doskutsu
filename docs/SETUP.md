@@ -153,7 +153,7 @@ built-in production default is used, so a fresh install with no config at
 all runs with sensible defaults.
 
 **Troubleshooting -- settings saved in SETUP don't take effect.** Because
-the environment wins, a leftover `SET SDL_HINT_DOSKUTSU_*` (forgotten in
+the environment wins, a leftover `SET SDL_HINT_DOS_*` (forgotten in
 `AUTOEXEC.BAT`, or hand-typed earlier in the session) silently overrides
 whatever SETUP writes to `DOSKUTSU.CFG` -- pick a music card, save, and
 the game still uses the old setting. The fix is to run **`SETUP.BAT`**
@@ -225,13 +225,13 @@ is present it stays the test tone. Plain `pcm` / `auto` modes keep the test
 tone. The WaveBlaster path stays blind-init / write-only (it never reads the
 MPU status register -- the same hard-freeze-safe rule the game uses).
 
-- `SET SDL_HINT_DOSKUTSU_SETUP_REAL_SFX=0` -- force the plain test tone instead
+- `SET SDL_HINT_DOS_SETUP_REAL_SFX=0` -- force the plain test tone instead
   of the real Polar Star (default is the real effect). `SETUP.EXE` only; affects
   the audio test, never the game. Strict-match: only the literal `0` disables.
-- `SET SDL_HINT_DOSKUTSU_SETUP_REAL_MUSIC=0` -- force the test arpeggio instead
+- `SET SDL_HINT_DOS_SETUP_REAL_MUSIC=0` -- force the test arpeggio instead
   of the real Title theme (default is the real theme). `SETUP.EXE` only.
   Strict-match: only the literal `0` disables.
-- `SET SDL_HINT_DOSKUTSU_SETUP_MIDI_BIOSCLK=1` -- diagnostic (default off): drive
+- `SET SDL_HINT_DOS_SETUP_MIDI_BIOSCLK=1` -- diagnostic (default off): drive
   the MIDI test's scheduler from the BIOS 18.2 Hz clock instead of the SDL
   millisecond clock. Used to isolate a real-hardware MIDI-tempo issue; not
   needed in normal use. Strict-match: only the literal `1` enables.

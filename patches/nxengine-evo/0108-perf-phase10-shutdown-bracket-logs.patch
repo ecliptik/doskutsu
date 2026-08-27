@@ -8,7 +8,7 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 DOS-PORT (patch 0108, Phase 10 W22-WB-E shutdown-hang triage). Adds
-9 doskutsu_dbg_log bracket lines around each step of main.cpp's
+9 dos_port_dbg_log bracket lines around each step of main.cpp's
 shutdown sequence (lines ~702-713), so the operator's next iter's
 PAUSESDL.LOG pinpoints exactly which step hangs by which numbered
 line is LAST written.
@@ -26,13 +26,13 @@ sequence so we can see which step the engine reaches before the
 hang (not the SDL CloseDevice that was originally suspected).
 
 Cross-vendor decl pattern matches slot 0102 / 0103 / 0100:
-  extern "C" void doskutsu_dbg_log(const char *fmt, ...);
+  extern "C" void dos_port_dbg_log(const char *fmt, ...);
 declared at file scope (not function scope -- language-spec
 restriction; first attempt placed it inside main() and gcc
 rejected with "expected unqualified-id before string constant",
 fixed to file scope which works cleanly).
 
-doskutsu_dbg_log itself defined in vendor/SDL/src/video/dos/
+dos_port_dbg_log itself defined in vendor/SDL/src/video/dos/
 SDL_dosdbg.c (SDL/0024-perf-wave-13-6-1-env-var-sdldbg-log-
 filename); the per-line fsync there means each bracket call hits
 disk before the next teardown step starts.
@@ -106,12 +106,12 @@ index e4392b0..502e943 100644
  #include "Utils/Logger.h"
 +
 +// patch 0108 (Phase 10 W22-WB-E shutdown-hang triage): cross-vendor
-+// extern decl for doskutsu_dbg_log. Declared in vendor/SDL/src/video/
++// extern decl for dos_port_dbg_log. Declared in vendor/SDL/src/video/
 +// dos/SDL_dosdbg.h with printf-style varargs; internal SDL header not
 +// on engine's public include path so we forward-declare at file scope
 +// here. C linkage so the cross-vendor symbol resolution is mangling-
 +// agnostic (matches slot 0100 / 0102 / 0103 cross-vendor extern pattern).
-+extern "C" void doskutsu_dbg_log(const char *fmt, ...);
++extern "C" void dos_port_dbg_log(const char *fmt, ...);
  using namespace NXE::Utils;
  
  #if defined(__SWITCH__)
@@ -120,7 +120,7 @@ index e4392b0..502e943 100644
  
  shutdown:;
 +  // patch 0108 (Phase 10 W22-WB-E shutdown-hang triage): bracket
-+  // each teardown step with doskutsu_dbg_log so the operator's
++  // each teardown step with dos_port_dbg_log so the operator's
 +  // PAUSESDL.LOG pinpoints exactly which step hangs by which
 +  // numbered line is LAST written. SDL/0024's per-line fsync
 +  // means each call hits disk before the next step starts; if a
@@ -129,30 +129,30 @@ index e4392b0..502e943 100644
 +  // W22-WB-D evidence), the highest-numbered "engine-shutdown[N/8]"
 +  // line in the SDL log identifies the last successful step.
 +  //
-+  // Cross-vendor doskutsu_dbg_log declared at file scope above
++  // Cross-vendor dos_port_dbg_log declared at file scope above
 +  // (per slot 0102/0103/0100 cross-vendor extern pattern).
 +
-+  doskutsu_dbg_log("engine-shutdown[1/8]: pre-game.tsc->Close");
++  dos_port_dbg_log("engine-shutdown[1/8]: pre-game.tsc->Close");
    game.tsc->Close();
-+  doskutsu_dbg_log("engine-shutdown[2/8]: pre-game.close");
++  dos_port_dbg_log("engine-shutdown[2/8]: pre-game.close");
    game.close();
-+  doskutsu_dbg_log("engine-shutdown[3/8]: pre-Carets::close");
++  dos_port_dbg_log("engine-shutdown[3/8]: pre-Carets::close");
    Carets::close();
  
-+  doskutsu_dbg_log("engine-shutdown[4/8]: pre-input_close");
++  dos_port_dbg_log("engine-shutdown[4/8]: pre-input_close");
    input_close();
-+  doskutsu_dbg_log("engine-shutdown[5/8]: pre-textbox.Deinit");
++  dos_port_dbg_log("engine-shutdown[5/8]: pre-textbox.Deinit");
    textbox.Deinit();
-+  doskutsu_dbg_log("engine-shutdown[6/8]: pre-SoundManager::shutdown");
++  dos_port_dbg_log("engine-shutdown[6/8]: pre-SoundManager::shutdown");
    NXE::Sound::SoundManager::getInstance()->shutdown();
-+  doskutsu_dbg_log("engine-shutdown[7/8]: pre-Renderer::close");
++  dos_port_dbg_log("engine-shutdown[7/8]: pre-Renderer::close");
    Renderer::getInstance()->close();
  #if defined(__SWITCH__)
    romfsExit();
  #endif
-+  doskutsu_dbg_log("engine-shutdown[8/8]: pre-SDL_Quit");
++  dos_port_dbg_log("engine-shutdown[8/8]: pre-SDL_Quit");
    SDL_Quit();
-+  doskutsu_dbg_log("engine-shutdown[final]: post-SDL_Quit; engine "
++  dos_port_dbg_log("engine-shutdown[final]: post-SDL_Quit; engine "
 +                   "teardown complete; control returning to main()");
    return error;
  

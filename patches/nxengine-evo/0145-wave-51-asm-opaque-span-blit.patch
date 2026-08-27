@@ -34,7 +34,7 @@ LEVER MECHANISM (opaque-span precompute; no runtime codegen):
   sprites keep short runs (smaller win). Sizing is left to the 0146
   ride-along census -- see WAVE-51-ASM-BLIT-DESIGN sec. 5.
 
-KILLSWITCH: SDL_HINT_DOSKUTSU_ASM_BLIT (strict "1" opt-in; default-OFF
+KILLSWITCH: SDL_HINT_DOS_ASM_BLIT (strict "1" opt-in; default-OFF
 for wave-51 per design sec. 4). Cached-at-boot static-const-bool
 (blit_asm_span_enabled()) -- never a per-blit getenv. When OFF, no
 span table is ever built (zero memory, zero scan cost) and
@@ -118,7 +118,7 @@ index 0000000..54d5913
 +// fast-string idiom and never re-tests the colorkey. No runtime
 +// codegen, modest memory.
 +//
-+// Gated on SDL_HINT_DOSKUTSU_ASM_BLIT (strict "1" opt-in, default-OFF
++// Gated on SDL_HINT_DOS_ASM_BLIT (strict "1" opt-in, default-OFF
 +// for wave-51). When the gate is OFF no span table is ever built (zero
 +// memory, zero cost) and `_blit_indexed` keeps its legacy per-pixel
 +// loop byte-for-byte.
@@ -143,7 +143,7 @@ index 0000000..54d5913
 +};
 +
 +// Per-source-surface opaque-span table. Built once at surface load when
-+// SDL_HINT_DOSKUTSU_ASM_BLIT is on AND the cached CPU surface is
++// SDL_HINT_DOS_ASM_BLIT is on AND the cached CPU surface is
 +// INDEX8 + colorkeyed. For row y, runs[ row_off[y] .. row_off[y+1] )
 +// are that row's opaque runs, sorted ascending by `start`; a
 +// fully-opaque row collapses to a single run. `row_off` has h+1
@@ -157,7 +157,7 @@ index 0000000..54d5913
 +};
 +
 +// Cached-at-boot gate accessor (defined in Renderer.cpp). True when the
-+// operator opted in with SDL_HINT_DOSKUTSU_ASM_BLIT=1. Constant for the
++// operator opted in with SDL_HINT_DOS_ASM_BLIT=1. Constant for the
 +// run -- evaluated once on first call, never per-blit.
 +bool blit_asm_span_enabled();
 +
@@ -187,7 +187,7 @@ index c7ee478..4d85d95 100644
  #ifndef NXE_DOS
  #  include "pngfuncs.h"
 @@ -3248,6 +3252,22 @@ bool Renderer::initVideo()
-              "(default; set SDL_HINT_DOSKUTSU_FLIP_INSTR=1 to opt in for "
+              "(default; set SDL_HINT_DOS_FLIP_INSTR=1 to opt in for "
               "wave-20 Lever A diagnostic)");
    }
 +  // DOS-PORT (patch 0145, Phase 11 wave-51): record asm opaque-span
@@ -195,7 +195,7 @@ index c7ee478..4d85d95 100644
 +  if (blit_asm_span_enabled())
 +  {
 +    LOG_INFO("Renderer::initVideo: asm opaque-span blit lever ENABLED via "
-+             "SDL_HINT_DOSKUTSU_ASM_BLIT=1 -- INDEX8 colorkey surfaces "
++             "SDL_HINT_DOS_ASM_BLIT=1 -- INDEX8 colorkey surfaces "
 +             "build per-row opaque-run tables at load; _blit_indexed "
 +             "copies runs via rep movsl, skipping the per-pixel colorkey "
 +             "branch (wave-51 single lever; default-OFF)");
@@ -203,12 +203,12 @@ index c7ee478..4d85d95 100644
 +  else
 +  {
 +    LOG_INFO("Renderer::initVideo: asm opaque-span blit lever DISABLED "
-+             "(default; set SDL_HINT_DOSKUTSU_ASM_BLIT=1 to opt in -- "
++             "(default; set SDL_HINT_DOS_ASM_BLIT=1 to opt in -- "
 +             "wave-51 _blit_indexed colorkey-blit lever)");
 +  }
    // DOS-PORT (patch 0064, Phase 9 wave 13.3): log whether the SDL-side
    // PumpEvents yield-skip is active. Default ON (skip); env-var override
-   // SDL_HINT_DOSKUTSU_FORCE_PUMP_YIELD=1 restores the original yield.
+   // SDL_HINT_DOS_FORCE_PUMP_YIELD=1 restores the original yield.
 @@ -5095,6 +5115,96 @@ static inline bool _blit_rgb565_mirrored(SDL_Surface *dst, SDL_Surface *src,
    return true;
  }
@@ -217,7 +217,7 @@ index c7ee478..4d85d95 100644
 +// lever. See BlitSpans.h for the rationale. Three pieces live here next
 +// to `_blit_indexed`:
 +//   _span_copy            -- per-run copy primitive (rep movsl idiom)
-+//   blit_asm_span_enabled -- cached SDL_HINT_DOSKUTSU_ASM_BLIT gate
++//   blit_asm_span_enabled -- cached SDL_HINT_DOS_ASM_BLIT gate
 +//   build_blit_span_table -- the load-time per-row run scan
 +
 +// Copy `n` bytes src->dst with the P54C `rep movsl` fast-string idiom
@@ -249,7 +249,7 @@ index c7ee478..4d85d95 100644
 +// is the shared helper near the top of this file. Evaluated once.
 +bool blit_asm_span_enabled()
 +{
-+  static const bool v = _strict_truthy_env("SDL_HINT_DOSKUTSU_ASM_BLIT");
++  static const bool v = _strict_truthy_env("SDL_HINT_DOS_ASM_BLIT");
 +  return v;
 +}
 +
@@ -315,7 +315,7 @@ index c7ee478..4d85d95 100644
 +// argument enables the opaque-span fast path. When non-NULL (and the
 +// surface is colorkeyed) the per-pixel colorkey branch is replaced by
 +// precomputed-run copies. nullptr (the default, and always when
-+// SDL_HINT_DOSKUTSU_ASM_BLIT is off) preserves the legacy per-pixel
++// SDL_HINT_DOS_ASM_BLIT is off) preserves the legacy per-pixel
 +// loop byte-for-byte -- this is the lever killswitch.
  static inline bool _blit_indexed(SDL_Surface *dst, SDL_Surface *src,
                                   SDL_Rect srcrect, SDL_Rect dstrect,
@@ -471,7 +471,7 @@ index a0c5222..546c4a9 100644
 +  // DOS-PORT (patch 0145, Phase 11 wave-51): opaque-span lever. Returns
 +  // this surface's precomputed non-colorkey run table for the asm
 +  // `_blit_indexed` fast path, or nullptr when the lever is disabled
-+  // (SDL_HINT_DOSKUTSU_ASM_BLIT unset) or the surface is not an
++  // (SDL_HINT_DOS_ASM_BLIT unset) or the surface is not an
 +  // INDEX8+colorkey asset. Built lazily on first call and cached for
 +  // the surface's lifetime; freed in cleanup(). Never a per-blit cost.
 +  const BlitSpanTable *spanTable();

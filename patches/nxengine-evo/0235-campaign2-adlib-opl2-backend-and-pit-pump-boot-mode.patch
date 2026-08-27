@@ -27,7 +27,7 @@ fails with no SB and the engine exits.
   (MIX_Init / MIX_CreateMixerDevice), installs MidiBackendOpl2, registers
   the MIDI tick, then starts the PIT/IRQ-0 OPL pump as the clock (register
   BEFORE start so PumpStart snapshots the callback). hz from
-  SDL_HINT_DOSKUTSU_OPL_TIMER_HZ (default 120, clamped [19,1000]).
+  SDL_HINT_DOS_OPL_TIMER_HZ (default 120, clamped [19,1000]).
   shutdown(): stop the pump FIRST (no IRQ into a torn-down backend; PIT
   restored), and skip MIX_Quit on the AdLib path (MIX_Init never ran).
 
@@ -73,16 +73,16 @@ index 5200132d..fa57b1b2 100644
 +  // pattern as the AUDIO_OFF check). See docs/internal/ADLIB-NATIVE-DESIGN.md.
 +  bool _adlib_mode = false;
    {
-     const char *e = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_OFF");
+     const char *e = std::getenv("SDL_HINT_DOS_AUDIO_OFF");
      _audio_off = e && e[0] == '1' && e[1] == 0;
-+    const char *b = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
++    const char *b = std::getenv("SDL_HINT_DOS_AUDIO_BACKEND");
 +    _adlib_mode = b && std::strcmp(b, "adlib") == 0;
    }
 -  if (_audio_off)
 +  if (_audio_off || _adlib_mode)
    {
      _sdl_init_flags &= ~SDL_INIT_AUDIO;
--    LOG_INFO("SDL_HINT_DOSKUTSU_AUDIO_OFF=1 -- skipping SDL_INIT_AUDIO "
+-    LOG_INFO("SDL_HINT_DOS_AUDIO_OFF=1 -- skipping SDL_INIT_AUDIO "
 -             "(W20A2 audio-off ablation; SB16 IRQ never hooked, audio "
 -             "subsystem not initialized; SoundManager::init() will also "
 -             "be skipped below)");
@@ -93,7 +93,7 @@ index 5200132d..fa57b1b2 100644
 +               "init() STILL RUNS (unlike AUDIO_OFF) to bring up the OPL2 "
 +               "backend. MUSIC ONLY -- no PCM SFX on a DAC-less AdLib card.");
 +    else
-+      LOG_INFO("SDL_HINT_DOSKUTSU_AUDIO_OFF=1 -- skipping SDL_INIT_AUDIO "
++      LOG_INFO("SDL_HINT_DOS_AUDIO_OFF=1 -- skipping SDL_INIT_AUDIO "
 +               "(W20A2 audio-off ablation; SB16 IRQ never hooked, audio "
 +               "subsystem not initialized; SoundManager::init() will also "
 +               "be skipped below)");
@@ -117,7 +117,7 @@ index 5200132d..fa57b1b2 100644
 +  }
 +
    // DOS-PORT (patch 0163, data cache): boot-time preload of heavy data
-   // files into RAM, behind SDL_HINT_DOSKUTSU_DATA_CACHE. Placed here
+   // files into RAM, behind SDL_HINT_DOS_DATA_CACHE. Placed here
    // because (a) SDL_Init must have run for SDL_GetHint to work, (b)
 diff --git a/src/sound/MidiBackendOpl2.cpp b/src/sound/MidiBackendOpl2.cpp
 new file mode 100644
@@ -616,7 +616,7 @@ index 00000000..ff0255b8
 + * (CHA-CHD) is simply ignored by an OPL2 chip. On absence the 8-patch
 + * placeholder family-bucket is used, identical to the OPL3 backend.
 + *
-+ * Selected when SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib (explicit-only;
++ * Selected when SDL_HINT_DOS_AUDIO_BACKEND=adlib (explicit-only;
 + * no auto-detect this phase per lead decision (b)). SoundManager::init
 + * detects OPL2 via SDL_DOSOpl2Detect, installs this backend, registers
 + * the MIDI tick, and starts the PIT pump.
@@ -707,7 +707,7 @@ index d5ab9722..477b473e 100644
 +++ b/src/sound/SoundManager.cpp
 @@ -9,6 +9,7 @@
  #include <SDL3/SDL_dosmidi_tick.h>  // patch 0168 (Lever 2b): SDL_DOSMidiTickRegister + IsrTickActive (sdl-engine SDL/0072)
- #include <SDL3/SDL_dospixtone.h>  // patch 0169 (Bug 6 RATEDIV bake-in): SDL_DOSPixtoneSetMasterRate (sdl-engine SDL/0074)
+ #include <SDL3/SDL_dossfx_synth.h>  // patch 0169 (Bug 6 RATEDIV bake-in): SDL_DOSSfxSynthSetMasterRate (sdl-engine SDL/0074)
  #include <SDL3/SDL_dosaudio_devicerate.h>  // patch 0205 (#31 v1.0.8): SDL_DOSAudioSetDeviceFrameRate (sdl-engine SDL/0090)
 +#include <SDL3/SDL_dosopltimer.h>  // patch 0234 (Campaign 2 AdLib): SDL_DOSOplTimerPumpStart/Stop/Active (sdl-engine SDL/0110)
  
@@ -766,7 +766,7 @@ index d5ab9722..477b473e 100644
 +  // (SDL_GetHint works now -- SDL_Init has run) and used to gate the
 +  // mixer-specific blocks below; the music-source-dir + catalog + tick
 +  // plumbing further down is SHARED with the SB path.
-+  const char *_be_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
++  const char *_be_hint = SDL_GetHint("SDL_HINT_DOS_AUDIO_BACKEND");
 +  const bool _adlib = _be_hint && SDL_strcmp(_be_hint, "adlib") == 0;
 +  if (_adlib)
 +  {
@@ -843,7 +843,7 @@ index d5ab9722..477b473e 100644
 +        LOG_WARN("Sound system: OPL2 probe failed on the AdLib path; music "
 +                 "will be SILENT this run (no OPL chip at 0x388). The game "
 +                 "still runs. Verify the card is in AdLib/OPL mode (e.g. "
-+                 "PicoGUS /mode adlib) and SDL_HINT_DOSKUTSU_OPL2_PORT if "
++                 "PicoGUS /mode adlib) and SDL_HINT_DOS_OPL2_PORT if "
 +                 "the OPL base port was moved.");
 +      break;
 +
@@ -874,18 +874,18 @@ index d5ab9722..477b473e 100644
 +    // arm order the SB path uses). The pump refuses if the SB device is hot,
 +    // bounds hz to [19,1000], and is the single owner of PIT ch0; on refusal
 +    // music is silent but the game runs. hz comes from
-+    // SDL_HINT_DOSKUTSU_OPL_TIMER_HZ (default 120).
++    // SDL_HINT_DOS_OPL_TIMER_HZ (default 120).
 +    SDL_DOSMidiTickRegister(&midi_scheduler_tick_isr_thunk);
 +
 +    int hz = 120;
-+    const char *hz_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_OPL_TIMER_HZ");
++    const char *hz_hint = SDL_GetHint("SDL_HINT_DOS_OPL_TIMER_HZ");
 +    if (hz_hint && hz_hint[0] != '\0')
 +    {
 +      const int v = SDL_atoi(hz_hint);
 +      if (v >= 19 && v <= 1000)
 +        hz = v;
 +      else
-+        LOG_WARN("adlib: SDL_HINT_DOSKUTSU_OPL_TIMER_HZ='{}' out of range "
++        LOG_WARN("adlib: SDL_HINT_DOS_OPL_TIMER_HZ='{}' out of range "
 +                 "[19,1000]; using default {} Hz.", hz_hint, hz);
 +    }
 +
@@ -917,24 +917,24 @@ index d5ab9722..477b473e 100644
 +  // (SB / non-adlib paths), so it is safe to call unconditionally. A second
 +  // restore happens via the atexit handler registered in main.cpp (belt +
 +  // braces for an abnormal exit).
-+  doskutsu_dbg_log("snd-shutdown[-1/6]: SDL_DOSOplTimerPumpStop "
++  dos_port_dbg_log("snd-shutdown[-1/6]: SDL_DOSOplTimerPumpStop "
 +                   "(restore PIT ch0; no-op off the AdLib path)");
 +  SDL_DOSOplTimerPumpStop();
 +
-   doskutsu_dbg_log("snd-shutdown[0/6]: pre-MidiScheduler::silence_for_shutdown");
+   dos_port_dbg_log("snd-shutdown[0/6]: pre-MidiScheduler::silence_for_shutdown");
    MidiScheduler::getInstance()->silence_for_shutdown();
  
 @@ -1189,7 +1315,11 @@ void SoundManager::shutdown()
      _mixer = nullptr;
    }
-   doskutsu_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
+   dos_port_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
 -  MIX_Quit();
 +  // patch 0234 (Campaign 2 AdLib): MIX_Quit pairs with MIX_Init, which the
 +  // AdLib path never called (no mixer). Skip it there to avoid an
 +  // unbalanced teardown.
 +  if (!_adlib_path)
 +    MIX_Quit();
-   doskutsu_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
+   dos_port_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
                     "SoundManager::shutdown body complete; "
                     "returning to engine-shutdown[7/8]");
 @@ -1285,7 +1415,11 @@ void SoundManager::music(uint32_t songno, bool resume)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # org-cache.sh -- pre-render every Organya song to the build-sha-keyed PCM cache
 # by running the built DOSKUTSU.EXE headless under DOSBox-X (max cycles) with
-# DOSKUTSU_ORG_PRECACHE_ALL=1. Produces CACHE/<rate>_<channels>/*.PCM keyed to
+# DOS_PORT_ORG_PRECACHE_ALL=1. Produces CACHE/<rate>_<channels>/*.PCM keyed to
 # the rendering binary's DOSKUTSU_BUILD_SHA12 (in each PCM header), so the cache
 # only HITs on the exact binary that produced it.
 #
@@ -68,9 +68,9 @@ rm -rf "$WORK/CACHE"
   printf 'COMMAND /E:2048 /C %%0 GO\r\n'
   printf 'goto end\r\n'
   printf ':run\r\n'
-  printf 'SET SDL_HINT_DOSKUTSU_AUDIO_TIER2=%s\r\n' "$TIER2"
-  printf 'SET DOSKUTSU_ORG_PRECACHE_ALL=1\r\n'
-  printf 'SET DOSKUTSU_LOG_TAG=PCACH\r\n'
+  printf 'SET SDL_HINT_DOS_AUDIO_TIER2=%s\r\n' "$TIER2"
+  printf 'SET DOS_PORT_ORG_PRECACHE_ALL=1\r\n'
+  printf 'SET DOS_PORT_LOG_TAG=PCACH\r\n'
   printf 'DOSKUTSU.EXE\r\n'
   printf ':end\r\n'
 } > "$WORK/PCACHE.BAT"
@@ -89,7 +89,7 @@ SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}" dosbox-x -conf "$CONF_FAST" -nopromp
   -c 'SET BLASTER=A220 I5 D1 H5 T6' \
   -c 'SET SDL_DOS_AUDIO_SB_SKIP_DETECTION=1' \
   -c 'SET SDL_INVALID_PARAM_CHECKS=0' \
-  -c 'SET DOSKUTSU_LOG_VERBOSE=1' \
+  -c 'SET DOS_PORT_LOG_VERBOSE=1' \
   -c "C:" -c "PCACHE.BAT" >"$WORK/dosbox.out" 2>&1 &
 DBX=$!
 

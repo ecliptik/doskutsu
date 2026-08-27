@@ -8,7 +8,7 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 DOS-PORT (patch 0092, Phase 9 wave 21 Lever G). Adds runtime audio
-config selection via SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 (strict-1, default
+config selection via SDL_HINT_DOS_AUDIO_TIER2=1 (strict-1, default
 OFF). Tier-1 path (env unset) preserves patch-0061 behavior bit-
 identical; Tier-2 opt-in flips to 11025 Hz mono with buffer pinned at
 256 sample frames.
@@ -44,7 +44,7 @@ Implementation (Path B per spec sec. 2.1):
       here; other TUs see only extern decls.
    b. At top of SoundManager::init() (BEFORE MIX_CreateMixerDevice
       AND before any Pixtone/Organya singleton construction): read
-      SDL_HINT_DOSKUTSU_AUDIO_TIER2; when "1", set SAMPLE_RATE=11025,
+      SDL_HINT_DOS_AUDIO_TIER2; when "1", set SAMPLE_RATE=11025,
       AUDIO_CHANNELS=1, AND pin SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES
       to "256" via SDL_SetHintWithPriority(...,OVERRIDE).
    c. Buffer-pin is essential (per spec sec. 2.3): without it, SDL3's
@@ -77,7 +77,7 @@ Implementation (Path B per spec sec. 2.1):
    Organya synth's sampling_rate (line 187) already used SAMPLE_RATE
    so it auto-rescales at synth init.
 
-5. docs/BOOT.md: new SDL_HINT_DOSKUTSU_AUDIO_TIER2 entry under
+5. docs/BOOT.md: new SDL_HINT_DOS_AUDIO_TIER2 entry under
    "User-facing options" (NOT diagnostic -- this is a hardware-tier
    config, not a debug flag). Documents the strict-1 match, audio
    quality trade, log-grep pattern, mechanism summary.
@@ -261,7 +261,7 @@ index 3191cc6..155de1e 100644
 +// DOS-PORT (patch 0092, Phase 9 wave 21 Lever G): runtime audio config.
 +// Initial values preserve patch-0061 Tier-1 behavior (22050 stereo).
 +// Reset to Tier-2 (11025 mono) at SoundManager::init() entry when
-+// SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 is set. Both at global namespace
++// SDL_HINT_DOS_AUDIO_TIER2=1 is set. Both at global namespace
 +// scope (NOT inside NXE::Sound) to match the prior `#define
 +// SAMPLE_RATE` global-scope semantics -- all consumers (Pixtone, Organya,
 +// Ogg) reference unqualified `SAMPLE_RATE` / `AUDIO_CHANNELS`.
@@ -281,7 +281,7 @@ index 3191cc6..155de1e 100644
    LOG_INFO("Sound system init");
  
 +  // DOS-PORT (patch 0092, Phase 9 wave 21 Lever G): Tier-2 audio
-+  // config selection. Read SDL_HINT_DOSKUTSU_AUDIO_TIER2 (strict-1
++  // config selection. Read SDL_HINT_DOS_AUDIO_TIER2 (strict-1
 +  // match per CLAUDE.md convention); when set, flip global SAMPLE_RATE
 +  // + AUDIO_CHANNELS to 11025 mono AND pin the SDL3 audio buffer size
 +  // to 256 sample frames via SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES.
@@ -308,7 +308,7 @@ index 3191cc6..155de1e 100644
 +  // semantics + SoundManager::init() driving the first construction
 +  // chain).
 +  {
-+    const char *tier2 = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_TIER2");
++    const char *tier2 = SDL_GetHint("SDL_HINT_DOS_AUDIO_TIER2");
 +    const bool tier2_on = tier2 && tier2[0] == '1' && tier2[1] == 0;
 +    if (tier2_on)
 +    {
@@ -320,21 +320,21 @@ index 3191cc6..155de1e 100644
 +      // un-pin and collapse the lever's mechanism.
 +      SDL_SetHintWithPriority(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES,
 +                              "256", SDL_HINT_OVERRIDE);
-+      LOG_INFO("Sound system: SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 -- Tier-2 "
++      LOG_INFO("Sound system: SDL_HINT_DOS_AUDIO_TIER2=1 -- Tier-2 "
 +               "audio config engaged ({} Hz, {} channel{}, buffer pinned "
 +               "to 256 frames). Predicted savings: -6.5 ms/flip opening "
 +               "(IRQ-rate halving, hardware-deterministic) + audio-mix "
 +               "CPU reduction (range -3 to -22 ms/flip; mixer-impl "
 +               "dependent, measured in W21A iter). Subjective audio A/B "
 +               "expected post-W21A; killswitch reverts via "
-+               "SDL_HINT_DOSKUTSU_AUDIO_TIER2=0 (or any non-'1' value).",
++               "SDL_HINT_DOS_AUDIO_TIER2=0 (or any non-'1' value).",
 +               (unsigned long)::SAMPLE_RATE, (unsigned long)::AUDIO_CHANNELS,
 +               ::AUDIO_CHANNELS == 1 ? "" : "s");
 +    }
 +    else
 +    {
 +      LOG_INFO("Sound system: Tier-1 audio config (default; {} Hz, {} "
-+               "channels). Set SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 to opt "
++               "channels). Set SDL_HINT_DOS_AUDIO_TIER2=1 to opt "
 +               "into Tier-2 (11025 Hz mono, 256-frame buffer) for fps "
 +               "gain on Tier 2/3 hardware (per docs/HARDWARE.md hardware "
 +               "tiers + docs/PHASE9-LEVER-G-PLAN.md mechanism).",
@@ -372,7 +372,7 @@ index ea0d278..636131a 100644
 +// DOS-PORT (patch 0092, Phase 9 wave 21 Lever G): converted from
 +// `#define` to runtime `extern uint32_t` so the Tier-2 audio config
 +// (11025 Hz mono) can be selected at runtime via the env hint
-+// SDL_HINT_DOSKUTSU_AUDIO_TIER2=1 without a rebuild. Pairs with new
++// SDL_HINT_DOS_AUDIO_TIER2=1 without a rebuild. Pairs with new
 +// `extern uint32_t AUDIO_CHANNELS` for the stereo/mono switch.
 +// Mechanism (per docs/PHASE9-LEVER-G-PLAN.md): halving sample rate +
 +// halving channels at the SDL audio device level halves IRQ rate

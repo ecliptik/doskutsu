@@ -494,7 +494,7 @@ interaction with rnhart.net handles that.
 ### Choosing the MIDI music set
 
 The MIDI backends (`opl3` / `wb` / `gus`) can play more than one music set.
-The engine resolves the set from `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE` (see
+The engine resolves the set from `SDL_HINT_DOS_AUDIO_MIDI_SOURCE` (see
 `docs/CONFIG.md`), and SETUP exposes the choice as the **MIDI music set**
 row on the Sound -> Music Options screen. The row appears only when a MIDI
 backend is selected AND at least two sets are installed; with a single set
@@ -546,14 +546,14 @@ Beyond the built-in sets, a custom MIDI arrangement can be supplied:
 
 2. Re-launch SETUP. The **MIDI music set** row now lists the directory as
    `Custom (mymidi)` alongside the built-in sets; pick it and save. (Or set
-   `MIDI_SET=mymidi` in `DOSKUTSU.CFG` / `SET SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE=mymidi`
+   `MIDI_SET=mymidi` in `DOSKUTSU.CFG` / `SET SDL_HINT_DOS_AUDIO_MIDI_SOURCE=mymidi`
    by hand -- see `docs/CONFIG.md`.)
 
 The engine accepts the directory only when the name is a single safe path
 segment and the directory holds at least one `.mid`; otherwise it falls
 back to WiiWare. Tracks not provided simply stay silent for those
 songs (same graceful skip as a partial built-in set). The killswitch
-`SDL_HINT_DOSKUTSU_AUDIO_MIDI_CUSTOM_DIRS=0` restricts selection back to the
+`SDL_HINT_DOS_AUDIO_MIDI_CUSTOM_DIRS=0` restricts selection back to the
 built-in sets if the old behavior is ever needed.
 
 **Provenance:** custom sets are entirely user-supplied -- we redistribute
@@ -592,7 +592,7 @@ This produces two sets from the same sources, via the `--gm-table` option:
 
 **Selecting a set at runtime** (SETUP's MIDI-set row, or by hand): OrgMIDI v2 =
 `MIDI_SET=orgmid2` (**the default**) -> `data/orgmid2/`; WiiWare =
-`MIDI_SET=wiimidi` -> `data/midi/` (the `SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE`
+`MIDI_SET=wiimidi` -> `data/midi/` (the `SDL_HINT_DOS_AUDIO_MIDI_SOURCE`
 / `..._MIDI_GM_VARIANT` env vars, see `docs/CONFIG.md`). On the GUS the two sets
 voice drums differently -- see [docs/SOUND.md](./SOUND.md#midi-music-sets).
 

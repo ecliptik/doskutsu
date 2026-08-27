@@ -11,7 +11,7 @@
 #   3. Operator runs: scp claude:/tmp/logback-wave<N>-main.sh /tmp/ && bash /tmp/logback-wave<N>-main.sh
 #
 # Conventions:
-#   - Engine writes per-PLAY logs as <TAG>.LOG via DOSKUTSU_LOG_TAG env-var
+#   - Engine writes per-PLAY logs as <TAG>.LOG via DOS_PORT_LOG_TAG env-var
 #     (per patch nxengine/0069). SDL writes <TAG>SDL.LOG (per patch SDL/0024).
 #     LOG_TAG is set inside each _PLAY<n>.BAT child shell to W<wave>A<n>.
 #   - No D<n>.LOG intermediates; no operator REN required.

@@ -16,7 +16,7 @@
  * open / no stick attached; joyport_sample reports "not present" so the caller
  * aborts calibration instead of storing -1.
  *
- * cli/sti around the count loop is REQUIRED: under PIXTONE_IRQ_MIX the SB16 ISR
+ * cli/sti around the count loop is REQUIRED: under SFX_SYNTH_IRQ_MIX the SB16 ISR
  * runs the mixer and would preempt mid-count, corrupting the discharge timing.
  * Protected-mode cli/sti work because CWSDPMI grants IOPL (the same reason the
  * port I/O already works). The primitive is kept byte-for-byte identical to the

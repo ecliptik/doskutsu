@@ -13,17 +13,17 @@ fast, so SFX play two octaves too high (486-campaign Bug 6).
 
 The ISR cannot read the engine's SAMPLE_RATE / AUDIO_CHANNELS globals, so the
 engine hands the master int16 rate to the SDL side via the new
-SDL_DOSPixtoneSetMasterRate export (sdl-engine SDL/0074). SDL caches it and
+SDL_DOSSfxSynthSetMasterRate export (sdl-engine SDL/0074). SDL caches it and
 at DOSSOUNDBLASTER_OpenDevice computes a tier-aware consumption divider
 (shift_div = log2(round(device->spec.freq / master_rate)) -> RATEDIV 4 for
 Tier-2, 1 for Tier-1), baking the operator-validated RATEDIV=4 as the default.
-The SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV env var stays a debug override.
+The SDL_HINT_DOS_SFX_SYNTH_IRQ_RATEDIV env var stays a debug override.
 
 The call runs in SoundManager::init before MIX_CreateMixerDevice (which
 triggers OpenDevice), after the Tier block finalizes the rate globals.
 Calling unconditionally is safe: SDL only consumes the value when Lever 3
 engages, and a <= 0 rate is a no-op. The setter signature (int arg, declared
-in the public <SDL3/SDL_dospixtone.h>) was locked cross-link-unit with
+in the public <SDL3/SDL_dossfx_synth.h>) was locked cross-link-unit with
 sdl-engine before authoring to avoid a link-time symbol mismatch.
 
 Also emits a one-time init LOG_INFO of the handed master_rate (engine-side
@@ -43,7 +43,7 @@ index 66d3678..d32422c 100644
  // SDL_AUDIO_DRIVER_DOS_SOUNDBLASTER outer guard.
  #include <SDL3/SDL_dosaudio_shutdown.h>
  #include <SDL3/SDL_dosmidi_tick.h>  // patch 0168 (Lever 2b): SDL_DOSMidiTickRegister + IsrTickActive (sdl-engine SDL/0072)
-+#include <SDL3/SDL_dospixtone.h>  // patch 0169 (Bug 6 RATEDIV bake-in): SDL_DOSPixtoneSetMasterRate (sdl-engine SDL/0074)
++#include <SDL3/SDL_dossfx_synth.h>  // patch 0169 (Bug 6 RATEDIV bake-in): SDL_DOSSfxSynthSetMasterRate (sdl-engine SDL/0074)
  
  // patch 0168 (Lever 2b): extern "C" forward-decl for the engine-side
  // tick_isr thunk defined in MidiScheduler.cpp. Address-of taken at
@@ -70,9 +70,9 @@ index 66d3678..d32422c 100644
 +  // Tier-2/Tier-1 block above has already finalized ::SAMPLE_RATE /
 +  // ::AUDIO_CHANNELS. Calling unconditionally is safe -- SDL only consumes
 +  // the value when Lever 3 engages, and a <= 0 rate is a no-op (RATEDIV=1
-+  // fallback). The SDL_HINT_DOSKUTSU_PIXTONE_IRQ_RATEDIV env var stays a
++  // fallback). The SDL_HINT_DOS_SFX_SYNTH_IRQ_RATEDIV env var stays a
 +  // debug override. Setter symbol from sdl-engine SDL/0074.
-+  SDL_DOSPixtoneSetMasterRate((int)(::SAMPLE_RATE * ::AUDIO_CHANNELS));
++  SDL_DOSSfxSynthSetMasterRate((int)(::SAMPLE_RATE * ::AUDIO_CHANNELS));
 +  // Engine-side witness of the value handed across the boundary, to pair
 +  // with sdl-engine SDL/0074's SDL-side "RATEDIV auto" banner (dev_freq /
 +  // master_rate / shift_div). If the boundary ever carries a wrong value

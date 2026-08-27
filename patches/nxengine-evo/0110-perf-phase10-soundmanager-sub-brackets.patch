@@ -8,7 +8,7 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 DOS-PORT (patch 0110, Phase 10 W22-WB-E #44 v3 hang triage). Adds 6
-doskutsu_dbg_log sub-bracket lines inside SoundManager::shutdown body
+dos_port_dbg_log sub-bracket lines inside SoundManager::shutdown body
 to pinpoint which exact sub-step hangs.
 
 Background -- slot 0108 narrowing 2026-05-07:
@@ -57,9 +57,9 @@ Bracket points:
         SoundManager::shutdown return and Renderer::close call;
         narrow further next iter at engine-level)
 
-Cross-vendor extern decl for doskutsu_dbg_log added to existing
+Cross-vendor extern decl for dos_port_dbg_log added to existing
 SoundManager.cpp file-scope extern "C" block (alongside slot 0100's
-SDL_DOSAudio* extern + slot 0110's new doskutsu_dbg_log).
+SDL_DOSAudio* extern + slot 0110's new dos_port_dbg_log).
 SoundManager.cpp's existing extern "C" cluster is the canonical
 home for cross-vendor decls per slot 0100 / 0102 / 0103 precedent.
 
@@ -121,12 +121,12 @@ index a3373cc..5303442 100644
    void p10_audio_idle_pause_callback(std::uint64_t paused_ns);
 +
 +  // patch 0110 (Phase 10 W22-WB-E #44 v3 hang triage): cross-vendor
-+  // extern decl for doskutsu_dbg_log. Declared in vendor/SDL/src/video/
++  // extern decl for dos_port_dbg_log. Declared in vendor/SDL/src/video/
 +  // dos/SDL_dosdbg.h with printf-style varargs (per slot 0108
 +  // precedent). Used in SoundManager::shutdown for sub-bracket
 +  // logging. C linkage matches slot 0108 / 0102 / 0103 / 0100
 +  // cross-vendor extern pattern.
-+  void doskutsu_dbg_log(const char *fmt, ...);
++  void dos_port_dbg_log(const char *fmt, ...);
  }
  
  #define MUSIC_OFF 0
@@ -139,13 +139,13 @@ index a3373cc..5303442 100644
 +  // hang to between [6/8] (pre-SoundManager::shutdown) and where
 +  // [7/8] (pre-Renderer::close) would have fired -- confirming the
 +  // hang is INSIDE this function. Numbered sub-bracket lines via
-+  // doskutsu_dbg_log (declared at file-scope in main.cpp per slot
++  // dos_port_dbg_log (declared at file-scope in main.cpp per slot
 +  // 0108) pinpoint the exact sub-step. SDL/0024's per-line fsync
 +  // means each line hits disk before the next sub-step starts;
 +  // the highest-numbered "snd-shutdown[N/6]" line in PAUSESDL.LOG
 +  // identifies the last sub-step that completed before the hang.
 +
-+  doskutsu_dbg_log("snd-shutdown[1/6]: pre-MidiScheduler::shutdown");
++  dos_port_dbg_log("snd-shutdown[1/6]: pre-MidiScheduler::shutdown");
    // patch 0106 (Phase 10 OPL3 hanging-note fix): MidiScheduler shutdown
    // FIRST. Released backend's dtor (MidiBackendOpl3 / WaveBlaster /
    // Stub) fires here in deterministic teardown order, ensuring chip
@@ -153,23 +153,23 @@ index a3373cc..5303442 100644
    // KEY-ON -> audible hanging note that persists until reboot.
    MidiScheduler::getInstance()->shutdown();
  
-+  doskutsu_dbg_log("snd-shutdown[2/6]: pre-Organya::shutdown");
++  dos_port_dbg_log("snd-shutdown[2/6]: pre-Organya::shutdown");
    Organya::getInstance()->shutdown();
-+  doskutsu_dbg_log("snd-shutdown[3/6]: pre-Pixtone::shutdown");
++  dos_port_dbg_log("snd-shutdown[3/6]: pre-Pixtone::shutdown");
    Pixtone::getInstance()->shutdown();
  
    // DOS-PORT: SDL3_mixer's destroy is MIX_DestroyMixer(mixer); pairs with
    // MIX_CreateMixerDevice. MIX_Quit() then unwinds the global state.
-+  doskutsu_dbg_log("snd-shutdown[4/6]: pre-MIX_DestroyMixer "
++  dos_port_dbg_log("snd-shutdown[4/6]: pre-MIX_DestroyMixer "
 +                   "(conditional on _mixer)");
    if (_mixer)
    {
      MIX_DestroyMixer(_mixer);
      _mixer = nullptr;
    }
-+  doskutsu_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
++  dos_port_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
    MIX_Quit();
-+  doskutsu_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
++  dos_port_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
 +                   "SoundManager::shutdown body complete; "
 +                   "returning to engine-shutdown[7/8]");
    LOG_INFO("Sound system shutdown");

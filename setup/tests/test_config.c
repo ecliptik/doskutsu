@@ -45,9 +45,9 @@ static void test_loader(void)
 
   /* a real env SET must survive the file (overwrite=0) */
   setenv("DOSKUTSU_USE_JOYSTICK", "REALSET", 1);
-  unsetenv("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
-  unsetenv("SDL_HINT_DOSKUTSU_PERF_MODE");
-  unsetenv("SDL_HINT_DOSKUTSU_SB16_FM_VOL");
+  unsetenv("SDL_HINT_DOS_AUDIO_BACKEND");
+  unsetenv("SDL_HINT_DOS_PERF_MODE");
+  unsetenv("SDL_HINT_DOS_SB16_FM_VOL");
 
   write_file(path,
     "; comment\r\n"
@@ -60,14 +60,14 @@ static void test_loader(void)
 
   int n = doskutsu_cfg_load(path);
   CHECK(n >= 3, "loader applied at least 3 recognized keys");
-  CHECK(getenv("SDL_HINT_DOSKUTSU_AUDIO_BACKEND") &&
-        strcmp(getenv("SDL_HINT_DOSKUTSU_AUDIO_BACKEND"), "opl3") == 0,
+  CHECK(getenv("SDL_HINT_DOS_AUDIO_BACKEND") &&
+        strcmp(getenv("SDL_HINT_DOS_AUDIO_BACKEND"), "opl3") == 0,
         "AUDIO_BACKEND mapped to its hint name");
-  CHECK(getenv("SDL_HINT_DOSKUTSU_PERF_MODE") &&
-        strcmp(getenv("SDL_HINT_DOSKUTSU_PERF_MODE"), "2") == 0,
+  CHECK(getenv("SDL_HINT_DOS_PERF_MODE") &&
+        strcmp(getenv("SDL_HINT_DOS_PERF_MODE"), "2") == 0,
         "PERF_MODE parsed (lowercase key, LF line)");
-  CHECK(getenv("SDL_HINT_DOSKUTSU_SB16_FM_VOL") &&
-        strcmp(getenv("SDL_HINT_DOSKUTSU_SB16_FM_VOL"), "20") == 0,
+  CHECK(getenv("SDL_HINT_DOS_SB16_FM_VOL") &&
+        strcmp(getenv("SDL_HINT_DOS_SB16_FM_VOL"), "20") == 0,
         "SB16_FM_VOL parsed");
   CHECK(strcmp(getenv("DOSKUTSU_USE_JOYSTICK"), "REALSET") == 0,
         "env > file: real SET preserved (overwrite=0)");
@@ -206,13 +206,13 @@ static void test_authoritative(void)
         "authoritative: file BLASTER OVERRIDES ambient SET (file > env)");
 
   /* contrast: a non-authoritative key (PERF_MODE) -- a real SET still wins */
-  setenv("SDL_HINT_DOSKUTSU_PERF_MODE", "2", 1);
+  setenv("SDL_HINT_DOS_PERF_MODE", "2", 1);
   write_file(path, "PERF_MODE=1\r\n");
   doskutsu_cfg_load(path);
-  CHECK(getenv("SDL_HINT_DOSKUTSU_PERF_MODE") &&
-        strcmp(getenv("SDL_HINT_DOSKUTSU_PERF_MODE"), "2") == 0,
+  CHECK(getenv("SDL_HINT_DOS_PERF_MODE") &&
+        strcmp(getenv("SDL_HINT_DOS_PERF_MODE"), "2") == 0,
         "non-authoritative: real SET PERF_MODE still wins (env > file)");
-  unsetenv("SDL_HINT_DOSKUTSU_PERF_MODE");
+  unsetenv("SDL_HINT_DOS_PERF_MODE");
 
   /* file with NO BLASTER line must leave an ambient SET BLASTER untouched */
   setenv("BLASTER", "A220 I5 D1 H5 T6", 1);
@@ -291,15 +291,15 @@ static void test_speed_class(void)
   int idx;
 
   unsetenv("SPEED_CLASS");
-  unsetenv("SDL_HINT_DOSKUTSU_PERF_MODE");
+  unsetenv("SDL_HINT_DOS_PERF_MODE");
   write_file(path, "SPEED_CLASS=fast\r\nPERF_MODE=1\r\n");
   doskutsu_cfg_load(path);
   CHECK(getenv("SPEED_CLASS") == NULL,
         "SETUP-only SPEED_CLASS is NOT published to the environment");
-  CHECK(getenv("SDL_HINT_DOSKUTSU_PERF_MODE") &&
-        strcmp(getenv("SDL_HINT_DOSKUTSU_PERF_MODE"), "1") == 0,
+  CHECK(getenv("SDL_HINT_DOS_PERF_MODE") &&
+        strcmp(getenv("SDL_HINT_DOS_PERF_MODE"), "1") == 0,
         "engine-consumed key past a SETUP-only key still applies");
-  unsetenv("SDL_HINT_DOSKUTSU_PERF_MODE");
+  unsetenv("SDL_HINT_DOS_PERF_MODE");
 
   idx = scfg_index("SPEED_CLASS");
   CHECK(idx >= 0, "SPEED_CLASS is a known SETUP key");
@@ -346,14 +346,14 @@ static void test_midiset_key(void)
   CHECK(strcmp(scfg_get(&b, scfg_index("MIDI_SET")), "orgmid") == 0,
         "round-trip MIDI_SET=orgmid");
 
-  /* the engine loader maps MIDI_SET -> SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE */
-  unsetenv("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE");
+  /* the engine loader maps MIDI_SET -> SDL_HINT_DOS_AUDIO_MIDI_SOURCE */
+  unsetenv("SDL_HINT_DOS_AUDIO_MIDI_SOURCE");
   write_file(path, "MIDI_SET=orgmid\r\n");
   doskutsu_cfg_load(path);
-  CHECK(getenv("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE") &&
-        strcmp(getenv("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE"), "orgmid") == 0,
-        "MIDI_SET mapped to its hint name (SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE)");
-  unsetenv("SDL_HINT_DOSKUTSU_AUDIO_MIDI_SOURCE");
+  CHECK(getenv("SDL_HINT_DOS_AUDIO_MIDI_SOURCE") &&
+        strcmp(getenv("SDL_HINT_DOS_AUDIO_MIDI_SOURCE"), "orgmid") == 0,
+        "MIDI_SET mapped to its hint name (SDL_HINT_DOS_AUDIO_MIDI_SOURCE)");
+  unsetenv("SDL_HINT_DOS_AUDIO_MIDI_SOURCE");
 }
 
 /* #39 / T2: midiset_scan() lists ONLY the known logical sets whose data subdir
@@ -544,7 +544,7 @@ static void test_musiccard_roundtrip(void)
 /* Phase 3 / #40: the BIND_* per-action remap keys + the reserved JOY_CAL
  * calibration key. The engine loader (input.cpp consumes the env vars; here we
  * only verify the shim publishes them to the right names) maps BIND_<ACTION>
- * to DOSKUTSU_BIND_<ACTION> and JOY_CAL to SDL_HINT_DOSKUTSU_JOY_CAL. Defaults
+ * to DOS_PORT_BIND_<ACTION> and JOY_CAL to SDL_HINT_DOS_JOY_CAL. Defaults
  * are "" so SETUP omits the line at default (killswitch: absent == today's
  * controls). The SETUP model must round-trip the value strings. */
 static void test_input_bindings(void)
@@ -565,28 +565,28 @@ static void test_input_bindings(void)
   CHECK(strcmp(scfg_get(&a, scfg_index("JOY_CAL")), "") == 0,
         "JOY_CAL default is empty (SDL uses auto-calibration)");
 
-  /* the engine loader publishes BIND_JUMP -> DOSKUTSU_BIND_JUMP (key+button)
-   * and JOY_CAL -> SDL_HINT_DOSKUTSU_JOY_CAL, verbatim value pass-through */
-  unsetenv("DOSKUTSU_BIND_JUMP");
-  unsetenv("DOSKUTSU_BIND_FIRE");
-  unsetenv("SDL_HINT_DOSKUTSU_JOY_CAL");
+  /* the engine loader publishes BIND_JUMP -> DOS_PORT_BIND_JUMP (key+button)
+   * and JOY_CAL -> SDL_HINT_DOS_JOY_CAL, verbatim value pass-through */
+  unsetenv("DOS_PORT_BIND_JUMP");
+  unsetenv("DOS_PORT_BIND_FIRE");
+  unsetenv("SDL_HINT_DOS_JOY_CAL");
   write_file(path,
     "BIND_JUMP=k:122,b:0\r\n"   /* SDLK_Z + gameport button 0 */
     "BIND_FIRE=k:120\r\n"       /* SDLK_X, no button           */
     "JOY_CAL=12,250,14,248\r\n");
   doskutsu_cfg_load(path);
-  CHECK(getenv("DOSKUTSU_BIND_JUMP") &&
-        strcmp(getenv("DOSKUTSU_BIND_JUMP"), "k:122,b:0") == 0,
-        "BIND_JUMP mapped to DOSKUTSU_BIND_JUMP (key+button verbatim)");
-  CHECK(getenv("DOSKUTSU_BIND_FIRE") &&
-        strcmp(getenv("DOSKUTSU_BIND_FIRE"), "k:120") == 0,
-        "BIND_FIRE mapped to DOSKUTSU_BIND_FIRE (key only)");
-  CHECK(getenv("SDL_HINT_DOSKUTSU_JOY_CAL") &&
-        strcmp(getenv("SDL_HINT_DOSKUTSU_JOY_CAL"), "12,250,14,248") == 0,
-        "JOY_CAL mapped to SDL_HINT_DOSKUTSU_JOY_CAL (SDL-consumed)");
-  unsetenv("DOSKUTSU_BIND_JUMP");
-  unsetenv("DOSKUTSU_BIND_FIRE");
-  unsetenv("SDL_HINT_DOSKUTSU_JOY_CAL");
+  CHECK(getenv("DOS_PORT_BIND_JUMP") &&
+        strcmp(getenv("DOS_PORT_BIND_JUMP"), "k:122,b:0") == 0,
+        "BIND_JUMP mapped to DOS_PORT_BIND_JUMP (key+button verbatim)");
+  CHECK(getenv("DOS_PORT_BIND_FIRE") &&
+        strcmp(getenv("DOS_PORT_BIND_FIRE"), "k:120") == 0,
+        "BIND_FIRE mapped to DOS_PORT_BIND_FIRE (key only)");
+  CHECK(getenv("SDL_HINT_DOS_JOY_CAL") &&
+        strcmp(getenv("SDL_HINT_DOS_JOY_CAL"), "12,250,14,248") == 0,
+        "JOY_CAL mapped to SDL_HINT_DOS_JOY_CAL (SDL-consumed)");
+  unsetenv("DOS_PORT_BIND_JUMP");
+  unsetenv("DOS_PORT_BIND_FIRE");
+  unsetenv("SDL_HINT_DOS_JOY_CAL");
 
   /* SETUP model round-trip of a binding string */
   idx = scfg_index("BIND_LEFT");

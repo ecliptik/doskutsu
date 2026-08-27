@@ -83,9 +83,9 @@ index 6650d8b8..cecc8501 100644
 +  // adlib it KEEPS SoundManager::init() so the GF1 backend + pump come up.
 +  bool _gus_mode = false;
    {
-     const char *e = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_OFF");
+     const char *e = std::getenv("SDL_HINT_DOS_AUDIO_OFF");
      _audio_off = e && e[0] == '1' && e[1] == 0;
-     const char *b = std::getenv("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
+     const char *b = std::getenv("SDL_HINT_DOS_AUDIO_BACKEND");
      _adlib_mode = b && std::strcmp(b, "adlib") == 0;
 +    _gus_mode   = b && std::strcmp(b, "gus") == 0;
 +  }
@@ -99,10 +99,10 @@ index 6650d8b8..cecc8501 100644
 +  {
 +    const char *us = std::getenv("ULTRASND");
 +    if (us && us[0] != '\0')
-+      SDL_SetHintWithPriority("SDL_HINT_DOSKUTSU_GUS_ULTRASND", us, SDL_HINT_OVERRIDE);
++      SDL_SetHintWithPriority("SDL_HINT_DOS_GUS_ULTRASND", us, SDL_HINT_OVERRIDE);
 +    const char *ud = std::getenv("ULTRADIR");
 +    if (ud && ud[0] != '\0')
-+      SDL_SetHintWithPriority("SDL_HINT_DOSKUTSU_GUS_ULTRADIR", ud, SDL_HINT_OVERRIDE);
++      SDL_SetHintWithPriority("SDL_HINT_DOS_GUS_ULTRADIR", ud, SDL_HINT_OVERRIDE);
 +    LOG_INFO("AUDIO_BACKEND=gus -- bridged ULTRASND='{}' ULTRADIR='{}' from env "
 +             "into the GUS SDL hints (SDL reads hints, not env).",
 +             us ? us : "(unset)", ud ? ud : "(unset)");
@@ -120,13 +120,13 @@ index 6650d8b8..cecc8501 100644
 +  // GF1 silent -- the g2k first-run footgun).
 +  if ((_adlib_mode || _gus_mode) && _audio_off)
    {
--    LOG_WARN("Both SDL_HINT_DOSKUTSU_AUDIO_BACKEND=adlib and "
--             "SDL_HINT_DOSKUTSU_AUDIO_OFF=1 are set -- adlib WINS (an "
+-    LOG_WARN("Both SDL_HINT_DOS_AUDIO_BACKEND=adlib and "
+-             "SDL_HINT_DOS_AUDIO_OFF=1 are set -- adlib WINS (an "
 -             "explicit OPL-music request needs the synth path). Ignoring "
 -             "AUDIO_OFF's SoundManager::init bypass; OPL2 + the PIT pump "
 -             "will come up. Unset one to silence this warning.");
-+    LOG_WARN("Both SDL_HINT_DOSKUTSU_AUDIO_BACKEND={} and "
-+             "SDL_HINT_DOSKUTSU_AUDIO_OFF=1 are set -- {} WINS (an explicit "
++    LOG_WARN("Both SDL_HINT_DOS_AUDIO_BACKEND={} and "
++             "SDL_HINT_DOS_AUDIO_OFF=1 are set -- {} WINS (an explicit "
 +             "music request needs the synth path). Ignoring AUDIO_OFF's "
 +             "SoundManager::init bypass; the backend + PIT pump will come up. "
 +             "Unset one to silence this warning.",
@@ -193,7 +193,7 @@ index 7f2a71c2..d09d8f79 100644
 @@ -166,7 +186,7 @@ void selectBackendFromEnv()
      selected = NXE::Diag::AudioBackend::organya;
      LOG_INFO("audio backend: unrecognized value '{}' for "
-              "SDL_HINT_DOSKUTSU_AUDIO_BACKEND; falling back to organya. "
+              "SDL_HINT_DOS_AUDIO_BACKEND; falling back to organya. "
 -             "Recognized values: auto | organya | wb | opl3 | adlib | tracker | midi-stub.",
 +             "Recognized values: auto | organya | wb | opl3 | adlib | gus | tracker | midi-stub.",
               value);
@@ -355,7 +355,7 @@ index 00000000..0ba5acac
 +  {
 +    _ready = false;
 +    LOG_INFO("gus backend: SDL_DOSGusInit failed -- no GF1 detected (check "
-+             "ULTRASND, or set SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION=1 for "
++             "ULTRASND, or set SDL_HINT_DOS_GUS_SKIP_DETECTION=1 for "
 +             "bring-up under emulation). Music will be SILENT this run; the "
 +             "game still runs.");
 +    return;
@@ -421,7 +421,7 @@ index 00000000..0ba5acac
 +{
 +  if (!base_name || !out) return false;
 +
-+  const char *ultradir = SDL_GetHint("SDL_HINT_DOSKUTSU_GUS_ULTRADIR");
++  const char *ultradir = SDL_GetHint("SDL_HINT_DOS_GUS_ULTRADIR");
 +  if (!ultradir || ultradir[0] == '\0') ultradir = "C:\\ULTRASND";
 +
 +  // Try <ULTRADIR>\<name>.pat then <ULTRADIR>\MIDI\<name>.pat (the operator's
@@ -827,7 +827,7 @@ index 00000000..fc5f4b48
 + * commanded through the SDL_DOSGus* exports. The GF1 mixes up to 28 voices in
 + * hardware straight to its DAC; the host CPU only allocates + dispatches.
 + *
-+ * Selected when SDL_HINT_DOSKUTSU_AUDIO_BACKEND=gus. The music clock is the
++ * Selected when SDL_HINT_DOS_AUDIO_BACKEND=gus. The music clock is the
 + * PIT/IRQ-0 pump (SDL/0110, shared with the AdLib path), NOT the SB IRQ-5 --
 + * a GUS-only box has no Sound Blaster. MUSIC ONLY for Phase 1 (#27); Pixtone
 + * SFX on GF1 voices lands in #28.
@@ -1061,7 +1061,7 @@ index af771c9f..c85ab35e 100644
    MidiScheduler::getInstance()->set_backend(
 @@ -302,6 +326,19 @@ bool SoundManager::init()
    // plumbing further down is SHARED with the SB path.
-   const char *_be_hint = SDL_GetHint("SDL_HINT_DOSKUTSU_AUDIO_BACKEND");
+   const char *_be_hint = SDL_GetHint("SDL_HINT_DOS_AUDIO_BACKEND");
    const bool _adlib = _be_hint && SDL_strcmp(_be_hint, "adlib") == 0;
 +  // patch 0238 (Campaign 3 GUS): the GF1 path is structurally the AdLib path --
 +  // no SB16, no SDL3_mixer, out-of-band synthesis clocked by the PIT pump. It
@@ -1132,8 +1132,8 @@ index af771c9f..c85ab35e 100644
 +        LOG_WARN("Sound system: GF1 probe failed on the GUS path; music will "
 +                 "be SILENT this run (no Gravis Ultrasound detected). The game "
 +                 "still runs. Verify ULTRASND is set (the engine bridges it to "
-+                 "SDL_HINT_DOSKUTSU_GUS_ULTRASND), the card is in /mode gus if "
-+                 "PicoGUS, or set SDL_HINT_DOSKUTSU_GUS_SKIP_DETECTION=1 for "
++                 "SDL_HINT_DOS_GUS_ULTRASND), the card is in /mode gus if "
++                 "PicoGUS, or set SDL_HINT_DOS_GUS_SKIP_DETECTION=1 for "
 +                 "emulation bring-up.");
 +      break;
 +
@@ -1197,7 +1197,7 @@ index af771c9f..c85ab35e 100644
 +    // registered callback at Start time. The pump refuses if the SB device is
 +    // hot, bounds hz to [19,1000], and is the single owner of PIT ch0; on
 +    // refusal music is silent but the game runs. hz comes from
-     // SDL_HINT_DOSKUTSU_OPL_TIMER_HZ (default 120).
+     // SDL_HINT_DOS_OPL_TIMER_HZ (default 120).
 +    const char *_pump_tag = _gus ? "gus" : "adlib";
      SDL_DOSMidiTickRegister(&midi_scheduler_tick_isr_thunk);
  
@@ -1206,9 +1206,9 @@ index af771c9f..c85ab35e 100644
        if (v >= 19 && v <= 1000)
          hz = v;
        else
--        LOG_WARN("adlib: SDL_HINT_DOSKUTSU_OPL_TIMER_HZ='{}' out of range "
+-        LOG_WARN("adlib: SDL_HINT_DOS_OPL_TIMER_HZ='{}' out of range "
 -                 "[19,1000]; using default {} Hz.", hz_hint, hz);
-+        LOG_WARN("{}: SDL_HINT_DOSKUTSU_OPL_TIMER_HZ='{}' out of range "
++        LOG_WARN("{}: SDL_HINT_DOS_OPL_TIMER_HZ='{}' out of range "
 +                 "[19,1000]; using default {} Hz.", _pump_tag, hz_hint, hz);
      }
  
@@ -1234,7 +1234,7 @@ index af771c9f..c85ab35e 100644
 @@ -1334,10 +1398,10 @@ void SoundManager::shutdown()
      _mixer = nullptr;
    }
-   doskutsu_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
+   dos_port_dbg_log("snd-shutdown[5/6]: pre-MIX_Quit");
 -  // patch 0234 (Campaign 2 AdLib): MIX_Quit pairs with MIX_Init, which the
 -  // AdLib path never called (no mixer). Skip it there to avoid an
 -  // unbalanced teardown.
@@ -1244,7 +1244,7 @@ index af771c9f..c85ab35e 100644
 +  // (no mixer). Skip it there to avoid an unbalanced teardown.
 +  if (!_adlib_path && !_gus_path)
      MIX_Quit();
-   doskutsu_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
+   dos_port_dbg_log("snd-shutdown[6/6]: post-MIX_Quit; "
                     "SoundManager::shutdown body complete; "
 @@ -1350,7 +1414,7 @@ void SoundManager::playSfx(NXE::Sound::SFX snd, int32_t loop)
    // patch 0236 (#19): no PCM SFX on the AdLib path (no DAC/mixer). No-op so
