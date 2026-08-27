@@ -65,6 +65,7 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* C++ flow needs <ctime> for time() etc; C uses <time.h>. */
