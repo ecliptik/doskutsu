@@ -1,0 +1,393 @@
+From d4159794fb21ff163c2a3bcc7e84d27c31b0f4af Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 23 May 2026 14:22:47 -0700
+Subject: [PATCH] dos: patch 0078 -- S3-2 Stage 1 hang fix: direct S3 CRTC
+ display-start flip (no INT 0x10)
+
+Fixes the Mimiga Village hang in the patch-0077 VRAM-resident page-flip
+lever (ON path only; OFF ran the full TAS clean). Root cause: the
+per-frame VBE 0x4F07 display-start flip is a DPMI protected-mode ->
+real-mode (__dpmi_int 0x10) transition. The first SFX in a new scene
+triggers an INT 21h SfxSynth-sample disk-load; with the SB16 IRQ-5 audio
+ISR also async, three users contend for the single non-re-entrant DPMI
+real-mode state -> deadlock (operator: hung MIDI note + frozen screen).
+Baseline (no per-frame INT) is safe; the lever's added per-frame INT 0x10
+is the tipover.
+
+Fix: replace BOTH 0x4F07 __dpmi_int(0x10) sites -- the per-frame flip in
+_crtc_set_display_start_byte AND the engage self-verify in
+_vram_resident_check_enabled -- with a DIRECT S3 CRTC display-start
+register write (pure protected-mode port I/O via 0x3D4/0x3D5). No
+real-mode transition -> the re-entrancy window is gone entirely.
+
+S3 ViRGE/DX display-start, verified by the crtcswap probe (S3CRTC.EXE) on
+the real g2k S3+UNIVBE (chip 0x8A01), operator-confirmed flip:
+  - WORD units: register value = byte_offset >> 1 (operator saw the WORD
+    hold turn page 1 visible; byte/dword stayed on page 0). 320x240x8
+    page-1 byte offset 0x12C00 -> word 0x9600 -> CR0C=0x96, CR0D=0x00,
+    CR69=0x00.
+  - CR0D=start[7:0], CR0C=start[15:8], CR69[4:0]=start[20:16] (RMW
+    preserve CR69[7:5]).
+  - streams mode OFF (probe: CR67=0x00). New gate: if (CR67 & 0x0C)==0x0C
+    the display start comes from the streams pri_fb reg, not the CRTC ->
+    DISABLE to copy-present.
+  - clear CR31[5:4]/CR51[1:0]/CR08[6:5] once at engage so the high bits
+    come deterministically from CR69 only (probe baseline already 0).
+
+IRQ-safety: the CRTC index/data pair (0x3D4/0x3D5) is stateful -- an
+interrupt between an index write and its data write would clobber the
+index. Each multi-register write (the flip, the engage clear, the engage
+self-test) is bracketed with pushfl/cli + restore (CWSDPMI grants direct
+cli/sti; the backend already uses bare cli in SDL_dos.h). ~us, audio-safe
+(vs masking IRQ-5 around a real-mode INT). The page-toggle + window-surface
+repoint are video-only state (no audio-ISR reader -- audited:
+SDL_dosaudio_sb.c touches none of it), so the bracket's role is purely
+port-pair atomicity. The bounded vblank-after (flicker latch) runs with
+interrupts enabled and is unchanged.
+
+The direct-CRTC self-verify replaces 0077's 0x4F07 GET/SET/GET: write
+CR0D/CR0C/CR69 the page-1 WORD value, read back, restore -- synchronous
+(no vblank between) so the display is not disturbed; a readback mismatch
+DISABLEs to copy-present. Removed the now-unused _vram_resident_pitch
+cache (the WORD address = byte_offset >> 1 needs no pitch).
+
+Killswitch SDL_HINT_DOS_VRAM_RESIDENT strict-"1" default-OFF; the OFF
+path is unchanged (byte-identical copy-present). Banners retagged
+"direct-CRTC ... NO INT 0x10" (embed witness + INT-0x10-removed proof for
+build-qa's two-witness).
+
+Workspace-local patch; never upstreamed (per sdl_ai_policy memory +
+vendor/SDL/CLAUDE.md notice).
+---
+ src/video/dos/SDL_dosframebuffer.c | 245 +++++++++++++++++------------
+ 1 file changed, 142 insertions(+), 103 deletions(-)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 0ddd9d943..e5a46cfa1 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -2952,12 +2952,9 @@ static int _vram_resident_state = -1;
+ // currently visible.
+ static int _vram_resident_visible_page = 0;
+ 
+-// DOSKUTSU patch 0077 (S3-2 Stage 1) -- cached VRAM pitch (bytes/scanline)
+-// for the VBE 0x4F07 display-start flip, which addresses the origin in
+-// scanlines (offset / pitch). Stashed from st->vram_pitch by the callers
+-// that hold the snapshot (compute_back_page + SDL_DOSVesaPagePresent) so
+-// the flip helper, which only receives a byte offset, can convert.
+-static int _vram_resident_pitch = 0;
++// (patch 0078 removed _vram_resident_pitch: the direct-CRTC flip uses
++// WORD units = byte_offset >> 1, independent of pitch, so no pitch cache
++// is needed -- pitch only gates pitches_match in PresentFull.)
+ 
+ // One-time banner emit gate so the smoke gate's two-witness check sees
+ // "first engagement" + "first success" without per-flip log spam.
+@@ -2981,6 +2978,45 @@ static inline void _crtc_write(Uint8 idx, Uint8 val)
+     outportb(CIRRUS_CRTC_DATA, val);
+ }
+ 
++// DOSKUTSU patch 0078 (S3-2 Stage 1 hang fix) -- interrupt save/disable +
++// restore, for bracketing the stateful CRTC index/data port-pair writes
++// (0x3D4/0x3D5) in the direct-CRTC display-start flip. An interrupt
++// landing between an index write and its data write would clobber the
++// index. CWSDPMI grants the client direct cli/sti (IOPL=3; the backend
++// already uses bare cli in SDL_dos.h), so pushfl/cli + restore is the
++// established idiom. ~us (a few port-outs) -- audio-safe, unlike masking
++// IRQ-5 around a real-mode INT. Save returns the prior EFLAGS so restore
++// re-enables only if interrupts were enabled on entry.
++static inline unsigned long _vr_irq_save_disable(void)
++{
++    unsigned long flags;
++    __asm__ __volatile__("pushfl\n\tcli\n\tpopl %0" : "=r"(flags) : : "memory", "cc");
++    return flags;
++}
++
++static inline void _vr_irq_restore(unsigned long flags)
++{
++    __asm__ __volatile__("pushl %0\n\tpopfl" : : "r"(flags) : "memory", "cc");
++}
++
++// DOSKUTSU patch 0078 -- write the S3 ViRGE/DX CRT display-start address
++// in WORD units (crtcswap-probe-verified on g2k S3+UNIVBE, chip 0x8A01):
++// CR0D=start[7:0], CR0C=start[15:8], CR69[4:0]=start[20:16] (RMW preserve
++// CR69[7:5]). Pure protected-mode port I/O -- NO real-mode INT -> no DPMI
++// re-entrancy. CLI-bracketed for index/data port-pair atomicity.
++static void _vram_resident_write_crtc_start_word(Uint32 word_addr)
++{
++    const Uint8 sa_low  = (Uint8)(word_addr & 0xFF);          // CR0D
++    const Uint8 sa_mid  = (Uint8)((word_addr >> 8) & 0xFF);   // CR0C
++    const Uint8 sa_high = (Uint8)((word_addr >> 16) & 0x1F);  // CR69[4:0]
++
++    const unsigned long _vr_if = _vr_irq_save_disable();
++    _crtc_write(0x0D, sa_low);
++    _crtc_write(0x0C, sa_mid);
++    _crtc_write(0x69, (Uint8)((_crtc_read(0x69) & ~(Uint8)0x1F) | sa_high));
++    _vr_irq_restore(_vr_if);
++}
++
+ // DOSKUTSU patch 0077 (S3-2 Stage 1) -- bounded vblank wait. The existing
+ // WaitForVBlank() at line ~1098 spins on the VGA status port with NO
+ // timeout; in the VRAM-resident flip path that is a HW-IO hang risk on
+@@ -3032,19 +3068,22 @@ static bool _vram_resident_is_s3_virge(Uint16 *out_chip_id)
+ // dos_port_dbg_log banner narrating either ENABLED or DISABLED + reason.
+ //
+ // DOSKUTSU patch 0077 (S3-2 Stage 1) -- retargeted from the wave-50
+-// Cirrus-5434 path to the S3 ViRGE/DX. Three gates, all fail-safe to the
+-// legacy copy-present (never hang):
++// Cirrus-5434 path to the S3 ViRGE/DX; patch 0078 made the flip
++// real-mode-INT-free (direct CRTC). Gates, all fail-safe to the legacy
++// copy-present (never hang, never a real-mode INT):
+ //   1. strict-"1" killswitch SDL_HINT_DOS_VRAM_RESIDENT (default-OFF).
+ //   2. chip is S3 ViRGE/DX (chip-id 0x8A01) -- decoupled from the Cirrus
+ //      gate / SDL_HINT_DOS_CIRRUS_BLT.
+-//   3. HANG-SAFE VBE 0x4F07 self-verify: GET current display-start, SET a
+-//      1-scanline test value (BX=0x0000 = set immediately, NO BIOS
+-//      retrace-wait so the call cannot spin on a missing retrace), GET
+-//      readback, restore. AX!=0x004F or a readback mismatch -> DISABLE ->
+-//      caller falls back to the copy-present. This is the team-lead hard
+-//      requirement: the 0x4F07 flip on S3+UNIVBE is otherwise unverified
+-//      and a broken flip is HW-IO that can hard-freeze the machine
+-//      (dosbox_not_proxy).
++//   3. (0078) NOT streams mode: CR67[3:2] != 0b11 (else the display start
++//      comes from the streams pri_fb reg, not the CRTC -> direct-CRTC
++//      can't flip).
++//   4. (0078) clear CR31[5:4]/CR51[1:0]/CR08[6:5] once so the high bits
++//      come deterministically from CR69 only.
++//   5. (0078) DIRECT-CRTC self-verify: write CR0D/CR0C/CR69 (the page-1
++//      WORD test value), read back, restore -- pure PM port I/O, NO INT
++//      0x10. A readback mismatch -> DISABLE -> copy-present fallback.
++//      Replaces 0077's 0x4F07 GET/SET/GET, which caused the Mimiga hang
++//      via DPMI real-mode re-entrancy vs the SB16 IRQ-5 ISR + INT 21h.
+ static int _vram_resident_check_enabled(void)
+ {
+     if (_vram_resident_state >= 0) {
+@@ -3073,66 +3112,76 @@ static int _vram_resident_check_enabled(void)
+         return 0;
+     }
+ 
+-    // (3) HANG-SAFE 0x4F07 self-verify. All calls BX=0x0000 (set
+-    // immediately, no retrace wait) so none can spin on a missing
+-    // vblank. GET current -> SET a different test scanline -> GET
+-    // readback -> restore the original. A no-op/broken SET is caught
+-    // because the readback would not equal the test value.
+-    __dpmi_regs r;
+-    SDL_zero(r);
+-    r.x.ax = 0x4F07;
+-    r.x.bx = 0x0001; // get display start
+-    __dpmi_int(0x10, &r);
+-    const Uint16 get_ax = r.x.ax;
+-    const Uint16 saved_cx = r.x.cx;
+-    const Uint16 saved_dx = r.x.dx;
+-    const Uint16 test_dx = (Uint16)(saved_dx == 0 ? 1 : 0);
+-
+-    Uint16 set_ax = 0;
+-    Uint16 rb_ax = 0;
+-    Uint16 rb_dx = 0xFFFF;
+-    if (get_ax == 0x004F) {
+-        SDL_zero(r);
+-        r.x.ax = 0x4F07;
+-        r.x.bx = 0x0000; // set display start immediately (no retrace wait)
+-        r.x.cx = saved_cx;
+-        r.x.dx = test_dx;
+-        __dpmi_int(0x10, &r);
+-        set_ax = r.x.ax;
+-
+-        SDL_zero(r);
+-        r.x.ax = 0x4F07;
+-        r.x.bx = 0x0001; // get display start readback
+-        __dpmi_int(0x10, &r);
+-        rb_ax = r.x.ax;
+-        rb_dx = r.x.dx;
+-
+-        // Restore the original display-start regardless of the outcome.
+-        SDL_zero(r);
+-        r.x.ax = 0x4F07;
+-        r.x.bx = 0x0000;
+-        r.x.cx = saved_cx;
+-        r.x.dx = saved_dx;
+-        __dpmi_int(0x10, &r);
+-    }
+-
+-    const bool verified = (get_ax == 0x004F && set_ax == 0x004F &&
+-                           rb_ax == 0x004F && rb_dx == test_dx);
+-    if (!verified) {
++    // (3) STREAMS-MODE gate (patch 0078). 86Box vid_s3_virge.c: the CRTC
++    // display-start bits apply only if (CR67 & 0x0C) != 0x0C. If streams
++    // mode is active (CR67[3:2]==0b11) the display start comes from the
++    // streams primary-FB register, NOT CR0C/0D/69 -> our direct-CRTC flip
++    // would not page-flip. The crtcswap probe found CR67=0x00 (non-streams)
++    // on g2k S3+UNIVBE; gate here so a streams config falls back safely.
++    const Uint8 cr67 = _crtc_read(0x67);
++    if ((cr67 & 0x0C) == 0x0C) {
+         dos_port_dbg_log("sdl: S3-2 stage1 VRAM-resident page-flip DISABLED "
+-                         "(0x4F07 self-verify FAILED: get_ax=0x%04X set_ax=0x%04X "
+-                         "rb_ax=0x%04X rb_dx=%u test_dx=%u; sysmem copy-present "
+-                         "fallback -- no hang)",
+-                         (unsigned)get_ax, (unsigned)set_ax, (unsigned)rb_ax,
+-                         (unsigned)rb_dx, (unsigned)test_dx);
++                         "(CR67=0x%02X streams mode active; display start via "
++                         "streams pri_fb not CRTC; sysmem copy-present fallback)",
++                         (unsigned)cr67);
+         _vram_resident_state = 0;
+         return 0;
+     }
+ 
++    // (4) Clear the older high-order + byte-pan bits ONCE so the
++    // display-start high bits come deterministically from CR69 only:
++    // CR31[5:4] (start[17:16]), CR51[1:0] (start[19:18]), CR08[6:5]
++    // (byte-pan). Probe baseline already read these as 0 on g2k; clearing
++    // is belt-and-suspenders against a config that pre-set them. CLI-
++    // bracketed (stateful index/data pair).
++    {
++        const unsigned long _vr_if = _vr_irq_save_disable();
++        _crtc_write(0x31, (Uint8)(_crtc_read(0x31) & ~(Uint8)0x30));
++        _crtc_write(0x51, (Uint8)(_crtc_read(0x51) & ~(Uint8)0x03));
++        _crtc_write(0x08, (Uint8)(_crtc_read(0x08) & ~(Uint8)0x60));
++        _vr_irq_restore(_vr_if);
++    }
++
++    // (5) DIRECT-CRTC self-verify (replaces patch 0077's 0x4F07 GET/SET/GET
++    // -- pure PM port I/O, NO INT 0x10 -> no DPMI real-mode re-entrancy).
++    // Save CR0D/CR0C/CR69, write the page-1 WORD test value (0x9600 ->
++    // CR0C=0x96), read the registers back, restore. Synchronous (no vblank
++    // wait between write and restore) so the start is restored before the
++    // next vsync latch -> the display is NOT disturbed. A locked/RO or
++    // absent register is caught: the readback would not equal what we wrote.
++    bool verified;
++    {
++        const unsigned long _vr_if = _vr_irq_save_disable();
++        const Uint8 s0d = _crtc_read(0x0D);
++        const Uint8 s0c = _crtc_read(0x0C);
++        const Uint8 s69 = _crtc_read(0x69);
++        _crtc_write(0x0D, 0x00);
++        _crtc_write(0x0C, 0x96); // page-1 word 0x9600 mid byte
++        _crtc_write(0x69, (Uint8)(s69 & ~(Uint8)0x1F));
++        const Uint8 r0d = _crtc_read(0x0D);
++        const Uint8 r0c = _crtc_read(0x0C);
++        const Uint8 r69 = _crtc_read(0x69);
++        _crtc_write(0x0D, s0d); // restore (before any vsync latch)
++        _crtc_write(0x0C, s0c);
++        _crtc_write(0x69, s69);
++        _vr_irq_restore(_vr_if);
++        verified = (r0d == 0x00 && r0c == 0x96 && (r69 & 0x1F) == 0x00);
++        if (!verified) {
++            dos_port_dbg_log("sdl: S3-2 stage1 VRAM-resident page-flip DISABLED "
++                             "(direct-CRTC self-verify FAILED: wrote CR0D=00 CR0C=96 "
++                             "CR69hi=0, read CR0D=0x%02X CR0C=0x%02X CR69=0x%02X; "
++                             "sysmem copy-present fallback -- no INT, no hang)",
++                             (unsigned)r0d, (unsigned)r0c, (unsigned)r69);
++            _vram_resident_state = 0;
++            return 0;
++        }
++    }
++
+     dos_port_dbg_log("sdl: S3-2 stage1 VRAM-resident page-flip ENABLED "
+-                     "(S3 ViRGE/DX chip-id=0x%04X; VBE 0x4F07 flip self-verified; "
++                     "(S3 ViRGE/DX chip-id=0x%04X; direct-CRTC WORD-unit flip "
++                     "self-verified, NO INT 0x10; CR67=0x%02X non-streams; "
+                      "bounded-vblank-after; copy-present dropped)",
+-                     (unsigned)chip_id);
++                     (unsigned)chip_id, (unsigned)cr67);
+     _vram_resident_state = 1;
+     _vram_resident_visible_page = 0; // reset toggle on (re-)enable
+     return 1;
+@@ -3160,43 +3209,35 @@ static bool _vram_resident_compute_back_page(const SDL_DOSVesaDirectState *st,
+     if (_vram_resident_check_enabled() == 0) {
+         return false; // OFF path: no state touched -> byte-identical present
+     }
+-    // Cache pitch for the 0x4F07 flip (scanline = offset / pitch).
+-    _vram_resident_pitch = st->vram_pitch;
+     int back_idx = 1 - _vram_resident_visible_page;
+     *out_back_off = (Uint32)back_idx * st->fb_size;
+     return true;
+ }
+ 
+-// DOSKUTSU patch 0077 (S3-2 Stage 1) -- display-start page-flip via VBE
+-// 0x4F07, replacing wave-50's Cirrus-specific direct-CRTC programming
+-// (CRTC[0x0C/0x0D]+[0x1B]+[0x1D]). 0x4F07 is chip-agnostic and the same
+-// BIOS call the slow path already uses for LFB page-flips, so it works on
+-// the S3 ViRGE/DX without an S3-specific CRTC register map. The origin is
+-// addressed in SCANLINES (DX) -- byte_offset / pitch -- where pitch is
+-// cached in _vram_resident_pitch by the snapshot-holding callers.
++// DOSKUTSU patch 0078 (S3-2 Stage 1 HANG FIX) -- display-start page-flip
++// via DIRECT S3 CRTC register write, replacing patch 0077's per-frame VBE
++// 0x4F07 __dpmi_int(0x10). The 0x4F07 PM->RM transition deadlocked the
++// machine when the SB16 IRQ-5 audio ISR + an INT 21h SFX disk-load
++// contended for the single non-re-entrant DPMI real-mode state (the
++// Mimiga polar-star hang). This path is PURE PROTECTED-MODE PORT I/O --
++// NO real-mode INT -> the re-entrancy window is gone entirely.
++//
++// S3 ViRGE/DX display-start is in WORD units (byte_offset >> 1),
++// crtcswap-probe-verified on the g2k S3+UNIVBE (chip 0x8A01): the
++// operator confirmed the WORD hold turns page 1 visible (byte/dword stay
++// on page 0). 320x240x8 page-1 byte offset 0x12C00 -> word 0x9600 ->
++// CR0C=0x96, CR0D=0x00, CR69=0x00. Streams mode is OFF (CR67=0x00,
++// gated at engage) so the CRTC start path is in effect.
+ //
+-// Uses BX=0x0000 (set display start IMMEDIATELY, no BIOS retrace-wait) so
+-// the call cannot spin on a missing retrace, then a BOUNDED vblank wait
+-// AFTER programming. Waiting AFTER (not before) is the wave-50 flicker
+-// fix: the CRTC start-address latches at vsync, so returning only after
+-// that vsync guarantees the just-presented page is actually visible
+-// before the engine draws into the other page. The wait is bounded so a
+-// stuck retrace bit degrades to a finite stall, never a hang.
++// Bounded vblank AFTER the program (flicker fix, unchanged from 0077):
++// the CRTC start-address latches at vsync, so returning only after that
++// vsync guarantees the just-presented page is visible before the engine
++// draws the other page. The wait runs with interrupts enabled (audio
++// flows) and is bounded (a stuck retrace bit degrades to a finite stall,
++// never a hang). No pitch needed -- WORD address = byte_offset >> 1.
+ static void _crtc_set_display_start_byte(Uint32 byte_offset)
+ {
+-    const int pitch = (_vram_resident_pitch > 0) ? _vram_resident_pitch : 1;
+-    const Uint16 scanline = (Uint16)(byte_offset / (Uint32)pitch);
+-
+-    __dpmi_regs r;
+-    SDL_zero(r);
+-    r.x.ax = 0x4F07;
+-    r.x.bx = 0x0000;   // set display start, immediate (no BIOS retrace wait)
+-    r.x.cx = 0;        // first displayed pixel in scan line (x = 0)
+-    r.x.dx = scanline; // first displayed scan line (page origin / pitch)
+-    __dpmi_int(0x10, &r);
+-
+-    // Flicker fix: wait one vblank AFTER programming so the start-address
+-    // latch has taken effect before we return. Bounded -- HW-IO safe.
++    _vram_resident_write_crtc_start_word(byte_offset >> 1); // WORD units
+     _vram_resident_wait_vblank_bounded();
+ }
+ 
+@@ -3222,7 +3263,7 @@ static void _vram_resident_finish_swap(const SDL_DOSVesaDirectState *st,
+         _vram_resident_engage_banner_logged = 1;
+         dos_port_dbg_log("sdl: S3-2 stage1 first page-flip present "
+                          "(hidden_page_byte_offset=0x%06lX; visible_page now=%d; "
+-                         "copy-present dropped, VBE 0x4F07 flip)",
++                         "copy-present dropped, direct-CRTC flip)",
+                          (unsigned long)hidden_byte_offset,
+                          _vram_resident_visible_page);
+     }
+@@ -3279,12 +3320,10 @@ bool SDL_DOSVesaPagePresent(const SDL_DOSVesaDirectState *st, int page_idx)
+         return false;
+     }
+     if (_vram_resident_check_enabled() == 0) {
+-        // Not engaged (killswitch off / not S3 / 0x4F07 self-verify failed):
++        // Not engaged (killswitch off / not S3 / self-verify failed):
+         // return false so the engine keeps presenting via the copy path.
+         return false;
+     }
+-    // Cache pitch for the 0x4F07 flip (scanline = offset / pitch).
+-    _vram_resident_pitch = st->vram_pitch;
+     _crtc_set_display_start_byte((Uint32)page_idx * st->fb_size);
+     _vram_resident_visible_page = page_idx;
+ 
+@@ -3293,7 +3332,7 @@ bool SDL_DOSVesaPagePresent(const SDL_DOSVesaDirectState *st, int page_idx)
+     if (!_vram_resident_engage_banner_logged) {
+         _vram_resident_engage_banner_logged = 1;
+         dos_port_dbg_log("sdl: S3-2 stage1 first page-flip present "
+-                         "(page_idx=%d; copy-present dropped, VBE 0x4F07 flip)",
++                         "(page_idx=%d; copy-present dropped, direct-CRTC flip)",
+                          page_idx);
+     }
+     return true;
+-- 
+2.47.3
+
