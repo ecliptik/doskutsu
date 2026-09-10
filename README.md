@@ -1,14 +1,14 @@
 # DOSKUTSU
 
+<p align="center">
+<a href="#quickstart">Quickstart</a> | <a href="#status">Status</a> | <a href="#requirements">Requirements</a> | <a href="#download">Download</a> | <a href="#usage">Usage</a> | <a href="#building">Building</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
+</p>
+
 DOSKUTSU is a faithful port of [Cave Story](https://www.cavestory.org/) (Doukutsu Monogatari) to MS-DOS 6.22 on retro Pentium-class hardware. It plays Daisuke "Pixel" Amaya's 2004 freeware classic on real 1990s-era PCs via [SDL3](https://www.libsdl.org/)'s [DOS backend](https://github.com/libsdl-org/SDL/pull/15377), [DJGPP](https://www.delorie.com/djgpp/), and [CWSDPMI](https://en.wikipedia.org/wiki/DOS_Protected_Mode_Interface).
 
 The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's original Japanese title).
 
 DOSKUTSU exists for preservation and the engineering challenge of running Cave Story on a 1990s MS-DOS PC.
-
-<p align="center">
-<a href="#quickstart">Quickstart</a> | <a href="#status">Status</a> | <a href="#requirements">Requirements</a> | <a href="#download">Download</a> | <a href="#usage">Usage</a> | <a href="#building">Building</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
-</p>
 
 ### Screenshots
 
