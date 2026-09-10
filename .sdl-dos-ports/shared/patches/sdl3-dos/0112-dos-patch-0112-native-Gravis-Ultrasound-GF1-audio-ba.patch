@@ -1,0 +1,1894 @@
+From 6c71203d22097e0b1f2943f470f81731806d3b86 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 22 Jun 2026 15:57:28 -0700
+Subject: [PATCH] dos: patch 0112 -- native Gravis Ultrasound (GF1) audio
+ backend
+
+Campaign 3. A native GF1 wavetable audio backend (new
+src/audio/dos/SDL_dosaudio_gus.c) driven OUT-OF-BAND, exactly like the shipped
+AdLib/OPL path (SDL/0110's PIT/OPL exports). It is NOT an SDL streaming audio
+device: no audio bootstrap, no SDL audio device opened, no SDL3_mixer PCM sink,
+no SDL_INIT_AUDIO involvement. The engine brings the card up via
+SDL_DOSGusInit() (mirroring the AdLib SDL_DOSOpl2Detect + pump start), then
+uploads sample bytes into the card's on-board DRAM and commands GF1 hardware
+voices through the exports in SDL3/SDL_dosgus.h. The GF1 mixes up to N voices
+in hardware straight to its DAC; the host CPU does allocation + event dispatch
+only.
+
+Why DOS needs this: a GUS-only machine cannot open SDL_INIT_AUDIO today, so it
+had to boot AUDIO_OFF. The engine adds a `gus` boot-mode that omits
+SDL_INIT_AUDIO (like `adlib`) and drives the GF1 purely through these exports.
+The Sound Blaster path is wholly untouched (no audio bootstrap, no shared
+audio-core edit), so it stays byte-identical.
+
+FULLY GF1-IRQ-INDEPENDENT (real-HW finding): a PicoGUS plays poll-based MIDIDEMO
+but is SILENT for IRQ-driven Doom -- it does not deliver the GF1 IRQ to
+IRQ-driven software. So this driver hooks NO GF1 IRQ and enables none: no ISR;
+reset reg 0x4C=0x03 (IRQ bit2 off); per-voice wave-end IRQ never set
+(SDL_DOSGUS_IRQ is a no-op); voice-reap polls voice_active_mask (GF1
+voice-stopped hw bit); the music clock is the external PIT pump.
+
+DRAM UPLOAD is 64KB-CRASH-SAFE (#36 real-HW fix): the g2k iter hard-crashed
+during the SFX upload because the 8237 DMA transfer crossed a 64KB ISA
+physical-page boundary (the controller wraps the offset within the page ->
+memory corruption -> page-fault; DOSBox doesn't enforce it so smoke passed).
+Fix:
+  - DEFAULT upload path = programmed-I/O poke -- the SAME mechanism as GF1
+    detection's DRAM peek/poke (proven on the operator's PicoGUS, which sized
+    1024KB DRAM that way) and immune to the 8237/64KB crash. Done in bounded
+    cli/sti bursts so a large per-song .pat upload can't starve the PIT clock /
+    cooperative scheduler.
+  - DMA upload is OPT-IN (SDL_HINT_DOS_GUS_DMA_UPLOAD=1), 8-bit only, and
+    SPLIT into <=32KB 64KB-page-safe chunks through one boundary-safe bounce
+    buffer so no single 8237 transfer can cross a page. Promote to default once
+    g2k-validated.
+  - DRAM allocations are 16-byte aligned (GF1 DMA dest reg 0x42 = addr>>4).
+
+Other Phase-0 scope:
+- SDL_DOSGusInit/Shutdown: parse ULTRASND/ULTRADIR/VOICES hints via SDL_GetHint
+  (never getenv), GF1 reset, DRAM peek/poke detect + 256K sizing, set active
+  voices (reg 0x0E -> rate), DAC enable; SKIP_DETECTION bypass.
+- Voice ops alloc/start/stop/freq/vol/pan. Driver owns all GF1 conversions
+  (FC=hz*1024/rate; 8-bit addr split; 16-bit bank quirk; linear->4.8-log vol;
+  0-255->4-bit pan). 28 voices (~22050 Hz) at Init.
+- IRQ-SAFE voice pool: AllocVoice/StartVoice/StopVoice mutate the shared
+  busy-list inside cli/sti -- the pool is driven from BOTH the main loop
+  (SfxSynth SFX) AND the IRQ-0 music pump, so a preempting note_on must not
+  double-claim a slot.
+- SDL_DOSGusResetDram(keep_bytes) rewinds the DRAM bump cursor preserving a low
+  keep region (persistent SFX bank survives per-song .pat swaps).
+- Hints SDL_HINT_DOS_GUS_{ULTRASND,ULTRADIR,VOICES,SKIP_DETECTION,DIAG,
+  DMA_UPLOAD} (DIAG + DMA_UPLOAD default-OFF).
+- REQUIRED detect banner "audio: SDL/0112 GUS GF1 detect: present=...".
+
+GF1 register indices cross-checked vs DOSBox-X gus.cpp + the GUS SDK; the
+IRQ/DMA latch + a few conversions are ACCURATE-BUT-CONFIRM inline pending the
+operator's g2k register pass. Validated by a clean libSDL3.a link: 12 exports,
+no audio bootstrap, no PC-speaker contamination, no GF1 IRQ hook.
+
+gus-5 (#41 the .pat-upload freeze + #40 quiesce, folded in):
+- #41 ROOT (IOCHRDY poke-overrun): the per-byte PIO path re-selected the FULL
+  GF1 DRAM address (0x43/0x44, ~5 outportb) before EVERY data byte poked to
+  3X7 -- ~6 port ops/byte. On the operator's PicoGUS (RP2040) this floods the
+  card's ISA command path; the 2nd .pat instrument upload of a song overruns it,
+  the card asserts IOCHRDY, and the outportb stalls the ISA bus with unbounded
+  wait states while the driver holds cli -> CPU freeze. (Earlier "a bounded PIO
+  loop can't hang" reasoning was wrong: a single outportb is not guaranteed to
+  return when the card holds IOCHRDY.)
+- #41 FIX (gated): SDL_HINT_DOS_GUS_PIO_AUTOINC=1 programs the DRAM address
+  ONCE per upload and pokes 3X7 sequentially, letting the GF1 auto-advance its
+  own DRAM pointer -- ~1 outportb/byte (~6x fewer). Default OFF (per-byte = the
+  observe cell) until g2k confirms autoinc reaches gameplay, then flip to ON.
+- OBSERVE diags (GUS_DIAG-gated): the upload-start log now includes the live
+  hardware active_mask (H1 contention vs H2 overrun decider), and gus_upload_pio
+  emits a byte-offset progress line every ~1KB (last line before a freeze pins
+  where the ISA bus wedged).
+- #40 SDL_DOSGusStopAllVoices(): stops + frees every voice in one cli/sti pass
+  (song-boundary quiesce; engine calls it at .pat residency swaps, never
+  per-SFX). This is the 12th export.
+- Test-tone (TESTTONE=1) now plays SYNCHRONOUSLY then EXPLICITLY StopVoice-frees
+  voice 0 before Init returns -- no reliance on GF1 wave-end auto-stop, nothing
+  lingering into gameplay; doubles as a #40 quiesce probe.
+- "device up" banner gains upload=pio[+autoinc] to witness the active cell.
+- New hint documented in docs/internal/BOOT.md.
+
+gus-6 (#42 the post-upload first-note freeze -- the real music blocker):
+- ROOT (code-confirmed): gus_encode_addr encoded the GF1 16-bit DRAM address
+  with the READ-side transform (a = (a & 0xC0000) | ((a & 0x1FFFF) << 1)) -- the
+  inverse of what a driver needs. The hardware then applies its own <<1 on read,
+  so a 16-bit voice fetched from ~4*A (the wrong DRAM region: other instruments
+  / un-uploaded garbage). All these .pat are 16-bit, so EVERY music voice
+  mis-fetched. The PicoGUS mis-fetch then asserted IOCHRDY on the next card I/O
+  -> CPU freeze right after on_song_start (no game-loop flips, no voice line).
+  gus-2 never hit it (the old freq bug left voices near-DC, never fetching);
+  #39 "in-tune" was an fc-value log check, not an ear check; DOSBox smoke never
+  audibly plays a 16-bit voice -- so this path had never played on anything.
+- FIX (one line): canonical GUS_16BIT_ADDR encode -- shift the in-bank offset
+  RIGHT: a = (a & 0xC0000) | ((a >> 1) & 0x1FFFF). Round-trip is now exact
+  (hw read-back == A). The 0x1FFFF mask is complete with >>1 (A spans 0..0x3FFFF
+  in a 256K bank -> A>>1 spans 0..0x1FFFF, no bits dropped). Ref: Gravis SDK /
+  Linux gus_wave.c; cross-checked vs DOSBox-X gus.cpp read xform.
+- CONFIRM diag (GUS_DIAG): the per-voice START log reconstructs the programmed
+  integer address from the actual encoded MSW|LSW, applies the GF1 read xform,
+  and prints hw_fetch=0x... (==start? N) -- 1 proves the fetch lands on the
+  uploaded address.
+- A/B fallback hint SDL_HINT_DOS_GUS_FORCE_8BIT_ADDR=1 (default OFF): forces
+  8-bit voice addressing to isolate the 16-bit path if the encode fix does not
+  fully clear the wedge. Diagnostic only.
+
+gus-7 (#39 the post-#42 SILENCE: diagnostic bundle, IRQ-safe):
+
+Static analysis exonerated the SDL voice path (DAC two-step 0x4C 0x00->0x01->0x03,
+mix-ctrl line-out 0x08 bit1=0 active-low, gus_w8 high-byte placement, logvol<<4
+into bits[15:4]) and DISPROVED the ramp-gating theory (DOSBox-X + DOSBox-staging:
+a stopped ramp with non-zero static 0x09 IS audible -- ramp does not gate output).
+So the silence needs RUNTIME values, but H5 blocked the diag. This bundle gets the
+data:
+- IRQ-SAFE voice-diag ring (the H5 fix): SetVoiceFreq/Vol + StartVoice run in the
+  note_on PIT-IRQ, where dos_port_dbg_log (fprintf+fsync) deadlocks via libc
+  reentrancy (confirmed H5 -- GUS_DIAG=1 hung). The ops now ENQUEUE fixed records
+  (FREQ hz/fc, VOL in/reg, START addr/ctrl) into a static ring INSIDE their
+  existing cli (memory-only, no I/O); a MAIN-LOOP-only flush (GetState per-frame
+  poll gated by an entry interrupt-flag check + a guaranteed flush at each
+  on_song_start UploadSample) drains them. GUS_DIAG=1 is now runnable on g2k.
+- POST-GO voice-status READ-BACK: StartVoice reads voice-control 0x80 (twice, GF1
+  latch quirk) right after GO and enqueues RBACK status -- stopped=1 means the GF1
+  did NOT run the voice (the decisive silence datum).
+- FORCE_MAXVOL probe (SDL_HINT_DOS_GUS_FORCE_MAXVOL=1, default OFF): forces
+  0x09=0xFFF0 in SetVoiceVol + StartVoice. A/B: audible -> the bug is the volume
+  VALUE (engine low/zero vol or conversion); still silent -> volume path
+  exonerated, deeper voice-run/DAC/PicoGUS cause (the ring + RBACK pin it).
+- device-up banner gains " maxvol=ON"; new hint documented in BOOT.md.
+No new export (still 12). The gus-6 hw_fetch START diag (also IRQ-context) is
+replaced by the ring -- the >>1 encode is already confirmed.
+
+gus-16 (#39 dead-zone PERMANENT FIX -- default voices 28 -> 14):
+
+Root cause CONFIRMED on g2k (wave-gus16, same binary, A/B): the PicoGUS
+PCM510xA DAC is dead-silent at EXACTLY 22.05kHz (~10% of cards; the reason
+pgusinit ships /gus44k). Our GUS_DEF_VOICES=28 set the GF1 output rate to
+617400/28 = 22050Hz -> the dead zone -> total silence. With GUS_VOICES=14
+(617400/14 = 44100Hz) the SAME binary is audible + playable + save/load OK;
+28 voices is silent. There is NO pitch/rate bug -- g_gus_rate is recomputed
+from g_gus_voices, so 14 voices plays in tune at 44100Hz (highest quality).
+The four prior register-gate fixes (double-write, vol-ramp, 0x4C=0x07,
+FULLCANON) are REFUTED by this finding; they stay default-ON as background
+correctness but none fixed #39.
+
+The fix: GUS_DEF_VOICES 28 -> 14 (one line). 44100Hz is the highest-quality
+GF1 point and clears the only DAC dead point. The SDL_HINT_DOS_GUS_VOICES
+hint still overrides for A/B, so no new killswitch is needed. Trade-off:
+14-voice polyphony vs 28 -- the operator's 14-voice Organya had no dropped
+notes, so 14 is the chosen default; a future trip could A/B a mid count
+(24 -> 25725Hz, still clears the dead zone) if dense songs ever drop notes.
+The g_gus_rate static initializer 22050 -> 44100 for consistency (cosmetic;
+always recomputed before use). BOOT.md GUS_VOICES + AUDIO_BACKEND=gus entries
+updated. Why DOS needs this: a no-SB DOS box on a PicoGUS /mode gus otherwise
+boots to a silent default.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ include/SDL3/SDL_dosgus.h        |  267 ++++++
+ src/audio/dos/SDL_dosaudio_gus.c | 1436 ++++++++++++++++++++++++++++++
+ 2 files changed, 1703 insertions(+)
+ create mode 100644 include/SDL3/SDL_dosgus.h
+ create mode 100644 src/audio/dos/SDL_dosaudio_gus.c
+
+diff --git a/include/SDL3/SDL_dosgus.h b/include/SDL3/SDL_dosgus.h
+new file mode 100644
+index 000000000..ae67412f5
+--- /dev/null
++++ b/include/SDL3/SDL_dosgus.h
+@@ -0,0 +1,267 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/*
++ * SDL_dosgus.h -- DOSKUTSU local patch SDL/0112 (Campaign 3, native Gravis
++ * Ultrasound / GF1 wavetable engine). NOT upstream SDL.
++ *
++ * Engine-facing export surface for the native GF1 audio backend
++ * (src/audio/dos/SDL_dosaudio_gus.c). The GF1 is driven OUT-OF-BAND, exactly
++ * like the shipped AdLib/OPL path (SDL/0110's PIT/OPL exports): it is NOT an
++ * SDL streaming audio device. There is no SDL audio device opened for GUS, no
++ * SDL_INIT_AUDIO involvement, and no SDL3_mixer PCM sink. The engine brings the
++ * card up via SDL_DOSGusInit() (mirroring how the AdLib path uses
++ * SDL_DOSOpl2Detect + the pump start), then uploads samples into the card's
++ * on-board DRAM and commands GF1 hardware voices through the calls below. The
++ * GF1 mixes in hardware straight to its DAC; the host CPU does allocation +
++ * event dispatch only.
++ *
++ * Export-pattern mirrors SDL3/SDL_dosvesa_directaccess.h (DOSKUTSU patch
++ * SDL/0034): SDL_DECLSPEC + SDLCALL, extern "C", thin snapshot struct.
++ *
++ * Division of labor (deliberate): the CALLER passes friendly engine units
++ * (playback Hz, 0..255 linear volume, 0..255 pan) and native-format sample
++ * bytes; the DRIVER owns every GF1 fixed-point / logarithmic / 4-bit register
++ * conversion so the engine never touches a raw GF1 register.
++ *
++ * Ownership: the ENGINE owns the voice pool lifecycle. AllocVoice hands out a
++ * voice; the driver NEVER auto-returns a wave-ended voice. The engine polls
++ * SDL_DOSGusGetState().voice_active_mask to learn a one-shot voice finished,
++ * then calls SDL_DOSGusStopVoice to free it (single-owner = no note desync).
++ *
++ * See docs/internal/GUS-NATIVE-DESIGN.md (model B amendment).
++ */
++
++#ifndef SDL_dosgus_h_
++#define SDL_dosgus_h_
++
++#include <SDL3/SDL_stdinc.h>
++#include <SDL3/SDL_begin_code.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Sentinel returned by SDL_DOSGusUploadSample on failure (OOM in card DRAM,
++   no active GF1 device). A valid DRAM byte address is always < dram_size
++   (<= 1 MB), so 0xFFFFFFFF can never be a real address. */
++#define SDL_DOSGUS_BAD_ADDR ((Uint32)0xFFFFFFFFu)
++
++/* Flags for SDL_DOSGusStartVoice(). */
++#define SDL_DOSGUS_LOOP   0x01u /* loop start..end (else one-shot, stop at end) */
++#define SDL_DOSGUS_16BIT  0x02u /* sample is 16-bit signed (else 8-bit unsigned) */
++#define SDL_DOSGUS_BIDI   0x04u /* bidirectional (ping-pong) loop */
++#define SDL_DOSGUS_IRQ    0x08u /* accepted but NO-OP: the IRQ-independent driver never enables wave-end IRQs (poll voice_active_mask instead) */
++
++/* Snapshot of the active GF1 device state. Cheap struct copy + a per-voice
++   hardware status poll; safe to call once per MIDI tick. */
++typedef struct SDL_DOSGusState
++{
++    bool   valid;             /* GF1 detected AND SDL_DOSGusInit succeeded */
++    Uint16 base_port;         /* GF1 base I/O port (e.g. 0x240) */
++    Uint8  gf1_irq;           /* GF1 IRQ (ULTRASND field 4) */
++    Uint8  play_dma;          /* playback DMA channel (ULTRASND field 2) */
++    Uint8  num_voices;        /* active-voice count programmed (e.g. 28) */
++    Uint8  pad0;
++    Uint32 output_rate;       /* resulting DAC sample rate (e.g. 22050 @ 28 voices) */
++    Uint32 dram_size;         /* detected on-board DRAM, bytes (256K..1MB) */
++    Uint32 dram_used;         /* bump-allocator high-water (bytes uploaded so far) */
++    Uint32 voice_active_mask; /* bit N set = voice N is still sounding (hardware) */
++    Uint32 abi_version;       /* export ABI version, currently 1 */
++} SDL_DOSGusState;
++
++/**
++ * Bring up the native GF1 card.
++ *
++ * Parses the GUS hints (SDL_HINT_DOS_GUS_ULTRASND / _ULTRADIR / _VOICES,
++ * which the engine bridges from the real ULTRASND/ULTRADIR env vars), resets
++ * the GF1, runs DRAM peek/poke detection + sizing, programs the active-voice
++ * count (rate), enables the DAC, and hooks + locks the GF1 IRQ. Emits the
++ * SDL/0112 detect banner. Out-of-band: no SDL audio device is opened.
++ *
++ * \returns true if a GF1 was detected and initialized (then
++ *          SDL_DOSGusGetState().valid==true); false if absent (honors
++ *          SDL_HINT_DOS_GUS_SKIP_DETECTION=1 as a bring-up bypass).
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSGusInit(void);
++
++/**
++ * Tear down the native GF1 card.
++ *
++ * Stops + silences all voices, unhooks the GF1 IRQ, and parks the chip in
++ * reset. Idempotent and safe to call unconditionally (a no-op if Init was
++ * never called or already torn down).
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSGusShutdown(void);
++
++/**
++ * Snapshot the native GF1 device state.
++ *
++ * \param out caller-allocated struct that receives the snapshot. The
++ *            voice_active_mask field is refreshed from the GF1 hardware
++ *            voice-stopped status on each call.
++ * \returns true when the GF1 device is active (out->valid==true); false
++ *          otherwise (out fully zeroed).
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC bool SDLCALL SDL_DOSGusGetState(SDL_DOSGusState *out);
++
++/**
++ * Upload a sample block into the card's on-board DRAM, VERBATIM.
++ *
++ * The bytes are written to DRAM exactly as supplied -- no sign conversion. The
++ * caller hands native GF1 format: 8-bit UNSIGNED, or 16-bit SIGNED when
++ * is16bit!=0 (the caller owns any .pat/.pxt signed->unsigned flip). The driver
++ * bump-allocates DRAM; 16-bit samples are aligned so they never straddle a
++ * 256K bank boundary.
++ *
++ * \param data source sample bytes. May be a protected-mode (>1MB) pointer.
++ * \param len  length in BYTES.
++ * \param is16bit non-zero if `data` is 16-bit signed PCM.
++ * \returns the DRAM byte address the sample now lives at (use it for the
++ *          start/end/loopstart arguments of SDL_DOSGusStartVoice), or
++ *          SDL_DOSGUS_BAD_ADDR on failure.
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC Uint32 SDLCALL SDL_DOSGusUploadSample(const void *data, Uint32 len, int is16bit);
++
++/**
++ * Rewind the DRAM bump allocator, preserving a low keep region.
++ *
++ * Sets the allocator high-water back to `keep_bytes`: subsequent uploads
++ * reuse DRAM above it, while [0, keep_bytes) is preserved. Intended for
++ * per-song .pat residency swaps that must NOT wipe a persistent low region
++ * (e.g. the resident SfxSynth SFX bank). Pass 0 to drop everything.
++ *
++ * Does NOT stop voices: the caller must first stop any voice still reading
++ * the region being freed (the engine owns voice lifecycle).
++ *
++ * \param keep_bytes number of low DRAM bytes to preserve.
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSGusResetDram(Uint32 keep_bytes);
++
++/**
++ * Allocate a hardware voice from the shared pool.
++ *
++ * \returns a voice index in [0, num_voices), or -1 if the pool is exhausted.
++ *          The voice stays allocated until the caller releases it with
++ *          SDL_DOSGusStopVoice -- the driver never auto-frees it, even after
++ *          a one-shot sample reaches its end (poll voice_active_mask to learn
++ *          it finished, then StopVoice).
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC int SDLCALL SDL_DOSGusAllocVoice(void);
++
++/**
++ * Start a hardware voice playing a resident DRAM sample.
++ *
++ * \param voice      a voice index from SDL_DOSGusAllocVoice.
++ * \param start      DRAM byte address of the sample's first byte.
++ * \param end        DRAM byte address of the sample's last byte (loop/stop).
++ * \param loopstart  DRAM byte address of the loop point (used when
++ *                   SDL_DOSGUS_LOOP is set; ignored otherwise).
++ * \param flags      SDL_DOSGUS_LOOP / _16BIT / _BIDI / _IRQ, OR'd.
++ *
++ * Addresses are plain DRAM byte addresses (the space UploadSample returns);
++ * the driver applies the GF1 fixed-point split and the 16-bit address quirk.
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSGusStartVoice(int voice, Uint32 start, Uint32 end, Uint32 loopstart, Uint32 flags);
++
++/**
++ * Stop a voice and return it to the pool.
++ *
++ * The engine calls this both on note_off (after its software release ramp)
++ * and to reap a one-shot voice that voice_active_mask reported finished.
++ *
++ * \param voice a voice index previously returned by SDL_DOSGusAllocVoice.
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSGusStopVoice(int voice);
++
++/**
++ * Stop and free EVERY voice in one pass (song-boundary quiesce).
++ *
++ * Stops + silences all hardware voices and returns them all to the pool inside
++ * a single critical section, so no voice is left reading card DRAM. Intended
++ * for SONG .pat-residency boundaries ONLY (call it before swapping the .pat
++ * bank + uploading the new song's instruments) -- never per-SFX. Idempotent and
++ * safe when no voices are active.
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSGusStopAllVoices(void);
++
++/**
++ * Set a voice's playback frequency.
++ *
++ * \param voice       a voice index.
++ * \param playback_hz the desired sample-playback rate in Hz. For a MIDI note:
++ *                    sample_native_rate * 2^((note - patch_root_key)/12).
++ *                    The driver converts Hz -> GF1 frequency-control value.
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSGusSetVoiceFreq(int voice, Uint32 playback_hz);
++
++/**
++ * Set a voice's volume (instantaneous).
++ *
++ * There is no hardware ramp export; the caller does software release ramps by
++ * stepping this across ticks, then SDL_DOSGusStopVoice.
++ *
++ * \param voice      a voice index.
++ * \param linear_vol 0..255 linear amplitude. The driver converts to the GF1
++ *                   4.8 logarithmic volume format.
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSGusSetVoiceVol(int voice, int linear_vol);
++
++/**
++ * Set a voice's stereo pan.
++ *
++ * \param voice a voice index.
++ * \param pan   0..255 (0 = hard left, 128 = center, 255 = hard right). The
++ *              driver maps to the GF1 4-bit pan register.
++ *
++ * \since DOSKUTSU patch SDL/0112.
++ */
++extern SDL_DECLSPEC void SDLCALL SDL_DOSGusSetVoicePan(int voice, int pan);
++
++#ifdef __cplusplus
++}
++#endif
++
++#include <SDL3/SDL_close_code.h>
++
++#endif /* SDL_dosgus_h_ */
+diff --git a/src/audio/dos/SDL_dosaudio_gus.c b/src/audio/dos/SDL_dosaudio_gus.c
+new file mode 100644
+index 000000000..064773e28
+--- /dev/null
++++ b/src/audio/dos/SDL_dosaudio_gus.c
+@@ -0,0 +1,1436 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty.  In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the following restrictions:
++
++  1. The origin of this software must not be misrepresented; you must not
++     claim that you wrote the original software. If you use this software
++     in a product, an acknowledgment in the product documentation would be
++     appreciated but is not required.
++  2. Altered source versions must be plainly marked as such, and must not be
++     misrepresented as being the original software.
++  3. This notice may not be removed or altered from any source distribution.
++*/
++
++/*
++ * DOSKUTSU local patch SDL/0112 -- Campaign 3, native Gravis Ultrasound (GF1).
++ *
++ * A native GF1 wavetable audio backend, driven OUT-OF-BAND exactly like the
++ * shipped AdLib/OPL path (SDL/0110's PIT/OPL exports) -- it is NOT an SDL
++ * streaming audio device. There is no DOSGUS audio bootstrap, no SDL audio
++ * device opened, no SDL3_mixer PCM sink, and no SDL_INIT_AUDIO involvement.
++ * The engine brings the card up via SDL_DOSGusInit() (mirroring how the AdLib
++ * path uses SDL_DOSOpl2Detect + the pump start), then uploads sample bytes
++ * into the card's on-board DRAM and commands GF1 hardware voices through the
++ * exports in SDL3/SDL_dosgus.h. The GF1 mixes up to N voices in hardware
++ * straight to its DAC; the host CPU does allocation + event dispatch only.
++ * This is the 50fps KPI angle (the entire PCM mix moves off the P54C).
++ *
++ * Ownership: the ENGINE owns the voice pool lifecycle. The driver never
++ * auto-returns a wave-ended voice; the engine polls
++ * SDL_DOSGusGetState().voice_active_mask (refreshed from the GF1 voice-stopped
++ * hardware status) and calls SDL_DOSGusStopVoice to free finished voices
++ * (single-owner = no note desync).
++ *
++ * GF1 register model: indices/transforms cross-checked against the DOSBox-X
++ * gus.cpp emulation (the campaign's functional witness) + the GUS SDK
++ * programming model. Validated FUNCTIONALLY in DOSBox-X first; the
++ * register-accuracy pass on real silicon (PicoGUS /mode gus, then a physical
++ * GUS) happens later with the operator (dosbox_not_proxy). Spots that are
++ * ACCURATE-BUT-CONFIRM are flagged inline.
++ */
++
++#include "SDL_internal.h"
++
++#if defined(SDL_PLATFORM_DOS)
++
++#include "../../core/dos/SDL_dos.h"
++#include "../../video/dos/SDL_dosdbg.h" /* dos_port_dbg_log routing (patch 0041) */
++#include <SDL3/SDL_dosgus.h>            /* the engine-facing export prototypes */
++
++/* ------------------------------------------------------------------------- */
++/* GF1 I/O port map (relative to the ULTRASND base port, e.g. 0x240).        */
++/* P2XR = base (the "2X" range); P3XR = base + 0x100 (the "3X" range).        */
++/* ------------------------------------------------------------------------- */
++#define GUS_P2X0_MIXCTRL(b)   ((b) + 0x000) /* mix control / reset latch select */
++#define GUS_P2X6_IRQSTATUS(b) ((b) + 0x006) /* board IRQ status (read) */
++#define GUS_P2XB_IRQDMA(b)    ((b) + 0x00B) /* IRQ/DMA control latch */
++#define GUS_P3X2_VOICESEL(b)  ((b) + 0x102) /* voice select */
++#define GUS_P3X3_REGSEL(b)    ((b) + 0x103) /* GF1 register index select */
++#define GUS_P3X4_DATALO(b)    ((b) + 0x104) /* GF1 data low (16-bit regs) */
++#define GUS_P3X5_DATAHI(b)    ((b) + 0x105) /* GF1 data high / 8-bit reg data */
++#define GUS_P3X7_DRAMIO(b)    ((b) + 0x107) /* DRAM programmed-I/O data */
++
++/* GF1 global register indices */
++#define GUS_REG_VOICES     0x0E /* set active-voice count: 0xC0 | (N-1) */
++#define GUS_REG_DMA_CTRL   0x41 /* DRAM DMA control */
++#define GUS_REG_DMA_ADDR   0x42 /* DRAM DMA start address (>> 4) */
++#define GUS_REG_DRAM_LO    0x43 /* DRAM peek/poke address low 16 */
++#define GUS_REG_DRAM_HI    0x44 /* DRAM peek/poke address high (bits 16-19) */
++#define GUS_REG_RESET      0x4C /* reset: bit0 master, bit1 DAC, bit2 IRQ */
++#define GUS_REG_IRQSTAT    0x8F /* voice IRQ source (read) */
++
++/* GF1 per-voice register indices (select voice via P3X2 first). The read
++   versions add 0x80 (so voice-control status reads at 0x80). */
++#define GUS_VREG_CTRL      0x00 /* voice control (read 0x80) */
++#define GUS_VREG_CTRL_RD   0x80
++#define GUS_VREG_FREQ      0x01 /* frequency control (16-bit) */
++#define GUS_VREG_STARTHI   0x02 /* start address MSW */
++#define GUS_VREG_STARTLO   0x03 /* start address LSW */
++#define GUS_VREG_ENDHI     0x04 /* end address MSW */
++#define GUS_VREG_ENDLO     0x05 /* end address LSW */
++#define GUS_VREG_RAMPRATE  0x06 /* volume ramp rate */
++#define GUS_VREG_RAMPSTART 0x07 /* volume ramp start */
++#define GUS_VREG_RAMPEND   0x08 /* volume ramp end */
++#define GUS_VREG_VOLUME    0x09 /* current volume (16-bit, bits 15-4) */
++#define GUS_VREG_CURHI     0x0A /* current address MSW */
++#define GUS_VREG_CURLO     0x0B /* current address LSW */
++#define GUS_VREG_PAN       0x0C /* pan/balance (4-bit) */
++#define GUS_VREG_VOLCTRL   0x0D /* volume ramp control */
++
++/* Voice control (0x00) bits */
++#define GUS_VC_STOP        0x03 /* stop + stopped (bit1 stop, bit0 stopped) */
++#define GUS_VC_16BIT       0x04
++#define GUS_VC_LOOP        0x08
++#define GUS_VC_BIDI        0x10
++#define GUS_VC_IRQ         0x20
++
++#define GUS_MAX_VOICES     32
++#define GUS_MIN_VOICES     14
++/* DOS-PORT: default 20 voices -> GF1 output rate = 617400/20 = 30870Hz.
++   g2k wave-gus18 ear-judged BEST: 20 voices beats 14 (44100Hz) -- the extra
++   polyphony outweighs the slightly lower DAC rate. AVOID 28 voices: it yields
++   EXACTLY 22050Hz, a PicoGUS firmware special-case (SCALE_22K_TO_44K forces
++   28-channel output to 44.1k) that collides with our driver's 22050 assumption
++   -> rate mismatch -> dead silence (g2k wave-gus16/18, same binary: V27/V29
++   audible, only V28 silent). There is no pitch bug (g_gus_rate is recomputed
++   from g_gus_voices below). The SDL_HINT_DOS_GUS_VOICES hint still
++   overrides [14,32] for A/B. pgusinit /gus44k 1 + 32 voices = full 44.1k
++   internal mixing at max polyphony (premium option). #39. */
++#define GUS_DEF_VOICES     20
++#define GUS_RATE_NUM       617400u /* output_rate ~= 617400 / active_voices */
++
++/* DMA-upload tunables. DMA upload is OPT-IN (SDL_HINT_DOS_GUS_DMA_UPLOAD=1);
++   the DEFAULT upload path is programmed-I/O poke, which is proven on real HW
++   (it is the same mechanism as GF1 detection's DRAM peek/poke) and immune to
++   the ISA 8237 64KB-physical-page crash (#36). When DMA IS enabled, only
++   samples >= GUS_DMA_UPLOAD_MIN take it, and the transfer is split into
++   GUS_DMA_CHUNK-byte pieces so a single 8237 transfer never crosses a 64KB
++   page (the real-HW crash mode). GUS_DMA_CHUNK must be <= 64KB and a multiple
++   of 16 (the GF1 DMA dest reg 0x42 holds addr>>4). */
++#define GUS_DMA_UPLOAD_MIN 4096
++#define GUS_DMA_CHUNK      32768u
++#define GUS_PIO_BURST      64u /* bytes per cli/sti window in PIO upload */
++
++/* ------------------------------------------------------------------------- */
++/* File-static card state. The GF1 is driven out-of-band, so the card / voice */
++/* / DRAM state lives here (no per-SDL-device struct).                        */
++/* ------------------------------------------------------------------------- */
++static volatile bool g_gus_active = false; /* card brought up + usable */
++static int  g_gus_base = -1;               /* base I/O port (e.g. 0x240) */
++static int  g_gus_play_dma = -1;           /* playback DMA channel */
++static int  g_gus_irq = -1;                /* GF1 IRQ */
++static int  g_gus_voices = GUS_DEF_VOICES; /* active-voice count */
++static Uint32 g_gus_rate = 30870;          /* resulting DAC rate (recomputed from voices; 617400/20) */
++static Uint32 g_gus_dram_size = 0;         /* detected DRAM bytes */
++static Uint32 g_gus_dram_used = 0;         /* bump-allocator high-water */
++static bool g_gus_diag = false;            /* SDL/0112 diag counters (default OFF) */
++static bool g_gus_dma_upload = false;      /* DMA upload opt-in (default OFF -> PIO; #36) */
++static bool g_gus_pio_autoinc = false;     /* PIO DRAM auto-increment (gus-5 #41; default OFF) */
++static bool g_gus_force_8bit_addr = false; /* gus-6 #42 A/B: force 8-bit voice addressing (default OFF) */
++static bool g_gus_force_maxvol = false;    /* gus-7 #39 probe: force every voice to max volume (default OFF) */
++static bool g_gus_reap_grace = false;      /* gus-8c #39: start-race mask guard (default OFF) */
++static bool g_gus_double_write = true;     /* gus-13 #39 FIX: real-GF1 control-reg errata (default ON; killswitch GUS_NO_DOUBLE_WRITE) */
++static bool g_gus_vol_ramp = true;         /* gus-14 #39 FIX: drive volume via the GF1 ramp engine (default ON; killswitch GUS_NO_VOL_RAMP) */
++static bool g_gus_dac_irq = true;          /* gus-15 #39 FIX: set 0x4C bit2 (master-IRQ-enable) -- may gate the DAC clock (default ON; killswitch GUS_NO_DAC_IRQBIT) */
++static bool g_gus_fullcanon = false;       /* gus-15 #39 FULLCANON hedge: + 160us reset settle + mixer latch-enable bit3 (opt-in GUS_FULLCANON) */
++
++/* voice allocation pool (busy = currently allocated to a caller). The ENGINE
++   owns this lifecycle -- the driver only sets it in AllocVoice and clears it
++   in StopVoice; the ISR never touches it. */
++static volatile bool g_gus_voice_busy[GUS_MAX_VOICES];
++
++/* gus-8c #39 start-race mask guard (candidate fix for the reap-driven silence,
++   GATED behind SDL_HINT_DOS_GUS_REAP_GRACE, default OFF). The engine reap
++   stops any busy voice GetState's voice_active_mask reports inactive; if the
++   PicoGUS 0x80 read mis-reports a JUST-STARTED voice as stopped (start-race),
++   every voice is reaped -> silence. With the guard ON, GetState reports a busy
++   voice ACTIVE until the hardware has read it RUNNING at least once (confirmed)
++   -- so a fresh voice can't be reaped in the race window. BOUNDED: if it never
++   confirms within GUS_REAP_GRACE_POLLS GetState polls (instant one-shot /
++   genuinely never started), it becomes reap-eligible again (no voice leak). */
++#define GUS_REAP_GRACE_POLLS 3u
++static volatile Uint8 g_gus_voice_confirmed[GUS_MAX_VOICES]; /* hw read it running >=1x */
++static volatile Uint8 g_gus_voice_polls[GUS_MAX_VOICES];     /* GetState polls since start (saturating) */
++
++/* IRQ-INDEPENDENT design (SDL/0112, real-HW finding 2026-06-23): the driver
++   hooks NO GF1 IRQ and enables none. DMA-upload completion is detected by
++   polling the host 8237 terminal-count (independent of the GF1 IRQ line);
++   voice-reap is poll-based via voice_active_mask; the music clock is the PIT
++   pump. This is why doskutsu GUS sounds on a PicoGUS that doesn't deliver the
++   GF1 IRQ to IRQ-driven software (where IRQ-driven Doom GUS stays silent). */
++
++/* diag counters */
++static Uint32 g_gus_n_upload = 0;
++static Uint32 g_gus_n_start = 0;
++
++/* gus-7 #39: IRQ-SAFE voice-diagnostic ring (the H5 fix). The voice ops
++   (SetVoiceFreq/Vol, StartVoice) run in the PIT-pump IRQ (note_on), where file
++   I/O -- dos_port_dbg_log = fprintf + per-line fsync (patch 0036) -- DEADLOCKS
++   via libc reentrancy if the IRQ fires mid main-loop fprintf (this is the
++   confirmed H5: GUS_DIAG=1 hung). So the ops now ENQUEUE fixed records into
++   this static ring (memory-only, done INSIDE their existing cli/sti so it is
++   atomic vs the IRQ -- no new cli/sti, no I/O), and a MAIN-LOOP-only flush
++   drains them to the log. GUS_DIAG is therefore IRQ-safe and runnable on g2k. */
++#define GUS_DIAG_RING 128u /* power of 2 */
++enum { GUS_DR_FREQ = 1, GUS_DR_VOL, GUS_DR_START, GUS_DR_STOP, GUS_DR_MASK };
++typedef struct { Uint8 kind; Uint8 voice; Uint16 seq; Uint32 a; Uint32 b; } gus_diag_rec;
++static volatile gus_diag_rec g_gus_dr[GUS_DIAG_RING];
++static volatile Uint32 g_gus_dr_head = 0; /* next write slot */
++static volatile Uint32 g_gus_dr_tail = 0; /* next read slot */
++static volatile Uint16 g_gus_dr_seq = 0;  /* monotonic op sequence (voice-state ordering) */
++static volatile int    g_gus_dr_flushing = 0;
++static Uint32 g_gus_dr_last_mask = 0xFFFFFFFFu; /* dedup the mask log (force first) */
++static int    g_gus_dr_last_busy = -1;
++
++/* Enqueue a diag record with a monotonic seq. The CALLER must already hold the
++   voice-op cli section so this is atomic vs the IRQ; it does NO I/O. The seq +
++   voice index let the flushed log show op ORDERING -- zero-duration notes
++   (START seq N -> STOP seq N+1 same voice) and voice pileup (all on one index)
++   are nx-opl's voice-state branch. Overwrites the oldest record when full. */
++static SDL_INLINE void gus_diag_put(Uint8 kind, Uint8 voice, Uint32 a, Uint32 b)
++{
++    Uint32 i = g_gus_dr_head & (GUS_DIAG_RING - 1u);
++    g_gus_dr[i].kind = kind;
++    g_gus_dr[i].voice = voice;
++    g_gus_dr[i].seq = g_gus_dr_seq++;
++    g_gus_dr[i].a = a;
++    g_gus_dr[i].b = b;
++    g_gus_dr_head++;
++    if (g_gus_dr_head - g_gus_dr_tail > GUS_DIAG_RING) {
++        g_gus_dr_tail = g_gus_dr_head - GUS_DIAG_RING; /* drop oldest */
++    }
++}
++
++/* True when CPU interrupts are ENABLED (IF set) at the call -> we are in
++   main-loop context, NOT inside an IRQ handler or a cli critical section.
++   Gates the diag flush so its file I/O only runs where it is safe. Capture
++   this at a function's ENTRY (before any cli), since DOS_EnableInterrupts is an
++   unconditional sti that would otherwise force IF=1 even in an IRQ-entered call. */
++static SDL_INLINE int gus_ints_enabled(void)
++{
++    unsigned long fl;
++    __asm__ __volatile__("pushfl\n\tpopl %0" : "=r"(fl));
++    return (fl & 0x200u) ? 1 : 0;
++}
++
++/* Drain the diag ring to the log. MAIN-LOOP ONLY (does fprintf+fsync). Callers
++   gate on gus_ints_enabled() captured at entry; a reentrancy flag guards
++   against a nested flush. Pops one record under cli, logs it with interrupts
++   on. */
++static void gus_diag_flush(void)
++{
++    if (!g_gus_diag || g_gus_dr_flushing) {
++        return;
++    }
++    g_gus_dr_flushing = 1;
++    for (;;) {
++        gus_diag_rec r;
++        Uint32 i;
++        DOS_DisableInterrupts();
++        if (g_gus_dr_tail == g_gus_dr_head) {
++            DOS_EnableInterrupts();
++            break;
++        }
++        i = g_gus_dr_tail & (GUS_DIAG_RING - 1u);
++        r.kind = g_gus_dr[i].kind;
++        r.voice = g_gus_dr[i].voice;
++        r.seq = g_gus_dr[i].seq;
++        r.a = g_gus_dr[i].a;
++        r.b = g_gus_dr[i].b;
++        g_gus_dr_tail++;
++        DOS_EnableInterrupts();
++        switch (r.kind) {
++        case GUS_DR_FREQ:
++            dos_port_dbg_log("audio: SDL/0112 GUS #%u v%d FREQ hz=%u -> fc=0x%04X",
++                             (unsigned)r.seq, r.voice, (unsigned)r.a, (unsigned)r.b);
++            break;
++        case GUS_DR_VOL:
++            dos_port_dbg_log("audio: SDL/0112 GUS #%u v%d VOL in=%d -> reg=0x%04X",
++                             (unsigned)r.seq, r.voice, (int)r.a, (unsigned)r.b);
++            break;
++        case GUS_DR_START:
++            dos_port_dbg_log("audio: SDL/0112 GUS #%u v%d START addr=0x%X ctrl=0x%02X",
++                             (unsigned)r.seq, r.voice, (unsigned)r.a, (unsigned)r.b);
++            break;
++        case GUS_DR_STOP:
++            dos_port_dbg_log("audio: SDL/0112 GUS #%u v%d STOP",
++                             (unsigned)r.seq, r.voice);
++            break;
++        case GUS_DR_MASK:
++            dos_port_dbg_log("audio: SDL/0112 GUS #%u MASK active=0x%X busy=%d",
++                             (unsigned)r.seq, (unsigned)r.a, (int)r.voice);
++            break;
++        default:
++            break;
++        }
++    }
++    g_gus_dr_flushing = 0;
++}
++
++/* ------------------------------------------------------------------------- */
++/* Low-level GF1 register access. The per-voice and DRAM-address sequences    */
++/* span the index port + a data port, so callers in non-ISR context wrap them */
++/* in cli/sti (the ISR also pokes these ports). 8-bit regs use the high data  */
++/* port; 16-bit regs use low+high.                                            */
++/* ------------------------------------------------------------------------- */
++static SDL_INLINE void gus_w8(Uint8 reg, Uint8 val)
++{
++    outportb(GUS_P3X3_REGSEL(g_gus_base), reg);
++    outportb(GUS_P3X5_DATAHI(g_gus_base), val);
++}
++
++static SDL_INLINE void gus_w16(Uint8 reg, Uint16 val)
++{
++    outportb(GUS_P3X3_REGSEL(g_gus_base), reg);
++    outportb(GUS_P3X4_DATALO(g_gus_base), (Uint8)(val & 0xFF));
++    outportb(GUS_P3X5_DATAHI(g_gus_base), (Uint8)(val >> 8));
++}
++
++static SDL_INLINE Uint8 gus_r8(Uint8 reg)
++{
++    outportb(GUS_P3X3_REGSEL(g_gus_base), reg);
++    return inportb(GUS_P3X5_DATAHI(g_gus_base));
++}
++
++static SDL_INLINE void gus_select_voice(int v)
++{
++    outportb(GUS_P3X2_VOICESEL(g_gus_base), (Uint8)v);
++}
++
++/* Point the DRAM peek/poke address registers at a 20-bit DRAM byte address. */
++static SDL_INLINE void gus_set_dram_addr(Uint32 addr)
++{
++    gus_w16(GUS_REG_DRAM_LO, (Uint16)(addr & 0xFFFF));
++    gus_w8(GUS_REG_DRAM_HI, (Uint8)((addr >> 16) & 0x0F));
++}
++
++static SDL_INLINE void gus_poke(Uint32 addr, Uint8 v)
++{
++    gus_set_dram_addr(addr);
++    outportb(GUS_P3X7_DRAMIO(g_gus_base), v);
++}
++
++static SDL_INLINE Uint8 gus_peek(Uint32 addr)
++{
++    gus_set_dram_addr(addr);
++    return inportb(GUS_P3X7_DRAMIO(g_gus_base));
++}
++
++/* ------------------------------------------------------------------------- */
++/* Unit conversions owned by the driver (so the engine never touches a raw    */
++/* GF1 register).                                                             */
++/* ------------------------------------------------------------------------- */
++
++/* Desired sample-playback Hz -> GF1 frequency-control value (FC). The GF1 FC
++   is a 6.9 fixed-point sample-position increment: frameadd = (FC>>1)/512 =
++   FC/1024 samples advanced per output tick, output tick rate == g_gus_rate.
++   So FC = playback_hz * 1024 / output_rate. (DOSBox-X gus.cpp:
++   frameadd=(val>>1)/512.) */
++static SDL_INLINE Uint16 gus_hz_to_fc(Uint32 playback_hz)
++{
++    Uint32 fc;
++    if (!g_gus_rate) {
++        return 0x400; /* 1.0 fallback */
++    }
++    fc = (Uint32)(((Uint64)playback_hz << 10) / g_gus_rate);
++    if (fc > 0xFFFF) {
++        fc = 0xFFFF; /* 6-bit integer part saturates ~63x */
++    }
++    return (Uint16)fc;
++}
++
++/* Linear amplitude 0..255 -> GF1 4.8 logarithmic volume (12-bit: 4-bit
++   exponent + 8-bit mantissa). Monotonic; full scale ~0xFFE. */
++static Uint16 gus_linear_to_logvol(int lin)
++{
++    Uint32 amp;
++    int p;
++    Uint8 mant;
++    if (lin <= 0) {
++        return 0;
++    }
++    if (lin > 255) {
++        lin = 255;
++    }
++    amp = (Uint32)lin << 8;            /* 256..65280 -> MSB in bits 8..15 */
++    p = 31 - __builtin_clz(amp);       /* position of the most-significant bit */
++    mant = (Uint8)((amp >> (p - 8)) & 0xFF);
++    return (Uint16)((((Uint32)p & 0x0F) << 8) | mant);
++}
++
++/* Encode a DRAM byte address into the GF1 voice address MSW/LSW pair. 8-bit:
++   the 32-bit accumulator is (byteaddr << 9) | 9-bit fraction, so MSW =
++   addr>>7, LSW = (addr & 0x7F) << 9.
++
++   16-bit (gus-6 #41 fix): the GF1 16-bit DRAM quirk requires the canonical
++   GUS_16BIT_ADDR ENCODE: keep the bank bits (18-19) and shift the in-bank
++   offset RIGHT by 1 -> programmed = (A & 0xC0000) | ((A>>1) & 0x1FFFF). The
++   prior code shifted LEFT, which is the GF1's READ-side transform (the inverse
++   -- what the hardware applies to recover the byte address FROM a programmed
++   address). Encoding with <<1 meant the GF1 then applied its own <<1 on read,
++   so a 16-bit voice fetched from ~4*A -- the wrong DRAM region (garbage /
++   un-uploaded). With >>1 the round-trip is exact (read-back == A). The 0x1FFFF
++   mask is now COMPLETE: A spans 0..0x3FFFF within a 256K bank, so A>>1 spans
++   0..0x1FFFF with no bits dropped (the earlier bit-17 loss was an artifact of
++   the wrong <<1 direction, not a mask-width gap). Ref: Gravis SDK /
++   Linux gus_wave.c GUS_16BIT_ADDR; cross-checked vs DOSBox-X gus.cpp read xform. */
++static void gus_encode_addr(Uint32 byteaddr, int is16bit, Uint16 *msw, Uint16 *lsw)
++{
++    Uint32 a = byteaddr;
++    if (is16bit) {
++        a = (a & 0xC0000u) | ((a >> 1u) & 0x1FFFFu);
++    }
++    *msw = (Uint16)((a >> 7) & 0x1FFF);
++    *lsw = (Uint16)((a & 0x7F) << 9);
++}
++
++/* ------------------------------------------------------------------------- */
++/* GF1 reset / IRQ-DMA latch / voice-count bring-up.                          */
++/* ------------------------------------------------------------------------- */
++
++/* IRQ# -> GF1 3-bit IRQ select code, and DMA# -> GF1 3-bit DMA select code.
++   Standard GUS latch tables (0 = none/invalid). ACCURATE-BUT-CONFIRM vs g2k. */
++static const Uint8 g_gus_irq_codes[16] = {
++    /*0*/ 0, /*1*/ 0, /*2*/ 1, /*3*/ 3, /*4*/ 0, /*5*/ 2, /*6*/ 0, /*7*/ 4,
++    /*8*/ 0, /*9*/ 0, /*10*/ 0, /*11*/ 5, /*12*/ 6, /*13*/ 0, /*14*/ 0, /*15*/ 7
++};
++static const Uint8 g_gus_dma_codes[8] = {
++    /*0*/ 0, /*1*/ 1, /*2*/ 0, /*3*/ 2, /*4*/ 0, /*5*/ 3, /*6*/ 4, /*7*/ 5
++};
++
++/* Program the GF1 IRQ + DMA selection latches. The mix-control register
++   (P2X0) bit6 selects which latch the P2XB write targets: 0 -> IRQ control,
++   1 -> DMA control. ACCURATE-BUT-CONFIRM (functional in DOSBox-X; g2k pass
++   later). PicoGUS pgusinit may already have latched these, but a proper
++   driver (re)programs them so a bare real GUS works too. */
++static void gus_program_irq_dma(void)
++{
++    Uint8 irqc = (g_gus_irq >= 0 && g_gus_irq < 16) ? g_gus_irq_codes[g_gus_irq] : 0;
++    Uint8 dmac = (g_gus_play_dma >= 0 && g_gus_play_dma < 8) ? g_gus_dma_codes[g_gus_play_dma] : 0;
++    /* gus-15 FULLCANON: set the mixer latch-enable bit3 (0x08) DURING the 2XB
++       latch writes (canonical) -- our default leaves bit3 clear until the final
++       write, so the latches may not take on a real GF1. Opt-in (default 0x00). */
++    Uint8 le = g_gus_fullcanon ? 0x08u : 0x00u;
++
++    DOS_DisableInterrupts();
++    /* select + write IRQ control latch (P2X0 bit6 = 0) */
++    outportb(GUS_P2X0_MIXCTRL(g_gus_base), (Uint8)(0x00 | le));
++    outportb(GUS_P2XB_IRQDMA(g_gus_base), irqc);
++    /* select + write DMA control latch (P2X0 bit6 = 1) */
++    outportb(GUS_P2X0_MIXCTRL(g_gus_base), (Uint8)(0x40 | le));
++    outportb(GUS_P2XB_IRQDMA(g_gus_base), dmac);
++    /* leave outputs enabled (bit1=0 line out enable, bit3=1 latches, bit6=0) */
++    outportb(GUS_P2X0_MIXCTRL(g_gus_base), 0x08);
++    DOS_EnableInterrupts();
++}
++
++/* Master GF1 reset: into reset, out of reset, then optionally DAC + IRQ. */
++static void gus_reset_chip(bool enable_outputs)
++{
++    Uint32 us = g_gus_fullcanon ? 160u : 100u; /* gus-15 FULLCANON: canonical 160us settle */
++    gus_w8(GUS_REG_RESET, 0x00); /* assert reset (halts voices + DMA) */
++    SDL_DelayPrecise(SDL_US_TO_NS(us));
++    gus_w8(GUS_REG_RESET, 0x01); /* master enable, out of reset */
++    SDL_DelayPrecise(SDL_US_TO_NS(us));
++    if (enable_outputs) {
++        gus_w8(GUS_REG_RESET, 0x03); /* bit0 master + bit1 DAC; IRQ (bit2) OFF (IRQ-independent) */
++        SDL_DelayPrecise(SDL_US_TO_NS(us));
++    }
++}
++
++/* Park every voice silent/stopped at DRAM 0 so nothing chatters at open. */
++static void gus_silence_all_voices(void)
++{
++    int v;
++    DOS_DisableInterrupts();
++    for (v = 0; v < g_gus_voices; v++) {
++        gus_select_voice(v);
++        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* stop any volume ramp */
++        gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);    /* stop the voice */
++        gus_w16(GUS_VREG_STARTHI, 0);
++        gus_w16(GUS_VREG_STARTLO, 0);
++        gus_w16(GUS_VREG_ENDHI, 0);
++        gus_w16(GUS_VREG_ENDLO, 0);
++        gus_w16(GUS_VREG_VOLUME, 0);
++        gus_w8(GUS_VREG_PAN, 0x07); /* center */
++    }
++    DOS_EnableInterrupts();
++}
++
++/* ------------------------------------------------------------------------- */
++/* Detection + DRAM sizing.                                                   */
++/* ------------------------------------------------------------------------- */
++
++static bool gus_dram_roundtrip(void)
++{
++    Uint8 a, b;
++    DOS_DisableInterrupts();
++    gus_poke(0, 0xAA);
++    gus_poke(1, 0x55);
++    a = gus_peek(0);
++    b = gus_peek(1);
++    DOS_EnableInterrupts();
++    return (a == 0xAA && b == 0x55);
++}
++
++/* Size on-board DRAM by probing 256K boundaries for absence / aliasing. */
++static Uint32 gus_size_dram(void)
++{
++    Uint32 size = 0;
++    Uint32 boundary;
++    DOS_DisableInterrupts();
++    for (boundary = 0; boundary < (1024u * 1024u); boundary += (256u * 1024u)) {
++        gus_poke(boundary, 0x12);
++        gus_poke(boundary + 1, 0x34);
++        if (gus_peek(boundary) != 0x12 || gus_peek(boundary + 1) != 0x34) {
++            break; /* no memory at this boundary */
++        }
++        if (boundary != 0) {
++            /* alias check: writing `boundary` must not disturb addr 0 */
++            gus_poke(0, 0xA5);
++            gus_poke(boundary, 0x5A);
++            if (gus_peek(0) != 0xA5) {
++                break; /* wrapped -> this boundary is an alias, real end below it */
++            }
++        }
++        size = boundary + (256u * 1024u);
++    }
++    DOS_EnableInterrupts();
++    if (size == 0) {
++        size = 256u * 1024u; /* a live GF1 has at least 256K */
++    }
++    return size;
++}
++
++/* No GF1 interrupt service routine: the driver is IRQ-independent (see the
++   top-of-file note). DMA-upload completion polls the host 8237 terminal-count
++   (gus_upload_dma), wave-end is detected by polling voice_active_mask in
++   SDL_DOSGusGetState, and the music clock is the external PIT pump (SDL/0110).
++   Nothing hooks or depends on the GF1 IRQ line. */
++
++/* ------------------------------------------------------------------------- */
++/* Hint parsing.                                                              */
++/* ------------------------------------------------------------------------- */
++static bool gus_hint_is_one(const char *name)
++{
++    const char *h = SDL_GetHint(name);
++    if (!h || !*h) {
++        /* DOS-PORT (gus-10): SDL_GetHint resolves env vars via SDL_getenv, which
++           reads a CACHED snapshot of `environ` taken lazily at first hint access.
++           On g2k this resolves the GUS_* hints fine, but bq-pg's headless
++           DOSBox-X runs (SDL_INIT_AUDIO is omitted on the gus boot path) can miss
++           a BAT/COMMAND.COM-set var that the LIVE libc environment still has.
++           Fall back to SDL_getenv_unsafe -- on DJGPP that is a direct getenv()
++           (live `environ`), the same path the engine reads AUDIO_BACKEND/SFX_OFF
++           through (proven to resolve under DOSBox-X). Still an SDL API, not a raw
++           getenv in backend code. team-lead-approved hardening; complements
++           fixing the autoexec hint NAME. Fallback-only: the SDL_GetHint success
++           path is unchanged, so SDL_SetHint overrides still win. */
++        h = SDL_getenv_unsafe(name);
++    }
++    return (h && h[0] == '1' && h[1] == '\0');
++}
++
++/* Parse "port,playDMA,recDMA,GF1irq,MIDIirq" (port hex, rest decimal). */
++static bool gus_parse_ultrasnd(void)
++{
++    const char *hint = SDL_GetHint("SDL_HINT_DOS_GUS_ULTRASND");
++    char *copy, *saveptr = NULL, *tok, *str;
++    int field = 0;
++
++    if (!hint || !hint[0]) {
++        return false;
++    }
++    copy = SDL_strdup(hint);
++    if (!copy) {
++        return false;
++    }
++    str = copy;
++    while ((tok = SDL_strtok_r(str, ",", &saveptr)) != NULL) {
++        long n = SDL_strtol(tok, NULL, (field == 0) ? 16 : 10);
++        switch (field) {
++        case 0: g_gus_base = (int)n; break;     /* base port (hex) */
++        case 1: g_gus_play_dma = (int)n; break; /* playback DMA */
++        case 2: break;                          /* record DMA (unused) */
++        case 3: g_gus_irq = (int)n; break;      /* GF1 IRQ */
++        case 4: break;                          /* MIDI IRQ (unused here) */
++        default: break;
++        }
++        field++;
++        str = NULL;
++    }
++    SDL_free(copy);
++    return (g_gus_base > 0);
++}
++
++static void gus_resolve_voices(void)
++{
++    const char *h = SDL_GetHint("SDL_HINT_DOS_GUS_VOICES");
++    int v = GUS_DEF_VOICES;
++    if (h && h[0]) {
++        v = (int)SDL_strtol(h, NULL, 10);
++    }
++    if (v < GUS_MIN_VOICES) {
++        v = GUS_MIN_VOICES;
++    }
++    if (v > GUS_MAX_VOICES) {
++        v = GUS_MAX_VOICES;
++    }
++    g_gus_voices = v;
++}
++
++/* ------------------------------------------------------------------------- */
++/* Sample upload (PIO poke + one-shot DMA), with bank-aligned bump allocation. */
++/* ------------------------------------------------------------------------- */
++
++/* Reserve `len` bytes of DRAM; 16-bit samples are aligned so they never
++   straddle a 256K bank boundary. Returns the DRAM byte address or BAD_ADDR. */
++static Uint32 gus_dram_alloc(Uint32 len, int is16bit)
++{
++    /* 16-byte align every allocation: the GF1 DMA dest register (0x42) holds
++       addr>>4, so a DMA upload requires a 16-aligned DRAM dest. Harmless for
++       the PIO path (exact 20-bit addressing). Keeps the chunked-DMA dest
++       (dram_addr + k*GUS_DMA_CHUNK, both 16-multiples) exact. */
++    Uint32 addr = (g_gus_dram_used + 15u) & ~15u;
++    if (is16bit) {
++        /* keep the whole sample inside one 256K bank */
++        Uint32 bank = addr & 0xC0000u;
++        if (((addr + len) & 0xC0000u) != bank) {
++            addr = bank + (256u * 1024u); /* bump to next bank start */
++        }
++    }
++    if (addr + len > g_gus_dram_size) {
++        return SDL_DOSGUS_BAD_ADDR; /* out of card DRAM */
++    }
++    g_gus_dram_used = addr + len;
++    return addr;
++}
++
++/* Programmed-I/O upload: poke each byte to DRAM via port 3X7. This is the
++   DEFAULT upload path (#36) -- the same mechanism as GF1 detection's DRAM
++   poke/peek (proven on real HW) and immune to the ISA 8237 64KB-page crash
++   (no DMA controller involved).
++
++   Each gus_set_dram_addr + poke must be atomic vs the IRQ-0 music pump (which
++   drives GF1 voice regs through the same index/data ports), so it runs with
++   interrupts disabled -- but in BOUNDED bursts (GUS_PIO_BURST bytes) that
++   re-enable between bursts, so a large per-song .pat upload can't starve the
++   PIT clock / cooperative scheduler. Per-byte address re-set: no auto-
++   increment assumption (matches the proven detection mechanism). */
++static void gus_upload_pio(Uint32 dram_addr, const Uint8 *src, Uint32 len)
++{
++    Uint32 i = 0;
++    const bool autoinc = g_gus_pio_autoinc;
++    /* gus-5 #41 (H2 fix, gated): with autoinc the GF1 DRAM address is programmed
++       ONCE (0x43/0x44) and the card advances its own DRAM pointer per 3X7 write
++       (~1 outportb/byte). The default per-byte path re-selects the FULL address
++       before EVERY byte (~6 outportb/byte). The per-byte hammering floods the
++       PicoGUS RP2040 ISA command path; the 2nd .pat upload overruns it -> the
++       card holds IOCHRDY -> outportb stalls the ISA bus unboundedly (cli held)
++       -> CPU freeze. autoinc cuts the port-op rate ~6x to relieve that. */
++    if (autoinc) {
++        gus_set_dram_addr(dram_addr); /* set ONCE; GF1 auto-increments per write */
++    }
++    while (i < len) {
++        Uint32 j, burst = len - i;
++        if (burst > GUS_PIO_BURST) {
++            burst = GUS_PIO_BURST;
++        }
++        DOS_DisableInterrupts();
++        for (j = 0; j < burst; j++) {
++            if (!autoinc) {
++                gus_set_dram_addr(dram_addr + i + j);
++            }
++            outportb(GUS_P3X7_DRAMIO(g_gus_base), src[i + j]);
++        }
++        DOS_EnableInterrupts();
++        i += burst;
++        /* gus-5 #41 H2 locator: byte offset every ~1KB, fsync'd with interrupts
++           ON (dbg_log does file I/O). The LAST line before a freeze pins where
++           in the upload the ISA bus wedged. GUS_DIAG-gated, default OFF. */
++        if (g_gus_diag && (i & 0x3FF) < GUS_PIO_BURST) {
++            dos_port_dbg_log("audio: SDL/0112 GUS upload progress: %u/%u bytes "
++                             "(dram=0x%X autoinc=%d)", (unsigned)i, (unsigned)len,
++                             (unsigned)(dram_addr + i), autoinc ? 1 : 0);
++        }
++    }
++}
++
++/* OPT-IN DMA upload (SDL_HINT_DOS_GUS_DMA_UPLOAD=1), 8-bit samples only.
++   64KB-SAFE BY CHUNKING (#36): a single conventional-memory bounce buffer of
++   GUS_DMA_CHUNK bytes is allocated via DOS_AllocateDMAMemory, which guarantees
++   that buffer does not straddle a 64KB ISA physical page (because GUS_DMA_CHUNK
++   <= 64KB). The sample is uploaded GUS_DMA_CHUNK bytes at a time through that
++   buffer to consecutive DRAM addresses, so NO single 8237 transfer ever
++   crosses a 64KB page -- the real-HW crash mode where the 8237 wraps the
++   offset within the page and corrupts memory (passed in DOSBox, which doesn't
++   enforce the boundary). Returns true on success; false -> caller uses PIO. */
++static bool gus_upload_dma(Uint32 dram_addr, const Uint8 *src, Uint32 len)
++{
++    _go32_dpmi_seginfo bounce_seg;
++    Uint8 *bounce;
++    Uint32 physical, off;
++    Uint8 physical_page;
++    int dma = g_gus_play_dma;
++
++    if (dma < 0 || dma > 3) {
++        return false; /* 8-bit (0-3) playback DMA channel only */
++    }
++    /* One boundary-safe bounce buffer reused for every chunk. */
++    bounce = (Uint8 *)DOS_AllocateDMAMemory((int)GUS_DMA_CHUNK, &bounce_seg);
++    if (!bounce) {
++        return false;
++    }
++    physical = DOS_LinearToPhysical(bounce);
++    physical_page = (Uint8)((physical >> 16) & 0xFF);
++
++    for (off = 0; off < len; off += GUS_DMA_CHUNK) {
++        Uint32 dma_bytes;
++        Uint32 dest = dram_addr + off;
++        int spin;
++        Uint32 nbytes = len - off;
++        if (nbytes > GUS_DMA_CHUNK) {
++            nbytes = GUS_DMA_CHUNK;
++        }
++        SDL_memcpy(bounce, src + off, nbytes);
++        dma_bytes = nbytes - 1;
++
++        DOS_DisableInterrupts();
++        (void)inportb(0x08); /* clear stale 8237 terminal-count before arming */
++
++        /* host 8237 (8-bit channel) -- single, READ from memory, one-shot. */
++        {
++            static const int page_ports[] = { 0x87, 0x83, 0x81, 0x82 };
++            outportb(0x0A, 0x04 | dma);                              /* mask channel */
++            outportb(0x0B, 0x48 | dma);                              /* single, read, one-shot */
++            outportb(page_ports[dma], physical_page);                /* page */
++            outportb(0x0C, 0x00);                                    /* clear flip-flop */
++            outportb(dma * 2, (Uint8)(physical & 0xFF));             /* offset low */
++            outportb(dma * 2, (Uint8)((physical >> 8) & 0xFF));      /* offset high */
++            outportb(0x0C, 0x00);                                    /* clear flip-flop */
++            outportb(dma * 2 + 1, (Uint8)(dma_bytes & 0xFF));        /* count low */
++            outportb(dma * 2 + 1, (Uint8)((dma_bytes >> 8) & 0xFF)); /* count high */
++            outportb(0x0A, dma);                                     /* unmask channel */
++        }
++
++        /* GF1 side for THIS chunk: DRAM dest (>>4; dest is 16-aligned via
++           gus_dram_alloc + a 16-multiple chunk size) + DMA enable, host->DRAM,
++           8-bit (bit6=0). ACCURATE-BUT-CONFIRM vs g2k. */
++        gus_w16(GUS_REG_DMA_ADDR, (Uint16)((dest >> 4) & 0xFFFF));
++        gus_w8(GUS_REG_DMA_CTRL, 0x01);
++        DOS_EnableInterrupts();
++
++        /* IRQ-INDEPENDENT completion poll: the HOST 8237 terminal-count status
++           (port 0x08, bit = channel; read-to-clear) -- does NOT depend on the
++           GF1 IRQ line (the Doom-silence finding); GF1 reg 0x41 bit6 is a
++           secondary signal. Bounded spin; interrupts enabled so the PIT pump /
++           cooperative scheduler keep running. */
++        for (spin = 0; spin < 100000; spin++) {
++            if (inportb(0x08) & (1 << dma)) {
++                break; /* host 8237 reached terminal count for this channel */
++            }
++            if (gus_r8(GUS_REG_DMA_CTRL) & 0x40) {
++                break; /* GF1 DMA-TC status (secondary, IRQ-line-independent) */
++            }
++            SDL_DelayPrecise(SDL_US_TO_NS(10));
++        }
++        gus_w8(GUS_REG_DMA_CTRL, 0x00); /* stop DMA for this chunk */
++    }
++
++    DOS_FreeConventionalMemory(&bounce_seg);
++    return true;
++}
++
++/* #39 diagnostic: a one-voice TEST-TONE played at init via the PUBLIC voice
++   primitives (UploadSample/AllocVoice/StartVoice/SetVoiceFreq/SetVoiceVol/
++   SetVoicePan). Gated by SDL_HINT_DOS_GUS_TESTTONE=1 (default OFF). It
++   isolates the SDL primitives from the engine's note->voice mapping: if the
++   tone is AUDIBLE on g2k, StartVoice/SetVoiceFreq/SetVoiceVol + the mix/DAC
++   output path are all correct and the silent-music bug is in MidiBackendGus's
++   note mapping (vel/chanvol->vol, note->FC, .pat->addr); if SILENT, the voice
++   primitives / output path are the bug. */
++#define GUS_TESTTONE_LEN 8000          /* ~0.36s at 22050 Hz */
++#define GUS_TESTTONE_PERIOD 50         /* 22050/440 ~= 50 samples -> ~440 Hz */
++static void gus_emit_test_tone(void)
++{
++    static Uint8 wave[GUS_TESTTONE_LEN]; /* static: keep it off the init stack */
++    int i, v;
++    Uint32 addr;
++
++    for (i = 0; i < GUS_TESTTONE_LEN; i++) {
++        wave[i] = ((i % GUS_TESTTONE_PERIOD) < (GUS_TESTTONE_PERIOD / 2)) ? 0xFF : 0x00;
++    }
++    addr = SDL_DOSGusUploadSample(wave, sizeof(wave), 0);
++    if (addr == SDL_DOSGUS_BAD_ADDR) {
++        dos_port_dbg_log("audio: SDL/0112 GUS TEST-TONE: DRAM upload FAILED");
++        return;
++    }
++    v = SDL_DOSGusAllocVoice();
++    if (v < 0) {
++        dos_port_dbg_log("audio: SDL/0112 GUS TEST-TONE: no free voice");
++        return;
++    }
++    /* ONE-SHOT, NOT looping (#39 cell-A hang fix): a forever-looping voice keeps
++       reading DRAM and contends with the engine's gameplay .pat PIO poke ->
++       wedge on the PicoGUS. This plays the ~0.36s tone ONCE and wave-ends
++       (voice stops itself + stops reading DRAM) within ~0.36s of boot, long
++       before on_song_start, so it can't contend. Mirrors the engine note_on
++       order (SetFreq -> SetVol -> SetPan -> StartVoice) so an audible tone also
++       proves the "vol/pan before StartVoice" path (the StartVoice-preserves-vol
++       #39 fix). Played at 22050 Hz (sample's native rate, FC ~ 1.0). */
++    SDL_DOSGusSetVoiceFreq(v, 22050u);
++    SDL_DOSGusSetVoiceVol(v, 255);
++    SDL_DOSGusSetVoicePan(v, 128);
++    SDL_DOSGusStartVoice(v, addr, addr + GUS_TESTTONE_LEN - 1, addr, 0); /* flags=0: one-shot, no loop */
++    dos_port_dbg_log("audio: SDL/0112 GUS TEST-TONE: voice=%d addr=0x%X playing "
++                     "~0.36s 440Hz square (max vol). AUDIBLE => voice primitives "
++                     "+ output path OK (bug is note-mapping); SILENT => "
++                     "primitives/output are the bug.", v, (unsigned)addr);
++    /* gus-5: SYNCHRONOUS play + EXPLICIT stop (test-tone wedge fix + #40 quiesce
++       probe). Do NOT rely on the GF1 wave-end auto-stop -- on the PicoGUS a
++       wave-ended-but-still-ALLOCATED voice keeps contending with a later DRAM
++       poke (the on_song_start wedge). Block here for the tone duration + margin,
++       then explicitly stop + free voice 0, so it is fully quiesced before Init
++       returns (long before any gameplay/.pat upload). ~0.45s one-time boot delay
++       in the TESTTONE=1 diagnostic cell only. */
++    SDL_DelayPrecise(SDL_MS_TO_NS(450));
++    SDL_DOSGusStopVoice(v);
++    dos_port_dbg_log("audio: SDL/0112 GUS TEST-TONE: voice %d explicitly stopped "
++                     "+ freed after play (no lingering voice into gameplay; "
++                     "#40 quiesce probe).", v);
++}
++
++/* #39 gus-13: CLEAN 16-BIT test-tone -- the 16-bit positive/negative control the
++   8-bit gus_emit_test_tone CANNOT provide. Identical to the 8-bit tone EXCEPT
++   is16bit=1, so the ONLY variable under test is the 16-bit path: UploadSample's
++   16-bit DRAM placement + StartVoice's gus_encode_addr >>1 encode + the GF1 0x04
++   DAC-mode bit (none of which the 8-bit tone touches -- so an audible 8-bit tone
++   does NOT prove 16-bit playback). Gated by SDL_HINT_DOS_GUS_TESTTONE16=1
++   (default OFF). AUDIBLE on g2k => 16-bit GF1 playback works on this card; SILENT
++   (while the 8-bit TESTTONE is audible) => the 16-bit playback path is the #39
++   silence. ONE-SHOT + synchronous explicit stop (mirrors the gus-5 8-bit-tone
++   wedge fix: never leave a voice reading DRAM into gameplay on the PicoGUS).
++   One-shot (flags = 16BIT only, no LOOP) keeps it a true single-variable delta
++   from the 8-bit tone; if it is audible but music still silent, the next probe
++   adds a LOOP variant to split 16-bit-vs-loop. */
++static void gus_emit_test_tone_16(void)
++{
++    static Sint16 wave16[GUS_TESTTONE_LEN]; /* static: off the init stack (~16KB) */
++    int i, v;
++    Uint32 addr, end_byte;
++
++    for (i = 0; i < GUS_TESTTONE_LEN; i++) {
++        wave16[i] = ((i % GUS_TESTTONE_PERIOD) < (GUS_TESTTONE_PERIOD / 2))
++                        ? (Sint16)28000 : (Sint16)(-28000);
++    }
++    /* is16bit=1: UploadSample takes a BYTE length (GUS_TESTTONE_LEN samples * 2). */
++    addr = SDL_DOSGusUploadSample(wave16, (Uint32)sizeof(wave16), 1);
++    if (addr == SDL_DOSGUS_BAD_ADDR) {
++        dos_port_dbg_log("audio: SDL/0112 GUS TEST-TONE16: DRAM upload FAILED");
++        return;
++    }
++    v = SDL_DOSGusAllocVoice();
++    if (v < 0) {
++        dos_port_dbg_log("audio: SDL/0112 GUS TEST-TONE16: no free voice");
++        return;
++    }
++    /* BYTE addresses (StartVoice does the 16-bit >>1 encode). end = byte addr of
++       the LAST 16-bit sample = addr + (LEN-1)*2. flags = 16BIT only (one-shot) --
++       the single-bit difference from the 8-bit tone's flags=0. */
++    end_byte = addr + ((Uint32)(GUS_TESTTONE_LEN - 1) * 2u);
++    SDL_DOSGusSetVoiceFreq(v, 22050u);
++    SDL_DOSGusSetVoiceVol(v, 255);
++    SDL_DOSGusSetVoicePan(v, 128);
++    SDL_DOSGusStartVoice(v, addr, end_byte, addr, SDL_DOSGUS_16BIT);
++    dos_port_dbg_log("audio: SDL/0112 GUS TEST-TONE16: voice=%d addr=0x%X end=0x%X "
++                     "playing ~0.36s 16-bit square (max vol). AUDIBLE => 16-bit GF1 "
++                     "playback OK; SILENT (with 8-bit TESTTONE audible) => 16-bit "
++                     "path is the #39 silence.", v, (unsigned)addr, (unsigned)end_byte);
++    SDL_DelayPrecise(SDL_MS_TO_NS(450));
++    SDL_DOSGusStopVoice(v);
++    dos_port_dbg_log("audio: SDL/0112 GUS TEST-TONE16: voice %d stopped + freed.", v);
++}
++
++/* ------------------------------------------------------------------------- */
++/* Engine-facing exports (SDL3/SDL_dosgus.h).                                 */
++/* ------------------------------------------------------------------------- */
++
++bool SDL_DOSGusInit(void)
++{
++    bool present;
++    bool skip;
++    int v;
++
++    if (g_gus_active) {
++        return true; /* already up */
++    }
++
++    if (!gus_parse_ultrasnd()) {
++        dos_port_dbg_log("audio: SDL/0112 GUS GF1 detect: present=0 base=0x0 "
++                         "irq=-1 dma=-1 dram=0KB voices=0 rate=0Hz "
++                         "(no ULTRASND hint)");
++        return false;
++    }
++
++    gus_resolve_voices();
++    g_gus_diag = gus_hint_is_one("SDL_HINT_DOS_GUS_DIAG");
++    g_gus_dma_upload = gus_hint_is_one("SDL_HINT_DOS_GUS_DMA_UPLOAD");
++    g_gus_pio_autoinc = gus_hint_is_one("SDL_HINT_DOS_GUS_PIO_AUTOINC");
++    g_gus_force_8bit_addr = gus_hint_is_one("SDL_HINT_DOS_GUS_FORCE_8BIT_ADDR");
++    g_gus_force_maxvol = gus_hint_is_one("SDL_HINT_DOS_GUS_FORCE_MAXVOL");
++    g_gus_reap_grace = gus_hint_is_one("SDL_HINT_DOS_GUS_REAP_GRACE");
++    /* gus-13 #39 FIX: double-write the GF1 control registers (errata). Default ON;
++       killswitch GUS_NO_DOUBLE_WRITE=1 disables for the A/B. */
++    g_gus_double_write = !gus_hint_is_one("SDL_HINT_DOS_GUS_NO_DOUBLE_WRITE");
++    /* gus-14 #39 FIX: drive voice volume through the GF1 ramp engine (errata --
++       a real GF1 updates the volume DAC only via the ramp accumulator, not a
++       direct 0x09 write with the ramp stopped). Default ON; GUS_NO_VOL_RAMP=1
++       reverts to the direct-0x09 path for the A/B. */
++    g_gus_vol_ramp = !gus_hint_is_one("SDL_HINT_DOS_GUS_NO_VOL_RAMP");
++    /* gus-15 #39 FIX: set the GF1 reset-reg master-IRQ-enable bit2 (0x4C=0x07 not
++       0x03) -- on a real GF1/PicoGUS the DAC may not clock to output unless bit2
++       is set. Default ON; GUS_NO_DAC_IRQBIT=1 reverts to 0x03 for the A/B. */
++    g_gus_dac_irq = !gus_hint_is_one("SDL_HINT_DOS_GUS_NO_DAC_IRQBIT");
++    /* gus-15 FULLCANON hedge (opt-in, default OFF): the OTHER documented canonical
++       deltas on top of 0x4C=0x07 -- 160us reset settle (vs our 100us) + mixer
++       latch-enable bit3 set DURING the IRQ/DMA latch writes. The catch-all g2k
++       cell if the IRQ-bit alone isn't enough. */
++    g_gus_fullcanon = gus_hint_is_one("SDL_HINT_DOS_GUS_FULLCANON");
++    g_gus_dr_head = g_gus_dr_tail = 0; /* arm the IRQ-safe diag ring */
++    skip = gus_hint_is_one("SDL_HINT_DOS_GUS_SKIP_DETECTION");
++
++    /* detection: reset the GF1, DRAM peek/poke roundtrip + size. */
++    if (skip) {
++        gus_reset_chip(false);
++        present = true;
++        g_gus_dram_size = 256u * 1024u;
++    } else {
++        gus_reset_chip(false);
++        present = gus_dram_roundtrip();
++        if (present) {
++            g_gus_dram_size = gus_size_dram();
++        }
++    }
++
++    g_gus_rate = GUS_RATE_NUM / (Uint32)g_gus_voices;
++
++    /* REQUIRED smoke banner -- anchored format "SDL/0112 GUS GF1 detect:
++       present=". Mirrors the SDL/0106 always-on decision-banner pattern. */
++    dos_port_dbg_log("audio: SDL/0112 GUS GF1 detect: present=%d base=0x%X "
++                     "irq=%d dma=%d dram=%dKB voices=%d rate=%dHz%s",
++                     present ? 1 : 0, g_gus_base, g_gus_irq, g_gus_play_dma,
++                     (int)(g_gus_dram_size / 1024), g_gus_voices,
++                     (int)g_gus_rate, skip ? " (skip-detect)" : "");
++
++    if (!present) {
++        SDL_SetError("No Gravis Ultrasound GF1 at port 0x%X (DRAM peek/poke "
++                     "roundtrip failed). Set "
++                     "SDL_HINT_DOS_GUS_SKIP_DETECTION=1 to bypass.",
++                     g_gus_base);
++        return false;
++    }
++
++    /* bring-up: DMA latch (still needed for the upload), active-voice count
++       (rate), master + DAC enable. The GF1 IRQ is NEITHER hooked NOR enabled
++       (reset reg bit2 stays OFF) -- IRQ-independent design (see top-of-file
++       note): upload completion polls the host 8237 TC, voice-reap polls
++       voice_active_mask, and the music clock is the external PIT pump. */
++    gus_program_irq_dma();
++    gus_w8(GUS_REG_VOICES, (Uint8)(0xC0 | (g_gus_voices - 1)));
++    /* gus-15 #39 candidate: master-IRQ-enable bit2. Canonical GUS init writes
++       0x4C=0x07 (master+DAC+IRQ); we wrote 0x03 (no IRQ) for the IRQ-independent
++       design. On a real GF1/PicoGUS the DAC may not CLOCK to output unless bit2
++       is set (DOSBox#149) -> every voice runs but is silent (our g2k symptom;
++       both per-voice fixes failed). We enable ZERO IRQ SOURCES (no wave-end, no
++       timer), so master-IRQ-enable with no source = no IRQ actually fires (safe).
++       Default ON; killswitch GUS_NO_DAC_IRQBIT=1 reverts to 0x03 for the A/B. */
++    {
++        Uint8 reset_val = g_gus_dac_irq ? 0x07 : 0x03;
++        gus_w8(GUS_REG_RESET, reset_val); /* master + DAC (+ IRQ-enable if gus-15) */
++        /* gus-13 #39: double-write the reset/DAC-enable (errata -- the first write
++           after reset can be dropped on a real GF1). Idempotent. */
++        if (g_gus_double_write) {
++            gus_w8(GUS_REG_RESET, reset_val);
++        }
++    }
++    SDL_DelayPrecise(SDL_US_TO_NS(g_gus_fullcanon ? 160u : 100u)); /* gus-15 FULLCANON settle */
++
++    for (v = 0; v < GUS_MAX_VOICES; v++) {
++        g_gus_voice_busy[v] = false;
++        g_gus_voice_confirmed[v] = 0;
++        g_gus_voice_polls[v] = 0;
++    }
++    g_gus_dram_used = 0;
++    gus_silence_all_voices();
++
++    g_gus_active = true;
++
++    dos_port_dbg_log("audio: SDL/0112 GUS device up: base=0x%X irq=%d dma=%d "
++                     "voices=%d rate=%dHz dram=%dKB upload=%s%s%s",
++                     g_gus_base, g_gus_irq, g_gus_play_dma, g_gus_voices,
++                     (int)g_gus_rate, (int)(g_gus_dram_size / 1024),
++                     g_gus_dma_upload ? "dma" : "pio",
++                     g_gus_pio_autoinc ? "+autoinc" : "",
++                     g_gus_force_maxvol ? " maxvol=ON" : "");
++
++    /* #39 diagnostic test-tone (gated, default OFF). */
++    if (gus_hint_is_one("SDL_HINT_DOS_GUS_TESTTONE")) {
++        gus_emit_test_tone();
++    }
++    /* #39 gus-13: clean 16-bit test-tone -- the 16-bit positive/negative control
++       (the 8-bit TESTTONE above exercises neither the >>1 encode nor the 0x04
++       DAC-mode bit). Gated, default OFF. */
++    if (gus_hint_is_one("SDL_HINT_DOS_GUS_TESTTONE16")) {
++        gus_emit_test_tone_16();
++    }
++    return true;
++}
++
++void SDL_DOSGusShutdown(void)
++{
++    if (!g_gus_active) {
++        return; /* idempotent no-op */
++    }
++    g_gus_active = false;
++    gus_silence_all_voices();
++    /* no GF1 IRQ was hooked (IRQ-independent design) -- nothing to unhook. */
++    gus_w8(GUS_REG_RESET, 0x00); /* park the chip in reset */
++}
++
++bool SDL_DOSGusGetState(SDL_DOSGusState *out)
++{
++    int v;
++    Uint32 mask = 0;
++    /* gus-7: capture interrupt-enabled state at ENTRY (before any cli) -- tells
++       us this call is in MAIN-LOOP context (IF set), the only place the diag
++       ring may be flushed to the log safely. Captured here because the cli/sti
++       below would otherwise leave IF=1 even on an IRQ-entered call. */
++    int was_main = gus_ints_enabled();
++
++    if (!out) {
++        return false;
++    }
++    SDL_zerop(out);
++    if (!g_gus_active) {
++        return false;
++    }
++
++    /* Refresh the per-voice sounding status from hardware: a voice is active
++       if its voice-control "stopped" bit (read reg 0x80, bit0) is clear. Read
++       twice -- the first read after a register select can latch stale data on
++       the GF1. Only busy (allocated) voices are polled. */
++    DOS_DisableInterrupts();
++    {
++        int busy = 0;
++        for (v = 0; v < g_gus_voices; v++) {
++            if (g_gus_voice_busy[v]) {
++                Uint8 ctrl;
++                int hw_running;
++                busy++;
++                gus_select_voice(v);
++                ctrl = gus_r8(GUS_VREG_CTRL_RD);
++                ctrl = gus_r8(GUS_VREG_CTRL_RD);
++                hw_running = !(ctrl & 0x01); /* bit0 clear -> still sounding */
++                if (g_gus_reap_grace) {
++                    /* gus-8c start-race guard: report a fresh voice ACTIVE until
++                       the hw confirms it running once; if it never confirms
++                       within the grace window, fall back to the hw bit (no leak). */
++                    if (hw_running) {
++                        g_gus_voice_confirmed[v] = 1;
++                    } else if (!g_gus_voice_confirmed[v] &&
++                               g_gus_voice_polls[v] < GUS_REAP_GRACE_POLLS) {
++                        hw_running = 1; /* protect the start-race window */
++                    }
++                    if (g_gus_voice_polls[v] < 255) {
++                        g_gus_voice_polls[v]++;
++                    }
++                }
++                if (hw_running) {
++                    mask |= (1u << v);
++                }
++            }
++        }
++        /* gus-8 #39 MASK AUDIT: the engine reap stops any busy voice this mask
++           reports INACTIVE. If the PicoGUS 0x80 read mis-reports a just-started
++           voice as stopped (start-race / latch quirk), busy>0 with active=0
++           right after notes fire => the reap kills every voice => universal
++           silence. Log the mask whenever it changes (deduped -- reap polls every
++           note). Memory-only enqueue, safe in both IRQ and main context. */
++        if (g_gus_diag && (mask != g_gus_dr_last_mask || busy != g_gus_dr_last_busy)) {
++            gus_diag_put(GUS_DR_MASK, (Uint8)busy, mask, 0);
++            g_gus_dr_last_mask = mask;
++            g_gus_dr_last_busy = busy;
++        }
++    }
++    DOS_EnableInterrupts();
++
++    out->valid = true;
++    out->base_port = (Uint16)g_gus_base;
++    out->gf1_irq = (Uint8)(g_gus_irq < 0 ? 0 : g_gus_irq);
++    out->play_dma = (Uint8)(g_gus_play_dma < 0 ? 0 : g_gus_play_dma);
++    out->num_voices = (Uint8)g_gus_voices;
++    out->output_rate = g_gus_rate;
++    out->dram_size = g_gus_dram_size;
++    out->dram_used = g_gus_dram_used;
++    out->voice_active_mask = mask;
++    out->abi_version = 1;
++
++    /* gus-7: drain the IRQ-safe voice-diag ring to the log -- ONLY when this
++       GetState was entered in main-loop context (was_main), never from the
++       IRQ-clocked reap path. The engine also polls this once per frame, so the
++       ring stays flushed. */
++    if (g_gus_diag && was_main) {
++        gus_diag_flush();
++    }
++    return true;
++}
++
++Uint32 SDL_DOSGusUploadSample(const void *data, Uint32 len, int is16bit)
++{
++    Uint32 dram_addr;
++    if (!g_gus_active || !data || len == 0) {
++        return SDL_DOSGUS_BAD_ADDR;
++    }
++    /* gus-7 safety-net flush: UploadSample runs at on_song_start (MAIN-LOOP), so
++       this guarantees the prior song's captured voice-diag records reach the log
++       even if the per-frame GetState flush never ran. */
++    if (g_gus_diag) {
++        gus_diag_flush();
++    }
++    dram_addr = gus_dram_alloc(len, is16bit);
++    if (dram_addr == SDL_DOSGUS_BAD_ADDR) {
++        return SDL_DOSGUS_BAD_ADDR;
++    }
++    /* uploaded VERBATIM -- no sign conversion (caller hands native GF1 format:
++       8-bit unsigned / 16-bit signed). DEFAULT path = PIO (#36): proven on real
++       HW (same mechanism as detection's DRAM poke/peek) and immune to the ISA
++       8237 64KB-page crash. DMA (64KB-safe chunked) is OPT-IN via
++       SDL_HINT_DOS_GUS_DMA_UPLOAD=1, and only for 8-bit samples >= the
++       threshold; 16-bit always takes PIO (sidesteps the 16-bit DMA dest quirk).
++
++       Both transports read EXACTLY [data, data+len): PIO is strictly byte-wise
++       (src[i] single bytes, no word/dword over-read), DMA is SDL_memcpy(nbytes)
++       (bounded). So a host page-fault during the read means `len` EXCEEDS the
++       caller's `data` buffer -- a caller-side length bug, NOT a transport
++       over-read (#38: PIO and DMA fault identically, which a word-alignment
++       over-read could not cause since PIO reads single bytes). */
++    {
++        const int want_dma = (g_gus_dma_upload && !is16bit && len >= GUS_DMA_UPLOAD_MIN);
++        g_gus_n_upload++;
++        /* DIAG (#38): logged + fsync'd BEFORE reading the host buffer, so if a
++           too-large `len` over-reads `data` into an unmapped DPMI page and hard-
++           faults, this is the LAST log line -- naming the culprit upload
++           (fx#/len/method/dram_addr). Pairs with the engine's per-.pxt
++           synth-size vs len-passed log to localize the mismatch. */
++        if (g_gus_diag) {
++            /* gus-9: memory-only -- NO GF1 read here. Dropped the gus-5
++               active_mask GetState call (a 0x80 read inside a diag block); this
++               PicoGUS wedges on ANY diag-added GF1 read. The live mask still
++               reaches the log via the GUS_DR_MASK ring record (sourced from the
++               core, non-diag GetState 0x80 read that already runs in the reap). */
++            dos_port_dbg_log("audio: SDL/0112 GUS upload #%u (start): src=%p len=%u "
++                             "dram=0x%X %s via=%s used=%uKB/%uKB",
++                             g_gus_n_upload, data, (unsigned)len, (unsigned)dram_addr,
++                             is16bit ? "16b" : "8b", want_dma ? "dma" : "pio",
++                             (unsigned)(g_gus_dram_used / 1024),
++                             (unsigned)(g_gus_dram_size / 1024));
++        }
++        if (want_dma && gus_upload_dma(dram_addr, (const Uint8 *)data, len)) {
++            /* uploaded via DMA */
++        } else {
++            gus_upload_pio(dram_addr, (const Uint8 *)data, len);
++        }
++    }
++    /* gus-9: the gus-8 on_song_start data-present PEEK (6x gus_peek on the GF1
++       DRAM port) is REMOVED -- it wedged the PicoGUS (any diag-added GF1 read
++       does, even main-context with voices stopped). The datum it gave already
++       settled the question (the 16-bit sample IS resident at the voice's encoded
++       read addr -> upload + #42 encode correct; silence is NOT the upload). The
++       diag is now 100% memory-only. */
++    return dram_addr;
++}
++
++void SDL_DOSGusResetDram(Uint32 keep_bytes)
++{
++    if (!g_gus_active) {
++        return;
++    }
++    if (keep_bytes > g_gus_dram_size) {
++        keep_bytes = g_gus_dram_size;
++    }
++    /* Rewind the bump cursor only -- the engine owns voice lifecycle and must
++       have already stopped any voice reading the region being freed. */
++    g_gus_dram_used = keep_bytes;
++    if (g_gus_diag) {
++        dos_port_dbg_log("audio: SDL/0112 GUS DRAM rewind: keep=%uKB (used now "
++                         "%uKB/%uKB)",
++                         (unsigned)(keep_bytes / 1024),
++                         (unsigned)(g_gus_dram_used / 1024),
++                         (unsigned)(g_gus_dram_size / 1024));
++    }
++}
++
++int SDL_DOSGusAllocVoice(void)
++{
++    int v, found = -1;
++    if (!g_gus_active) {
++        return -1;
++    }
++    /* IRQ-SAFE: the voice pool is shared between main-loop SFX (SfxSynth
++       playSfx -> AllocVoice) and IRQ-0-pump music note_on (MidiBackendGus ->
++       AllocVoice). A main-loop AllocVoice can be preempted mid-scan by the
++       pump IRQ firing a note_on that also allocates; without a critical
++       section both see the same free slot and double-claim it. cli/sti makes
++       the find-free + claim atomic across the IRQ boundary. (StartVoice /
++       StopVoice mutate the busy-list inside their own cli/sti windows too.) */
++    DOS_DisableInterrupts();
++    for (v = 0; v < g_gus_voices; v++) {
++        if (!g_gus_voice_busy[v]) {
++            g_gus_voice_busy[v] = true;
++            found = v;
++            break;
++        }
++    }
++    DOS_EnableInterrupts();
++    return found; /* -1 if pool exhausted -- caller does its own steal policy */
++}
++
++void SDL_DOSGusStartVoice(int voice, Uint32 start, Uint32 end, Uint32 loopstart, Uint32 flags)
++{
++    Uint16 smsw, slsw, emsw, elsw, cmsw, clsw;
++    int is16 = (flags & SDL_DOSGUS_16BIT) ? 1 : 0;
++    Uint8 ctrl = 0x00;
++    Uint32 curaddr = (flags & SDL_DOSGUS_LOOP) ? loopstart : start;
++
++    if (!g_gus_active || voice < 0 || voice >= g_gus_voices) {
++        return;
++    }
++
++    /* gus-6 #42 A/B fallback: force 8-bit voice addressing + clear the 16-bit
++       control bit. Plays the (16-bit) DRAM data AS IF linear 8-bit -- wrong
++       pitch/noise, but if it RUNS without wedging it isolates the freeze to the
++       16-bit addressing/mode path vs something else. Diagnostic only, default
++       OFF; the >>1 encode fix is the real fix, this is the isolation cell. */
++    if (g_gus_force_8bit_addr) {
++        is16 = 0;
++    }
++
++    gus_encode_addr(start, is16, &smsw, &slsw);
++    gus_encode_addr(end, is16, &emsw, &elsw);
++    gus_encode_addr(curaddr, is16, &cmsw, &clsw);
++
++    if (is16) {
++        ctrl |= GUS_VC_16BIT;
++    }
++    if (flags & SDL_DOSGUS_LOOP) {
++        ctrl |= GUS_VC_LOOP;
++    }
++    if (flags & SDL_DOSGUS_BIDI) {
++        ctrl |= GUS_VC_BIDI;
++    }
++    /* SDL_DOSGUS_IRQ is deliberately NOT honored: the IRQ-independent design
++       never enables the per-voice wave-end IRQ (the engine detects wave-end by
++       polling voice_active_mask). The flag is accepted for API compatibility
++       but sets no hardware bit, so the GF1 never asserts its IRQ line. */
++
++    DOS_DisableInterrupts();
++    gus_select_voice(voice);
++    gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);    /* stop before reprogramming */
++    if (!g_gus_vol_ramp) {
++        /* legacy direct-volume path holds the ramp stopped here. In vol-ramp mode
++           (gus-14) SetVoiceVol owns + RUNS the ramp -- do NOT stop it here. */
++        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* hold volume (no ramp) */
++        /* gus-13 #39 FIX: double-write the volume-control register (errata -- the
++           first 0x0D write after a control change can be dropped on a real GF1). */
++        if (g_gus_double_write) gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
++    }
++    gus_w16(GUS_VREG_STARTHI, smsw);
++    gus_w16(GUS_VREG_STARTLO, slsw);
++    gus_w16(GUS_VREG_ENDHI, emsw);
++    gus_w16(GUS_VREG_ENDLO, elsw);
++    gus_w16(GUS_VREG_CURHI, cmsw);
++    gus_w16(GUS_VREG_CURLO, clsw);
++    /* Full ramp range so the current volume (0x09) is never clamped to
++       [start,end] -- DOSBox-X doesn't clamp, but a real GF1/PicoGUS might, and
++       leaving 0x07/0x08 at 0 would clamp 0x09 to 0 = silent (#39 suspect).
++       Skipped in vol-ramp mode (gus-14): SetVoiceVol owns + runs the ramp. */
++    if (!g_gus_vol_ramp) {
++        gus_w8(GUS_VREG_RAMPSTART, 0x00);
++        gus_w8(GUS_VREG_RAMPEND, 0xFF);
++    }
++    /* #39: StartVoice does NOT write the volume (0x09) or pan (0x0C) -- it
++       PRESERVES whatever the caller set via SetVoiceVol/SetVoicePan, which the
++       engine calls BEFORE StartVoice (note_on order: SetVoiceFreq -> SetVoiceVol
++       -> SetVoicePan -> StartVoice). Previously StartVoice clobbered both with a
++       fixed default, wasting the per-note velocity/pan (and a default-200 wrote
++       over the engine's value). The caller owns volume + pan; this just arms
++       addresses + ramp bounds and starts the voice. */
++    if (g_gus_force_maxvol) {
++        gus_w16(GUS_VREG_VOLUME, 0xFFF0); /* gus-7 #39 probe: max vol regardless of caller */
++    }
++    gus_w8(GUS_VREG_CTRL, ctrl);           /* GO */
++    /* gus-13 #39 FIX: double-write the voice-control GO (errata). The FAQ/ALSA
++       symptom matches #39 verbatim: "voices read running after a single 0x00
++       write but are SILENT -> double-write 0x00 and 0x0D." The voice reads
++       running off the first write; the second ensures the play state actually
++       latches on a real GF1 (emulators tolerate the single write). Idempotent. */
++    if (g_gus_double_write) gus_w8(GUS_VREG_CTRL, ctrl);
++    g_gus_voice_busy[voice] = true;        /* claim inside the critical section */
++    g_gus_voice_confirmed[voice] = 0;      /* gus-8c: re-arm the start-race guard */
++    g_gus_voice_polls[voice] = 0;
++    /* gus-8 #39: IRQ voice path is MEMORY-ONLY -- enqueue the COMMANDED values
++       (start addr, ctrl) only, ZERO port reads. gus-7 put a GF1 DRAM PEEK + a
++       voice-status read-back HERE (in the note_on IRQ, right after GO); on the
++       PicoGUS a DRAM/status read concurrent with the just-activated voice
++       CONTENDS for the GF1 -> bus wedge (GUS_DIAG=1 froze at the first note;
++       GUS_DIAG=0 reached gameplay). The data-present PEEK moved to on_song_start
++       (UploadSample, main-context, before any voice is active -- see there). */
++    if (g_gus_diag) {
++        gus_diag_put(GUS_DR_START, (Uint8)voice, start, ctrl);
++    }
++    DOS_EnableInterrupts();
++
++    g_gus_n_start++;
++}
++
++void SDL_DOSGusStopVoice(int voice)
++{
++    if (!g_gus_active || voice < 0 || voice >= g_gus_voices) {
++        return;
++    }
++    DOS_DisableInterrupts();
++    gus_select_voice(voice);
++    gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
++    gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);
++    g_gus_voice_busy[voice] = false;       /* free inside the critical section */
++    if (g_gus_diag) {
++        /* gus-7: capture STOP (IRQ-safe) for the voice-state branch -- a START
++           immediately followed by a STOP on the same voice (adjacent seq) is a
++           zero-duration note = silent. */
++        gus_diag_put(GUS_DR_STOP, (Uint8)voice, 0, 0);
++    }
++    DOS_EnableInterrupts();
++}
++
++void SDL_DOSGusStopAllVoices(void)
++{
++    int v;
++    if (!g_gus_active) {
++        return;
++    }
++    /* #40 song-boundary quiesce: stop + free EVERY voice in one critical section
++       so no voice is still reading DRAM when the engine swaps the .pat residency
++       and pokes new instruments. The engine calls this only at SONG .pat
++       boundaries (never per-SFX). Mirrors StopVoice's stop+free, iterated. */
++    DOS_DisableInterrupts();
++    for (v = 0; v < g_gus_voices; v++) {
++        gus_select_voice(v);
++        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);
++        gus_w8(GUS_VREG_CTRL, GUS_VC_STOP);
++        g_gus_voice_busy[v] = false;
++    }
++    DOS_EnableInterrupts();
++    if (g_gus_diag) {
++        dos_port_dbg_log("audio: SDL/0112 GUS StopAllVoices: %d voices stopped + "
++                         "freed (song-boundary quiesce, #40).", g_gus_voices);
++    }
++}
++
++void SDL_DOSGusSetVoiceFreq(int voice, Uint32 playback_hz)
++{
++    Uint16 fc;
++    if (!g_gus_active || voice < 0 || voice >= g_gus_voices) {
++        return;
++    }
++    fc = gus_hz_to_fc(playback_hz);
++    DOS_DisableInterrupts();
++    gus_select_voice(voice);
++    gus_w16(GUS_VREG_FREQ, fc);
++    /* gus-7: enqueue INSIDE the cli (IRQ-safe, memory-only) -- this runs in the
++       note_on IRQ. fc near 0 => caller passed note-pitch Hz instead of sample
++       PLAYBACK rate -> near-DC -> silent (a #39 suspect). */
++    if (g_gus_diag) {
++        gus_diag_put(GUS_DR_FREQ, (Uint8)voice, playback_hz, fc);
++    }
++    DOS_EnableInterrupts();
++}
++
++void SDL_DOSGusSetVoiceVol(int voice, int linear_vol)
++{
++    Uint16 reg;
++    if (!g_gus_active || voice < 0 || voice >= g_gus_voices) {
++        return;
++    }
++    reg = (Uint16)(gus_linear_to_logvol(linear_vol) << 4);
++    if (g_gus_force_maxvol) {
++        reg = 0xFFF0; /* gus-7 #39 probe: force max volume regardless of caller */
++    }
++    DOS_DisableInterrupts();
++    gus_select_voice(voice);
++    if (g_gus_vol_ramp) {
++        /* gus-14 #39 FIX: drive the volume THROUGH the GF1 ramp engine. On a real
++           GF1 the volume DAC tracks the ramp accumulator -- a directly-written
++           0x09 with the ramp stopped never reaches the DAC, so the voice runs but
++           is SILENT (confirmed on g2k: TONE8/TONE16 ran at max-vol yet silent,
++           while MIDIDEMO -- which ramps -- played on the same card). Seed the
++           accumulator at the floor, set the ramp target (top 8 bits of the log
++           volume) and run UP at max rate: it climbs to target in <1ms and HOLDS
++           (no loop/rollover). The voice may be started just after this (note_on
++           order) -- the ramp completes around/just after GO, an inaudible fast
++           attack. */
++        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP);        /* halt the ramp to reprogram */
++        gus_w8(GUS_VREG_RAMPSTART, 0x00);             /* floor */
++        gus_w8(GUS_VREG_RAMPEND, (Uint8)(reg >> 8));  /* target = top 8 bits of 0x09 */
++        gus_w8(GUS_VREG_RAMPRATE, 0x3F);              /* fastest: range 0, max increment */
++        gus_w16(GUS_VREG_VOLUME, 0x0000);             /* current = floor (ramp start) */
++        gus_w8(GUS_VREG_VOLCTRL, 0x00);               /* RUN up: no stop/loop/rollover/IRQ */
++        if (g_gus_double_write) gus_w8(GUS_VREG_VOLCTRL, 0x00); /* errata double-write */
++    } else {
++        /* legacy direct-0x09 path (GUS_NO_VOL_RAMP=1) -- the A/B baseline. */
++        gus_w8(GUS_VREG_VOLCTRL, GUS_VC_STOP); /* manual hold (ramp stopped) */
++        gus_w8(GUS_VREG_RAMPSTART, 0x00);      /* full ramp range so 0x09 isn't clamped (#39) */
++        gus_w8(GUS_VREG_RAMPEND, 0xFF);
++        gus_w16(GUS_VREG_VOLUME, reg);
++    }
++    if (g_gus_diag) {
++        gus_diag_put(GUS_DR_VOL, (Uint8)voice, (Uint32)linear_vol, reg); /* IRQ-safe */
++    }
++    DOS_EnableInterrupts();
++}
++
++void SDL_DOSGusSetVoicePan(int voice, int pan)
++{
++    if (!g_gus_active || voice < 0 || voice >= g_gus_voices) {
++        return;
++    }
++    if (pan < 0) {
++        pan = 0;
++    }
++    if (pan > 255) {
++        pan = 255;
++    }
++    DOS_DisableInterrupts();
++    gus_select_voice(voice);
++    gus_w8(GUS_VREG_PAN, (Uint8)(pan >> 4)); /* 0..255 -> 4-bit 0..15 */
++    DOS_EnableInterrupts();
++}
++
++#endif /* defined(SDL_PLATFORM_DOS) */
+-- 
+2.47.3
+

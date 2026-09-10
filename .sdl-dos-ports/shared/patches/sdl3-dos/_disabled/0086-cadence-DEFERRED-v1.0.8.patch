@@ -1,0 +1,227 @@
+From f19c6d84f54f60ec6acba4ac1f2a40d8582d0a52 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 1 Jun 2026 18:02:15 -0700
+Subject: [PATCH] dos: patch 0086 -- Bug-5 (#31) FIX: in-band
+ cooperative-scheduler yield (cadence)
+
+Root cause CONFIRMED on g2k (bug5tail a1fd0e50, the 0083/0084/0085 + engine
+0194/0195 marker bisection): the organya title/stage hang is a cooperative-
+scheduler MONOPOLY. The game main thread parks at the per-flip SDL_Delay(0) ->
+DOS_Yield() (the only scheduler-entering call in flip()'s common tail); the
+scheduler longjmps to the organya software-synth audio thread (raw_tid=1),
+which under organya NEVER yields back. Its two yield paths are both untaken:
+the PlayDevice silence-throttle (SDL_Delay(10)) does not fire (the in-band
+organya mix is non-silent) and the WaitDevice ring-full DOS_Yield does not fire
+(the ring stays lean, IRQ-5 ISR drains as fast as it fills, avail=0). So main
+never resumes. Markers: S2 main->thread1 longjmp + FindNextRunnable=1 == audio
+raw_tid=1, NO RESUMED, room_returns 0->13199 lockstep with cb_fills, yield_full
+frozen 0; opl3 control completed the quartet (its ring is silence so the
+silence-throttle yields every iter).
+
+FIX: a bare DOS_Yield() on the WaitDevice room-available path (the exact
+monopoly path) so the audio thread hands CPU back to main and cannot
+monopolize. Site chosen over the under-lock PlayDevice silence-throttle-mirror
+because WaitDevice runs LOCK-FREE (per the 0066 hard-park analysis it executes
+outside Iterate's device->lock) -- a yield here cannot spawn a new cooperative-
+lock wedge, the 0066/0068 failure class this fix closes. Bare DOS_Yield (=
+SDL_Delay(0)) NOT SDL_Delay(10): the organya producer is the audio thread
+itself (the Organya stream get-callback synthesizes + pushes on pull), so a
+10 ms sleep would starve it; a bare yield shares CPU without sleeping the
+producer and is self-regulating (DOS_Yield only switches when main is READY).
+
+CADENCE (the g2k bug5fix follow-up): the initial every-chunk yield FIXED the
+hang (PLAY0 reached Mimiga, coop_yields 0->2799, clean quit; PLAY1 fix-OFF
+park-reproduced = clean attribution) but UNDERRAN organya audio (consec_silent
+7-9 vs the wedge binary's 0-2). The audio thread IS the producer, so yielding
+after every single chunk never lets it build a ring buffer ahead of the ISR
+drain. Fix: yield every N room-path returns (mod-N counter) instead of every
+chunk -- the non-preemptive scheduler runs the audio thread N chunks
+uninterrupted between yields, building an N-deep buffer for the ISR to drain
+during main's slice. This is a TRADE: higher N -> deeper buffer (better audio)
+but fewer main slices (LOWER render fps; N=1 measured ~18 fps best-case, higher
+N lower). N is the new hint SDL_HINT_DOS_DOS_AUDIO_COOP_YIELD_EVERY
+(integer, clamp 1..64, resolved at OpenDevice, default 4 placeholder); N=1 ==
+the banked every-chunk behavior. The g2k organya sweep (EVERY=2/4/8) picks the
+ship default: lowest N that clears consec_silent (~0-2) while flip_n/fps stay
+acceptable.
+
+Killswitch SDL_HINT_DOS_DOS_AUDIO_COOP_YIELD=0 (strict "0", UNCHANGED --
+the EVERY cadence is a separate hint so the killswitch semantics + the shipped
+BOOT.md/smoke-banner are untouched) reverts to the pre-fix monopoly for the
+g2k A/B. opl3/wb are unaffected by construction (they yield every iter via the
+silence-throttle regardless of the room-path cadence -- the cadence is
+effectively organya-only, so out-of-band regression risk is ~nil). Default-ON
+(correctness fix per the killswitch-with-correctness discipline). coop_yields
+counts ACTUAL yields (climbs ~room_returns/N -- the lever-engaged witness),
+appended to patch 0082's per-100-cb_fills snd: line (no new fsync). SDL-only;
+single lever (the 0083/0084/0085 markers ride along for the g2k re-confirm).
+BOOT.md documents both hints; smoke banner updated (optional, like 0069).
+Confirm-iter gates the default-ON ship (v1.0.7). Workspace-local; never
+upstreamed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 115 ++++++++++++++++++++++++++++++--
+ 1 file changed, 111 insertions(+), 4 deletions(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 60437aa29..966f7ef2d 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -1420,9 +1420,57 @@ static void MaybeServiceIdlePauseRequests(void)
+    CONFIRMED. They are APPENDED to patch 0082's existing every-100-cb_fills
+    starve-diag/snd: line (no new LOG line, zero added fsync). Always incremented
+    (two adds; read only under STARVE_DIAG). Workspace-local; never upstreamed. */
+-static Uint32 g_dos_wd_room_returns    = 0;  /* WaitDevice room-available returns (no yield) */
++static Uint32 g_dos_wd_room_returns    = 0;  /* WaitDevice room-available path taken */
+ static Uint32 g_dos_wd_ringfull_yields = 0;  /* WaitDevice ring-full DOS_Yield count */
+ 
++/* DOSKUTSU patch (SDL/0086): Bug-5 (#31) FIX -- the in-band cooperative yield.
++   Root cause CONFIRMED on g2k (bug5tail a1fd0e50): cooperative-scheduler
++   MONOPOLY. main parks at the per-flip SDL_Delay(0)/DOS_Yield; the scheduler
++   longjmps to the organya audio thread, which under organya never yields back
++   -- the PlayDevice silence-throttle (SDL_Delay(10)) never fires on the
++   non-silent in-band mix, and the ring stays lean (avail=0) so the WaitDevice
++   ring-full yield never fires either -- so main never resumes. opl3 is immune
++   (its SB16 ring carries silence, music is on the YMF262 chip, so the
++   silence-throttle yields every iter).
++
++   FIX: a bare unconditional DOS_Yield on the WaitDevice room-available path
++   (the exact monopoly path -- room_returns climbed 0->13199 lockstep with
++   cb_fills on g2k while yield_full stayed 0) so the audio thread returns CPU to
++   main once per chunk. Chosen over the under-lock PlayDevice silence-throttle-
++   mirror site because WaitDevice runs LOCK-FREE (per the 0066 hard-park
++   analysis it executes OUTSIDE Iterate's device->lock) -- yielding here cannot
++   spawn a NEW cooperative-lock wedge, which is exactly the 0066/0068 failure
++   class this fix closes. Bare DOS_Yield NOT SDL_Delay(10): the organya producer
++   is the audio thread itself (the Organya stream get-callback synthesizes +
++   SDL_PutAudioStreamData on pull), so a 10ms sleep would starve the avail=0
++   producer -> underrun; a bare yield shares CPU with main without sleeping the
++   producer and is self-regulating (DOS_Yield only switches when main is READY).
++   Unconditional: avail=0 (room available) is precisely when main is parked, so
++   gating on not-starving would re-create the monopoly.
++
++   Default-ON; killswitch SDL_HINT_DOS_DOS_AUDIO_COOP_YIELD=0 reverts to the
++   pre-fix monopoly for the g2k A/B. Resolved at OpenDevice. g_dos_wd_coop_yields
++   counts the fired yields (rides patch 0082's snd: line; climbs with the fix ON,
++   frozen 0 with =0) so the confirm iter witnesses the lever engaged. SDL-only;
++   single new lever (0083/0084/0085 markers ride along). Workspace-local; never
++   upstreamed. */
++static bool   g_dos_audio_coop_yield_enabled = true;  /* default-ON; =0 killswitch */
++static Uint32 g_dos_wd_coop_yields           = 0;     /* SDL/0086 yields fired on the room path */
++/* DOSKUTSU patch (SDL/0086 cadence): yield-every-N-chunks. The every-chunk
++   yield (initial 0086) fixed the hang but underran organya on g2k (bug5fix
++   consec_silent 7-9): the audio thread IS the organya producer, so yielding
++   after every chunk never let it build a ring buffer ahead of the ISR drain.
++   Yielding every N room-path returns instead lets the synth run N chunks
++   uninterrupted (non-preemptive scheduler) to build an N-deep buffer before
++   handing main a slice. TRADE: higher N -> deeper buffer (better audio) but
++   fewer main slices (LOWER render fps; N=1 measured ~18 fps best-case on g2k,
++   higher N is lower). The g2k sweep (EVERY=2/4/8 on organya) picks the ship
++   value. SDL_HINT_DOS_DOS_AUDIO_COOP_YIELD_EVERY = integer N (clamp 1..64),
++   resolved at OpenDevice; N=1 == the banked every-chunk behavior. Default 4 is
++   a placeholder until the sweep settles it. */
++static Uint32 g_dos_audio_coop_yield_every   = 4;     /* SDL/0086 cadence N (1..64); sweep-tuned */
++static Uint32 g_dos_wd_coop_counter          = 0;     /* SDL/0086 room-path mod-N cadence counter */
++
+ // Wait until the ring buffer has room for one more chunk.
+ // The audio thread keeps yielding so the game's main thread can run while
+ // we wait. Because the ISR is steadily draining the ring, this only blocks
+@@ -1514,7 +1562,27 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+             if (g_p12_sdl_audio_instr_active) {
+                 g_p12_sdl_audio_thread_ns += SDL_GetTicksNS() - _p12_wait_t0;
+             }
+-            g_dos_wd_room_returns++; /* SDL/0085 S2: room-available, NO yield */
++            g_dos_wd_room_returns++; /* SDL/0085 S2: room-available path taken */
++            /* DOSKUTSU patch (SDL/0086): Bug-5 FIX -- the in-band cooperative
++               yield. Hand CPU back to main once per chunk so the organya audio
++               thread cannot monopolize the cooperative scheduler (the confirmed
++               title-hang). Lock-free site (WaitDevice runs outside device->lock)
++               so this cannot create a new cooperative-lock wedge. Bare DOS_Yield
++               only switches if main is READY (self-regulating) and does not sleep
++               the producer -- see the block comment at the
++               g_dos_audio_coop_yield_enabled decl for the full rationale.
++               Killswitch =0 -> pre-fix monopoly (g2k A/B). CADENCE: yield only
++               every g_dos_audio_coop_yield_every room-path returns (mod-N), so
++               the synth builds an N-deep buffer between yields instead of being
++               forced to hand off after every single chunk (g2k bug5fix: N=1
++               every-chunk underran organya). N=1 == yield every chunk. */
++            if (g_dos_audio_coop_yield_enabled) {
++                if (++g_dos_wd_coop_counter >= g_dos_audio_coop_yield_every) {
++                    g_dos_wd_coop_counter = 0;
++                    g_dos_wd_coop_yields++;
++                    DOS_Yield();
++                }
++            }
+             return true; // room for at least one chunk
+         }
+ 
+@@ -1635,6 +1703,42 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+         }
+     }
+ 
++    /* DOSKUTSU patch (SDL/0086): resolve the Bug-5 in-band cooperative-yield
++       killswitch. Default-ON (the fix); SDL_HINT_DOS_DOS_AUDIO_COOP_YIELD=0
++       reverts to the pre-fix cooperative-scheduler monopoly (organya title-hang)
++       for the g2k A/B. Strict "0" per CLAUDE.md killswitch discipline. Resolved
++       once here (main thread, before the audio thread starts) and read in
++       DOSSOUNDBLASTER_WaitDevice. Banner emitted unconditionally so the smoke
++       gate can verify the lever is wired. */
++    {
++        const char *cy_hint = SDL_GetHint("SDL_HINT_DOS_DOS_AUDIO_COOP_YIELD");
++        const bool cy_disabled = (cy_hint && cy_hint[0] == '0' && cy_hint[1] == 0);
++        g_dos_audio_coop_yield_enabled = !cy_disabled;
++        /* SDL/0086 cadence: resolve the yield-every-N hint (separate from the
++           killswitch above so COOP_YIELD's strict-0 semantics stay unchanged).
++           SDL_HINT_DOS_DOS_AUDIO_COOP_YIELD_EVERY = integer N, clamp 1..64,
++           default 4 (placeholder; the g2k sweep picks the ship value). N=1 ==
++           yield every chunk (the banked underrun). Malformed/<1 -> 1; >64 -> 64. */
++        {
++            const char *ce_hint = SDL_GetHint("SDL_HINT_DOS_DOS_AUDIO_COOP_YIELD_EVERY");
++            g_dos_audio_coop_yield_every = 4;
++            if (ce_hint && ce_hint[0]) {
++                int v = SDL_atoi(ce_hint);
++                if (v < 1) { v = 1; }
++                if (v > 64) { v = 64; }
++                g_dos_audio_coop_yield_every = (Uint32)v;
++            }
++        }
++        dos_port_dbg_log("audio: SDL/0086 in-band COOP_YIELD %s -- Bug-5 organya "
++                         "cooperative-scheduler monopoly fix (WaitDevice room-path "
++                         "DOS_Yield every=%lu chunks; %s)",
++                         g_dos_audio_coop_yield_enabled ? "ENABLED (default-ON)" : "DISABLED",
++                         (unsigned long)g_dos_audio_coop_yield_every,
++                         g_dos_audio_coop_yield_enabled
++                             ? "audio thread yields to main every N chunks"
++                             : "killswitch=0, pre-fix monopoly behavior");
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0069): banner for the cumulative
+        silent-IRQ counter export. Pure-data instrumentation -- no
+        killswitch, no env var; the counter (defined in
+@@ -3065,7 +3169,7 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+                 dos_port_dbg_log(
+                     "audio: starve-diag/snd: t=%lu avail=%d chunk=%d "
+                     "consec_silent=%lu silent_total=%lu cb_fills=%lu "
+-                    "room_returns=%lu yield_full=%lu "
++                    "room_returns=%lu yield_full=%lu coop_yields=%lu "
+                     "paused=%d pause_req=%d%s",
+                     (unsigned long)SDL_GetTicks(),
+                     sd_avail, isr_chunk_size,
+@@ -3073,9 +3177,12 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+                     (unsigned long)dos_port_audio_silent_irq_count,
+                     (unsigned long)s_sd_calls,
+                     /* SDL/0085 S2 yield-asymmetry: room climbs / yield_full
+-                       FROZEN under organya == audio thread never yields back. */
++                       FROZEN under organya == audio thread never yields back.
++                       SDL/0086 coop_yields: the fix's room-path DOS_Yield count
++                       -- climbs with COOP_YIELD ON, frozen 0 with killswitch=0. */
+                     (unsigned long)g_dos_wd_room_returns,
+                     (unsigned long)g_dos_wd_ringfull_yields,
++                    (unsigned long)g_dos_wd_coop_yields,
+                     (int)isr_dsp_paused, (int)g_dos_audio_pause_request,
+                     sd_low ? " LOW" : "");
+             }
+-- 
+2.47.3
+

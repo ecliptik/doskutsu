@@ -1,0 +1,121 @@
+From 37ca52726aa36b45adb3a7155e36e13ec97d5312 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 30 May 2026 15:43:24 -0700
+Subject: [PATCH] dos: patch 0084 -- Bug-5 (#31) round-2 present-path
+ SDL_DelayPrecise pin
+
+Round-1 (0083) ruled out the DV present (PresentFull never reached: pf=0 on
+the hung organya cell). The bisection localized the wedge to flip()'s
+pre-present SDL calls, but reading ruled the engine code + all 4 DV-path calls
+(GetGeneration/GetState/ProgramPalette/FlushRenderer) bounded with no shared
+audio lock -- so the SDL/0068 device-lock-deadlock hypothesis does not hold
+here. The cb_fills-climbing hang must run a yielding loop; the ONLY
+SDL_Delay-family yielder in the entire present path is SDL_DelayPrecise (via
+SDL_SimulateRenderVSync, the vsync-simulation frame-pacing). Reading says it is
+bounded (16.67 ms 60Hz default interval; my snd: t= data shows the clock
+advances through the hang, so it should reach target + exit) -- but we have
+been wrong repeatedly on static reads, so this confirms it EMPIRICALLY on g2k.
+
+Two markers, armed by nxengine 0194's g_title_diag_armed latch (title window
+only, so unrelated delays don't log), markers-only:
+- SimulateRenderVSync (SDL_render.c): pre-delay (interval/elapsed/duration) +
+  post-delay. If PLAY0 takes the render branch and wedges here, pre-delay logs
+  but post-delay never does -> SDL_DelayPrecise(duration) hung; the duration
+  value shows a misconfigured-huge pacing interval if any.
+- SDL_DelayPrecise loop (SDL_timer.c): iteration counter, emit every 256 (a
+  normal bounded ~16-iter call emits 0; a spinning call emits) with now_ns vs
+  target_ns -> shows whether SDL_GetTicksNS is advancing toward target or the
+  clock is stuck.
+
+Pairs with nxengine 0194-r2's which-branch + per-call breadcrumbs: nx pins
+WHICH branch/call PLAY0 enters; this pins whether the only present-path yielder
+spins + why. Latch link-clean (extern "C" g_title_diag_armed, unmangled, nm
+U _g_title_diag_armed). Default OFF (latch false). Workspace-local; never
+upstreamed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/render/SDL_render.c | 18 ++++++++++++++++++
+ src/timer/SDL_timer.c   | 21 +++++++++++++++++++++
+ 2 files changed, 39 insertions(+)
+
+diff --git a/src/render/SDL_render.c b/src/render/SDL_render.c
+index 03dad68f4..3fa996d84 100644
+--- a/src/render/SDL_render.c
++++ b/src/render/SDL_render.c
+@@ -5530,8 +5530,26 @@ static void SDL_SimulateRenderVSync(SDL_Renderer *renderer)
+     elapsed = (now - renderer->last_present);
+     if (elapsed < interval) {
+         Uint64 duration = (interval - elapsed);
++        /* DOSKUTSU patch (SDL/0084): Bug-5 (#31) round-2 present-path pin.
++           This is the present path's only SDL_Delay-family yielder. If PLAY0
++           (organya) takes the render branch (per nxengine 0194's which-branch
++           breadcrumb) and wedges here, "pre-delay" logs (with the duration) but
++           "post-delay" never logs -> SDL_DelayPrecise(duration) hung; the
++           duration value shows if it's a huge/misconfigured pacing interval.
++           If "post-delay" logs, the present-path SDL_DelayPrecise is NOT the
++           hang. Gated on nxengine 0194's armed latch (title window only).
++           Markers-only. */
++        extern volatile bool g_title_diag_armed; /* nxengine 0194, extern "C", C-linkage */
++        if (g_title_diag_armed) {
++            dos_port_dbg_log("present-diag/simvsync: pre-delay interval_ns=%lu elapsed_ns=%lu duration_ns=%lu t=%lu",
++                             (unsigned long)interval, (unsigned long)elapsed,
++                             (unsigned long)duration, (unsigned long)SDL_GetTicks());
++        }
+         SDL_DelayPrecise(duration);
+         now = SDL_GetTicksNS();
++        if (g_title_diag_armed) {
++            dos_port_dbg_log("present-diag/simvsync: post-delay t=%lu", (unsigned long)SDL_GetTicks());
++        }
+     }
+ 
+     elapsed = (now - renderer->last_present);
+diff --git a/src/timer/SDL_timer.c b/src/timer/SDL_timer.c
+index 5fc4573d3..cd37d8242 100644
+--- a/src/timer/SDL_timer.c
++++ b/src/timer/SDL_timer.c
+@@ -22,6 +22,7 @@
+ 
+ #include "SDL_timer_c.h"
+ #include "../thread/SDL_systhread.h"
++#include "../video/dos/SDL_dosdbg.h" /* DOSKUTSU patch 0084: dos_port_dbg_log (no-op macro off-DOS) */
+ 
+ // #define DEBUG_TIMERS
+ 
+@@ -698,6 +699,21 @@ void SDL_DelayPrecise(Uint64 ns)
+     // that's fine, the code below can cope with that, but in practice no
+     // platforms behave that way.
+     Uint64 max_sleep_ns = SHORT_SLEEP_NS;
++    /* DOSKUTSU patch (SDL/0084): Bug-5 (#31) round-2 -- SDL_DelayPrecise loop
++       iteration counter + clock progression, to DEFINITIVELY rule this loop
++       in/out as the hung present-path yielder on g2k under organya. This is the
++       only SDL_Delay-family yielder in the present path; the cb_fills-climbing
++       hang must run a yielding loop, and reading says this loop is bounded (it
++       exits when SDL_GetTicksNS reaches target, and my snd: t= data shows the
++       clock advances) -- this counter confirms that EMPIRICALLY: a normal
++       bounded call (~16 iters for a 16 ms frame-pacing delay) emits 0 lines
++       (every-256 gate); a SPINNING call emits, and now_ns vs target_ns shows
++       whether SDL_GetTicksNS is advancing toward target (clock-stuck) or target
++       is huge. Gated on nxengine 0194's armed latch (title window only), so
++       unrelated SDL_DelayPrecise calls don't log. Markers-only; default OFF
++       (latch false). Workspace-local; never upstreamed. */
++    extern volatile bool g_title_diag_armed; /* nxengine 0194, extern "C", C-linkage */
++    Uint32 _dp_iter = 0;
+     while (current_value + max_sleep_ns < target_value) {
+         // Sleep for a short time
+         SDL_SYS_DelayNS(SHORT_SLEEP_NS);
+@@ -708,6 +724,11 @@ void SDL_DelayPrecise(Uint64 ns)
+             max_sleep_ns = next_sleep_ns;
+         }
+         current_value = now;
++        if (g_title_diag_armed && ((++_dp_iter % 256) == 0)) {
++            dos_port_dbg_log("present-diag/delayprecise: iter=%lu now_ns=%lu target_ns=%lu t=%lu",
++                             (unsigned long)_dp_iter, (unsigned long)now,
++                             (unsigned long)target_value, (unsigned long)SDL_GetTicks());
++        }
+     }
+ 
+     // Do a shorter sleep of the remaining time here, less the max overshoot in
+-- 
+2.47.3
+

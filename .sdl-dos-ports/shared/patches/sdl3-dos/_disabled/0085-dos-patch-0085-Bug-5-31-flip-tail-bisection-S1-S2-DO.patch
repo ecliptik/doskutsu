@@ -1,0 +1,348 @@
+From 191d4c9ae6c62fab3694197d89b51f4fe98ce9d6 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Mon, 1 Jun 2026 08:42:58 -0700
+Subject: [PATCH] dos: patch 0085 -- Bug-5 (#31) flip-tail bisection S1+S2
+ DOS_Yield pin
+
+Round-3 of the flip-tail bisection (markers-only; AppMinimized / stages[1005]
+OOB / SDL_GetWindowSurface / DV-present all REFUTED). nx-engine localized the
+organya title-hang to flip()'s COMMON tail (Renderer.cpp 5436->5751),
+contained in flip_n=1 (flip never returned). The only scheduler-entering call
+in that span is the per-flip SDL_Delay(0) at Renderer.cpp:5500 ->
+SDL_SYS_DelayNS(0) -> DOS_Yield(). This is the SDL half: it pins whether main
+parks inside DOS_Yield, names what it parks on, and confirms/refutes the
+cooperative-starvation mechanism (the in-band organya stream never lets the
+audio thread yield back to main).
+
+S1 (timer/dos/SDL_systimer.c, ns==0 path): one-shot armed breadcrumbs
+bracketing the DOS_Yield call -- "pre-DOS_Yield" / "post-DOS_Yield RETURNED".
+Pairs with engine T2/T3 at 5500. engine-T2 + S1-pre with neither S1-post nor
+engine-T3 => main PARKED inside DOS_Yield. Setting g_dos_starve_diag_in_delay0
+around the call scopes the S2 scheduler breadcrumbs to THIS ns==0 call (the
+present-path DelayPrecise uses ns!=0 and so does not trip them).
+
+S2 (core/dos/SDL_dos_scheduler.c, DOS_Yield body): the contract floated a
+"DOS_Yield spins on the SB16 device->lock" hypothesis, but DOS_Yield holds NO
+lock and never spins -- pure round-robin (FindNextRunnable -> setjmp -> mark
+prev READY -> longjmp). The device->lock regime (SDL/0068) lives in
+SDL_DOSAudioPump, which is past T7 in run_tick, NOT on the flip-tail. The real
+park-point is the longjmp. Breadcrumbs (one-shot, scoped to the flip-tail
+ns==0 call on the main thread, prev/current_thread==0):
+  - FindNextRunnable=next switch ("main->threadN longjmp, no return until
+    re-sched") -- main handed the CPU to thread N and parks.
+  - FindNextRunnable=-1 ("no other READY; returns to main -- self-deadlock
+    candidate") -- its ABSENCE in the wedge confirms main parked at the switch.
+  - "main RESUMED" in the resumed branch -- if switch logs but RESUMED + S1-post
+    never do, main is parked at the longjmp = cooperative starvation.
+FindNextRunnable's result is the sole (a)/(b) discriminator (cb_fills is
+~120/sec, IRQ/DMA-driven, and says nothing about main's scheduling): N=audio
+thread => audio-thread monopoly (case a); -1 => self-deadlock (case b, main is
+the sole producer of the in-band stream).
+
+S2 (audio/dos/SDL_dosaudio_sb.c) -- the smoking gun, no new LOG line:
+  - g_dos_wd_room_returns (WaitDevice room-available return, sb.c room path) vs
+    g_dos_wd_ringfull_yields (WaitDevice ring-full DOS_Yield) counters, APPENDED
+    to patch 0082's existing every-100-cb_fills starve-diag/snd: line (zero
+    added fsync). room climbs unbounded / yield_full FROZEN under organya ==
+    the audio thread takes the no-yield path every wake and never yields back
+    = mechanism CONFIRMED. (Under in-band organya the mix is non-silent, so the
+    PlayDevice silence-skip SDL_Delay(10) throttle -- the out-of-band opl3/WB
+    yield path -- never fires; the only other yield is ring-full, which never
+    happens while the stream starves.)
+  - one-shot "audio-thread raw_tid=N" (DOS_GetCurrentThreadID()-1, normalized
+    to scheduler's raw index) identifies the thread that pulls the organya
+    stream. Matching FindNextRunnable=next against it answers self-deadlock
+    (b) vs monopoly (a) from the SDL side (nx engine cannot see the DOS thread
+    context).
+
+Object note: organya is a standalone SDL3 audio STREAM (organyaStreamCallback
+via SDL_SetAudioStreamGetCallback), NOT an SDL3_mixer source -- the markers
+target the device-output / stream path.
+
+Scoping: g_dos_starve_diag_in_delay0 (defined in the scheduler TU) is set true
+ONLY by SDL_SYS_DelayNS's ns==0 path; the switch breadcrumb is additionally
+gated on prev==0 so the audio thread's own DOS_Yield calls (which see the flag
+leaked-true while main is parked) do not mis-fire. S1/S2 latch on the FIRST
+armed SDL_Delay(0) -- cross-check S1-pre's t vs engine T2's t to confirm it is
+the 5500 tail call (the heavy present yielder is ns!=0, so it cannot consume
+them).
+
+Gate: STARVE_DIAG=1 + g_title_diag_armed (mirrors SDL/0082/0083; no new env
+var, no BOOT.md edit). One-shot per breadcrumb; the room/yield counters ride
+0082's existing emit (two unconditional adds, read only under STARVE_DIAG).
+Default OFF. S3 link-check: g_dos_starve_diag_in_delay0 + DOS_GetCurrentThreadID
+resolve in libSDL3.a; the wd counters are sb.c-local statics; g_title_diag_armed
+resolves from the engine at final link (same as 0084). The fix class this
+points to (make the in-band stream-refill path yield like the silence throttle)
+is FLAGGED ONLY -- not authored this round; markers confirm the mechanism on
+g2k first. Workspace-local; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c  | 34 +++++++++++++++
+ src/core/dos/SDL_dos_scheduler.c | 71 ++++++++++++++++++++++++++++++++
+ src/timer/dos/SDL_systimer.c     | 52 +++++++++++++++++++++++
+ 3 files changed, 157 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 58fd29ec2..60437aa29 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -1408,6 +1408,21 @@ static void MaybeServiceIdlePauseRequests(void)
+     }
+ }
+ 
++/* DOSKUTSU patch (SDL/0085): Bug-5 (#31) WaitDevice yield-asymmetry counters.
++   The decisive S2 read for the organya title-hang. WaitDevice's two outcomes:
++   ring has room -> return WITHOUT yielding (room-available path); ring full ->
++   DOS_Yield. Under in-band organya the mix is non-silent (so the silence-skip
++   SDL_Delay(10) throttle in PlayDevice never fires) and the stream starves
++   (avail=0), so the audio thread takes the room-available path on every wake
++   and NEVER reaches the ring-full DOS_Yield -- it never cooperatively yields
++   back to main. These counters make that empirical: g_dos_wd_room_returns
++   climbs unbounded while g_dos_wd_ringfull_yields stays FROZEN == mechanism
++   CONFIRMED. They are APPENDED to patch 0082's existing every-100-cb_fills
++   starve-diag/snd: line (no new LOG line, zero added fsync). Always incremented
++   (two adds; read only under STARVE_DIAG). Workspace-local; never upstreamed. */
++static Uint32 g_dos_wd_room_returns    = 0;  /* WaitDevice room-available returns (no yield) */
++static Uint32 g_dos_wd_ringfull_yields = 0;  /* WaitDevice ring-full DOS_Yield count */
++
+ // Wait until the ring buffer has room for one more chunk.
+ // The audio thread keeps yielding so the game's main thread can run while
+ // we wait. Because the ISR is steadily draining the ring, this only blocks
+@@ -1499,6 +1514,7 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+             if (g_p12_sdl_audio_instr_active) {
+                 g_p12_sdl_audio_thread_ns += SDL_GetTicksNS() - _p12_wait_t0;
+             }
++            g_dos_wd_room_returns++; /* SDL/0085 S2: room-available, NO yield */
+             return true; // room for at least one chunk
+         }
+ 
+@@ -1565,6 +1581,7 @@ static bool DOSSOUNDBLASTER_WaitDevice(SDL_AudioDevice *device)
+             }
+         }
+ 
++        g_dos_wd_ringfull_yields++; /* SDL/0085 S2: ring full -> cooperative yield */
+         DOS_Yield();
+     }
+ }
+@@ -3022,6 +3039,18 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+             if (s_sd_enabled) {
+                 dos_port_dbg_log("audio: SDL/0082 STARVE_DIAG=1 -- Bug-5 ring/"
+                                  "silent-IRQ starve markers ENABLED (snd: layer)");
++                /* DOSKUTSU patch (SDL/0085): record the SDL playback audio
++                   thread's RAW scheduler index (DOS_GetCurrentThreadID()-1, to
++                   match scheduler.c's FindNextRunnable/`next` index; the API
++                   returns index+1). PlayDevice runs on this thread, so this is
++                   the thread that pulls the organya stream. The bisection
++                   matches scheduler S2 FindNextRunnable=next against this id:
++                   next==audio_raw_tid => main switched to the audio thread =
++                   monopoly (case a); FindNextRunnable=-1 => self-deadlock
++                   (case b, main is the sole stream producer). One-shot. */
++                dos_port_dbg_log("starve-diag/snd: S2 audio-thread raw_tid=%d "
++                                 "(pulls the organya stream)",
++                                 DOS_GetCurrentThreadID() - 1);
+             }
+         }
+         s_sd_calls++;
+@@ -3036,12 +3065,17 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+                 dos_port_dbg_log(
+                     "audio: starve-diag/snd: t=%lu avail=%d chunk=%d "
+                     "consec_silent=%lu silent_total=%lu cb_fills=%lu "
++                    "room_returns=%lu yield_full=%lu "
+                     "paused=%d pause_req=%d%s",
+                     (unsigned long)SDL_GetTicks(),
+                     sd_avail, isr_chunk_size,
+                     (unsigned long)isr_consecutive_silent_irqs,
+                     (unsigned long)dos_port_audio_silent_irq_count,
+                     (unsigned long)s_sd_calls,
++                    /* SDL/0085 S2 yield-asymmetry: room climbs / yield_full
++                       FROZEN under organya == audio thread never yields back. */
++                    (unsigned long)g_dos_wd_room_returns,
++                    (unsigned long)g_dos_wd_ringfull_yields,
+                     (int)isr_dsp_paused, (int)g_dos_audio_pause_request,
+                     sd_low ? " LOW" : "");
+             }
+diff --git a/src/core/dos/SDL_dos_scheduler.c b/src/core/dos/SDL_dos_scheduler.c
+index 9c0163ce1..4337a4b34 100644
+--- a/src/core/dos/SDL_dos_scheduler.c
++++ b/src/core/dos/SDL_dos_scheduler.c
+@@ -25,6 +25,7 @@
+ 
+ #include "SDL_dos.h"
+ #include "SDL_dos_scheduler.h"
++#include "../../video/dos/SDL_dosdbg.h" /* DOSKUTSU patch 0085: dos_port_dbg_log (no-op macro off-DOSVESA) */
+ #include <setjmp.h>
+ 
+ /* DJGPP's jmp_buf is defined as:
+@@ -42,6 +43,31 @@ static DOS_ThreadContext threads[DOS_MAX_THREADS];
+ static int current_thread = 0; // Index of currently running thread
+ static bool scheduler_initialized = false;
+ 
++/* DOSKUTSU patch (SDL/0085): Bug-5 (#31) flip-tail bisection S2 -- name where
++   main parks inside DOS_Yield. The flip-tail SDL_Delay(0) (Renderer.cpp:5500)
++   is the only scheduler-entering call in flip()'s common tail; this pins
++   whether main reaches the longjmp (switches to the audio thread) and never
++   gets re-scheduled (cooperative starvation -- the audio thread's only yield
++   under in-band organya is WaitDevice ring-full, which never fires when the
++   ring starves; the silence-skip SDL_Delay(10) throttle fires only for
++   out-of-band backends like opl3) vs. DOS_Yield returning normally.
++
++   CORRECTION to the contract's S2 framing: DOS_Yield's body holds NO lock and
++   never spins. The SB16 device->lock cooperative-starvation regime (SDL/0068)
++   lives in SDL_DOSAudioPump, a path NOT on the flip-tail (the tail's only
++   yielder is SDL_Delay(0)). The park-point is the longjmp itself: main's
++   setjmp does not return until another thread longjmps back to it. So the
++   breadcrumb sits at the longjmp + the resumed branch.
++
++   g_dos_starve_diag_in_delay0 is set true by SDL_SYS_DelayNS's ns==0 path only
++   (the present-path DelayPrecise uses ns!=0, so it does NOT trip S2), and the
++   switch breadcrumb is additionally gated on prev==0 (main thread) so the audio
++   thread's own DOS_Yield calls -- which see the flag leaked-true while main is
++   parked -- do not mis-fire. One-shot per site. Markers-only; read-only w.r.t.
++   scheduling. Default OFF (flag false). Workspace-local; never upstreamed. */
++extern volatile bool g_title_diag_armed;            /* nxengine 0194, extern "C" */
++volatile bool g_dos_starve_diag_in_delay0 = false;  /* set by SDL_SYS_DelayNS(0) */
++
+ // Find the next runnable thread using round-robin scheduling.
+ // Returns thread ID, or -1 if no other thread is runnable.
+ static int FindNextRunnable(int start)
+@@ -192,6 +218,22 @@ void DOS_Yield(void)
+ 
+     int next = FindNextRunnable(current_thread);
+     if (next < 0) {
++        /* DOSKUTSU patch (SDL/0085): S2 FindNextRunnable=-1 breadcrumb. No other
++           thread is READY, so DOS_Yield returns to main immediately (no switch).
++           In the organya wedge this should NOT fire (the audio thread is READY,
++           so the switch branch below logs instead); its PRESENCE would mean main
++           is the sole runnable context => self-deadlock (case b: main is the sole
++           producer of the in-band organya stream, yielding forever waiting for
++           itself). Scoped to the flip-tail SDL_Delay(0) on main. One-shot. */
++        if (g_dos_starve_diag_in_delay0 && current_thread == 0) {
++            static bool _bcd_s2nrun = false;
++            if (!_bcd_s2nrun) {
++                dos_port_dbg_log("starve-diag/snd: S2 DOS_Yield FindNextRunnable=-1 "
++                                 "(no other READY; returns to main -- self-deadlock "
++                                 "candidate) t=%lu", (unsigned long)SDL_GetTicks());
++                _bcd_s2nrun = true;
++            }
++        }
+         return; // No other runnable thread, continue current
+     }
+ 
+@@ -204,6 +246,21 @@ void DOS_Yield(void)
+             threads[prev].state = DOS_THREAD_READY;
+         }
+ 
++        /* DOSKUTSU patch (SDL/0085): S2 switch breadcrumb. main is about to
++           longjmp to thread `next` and will not return to this frame until it
++           is re-scheduled. Scoped to the flip-tail SDL_Delay(0)
++           (g_dos_starve_diag_in_delay0) on the main thread (prev==0). One-shot. */
++        if (g_dos_starve_diag_in_delay0 && prev == 0) {
++            static bool _bcd_s2switch = false;
++            if (!_bcd_s2switch) {
++                dos_port_dbg_log("starve-diag/snd: S2 DOS_Yield FindNextRunnable=%d "
++                                 "(main->thread%d longjmp, no return until re-sched; "
++                                 "match vs audio-thread raw_tid => monopoly case a) t=%lu",
++                                 next, next, (unsigned long)SDL_GetTicks());
++                _bcd_s2switch = true;
++            }
++        }
++
+         // Switch to next thread
+         current_thread = next;
+         threads[next].state = DOS_THREAD_RUNNING;
+@@ -214,6 +271,20 @@ void DOS_Yield(void)
+         longjmp(threads[next].env, 1);
+     }
+     // else: we've been switched back to — just return
++
++    /* DOSKUTSU patch (SDL/0085): S2 resume breadcrumb. main was re-scheduled
++       (another thread longjmp'd back into this frame; current_thread is now 0).
++       If S2-switch logged but this never does -- alongside S1 post-DOS_Yield
++       missing -- main is parked at the longjmp = cooperative starvation (the
++       audio thread never yielded back). One-shot. */
++    if (g_dos_starve_diag_in_delay0 && current_thread == 0) {
++        static bool _bcd_s2resume = false;
++        if (!_bcd_s2resume) {
++            dos_port_dbg_log("starve-diag/snd: S2 DOS_Yield main RESUMED "
++                             "(re-scheduled) t=%lu", (unsigned long)SDL_GetTicks());
++            _bcd_s2resume = true;
++        }
++    }
+ }
+ 
+ void DOS_ExitThread(int status)
+diff --git a/src/timer/dos/SDL_systimer.c b/src/timer/dos/SDL_systimer.c
+index d47bae177..208a31b80 100644
+--- a/src/timer/dos/SDL_systimer.c
++++ b/src/timer/dos/SDL_systimer.c
+@@ -26,6 +26,36 @@
+ #include <time.h> /* uclock, uclock_t, UCLOCKS_PER_SEC */
+ 
+ #include "../../core/dos/SDL_dos_scheduler.h"
++#include "../../video/dos/SDL_dosdbg.h" /* DOSKUTSU patch 0085: dos_port_dbg_log (no-op macro off-DOSVESA) */
++
++/* DOSKUTSU patch (SDL/0085): Bug-5 (#31) flip-tail bisection S1 -- bracket the
++   flip-tail SDL_Delay(0) -> SDL_SYS_DelayNS(0) -> DOS_Yield call (the only
++   scheduler-entering call in flip()'s common tail, Renderer.cpp:5500). Pairs
++   with engine T2/T3: if engine T2 (pre-SDL_Delay) + this "pre-DOS_Yield" log
++   and neither "post-DOS_Yield RETURNED" nor engine T3 fire -> main PARKED
++   inside DOS_Yield. Setting g_dos_starve_diag_in_delay0 (defined in the
++   scheduler TU) around the call arms the S2 breadcrumbs inside DOS_Yield to
++   fire ONLY for this ns==0 path -- the present-path DelayPrecise yielder uses
++   ns!=0 and so does not trip them. Gate = STARVE_DIAG=1 + g_title_diag_armed
++   (mirrors SDL/0082/0083). One-shot per site; default OFF.
++
++   CAVEAT (read in the log): S1/S2 latch on the FIRST armed SDL_Delay(0). The
++   heavy present-path yielder is ns!=0 so it cannot consume them, but cross-
++   check S1-pre's t against engine T2's t to confirm this IS the 5500 tail call
++   (low risk -- arming is at title_init, the tail is the first SDL_Delay(0)).
++   Workspace-local; never upstreamed. */
++extern volatile bool g_title_diag_armed;          /* nxengine 0194, extern "C" */
++extern volatile bool g_dos_starve_diag_in_delay0; /* scheduler TU (SDL/0085) */
++static int s_sd085_enabled = -1;                  /* -1 unread; cached strict-1 STARVE_DIAG */
++
++static bool _sd085_active(void)
++{
++    if (s_sd085_enabled < 0) {
++        const char *sd = SDL_GetHint("SDL_HINT_DOS_STARVE_DIAG");
++        s_sd085_enabled = (sd && sd[0] == '1' && sd[1] == '\0') ? 1 : 0;
++    }
++    return s_sd085_enabled == 1 && g_title_diag_armed;
++}
+ 
+ /* DJGPP's uclock() reprograms PIT channel 0 for a higher tick rate on first
+    call, giving ~1.19 MHz resolution (UCLOCKS_PER_SEC == 1193180).  This is
+@@ -45,6 +75,28 @@ Uint64 SDL_GetPerformanceFrequency(void)
+ void SDL_SYS_DelayNS(Uint64 ns)
+ {
+     if (ns == 0) {
++        /* DOSKUTSU patch (SDL/0085): S1 flip-tail SDL_Delay(0) bracket + S2 arm.
++           One-shot, armed window only; g_dos_starve_diag_in_delay0 scopes the
++           DOS_Yield-body breadcrumbs to this call. The clear after DOS_Yield is
++           NOT reached if main parks inside (wedge) -- harmless, the flag staying
++           true only keeps S2 armed and prev==0 excludes the audio thread. */
++        if (_sd085_active()) {
++            static bool _bcd_s1pre = false, _bcd_s1post = false;
++            if (!_bcd_s1pre) {
++                dos_port_dbg_log("starve-diag/snd: S1 SDL_SYS_DelayNS(0) "
++                                 "pre-DOS_Yield t=%lu", (unsigned long)SDL_GetTicks());
++                _bcd_s1pre = true;
++            }
++            g_dos_starve_diag_in_delay0 = true;
++            DOS_Yield();
++            g_dos_starve_diag_in_delay0 = false;
++            if (!_bcd_s1post) {
++                dos_port_dbg_log("starve-diag/snd: S1 SDL_SYS_DelayNS(0) "
++                                 "post-DOS_Yield RETURNED t=%lu", (unsigned long)SDL_GetTicks());
++                _bcd_s1post = true;
++            }
++            return;
++        }
+         DOS_Yield();
+         return;
+     }
+-- 
+2.47.3
+

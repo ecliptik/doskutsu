@@ -1,0 +1,116 @@
+From 2e6be1c0823eba589cc305e985a093a07655e456 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Fri, 29 May 2026 17:31:18 -0700
+Subject: [PATCH] dos: patch 0082 -- Bug-5 (#31) Organya title-hang audio-side
+ starve-diag
+
+The DX2-66 cold-boot Organya title hang (#31; 486-class + organya-opt-in,
+OPL3 default unaffected) wedges at the first bkMoon truecolor decode. The
+title runs run_tick(), which -- unlike gameplay's run_tick_fixed -- has no
+audio pump, so the SB16 ring can drain unattended during heavy un-pumped
+title frames. To distinguish ring starvation (pump-fixable) from a pure
+main-thread compute wedge (pre-decode-fixable) we sample the producer-side
+ring + silent-IRQ state right up to the wedge.
+
+Placed at PlayDevice ENTRY -- before the SDL/0054 silence-detect early-return
+(sb.c:~3269) -- so it fires on EVERY PlayDevice call, including the all-
+silence calls that skip the ring write. Those silence-skip calls are exactly
+the starvation-relevant ones: the ring keeps draining via the ISR while the
+producer writes nothing, so the avail trajectory across silence-skips IS the
+starvation signal. (An after-the-ring-write placement misses them, and on a
+fully-silent DOSBox title never runs at all -- caught by the DOSBox
+correctness cell before the operator round.) PlayDevice is non-IRQ context so
+dos_port_dbg_log is safe here; the ISR is not (it only bumps the memory-locked
+counters this reads). When the main thread wedges, PlayDevice stops and the
+snd: lines stop -- the last line's avail/consec_silent/cb_fills trajectory
+names the mechanism alongside nxengine 0192's "starve-diag/eng:" bracket.
+
+SDL_HINT_DOS_STARVE_DIAG=1 (strict-1, default OFF) gates BOTH the SDL
+"snd:" layer and the engine "eng:" layer via one env. Read-only w.r.t. the
+audio output. Workspace-local; never upstreamed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 66 +++++++++++++++++++++++++++++++++
+ 1 file changed, 66 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 36c280e15..58fd29ec2 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -2982,6 +2982,72 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+ {
+     struct SDL_PrivateAudioData *hidden = device->hidden;
+ 
++    /* DOSKUTSU patch (SDL/0082): Bug-5 (#31) Organya title-hang audio-side
++       starve-diagnostic ("snd:" layer). Placed at PlayDevice ENTRY -- BEFORE
++       the SDL/0054 silence-detect early-return (sb.c:~3269) -- so it fires on
++       EVERY PlayDevice call, including the all-silence calls that skip the ring
++       write. Those silence-skip calls are exactly the starvation-relevant ones:
++       the ring keeps draining via the ISR while the producer writes nothing, so
++       the avail trajectory across silence-skips IS the starvation signal. (An
++       after-the-ring-write placement misses them entirely, and on a fully-
++       silent DOSBox title never runs at all -- build-qa's cheap-catch.)
++
++       When SDL_HINT_DOS_STARVE_DIAG=1 (strict-1, default OFF) emit the SB16
++       ring + silent-IRQ state on a coarse cadence (every 100 PlayDevice calls)
++       PLUS an edge-triggered line the first call the ring drops below one chunk
++       (underflow onset). PlayDevice is non-IRQ context so dos_port_dbg_log
++       (fopen/fwrite/fsync) is safe here -- the ISR is not (it only bumps the
++       memory-locked counters this reads). avail is sampled at entry (ring level
++       as the producer arrives, before this call's potential write). When the
++       title main thread wedges (e.g. inside the bkMoon truecolor decode --
++       title run_tick has no audio pump) PlayDevice stops being called and the
++       snd: lines stop: the last line's avail / consec_silent / cb_fills
++       trajectory, read alongside nxengine 0192's "starve-diag/eng:" backdrop
++       bracket on one log, names the wedge (ring full at the last line ->
++       compute wedge, pre-decode candidate; avail draining toward 0 /
++       consec_silent climbing -> ring starvation, pump candidate). cb_fills =
++       monotonic PlayDevice-call (producer-liveness) count. STARVE_DIAG gates
++       BOTH the SDL "snd:" layer and the engine "eng:" layer via one env.
++       Read-only w.r.t. audio output; default OFF; strict-1. Timestamp =
++       SDL_GetTicks() ms (shared clock with the engine breadcrumbs). Documented
++       in docs/internal/BOOT.md. Workspace-local; never upstreamed. */
++    {
++        static int    s_sd_enabled = -1;    /* -1 unread; 0/1 cached strict-1 */
++        static Uint32 s_sd_calls   = 0;     /* monotonic PlayDevice-call count (cb_fills) */
++        static Uint32 s_sd_cadence = 0;     /* 0..99 heartbeat cadence */
++        static bool   s_sd_low     = false; /* edge: ring was below one chunk last call */
++        if (s_sd_enabled < 0) {
++            const char *sd = SDL_GetHint("SDL_HINT_DOS_STARVE_DIAG");
++            s_sd_enabled = (sd && sd[0] == '1' && sd[1] == '\0') ? 1 : 0;
++            if (s_sd_enabled) {
++                dos_port_dbg_log("audio: SDL/0082 STARVE_DIAG=1 -- Bug-5 ring/"
++                                 "silent-IRQ starve markers ENABLED (snd: layer)");
++            }
++        }
++        s_sd_calls++;
++        if (s_sd_enabled) {
++            const int  sd_avail = isr_ring_write - isr_ring_read;
++            const bool sd_low   = (sd_avail < isr_chunk_size);
++            bool sd_emit = false;
++            if (++s_sd_cadence >= 100) { s_sd_cadence = 0; sd_emit = true; }
++            if (sd_low && !s_sd_low) { sd_emit = true; } /* underflow-onset edge */
++            s_sd_low = sd_low;
++            if (sd_emit) {
++                dos_port_dbg_log(
++                    "audio: starve-diag/snd: t=%lu avail=%d chunk=%d "
++                    "consec_silent=%lu silent_total=%lu cb_fills=%lu "
++                    "paused=%d pause_req=%d%s",
++                    (unsigned long)SDL_GetTicks(),
++                    sd_avail, isr_chunk_size,
++                    (unsigned long)isr_consecutive_silent_irqs,
++                    (unsigned long)dos_port_audio_silent_irq_count,
++                    (unsigned long)s_sd_calls,
++                    (int)isr_dsp_paused, (int)g_dos_audio_pause_request,
++                    sd_low ? " LOW" : "");
++            }
++        }
++    }
++
+     /* DOSKUTSU patch (Phase 11 patch 0073): Bug 6 rate-meas. The decisive
+        measurement -- derive the TRUE SB16 IRQ frequency from the EXISTING
+        per-IRQ counter (dos_port_audio_irq_count, ++ once per IRQ at the
+-- 
+2.47.3
+
