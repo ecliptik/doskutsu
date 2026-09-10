@@ -7,7 +7,7 @@ The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's o
 DOSKUTSU exists for preservation and the engineering challenge of running Cave Story on a 1990s MS-DOS PC.
 
 <p align="center">
-<a href="#quickstart">Quickstart</a> | <a href="#status">Status</a> | <a href="#download">Download</a> | <a href="#requirements">Requirements</a> | <a href="#usage">Usage</a> | <a href="#building">Building</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
+<a href="#quickstart">Quickstart</a> | <a href="#status">Status</a> | <a href="#requirements">Requirements</a> | <a href="#download">Download</a> | <a href="#usage">Usage</a> | <a href="#building">Building</a> | <a href="#how-this-project-is-developed">How It's Developed</a> | <a href="#components-and-license">Components and License</a>
 </p>
 
 ### Screenshots
@@ -55,7 +55,7 @@ See [Download](#download), [Game Assets](#game-assets), [Building](#building), [
 - Up to ~33fps (depending on CPU and bus bandwidth)
 - TAS support (see [docs/TAS.md](./docs/TAS.md))
 
-Frame rate depends on the CPU, the video card, and which music backend is used. The figures below are real-hardware measurements, replaying an identical 102-second recording in every configuration:
+Frame rate depends on CPU, video card, and audio backend. Figures below are real-hardware measurements from an identical 102-second replay:
 
 | CPU | Frame rate | Best configuration |
 |---|---|---|
@@ -64,71 +64,15 @@ Frame rate depends on the CPU, the video card, and which music backend is used. 
 | 486DX2-66 | ~25 fps | AdLib + S3 ViRGE |
 | 486DX2-50 | ~19 fps | AdLib + S3 ViRGE, choppy |
 
-AdLib is the pick on every CPU measured -- it renders 1.5-2 fps faster than OPL3 FM and cuts loading time sharply as well. An S3 ViRGE is worth ~1 fps over a Cirrus CL-GD5430 on any CPU, and Organya-HQ (22050 Hz stereo) costs about a quarter of the frame rate on a Pentium and is not viable below one.
+AdLib is fastest on every CPU tested -- 1.5-2 fps over OPL3 FM, with much shorter load times. An S3 ViRGE gains ~1 fps over a Cirrus CL-GD5430. Organya-HQ (22050 Hz stereo) costs about a quarter of the frame rate on a Pentium and isn't viable below one.
 
-Above roughly a 486DX4-100, a faster CPU stops improving the frame rate -- the render loop is limited by something other than clock speed.
+Above roughly a 486DX4-100, a faster CPU stops improving frame rate -- the render loop is limited by something other than clock speed.
 
-### Performance targets
+[docs/BENCHMARKS.md](./docs/BENCHMARKS.md) is the full report: 157 cells across two measurement rounds, four CPUs, three video cards, and three sound cards, with charts, method, and raw logs. [docs/FPS-MATRIX.md](./docs/FPS-MATRIX.md) keeps the older per-wave history.
 
-Targets are measured with **OPL3 FM music on an S3 ViRGE**. That is the configuration most machines will actually run: a Sound Blaster supplies OPL3, while a WaveBlaster daughterboard is uncommon. The figure is per-loop frame rate -- frames per second of game time, the same metric the table above and `docs/BENCHMARKS.md` report -- so targets and published numbers compare directly.
-
-| Machine | Target | Measured | Status |
-|---|---|---|---|
-| Pentium OverDrive 83 | 30 fps | 30.2 fps | met, no margin |
-| 486DX2-66 | 25 fps | 22.2 fps | 2.8 fps short |
-
-The reference machine is the Pentium OverDrive 83 and the low end that should still play properly is the 486DX2-66.
-
-50 fps is the moonshot -- it is Cave Story's `GAME_FPS=50` design rate, and hitting it would mean the port runs at the speed the game was written for. It is not the bar for shipping, and on 486-class silicon it is not currently reachable: the frame is dominated by tilemap compositing, which is bounded by system memory bandwidth measured at ~17 MB/s flat beyond an 8 KB L1 on a DX2-66.
-
-Optimization work is measured on the Pentium OverDrive 83, because that is the reference machine. This matters more than it sounds: the OverDrive and the Am5x86-133 both sit at the same frame rate, so the reference machine is already limited by something other than clock speed, and a change that helps a slower CPU may do nothing at all on it.
-
-[docs/BENCHMARKS.md](./docs/BENCHMARKS.md) is the full report: 157 cells across two measurement rounds and four CPUs, three video cards and three sound cards, with charts, method, and the raw logs. [docs/FPS-MATRIX.md](./docs/FPS-MATRIX.md) keeps the older per-wave history.
-
-Cave Story runs at 50 fps; the reference PC's hardware limits fully-detailed rendering to about 33 fps. It still plays at the correct 50 Hz speed through [Fixed-Timestep mode](#fixed-timestep-mode), which advances game logic on a fixed 50 Hz clock independent of the render rate.
+Cave Story runs at 50 fps natively; on this hardware it renders at up to ~33 fps, but [Fixed-Timestep mode](#fixed-timestep-mode) keeps game logic advancing at the correct 50 Hz regardless of render rate.
 
 See the [changelog](CHANGELOG.md) for development and progress details.
-
-### Fixed-Timestep mode
-
-Cave Story's engine advances game logic once per rendered frame, so at 30 fps the game also runs at about 60% speed - sluggish. Fixed-Timestep mode decouples the two: logic advances on a fixed 50 Hz clock regardless of frame rate, so the game plays at its intended speed even though the screen draws fewer frames. The motion is less smooth; the speed is correct.
-
-It is on by default; set `SDL_HINT_DOS_FIXED_TIMESTEP=0` to use the legacy frame-coupled loop.
-
-### Audio backends
-
-The soundtrack plays with either Cave Story's original Organya synthesizer or with MIDI. Organya is more faithful to the original, but has a significant performance impact; MIDI plays through a hardware synthesizer, off the CPU, and is the recommended default on DOS. Supported audio hardware:
-
-- **Sound Blaster OPL3 FM** -- the default; works on any Sound Blaster; sound effects on the SB DAC
-- **WaveBlaster / DreamBlaster** -- wavetable daughterboard on the SB16 WaveBlaster header
-- **AdLib / OPL2** -- music on a card with no Sound Blaster (music only; no sound effects)
-- **Gravis UltraSound** (or PicoGUS) -- GF1 wavetable music *and* sound effects; no Sound Blaster needed
-- **Organya** -- Pixel's original tracker synth, in software (higher CPU cost)
-
-The MIDI backends play a choice of music sets: an `org2mid` conversion of the original score (the default), the WiiWare arrangement, or a custom drop-in set. Pick everything in `SETUP.EXE`; [docs/SOUND.md](./docs/SOUND.md) is the sound-configuration guide and [docs/CONFIG.md](./docs/CONFIG.md) documents every setting and environment variable.
-
----
-
-## Download
-
-See **[Releases](https://github.com/ecliptik/doskutsu/releases)** for pre-built binaries or build from source (see [Building](#building)).
-
-<!-- LATEST-RELEASE:START -->
-**Latest release:** [`doskutsu-1.7.0.zip`](https://github.com/ecliptik/doskutsu/releases/download/v1.7.0/doskutsu-1.7.0.zip) (v1.7.0)
-<!-- LATEST-RELEASE:END -->
-
-Each bundle is a single `doskutsu-<version>.zip` containing `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, the license texts, and NXEngine-evo's GPLv3 engine support data. The engine is the program; the game data is user-supplied, exactly the way a Doom source port ships without an IWAD.
-
-### Game Assets
-
-**DOSKUTSU does not include any Cave Story game data.** The binary built from this repository plays nothing on its own. Users supply their own copy of the 2004 EN freeware assets, extracted from the canonical `Doukutsu.exe`.
-
-[docs/ASSETS.md](./docs/ASSETS.md) is the canonical, complete asset procedure - follow it start to finish; it covers fetching the freeware bundle and extracting the full data tree (maps, sprites, music, SFX) plus the expected directory layout. The two scripts below automate only the Pixtone-SFX slice of that workflow; running them alone does not produce a playable `DATA\` tree:
-
-- `scripts/fetch-cs-pxt.py` is the one-shot orchestrator. It fetches the 2004 EN freeware bundle from [cavestory.one](https://www.cavestory.one/downloads/cavestoryen.zip) (SHA-256-pinned), extracts `Doukutsu.exe` to a tempdir, runs the Pixtone parameter extractor, and cleans up. The freeware archive does not persist on the user's machine after the script completes.
-- `scripts/extract-pxt.py` is the canonical extractor, transcribed from NXEngine-evo's own `extract/extractpxt.cpp`. It operates on file offsets in `Doukutsu.exe` and emits ASCII Pixtone parameter files.
-
-The same posture applies as the broader Cave Story port community ([NXEngine-evo](https://github.com/nxengine/nxengine-evo), [doukutsu-rs](https://github.com/doukutsu-rs/doukutsu-rs)): the engine code is open source; the game data is user-supplied freeware.
 
 ---
 
@@ -154,6 +98,49 @@ The same posture applies as the broader Cave Story port community ([NXEngine-evo
 
 ---
 
+## Fixed-Timestep mode
+
+Cave Story's engine ties game logic to the render rate, so at 30 fps it also runs at ~60% speed. Fixed-Timestep mode decouples the two: logic advances on a fixed 50 Hz clock regardless of frame rate, so the game plays at its intended speed even with fewer frames drawn. Motion is less smooth; speed is correct.
+
+On by default; set `SDL_HINT_DOS_FIXED_TIMESTEP=0` for the legacy frame-coupled loop.
+
+## Audio backends
+
+Music plays through either Cave Story's original Organya synthesizer or MIDI. Organya is more faithful but costs significant CPU; MIDI runs on a hardware synthesizer, off the CPU, and is the recommended default. Supported hardware:
+
+- **Sound Blaster OPL3 FM** -- the default; works on any Sound Blaster; sound effects on the SB DAC
+- **WaveBlaster / DreamBlaster** -- wavetable daughterboard on the SB16 WaveBlaster header
+- **AdLib / OPL2** -- music on a card with no Sound Blaster (music only; no sound effects)
+- **Gravis UltraSound** (or PicoGUS) -- GF1 wavetable music *and* sound effects; no Sound Blaster needed
+- **Organya** -- Pixel's original tracker synth, in software (higher CPU cost)
+
+MIDI backends offer a choice of music sets: an `org2mid` conversion of the original score (default), the WiiWare arrangement, or a custom drop-in set. Configure everything in `SETUP.EXE`; see [docs/SOUND.md](./docs/SOUND.md) for sound configuration and [docs/CONFIG.md](./docs/CONFIG.md) for every setting and environment variable.
+
+---
+
+## Download
+
+See **[Releases](https://github.com/ecliptik/doskutsu/releases)** for pre-built binaries, or build from source (see [Building](#building)).
+
+<!-- LATEST-RELEASE:START -->
+**Latest release:** [`doskutsu-1.7.0.zip`](https://github.com/ecliptik/doskutsu/releases/download/v1.7.0/doskutsu-1.7.0.zip) (v1.7.0)
+<!-- LATEST-RELEASE:END -->
+
+Each bundle (`doskutsu-<version>.zip`) contains `DOSKUTSU.EXE`, `SETUP.EXE`, the `CWSDPMI.EXE` DPMI host, license texts, and NXEngine-evo's GPLv3 engine data. The engine is the program; game data is user-supplied, like a Doom source port shipping without an IWAD.
+
+### Game Assets
+
+**DOSKUTSU ships no Cave Story game data** and plays nothing on its own. Users supply their own copy of the 2004 EN freeware assets, extracted from the canonical `Doukutsu.exe`.
+
+[docs/ASSETS.md](./docs/ASSETS.md) is the canonical, complete procedure -- follow it start to finish; it covers fetching the freeware bundle, extracting the full data tree (maps, sprites, music, SFX), and the expected directory layout. The two scripts below automate only the Pixtone-SFX slice of that workflow; running them alone does not produce a playable `DATA\` tree:
+
+- `scripts/fetch-cs-pxt.py` is the one-shot orchestrator: fetches the 2004 EN freeware bundle from [cavestory.one](https://www.cavestory.one/downloads/cavestoryen.zip) (SHA-256-pinned), extracts `Doukutsu.exe` to a tempdir, runs the Pixtone extractor, and cleans up. The archive doesn't persist after it runs.
+- `scripts/extract-pxt.py` is the canonical extractor, transcribed from NXEngine-evo's `extract/extractpxt.cpp`. It reads file offsets in `Doukutsu.exe` and emits ASCII Pixtone parameter files.
+
+Same posture as the broader Cave Story port community ([NXEngine-evo](https://github.com/nxengine/nxengine-evo), [doukutsu-rs](https://github.com/doukutsu-rs/doukutsu-rs)): engine code is open source, game data is user-supplied freeware.
+
+---
+
 ## Usage
 
 `DOSKUTSU.EXE`, the CWSDPMI host, and the Cave Story data all live together in one directory:
@@ -170,7 +157,7 @@ C:\DOSKUTSU\
 
 See [Quickstart](#quickstart) to get binaries/assets and set up the game directory.
 
-The DOS machine needs a standard DJGPP-compatible boot environment: `HIMEM.SYS` loaded, `NOEMS`, a SB16-compatible `BLASTER` variable set, and a VESA 1.2+ video BIOS (a software VESA driver works as a fallback).
+The DOS machine needs a standard DJGPP boot environment: `HIMEM.SYS` loaded, `NOEMS`, a SB16-compatible `BLASTER` variable, and a VESA 1.2+ video BIOS (a software VESA driver works as a fallback).
 
 Run `SETUP.EXE` once to configure sound ([Configuration](#configuration)), then
 run the game:
@@ -197,20 +184,20 @@ Use `SETUP.EXE` to map keys and configure joystick support.
 
 ### Configuration
 
-Use `SETUP.EXE` to configure DOSKUTSU - sound, input and other settings:
+Use `SETUP.EXE` to configure DOSKUTSU -- sound, input and other settings:
 
 ```
 C:\DOSKUTSU> SETUP
 ```
 
-SETUP detects the hardware, recommends settings, and configures sound,
-performance, and input. It can play a real sound effect and the Title theme to
+SETUP detects hardware, recommends settings, and configures sound,
+performance, and input. It can play a sound effect and the Title theme to
 confirm audio works, then writes `DOSKUTSU.CFG`, which the game reads
 at startup. See [docs/SETUP.md](./docs/SETUP.md) for the full reference and
-[docs/SOUND.md](./docs/SOUND.md) for the sound-configuration guide.
+[docs/SOUND.md](./docs/SOUND.md) for sound configuration.
 
-Alternately, skip SETUP and use DOS environment variables (`SET` in
-`AUTOEXEC.BAT` or at the prompt). Precedence is **environment variable >
+Or skip SETUP and use DOS environment variables (`SET` in
+`AUTOEXEC.BAT` or at the prompt). Precedence: **environment variable >
 `DOSKUTSU.CFG` > built-in default**. See [docs/CONFIG.md](./docs/CONFIG.md) for
 every option.
 
@@ -224,7 +211,7 @@ Building needs a Linux (or WSL) host with:
 - `cmake`, `git`, `make`, `gcc`, `python3`, `unzip`, `zip`
 - `dosbox-x` -- runs the automated build-verification smoke tests
 
-[docs/BUILDING.md](./docs/BUILDING.md) has the details: package install commands for common distros, the DJGPP install, each build stage, DOSBox-X testing, and common errors.
+[docs/BUILDING.md](./docs/BUILDING.md) covers distro install commands, the DJGPP install, each build stage, DOSBox-X testing, and common errors.
 
 Once DJGPP is installed -- the one-command path:
 
@@ -246,8 +233,7 @@ make setup                      # build SETUP.EXE (the configurator)
 make setup-test                 # host-side SETUP unit tests
 ```
 
-`make dist` bundles the game, `CWSDPMI.EXE`, and the live-audio `SETUP.EXE`
-(built with its audio backend linked in) into a ready-to-deploy archive.
+`make dist` bundles the game, `CWSDPMI.EXE`, and live-audio `SETUP.EXE` into a ready-to-deploy archive.
 
 ---
 
@@ -255,15 +241,15 @@ make setup-test                 # host-side SETUP unit tests
 
 DOSKUTSU is developed agentically with [Claude Code](https://claude.com/code).
 
-- **Claude Code authors the patches** across the SDL3 DOS backend, the NXEngine-evo engine, the build system, scripts, and docs. They land as `patches/<vendor>/NNNN-*.patch` files in this repository.
+- **Claude Code authors the patches** across the SDL3 DOS backend, NXEngine-evo, the build system, scripts, and docs, landing as `patches/<vendor>/NNNN-*.patch` files in this repository.
 - **Human developers drive testing and iteration**: TAS replays, real-hardware playthroughs, bug reports, and deciding what to fix next.
-- **Workspace-local patches only.** This project does not contribute patches upstream to [libsdl-org/SDL](https://github.com/libsdl-org/SDL), [libsdl-org/SDL_mixer](https://github.com/libsdl-org/SDL_mixer), [libsdl-org/SDL_image](https://github.com/libsdl-org/SDL_image), or [nxengine/nxengine-evo](https://github.com/nxengine/nxengine-evo).
+- **Workspace-local patches only.** Nothing is contributed upstream to [libsdl-org/SDL](https://github.com/libsdl-org/SDL), [libsdl-org/SDL_mixer](https://github.com/libsdl-org/SDL_mixer), [libsdl-org/SDL_image](https://github.com/libsdl-org/SDL_image), or [nxengine/nxengine-evo](https://github.com/nxengine/nxengine-evo).
 
 ---
 
 ## Components and License
 
-DOSKUTSU's own source - the build system, scripts, and documentation - is **MIT-licensed** ([LICENSE](./LICENSE)). The shipped `DOSKUTSU.EXE` is **GPLv3**: it statically links NXEngine-evo, which is GPLv3, and that license governs the combined binary. The DOS-port patches under `patches/` are derivative works of their upstreams and carry those upstreams' licenses: GPLv3 for the NXEngine-evo patches, zlib for the SDL3 patches. Redistributed bundles carry the GPLv3 license text and a pointer back to this repository.
+DOSKUTSU's own source -- the build system, scripts, and documentation -- is **MIT-licensed** ([LICENSE](./LICENSE)). The shipped `DOSKUTSU.EXE` is **GPLv3**: it statically links NXEngine-evo (GPLv3), which governs the combined binary. Patches under `patches/` are derivative works of their upstreams and carry those licenses: GPLv3 for the NXEngine-evo patches, zlib for the SDL3 patches. Redistributed bundles include the GPLv3 license text and a pointer back to this repository.
 
 Each component below is listed with its purpose, license, and whether it links into `DOSKUTSU.EXE`:
 
