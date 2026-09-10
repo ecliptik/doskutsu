@@ -11,14 +11,16 @@
 # See PLAN.md for the phased rationale behind each stage; see docs/BUILDING.md
 # for prerequisites and troubleshooting.
 
-# --- Shared SDL3-DOS build stages (via .sdl-dos-ports submodule) --------------
+# --- Shared SDL3-DOS build stages (via .sdl-dos-ports subtree) ----------------
 #
 # The DJGPP toolchain wiring (DJGPP_ROOT/BIN/TBIN, CC/CXX/STUBEDIT, PATH
 # export, TOOLCHAIN_FILE), BUILD_DIR/SYSROOT, the SDL vendor paths,
 # NOSIMD_FLAGS, CMAKE_COMMON, NPROC, the djgpp-check /
 # sources / patches / verify-patches-applied targets, and the SDL3 /
 # SDL3_mixer / SDL3_image cross-build stages all live in the shared fragment
-# now consumed via the submodule (migration step 4 -- single source of truth).
+# now consumed via the subtree (migration step 4 -- single source of truth;
+# converted from a git submodule to a squashed subtree 2026-09-10 so a plain
+# clone is self-contained -- see CLAUDE.md's "Vendoring + patches" section).
 # PORT_NAME is set before the include so the SDL_REVISION string embedded in
 # libSDL3.a reads "doskutsu". Set DJGPP_PREFIX=/path to use a system DJGPP
 # install instead of the tools/djgpp symlink (the fragment honours it).
