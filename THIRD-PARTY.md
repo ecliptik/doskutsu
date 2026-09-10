@@ -16,7 +16,7 @@ Complete attribution and license matrix for everything DOSKUTSU touches, vendors
 | stb_vorbis | bundled in SDL_mixer | **public domain / MIT** | Yes (via SDL_mixer) | OGG Vorbis decoder |
 | stb_image | bundled in SDL_image | **public domain / MIT** | Yes (via SDL_image) | PNG decoder |
 | [DMXOPL](https://github.com/sneakernets/DMXOPL) | `master` (GENMIDI.op2) | **MIT** (repo LICENSE; DoomWiki lists CC BY-SA 4.0 -- both GPLv3-compatible) | Yes (`data/opl3bank.dat`) | OPL3 General MIDI instrument bank for the `opl3` music backend |
-| [DJGPP libc](https://www.delorie.com/djgpp/) | 2.05+ (via GCC 12.2.0) | **GPL + runtime-library exception** | Yes (statically linked) | C runtime on DOS |
+| [DJGPP libc](https://www.delorie.com/djgpp/) | 2.05+ (via GCC 12.2.0) | **free to use unmodified** ([FAQ 19.1](https://www.delorie.com/djgpp/v2faq/faq19_1.html)) + **GCC Runtime Library Exception** for linked `libgcc` code | Yes (statically linked) | C runtime on DOS |
 | [CWSDPMI](https://sandmann.dotster.com/cwsdpmi/) | r7 | **freeware, redistribution permitted** | Yes (separate .exe, not linked) | DPMI host |
 | [Cave Story / Doukutsu Monogatari](https://www.cavestory.org/) | 2004 freeware EN | **freeware per Pixel's 2004 terms** | **No** -- user-extracted | Game content (maps, sprites, music, text) |
 | [DOSBox-X](https://dosbox-x.com/) | system package | GPLv2 | No (dev-only) | Pre-hardware testing emulator |
@@ -32,7 +32,7 @@ Complete attribution and license matrix for everything DOSKUTSU touches, vendors
 
 - **zlib** (SDL3, sdl2-compat, SDL_mixer, SDL_image) is GPLv3-compatible (FSF-listed as compatible).
 - **stb_* public domain / MIT** are GPLv3-compatible.
-- **DJGPP libc's runtime-library exception** explicitly permits distributing statically-linked binaries under terms of the program's own license -- exactly how libstdc++'s exception works. Statically linking DJGPP libc into a GPLv3 binary is fine; the libc does not re-impose its own GPL on downstream.
+- **DJGPP libc** carries no restriction on programs compiled with it, per DJGPP's own FAQ ([19.1](https://www.delorie.com/djgpp/v2faq/faq19_1.html)) -- restrictions only attach if you modify the library's own sources, which this port does not; any `libgcc` support code GCC itself pulls in is separately covered by the correctly-named [GCC Runtime Library Exception](https://www.gnu.org/licenses/gcc-exception-3.1.html), written for exactly this "distribute a compiled binary" case. Statically linking DJGPP libc into a GPLv3 binary is fine either way; neither re-imposes its own terms on downstream.
 
 All GPLv3-compatible. No conflicts.
 
@@ -140,10 +140,10 @@ Pixel released the 2004 `Doukutsu.exe` as freeware with redistribution permitted
 
 ### DJGPP libc
 
-- **License:** GPL with the same runtime-library exception used by libstdc++ ([details](https://www.delorie.com/djgpp/doc/libc/)). The exception explicitly permits distributing statically-linked binaries under whatever license you want, without imposing GPL on downstream.
+- **License:** free to use unmodified ([FAQ 19.1](https://www.delorie.com/djgpp/v2faq/faq19_1.html) -- restrictions only attach if you modify the library's own sources); linked `libgcc` support code is separately covered by the [GCC Runtime Library Exception](https://www.gnu.org/licenses/gcc-exception-3.1.html), which explicitly permits distributing statically-linked binaries under whatever license you want, without imposing GPL on downstream.
 - **Source:** https://www.delorie.com/djgpp/
 - **Role:** C runtime for DJGPP-compiled binaries. Statically linked into everything.
-- **Redistribution:** covered by the runtime-library exception; no specific action needed in dist zip beyond attribution here
+- **Redistribution:** covered by the above; no specific action needed in dist zip beyond attribution here
 
 ### CWSDPMI
 
