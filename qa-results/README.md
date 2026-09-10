@@ -75,7 +75,7 @@ because they were derived by hand instead.
 
 | What | Why |
 |---|---|
-| `2026-08-11-mach64-corruption` | Lane F aborted. The ATI Mach64's VBE offers no mode below 512x384, so the game drew a 320x240 screen into a 512x384 surface. No usable frame rate; the photographs and the diagnosis are kept. |
+| `2026-08-11-mach64-corruption` | Lane F aborted. The ATI Mach64's VBE offers no mode below 512x384, so the game drew a 320x240 screen into a 512x384 surface. No usable frame rate; the diagnosis is kept, the source photographs were removed to save space once the bug closed (patch 0320). |
 | ~~`5112` and `6112` (Organya-HQ)~~ | **EXCLUSION REVERSED 2026-08-13.** Round 2 re-ran this cell twice per CPU and both figures reproduce within noise (`5112` 14.08 against 14.13/14.14; `6112` 13.56 against 13.29/13.26). The measurements were never wrong. What misled was the metric: on this cell the HQ cost lands in load-stall overhead rather than loop rate, and does so more as the CPU slows -- so per-loop comparisons across CPUs compare different things. Both figures are restored, with that caveat. |
 | `2026-08-10-POD83-picogus-v170` | Same binary, but superseded by the `-sfx` round which is a superset (13 cells against 10). Kept because it was the first fully clean round. |
 

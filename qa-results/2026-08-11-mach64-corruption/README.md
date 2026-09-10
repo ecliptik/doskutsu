@@ -92,5 +92,8 @@ retry). If glyph corruption survives that, there is a third bug.
 
 ## Files
 
-`IMG_4415` early boot, sparse mis-placed sprites - `IMG_4417` title screen -
-`IMG_4418` inventory - `IMG_4420` Mimiga Village.
+The five source photographs (`IMG_4415` early boot, sparse mis-placed sprites;
+`IMG_4416`; `IMG_4417` title screen; `IMG_4418` inventory; `IMG_4420` Mimiga
+Village) were removed from the repository to save space once this
+investigation closed (fix: patch 0320). Every finding they produced is
+recorded in prose above.

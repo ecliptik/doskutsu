@@ -9,7 +9,9 @@ are double-scanned modes.** No driver can synthesise them.
 
 ## The evidence, three independent ways
 
-**1. SciTech UniVBE 6.70 says so outright** (`univbe-doublescan-warning.jpeg`):
+**1. SciTech UniVBE 6.70 says so outright** (`univbe-doublescan-warning.jpeg`,
+removed from the repository to save space once this closed -- the text below
+is the full content of the photo):
 
     Graphics Chip: ATI Mach64 CT PCI with 2 MB
     Note that the ATI Mach64-CT and Mach64-ET based boards do not support
