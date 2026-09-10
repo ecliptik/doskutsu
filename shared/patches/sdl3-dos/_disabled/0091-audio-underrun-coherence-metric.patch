@@ -1,0 +1,138 @@
+From b342b9a36f1c0a52776f6423d0530046d2fd113c Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 3 Jun 2026 08:39:42 -0700
+Subject: [PATCH] dos: patch 0091 -- [audio-underrun] coherence metric (v1.0.8
+ pump iter)
+
+The operator's load-bearing complaint about organya on the 486 is "not
+coherent" (clicks/pops + slow tempo) -- both are the same root: SB16 ring
+underruns. This adds the objective metric that turns that subjective report
+into a number for the head-to-head pump iter, per flush-instr-2's contract
+(docs/internal/V108-PUMP-ITER-CONTRACT.md).
+
+Emits ONE buffered line at DOSSOUNDBLASTER_CloseDevice (teardown, non-IRQ
+context -- a single dos_port_dbg_log fopen/fwrite/fsync, I/O-immune during
+the run; the wave-38 -14fps per-line-fsync lesson):
+  [audio-underrun] cell=<tag> total_irqs=N total_silent=S max_run=M silent_pct=P.PP
+
+total_irqs / total_silent reuse the existing exported counters
+(dos_port_audio_irq_count / dos_port_audio_silent_irq_count). The only new
+state is isr_max_silent_run -- the high-water of the consecutive-silent-IRQ
+run, updated with one compare + conditional store in the IRQ underrun branch
+(IRQ-safe single-bus-cycle ops; DPMI-locked alongside the other isr_* state).
+silent_pct is rendered P.PP via integer basis-point math
+(total_silent*10000/total_irqs) -- no float in the DOS audio TU.
+
+GATE: the emit no-ops unless DOS_PORT_LOG_TAG is set -- the metric's natural
+ship-suppressor (flush-instr-2's call). The iter cells set DOS_PORT_LOG_TAG
+for log routing anyway, so the metric appears in EVERY cell with no separate
+opt-in flag a cell could forget; in ship (LOG_TAG unset) the emit is a no-op
+(no log leak, no teardown fsync). cell=<tag> equals the LOG_TAG value (==
+<TAG>SDL.LOG stem == realhw's per-cell discriminator). The ISR max_run
+high-water stays unconditional (~zero cost). One line per device-open.
+
+silent_pct is the objective coherence number: pre-registered ~56% at the 44%
+delivery anchor, expected to fall toward ~0 as the pump / pre-render close the
+underruns -- and it confirms A-minimal (pre-render) is coherent-by-construction
+(a non-zero would flag a real producer bug). Workspace-local.
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 62 +++++++++++++++++++++++++++++++++
+ 1 file changed, 62 insertions(+)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index e592ec3ab..2cf2c0a2f 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -697,6 +697,17 @@ static volatile int isr_irq_ack_port = 0;
+    mechanism to suppress IRQs entirely during silent gameplay. */
+ #define IDLE_PAUSE_THRESHOLD 4
+ static volatile uint32_t isr_consecutive_silent_irqs = 0;
++
++/* DOSKUTSU patch (SDL/0091): longest consecutive ring-underrun streak seen
++   this device-open lifetime. The objective coherence metric for the v1.0.8
++   pump iter: the ISR tracks the high-water of isr_consecutive_silent_irqs (a
++   long silent run == an audible gap/click; a short run == a benign one-chunk
++   warmup hole). Emitted once at CloseDevice as the [audio-underrun] line
++   alongside the existing total IRQ / total-silent counters. One compare +
++   conditional store in the IRQ underrun branch; DPMI-locked alongside the
++   other isr_* state. Never reset mid-run; the emit is the only reader.
++   See docs/internal/V108-PUMP-ITER-CONTRACT.md (flush-instr-2). */
++static volatile uint32_t isr_max_silent_run = 0;
+ static volatile bool isr_dsp_paused = false; /* set/cleared by non-IRQ service path */
+ static Uint64 s_dsp_pause_start_ns = 0;      /* set when pause issued; read at resume to compute paused_ns */
+ 
+@@ -1398,6 +1409,13 @@ static void SoundBlasterIRQHandler(void)
+            via single increment + atomic flag set; service path handles
+            the actual DSP command. */
+         isr_consecutive_silent_irqs++;
++        /* DOSKUTSU patch (SDL/0091): track the longest consecutive silent
++           run (underrun high-water) for the [audio-underrun] coherence
++           emit. One compare + conditional store; IRQ-safe (single-bus-cycle
++           ops on x86, same precedent as the increments around it). */
++        if (isr_consecutive_silent_irqs > isr_max_silent_run) {
++            isr_max_silent_run = isr_consecutive_silent_irqs;
++        }
+         /* DOSKUTSU patch (Phase 11 patch 0069): cumulative silent-IRQ
+            counter for the SfxSynth multi-source probe. Single 32-bit
+            volatile increment alongside the existing consecutive-depth
+@@ -2546,6 +2564,7 @@ static bool DOSSOUNDBLASTER_OpenDevice(SDL_AudioDevice *device)
+        counters in SDL_dos_audio_synth.c (patch 0037) are also touched
+        from IRQ context and must be locked. */
+     DOS_LockVariable(isr_consecutive_silent_irqs);
++    DOS_LockVariable(isr_max_silent_run); /* SDL/0091: underrun high-water */
+     DOS_LockVariable(isr_dsp_paused);
+     DOS_LockVariable(g_dos_audio_idle_pause_enabled);
+     DOS_LockVariable(g_dos_audio_pause_request);
+@@ -3619,6 +3638,49 @@ static bool DOSSOUNDBLASTER_PlayDevice(SDL_AudioDevice *device, const Uint8 *buf
+ 
+ static void DOSSOUNDBLASTER_CloseDevice(SDL_AudioDevice *device)
+ {
++    /* DOSKUTSU patch (SDL/0091): objective coherence metric for the v1.0.8
++       pump iter (flush-instr-2 contract, docs/internal/V108-PUMP-ITER-CONTRACT.md).
++       Emit ONE buffered [audio-underrun] line at device teardown (non-IRQ
++       context here, so the single dos_port_dbg_log fopen/fwrite/fsync is safe +
++       I/O-immune during the run -- no per-IRQ I/O; the wave-38 -14fps per-line-
++       fsync lesson). silent_pct = total_silent/total_irqs; a high pct (or a long
++       max_run) IS the operator's "not coherent" (underruns -> clicks/pops + slow
++       tempo, one root). Rendered as P.PP via integer basis-point math
++       (total_silent*10000/total_irqs, multiply-before-divide, Uint64 intermediate)
++       -- no float in the DOS audio TU (DJGPP %f hygiene). The reader also has the
++       raw total_silent/total_irqs in the line for an exact pct.
++
++       GATE: the EMIT no-ops unless DOS_PORT_LOG_TAG is set. This is the metric's
++       natural ship-suppressor (flush-instr-2's call): the iter cells set
++       DOS_PORT_LOG_TAG for log routing anyway, so the metric appears in EVERY
++       cell WITHOUT a separate opt-in flag a cell could forget -- yet in ship
++       (LOG_TAG unset) the emit is a no-op, so no [audio-underrun] line leaks into
++       a shipped binary's logs and there is no teardown fsync in ship. The cell=
++       field equals the LOG_TAG value (== the <TAG>SDL.LOG stem == realhw's
++       per-cell stale-log discriminator), so realhw's content-gate matches
++       directly. The ISR-side max_run high-water (isr_max_silent_run) stays
++       UNCONDITIONAL -- ~zero cost (one compare) and accumulated continuously so a
++       teardown read reports the full run. CloseDevice runs once per device-open,
++       so this is one line per run. */
++    {
++        const char *_un_tag = SDL_getenv("DOS_PORT_LOG_TAG");
++        if (_un_tag && _un_tag[0]) {
++            const Uint32 _un_irqs   = dos_port_audio_irq_count;
++            const Uint32 _un_silent = dos_port_audio_silent_irq_count;
++            const Uint32 _un_maxrun = isr_max_silent_run;
++            const Uint32 _un_bp = (_un_irqs > 0)
++                ? (Uint32)(((Uint64)_un_silent * 10000ULL) / _un_irqs) : 0;
++            dos_port_dbg_log("[audio-underrun] cell=%s total_irqs=%lu total_silent=%lu "
++                             "max_run=%lu silent_pct=%lu.%02lu",
++                             _un_tag,
++                             (unsigned long)_un_irqs,
++                             (unsigned long)_un_silent,
++                             (unsigned long)_un_maxrun,
++                             (unsigned long)(_un_bp / 100),
++                             (unsigned long)(_un_bp % 100));
++        }
++    }
++
+     struct SDL_PrivateAudioData *hidden = device->hidden;
+     if (hidden) {
+         /* DOSKUTSU patch (Phase 10 patch 0043): force-DSP-pause hard-
+-- 
+2.47.3
+

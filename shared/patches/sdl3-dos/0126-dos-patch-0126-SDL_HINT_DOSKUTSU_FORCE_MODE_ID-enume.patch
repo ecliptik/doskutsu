@@ -1,0 +1,211 @@
+From 3dd32b6d810541c744c9f18b06d39bedab50a847 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Tue, 25 Aug 2026 19:09:47 -0700
+Subject: [PATCH] dos: patch 0126 -- SDL_HINT_DOS_FORCE_MODE_ID
+ enumeration filter
+
+Why DOS needs this: SDL_GetClosestFullscreenDisplayMode (SDL_video.c)
+tie-breaks on the CLOSEST ASPECT RATIO among modes at least as large as
+the request. For the engine's 320x240 request (aspect 1.3333) that
+actively EXCLUDES 640x400 (id=0x0100, aspect 1.6) in favour of 640x480
+(id=0x0101, aspect 1.3333, exact match) on the ATI Mach64 card ROM, and
+on a UniVBE mode list hands the pick to 512x384 (id=0x01F3) over 640x480.
+No existing hint reaches the FIRST pick: SDL_DOS_MAX_BPP filters on depth,
+and SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE only suppresses LATER
+mode-sets. The Mach64-to-30fps plan needs both 0x0101 (Phase 1: isolate
+the LFB at a fixed 640x480 under UniVBE) and 0x0100 (Phase 2: 640x400 to
+buy back scanout bandwidth), and neither is reachable today.
+
+Shape: read SDL_HINT_DOS_FORCE_MODE_ID once during enumeration in
+DOSVESA_GetDisplayModes and drop every enumerated VESA mode whose id does
+not match -- same insertion point and style as patch 0006's DOS_MAX_BPP
+depth cap, which already filters this list. Filtering the ENUMERATION
+list (not intercepting the mode-set) leaves SDL's closest-match, the pin,
+the LFB decision and the surface lifecycle entirely untouched -- the pick
+simply has one candidate, which avoids the surface/hardware geometry
+disagreement this campaign already spent two rounds on.
+
+Strict-match per the project env-var convention: unset, empty, malformed
+and a literal "0" all mean OFF. If the requested id is not enumerated by
+the BIOS the filter falls back LOUDLY (a log line) to the unfiltered list
+rather than producing an empty mode list, which would fail video init.
+VGA mode 13h stays added unconditionally (as in patch 0006), so the SDL
+mode list is never empty even in the fallback.
+
+Because it defaults OFF, every other card's enumerated mode list is
+byte-unchanged and no other cell's result moves -- but that guarantee
+holds ONLY while the default is off. It is a claim about the
+configurations that exist today; the phases in the plan exist
+specifically to add configurations that SET this hint, so anyone who
+changes the default breaks the "byte-unchanged for every other card"
+property silently.
+
+One boot banner per process at video init (DOSVESA-FORCEMODE: ...) names
+the requested id, whether it was found, and the resulting pick.
+
+Local-only patch per workspace policy; never upstreamed.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ include/SDL3/SDL_hints.h     | 39 +++++++++++++++++++
+ src/video/dos/SDL_dosmodes.c | 75 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 114 insertions(+)
+
+diff --git a/include/SDL3/SDL_hints.h b/include/SDL3/SDL_hints.h
+index a105eeb0b..268ac99a4 100644
+--- a/include/SDL3/SDL_hints.h
++++ b/include/SDL3/SDL_hints.h
+@@ -805,6 +805,45 @@ extern "C" {
+  */
+ #define SDL_HINT_DOS_MAX_BPP "SDL_DOS_MAX_BPP"
+ 
++/**
++ * A variable that forces DOS VESA mode enumeration down to a single named
++ * VBE mode id.
++ *
++ * Numeric value (decimal or "0x"-prefixed hex): when set to a mode id that
++ * the BIOS actually enumerates, DOSVESA_GetDisplayModes drops every OTHER
++ * enumerated VESA mode, leaving SDL's closest-mode matching a single
++ * candidate. This forces a specific mode past
++ * SDL_GetClosestFullscreenDisplayMode's closest-aspect-ratio tie-break,
++ * which otherwise actively excludes some modes: for a 320x240 request it
++ * prefers 640x480 (aspect 1.3333, exact match) over 640x400 (aspect 1.6),
++ * and on a UniVBE mode list hands the pick to 512x384 over 640x480. No
++ * other hint reaches the FIRST pick -- SDL_HINT_DOS_MAX_BPP filters on
++ * depth, and SDL_HINT_DOS_PIN_WINDOW_TO_NATIVE_MODE only suppresses LATER
++ * mode-sets.
++ *
++ * Filtering the ENUMERATION list (rather than intercepting the mode-set)
++ * leaves SDL's closest-match, the pin, the LFB decision and the surface
++ * lifecycle entirely untouched.
++ *
++ * Strict match: unset, empty, malformed and a literal "0" all mean OFF
++ * (this project's env-var convention). When the requested id is not
++ * enumerated by the BIOS the filter falls back LOUDLY to the unfiltered
++ * list rather than producing an empty mode list.
++ *
++ * Useful values:
++ *
++ * - unset: Enumerate all supported VESA modes. (default)
++ * - "0x0101": Force VBE mode 0x0101 (640x480x8) on the Mach64 card ROM.
++ * - "0x0100": Force VBE mode 0x0100 (640x400x8).
++ *
++ * This hint must be set before the first call to SDL_GetDisplayMode() (or
++ * any function that triggers display-mode enumeration, including
++ * SDL_CreateWindow).
++ *
++ * Added by patches/SDL/0126 (DOSKUTSU local patch, never upstreamed).
++ */
++#define SDL_HINT_DOS_FORCE_MODE_ID "SDL_HINT_DOS_FORCE_MODE_ID"
++
+ /**
+  * A variable that pins the DOS VBE mode to whatever was set first and
+  * suppresses any subsequent SDL3 internal mode-change request whose
+diff --git a/src/video/dos/SDL_dosmodes.c b/src/video/dos/SDL_dosmodes.c
+index 322232f24..5663bb441 100644
+--- a/src/video/dos/SDL_dosmodes.c
++++ b/src/video/dos/SDL_dosmodes.c
+@@ -618,6 +618,51 @@ bool DOSVESA_GetDisplayModes(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_disp
+     const char *max_bpp_str = SDL_GetHint(SDL_HINT_DOS_MAX_BPP);
+     const int max_bpp = max_bpp_str ? SDL_atoi(max_bpp_str) : 0;
+ 
++    // Patch 0126 (DOSKUTSU): SDL_HINT_DOS_FORCE_MODE_ID forces the mode
++    // pick to a single named VBE mode id by filtering the enumerated list down
++    // to that one id -- same insertion point and style as patch 0006's bpp cap
++    // just above. Why DOS needs this: SDL_GetClosestFullscreenDisplayMode
++    // (SDL_video.c) tie-breaks on the CLOSEST ASPECT RATIO among modes at least
++    // as large as the 320x240 request, which actively EXCLUDES 640x400
++    // (aspect 1.6) in favour of 640x480 (aspect 1.3333, exact match) on the
++    // Mach64 card ROM, and hands UniVBE runs to 512x384 instead of 640x480.
++    // No existing hint reaches the first pick (DOS_MAX_BPP filters on depth;
++    // PIN_WINDOW_TO_NATIVE_MODE only suppresses LATER mode-sets). Filtering the
++    // enumeration list leaves SDL's closest-match / pin / LFB-decision / surface
++    // lifecycle logic completely untouched -- the pick simply has one candidate.
++    // See docs/internal/MACH64-30FPS-PLAN.md sec.9 + docs/BOOT.md.
++    //
++    // Strict-match per this project's env-var convention: unset, empty,
++    // malformed and a literal "0" all parse to <= 0 here and mean OFF. Because
++    // it defaults OFF, every other card's enumerated mode list is byte-unchanged
++    // -- but that guarantee holds ONLY while the default is off: it is a claim
++    // about the configurations that exist today, and the phases that set this
++    // hint are exactly the configurations that break it. Anyone changing the
++    // default breaks the "byte-unchanged for every other card" property silently.
++    const char *force_mode_id_str = SDL_GetHint(SDL_HINT_DOS_FORCE_MODE_ID);
++    const long force_mode_id_parsed = force_mode_id_str ? SDL_strtol(force_mode_id_str, NULL, 0) : 0;
++    const int force_mode_id_req = (force_mode_id_parsed > 0 && force_mode_id_parsed <= 0xFFFF)
++                                      ? (int)force_mode_id_parsed
++                                      : 0;
++
++    // Confirm the requested id is actually enumerated by the BIOS. If it is
++    // not, fall back LOUDLY to the UNFILTERED list rather than filtering the
++    // VESA list to nothing -- an empty mode list would fail video init, a far
++    // worse failure than the filter simply not engaging. (VGA mode 13h is
++    // always added below regardless, so the SDL mode list is never truly empty;
++    // this fallback preserves the card's REAL modes, not merely non-emptiness.)
++    bool force_mode_present = false;
++    if (force_mode_id_req && vinfo) {
++        for (int mi = 0; mi < vinfo->num_modes; mi++) {
++            if (vinfo->mode_list[mi] == (Uint16)force_mode_id_req) {
++                force_mode_present = true;
++                break;
++            }
++        }
++    }
++    const bool force_mode_active = force_mode_id_req && force_mode_present;
++    int forced_w = 0, forced_h = 0; // geometry of the forced mode, for the boot banner
++
+     // Enumerate VESA modes if we have a VBE 1.2+ BIOS.  Older VBE versions
+     // (1.0, 1.1) or no VESA at all just skip this loop and fall through to
+     // the VGA mode 13h fallback below.
+@@ -626,11 +671,24 @@ bool DOSVESA_GetDisplayModes(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_disp
+     for (int mi = 0; mi < num_vesa_modes; mi++) {
+         const Uint16 modeid = vinfo->mode_list[mi];
+ 
++        // Patch 0126: force-mode-id filter -- drop every enumerated VESA mode
++        // whose id does not match the requested one, leaving closest-match a
++        // single candidate. Mirrors patch 0006's continue in the skip chain.
++        if (force_mode_active && modeid != (Uint16)force_mode_id_req) {
++            continue;
++        }
++
+         SDL_DisplayModeData info;
+         if (!GetVESAModeInfo(modeid, &info)) {
+             continue;
+         }
+ 
++        // Patch 0126: remember the forced mode's geometry for the boot banner.
++        if (force_mode_active && modeid == (Uint16)force_mode_id_req) {
++            forced_w = (int)info.w;
++            forced_h = (int)info.h;
++        }
++
+         // Skip 320x200x8 from VESA. We always want VGA mode 13h for this
+         // resolution (no page flip, no LFB overhead, universal compatibility).
+         if (info.bpp == 8 && info.w == 320 && info.h == 200) {
+@@ -719,6 +777,23 @@ bool DOSVESA_GetDisplayModes(SDL_VideoDevice *device, SDL_VideoDisplay *sdl_disp
+         }
+     }
+ 
++    // Patch 0126 (DOSKUTSU): force-mode-id boot banner. Emitted UNCONDITIONALLY
++    // and once per enumeration (video init, always reached before the title) so
++    // the smoke-gate BANNERS entry witnesses this code path on every run, and so
++    // a real-HW log always records which mode-id filter state was live. Names the
++    // requested id, whether it was found, and the resulting pick.
++    if (!force_mode_id_req) {
++        DOS_PORT_MODES_LOG("DOSVESA-FORCEMODE: hint unset -> filter inactive (all modes enumerated)");
++    } else if (!force_mode_present) {
++        DOS_PORT_MODES_LOG("DOSVESA-FORCEMODE: requested id=0x%04X NOT enumerated -> FALLBACK "
++                           "to unfiltered mode list (video init preserved)",
++                           (unsigned)force_mode_id_req);
++    } else {
++        DOS_PORT_MODES_LOG("DOSVESA-FORCEMODE: requested id=0x%04X FOUND -> enumeration filtered "
++                           "to this id (pick=%dx%d)",
++                           (unsigned)force_mode_id_req, forced_w, forced_h);
++    }
++
+     // Always add VGA mode 13h for 320x200x8. We skipped any VESA 320x200x8
+     // modes above so this is the only entry at that resolution.
+     {
+-- 
+2.47.3
+

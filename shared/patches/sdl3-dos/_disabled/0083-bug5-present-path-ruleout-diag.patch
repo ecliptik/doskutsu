@@ -1,0 +1,134 @@
+From 31b2bedd7d75810d2ffe38afcb579decdd7dbe97 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 30 May 2026 13:44:11 -0700
+Subject: [PATCH] dos: patch 0083 -- Bug-5 (#31) present-path rule-out
+ diagnostic
+
+The g2k fix iter refuted AppMinimized and localized the Bug-5 wedge to a
+yield-bearing loop in the title_init -> title-gameloop handoff that calls
+flip() repeatedly (cb_fills accelerates 5x past the engine freeze, organya
+plays steadily). The production present, SDL_DOSVesaDirectPresentFull, is a
+straight-line memcpy that cannot hang; WaitForVBlank (slow-path-only) is a
+yield-less spin whose stall would FREEZE the audio pump, which is incompatible
+with the observed cb_fills acceleration. So the present provably cannot be the
+wedge -- it can only complete repeatedly.
+
+These markers make that rule-out empirical: a SDL_DOSVesaDirectPresentFull
+CALL COUNTER (emit every 128 invocations during the armed window) shows the
+present firing REPEATEDLY (completing each iteration of the repeated-flip
+loop), and the WaitForVBlank enter/exit pair catches a stuck vsync in the slow
+path. The engine-side flip-counter + inner-loop exit-condition that NAME the
+stuck loop are nxengine 0194's handoff-bisection breadcrumbs; this is the SDL
+present rule-out half of the combined diagnostic binary.
+
+Armed by the engine latch g_title_diag_armed (defined + set true at title_init
+in nxengine 0194 main.cpp; MUST have extern "C" linkage engine-side so this C
+extern resolves -- same cross-link pattern as g_dos_sfx_synth_active_count) so the
+intro's ~488 presents do not log, AND gated on SDL_HINT_DOS_STARVE_DIAG=1
+(shared with patch 0082, carried for cb_fills corroboration). Markers-only;
+read-only w.r.t. the displayed frame. Default OFF. Workspace-local; never
+upstreamed.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/video/dos/SDL_dosframebuffer.c | 69 ++++++++++++++++++++++++++++++
+ 1 file changed, 69 insertions(+)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index dddb5f357..fd6845c44 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -1109,14 +1109,61 @@ static void BankedFramebufferCopyRect(const SDL_DisplayModeData *mdata,
+     }
+ }
+ 
++/* DOSKUTSU patch (SDL/0083): Bug-5 (#31) present-path RULE-OUT diagnostic. The
++   g2k fix iter refuted AppMinimized and localized the wedge to a yield-bearing
++   loop in the title_init -> title-gameloop handoff that calls flip() repeatedly
++   (cb_fills accelerates + organya plays steadily). The production present,
++   SDL_DOSVesaDirectPresentFull, is a STRAIGHT-LINE memcpy and cannot hang;
++   WaitForVBlank (slow-path-only) is a YIELD-LESS spin that would FREEZE the
++   audio pump (so a stuck one is incompatible with the observed cb_fills accel).
++   So these markers are the empirical RULE-OUT: a PresentFull CALL COUNTER
++   (emit every 128 calls during the armed window) shows the present firing
++   REPEATEDLY -- i.e. the present COMPLETES each iteration of the repeated-flip
++   loop, rather than hanging -- and the WaitForVBlank enter/exit pair catches
++   the one case the analysis would be wrong (a stuck vsync in the slow path:
++   "enter" logs with no "exit"). The engine-side flip-counter + the inner-loop
++   exit-condition (which NAMES the stuck loop + why it doesn't exit) land in the
++   nxengine bisection breadcrumbs; this is the SDL half.
++
++   Armed by the engine latch g_title_diag_armed (set at title_init,
++   so the intro's ~488 presents do NOT log -- avoids per-present perturbation),
++   AND gated on SDL_HINT_DOS_STARVE_DIAG=1 (shared with SDL/0082's snd:
++   markers, which carry along for cb_fills corroboration). dos_port_dbg_log is
++   safe here (present path = non-IRQ main thread). Markers-only, read-only
++   w.r.t. the displayed frame. Default OFF. Workspace-local; never upstreamed. */
++extern volatile bool g_title_diag_armed; /* engine-defined, set true in title_init (nxengine) */
++static int    s_pd_enabled  = -1;  /* -1 unread; 0/1 cached strict-1 STARVE_DIAG */
++static bool   s_pd_banner   = false;
++static Uint32 s_pd_pf_calls = 0;   /* PresentFull invocations during the armed window */
++static Uint32 s_pd_vbl_calls = 0;  /* WaitForVBlank invocations (slow path) */
++
++static bool _pd_active(void)
++{
++    if (s_pd_enabled < 0) {
++        const char *sd = SDL_GetHint("SDL_HINT_DOS_STARVE_DIAG");
++        s_pd_enabled = (sd && sd[0] == '1' && sd[1] == '\0') ? 1 : 0;
++    }
++    return s_pd_enabled == 1 && g_title_diag_armed;
++}
++
+ static void WaitForVBlank(void)
+ {
++    const bool _pd = _pd_active();
++    if (_pd) {
++        s_pd_vbl_calls++;
++        dos_port_dbg_log("present-diag/vbl: enter call=%lu t=%lu",
++                         (unsigned long)s_pd_vbl_calls, (unsigned long)SDL_GetTicks());
++    }
+     while (inportb(VGA_STATUS_PORT) & VGA_STATUS_VBLANK) {
+         SDL_CPUPauseInstruction();
+     }
+     while (!(inportb(VGA_STATUS_PORT) & VGA_STATUS_VBLANK)) {
+         SDL_CPUPauseInstruction();
+     }
++    if (_pd) {
++        dos_port_dbg_log("present-diag/vbl: exit  call=%lu t=%lu",
++                         (unsigned long)s_pd_vbl_calls, (unsigned long)SDL_GetTicks());
++    }
+ }
+ 
+ static void ProgramVGADAC(SDL_Palette *palette)
+@@ -2614,6 +2661,28 @@ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+     const Uint64 _instr_t_entry =
+         _instr_enabled_cached ? SDL_GetTicksNS() : 0;
+ 
++    /* DOSKUTSU patch (SDL/0083): present-path rule-out call counter. During the
++       armed window (engine sets g_title_diag_armed at title_init) +
++       STARVE_DIAG=1, count PresentFull invocations + emit every 128. A climbing
++       count during the Bug-5 wedge proves the present fires REPEATEDLY (the
++       repeated-flip loop iterating, present completing each time) -- i.e. the
++       present is NOT the hang. A frozen count means PresentFull stopped being
++       called (the loop doesn't flip via this path). See the block comment at
++       WaitForVBlank for the full rationale. */
++    if (_pd_active()) {
++        s_pd_pf_calls++;
++        if (!s_pd_banner) {
++            dos_port_dbg_log("present-diag: SDL/0083 ENABLED + ARMED "
++                             "(STARVE_DIAG=1, title-armed) -- present-path rule-out markers");
++            s_pd_banner = true;
++        }
++        if ((s_pd_pf_calls % 128) == 0) {
++            dos_port_dbg_log("present-diag/pf: calls=%lu t=%lu vbl_calls=%lu",
++                             (unsigned long)s_pd_pf_calls, (unsigned long)SDL_GetTicks(),
++                             (unsigned long)s_pd_vbl_calls);
++        }
++    }
++
+     if (!st || !st->valid || !pixels) {
+         _instr_record_dv_present_at_exit(_instr_t_entry);
+         return false;
+-- 
+2.47.3
+

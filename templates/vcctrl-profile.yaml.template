@@ -1,0 +1,82 @@
+# <NAME> -- the target-software profile for the vcctrl harness.
+#
+# Modeled on vcctrl's profiles/doskutsu.yaml. Everything in this file is a
+# fact about YOUR DOS program and the machine it runs on -- nothing here is
+# a fact about vcctrl itself, and nothing here belongs in the rig's
+# vcctrl.yaml (that file stays machine-local and is not tracked in any repo).
+#
+# See sdl-dos-ports' docs/hardware-testing.md before using this: the
+# harness/vcctrl-sweep|-cell|-collect orchestration scripts are currently
+# doskutsu-coupled and may not yet run a second project's profile
+# unattended. The `target`/`timing`/`machines` sections below are safe to
+# fill in regardless -- they document your project's facts either way. The
+# `sweeps` section only matters once you have a scripted/TAS-driven
+# unattended run to describe; leave it out until then.
+
+version: 1
+name: <name>
+
+# ------------------------------------------------------------------ target
+target:
+  # Where the program lives and is run from, on the DOS target.
+  dir: "C:\\<NAME>"
+  configs: "CFGS"
+  ftp_put: "C:\\MTCP\\PUT.BAT"
+
+  # THE BOOT-PROFILE WITNESS. Whatever env var or file your CONFIG.SYS/
+  # AUTOEXEC.BAT boot-menu profiles set differently is what proves which
+  # profile is currently loaded -- a cell must verify this before trusting
+  # its results. Keep this ONE-DIRECTIONAL: presence should prove one
+  # specific positive fact (e.g. "a sound profile is loaded, so this is
+  # NOT the network profile"), never be read backwards as proof of absence
+  # of some other profile. See vcctrl's docs/HARNESS-STANDARD.md sec. 12
+  # and docs/OPEN-FAULTS.md sec. 15 for why this matters -- a naive
+  # "prove NET by an absent BLASTER" check will happily accept a profile
+  # with no network stack at all and fail silently later.
+  profile_witness:
+    variable: <ENV_VAR_YOUR_BOOT_MENU_SETS>
+    proves: "<the one positive fact this proves>"
+    direction: one-way
+
+  # The env var names YOUR program itself consults -- do not invent names
+  # here that nothing on the target reads. Fill in only what your port
+  # actually implements (TAS replay / deterministic seed / auto-exit /
+  # log tagging / native-mode pin / screenshot ticks are doskutsu's set;
+  # yours may differ or be a subset).
+  env:
+    replay: <NAME>_TAS_REPLAY
+    seed: <NAME>_TAS_PRNG_SEED
+    auto_exit_tick: <NAME>_TAS_AUTO_EXIT_TICK
+    log_tag: <NAME>_LOG_TAG
+    pin_native_mode: <NAME>_PIN_NATIVE_MODE
+    shot_ticks: <NAME>_SHOT_TICKS
+
+timing:
+  # How long your boot menu waits before timing out and picking a default,
+  # in seconds -- this is target physics, not rig physics. The keystroke
+  # budget for hitting a menu choice in time is derived from this plus the
+  # rig's own keyboard-buffer depth (declared in vcctrl.yaml), not here.
+  menu_window_s: 14
+
+# ----------------------------------------------------------------- machines
+# Tag and display name per CPU your project targets. Match sdl-dos-ports'
+# HARDWARE.md matrix where possible so results stay comparable across ports.
+machines:
+  "1": {tag: "P", name: "Pentium OverDrive 83"}
+  "2": {tag: "A", name: "Am5x86-133"}
+  "3": {tag: "6", name: "486DX2-66"}
+  "4": {tag: "5", name: "486DX2-50"}
+
+# ------------------------------------------------------------------- sweeps
+# Optional. Only meaningful once you have a scripted/TAS-driven unattended
+# run and the harness scripts have been generalized to read it (see
+# docs/hardware-testing.md "Current gap"). Per-sweep wall-clock budgets
+# should be measured, not guessed -- state which machine/run the timeout
+# was derived from.
+#
+# sweeps:
+#   <SWEEP_NAME>:
+#     cells: <count>
+#     timeout_min: <budget, ~2x the slowest machine's measured time>
+#     measured: "<Xm Ys> on <machine>"
+#     tags: ["<cell-tag>", ...]

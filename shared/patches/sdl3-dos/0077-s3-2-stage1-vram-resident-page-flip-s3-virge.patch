@@ -1,0 +1,655 @@
+From cb35b084c24ae5f9c1d0dcf847fb619197401cfb Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Sat, 23 May 2026 10:51:08 -0700
+Subject: [PATCH] dos: patch 0077 -- S3-2 Stage 1: VRAM-resident always-VRAM
+ page-flip (S3 ViRGE/DX)
+
+Retargets the wave-50 VRAM-resident page-flip (patch 0061, Cirrus 5434) to
+the S3 ViRGE/DX per the S3-2 de-risk verdict (docs/internal/S3-2-FINAL-
+VERDICT.md = GREEN_VRAM_RESIDENT_WINS): the S3 writes VRAM at ~60 MB/s and
+dropping the present-copy nets a MEASURED -2.89 ms/frame (FRAME_VRAM 8.18 <
+FRAME_SYS 11.06), where the same mechanism LOST on the slow-VRAM Cirrus.
+
+Stage 1 = the SIMPLEST correct model: ZERO engine change. When engaged, the
+engine composites the full frame straight into an off-screen VRAM page and
+the present becomes a display-start page-flip with no copy:
+
+  - CreateWindowFramebuffer is unchanged (returns the sysmem surface), so
+    window creation stays byte-identical.
+  - SDL_DOSVesaDirectPresentFull, when engaged, auto-detects whether the
+    source pixels are already the hidden VRAM page (steady state -> SKIP the
+    copy = the dropped present-copy win) or a sysmem buffer (first frame /
+    sysmem-composited frame -> copy sysmem to the hidden page), then flips
+    the hidden page to visible via VBE 0x4F07 and repoints
+    window->surface->pixels at the new hidden page. The engine's existing
+    unconditional per-flip SDL_GetWindowSurface re-query then composites the
+    next frame straight into VRAM -- no engine code change. The surface-
+    pixels repoint mirrors the proven slow-path LFB page-flip pattern
+    (DOSVESA_UpdateWindowFramebuffer sets dst->pixels to the new back page).
+
+Approved properties:
+  - Chip gate: S3 ViRGE/DX (unlock CR38=0x48/CR39=0xA5, read device-ID
+    CR2D/CR2E, gate strict 0x8A01), decoupled from the Cirrus gate /
+    SDL_HINT_DOS_CIRRUS_BLT.
+  - Flip via chip-agnostic VBE 0x4F07 (scanline = offset/pitch), replacing
+    the Cirrus-specific direct-CRTC programming.
+  - HANG-SAFE engage: at first engage, self-verify 0x4F07 via GET / SET(1-
+    scanline test) / GET-readback / restore, all BX=0x0000 (set immediately,
+    NO BIOS retrace-wait so the call cannot spin on a missing retrace).
+    AX!=0x004F or a readback mismatch DISABLES the lever -> copy-present
+    fallback. Per-flip uses 0x4F07 BX=0x0000 then a BOUNDED vblank wait
+    AFTER the program (the stock WaitForVBlank is unbounded). Waiting after
+    fixes the wave-50 flicker and the bound prevents a HW-IO hang
+    (dosbox_not_proxy: a broken flip can hard-freeze g2k).
+  - Engaged only on the LFB path (use_dosmemput == false; the banked path
+    has no nearptr the engine could composite into) and pitches_match (so
+    the surface pitch never changes under the engine).
+
+Killswitch SDL_HINT_DOS_VRAM_RESIDENT stays strict-"1" default-OFF; the
+OFF path falls through to the legacy copy-present, byte-identical to pre-0061.
+Alpha/RMW composites land in VRAM in this always-VRAM model (slow-but-correct
+under the default-OFF killswitch; the KPI Mimiga scene is write-only so it is
+not exercised there -- per-frame alpha-vs-writeonly routing is deferred to
+Stage 1.5). Removed the dead Cirrus CRTC[0x14]/[0x17]/SR[0x07] sanity check +
+_sr_read. Env var documented in docs/internal/BOOT.md (parent repo).
+
+Workspace-local patch; never upstreamed (per sdl_ai_policy memory +
+vendor/SDL/CLAUDE.md notice).
+---
+ src/video/dos/SDL_dosframebuffer.c | 448 ++++++++++++++++++++---------
+ 1 file changed, 306 insertions(+), 142 deletions(-)
+
+diff --git a/src/video/dos/SDL_dosframebuffer.c b/src/video/dos/SDL_dosframebuffer.c
+index 87e660cdb..0ddd9d943 100644
+--- a/src/video/dos/SDL_dosframebuffer.c
++++ b/src/video/dos/SDL_dosframebuffer.c
+@@ -421,6 +421,15 @@ typedef struct DOSFramebufferState
+     int src_pitch;      // == surface->pitch
+     Uint32 fb_size;     // total framebuffer bytes (pitch * h) for full-surface fast path
+     bool pitches_match; // src_pitch == vram_pitch (enables single-copy fast path)
++
++    // DOSKUTSU patch 0077 (S3-2 Stage 1) -- window handle captured at
++    // CreateWindowFramebuffer so the fast-path SDL_DOSVesaDirectPresentFull
++    // (which only receives the direct-state snapshot, not the window) can
++    // repoint window->surface->pixels at the alternating VRAM page when the
++    // VRAM-resident page-flip is engaged. The engine's per-flip
++    // SDL_GetWindowSurface re-query then composites the next frame straight
++    // into VRAM with no engine code change. NULL when not in the fast path.
++    SDL_Window *window;
+ } DOSFramebufferState;
+ 
+ static DOSFramebufferState fb_state;
+@@ -896,6 +905,11 @@ bool DOSVESA_CreateWindowFramebuffer(SDL_VideoDevice *device, SDL_Window *window
+                 return CreateNormalFramebuffer(device, window, format, pixels, pitch);
+             }
+ 
++            // DOSKUTSU patch 0077 (S3-2 Stage 1): capture the window so the
++            // fast-path PresentFull can repoint window->surface->pixels at
++            // the alternating VRAM page when VRAM-resident is engaged.
++            fb_state.window = window;
++
+             *format = surface_format;
+             *pixels = surface->pixels;
+             *pitch = surface->pitch;
+@@ -2575,7 +2589,15 @@ void SDL_DOSVesaDirectProgramPalette(const SDL_Palette *palette)
+ //     so the NEXT present writes to the OTHER page.
+ static bool _vram_resident_compute_back_page(const SDL_DOSVesaDirectState *st,
+                                               Uint32 *out_back_off);
+-static void _vram_resident_finish_swap(Uint32 back_page_byte_offset);
++// patch 0077 (S3-2 Stage 1): flip + toggle + repoint the window surface at
++// the new hidden VRAM page (st gives the LFB base + fb_size). Owns the
++// visible-page toggle (the static lives below this forward decl).
++static void _vram_resident_finish_swap(const SDL_DOSVesaDirectState *st,
++                                       Uint32 hidden_byte_offset);
++// patch 0077 (S3-2 Stage 1): repoint window->surface->pixels at the new
++// hidden VRAM page after a flip so the engine's per-flip GetWindowSurface
++// re-query composites the next frame straight into VRAM (zero engine change).
++static void _vram_resident_repoint_window_surface(Uint8 *new_pixels);
+ 
+ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+                                    const void *pixels)
+@@ -2604,56 +2626,60 @@ bool SDL_DOSVesaDirectPresentFull(const SDL_DOSVesaDirectState *st,
+         return false;
+     }
+ 
+-    // DOSKUTSU patch 0061 (Phase 11 wave-50 cycle 1) -- VRAM-resident
+-    // page-flip divert. When SDL_HINT_DOS_VRAM_RESIDENT=1 AND chip
+-    // is Cirrus 5434 AND runtime encoding sanity-check passes, redirect
+-    // the present write to an off-screen back-page and CRTC-swap. Else
+-    // fall through to the legacy write-to-visible-page path. The
+-    // forward-declared helpers below live at end of file. Engine code
+-    // remains unchanged for cycle 1; this is the essential diagnostic
+-    // for whether VRAM writes escape the sysmem 20 MB/s ceiling.
++    // DOSKUTSU patch 0077 (S3-2 Stage 1) -- always-VRAM page-flip present.
++    // When SDL_HINT_DOS_VRAM_RESIDENT=1 AND chip is S3 ViRGE/DX AND
++    // the 0x4F07 self-verify passed (all in _vram_resident_compute_back_page
++    // -> _vram_resident_check_enabled) AND we are on the LFB nearptr path,
++    // present by FLIPPING to the off-screen page instead of copying:
+     //
+-    // The helper returns a tri-valued result via the out-pointer pattern:
+-    // engaged=true means use _vr_back_off as dst; engaged=false means
+-    // take the legacy path (caller passes st->page_offset). The
+-    // engagement flag is decoupled from the back-page offset value
+-    // because the offset legitimately becomes 0 when the visible page
+-    // is page 1 (back-page = page 0; offset 0 = visible region).
++    //   - The engine composites the full frame into the hidden VRAM page
++    //     (its window->surface->pixels was repointed there by the previous
++    //     present), so `pixels` already == the hidden page -> SKIP the copy
++    //     (this is the dropped present-copy = the measured -2.89 ms win).
++    //   - On the first present (and any frame the engine drew into sysmem,
++    //     e.g. an alpha frame in a future per-frame-routing stage), `pixels`
++    //     is a sysmem buffer != the hidden page -> copy sysmem -> hidden.
++    //   - Flip the hidden page to visible (VBE 0x4F07, hang-safe, bounded
++    //     vblank AFTER), advance the toggle, then repoint
++    //     window->surface->pixels at the NEW hidden page so the engine's
++    //     existing per-flip SDL_GetWindowSurface re-query composites the
++    //     next frame straight into VRAM -- ZERO engine code change.
++    //
++    // Engaged only on the LFB path (use_dosmemput == false): the banked
++    // path has no nearptr the engine could composite into. pitches_match is
++    // already guaranteed above. When NOT engaged, fall through to the legacy
++    // copy-present, byte-identical to pre-0061.
+     Uint32 _vr_back_off = 0;
+-    const bool _vr_engaged = _vram_resident_compute_back_page(st, &_vr_back_off);
+-    const Uint32 _dst_offset = _vr_engaged ? _vr_back_off : st->page_offset;
++    const bool _vr_engaged = !st->use_dosmemput && st->vram_ptr &&
++                             _vram_resident_compute_back_page(st, &_vr_back_off);
++    if (_vr_engaged) {
++        Uint8 *const hidden_ptr = st->vram_ptr + _vr_back_off;
++        if ((const void *)hidden_ptr != pixels) {
++            // src is sysmem (first frame / sysmem-composited frame): copy.
++            SDL_memcpy(hidden_ptr, pixels, st->fb_size);
++        }
++        // Flip hidden->visible (0x4F07, bounded vblank after), toggle, and
++        // repoint window->surface->pixels at the new hidden page -- all
++        // inside finish_swap, which owns the visible-page toggle.
++        _vram_resident_finish_swap(st, _vr_back_off);
++        _instr_record_dv_present_at_exit(_instr_t_entry);
++        return true;
++    }
+ 
++    // Not engaged: legacy copy-present (byte-identical to pre-0061).
+     if (!st->use_dosmemput) {
+-        // LFB nearptr -- single SDL_memcpy. vram_ptr already includes
+-        // display_start_offset; _dst_offset is the back-page offset
+-        // when VRAM-resident is engaged, else the legacy page_offset
+-        // (0 today).
+         if (!st->vram_ptr) {
+             _instr_record_dv_present_at_exit(_instr_t_entry);
+             return false;
+         }
+-        SDL_memcpy(st->vram_ptr + _dst_offset, pixels, st->fb_size);
+-    } else if (_vr_engaged || st->banked_multibank) {
+-        // Banked path -- multi-bank walker. VRAM-resident always uses
+-        // this branch because the back-page (byte 76800) crosses the
+-        // 64 KB bank boundary; single-bank dosmemput cannot reach it.
++        SDL_memcpy(st->vram_ptr + st->page_offset, pixels, st->fb_size);
++    } else if (st->banked_multibank) {
+         int current_bank = -1;
+-        BankedDosmemput((const Uint8 *)pixels, st->fb_size, _dst_offset,
++        BankedDosmemput((const Uint8 *)pixels, st->fb_size, st->page_offset,
+                         st->win_gran_bytes, st->win_size_bytes,
+                         st->win_base, st->win_func_ptr, &current_bank);
+     } else {
+-        // Banked path -- single-bank fast case (legacy behavior).
+-        dosmemput(pixels, st->fb_size, st->vram_phys + _dst_offset);
+-    }
+-
+-    if (_vr_engaged) {
+-        // CRTC swap so the just-written back-page becomes visible. The
+-        // helper waits one VBL for tear-free presentation, programs
+-        // CRTC[0x0D] + [0x0C] + [0x1B] bit 0 (BYTE-units encoding per
+-        // probe-engineer's crtcswap verdict), and toggles the internal
+-        // s_vram_resident_visible_page so the NEXT present writes to
+-        // the OTHER page.
+-        _vram_resident_finish_swap(_vr_back_off);
++        dosmemput(pixels, st->fb_size, st->vram_phys + st->page_offset);
+     }
+ 
+     _instr_record_dv_present_at_exit(_instr_t_entry);
+@@ -2884,51 +2910,64 @@ bool SDL_DOSVesaDirect_BLTCopy(Uint32 src_vram_off,
+ }
+ 
+ // ============================================================================
+-// DOSKUTSU patch 0061 (Phase 11 wave-50 cycle 1) -- VRAM-resident page-flip.
++// DOSKUTSU patch 0061 (wave-50 cycle 1) -- VRAM-resident page-flip,
++// RETARGETED to the S3 ViRGE/DX by patch 0077 (S3-2 Stage 1).
+ //
+-// Two new public helpers (SDL_DOSVesaGetBackBufferPage +
+-// SDL_DOSVesaPagePresent) plus an in-place divert inside
+-// SDL_DOSVesaDirectPresentFull (above) that, when
+-// SDL_HINT_DOS_VRAM_RESIDENT=1, redirects the present write to an
+-// off-screen back-page and CRTC-swaps that page into visibility. Engine
+-// code is unchanged for cycle 1; this is the essential diagnostic
+-// for whether VRAM writes (LFB or banked dosmemput to off-screen pages)
+-// escape the PODP83 sysmem 20 MB/s ceiling.
++// Two public helpers (SDL_DOSVesaGetBackBufferPage + SDL_DOSVesaPagePresent)
++// plus an in-place divert inside SDL_DOSVesaDirectPresentFull (above) that,
++// when SDL_HINT_DOS_VRAM_RESIDENT=1, present an off-screen VRAM
++// back-page by flipping the display origin to it instead of copying.
+ //
+-// Encoding anchor: tests/probes/crtcswap.c verdict at
+-// docs/internal/WAVE-50-CRTCSWAP-PROBE-RESULTS.md sec. 3 = BYTE units;
+-// CRTC[0x1B] bit 0 carries display-start bit 16 for offsets >= 65536.
+-// CRTC[0x1D] high bits NOT needed for offsets < 256 KB (we cap practical
+-// page count at 4 -> max offset 307200 = under 19 bits; bits 17/18
+-// land in CRTC[0x1D] which we DO program in the helper for safety).
++// patch 0077 retargeting (S3-2 de-risk verdict GREEN_VRAM_RESIDENT_WINS,
++// docs/internal/S3-2-FINAL-VERDICT.md -- the S3 writes VRAM at 60 MB/s and
++// dropping the present-copy nets a MEASURED -2.89 ms/frame, where the same
++// mechanism LOST on the slow-VRAM Cirrus):
++//   - chip gate changed from Cirrus 5434 (CRTC[0x27]==0xA8 via SDL/0060)
++//     to S3 ViRGE/DX (chip-id 0x8A01), decoupled from CIRRUS_BLT;
++//   - display-start flip changed from Cirrus-specific direct-CRTC
++//     (CRTC[0x0C/0x0D]+[0x1B]+[0x1D], BYTE units) to chip-agnostic VBE
++//     0x4F07 (scanline units), gated by a HANG-SAFE 0x4F07 self-verify;
++//   - the wave-50 flicker bug is fixed: the bounded vblank wait now runs
++//     AFTER the display-start program, not before.
++// Engine side (nx-engine, task #14) repoints its render back-surface to
++// SDL_DOSVesaGetBackBufferPage so the CPU composites straight into VRAM;
++// SDL's half (this file) owns the back-page lifecycle + the flip present.
+ //
+-// Runtime encoding sanity check: at first engagement, reads CRTC[0x14]
+-// bit 6 (dword-mode flag) and aborts if set. Other reads (CRTC[0x17]
+-// bit 6 word/byte, SR[0x07] Cirrus ext) are logged for diagnostic
+-// visibility but do not gate engagement (VGA bit polarity for word/byte
+-// varies; safe default is trust the probe-verified byte path unless
+-// dword is clearly configured).
++// Killswitch SDL_HINT_DOS_VRAM_RESIDENT default-OFF; the OFF path is
++// byte-identical to the legacy sysmem copy-present. Every engage gate
++// fails SAFE to the copy-present -- never a hang (HW-IO safety per
++// dosbox_not_proxy).
+ //
+ // Workspace-local patch; never upstreamed (per sdl_ai_policy memory).
+ // ============================================================================
+ 
+ // VRAM-resident state. Tri-state availability: -1 unknown / 0 disabled
+-// (killswitch OFF or chip not 5434 or sanity fail) / 1 enabled.
++// (killswitch OFF or chip not S3 ViRGE/DX or 0x4F07 self-verify fail) /
++// 1 enabled.
+ static int _vram_resident_state = -1;
+ 
+ // Visible-page index toggle. Starts at 0 (legacy state: visible page is
+ // always page 0 before any divert engagement). On each successful
+-// CRTC swap, toggles between 0 and 1 -- so the present write always
+-// targets the page NOT currently visible.
++// page-flip, toggles -- so the present write always targets the page NOT
++// currently visible.
+ static int _vram_resident_visible_page = 0;
+ 
++// DOSKUTSU patch 0077 (S3-2 Stage 1) -- cached VRAM pitch (bytes/scanline)
++// for the VBE 0x4F07 display-start flip, which addresses the origin in
++// scanlines (offset / pitch). Stashed from st->vram_pitch by the callers
++// that hold the snapshot (compute_back_page + SDL_DOSVesaPagePresent) so
++// the flip helper, which only receives a byte offset, can convert.
++static int _vram_resident_pitch = 0;
++
+ // One-time banner emit gate so the smoke gate's two-witness check sees
+ // "first engagement" + "first success" without per-flip log spam.
+ static int _vram_resident_engage_banner_logged = 0;
+ 
+ // CRTC index/data ports already named by SDL/0060 as CIRRUS_CRTC_IDX /
+-// CIRRUS_CRTC_DATA (0x3D4 / 0x3D5). Sequencer index/data ports also
+-// reused: CIRRUS_SR_INDEX / CIRRUS_SR_DATA (0x3C4 / 0x3C5).
++// CIRRUS_CRTC_DATA (0x3D4 / 0x3D5) -- generic VGA CRTC ports, reused here
++// for the S3 extended-CRTC chip-ID read. (patch 0077 dropped the Cirrus
++// sequencer SR[0x07] sanity read; the display-start flip now uses VBE
++// 0x4F07, not direct CRTC programming.)
+ 
+ static inline Uint8 _crtc_read(Uint8 idx)
+ {
+@@ -2942,68 +2981,158 @@ static inline void _crtc_write(Uint8 idx, Uint8 val)
+     outportb(CIRRUS_CRTC_DATA, val);
+ }
+ 
+-static inline Uint8 _sr_read(Uint8 idx)
++// DOSKUTSU patch 0077 (S3-2 Stage 1) -- bounded vblank wait. The existing
++// WaitForVBlank() at line ~1098 spins on the VGA status port with NO
++// timeout; in the VRAM-resident flip path that is a HW-IO hang risk on
++// real hardware if the retrace bit never toggles (a broken/odd mode can
++// hard-freeze g2k -- dosbox_not_proxy). This variant bounds each spin
++// with a guard so the worst case is a finite stall + fall-through, never
++// an infinite hang. Used AFTER the 0x4F07 display-start program so the
++// CRTC start-address latch (at vsync) has taken effect before we return
++// (fixes the wave-50 flicker, whose bug was waiting BEFORE the program).
++static void _vram_resident_wait_vblank_bounded(void)
++{
++    long guard;
++    // If currently inside a vblank, wait for it to end so we catch a
++    // fresh leading edge below.
++    for (guard = 0; (inportb(VGA_STATUS_PORT) & VGA_STATUS_VBLANK) &&
++                    guard < 2000000L; ++guard) {
++        SDL_CPUPauseInstruction();
++    }
++    // Wait for the next vblank to begin (the start-address latch boundary).
++    for (guard = 0; !(inportb(VGA_STATUS_PORT) & VGA_STATUS_VBLANK) &&
++                    guard < 2000000L; ++guard) {
++        SDL_CPUPauseInstruction();
++    }
++}
++
++// DOSKUTSU patch 0077 (S3-2 Stage 1) -- S3 ViRGE/DX chip detection.
++// Unlocks the S3 extended CRTC registers (CR38 "register lock 1" = 0x48,
++// CR39 "register lock 2" = 0xA5) then reads the device-ID pair CR2D
++// (high) / CR2E (low). The g2k card is an S3 ViRGE/DX (86C375) which the
++// crtcswap / s3blt probes confirmed reports chip-id 0x8A01. Gate strict
++// on 0x8A01: this lever's display-start flip is only validated for that
++// chip. Only ever called when the strict-"1" killswitch is set, so the
++// CR38/39 unlock writes never happen on a default (OFF) boot.
++static bool _vram_resident_is_s3_virge(Uint16 *out_chip_id)
+ {
+-    outportb(CIRRUS_SR_INDEX, idx);
+-    return inportb(CIRRUS_SR_DATA);
++    _crtc_write(0x38, 0x48); // unlock S3 extended CRTC (lock 1)
++    _crtc_write(0x39, 0xA5); // unlock S3 extended CRTC (lock 2)
++    const Uint8 id_hi = _crtc_read(0x2D);
++    const Uint8 id_lo = _crtc_read(0x2E);
++    const Uint16 chip_id = (Uint16)(((Uint16)id_hi << 8) | id_lo);
++    if (out_chip_id) {
++        *out_chip_id = chip_id;
++    }
++    return (chip_id == 0x8A01);
+ }
+ 
+ // Probe + cache VRAM-resident availability. Called lazily from the
+ // PresentFull divert and from SDL_DOSVesaPagePresent. Emits a one-time
+-// dos_port_dbg_log banner narrating either ENABLED + sanity-check
+-// register values, or DISABLED + reason.
++// dos_port_dbg_log banner narrating either ENABLED or DISABLED + reason.
++//
++// DOSKUTSU patch 0077 (S3-2 Stage 1) -- retargeted from the wave-50
++// Cirrus-5434 path to the S3 ViRGE/DX. Three gates, all fail-safe to the
++// legacy copy-present (never hang):
++//   1. strict-"1" killswitch SDL_HINT_DOS_VRAM_RESIDENT (default-OFF).
++//   2. chip is S3 ViRGE/DX (chip-id 0x8A01) -- decoupled from the Cirrus
++//      gate / SDL_HINT_DOS_CIRRUS_BLT.
++//   3. HANG-SAFE VBE 0x4F07 self-verify: GET current display-start, SET a
++//      1-scanline test value (BX=0x0000 = set immediately, NO BIOS
++//      retrace-wait so the call cannot spin on a missing retrace), GET
++//      readback, restore. AX!=0x004F or a readback mismatch -> DISABLE ->
++//      caller falls back to the copy-present. This is the team-lead hard
++//      requirement: the 0x4F07 flip on S3+UNIVBE is otherwise unverified
++//      and a broken flip is HW-IO that can hard-freeze the machine
++//      (dosbox_not_proxy).
+ static int _vram_resident_check_enabled(void)
+ {
+     if (_vram_resident_state >= 0) {
+         return _vram_resident_state;
+     }
+ 
+-    // Killswitch first -- strict-"1" match (default-OFF for cycle 1).
++    // (1) Killswitch -- strict-"1" match (default-OFF). OFF emits no
++    // banner; the absence of any "S3-2 stage1" line in the log is the
++    // off signal, and the CR38/39 S3 unlock below never runs on a
++    // default boot.
+     const char *env = SDL_getenv("SDL_HINT_DOS_VRAM_RESIDENT");
+     if (!env || env[0] != '1' || env[1] != 0) {
+-        // No banner emitted in the default-off path; the absence of any
+-        // wave-50 banner in the log is itself the "off" signal.
+         _vram_resident_state = 0;
+         return 0;
+     }
+ 
+-    // Chip detect: reuse SDL/0060's Cirrus 5434 strict probe. Returns
+-    // true iff CRTC[0x27]==0xA8 AND its own killswitch is not engaged.
+-    // The probe-verified CRTC encoding is specific to Cirrus 5434 + UniVBE
+-    // 6.7; we refuse engagement on other chips/firmware combinations.
+-    if (!SDL_DOSVesaDirect_IsCirrusBLTAvailable()) {
+-        dos_port_dbg_log("sdl: wave-50 VRAM-resident page-flip DISABLED "
+-                         "(chip not Cirrus 5434 OR SDL_HINT_DOS_CIRRUS_BLT=0; "
+-                         "engine uses sysmem fallback)");
++    // (2) S3 ViRGE/DX detect (NOT the Cirrus gate). Decoupled from
++    // SDL_HINT_DOS_CIRRUS_BLT -- this lever ships for the S3.
++    Uint16 chip_id = 0;
++    if (!_vram_resident_is_s3_virge(&chip_id)) {
++        dos_port_dbg_log("sdl: S3-2 stage1 VRAM-resident page-flip DISABLED "
++                         "(chip-id=0x%04X != S3 ViRGE/DX 0x8A01; "
++                         "sysmem copy-present fallback)",
++                         (unsigned)chip_id);
+         _vram_resident_state = 0;
+         return 0;
+     }
+ 
+-    // Runtime encoding sanity check per probe-engineer recommendation.
+-    Uint8 crtc14 = _crtc_read(0x14);
+-    Uint8 crtc17 = _crtc_read(0x17);
+-    Uint8 sr07   = _sr_read(0x07);
+-    bool dword_mode = (crtc14 & 0x40) != 0;
+-
+-    if (dword_mode) {
+-        // Clearly disqualifying: dword addressing is active; the probe
+-        // verified only the byte-units encoding. Fall back rather than
+-        // risk programming the wrong display-start.
+-        dos_port_dbg_log("sdl: wave-50 VRAM-resident page-flip DISABLED "
+-                         "(chip configured for non-byte encoding: "
+-                         "CRTC[0x14]=0x%02X bit6=1 (dword); CRTC[0x17]=0x%02X "
+-                         "SR[0x07]=0x%02X; falling back to dosmemput; "
+-                         "UNEXPECTED -- file probe-engineer follow-up)",
+-                         (unsigned)crtc14, (unsigned)crtc17, (unsigned)sr07);
++    // (3) HANG-SAFE 0x4F07 self-verify. All calls BX=0x0000 (set
++    // immediately, no retrace wait) so none can spin on a missing
++    // vblank. GET current -> SET a different test scanline -> GET
++    // readback -> restore the original. A no-op/broken SET is caught
++    // because the readback would not equal the test value.
++    __dpmi_regs r;
++    SDL_zero(r);
++    r.x.ax = 0x4F07;
++    r.x.bx = 0x0001; // get display start
++    __dpmi_int(0x10, &r);
++    const Uint16 get_ax = r.x.ax;
++    const Uint16 saved_cx = r.x.cx;
++    const Uint16 saved_dx = r.x.dx;
++    const Uint16 test_dx = (Uint16)(saved_dx == 0 ? 1 : 0);
++
++    Uint16 set_ax = 0;
++    Uint16 rb_ax = 0;
++    Uint16 rb_dx = 0xFFFF;
++    if (get_ax == 0x004F) {
++        SDL_zero(r);
++        r.x.ax = 0x4F07;
++        r.x.bx = 0x0000; // set display start immediately (no retrace wait)
++        r.x.cx = saved_cx;
++        r.x.dx = test_dx;
++        __dpmi_int(0x10, &r);
++        set_ax = r.x.ax;
++
++        SDL_zero(r);
++        r.x.ax = 0x4F07;
++        r.x.bx = 0x0001; // get display start readback
++        __dpmi_int(0x10, &r);
++        rb_ax = r.x.ax;
++        rb_dx = r.x.dx;
++
++        // Restore the original display-start regardless of the outcome.
++        SDL_zero(r);
++        r.x.ax = 0x4F07;
++        r.x.bx = 0x0000;
++        r.x.cx = saved_cx;
++        r.x.dx = saved_dx;
++        __dpmi_int(0x10, &r);
++    }
++
++    const bool verified = (get_ax == 0x004F && set_ax == 0x004F &&
++                           rb_ax == 0x004F && rb_dx == test_dx);
++    if (!verified) {
++        dos_port_dbg_log("sdl: S3-2 stage1 VRAM-resident page-flip DISABLED "
++                         "(0x4F07 self-verify FAILED: get_ax=0x%04X set_ax=0x%04X "
++                         "rb_ax=0x%04X rb_dx=%u test_dx=%u; sysmem copy-present "
++                         "fallback -- no hang)",
++                         (unsigned)get_ax, (unsigned)set_ax, (unsigned)rb_ax,
++                         (unsigned)rb_dx, (unsigned)test_dx);
+         _vram_resident_state = 0;
+         return 0;
+     }
+ 
+-    dos_port_dbg_log("sdl: wave-50 VRAM-resident page-flip ENABLED "
+-                     "(back-page=0x012C00; CRTC encoding=BYTE verified "
+-                     "via probe; CRTC[0x14]=0x%02X CRTC[0x17]=0x%02X "
+-                     "SR[0x07]=0x%02X)",
+-                     (unsigned)crtc14, (unsigned)crtc17, (unsigned)sr07);
++    dos_port_dbg_log("sdl: S3-2 stage1 VRAM-resident page-flip ENABLED "
++                     "(S3 ViRGE/DX chip-id=0x%04X; VBE 0x4F07 flip self-verified; "
++                     "bounded-vblank-after; copy-present dropped)",
++                     (unsigned)chip_id);
+     _vram_resident_state = 1;
+     _vram_resident_visible_page = 0; // reset toggle on (re-)enable
+     return 1;
+@@ -3029,69 +3158,91 @@ static bool _vram_resident_compute_back_page(const SDL_DOSVesaDirectState *st,
+         return false;
+     }
+     if (_vram_resident_check_enabled() == 0) {
+-        return false;
++        return false; // OFF path: no state touched -> byte-identical present
+     }
++    // Cache pitch for the 0x4F07 flip (scanline = offset / pitch).
++    _vram_resident_pitch = st->vram_pitch;
+     int back_idx = 1 - _vram_resident_visible_page;
+     *out_back_off = (Uint32)back_idx * st->fb_size;
+     return true;
+ }
+ 
+-// CRTC start-address swap in BYTE units. Programs 0x0D (low byte),
+-// 0x0C (high byte), and Cirrus 5434 extension regs 0x1B bit 0 (bit 16)
+-// + 0x1D bits 6:0 cleared (bits 23:17; we only need bits up to 17 for
+-// page indices 0..3 of 76800 bytes each = max offset 230400 < 2^18).
+-// Waits one VBL via WaitForVBlank() (already in this TU) for tear-free
+-// swap; under DOSBox-X this is a no-op since the emulated VBL bit
+-// toggles at high frequency.
++// DOSKUTSU patch 0077 (S3-2 Stage 1) -- display-start page-flip via VBE
++// 0x4F07, replacing wave-50's Cirrus-specific direct-CRTC programming
++// (CRTC[0x0C/0x0D]+[0x1B]+[0x1D]). 0x4F07 is chip-agnostic and the same
++// BIOS call the slow path already uses for LFB page-flips, so it works on
++// the S3 ViRGE/DX without an S3-specific CRTC register map. The origin is
++// addressed in SCANLINES (DX) -- byte_offset / pitch -- where pitch is
++// cached in _vram_resident_pitch by the snapshot-holding callers.
++//
++// Uses BX=0x0000 (set display start IMMEDIATELY, no BIOS retrace-wait) so
++// the call cannot spin on a missing retrace, then a BOUNDED vblank wait
++// AFTER programming. Waiting AFTER (not before) is the wave-50 flicker
++// fix: the CRTC start-address latches at vsync, so returning only after
++// that vsync guarantees the just-presented page is actually visible
++// before the engine draws into the other page. The wait is bounded so a
++// stuck retrace bit degrades to a finite stall, never a hang.
+ static void _crtc_set_display_start_byte(Uint32 byte_offset)
+ {
+-    // Wait for vertical blanking before re-programming so the new
+-    // display origin takes effect at the next frame boundary instead
+-    // of mid-scan. WaitForVBlank() is the existing primitive at
+-    // SDL_dosframebuffer.c:1098.
+-    WaitForVBlank();
+-
+-    // Low/high address bytes (bits 0..15).
+-    _crtc_write(0x0D, (Uint8)(byte_offset & 0xFF));
+-    _crtc_write(0x0C, (Uint8)((byte_offset >> 8) & 0xFF));
+-
+-    // Cirrus 5434 display-start bit 16 lives in CRTC[0x1B] bit 0.
+-    // Read-modify-write to preserve the other bits in 0x1B (chip-state
+-    // controls; should not be clobbered).
+-    Uint8 v1b = _crtc_read(0x1B);
+-    v1b = (Uint8)((v1b & ~(Uint8)0x01) |
+-                  (Uint8)((byte_offset >> 16) & 0x01));
+-    _crtc_write(0x1B, v1b);
+-
+-    // Cirrus 5434 display-start bits 17:18 live in CRTC[0x1D] bits 6:7.
+-    // We program them defensively even though the probe verdict
+-    // covers only bit 16 (page-1 offset 76800 = 0x012C00 needs only
+-    // bit 16). Pages 2/3 would set these bits; clearing them in the
+-    // common case keeps the state deterministic across page toggles.
+-    Uint8 v1d = _crtc_read(0x1D);
+-    Uint8 ext_hi = (Uint8)(((byte_offset >> 17) & 0x03) << 6);
+-    v1d = (Uint8)((v1d & ~(Uint8)0xC0) | ext_hi);
+-    _crtc_write(0x1D, v1d);
++    const int pitch = (_vram_resident_pitch > 0) ? _vram_resident_pitch : 1;
++    const Uint16 scanline = (Uint16)(byte_offset / (Uint32)pitch);
++
++    __dpmi_regs r;
++    SDL_zero(r);
++    r.x.ax = 0x4F07;
++    r.x.bx = 0x0000;   // set display start, immediate (no BIOS retrace wait)
++    r.x.cx = 0;        // first displayed pixel in scan line (x = 0)
++    r.x.dx = scanline; // first displayed scan line (page origin / pitch)
++    __dpmi_int(0x10, &r);
++
++    // Flicker fix: wait one vblank AFTER programming so the start-address
++    // latch has taken effect before we return. Bounded -- HW-IO safe.
++    _vram_resident_wait_vblank_bounded();
+ }
+ 
+ // Helper called from SDL_DOSVesaDirectPresentFull's divert AFTER the
+ // write to the back-page completes. Programs CRTC for the new visible
+ // origin, then toggles the visible-page index so the next present
+ // targets the OTHER page.
+-static void _vram_resident_finish_swap(Uint32 back_page_byte_offset)
++static void _vram_resident_finish_swap(const SDL_DOSVesaDirectState *st,
++                                       Uint32 hidden_byte_offset)
+ {
+-    _crtc_set_display_start_byte(back_page_byte_offset);
++    _crtc_set_display_start_byte(hidden_byte_offset);
+     _vram_resident_visible_page = 1 - _vram_resident_visible_page;
+ 
++    // Repoint the window surface at the NEW hidden page so the engine's
++    // next SDL_GetWindowSurface composites straight into VRAM (zero engine
++    // change). LFB path only (st->vram_ptr non-NULL).
++    if (st && st->vram_ptr) {
++        _vram_resident_repoint_window_surface(
++            st->vram_ptr + (Uint32)(1 - _vram_resident_visible_page) * st->fb_size);
++    }
++
+     if (!_vram_resident_engage_banner_logged) {
+         _vram_resident_engage_banner_logged = 1;
+-        dos_port_dbg_log("sdl: wave-50 VRAM-resident page-flip first swap "
+-                         "(back_page_byte_offset=0x%06lX; visible_page now=%d)",
+-                         (unsigned long)back_page_byte_offset,
++        dos_port_dbg_log("sdl: S3-2 stage1 first page-flip present "
++                         "(hidden_page_byte_offset=0x%06lX; visible_page now=%d; "
++                         "copy-present dropped, VBE 0x4F07 flip)",
++                         (unsigned long)hidden_byte_offset,
+                          _vram_resident_visible_page);
+     }
+ }
+ 
++// patch 0077 (S3-2 Stage 1): repoint the window framebuffer surface at the
++// new hidden VRAM page after a flip. The engine's per-flip
++// SDL_GetWindowSurface re-query returns this same surface object, so on the
++// next frame it composites straight into the new hidden VRAM page -- the
++// dropped-present-copy win with zero engine code change. Mirrors the proven
++// slow-path LFB page-flip pattern (DOSVESA_UpdateWindowFramebuffer sets
++// dst->pixels to the new back page). Guards NULL so a present before the
++// window surface exists is a no-op.
++static void _vram_resident_repoint_window_surface(Uint8 *new_pixels)
++{
++    if (fb_state.window && fb_state.window->surface) {
++        fb_state.window->surface->pixels = new_pixels;
++    }
++}
++
+ bool SDL_DOSVesaGetBackBufferPage(const SDL_DOSVesaDirectState *st,
+                                    int page_idx,
+                                    Uint8 **out_nearptr,
+@@ -3128,10 +3279,23 @@ bool SDL_DOSVesaPagePresent(const SDL_DOSVesaDirectState *st, int page_idx)
+         return false;
+     }
+     if (_vram_resident_check_enabled() == 0) {
++        // Not engaged (killswitch off / not S3 / 0x4F07 self-verify failed):
++        // return false so the engine keeps presenting via the copy path.
+         return false;
+     }
++    // Cache pitch for the 0x4F07 flip (scanline = offset / pitch).
++    _vram_resident_pitch = st->vram_pitch;
+     _crtc_set_display_start_byte((Uint32)page_idx * st->fb_size);
+     _vram_resident_visible_page = page_idx;
++
++    // One-time runtime witness for the smoke-gate two-witness pattern
++    // (pairs with the ENABLED banner emitted from _vram_resident_check_enabled).
++    if (!_vram_resident_engage_banner_logged) {
++        _vram_resident_engage_banner_logged = 1;
++        dos_port_dbg_log("sdl: S3-2 stage1 first page-flip present "
++                         "(page_idx=%d; copy-present dropped, VBE 0x4F07 flip)",
++                         page_idx);
++    }
+     return true;
+ }
+ 
+-- 
+2.47.3
+

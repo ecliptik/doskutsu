@@ -1,0 +1,69 @@
+From d9152e4f8b8c346fcfd5636233a74b99d5b46e99 Mon Sep 17 00:00:00 2001
+From: Micheal Waltz <micheal@ecliptik.com>
+Date: Wed, 3 Jun 2026 08:27:16 -0700
+Subject: [PATCH 2/3] dos: patch 0089 -- RING_CHUNKS=32 deeper-ring lever
+ (v1.0.8 coherence)
+
+Extends resolve_ring_chunks() to accept SDL_HINT_DOS_AUDIO_RING_CHUNKS=32
+(default stays 16; byte-identical when unset). At 32 chunks the ring holds
+~743 ms at 11025 stereo S16 (vs 372 ms at 16), giving the v1.0.8 depth-setpoint
+pump more underrun runway across bursty render stalls.
+
+Safe on DOS: the ring is DPMI-locked HEAP (SDL_calloc at OpenDevice), NOT the
+64 KB-segment-capped conventional-memory DMA buffer, so 32 KB of locked heap
+is fine on the 48 MB target. Grows chunk COUNT not chunk SIZE, so the
+wave-13.5 P54C 8 KB/2-way L1 cache-thrash finding (big chunks ~15% slower)
+does not apply.
+
+Coherence/jitter ride-along only -- a deeper ring smooths bursts but does NOT
+raise the average refill rate, so it cannot fix tempo on its own (only delays
+underrun if average delivery is below real-time). Env-gated; default-OFF.
+See docs/internal/V108-MUSIC-RETROSPECTIVE.md sec.5.2. Workspace-local.
+---
+ src/audio/dos/SDL_dosaudio_sb.c | 16 +++++++++++++++-
+ 1 file changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/src/audio/dos/SDL_dosaudio_sb.c b/src/audio/dos/SDL_dosaudio_sb.c
+index 9d4092049..67e8e9ae4 100644
+--- a/src/audio/dos/SDL_dosaudio_sb.c
++++ b/src/audio/dos/SDL_dosaudio_sb.c
+@@ -603,7 +603,7 @@ static Uint8 ReadSoundBlasterDSP(void)
+ // the ISR just does a memcpy (no SDL calls, no DPMI, no allocator).
+ 
+ // Number of DMA half-buffers that fit in the ring. Must be a power of two
+-// (we accept 4, 8, 16). Resolved from SDL_HINT_DOS_AUDIO_RING_CHUNKS;
++// (we accept 4, 8, 16, 32 -- SDL/0089 added 32). Resolved from SDL_HINT_DOS_AUDIO_RING_CHUNKS;
+ // see resolve_ring_chunks() below.
+ //
+ // DOSKUTSU patch (Phase 9 wave 13.6.1): wave 13.6 hardcoded this to 16
+@@ -615,6 +615,7 @@ static Uint8 ReadSoundBlasterDSP(void)
+ //   SET SDL_HINT_DOS_AUDIO_RING_CHUNKS=4   (8 KB ring, 92 ms -- wave 13.5 baseline)
+ //   SET SDL_HINT_DOS_AUDIO_RING_CHUNKS=8   (16 KB ring, 184 ms -- intermediate)
+ //   SET SDL_HINT_DOS_AUDIO_RING_CHUNKS=16  (32 KB ring, 372 ms -- wave 13.6 default)
++//   SET SDL_HINT_DOS_AUDIO_RING_CHUNKS=32  (SDL/0089 deeper-ring lever; the KB/ms above are the wave-13 2048 B-chunk basis -- in the current 256-frame/1024 B-chunk config 32 chunks = 32 KB = ~743 ms at 11025 stereo / ~186 ms at 44100)
+ // Default (unset / unrecognized) = 16 to match wave 13.6 behaviour
+ // when no env vars are set.
+ //
+@@ -639,6 +640,19 @@ static int resolve_ring_chunks(void)
+                 v = 8;
+             } else if (e[0] == '1' && e[1] == '6' && e[2] == 0) {
+                 v = 16;
++            } else if (e[0] == '3' && e[1] == '2' && e[2] == 0) {
++                /* DOSKUTSU patch (SDL/0089): deeper-ring lever for the v1.0.8
++                   organya-delivery campaign. 32 chunks = 32 KB ring = ~743 ms at
++                   11025 stereo S16 (vs 372 ms at 16). The ring is DPMI-locked HEAP
++                   (SDL_calloc at OpenDevice), NOT the 64 KB-capped conventional-mem
++                   DMA buffer, so 32 KB is fine on the 48 MB target. Grows chunk
++                   COUNT, not chunk SIZE -- so the wave-13.5 P54C L1 cache-thrash
++                   finding (big chunks ~15% slower) does NOT apply. Coherence/jitter
++                   ride-along for the depth-setpoint pump (more underrun runway); NOT
++                   a tempo fix on its own (a deeper ring only delays underrun if the
++                   average refill rate is already at real-time). See
++                   docs/internal/V108-MUSIC-RETROSPECTIVE.md sec.5.2. */
++                v = 32;
+             }
+             /* else: keep default 16 */
+         }
+-- 
+2.47.3
+
