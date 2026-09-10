@@ -19,7 +19,7 @@ same recording. **These are the current numbers; the detailed sections below
 are round 1 (`09e449c5a81d`) and its charts are drawn from that data.**
 
 | CPU | AdLib | OPL3 FM | Organya | Organya-HQ |
-|---|---|---|---|---|
+|---|---:|---:|---:|---:|
 | Pentium OverDrive 83 | **32.95** | 30.92 | 28.44 | 20.45 |
 | Am5x86-133 | **32.78** | 31.03 | 28.52 | 20.35 |
 | 486DX2-66 | **24.88** | 22.92 | 20.70 | 13.29 |
@@ -48,8 +48,10 @@ Round M (2026-08-17) re-measured all four CPUs against the same recording on a
 current binary, holding video and sound fixed at S3 ViRGE + PicoGUS so only the
 CPU varies. Frames per second of game time, as above.
 
+![AdLib leads every CPU, by how much: a color-coded fps matrix across four CPUs and three backends](benchmarks/backend-matrix.svg)
+
 | CPU | AdLib | OPL3 FM | Organya |
-|---|---|---|---|
+|---|---:|---:|---:|
 | Pentium OverDrive 83 | **32.2** | 30.2 | 27.7 |
 | Am5x86-133 | **32.1** | 30.5 | 27.6 |
 | 486DX2-66 | **24.0** | 22.2 | 19.8 |
@@ -114,7 +116,7 @@ render loop is waiting on, it is not clock cycles.
 still improves *loading* -- see finding 3.
 
 | Music backend | POD-83 | Am5x86-133 | 486DX2-66 | 486DX2-50 |
-|---|---|---|---|---|
+|---|---:|---:|---:|---:|
 | GUS, 20 voices | **32.1** / 45s | **31.9** / 45s | **24.2** / 53s | **18.3** / 66s |
 | AdLib / OPL2 | **32.0** / 19s | **31.8** / 19s | **23.6** / 25s | **17.9** / 32s |
 | OPL3 FM  (default) | **31.4** / 22s | **31.3** / 27s | **23.2** / 43s | **17.4** / 56s |
@@ -142,7 +144,7 @@ Organya is the only backend paying a genuine per-loop penalty, which matches
 its reputation as the expensive option.
 
 | Cell | Backend | per-loop fps | overhead_s | median fps |
-|---|---|---|---|---|
+|---|---|---:|---:|---:|
 | `G23B` | GUS, 32 voices | 32.3 | 48 | _pump - invalid_ |
 | `G62` | AdLib, SFX off | 32.2 | 18 | _pump - invalid_ |
 | `G22` | GUS, 20 voices | 32.1 | 45 | _pump - invalid_ |
@@ -186,7 +188,7 @@ far more for loading time than the frame-rate table suggests.
 ![Video and sound card cost per CPU](benchmarks/hardware-cost.svg)
 
 | CPU | ViRGE | Cirrus | video cost | PicoGUS | Vibra16 | sound cost |
-|---|---|---|---|---|---|---|
+|---|---:|---:|---:|---:|---:|---:|
 | POD-83 | 31.60 | 30.40 | **1.20** | 31.38 | 30.48 | **0.90** |
 | Am5x86-133 | 31.27 | 30.15 | **1.13** | 31.32 | 30.46 | **0.86** |
 | 486DX2-66 | 23.19 | 22.42 | **0.76** | 23.22 | 22.14 | **1.08** |
@@ -220,7 +222,7 @@ result is any departure from it.
 sort by backend:
 
 | Backend | DX2-66 | DX2-50 | ratio | reading |
-|---|---|---|---|---|
+|---|---:|---:|---:|---|
 | AdLib | 23.56 | 17.92 | 0.7607 | above - fixed non-CPU cost |
 | GUS, 20 voices | 24.24 | 18.30 | 0.7553 | above - fixed non-CPU cost |
 | OPL3 FM | 23.22 | 17.39 | 0.7492 | on 0.75 |

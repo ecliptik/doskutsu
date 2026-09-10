@@ -10,6 +10,8 @@ The name is a portmanteau of **DOS** and **Doukutsu Monogatari** (Cave Story's o
 
 DOSKUTSU exists for preservation and the engineering challenge of running Cave Story on a 1990s MS-DOS PC.
 
+This project was 100% built agentically using [Claude Code](https://claude.com/claude-code).
+
 ### Screenshots
 
 | | |
