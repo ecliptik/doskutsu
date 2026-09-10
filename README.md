@@ -64,11 +64,7 @@ Frame rate depends on CPU, video card, and audio backend. Figures below are real
 | 486DX2-66 | ~25 fps | AdLib + S3 ViRGE |
 | 486DX2-50 | ~19 fps | AdLib + S3 ViRGE, choppy |
 
-AdLib is fastest on every CPU tested -- 1.5-2 fps over OPL3 FM, with much shorter load times. An S3 ViRGE gains ~1 fps over a Cirrus CL-GD5430. Organya-HQ (22050 Hz stereo) costs about a quarter of the frame rate on a Pentium and isn't viable below one.
-
-Above roughly a 486DX4-100, a faster CPU stops improving frame rate -- the render loop is limited by something other than clock speed.
-
-[docs/BENCHMARKS.md](./docs/BENCHMARKS.md) is the full report: 157 cells across two measurement rounds, four CPUs, three video cards, and three sound cards, with charts, method, and raw logs. [docs/FPS-MATRIX.md](./docs/FPS-MATRIX.md) keeps the older per-wave history.
+[docs/BENCHMARKS.md](./docs/BENCHMARKS.md) is the full report: 157 cells across two measurement rounds, four CPUs, three video cards, and three sound cards, with charts, method, and raw logs.
 
 Cave Story runs at 50 fps natively; on this hardware it renders at up to ~33 fps, but [Fixed-Timestep mode](#fixed-timestep-mode) keeps game logic advancing at the correct 50 Hz regardless of render rate.
 
