@@ -1,0 +1,219 @@
+# doskutsu -- the target-software profile for the vcctrl harness.
+#
+# vcctrl's docs/HARNESS-STANDARD.md sec. 12: a profile records ONE
+# project's adoption -- its parameters and its platform facts -- so the
+# standard and the harness stay target-agnostic. Everything here is a
+# fact about the DOS program and the machine it runs on. Nothing here is
+# a fact about vcctrl.
+#
+# Rig physics live in vcctrl.yaml under harness.timing, NOT here: the
+# BIOS keyboard buffer depth belongs to the machine, not to this port.
+#
+# MOVED HERE 2026-09-11, from vcctrl's own profiles/doskutsu.yaml, once
+# every port tracking its own profile in its own repo became the
+# established convention (dosags's profiles/dosags.yaml, dossage's
+# profiles/dossage.yaml). vcctrl's own local (gitignored) vcctrl.yaml
+# now sets `harness.profile` to this file's absolute path explicitly --
+# before this move, harness/vcctrl-sweep|-cell|-collect fell back to
+# finding this file beside themselves in vcctrl's own repo when no
+# `harness.profile` was set, which is why it lived there. See
+# sdl-dos-ports' docs/hardware-testing.md, "The orchestration layer"
+# section, for the generalization this follows, and the "CORRECTED"
+# note under `env:` below for a real bug found and fixed the same day --
+# every env-var name here had been copied from vcctrl-cell's own
+# pre-generalization hardcoded strings without checking them against
+# this repo's actual source, and every one of them was wrong.
+
+version: 1
+name: doskutsu
+
+# ------------------------------------------------------------------ target
+target:
+  # Where the program lives and is run from.
+  dir: "C:\\DOSKUTSU"
+  configs: "CFGS"
+  ftp_put: "C:\\MTCP\\PUT.BAT"
+
+  # The executable a single cell launches (harness/vcctrl-cell).
+  exe: "DOSKUTSU.EXE"
+
+  # Per-card config switching (harness/vcctrl-cell's --cfg). `default_cfg` is
+  # what a cell uses when --cfg is not passed; `cfg_dest` is the filename the
+  # engine itself reads. Both are null/absent for a port with no config-file
+  # switching mechanism -- inventing one here would make vcctrl-cell copy a
+  # file that means nothing on that target.
+  default_cfg: "OPL3.CFG"
+  cfg_dest: "DOSKUTSU.CFG"
+
+  # The command that resets the environment before a cell sets its own
+  # variables (harness/vcctrl-cell). Null/absent skips this step entirely --
+  # a port with no such command has nothing to call and nothing to gain by
+  # pretending to.
+  env_clear_cmd: "CALL CLRENV"
+
+  # Default TAS replay tape + PRNG seed a cell arms unless --set overrides
+  # them (harness/vcctrl-cell). Only used when `env.replay`/`env.seed` below
+  # are also set -- a port with no TAS-replay mechanism (dosags's own
+  # AutoPilot module drives itself, no external reel) declares neither pair.
+  default_replay: "QA.TAS"
+  default_seed: "12345"
+
+  # The unattended-sweep harness's own entry point (harness/vcctrl-sweep),
+  # typed as `<sweep_entry_cmd> <machine> <declared-hw...>`. Null/absent for
+  # a port with no sweep harness at all -- vcctrl-sweep already refuses for
+  # such a profile (no sweeps/machines section), this is just the command
+  # name for when one exists.
+  sweep_entry_cmd: "QA"
+
+  # Per-video-card overrides, found empirically and REQUIRED, not preferred
+  # (see harness/vcctrl-cell's own "PER-CARD DEFAULTS" section for the
+  # Mach64 story). Keyed by --card value; each entry maps a semantic key
+  # from `env:` below to the value that card needs. A card not listed here
+  # gets no override -- which is a real, checked finding for virge/cirrus,
+  # not an omission.
+  card_overrides:
+    mach64:
+      pin_native_mode: "0"
+
+  # THE BOOT-PROFILE WITNESS. Which string proves which profile is DATA;
+  # that a cell must verify its profile before its results are trusted is
+  # the CHECK, and the check is not configurable. See
+  # docs/HARNESS-STANDARD.md sec. 12 and the note in harness/vcctrl-cell:
+  # a stranger whose rig has no sound card will switch a check off within
+  # an hour of it inconveniencing them, and then get results from an
+  # unverified configuration that look entirely normal.
+  # ONE-DIRECTIONAL. Read it backwards and it lies.
+  #
+  # PRESENT  -> the profile is PGSB or VIBRA, and is therefore NOT NET.
+  #             That is the only claim a cell needs, and it is why this is
+  #             here: a measured run must not be in NET.
+  # ABSENT   -> rules out PGSB and VIBRA and says NOTHING ELSE. FOUR profiles
+  #             set no BLASTER at all -- NET, PGADLIB, PGGUS and CLEAN -- so an
+  #             absence is consistent with all four.
+  #
+  # ABSENCE IS NOT EVIDENCE OF NET, and CLEAN is why that matters: it has no
+  # network stack whatsoever. Anything that reboots into NET and confirms it by
+  # a missing BLASTER would accept CLEAN, then type an FTP command into a
+  # machine with no packet driver and learn the answer from the failure.
+  #
+  # To prove NET, attest the CAPABILITY rather than the label -- the packet
+  # driver answering, or better a reachability check against the file server
+  # the transfer will actually dial. Positive, about the resource in use, and
+  # it fails closed.
+  #
+  # `PGSB` in `proves` is the DEFAULT profile's name, not a reading. The value
+  # of BLASTER distinguishes PGSB from VIBRA; its presence does not.
+  # See docs/OPEN-FAULTS.md sec. 15.
+  profile_witness:
+    variable: BLASTER
+    # THE VALUE, NOT JUST THE PRESENCE. PGSB and VIBRA both set BLASTER, with
+    # distinct strings read straight off g2k:AUTOEXEC.BAT -- presence alone
+    # cannot tell them apart (docs/OPEN-FAULTS.md sec 15). Null/absent here
+    # would fall back to a presence-only check, which is enough for a port
+    # with only one BLASTER-setting profile to distinguish from NET.
+    value: "A220 I7 D3 P330 T3"
+    proves: "NOT the NET profile (a sound profile is loaded)"
+    direction: one-way
+
+  # The names the program itself consults. Inventing one here would set a
+  # variable on the target that nothing reads.
+  #
+  # CORRECTED 2026-09-11 (vcctrl-harness-migration fork): every one of these
+  # was previously written as DOSKUTSU_<LEVER>, copied verbatim from
+  # vcctrl-cell's own (pre-generalization) hardcoded strings without an
+  # independent check against doskutsu's actual source. That was wrong --
+  # confirmed directly against vendor/nxengine-evo/src/{tas.cpp,main.cpp,
+  # graphics/Renderer.cpp} (the real getenv() call sites) and
+  # tests/qa/CLRENV.BAT + RB.BAT (the real, currently-generated/used DOS
+  # batch files) in the doskutsu repo: doskutsu migrated these specific
+  # levers to the shared, neutral DOS_PORT_* naming at some point (an old
+  # DOSKUTSU_LOG_TAG use survives only in two now-_disabled/ patches), and
+  # vcctrl-cell's own hardcoded strings were never updated to follow. This
+  # means every vcctrl-cell-driven diagnostic cell that intended to arm a
+  # TAS replay/seed/pin/log-tag/shot-ticks lever via the OLD names below
+  # would have silently NOT armed it -- the engine has no fallback to the
+  # DOSKUTSU_-prefixed spelling at all. DOSKUTSU_NO_AUDIO is a real,
+  # different, legitimately DOSKUTSU_-prefixed var (no shared-layer
+  # equivalent) and is unaffected; it isn't one of this harness's levers.
+  env:
+    replay: DOS_PORT_TAS_REPLAY
+    seed: DOS_PORT_TAS_PRNG_SEED
+    auto_exit_tick: DOS_PORT_TAS_AUTO_EXIT_TICK
+    log_tag: DOS_PORT_LOG_TAG
+    pin_native_mode: DOS_PORT_PIN_NATIVE_MODE
+    shot_ticks: DOS_PORT_SHOT_TICKS
+    # Harness-side, not engine-side: keeps the console in mode 12h between
+    # cells so the capture stick never loses lock at a text-mode prompt.
+    # Consulted by the harness's own QA.BAT/ADIAG.BAT etc. (verified: real
+    # `IF "%DKTCAP%"=="1"` checks in tests/qa/ADIAG.BAT), not by
+    # DOSKUTSU.EXE itself -- this one was never renamed and is confirmed
+    # still correct as DKTCAP.
+    capture_flag: DKTCAP
+
+timing:
+  # TARGET physics: the CONFIG.SYS menu times out this long after the POST
+  # edge, so selection is blind and has to cover a window. The keystroke
+  # BUDGET is not here -- it is derived from this and the rig's buffer
+  # depth, and a derived value presented as configuration is a value with
+  # its reasoning deleted.
+  menu_window_s: 14
+
+# ----------------------------------------------------------------- machines
+# Tag and name per CPU. Was sweeps.json.
+machines:
+  "1": {tag: "G", name: "Pentium OverDrive 83"}
+  "2": {tag: "A", name: "Am5x86-133"}
+  "3": {tag: "6", name: "486DX2-66"}
+  "4": {tag: "5", name: "486DX2-50"}
+
+# ------------------------------------------------------------------- sweeps
+# Per-sweep wall-clock budgets. 
+#
+# 
+# Per-sweep wall-clock budgets. Spans measured by the doskutsu session from rounds M/N/O (POD-83, Am5x86, DX2-66, DX2-50) and I/J/K (DX2-66). Timeouts are ~2x the slowest machine. Duration is a function of cell count and CPU, near-independent of what the cells do: cells are tick-driven against a fixed QA.TAS reel, so wall-clock is set by tick count, not by the code under test.
+sweeps:
+  ADIAG:
+    cells: 4
+    timeout_min: 22
+    measured: "10m16s DX2-66"
+    tags: ["A0", "AM", "AS", "AX"]
+  DEEP:
+    cells: 2
+    timeout_min: 17
+    measured: "6m40s POD"
+    tags: ["C4D", "51D"]
+  FINE:
+    cells: 2
+    timeout_min: 12
+    measured: "5m25s DX2-66"
+    tags: ["C4F", "51F"]
+  LEV:
+    cells: 3
+    timeout_min: 17
+    measured: "6m54s POD"
+    tags: ["L0", "LA", "LP"]
+  MINE:
+    cells: 2
+    timeout_min: 12
+    measured: "4m49s POD"
+    tags: ["MN", "MF"]
+  PUMP:
+    cells: 4
+    timeout_min: 23
+    measured: "not yet measured -- budget taken from RB, same 4-cell shape"
+    tags: ["PU0", "PUA", "PU0B", "PUAB"]
+  RB:
+    cells: 4
+    timeout_min: 23
+    measured: "9m11s POD / 11m31s DX2-50"
+    tags: ["R4", "R4B", "R3", "R5"]
+  TAB:
+    cells: 3
+    timeout_min: 18
+    measured: "7m59s DX2-66"
+    tags: ["T0", "TB", "TC"]
+  WC:
+    cells: 3
+    timeout_min: 18
+    measured: "7m11s POD"
+    tags: ["W0", "WA", "WB"]
